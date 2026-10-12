@@ -149,6 +149,110 @@ describe("Composer — blocked state (§3.16a)", () => {
     expect(props.onAlwaysAllow).toHaveBeenCalledTimes(1);
   });
 
+  /** Design 09 §4.2: a per-call approval has no *Always allow*. */
+  it("offers no Always allow for a per-call approval", () => {
+    const props = setup({
+      blocked: true,
+      pendingToolName: "memory_confirm",
+      perCall: true,
+      onApprove: vi.fn(),
+      onDeny: vi.fn(),
+      onAlwaysAllow: vi.fn(),
+    });
+    expect(screen.queryByRole("button", { name: "Always allow" })).toBeNull();
+    screen.getByRole("button", { name: /Approve/ }).click();
+    expect(props.onApprove).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The bar sits right above Approve, so it names the tool as the card does:
+   * an MCP or plugin name is its third party's, and a bidi override, a
+   * zero-width space or a line break in it is shown, not obeyed (one-line
+   * escape, `escapeHiddenLine`).
+   */
+  it("names the tool it waits on with its hidden characters shown as escapes", () => {
+    setup({
+      blocked: true,
+      pendingToolName: "srv__rm\u{202E}fdp\u{200B}\nArguments: {}",
+    });
+    const bar = screen.getByText(
+      (_, node) =>
+        node?.tagName === "SPAN" &&
+        (node.textContent ?? "").endsWith(" is waiting on you"),
+    );
+    expect(bar.textContent).toBe(
+      "srv__rm<U+202E>fdp<U+200B><U+000A>Arguments: {} is waiting on you",
+    );
+    expect(bar.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
+  });
+
+  /**
+   * The bar shows the name alone, right above Approve. When the request holds
+   * hidden characters anywhere — in its arguments too, which the bar does not
+   * show — it says how many, and that the card shows them.
+   */
+  it("counts the whole request's hidden characters beside the name and points at its card", () => {
+    setup({
+      blocked: true,
+      pendingToolName: "shell_execute",
+      pendingHidden: 2,
+    });
+    const bar = screen.getByText(
+      (_, node) =>
+        node?.tagName === "SPAN" &&
+        (node.textContent ?? "").startsWith("shell_execute is waiting on you"),
+    );
+    expect(bar.textContent).toBe(
+      "shell_execute is waiting on you · its card shows 2 hidden characters",
+    );
+  });
+
+  /**
+   * Approve and Deny answer the oldest pending prompt. With more than one,
+   * the bar says so and names the card it answers by its red outline.
+   */
+  it("says it answers the oldest of several pending prompts, and which card that is", () => {
+    setup({
+      blocked: true,
+      pendingToolName: "shell_execute",
+      pendingCount: 2,
+      pendingHidden: 1,
+    });
+    const bar = screen.getByText(
+      (_, node) =>
+        node?.tagName === "SPAN" &&
+        (node.textContent ?? "").startsWith("shell_execute is waiting on you"),
+    );
+    expect(bar.textContent).toBe(
+      "shell_execute is waiting on you · oldest of 2 pending — its card is outlined in red · its card shows 1 hidden character",
+    );
+  });
+
+  it("says nothing of hidden characters when the request holds none", () => {
+    setup({
+      blocked: true,
+      pendingToolName: "shell_execute",
+      pendingHidden: 0,
+    });
+    expect(screen.getByText("shell_execute is waiting on you")).toBeVisible();
+    expect(screen.queryByText(/hidden character/)).toBeNull();
+  });
+
+  /**
+   * A name with no break opportunity in it (escapes included: `<`, the hex
+   * and `>` do not break) longer than the bar ran past the transcript's edge.
+   * The bar wraps it anywhere instead, right above Approve.
+   */
+  it("wraps a tool name too long for the bar instead of running past it", () => {
+    setup({ blocked: true, pendingToolName: `srv__${"x".repeat(200)}` });
+    const bar = screen.getByText(
+      (_, node) =>
+        node?.tagName === "SPAN" &&
+        (node.textContent ?? "").endsWith(" is waiting on you"),
+    );
+    expect(bar).toHaveClass("min-w-0", "wrap-anywhere");
+  });
+
   it("disables the three answers while one is in flight", () => {
     setup({ blocked: true, answering: true });
     expect(screen.getByRole("button", { name: /Approve/ })).toBeDisabled();

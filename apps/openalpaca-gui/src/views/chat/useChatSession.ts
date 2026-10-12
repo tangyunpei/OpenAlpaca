@@ -51,8 +51,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ASSISTANT_NAME,
+  escapeConfirmation,
   executedResolutionNote,
   formatDurationMs,
+  notWaitingResolutionNote,
   resolutionNote,
   settlingRun,
   shortTitle,
@@ -65,6 +67,7 @@ import {
 import { toUiStatus, type UiStatus } from "@/components/ui";
 import { useAgentTemplates } from "@/hooks/useAgents";
 import {
+  isNoLongerPending,
   useChatHistory,
   useChatStream,
   usePendingConfirmations,
@@ -76,10 +79,13 @@ import {
   useQueueFollowup,
 } from "@/hooks/useFollowups";
 import { useTasks } from "@/hooks/useTasks";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { followupErrorMessage, type FollowupRecord } from "@/lib/api/followups";
 import { sessionErrorMessage } from "@/lib/api/sessions";
 import { steerErrorMessage, steerTask } from "@/lib/api/tasks";
 import type { ApprovalScope } from "@/lib/api/types";
+import type { ContinuedFrom } from "@/lib/chat-stream";
+import { isConfirmationOver } from "@/lib/confirmations-over";
 import { ApiError } from "@/lib/http";
 import { isTerminalRunStatus } from "@/lib/query-client";
 import { useProjectStore, workspaceOption } from "@/stores/project";
@@ -89,6 +95,8 @@ import { useUiStore, type ComposerMode } from "@/stores/ui";
 import { useResolutions } from "./resolution-store";
 import {
   buildTranscript,
+  persistedLiveTurn,
+  type AnsweredTurn,
   type ConfirmationEntry,
   type PendingTurn,
   type RunReportData,
@@ -288,6 +296,24 @@ export interface ChatSession {
   blocked: boolean;
   /** The tool the daemon is waiting on, if any. */
   pendingToolName: string | null;
+  /**
+   * The hidden characters that request holds — name, arguments and agent, the
+   * card's own count (`escapeConfirmation`) — which the composer's bar, the
+   * palette's row and the run card say beside the name they show. 0 when
+   * nothing is pending.
+   */
+  pendingHidden: number;
+  /**
+   * How many prompts are pending. `approve`, `deny` and `alwaysAllow` answer
+   * the oldest — the one `pendingToolName` names — and the composer's bar and
+   * the palette's row say so when there is more than one.
+   */
+  pendingCount: number;
+  /**
+   * Its approval is good for this call only (design 09 §4.2): the composer
+   * offers no *Always allow*, and `alwaysAllow` does nothing.
+   */
+  pendingPerCall: boolean;
   /** The run holding that confirmation — `null` when it cannot be resolved. */
   blockedRunId: string | null;
   answering: boolean;
@@ -308,6 +334,14 @@ export interface ChatSession {
 
   activeRuns: ActiveRun[];
   steer: { mode: ComposerMode; label: string } | null;
+
+  /**
+   * The previous conversation the latest turn was given (design 11 §4 (b),
+   * §5) — `done.continued_from` — or `null`. Live only: kept from one `done`
+   * to the next, so it does not blink while a turn runs, and dropped with
+   * the conversation.
+   */
+  continuedFrom: ContinuedFrom | null;
 
   /** The lane's pending follow-up queue, oldest first (claim order). */
   followups: FollowupRecord[];
@@ -338,6 +372,7 @@ export function useChatSession(): ChatSession {
   // asks the daemon for the lane's active session, which is the state R48
   // needs in order to open a new conversation when the project changes.
   const selectedSessionId = useSessionSelection((s) => s.selectedId);
+  const selectedWorkspaceId = useSessionSelection((s) => s.selectedWorkspaceId);
   const sessionArg =
     selectedSessionId === null ? {} : { sessionId: selectedSessionId };
 
@@ -443,9 +478,15 @@ export function useChatSession(): ChatSession {
   // `null` (no project chosen) sends no header at all.
   const projectPath = useProjectStore((s) => s.path);
 
-  // The picker's project governs where an upload's bytes land (D2), the same
-  // way it governs the turn that will carry them.
-  const attachments = useComposerAttachments(projectPath);
+  // An upload's bytes land in the project of the turn that will carry them
+  // (D2): the resumed conversation's own when it has one, since R49 runs the
+  // turn there (R6), else the window's — which is also where a resumed
+  // conversation no turn has bound yet will be bound.
+  const attachments = useComposerAttachments(
+    selectedSessionId !== null && selectedWorkspaceId !== null
+      ? selectedWorkspaceId
+      : projectPath,
+  );
   /** Stable (`useCallback(…, [])`), so the session reset can depend on it. */
   const clearAttachments = attachments.clear;
 
@@ -467,6 +508,19 @@ export function useChatSession(): ChatSession {
   const noteToolRun = useResolutions((s) => s.noteToolRun);
   const clearResolutions = useResolutions((s) => s.clear);
   const [steers, setSteers] = useState<SteerEntry[]>([]);
+  const [continuedFrom, setContinuedFrom] = useState<ContinuedFrom | null>(
+    null,
+  );
+  /**
+   * Each turn this view watched finish, by stream, with the stored row that
+   * replaced it — what keeps "Notes used in this answer" (and the skipped-
+   * attachment note) on the answer once history catches up and after the next
+   * turn starts (`AnsweredTurn`). By stream, so an earlier answer with the
+   * same text is never credited with this turn's notes: the entry moves to the
+   * newest matching row as history catches up. Session-local, like
+   * `continuedFrom`: cleared with the conversation, gone on a reload.
+   */
+  const [answered, setAnswered] = useState<Record<string, AnsweredTurn>>({});
   const [confirmationMeta, setConfirmationMeta] = useState<
     Record<string, ConfirmationMeta>
   >({});
@@ -505,8 +559,8 @@ export function useChatSession(): ChatSession {
     if (!isTerminalRunStatus(event.status)) return;
 
     // A finished run is not waiting on anything any more (G1). The daemon
-    // publishes no frame for a prompt that timed out or was answered
-    // elsewhere, so this is what retires a card the run has moved past —
+    // announces a prompt that timed out or was answered elsewhere (T1), but a
+    // frame can be missed, so this too retires a card the run has moved past —
     // before the `started` check below, because a card can outlive this
     // client's memory of who started the run.
     for (const [requestId, meta] of Object.entries(confirmationMeta)) {
@@ -580,11 +634,17 @@ export function useChatSession(): ChatSession {
   useServerEvent(ARTIFACT_EVENTS, (event) => {
     if (event.type !== "artifact_written") return;
     if (event.task_id !== null && !started.current.has(event.task_id)) return;
+    // A daemon older than storage design Stage 2 sends neither field: its
+    // frame is a by-product, which opens (the Rust side's serde defaults).
+    const inProject = event.in_project === true;
+    const openable = event.openable !== false;
     setArtifacts((current) =>
       current.some(
         (entry) =>
           entry.artifactId === event.artifact_id &&
-          entry.version === event.version,
+          // A project file is always version 1, so a rewrite of it is told
+          // apart by its stamp; a by-product by its version.
+          (inProject ? entry.at === event.ts : entry.version === event.version),
       )
         ? current
         : [
@@ -594,8 +654,11 @@ export function useChatSession(): ChatSession {
               name: event.name,
               kind: event.kind,
               version: event.version,
+              path: event.path,
               taskId: event.task_id,
               at: event.ts,
+              inProject,
+              openable,
             },
           ],
     );
@@ -630,7 +693,17 @@ export function useChatSession(): ChatSession {
    *
    * A prompt this window has already seen is skipped — `confirmationMeta` is
    * the record of that, and it survives a card being retired (G1), so a
-   * dismissed card is not resurrected by the next poll.
+   * dismissed card is not resurrected by the next poll. So is one the daemon
+   * has said is over (`lib/confirmations-over`), which outlives this view and
+   * the conversation: a read that left before the answer may land after it.
+   *
+   * Only a read made during **this** mount seeds anything (G1, Round G). The
+   * views are swapped, not stacked, so this hook — and `confirmationMeta`
+   * with it — is new every time chat is opened, while the query's cache is
+   * the app's: a list read before the trip, when a prompt was still pending,
+   * used to draw its card again over its own `Approved` row, and the click
+   * then went to a prompt the daemon no longer held. The query reads on every
+   * mount, and until that read lands there is no snapshot here at all.
    *
    * A read that **failed** is carried out as `confirmationsError` rather than
    * swallowed (V9): the view says so where it says a failed history, because
@@ -638,8 +711,13 @@ export function useChatSession(): ChatSession {
    * nothing in it. The live frames are untouched by it.
    */
   const pendingConfirmations = usePendingConfirmations(stream.blocked);
-  const pendingRows = pendingConfirmations.data;
+  const [mountedAtMs] = useState(() => Date.now());
   const snapshotAtMs = pendingConfirmations.dataUpdatedAt;
+  // `>=`: a localhost read can land within the millisecond of the mount. Not
+  // `isFetchedAfterMount`, which is true after a *failed* read too — and then
+  // the data is still the pre-mount list.
+  const pendingRows =
+    snapshotAtMs >= mountedAtMs ? pendingConfirmations.data : undefined;
   const confirmationMetaRef = useRef(confirmationMeta);
   confirmationMetaRef.current = confirmationMeta;
   const adoptConfirmation = stream.adoptConfirmation;
@@ -679,6 +757,7 @@ export function useChatSession(): ChatSession {
     const fresh = pendingRows.filter(
       (row) =>
         confirmationMetaRef.current[row.request_id] === undefined &&
+        !isConfirmationOver(row.request_id) &&
         confirmationBelongsHere(row, {
           streamId: null,
           laneKey: laneKeyRef.current,
@@ -716,6 +795,8 @@ export function useChatSession(): ChatSession {
         request_id: row.request_id,
         tool_name: row.tool_name,
         tool_arguments: row.tool_arguments,
+        preview: row.preview ?? null,
+        per_call: row.per_call === true,
       });
     }
     setConfirmationMeta((current) => {
@@ -804,6 +885,31 @@ export function useChatSession(): ChatSession {
     stream.state.phase === "done" ||
     (stream.state.phase === "error" && stream.state.error?.transport === false);
   const streamId = stream.state.streamId;
+  /**
+   * Design 11 §5: each answered turn says what it continued from — the
+   * previous conversation for a new conversation's first turns, `null`
+   * after — and the chat view's line follows the latest.
+   */
+  const doneResult = stream.state.phase === "done" ? stream.state.result : null;
+  useEffect(() => {
+    if (doneResult === null) return;
+    setContinuedFrom(doneResult.continued_from ?? null);
+  }, [doneResult]);
+
+  const replacedBy =
+    persistedLiveTurn(stream.state, history.data?.messages ?? [])?.id ?? null;
+  useEffect(() => {
+    if (doneResult === null || streamId === null || replacedBy === null) return;
+    setAnswered((current) =>
+      current[streamId]?.messageId === replacedBy
+        ? current
+        : {
+            ...current,
+            [streamId]: { messageId: replacedBy, done: doneResult },
+          },
+    );
+  }, [doneResult, streamId, replacedBy]);
+
   useEffect(() => {
     if (!daemonEndedTurn || streamId === null) return;
     for (const card of shownConfirmationsRef.current) {
@@ -877,6 +983,8 @@ export function useChatSession(): ChatSession {
           requestId: request.request_id,
           toolName: request.tool_name,
           toolArguments: request.tool_arguments,
+          preview: request.preview ?? null,
+          perCall: request.per_call === true,
           agentName:
             agentId === null
               ? null
@@ -892,6 +1000,13 @@ export function useChatSession(): ChatSession {
   );
 
   const firstConfirmation = confirmations[0] ?? null;
+  const pendingHidden = useMemo(
+    () =>
+      firstConfirmation === null
+        ? 0
+        : escapeConfirmation(firstConfirmation).hidden,
+    [firstConfirmation],
+  );
 
   /**
    * The run the daemon is blocked on.
@@ -965,6 +1080,8 @@ export function useChatSession(): ChatSession {
     setArtifacts([]);
     clearResolutions();
     setSteers([]);
+    setContinuedFrom(null);
+    setAnswered({});
     clearAttachments();
     setConfirmationMeta({});
     firstSeenAtMs.current.clear();
@@ -991,6 +1108,7 @@ export function useChatSession(): ChatSession {
         pending,
         steerLabel: steerRun === null ? undefined : shortTitle(steerRun.title),
         attachmentNames: attachments.names,
+        answered: Object.values(answered),
       }),
     [
       history.data,
@@ -1003,6 +1121,7 @@ export function useChatSession(): ChatSession {
       pending,
       steerRun,
       attachments.names,
+      answered,
     ],
   );
 
@@ -1125,12 +1244,13 @@ export function useChatSession(): ChatSession {
       steer: null,
       // T5: the same files, drawn as files, from the moment the turn is sent
       // — the stored row's own links replace them when history catches up.
-      // The name is this client's, which is why the card issues no metadata
-      // request for it.
+      // The name and the type are the upload's answer, which is why the card
+      // issues no metadata request for it; the type gives it the Library's
+      // badge meanwhile (G3a).
       attachments: refs.map((ref) => ({
         fileId: ref.file_id,
         filename: attachments.names[ref.file_id] ?? null,
-        mimeType: null,
+        mimeType: attachments.mimeTypes[ref.file_id] ?? null,
         kind: null,
       })),
     });
@@ -1213,11 +1333,25 @@ export function useChatSession(): ChatSession {
   // keeps `approve`/`deny` stable, which is what the window key binding wants.
   const respondRef = useRef(stream.respond);
   respondRef.current = stream.respond;
+  /**
+   * An answer is in flight (G1, Round G). The buttons are disabled on
+   * `answering`, but Enter and Escape reach `approve`/`deny` from the window's
+   * key ladder, and a second keypress can land before the re-render that
+   * would carry `answering` there — so the gate is here, set synchronously,
+   * on the one path every surface goes through. Two Enters used to post the
+   * same answer twice and draw the daemon's 404 for the second.
+   */
+  const answeringRef = useRef(false);
 
   const answer = useCallback(
-    (resolution: Resolution, scope?: ApprovalScope) => {
+    (
+      resolution: Exclude<Resolution, "timed_out" | "not_waiting">,
+      scope?: ApprovalScope,
+      onAccepted?: () => void,
+    ) => {
       const target = firstConfirmation;
-      if (target === null) return;
+      if (target === null || answeringRef.current) return;
+      answeringRef.current = true;
       // When the answer went out — the earliest a `tool_executed` for it can
       // be this one's (G6).
       const answeredAtMs = Date.now();
@@ -1238,6 +1372,7 @@ export function useChatSession(): ChatSession {
         },
         {
           onSuccess: () => {
+            onAccepted?.();
             addResolution({
               requestId: target.requestId,
               resolution,
@@ -1259,7 +1394,25 @@ export function useChatSession(): ChatSession {
             });
           },
           onError: (error: Error) => {
-            showToast(error.message);
+            if (!isNoLongerPending(error)) {
+              showToast(error.message);
+              return;
+            }
+            // The daemon held no such prompt (G1, Round G): the card is gone
+            // (`useChatStream` retired it and re-reads the list) and this row
+            // says why in the person's terms — never `Approved`/`Denied`,
+            // because nothing was answered. A prompt that already has a row
+            // keeps it: the store records one resolution per request.
+            addResolution({
+              requestId: target.requestId,
+              resolution: "not_waiting",
+              note: notWaitingResolutionNote(target.toolName),
+              at: new Date().toISOString(),
+              ...owner,
+            });
+          },
+          onSettled: () => {
+            answeringRef.current = false;
           },
         },
       );
@@ -1270,13 +1423,22 @@ export function useChatSession(): ChatSession {
   const approve = useCallback(() => answer("approved"), [answer]);
   const deny = useCallback(() => answer("denied"), [answer]);
   const alwaysAllow = useCallback(() => {
+    // A per-call card has no *Always allow* (design 09 §4.2): the daemon
+    // would ignore the scope, and a toast saying otherwise would be a lie.
+    if (firstConfirmation?.perCall === true) return;
     const toolName = firstConfirmation?.toolName ?? null;
-    answer("approved", "entire_tool");
     // §4.4's own copy — the daemon now caches `EntireTool` for the rest of
-    // the session, so this is no longer a polite lie.
-    if (toolName !== null) {
-      showToast(`${toolName} added to the allowlist — it won't ask again`);
-    }
+    // the session, so this is no longer a polite lie. Said only once the
+    // daemon took the answer: a prompt it no longer held added nothing to
+    // any allowlist (G1, Round G).
+    // The name as the card showed it; a toast is a string, so the escapes
+    // are the plain-text `<U+XXXX>` form.
+    answer("approved", "entire_tool", () => {
+      if (toolName === null) return;
+      showToast(
+        `${escapeHiddenLine(toolName).text} added to the allowlist — it won't ask again`,
+      );
+    });
   }, [answer, firstConfirmation, showToast]);
 
   return {
@@ -1302,6 +1464,9 @@ export function useChatSession(): ChatSession {
 
     blocked: stream.blocked,
     pendingToolName: firstConfirmation?.toolName ?? null,
+    pendingHidden,
+    pendingCount: confirmations.length,
+    pendingPerCall: firstConfirmation?.perCall ?? false,
     blockedRunId,
     answering: stream.respond.isPending,
     approve,
@@ -1312,6 +1477,8 @@ export function useChatSession(): ChatSession {
 
     activeRuns,
     steer,
+
+    continuedFrom,
 
     followups: followupQueue.data ?? [],
     followupsError: followupQueue.error,

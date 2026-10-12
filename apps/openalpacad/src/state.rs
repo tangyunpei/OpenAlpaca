@@ -45,7 +45,14 @@ pub struct AppState {
     pub chat_service: Arc<ChatService>,
     pub token_manager: Option<Arc<openalpaca_llm::TokenManager>>,
     pub provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>>,
-    pub embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    /// The memory service (memory redesign, design §7a), held for the
+    /// `/v1/memories*` routes and the workspace move's quiesce hook (plan
+    /// 3.7, 3.8); the same instance the tool registry and the orchestrator
+    /// hold.
+    pub memory_service: Arc<openalpaca_core::memory::service::MemoryService>,
+    /// `USER.md` and its backups, for `GET|PUT /v1/persona/user` (design
+    /// §7a; MD-3) — the same paths the `update_persona` tool writes.
+    pub persona_user: Arc<openalpaca_core::tools::builtins::UserDocumentWriter>,
     pub local_user_id: String,
     pub default_lane_key: String,
     pub llm_config_path: PathBuf,

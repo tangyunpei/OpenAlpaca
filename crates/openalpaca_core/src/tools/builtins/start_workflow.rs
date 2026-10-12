@@ -32,8 +32,8 @@ pub struct StartWorkflowTool {
     /// M6 — the client that sent this turn said it cannot answer a tool
     /// confirmation. Carried into the workflow this turn starts: the run
     /// outlives the turn, so the fact has to travel with it or the first
-    /// `artifact_write` blocks for the whole confirmation timeout with
-    /// nobody to answer.
+    /// `file_write` or `shell_execute` blocks for the whole confirmation
+    /// timeout with nobody to answer.
     unattended: bool,
     /// Result cell: the outcome of the (single) successful dispatch this
     /// request made, if any.
@@ -175,11 +175,10 @@ pub fn start_workflow_tool_definition() -> ToolDefinition {
         description: "Start a background workflow for a substantial, multi-step task. A lead \
                        agent will plan the work, delegate to subagents, and post a completion \
                        report to this conversation when done. Use for real tasks (research, \
-                       builds, multi-file changes); whenever the user explicitly asks for a \
-                       workflow or a background run; and whenever the user asks to write or \
-                       save an artifact or a file, which only a workflow can do — answer simple \
-                       questions directly instead. This is the ONLY way to start a run: if you \
-                       do not call it, no workflow exists and no task id was issued."
+                       builds, multi-file changes) and whenever the user explicitly asks for a \
+                       workflow or a background run — answer simple questions directly instead. \
+                       This is the ONLY way to start a run: if you do not call it, no workflow \
+                       exists and no task id was issued."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -245,12 +244,14 @@ mod tests {
             gate,
             tool_registry,
             db,
-            None,
             daemon_config,
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
             Arc::new(crate::prompt_ctx::ContextManager::noop()),
             Arc::new(crate::compose::ComposeEngine::new(16)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(crate::orchestrator::BackgroundJobs::new()),
         ));
         (ctx, dispatcher, bus)
     }

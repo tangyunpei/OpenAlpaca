@@ -1,12 +1,16 @@
 /**
  * The Library's left column (DESIGN_SPEC §2.4, §3.29, §3.30).
  *
- * The header count is the daemon's own unpaged `total`, so it is the size of
- * the library rather than of this page. The kind chips narrow what is *shown*:
- * they are a view filter, not a query, because two of the seven labels (`Media`,
- * `Output`) cover more than one artifact kind and `?kind=` takes exactly one —
- * filtering here keeps every chip behaving the same way and keeps `total`
- * meaning one thing. `Load more` is what walks the rest of the library.
+ * The Library has two sides (storage design §13): by-products — drafts,
+ * hand-offs, uploads, a file saved with no project — by default, and the files
+ * agents wrote into a project behind the `Results in the project` chip. The
+ * side is a *query* (`?in_project=`), so the header count is the daemon's own
+ * unpaged `total` for that side rather than the size of this page. The kind
+ * chips narrow what is *shown*: they are a view filter, not a query, because
+ * two of the seven labels (`Media`, `Output`) cover more than one artifact
+ * kind and `?kind=` takes exactly one — filtering here keeps every chip
+ * behaving the same way and keeps `total` meaning one thing. `Load more` is
+ * what walks the rest of the side.
  *
  * Presentational: the query lives in `LibraryView`, so every state below is a
  * prop and can be rendered without a daemon.
@@ -24,10 +28,24 @@ import type { Artifact } from "@/lib/api/artifacts";
 
 import { LibraryRow } from "./LibraryRow";
 
+/** The chip that switches the list to the files agents wrote into a project. */
+export const RESULTS_FILTER = "Results in the project";
+
+/** The design's own empty sentence, for the by-products side. */
+export const LIBRARY_EMPTY =
+  "Nothing in the library yet. Files the agents produce land here.";
+
+/** The results side's empty sentence. */
+export const RESULTS_EMPTY =
+  "No files written into a project yet. A file an agent writes in your project's folder is listed here.";
+
 export interface LibraryListProps {
   width: number;
   kind: string;
   onKindChange: (kind: string) => void;
+  /** The side shown: `false` by-products (the default), `true` results. */
+  results: boolean;
+  onResultsChange: (results: boolean) => void;
   /** Every row loaded so far, in server order. */
   artifacts: readonly Artifact[];
   /** The unpaged count, or `null` while it is unknown. */
@@ -47,6 +65,8 @@ export function LibraryList({
   width,
   kind,
   onKindChange,
+  results,
+  onResultsChange,
   artifacts,
   total,
   loading,
@@ -81,6 +101,12 @@ export function LibraryList({
             onSelect={onKindChange}
           />
         ))}
+        <KindFilterChip
+          label={RESULTS_FILTER}
+          selected={results}
+          onSelect={() => onResultsChange(!results)}
+          className="ml-auto"
+        />
       </div>
 
       <div className="sc min-h-0 flex-1 overflow-y-auto p-[8px]">
@@ -93,7 +119,9 @@ export function LibraryList({
         ) : rows.length === 0 ? (
           <SectionEmpty>
             {artifacts.length === 0
-              ? "Nothing in the library yet. Files the agents produce land here."
+              ? results
+                ? RESULTS_EMPTY
+                : LIBRARY_EMPTY
               : `No ${kind.toLowerCase()} files among the ${artifacts.length} loaded.`}
           </SectionEmpty>
         ) : (

@@ -1,6 +1,6 @@
 //! Telegram message handling: dispatch, link/unlink commands, attachments.
 
-use super::delivery::{download_telegram_file, send_with_retry};
+use super::delivery::{approval_message, download_telegram_file, send_with_retry};
 use super::TelegramConnector;
 use crate::common::{
     KeyedRateLimiter, LinkResult, format_denial_message, handle_link_token,
@@ -74,7 +74,7 @@ impl TelegramConnector {
                 &pending_confirmations,
             )
         {
-            bot.send_message(chat_id, &reply).await?;
+            approval_message(&bot, chat_id, &reply).await?;
             return Ok(());
         }
 

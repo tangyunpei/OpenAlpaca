@@ -1,7 +1,8 @@
 //! Chat command — delegates to REPL (interactive) or chat_stream (single/pipe)
 //!
 //! Every turn now carries the project it belongs to (the CLI's working
-//! directory, as `x-workspace-path`) and, when the caller resumed one, the
+//! directory, the root `--project` chose, or a resumed conversation's own
+//! project, as `x-workspace-path`) and, when the caller resumed one, the
 //! conversation it belongs to (`session_id`). See `chat_stream::ChatTarget`.
 
 use anyhow::{Context, Result, bail};
@@ -35,6 +36,11 @@ pub struct ChatArgs {
     /// Continue the conversation with this id (`openalpaca sessions` lists them)
     #[arg(long, value_name = "ID")]
     pub session: Option<String>,
+
+    /// Work in this folder's project: the git repository it lies in, or the
+    /// folder itself when it lies in none — OpenAlpaca remembers the choice
+    #[arg(long, value_name = "DIR")]
+    pub project: Option<std::path::PathBuf>,
 }
 
 pub async fn run(args: ChatArgs) -> Result<()> {
@@ -44,18 +50,29 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
     let stdout_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let mut target = ChatTarget::for_cwd();
+    let mut target = match args.project.as_deref() {
+        Some(dir) => {
+            let client = DaemonClient::connect()?;
+            let project = choose_project(&client, dir).await?;
+            eprintln!(
+                "{}",
+                format!("Project {} · projects/{}", project.root, project.name).dimmed()
+            );
+            ChatTarget::for_project(project.root)
+        }
+        None => ChatTarget::for_cwd(),
+    };
 
     if args.resume || args.session.is_some() {
         let client = DaemonClient::connect()?;
         let lane_key = sessions::default_lane_key(&client).await?;
         let session_id = match args.session.as_deref() {
             Some(id) => named_session(&client, id, &lane_key).await?,
-            None => pick_session(&client, &lane_key, interactive).await?,
+            None => pick_session(&client, &lane_key, interactive, &target).await?,
         };
         let resumed = resume(&client, &session_id).await?;
         print_transcript_tail(&client, &resumed.id).await?;
-        target = target.resuming(resumed.id);
+        target = resumed_target(target, &resumed);
     }
 
     // M6/S10: say so before the turn starts, not after a run has hung on a
@@ -110,19 +127,18 @@ fn refuse_foreign_lane(session: &SessionItem, lane_key: &str) -> Result<()> {
     )
 }
 
-/// The project a `--resume` is scoped to (plan §5.7): the working directory's
-/// own project root, resolved exactly as the daemon resolves a turn's
-/// `x-workspace-path`, so the value filtered on is the one `workspace_id`
-/// holds.
+/// The project a `--resume` is scoped to (plan §5.7): `--project`'s answered
+/// root as the daemon answered it (R23) — resolving it again here turned a
+/// missing project's root into no project — or else the root of the working
+/// directory, resolved as the daemon resolves a turn's `x-workspace-path`.
 ///
-/// `None` — a directory under no project marker, or one inside the home store
-/// — leaves the listing lane-wide, because "conversations with no project" is
-/// not a filter `GET /v1/sessions` can express: its `workspace_id` is an
-/// equality on a column that is NULL for exactly those rows. A turn from such a
-/// directory carries no project either, so the two agree.
-fn resume_workspace() -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    sessions::resolve_workspace_filter(&cwd.to_string_lossy()).ok()
+/// `None` — no project there — leaves the listing lane-wide: "conversations
+/// with no project" is not a filter `GET /v1/sessions` can express.
+fn resume_workspace(target: &ChatTarget) -> Option<String> {
+    if let Some(root) = target.project_root() {
+        return Some(root.to_string());
+    }
+    sessions::resolve_workspace_filter(target.workspace_path()?).ok()
 }
 
 /// Which conversation `--resume` continues.
@@ -136,8 +152,13 @@ fn resume_workspace() -> Option<String> {
 /// Interactively that is the user's choice from those, newest first. With no
 /// terminal to ask at, it is the most recent — the same row the picker would
 /// open on — because a prompt written to a pipe is a hang, not a question.
-async fn pick_session(client: &DaemonClient, lane_key: &str, interactive: bool) -> Result<String> {
-    let workspace_id = resume_workspace();
+async fn pick_session(
+    client: &DaemonClient,
+    lane_key: &str,
+    interactive: bool,
+    target: &ChatTarget,
+) -> Result<String> {
+    let workspace_id = resume_workspace(target);
     let rows = sessions::lane_sessions_on(client, lane_key, workspace_id.as_deref(), 25).await?;
     let newest = sessions::require_one(&rows, workspace_id.as_deref())?;
     if !interactive {
@@ -155,6 +176,19 @@ async fn pick_session(client: &DaemonClient, lane_key: &str, interactive: bool) 
     rows.get(choice)
         .map(|row| row.id.clone())
         .context("The picker returned a row that is no longer in the list")
+}
+
+/// The target this chat's turns go out on once `resumed` is the
+/// conversation they address (R6): its id, and its project when it has one —
+/// R49 runs each turn there, so a `--file` must be filed there too, not under
+/// this shell's directory. A conversation no turn has bound keeps this chat's
+/// own path, which its first turn binds it to.
+fn resumed_target(target: ChatTarget, resumed: &SessionItem) -> ChatTarget {
+    let target = target.resuming(resumed.id.clone());
+    match &resumed.workspace_id {
+        Some(root) => target.in_project(root.clone()),
+        None => target,
+    }
 }
 
 /// Re-open a conversation, whatever state it is in.
@@ -186,6 +220,29 @@ async fn resume(client: &DaemonClient, session_id: &str) -> Result<SessionItem> 
         format!("Resuming {title} ({}) · {project}", session.id).dimmed()
     );
     Ok(session)
+}
+
+/// A project as `POST /v1/workspaces` answers it — the two fields this
+/// command prints and sends.
+#[derive(Debug, serde::Deserialize)]
+struct ChosenProject {
+    root: String,
+    name: String,
+}
+
+/// `chat --project <dir>` (R10): the daemon resolves the folder — the git
+/// repository it lies in, else the folder itself — and remembers it; every
+/// turn then carries the answered root, never the typed text.
+async fn choose_project(client: &DaemonClient, dir: &std::path::Path) -> Result<ChosenProject> {
+    let path = std::path::absolute(dir)
+        .with_context(|| format!("Cannot make {} an absolute path", dir.display()))?;
+    client
+        .post(
+            "/v1/workspaces",
+            &serde_json::json!({ "path": path.to_string_lossy() }),
+        )
+        .await
+        .with_context(|| format!("Could not use {} as this chat's project", path.display()))
 }
 
 #[derive(serde::Deserialize)]
@@ -232,7 +289,12 @@ fn tail_of(messages: &[TranscriptMessage], limit: usize) -> &[TranscriptMessage]
 }
 
 /// The block printed above the prompt, one line per turn.
-fn render_tail(messages: &[TranscriptMessage]) -> String {
+///
+/// The stored turns are printed into the terminal whose inline `[y/N]`
+/// prompt comes next — an assistant row is the model's own answer as it
+/// wrote it — so a terminal gets each one as it gets a streamed answer
+/// (`chat_stream::model_text`); a pipe gets the stored text.
+fn render_tail(messages: &[TranscriptMessage], tty: bool) -> String {
     let mut out = String::new();
     for message in messages {
         let who = match message.role.as_str() {
@@ -240,7 +302,8 @@ fn render_tail(messages: &[TranscriptMessage]) -> String {
             "assistant" => "Alpaca:".cyan().bold(),
             other => other.dimmed(),
         };
-        out.push_str(&format!("{} {}\n", who, message.content.trim()));
+        let content = chat_stream::model_text(tty, message.content.trim());
+        out.push_str(&format!("{} {}\n", who, content));
     }
     out
 }
@@ -268,7 +331,13 @@ async fn print_transcript_tail(client: &DaemonClient, session_id: &str) -> Resul
     }
 
     println!();
-    print!("{}", render_tail(tail_of(&page.messages, TAIL_MESSAGES)));
+    print!(
+        "{}",
+        render_tail(
+            tail_of(&page.messages, TAIL_MESSAGES),
+            std::io::IsTerminal::is_terminal(&std::io::stdout())
+        )
+    );
     println!("{}", "─".repeat(40).dimmed());
     Ok(())
 }
@@ -281,7 +350,7 @@ async fn single_message(
     let client = DaemonClient::connect()?;
 
     // Upload files and collect attachment refs
-    let attachments = upload_files(&client, files).await?;
+    let attachments = upload_files(&client, files, target).await?;
 
     // The same rule as the piped path: `--message` is the other non-interactive
     // way in, and `openalpaca chat --message q > answer.txt` had `Alpaca: `
@@ -297,7 +366,11 @@ async fn single_message(
         &Default::default(),
     )
     .await?;
-    refuse_failed_turn(&result, stdout_is_terminal)?;
+    refuse_failed_turn(
+        &result,
+        stdout_is_terminal,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    )?;
     if let StreamResult::Delegation { delegation, .. } = &result {
         chat_stream::poll_task_completion(&client, &delegation.task_id).await?;
     }
@@ -314,25 +387,41 @@ async fn single_message(
 /// The newline closes the label (and any partial reply) already on stdout, and
 /// follows the same rule the label does: a terminal gets it, a pipe — whose
 /// stdout is somebody else's input — gets nothing it did not ask for.
-fn refuse_failed_turn(result: &StreamResult, stdout_is_terminal: bool) -> Result<()> {
+///
+/// `main` prints the message on stderr, so a stderr that is a terminal gets
+/// it as it gets a streamed answer (`chat_stream::model_text`): for a loop
+/// that ended in an error it quotes the last tool's own error text, and a
+/// control sequence in it would outlive the process in that terminal. The
+/// exit code is the same either way.
+fn refuse_failed_turn(
+    result: &StreamResult,
+    stdout_is_terminal: bool,
+    stderr_is_terminal: bool,
+) -> Result<()> {
     match result.failure() {
         Some(message) => {
             if stdout_is_terminal {
                 println!();
             }
-            bail!("{message}")
+            bail!("{}", chat_stream::model_text(stderr_is_terminal, message))
         }
         None => Ok(()),
     }
 }
 
+/// Uploads each `--file` into the turn's project: every upload carries the
+/// headers the turn itself sends ([`ChatTarget::headers`]) — this chat's
+/// directory or `--project`'s root, or, once a conversation is resumed, that
+/// conversation's own project when it has one ([`resumed_target`], R6).
 async fn upload_files(
     client: &DaemonClient,
     files: &[std::path::PathBuf],
+    target: &ChatTarget,
 ) -> Result<Vec<serde_json::Value>> {
+    let headers = target.headers();
     let mut attachments = Vec::new();
     for path in files {
-        let resp = client.upload_file(path).await?;
+        let resp = client.upload_file(path, &headers).await?;
         let file_id = resp["id"]
             .as_str()
             .context("Upload response missing 'id'")?
@@ -395,7 +484,11 @@ async fn pipe_mode(target: &ChatTarget) -> Result<()> {
         &Default::default(),
     )
     .await?;
-    refuse_failed_turn(&result, stdout_is_terminal)?;
+    refuse_failed_turn(
+        &result,
+        stdout_is_terminal,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    )?;
     if let StreamResult::Delegation { delegation, .. } = &result {
         chat_stream::poll_task_completion(&client, &delegation.task_id).await?;
     }
@@ -521,14 +614,38 @@ mod tests {
                 message: "LLM error: no routable model".to_string(),
             },
             false,
+            false,
         )
         .expect_err("a failed turn is a failed command");
         assert_eq!(err.to_string(), "LLM error: no routable model");
     }
 
+    /// The message a failed turn is refused with is printed on stderr, and
+    /// for an `Error` exit it quotes the last tool's own error text — an MCP
+    /// server's, say. At a terminal it is shown as a streamed answer is,
+    /// every control but `\n` and `\t` as `<U+XXXX>`, so it cannot leave a
+    /// palette change or a scroll region behind; a stderr that is not a
+    /// terminal gets the daemon's words as they came.
+    #[test]
+    fn a_failed_turns_message_reaches_a_terminal_without_a_control_character() {
+        let failed = StreamResult::Failed {
+            message: "The last tool error was: x\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r".to_string(),
+        };
+        let err = refuse_failed_turn(&failed, false, true).expect_err("a failed turn");
+        assert_eq!(
+            err.to_string(),
+            "The last tool error was: x<U+001B>]4;3;#000000<U+0007><U+001B>[1;2r"
+        );
+        let err = refuse_failed_turn(&failed, false, false).expect_err("a failed turn");
+        assert_eq!(
+            err.to_string(),
+            "The last tool error was: x\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r"
+        );
+    }
+
     #[test]
     fn an_answered_turn_is_a_successful_command() {
-        assert!(refuse_failed_turn(&StreamResult::Response(None), true).is_ok());
+        assert!(refuse_failed_turn(&StreamResult::Response(None), true, true).is_ok());
         assert!(
             refuse_failed_turn(
                 &StreamResult::Delegation {
@@ -538,6 +655,7 @@ mod tests {
                         title: "a run".to_string(),
                     },
                 },
+                true,
                 true,
             )
             .is_ok()
@@ -626,7 +744,7 @@ mod tests {
         colored::control::set_override(false);
 
         let all = transcript(50);
-        let printed = render_tail(tail_of(&all, TAIL_MESSAGES));
+        let printed = render_tail(tail_of(&all, TAIL_MESSAGES), false);
         let lines: Vec<&str> = printed.lines().collect();
 
         assert_eq!(lines.len(), TAIL_MESSAGES, "{printed}");
@@ -643,8 +761,223 @@ mod tests {
     fn a_short_conversation_prints_whole() {
         colored::control::set_override(false);
 
-        let printed = render_tail(tail_of(&transcript(3), TAIL_MESSAGES));
+        let printed = render_tail(tail_of(&transcript(3), TAIL_MESSAGES), false);
         let lines: Vec<&str> = printed.lines().collect();
         assert_eq!(lines, vec!["You: turn 1", "Alpaca: turn 2", "You: turn 3"]);
+    }
+
+    /// A resumed conversation's stored turns are printed into the terminal
+    /// whose inline `[y/N]` prompt comes next, so they reach it as a
+    /// streamed answer does: every control character but `\n` and `\t`
+    /// shown as `<U+XXXX>` — a palette change (OSC 4) or a scroll region
+    /// (`ESC [ 1 ; 2 r`) stored in an answer would outlive it, and the
+    /// prompt's reset undoes neither. A pipe gets the stored text.
+    #[test]
+    fn a_resumed_tail_reaches_a_terminal_without_a_control_character() {
+        colored::control::set_override(false);
+
+        let messages = vec![
+            TranscriptMessage {
+                role: "user".to_string(),
+                content: "hi\u{1b}[?7l".to_string(),
+            },
+            TranscriptMessage {
+                role: "assistant".to_string(),
+                content: "done\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r\n".to_string(),
+            },
+        ];
+        assert_eq!(
+            render_tail(&messages, true),
+            "You: hi<U+001B>[?7l\nAlpaca: done<U+001B>]4;3;#000000<U+0007><U+001B>[1;2r\n"
+        );
+        assert_eq!(
+            render_tail(&messages, false),
+            "You: hi\u{1b}[?7l\nAlpaca: done\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r\n"
+        );
+    }
+
+    /// Design §4: a `--file` upload goes to the same project as the turn it
+    /// is attached to. The upload request carries exactly the
+    /// `x-workspace-path` the turn sends (percent-encoded, R81), so the
+    /// daemon files the bytes under that project and not at home.
+    #[tokio::test]
+    async fn a_file_upload_carries_the_turns_workspace_header() {
+        let (addr, server) = crate::test_util::serve(vec![crate::test_util::json_answer(
+            "200 OK",
+            "unused",
+            r#"{"id":"file-1"}"#,
+        )]);
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let target = ChatTarget::for_workspace(Some("/Users/dev/项目".to_string()));
+
+        let attachments = upload_files(&client, &[file], &target).await.unwrap();
+
+        assert_eq!(
+            attachments,
+            vec![serde_json::json!({ "file_id": "file-1" })]
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        let head = requests[0].to_ascii_lowercase();
+        assert!(
+            head.starts_with("post /v1/files/upload "),
+            "{}",
+            requests[0]
+        );
+        let (name, value) = target.headers().into_iter().next().unwrap();
+        assert!(
+            head.contains(&format!("{name}: {value}").to_ascii_lowercase()),
+            "the upload carries the turn's project header:\n{}",
+            requests[0]
+        );
+    }
+
+    /// R6: a turn that names a conversation runs in that conversation's
+    /// project (R49), so a `--file` uploaded for it must be filed there, not
+    /// under this shell's directory — where a delete of the conversation's
+    /// project would leave it behind, unattached.
+    #[tokio::test]
+    async fn a_file_upload_into_a_resumed_conversation_carries_that_conversations_project() {
+        let (addr, server) = crate::test_util::serve(vec![crate::test_util::json_answer(
+            "200 OK",
+            "unused",
+            r#"{"id":"file-1"}"#,
+        )]);
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("report.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let resumed = session_on("alice:gui");
+        let target = resumed_target(
+            ChatTarget::for_workspace(Some("/Users/dev/elsewhere".to_string())),
+            &resumed,
+        );
+
+        upload_files(&client, &[file], &target).await.unwrap();
+
+        let requests = server.join().unwrap();
+        let head = requests[0].to_ascii_lowercase();
+        assert!(
+            head.contains("x-workspace-path: /users/dev/openalpaca\r\n"),
+            "the upload carries the resumed conversation's project:\n{}",
+            requests[0]
+        );
+        assert_eq!(target.workspace_path(), Some("/Users/dev/openalpaca"));
+        assert_eq!(
+            target.body("hi", &[])["session_id"],
+            serde_json::json!(resumed.id)
+        );
+    }
+
+    /// A conversation no turn has bound yet takes the turn's own project as
+    /// its first binding, so its uploads go there too.
+    #[test]
+    fn a_resumed_conversation_with_no_project_keeps_this_chats_own() {
+        let mut resumed = session_on("alice:gui");
+        resumed.workspace_id = None;
+        let target = resumed_target(
+            ChatTarget::for_workspace(Some("/Users/dev/elsewhere".to_string())),
+            &resumed,
+        );
+
+        assert_eq!(target.workspace_path(), Some("/Users/dev/elsewhere"));
+        assert_eq!(
+            target.body("hi", &[])["session_id"],
+            serde_json::json!(resumed.id)
+        );
+    }
+
+    /// R23: `--project`'s answer is the daemon's resolved root, so `--resume`
+    /// lists that root's conversations as answered. Resolved again here, a
+    /// missing project's root canonicalized to nothing and the list widened
+    /// to every conversation on the lane — another project's among them.
+    #[test]
+    fn a_resume_after_project_lists_the_conversations_of_the_root_the_daemon_answered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+        let answered = tmp.path().canonicalize().unwrap().join("work").join("mono");
+
+        let target = ChatTarget::for_project(answered.to_string_lossy().into_owned());
+
+        assert_eq!(
+            resume_workspace(&target),
+            Some(answered.to_string_lossy().into_owned())
+        );
+    }
+
+    /// R23: a missing project's root (ST-7) — the working directory's path
+    /// as written — still scopes `--resume` to that project.
+    #[test]
+    fn a_resume_from_a_missing_projects_root_lists_that_projects_conversations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+        let root = tmp.path().canonicalize().unwrap().join("moved-away");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        openalpaca_storage::store::projects::register(&root).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let target = ChatTarget::for_workspace(Some(root.to_string_lossy().into_owned()));
+
+        assert_eq!(
+            resume_workspace(&target),
+            Some(root.to_string_lossy().into_owned())
+        );
+    }
+
+    /// R10's CLI half: the folder is sent absolute, the daemon answers the
+    /// project it resolves to, and every turn carries that root.
+    #[tokio::test]
+    async fn chat_project_posts_the_folder_and_every_turn_carries_the_answered_root() {
+        use crate::test_util::{json_answer, serve};
+        let answer = serde_json::json!({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "root": "/work/mono",
+            "name": "-work-mono",
+            "missing": false,
+        });
+        let (addr, server) = serve(vec![json_answer("200 OK", "e", &answer.to_string())]);
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+
+        let project = choose_project(&client, std::path::Path::new("/work/mono/packages/web"))
+            .await
+            .unwrap();
+
+        let seen = server.join().unwrap();
+        assert!(
+            seen[0].starts_with("POST /v1/workspaces HTTP/1.1"),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            seen[0].ends_with(r#"{"path":"/work/mono/packages/web"}"#),
+            "{}",
+            seen[0]
+        );
+        assert_eq!(project.root, "/work/mono");
+        assert_eq!(project.name, "-work-mono");
+        let target = ChatTarget::for_workspace(Some(project.root.clone()));
+        assert_eq!(
+            target.headers(),
+            vec![("x-workspace-path", "/work/mono".to_string())]
+        );
+        assert_eq!(target.workspace_path(), Some("/work/mono"));
+    }
+
+    /// Uses the module's own `Harness` (`#[command(flatten)] args: ChatArgs`)
+    /// and `use clap::Parser;`, both already in `mod tests` at HEAD.
+    #[test]
+    fn chat_takes_a_project_folder() {
+        let parsed = Harness::try_parse_from(["chat", "--project", "../app"])
+            .unwrap()
+            .args;
+        assert_eq!(
+            parsed.project.as_deref(),
+            Some(std::path::Path::new("../app"))
+        );
+        let plain = Harness::try_parse_from(["chat"]).unwrap().args;
+        assert!(plain.project.is_none());
     }
 }

@@ -122,8 +122,10 @@ impl ScopedRun for PluginLoopOutcome {
 ///      result rather than aborting the loop.
 ///    - anything else (`"working"`) → wait [`POLL_INTERVAL`] and re-poll.
 /// 3. The cancellation token is checked between steps and raced against
-///    the poll sleep; `stop()` is sent to the plugin on every abnormal
-///    exit (cancel, RPC error, iteration cap).
+///    the poll sleep and against each proxied tool call, whose future a
+///    cancel drops (R45: a running command is killed with what it started,
+///    a waiting card withdrawn); `stop()` is sent to the plugin on every
+///    abnormal exit (cancel, RPC error, iteration cap).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_plugin_agent_loop(
     executor: &Arc<dyn PluginAgentExecutor>,
@@ -238,9 +240,32 @@ pub async fn run_plugin_agent_loop(
                     // sanitization, confirmation gating, circuit breaker,
                     // and timeout all apply. Denials are fed back to the
                     // plugin as the tool result.
-                    let result = sandbox
-                        .execute_tool(&tool_call, sandbox_policy, tool_ctx)
-                        .await;
+                    let call = sandbox.execute_tool(&tool_call, sandbox_policy, tool_ctx);
+                    let result = if let Some(token) = cancel_token {
+                        // Raced against the cancel, as the agentic loop races
+                        // its tool calls (R45, storage design §11): `select!`
+                        // drops the call's future before the cancel arm runs,
+                        // and dropping it kills a running command with the
+                        // processes it started and withdraws a card still
+                        // waiting for a person.
+                        tokio::select! {
+                            result = call => result,
+                            _ = token.cancelled() => {
+                                tracing::info!(
+                                    instance_id,
+                                    tool = name,
+                                    "plugin agent cancelled during a tool call"
+                                );
+                                let _ = executor.stop(instance_id).await;
+                                return PluginLoopOutcome::Failed {
+                                    error: "Cancelled".to_string(),
+                                    tool_calls_made: total_tool_calls,
+                                };
+                            }
+                        }
+                    } else {
+                        call.await
+                    };
                     results.push(serde_json::json!({
                         "tool": name,
                         "result": result.unwrap_or_else(|e| e),
@@ -854,5 +879,207 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert!(executor.was_stopped());
+    }
+
+    // ── R45 (storage design §11): a cancelled run takes its proxied call ──
+    // A plugin agent's tool calls go through the same sandbox as an LLM
+    // loop's, so a run cancelled while one of them is in flight must drop
+    // that call's future: the command and what it started are killed, and a
+    // card still waiting for a person is withdrawn.
+
+    /// A sandbox holding the real `shell_execute`.
+    #[cfg(unix)]
+    fn shell_sandbox(
+        broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
+    ) -> Arc<SandboxManager> {
+        let registry = ToolRegistry::default();
+        let shell = crate::tools::builtins::builtin_tools(None, None, None)
+            .into_iter()
+            .find(|tool| tool.definition.name == "shell_execute")
+            .expect("shell_execute is a builtin");
+        registry.register(shell).unwrap();
+        let mut sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        if let Some(broker) = broker {
+            sandbox.set_confirmation_broker(broker);
+        }
+        Arc::new(sandbox)
+    }
+
+    /// A plugin template granting `shell_execute`, its per-tool timeout far
+    /// past every bound these tests wait, so only the cancel can end the call.
+    #[cfg(unix)]
+    fn shell_policy(auto_approve: bool) -> SandboxPolicy {
+        let mut policy = SandboxPolicy::from_constraints(
+            "plugin-instance",
+            &crate::agent::subagent::AgentConstraints {
+                allowed_capabilities: vec!["shell_execute".to_string()],
+                timeout_seconds: Some(120),
+                auto_approve,
+                ..Default::default()
+            },
+        );
+        policy.confirmation_timeout_secs = Some(300);
+        policy
+    }
+
+    /// A plugin agent whose first step asks for `command`.
+    #[cfg(unix)]
+    fn asks_to_run(command: &str) -> Arc<StubExecutor> {
+        StubExecutor::new(
+            true,
+            vec![
+                (
+                    "tool_request".into(),
+                    String::new(),
+                    vec![serde_json::json!({
+                        "tool": "shell_execute",
+                        "arguments": {"command": command},
+                    })],
+                ),
+                ("complete".into(), "ran it".into(), vec![]),
+            ],
+        )
+    }
+
+    /// The loop on a task of its own, as the lead's subagent spawn runs it.
+    #[cfg(unix)]
+    fn spawn_loop(
+        executor: &Arc<StubExecutor>,
+        sandbox: Arc<SandboxManager>,
+        policy: SandboxPolicy,
+        ctx: ToolContext,
+        token: CancellationToken,
+    ) -> tokio::task::JoinHandle<PluginLoopOutcome> {
+        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        tokio::spawn(async move {
+            run_plugin_agent_loop(
+                &exec,
+                "plugin-instance",
+                "task-1",
+                "do the thing",
+                &serde_json::json!({}),
+                &sandbox,
+                &policy,
+                &ctx,
+                Some(&token),
+                None,
+            )
+            .await
+        })
+    }
+
+    /// What the loop returned within `within` of its cancel, or `None` when it
+    /// was still inside its call — then the call is dropped here, so the test
+    /// leaves nothing running behind it.
+    #[cfg(unix)]
+    async fn outcome_within(
+        run: &mut tokio::task::JoinHandle<PluginLoopOutcome>,
+        within: Duration,
+    ) -> Option<PluginLoopOutcome> {
+        match tokio::time::timeout(within, &mut *run).await {
+            Ok(joined) => Some(joined.expect("the plugin loop's task panicked")),
+            Err(_) => None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_plugin_agent_kills_the_command_its_tool_call_started() {
+        use crate::test_util::{
+            GONE_WITHIN, GuardedProject, KillOnFail, pid_from_file, wait_until_gone,
+        };
+        let gp = GuardedProject::new();
+        let pidfile = gp.root.join("sleep.pid");
+        let executor = asks_to_run(&format!(
+            "sleep 30 & echo $! > '{}'; wait",
+            pidfile.display()
+        ));
+        let token = CancellationToken::new();
+        let mut run = spawn_loop(
+            &executor,
+            shell_sandbox(None),
+            shell_policy(true),
+            gp.ctx(),
+            token.clone(),
+        );
+        let pid = pid_from_file(&pidfile, Duration::from_secs(5)).await;
+        let _kill = KillOnFail(pid);
+
+        token.cancel();
+        let outcome = outcome_within(&mut run, GONE_WITHIN).await;
+        let gone = wait_until_gone(pid, GONE_WITHIN).await;
+        if outcome.is_none() {
+            run.abort();
+            let _ = run.await;
+        }
+
+        let Some(PluginLoopOutcome::Failed { error, .. }) = outcome else {
+            panic!("the loop ran on inside its tool call after the cancel: {outcome:?}");
+        };
+        assert_eq!(error, "Cancelled");
+        assert!(
+            gone,
+            "the background sleep {pid} outlived the cancelled run"
+        );
+        assert!(
+            executor.was_stopped(),
+            "the plugin instance was not stopped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancel_while_the_card_waits_withdraws_the_card_and_runs_nothing() {
+        use crate::security::confirmation::ConfirmationBroker;
+        use crate::test_util::{GONE_WITHIN, GuardedProject};
+        let gp = GuardedProject::new();
+        let marker = gp.root.join("ran.txt");
+        let executor = asks_to_run(&format!("touch '{}'", marker.display()));
+        let broker = Arc::new(ConfirmationBroker::new());
+        let token = CancellationToken::new();
+        let mut run = spawn_loop(
+            &executor,
+            shell_sandbox(Some(broker.clone())),
+            shell_policy(false),
+            gp.ctx(),
+            token.clone(),
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while broker.pending_count() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the command's card was never raised"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        token.cancel();
+        let outcome = outcome_within(&mut run, GONE_WITHIN).await;
+        let pending = broker.pending_requests();
+        if outcome.is_none() {
+            run.abort();
+            let _ = run.await;
+        }
+
+        let Some(PluginLoopOutcome::Failed { error, .. }) = outcome else {
+            panic!("the loop waited on the card after the cancel: {outcome:?}");
+        };
+        assert_eq!(error, "Cancelled");
+        assert!(
+            pending.is_empty(),
+            "the card outlived the cancelled run: {:?}",
+            pending
+                .iter()
+                .map(|card| &card.tool_name)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !marker.exists(),
+            "a command whose card was withdrawn never runs"
+        );
+        assert!(
+            executor.was_stopped(),
+            "the plugin instance was not stopped"
+        );
     }
 }

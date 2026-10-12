@@ -16,14 +16,9 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) struct HomeStoreGuard {
     _lock: MutexGuard<'static, ()>,
     prev: Option<OsString>,
-    /// The user-home variables [`HomeStoreGuard::set_with_home`] replaced, to
-    /// restore on drop. Empty for [`HomeStoreGuard::set`].
-    prev_home: Vec<(&'static str, Option<OsString>)>,
+    /// `HOME` as it was, when [`HomeStoreGuard::for_user_home`] moved it.
+    prev_home: Option<Option<OsString>>,
 }
-
-/// What `directories::ProjectDirs` reads to place the legacy app dir: `HOME`
-/// everywhere on unix, and `XDG_DATA_HOME` first on Linux when it is set.
-const USER_HOME_VARS: [&str; 2] = ["HOME", "XDG_DATA_HOME"];
 
 impl HomeStoreGuard {
     pub(crate) fn set(path: &Path) -> Self {
@@ -35,35 +30,39 @@ impl HomeStoreGuard {
         Self {
             _lock: lock,
             prev,
-            prev_home: Vec::new(),
+            prev_home: None,
         }
     }
 
-    /// [`HomeStoreGuard::set`], and also points the user's home directory at
-    /// `home` — for any test that can reach [`legacy_root::legacy_app_dir`].
-    ///
-    /// `OPENALPACA_HOME_STORE` does not move the legacy root: it resolves
-    /// through `directories::ProjectDirs`, which reads `HOME`, so under
-    /// [`HomeStoreGuard::set`] alone such a test would resolve the real
-    /// `~/Library/Application Support/OpenAlpaca`. Same lock, no second one.
-    /// Panics — restoring everything on the way out — if the legacy root still
-    /// resolves outside `home`: a test must never be able to reach it.
-    pub(crate) fn set_with_home(path: &Path, home: &Path) -> Self {
-        let mut guard = Self::set(path);
-        guard.prev_home = USER_HOME_VARS
-            .iter()
-            .map(|var| (*var, std::env::var_os(var)))
-            .collect();
-        // SAFETY: still holding ENV_LOCK, taken by `set` above.
+    /// Moves the user's home directory — `HOME`, which `directories::BaseDirs`
+    /// reads, so `home_root()`'s fallback becomes `<home>/.openalpaca` — and
+    /// sets `OPENALPACA_HOME_STORE` to `store`, or removes it for `None`. For
+    /// the test-build guard of `store::projects::register`: its "unset" and
+    /// "the real store" cases then name a temp directory, so even a guard that
+    /// failed to fire could write nothing into the developer's store. Same
+    /// lock, no second one. Panics, restoring both variables, if `BaseDirs`
+    /// does not answer with `home`.
+    pub(crate) fn for_user_home(home: &Path, store: Option<&Path>) -> Self {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = Self {
+            _lock: lock,
+            prev: std::env::var_os(HOME_STORE_ENV),
+            prev_home: Some(std::env::var_os("HOME")),
+        };
+        // SAFETY: serialized by ENV_LOCK, which `guard` holds until it drops
+        // and restores both variables.
         unsafe {
             std::env::set_var("HOME", home);
-            std::env::remove_var("XDG_DATA_HOME");
+            match store {
+                Some(store) => std::env::set_var(HOME_STORE_ENV, store),
+                None => std::env::remove_var(HOME_STORE_ENV),
+            }
         }
-        let legacy = legacy_root::legacy_app_dir().expect("the legacy app dir must resolve");
-        assert!(
-            legacy.starts_with(home),
-            "HOME override did not sandbox the legacy root ({}); refusing to run",
-            legacy.display()
+        let resolved = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+        assert_eq!(
+            resolved.as_deref(),
+            Some(home),
+            "HOME did not move the user's home directory; refusing to run"
         );
         guard
     }
@@ -72,10 +71,10 @@ impl HomeStoreGuard {
 impl Drop for HomeStoreGuard {
     fn drop(&mut self) {
         // SAFETY: as above — still holding ENV_LOCK.
-        for (var, prev) in self.prev_home.drain(..) {
-            match prev {
-                Some(v) => unsafe { std::env::set_var(var, v) },
-                None => unsafe { std::env::remove_var(var) },
+        if let Some(prev_home) = self.prev_home.take() {
+            match prev_home {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
             }
         }
         match self.prev.take() {
@@ -83,6 +82,21 @@ impl Drop for HomeStoreGuard {
             None => unsafe { std::env::remove_var(HOME_STORE_ENV) },
         }
     }
+}
+
+/// Whether the volume holding `dir` ignores case: a file made as
+/// `case-probe-Ab` is found by a stat of `CASE-PROBE-AB`. macOS's default
+/// volume does; Linux's tmpfs and ext4 do not, so a test of a rename by
+/// case only returns early there (storage design ST-23). `dir` is a test's
+/// own temp folder; the probe is removed before this returns. Unix only, as
+/// every test that calls it.
+#[cfg(unix)]
+pub(crate) fn volume_ignores_case(dir: &Path) -> bool {
+    let made = dir.join("case-probe-Ab");
+    std::fs::write(&made, b"").unwrap();
+    let ignores = std::fs::symlink_metadata(dir.join("CASE-PROBE-AB")).is_ok();
+    std::fs::remove_file(&made).unwrap();
+    ignores
 }
 
 // ============================================================================
@@ -168,14 +182,13 @@ fn test_paths_are_consistent() {
     let db = database_path().unwrap();
     let logs = logs_dir().unwrap();
     let backups = backups_dir().unwrap();
-    // L11: the embedding model's ~1 GB of weights is regenerable machine
-    // state, so it belongs under `state/` — not in the daemon's CWD, which is
-    // where the library puts it when nobody says otherwise.
-    let embeddings = embedding_cache_dir().unwrap();
+    // The memory search index's directory: regenerable machine state, so it
+    // is under `state/` too — and a path query only, created by the index.
+    let cache = cache_dir().unwrap();
 
     assert_eq!(state, tmp.path().join("state"));
     assert!(state.is_dir(), "state_dir() creates the directory");
-    for p in [&discovery, &lock, &db, &logs, &backups, &embeddings] {
+    for p in [&discovery, &lock, &db, &logs, &backups, &cache] {
         assert!(p.starts_with(&state), "{} is not under state/", p.display());
     }
     assert!(discovery.ends_with("discovery.json"));
@@ -183,10 +196,10 @@ fn test_paths_are_consistent() {
     assert!(db.ends_with("openalpaca.db"));
     assert!(logs.is_dir() && logs.ends_with("logs"));
     assert!(backups.is_dir() && backups.ends_with("backups"));
-    assert_eq!(embeddings, state.join("cache").join("fastembed"));
+    assert_eq!(cache, state.join("cache"));
     assert!(
-        embeddings.is_dir(),
-        "embedding_cache_dir() creates it on demand"
+        !cache.exists(),
+        "cache_dir() is a path query and creates nothing"
     );
     assert_eq!(master_key_dir().unwrap(), state);
 
@@ -233,9 +246,7 @@ fn open_home_database_creates_the_state_directory_at_0700() {
 
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("home");
-    // `open_home_database` checks for a legacy root first, so `HOME` is
-    // sandboxed too (and holds no legacy root).
-    let _guard = HomeStoreGuard::set_with_home(&root, &tmp.path().join("user"));
+    let _guard = HomeStoreGuard::set(&root);
     assert!(!root.join("state").exists());
 
     let db = open_home_database().unwrap();
@@ -253,51 +264,35 @@ fn open_home_database_creates_the_state_directory_at_0700() {
     );
 }
 
-/// Where a pre-D2 upload's bytes sit: `state/assets/ab/cd/<sha256>`.
-///
-/// A fixture, not a path the system computes any more — nothing writes there
-/// and nothing moves what is there. It lives here, beside the private
-/// `state_dir_path` it is spelled from, so a test that reconstructs the old
-/// layout does not re-derive it.
-pub(crate) fn interim_blob_path(sha256: &str) -> PathBuf {
-    state_dir_path()
-        .unwrap()
-        .join("assets")
-        .join(&sha256[0..2])
-        .join(&sha256[2..4])
-        .join(sha256)
-}
-
 // ============================================================================
 // ensure_store
 // ============================================================================
 
-/// The README is the document this subsystem writes into the user's own
-/// project, and D2 put human-named uploads there. The daemon's asset sweep
+/// The home README is the document a person reads to learn what each entry
+/// keeps, and D2 gave uploads human-readable names. The daemon's asset sweep
 /// deletes an upload that was never attached to a message once the grace period
 /// passes — bytes and row — so no retention row may promise those files are kept
 /// forever. Produced artifacts are genuinely never swept; only uploads are.
 #[test]
-fn the_readmes_tell_the_truth_about_upload_retention() {
-    for (name, text) in [("home", HOME_README), ("project", PROJECT_README)] {
-        let uploads = text
+fn the_home_readme_tells_the_truth_about_upload_retention() {
+    let uploads = HOME_README
+        .lines()
+        .find(|line| line.starts_with("| `uploads/`"))
+        .expect("the home README has an uploads/ row");
+    assert!(
+        !uploads.contains("never garbage-collected"),
+        "the home README promises uploads survive, but the sweep deletes them: {uploads}"
+    );
+    assert!(
+        uploads.contains("grace period"),
+        "the home README must name the retention rule the sweep applies: {uploads}"
+    );
+    assert!(
+        HOME_README
             .lines()
-            .find(|line| line.starts_with("| `uploads/`"))
-            .unwrap_or_else(|| panic!("the {name} README has no uploads/ row"));
-        assert!(
-            !uploads.contains("never garbage-collected"),
-            "the {name} README promises uploads survive, but the sweep deletes them: {uploads}"
-        );
-        assert!(
-            uploads.contains("grace period"),
-            "the {name} README must name the retention rule the sweep applies: {uploads}"
-        );
-        assert!(
-            text.lines()
-                .any(|line| line.starts_with("| `artifacts/`") && line.contains("never")),
-            "the {name} README must keep saying produced artifacts are never swept"
-        );
-    }
+            .any(|line| line.starts_with("| `artifacts/`") && line.contains("never")),
+        "the home README must keep saying produced artifacts are never swept"
+    );
 }
 
 #[test]
@@ -336,76 +331,157 @@ fn ensure_store_seeds_the_home_root() {
     assert_eq!(install_id(&root).unwrap().as_deref(), Some(id.as_str()));
 }
 
-/// A store seeded by an earlier build carries a README that calls deleting
-/// `state/` a factory reset. Nobody edited it, so it is brought up to date —
-/// every earlier text, not just the last.
+/// The memory redesign's rows (plan 3.7): the home README names the control
+/// snapshots and the search index under `state/` and the notes under
+/// `memory/`, and says nothing of an embedding model.
 #[test]
-fn ensure_store_replaces_an_unedited_superseded_home_readme() {
-    let tmp = tempdir().unwrap();
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let root = ensure_store(&StoreScope::Home).unwrap();
-    let readme = root.join("README.md");
-
-    for (n, old) in SUPERSEDED_HOME_READMES.iter().enumerate() {
+fn the_home_readme_describes_markdown_memory() {
+    for needle in [
+        "| `state/memory-control/` |",
+        "`memory-index-v1.sqlite`",
+        "| `memory/` |",
+        "`owners/<owner-key>/",
+        // S6text M1: the row reads as a sentence, a space before the path.
+        "per owner: `owners/<owner-key>/notes/*.md`",
+    ] {
         assert!(
-            old.contains("Deleting `state/` is a factory reset"),
-            "superseded text {n} is the one this replaces"
+            HOME_README.contains(needle),
+            "the home README must contain {needle:?}"
         );
-        fs::write(&readme, old).unwrap();
-        ensure_store(&StoreScope::Home).unwrap();
-        assert_eq!(
-            fs::read_to_string(&readme).unwrap(),
-            HOME_README,
-            "superseded text {n} must be replaced by the current one"
+    }
+    for stale in ["embedding", "fastembed", "~1 GB", "`memory/`, `skills/`"] {
+        assert!(
+            !HOME_README.contains(stale),
+            "the home README must not say {stale:?}"
+        );
+    }
+}
+
+/// Storage design R1–R3: the home README lists `projects/` — one folder per
+/// project, the user's like everything at the root but `state/` — and the
+/// CLI's `repl_history` in `state/`. The two reserved kinds that never held
+/// content are gone from it (`skills`: the live one is `config/skills/`;
+/// `cache`: the live one is `state/cache/`), and `scratch/` alone stays:
+/// since Stage 2 a conversation's working folder. A deleted project's files
+/// that another conversation still shows are kept under `kept/` in the root's
+/// `artifacts/` and `uploads/`, and those two rows say so.
+#[test]
+fn the_home_readme_lists_projects_and_repl_history_and_only_live_kinds() {
+    let row = |entry: &str| {
+        let head = format!("| `{entry}` |");
+        HOME_README
+            .lines()
+            .find(|line| line.starts_with(&head))
+            .map(str::to_owned)
+    };
+    let projects = row("projects/").expect("the home README has a projects/ row");
+    for needle in ["project.json", "artifacts/", "uploads/", "memory/", "yours"] {
+        assert!(
+            projects.contains(needle),
+            "the projects/ row must name {needle:?}: {projects}"
+        );
+    }
+    let state = row("state/").expect("the home README has a state/ row");
+    assert!(state.contains("`repl_history`"), "{state}");
+    for gone in ["skills/", "cache/", "scratch/`, `cache/"] {
+        assert!(
+            row(gone).is_none(),
+            "the home README must not list {gone:?} as an entry"
         );
     }
     assert!(
-        !SUPERSEDED_HOME_READMES.contains(&HOME_README),
-        "the current text must not be listed as superseded"
+        row("scratch/").is_some(),
+        "scratch/ is listed: a conversation with no project works there"
     );
+    for kept in ["artifacts/", "uploads/"] {
+        let line = row(kept).unwrap_or_else(|| panic!("the home README has a {kept} row"));
+        assert!(line.contains("`kept/`"), "{line}");
+    }
 }
 
-/// The refresh is documentation and must never stop a boot. `ensure_store`
-/// runs before the daemon's singleton lock and in the GUI and the CLI too, so
-/// two launchers can refresh at once and the loser's rename fails. A temp path
-/// that cannot be written stands in for that race: the store still opens, and
-/// the old text stays for the next boot to replace.
+/// Storage design Stage 2 (ST-10, ST-12): in a project an agent writes and
+/// edits the project's own files — real files, each write asking first — and
+/// OpenAlpaca's stores still write nothing there. Final review R27's row named
+/// a daemon started outside the home store as the one writer inside a project;
+/// Stage 2 removed that startup-folder write (`file_write` acts in the turn's
+/// working folder), so the row names the approved agent instead. A chosen
+/// folder with no git is a project too, so the row promises no git history:
+/// it names the pre-edit copy OpenAlpaca keeps in the conversation's log, and
+/// git only where the project is a repository. Only `file_write` and
+/// `file_edit` keep that copy (final review d8-docs-2): the row names them and
+/// says a shell command's changes keep none — the README is written only when
+/// absent, so a store keeps whatever it was seeded with.
 #[test]
-fn a_readme_refresh_that_fails_does_not_fail_ensure_store() {
-    let tmp = tempdir().unwrap();
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let root = ensure_store(&StoreScope::Home).unwrap();
-    let readme = root.join("README.md");
-    fs::write(&readme, SUPERSEDED_HOME_READMES[0]).unwrap();
-    // `write_atomic` writes `README.md.tmp` first; a directory there makes
-    // that fail exactly as a lost rename race does.
-    fs::create_dir(root.join("README.md.tmp")).unwrap();
-
-    ensure_store(&StoreScope::Home).expect("a failed README refresh must not fail ensure_store");
-    assert_eq!(
-        fs::read_to_string(&readme).unwrap(),
-        SUPERSEDED_HOME_READMES[0],
-        "the refresh failed, so the old text is left for the next boot"
-    );
+fn the_home_readme_projects_row_says_agents_write_the_projects_own_files_only_with_approval() {
+    let projects = HOME_README
+        .lines()
+        .find(|line| line.starts_with("| `projects/` |"))
+        .expect("the home README has a projects/ row");
+    for needle in [
+        "project.json",
+        "by-products",
+        "real files",
+        "asking you first",
+        "`sessions/<id>/snapshots/`",
+        "before `file_write` or `file_edit` replaces or edits a file",
+        "a shell command's changes keep no copy",
+        "where the project is a repository",
+        "never the project's own files",
+    ] {
+        assert!(
+            projects.contains(needle),
+            "the projects/ row must say {needle:?}: {projects}"
+        );
+    }
+    for stale in [
+        "`openalpaca daemon start`",
+        "the directory it was started in",
+        "plain files",
+        "Nothing is ever written inside",
+        "git keeps",
+        "before an agent replaces or edits",
+    ] {
+        assert!(
+            !projects.contains(stale),
+            "the projects/ row must not say {stale:?}: {projects}"
+        );
+    }
 }
 
-/// A tripwire, not a spec: the refresh above only reaches stores seeded by a
-/// text listed in `SUPERSEDED_HOME_READMES`. Changing `HOME_README` without
-/// listing the text it replaces would strand every store seeded by this build.
+/// Storage design Stage 2 (ST-10, R44): a conversation with no project works
+/// in a folder of its own, `scratch/<conversation id>/`, made the first time a
+/// tool works there and removed with the conversation — clearing or archiving
+/// it keeps the folder, and nothing else sweeps it.
 #[test]
-fn a_changed_home_readme_lists_the_text_it_replaces() {
-    use sha2::{Digest, Sha256};
-    assert_eq!(
-        format!("{:x}", Sha256::digest(HOME_README.as_bytes())),
-        "eceb21d5c6376fbcf29b09ab5e0774d3f62ace62a82468fad3ff257d2cc2a9a5",
-        "HOME_README changed: save its previous text as \
-         store/superseded_readmes/home-<next>.txt, list it in \
-         SUPERSEDED_HOME_READMES, then update this digest"
-    );
+fn the_home_readme_scratch_row_says_a_conversation_with_no_project_works_there_and_it_goes_with_it()
+{
+    let scratch = HOME_README
+        .lines()
+        .find(|line| line.starts_with("| `scratch/` |"))
+        .expect("the home README has a scratch/ row");
+    for needle in [
+        "no project",
+        "`scratch/<conversation id>/`",
+        "shell commands",
+        "removed with its conversation",
+        "nothing else sweeps it",
+    ] {
+        assert!(
+            scratch.contains(needle),
+            "the scratch/ row must say {needle:?}: {scratch}"
+        );
+    }
+    for stale in ["reserved", "swept freely"] {
+        assert!(
+            !scratch.contains(stale),
+            "the scratch/ row must not say {stale:?}: {scratch}"
+        );
+    }
 }
 
-/// The README is the user's the moment they change it: an edited earlier
-/// text — even by one byte — and any text of their own are left alone.
+/// The README is the user's the moment it exists: it is written only when
+/// absent, so an edited text — even by one byte — and any text of their own
+/// are left alone.
 #[test]
 fn ensure_store_leaves_an_edited_home_readme_alone() {
     let tmp = tempdir().unwrap();
@@ -413,221 +489,91 @@ fn ensure_store_leaves_an_edited_home_readme_alone() {
     let root = ensure_store(&StoreScope::Home).unwrap();
     let readme = root.join("README.md");
 
-    let edited_old = format!("{}\nMy note: keep backups.\n", SUPERSEDED_HOME_READMES[4]);
-    let trimmed_old = SUPERSEDED_HOME_READMES[0].trim_end().to_owned();
-    for mine in [edited_old, trimmed_old, "# my own notes\n".to_owned()] {
+    let edited = format!("{HOME_README}\nMy note: keep backups.\n");
+    let trimmed = HOME_README.trim_end().to_owned();
+    for mine in [edited, trimmed, "# my own notes\n".to_owned()] {
         fs::write(&readme, &mine).unwrap();
         ensure_store(&StoreScope::Home).unwrap();
         assert_eq!(fs::read_to_string(&readme).unwrap(), mine);
     }
 }
 
-/// Only the home README is refreshed; a project store's is never rewritten,
-/// even with a superseded home text in it.
+/// ST-1: a project's store is its folder under the home store's
+/// `projects/`, found by `projects::lookup`; `content_dir` keeps its shape
+/// beneath it, and nothing is written into the project's own folder — no
+/// README, no `.gitignore`, no `.layout` either (R3).
 #[test]
-fn a_project_readme_is_never_refreshed() {
+fn a_project_store_is_its_folder_under_projects() {
     let tmp = tempdir().unwrap();
-    // `ensure_store` asks whether a root is the home root, which resolves it.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let project = tmp.path().join("project");
+    let root = tmp.path().canonicalize().unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home"));
+    let project = root.join("work").join("app");
     fs::create_dir_all(&project).unwrap();
-    let scope = StoreScope::Project(project);
-    let root = ensure_store(&scope).unwrap();
-    let readme = root.join("README.md");
-    fs::write(&readme, SUPERSEDED_HOME_READMES[4]).unwrap();
-    ensure_store(&scope).unwrap();
-    assert_eq!(
-        fs::read_to_string(&readme).unwrap(),
-        SUPERSEDED_HOME_READMES[4]
-    );
-}
-
-#[test]
-fn ensure_store_seeds_a_project_root() {
-    let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let project = tmp.path().to_path_buf();
+    let registered = projects::register(&project).unwrap();
     let scope = StoreScope::Project(project.clone());
 
-    let root = ensure_store(&scope).unwrap();
-    assert_eq!(root, project.join(".openalpaca"));
-
-    let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
+    let store = store_root(&scope).unwrap();
+    assert_eq!(store, registered.dir);
     assert_eq!(
-        gitignore,
-        "/.layout\n/uploads/\n/sessions/\n/scratch/\n/cache/\n.versions/\n"
+        store,
+        root.join("home")
+            .join(projects::PROJECTS_DIR)
+            .join(projects::folder_name(&project))
     );
-    assert!(
-        fs::read_to_string(root.join("README.md"))
-            .unwrap()
-            .contains("project store")
-    );
-    assert_eq!(layout_version(&root).unwrap(), Some(1));
+    assert_eq!(ensure_store(&scope).unwrap(), store);
     assert_eq!(
-        install_id(&root).unwrap(),
-        None,
-        "only the home root carries an install id"
+        content_dir(&scope, ContentKind::Uploads).unwrap(),
+        store.join("uploads")
     );
-
-    // User edits stick.
-    fs::write(root.join(".gitignore"), "# mine\n").unwrap();
-    ensure_store(&scope).unwrap();
+    let mut entries: Vec<String> = fs::read_dir(&store)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
     assert_eq!(
-        fs::read_to_string(root.join(".gitignore")).unwrap(),
-        "# mine\n"
+        entries,
+        [projects::PROJECT_FILE, "uploads"],
+        "project.json and content only (R3)"
+    );
+    assert_eq!(
+        fs::read_dir(&project).unwrap().count(),
+        0,
+        "nothing in the project's own folder (ST-1)"
     );
 }
 
-/// `walk_up_for_marker` counts `.openalpaca` as a project marker, so a path
-/// under `$HOME` with no closer marker resolves to `$HOME` — whose "project
-/// store" is the home root itself. Seeded from the project branch, that put a
-/// `.gitignore` in the home root and a README describing a project store. The
-/// metadata follows the resolved root, not the scope variant.
+/// R12: a root with no folder under `projects/` has no store. `store_root`,
+/// `ensure_store` and `content_dir` answer the typed `NotRegistered` error,
+/// which `projects::is_not_registered` recognises, and create nothing — not
+/// under the home store, not in the folder.
 #[test]
-fn ensure_store_on_a_project_that_is_the_home_root_seeds_the_home_metadata() {
+fn an_unregistered_project_root_has_no_store_and_nothing_is_created() {
     let tmp = tempdir().unwrap();
-    let home = tmp.path().join("home");
-    let _guard = HomeStoreGuard::set(&home.join(".openalpaca"));
+    let root = tmp.path().canonicalize().unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home"));
+    let repo = root.join("work").join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let scope = StoreScope::Project(repo.clone());
 
-    // `Project($HOME)` — the shape a CWD under `$HOME` with no marker resolves
-    // to. Its store root is `$HOME/.openalpaca`, which *is* the home root.
-    let root = ensure_store(&StoreScope::Project(home.clone())).unwrap();
-    assert_eq!(root, home.join(".openalpaca"));
-
-    assert!(
-        !root.join(".gitignore").exists(),
-        "no project .gitignore is written into the home root"
-    );
-    let readme = fs::read_to_string(root.join("README.md")).unwrap();
-    assert!(
-        readme.contains("Retention class") && !readme.contains("project store"),
-        "the home README is the one seeded"
-    );
-    assert!(
-        install_id(&root).unwrap().is_some(),
-        "and the home root's install id with it"
-    );
-
-    // A real project under the home directory — one with a root of its own — is
-    // untouched by the fold.
-    let inner = home.join("work");
-    let inner_root = ensure_store(&StoreScope::Project(inner.clone())).unwrap();
-    assert_eq!(inner_root, inner.join(".openalpaca"));
-    assert!(inner_root.join(".gitignore").exists());
-}
-
-#[test]
-fn unknown_entries_names_only_what_the_store_did_not_create() {
-    let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let scope = StoreScope::Project(tmp.path().to_path_buf());
-    let root = ensure_store(&scope).unwrap();
-    // Two kinds the store created, and two names it did not.
-    fs::create_dir_all(root.join("artifacts")).unwrap();
-    fs::create_dir_all(root.join("uploads")).unwrap();
-    fs::create_dir_all(root.join("my-notes")).unwrap();
-    fs::write(root.join("todo.txt"), "mine").unwrap();
-
+    for err in [
+        store_root(&scope).unwrap_err(),
+        ensure_store(&scope).unwrap_err(),
+        content_dir(&scope, ContentKind::Artifacts).unwrap_err(),
+    ] {
+        assert!(projects::is_not_registered(&err), "{err:#}");
+        assert_eq!(
+            err.downcast_ref::<projects::ProjectError>()
+                .map(projects::ProjectError::code),
+            Some("WORKSPACE_NOT_FOUND")
+        );
+    }
+    assert!(!root.join("home").exists(), "nothing under the home store");
     assert_eq!(
-        unknown_entries(&root, false),
-        vec!["my-notes".to_string(), "todo.txt".to_string()],
-        "the seeded metadata and every ContentKind are the store's own"
+        fs::read_dir(&repo).unwrap().count(),
+        1,
+        "the folder holds its .git and nothing else"
     );
-    // A root with nothing in it, and one that does not exist, both say nothing.
-    assert!(unknown_entries(&tmp.path().join("no-such-store"), false).is_empty());
-}
-
-#[test]
-fn unknown_entries_treats_state_and_plugins_as_home_only_names() {
-    let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let scope = StoreScope::Project(tmp.path().to_path_buf());
-    let root = ensure_store(&scope).unwrap();
-    fs::create_dir_all(root.join("state")).unwrap();
-    fs::create_dir_all(root.join("plugins")).unwrap();
-
-    // Home-root names, so a project root does not get a pass on them: they
-    // are exactly the kind of name this list exists to report.
-    assert_eq!(
-        unknown_entries(&root, false),
-        vec!["plugins".to_string(), "state".to_string()],
-        "under a project root, state/plugins are unknown like any other name"
-    );
-    // The same directory, read as the home root, waves both through.
-    assert!(
-        unknown_entries(&root, true).is_empty(),
-        "the home root owns state/ and plugins/ beside its content dirs"
-    );
-}
-
-/// The Minor #4 regression the round-2 findings caught: `config` is reserved
-/// by the *project* README too ("`memory/`, `skills/`, `config/` — reserved;
-/// not created until used"), even though it is not a [`ContentKind`] — so an
-/// existing `<project>/.openalpaca/config/` must be named once, by the plan's
-/// own `skills/, config/` keep line, and not a second time here.
-#[test]
-fn unknown_entries_treats_config_as_reserved_in_both_scopes() {
-    let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let scope = StoreScope::Project(tmp.path().to_path_buf());
-    let root = ensure_store(&scope).unwrap();
-    fs::create_dir_all(root.join("config")).unwrap();
-    fs::create_dir_all(root.join("notes")).unwrap();
-
-    assert_eq!(
-        unknown_entries(&root, false),
-        vec!["notes".to_string()],
-        "config/ is a reserved project name, not an unknown one — notes/ still is"
-    );
-    // The home root owns config/ too, but not notes/ — it is unknown to
-    // either scope, so it stays in both answers.
-    assert_eq!(
-        unknown_entries(&root, true),
-        vec!["notes".to_string()],
-        "config/ is known at the home root as well"
-    );
-}
-
-/// §1.3 rule 1: dot-prefixed names are reserved for store metadata forever.
-/// `.versions/` lives nested under `artifacts/**/` today and never at a store
-/// root, but the reservation holds regardless of whether anything currently
-/// writes there.
-#[test]
-fn unknown_entries_reserves_dot_versions_even_though_nothing_writes_it_at_the_root() {
-    let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let scope = StoreScope::Project(tmp.path().to_path_buf());
-    let root = ensure_store(&scope).unwrap();
-    fs::create_dir_all(root.join(".versions")).unwrap();
-
-    assert!(
-        unknown_entries(&root, false).is_empty(),
-        ".versions is reserved store metadata, not an unknown name"
-    );
-}
-
-#[test]
-fn install_id_is_appended_once_to_a_pre_existing_layout() {
-    let tmp = tempdir().unwrap();
-    let _guard = HomeStoreGuard::set(tmp.path());
-    fs::write(tmp.path().join(".layout"), "1\n").unwrap();
-
-    ensure_store(&StoreScope::Home).unwrap();
-    let id = install_id(tmp.path()).unwrap().unwrap();
-    assert_eq!(layout_version(tmp.path()).unwrap(), Some(1));
-
-    ensure_store(&StoreScope::Home).unwrap();
-    assert_eq!(install_id(tmp.path()).unwrap().unwrap(), id);
 }
 
 #[test]
@@ -638,6 +584,8 @@ fn layout_version_reports_absence_and_rejects_garbage() {
     assert!(layout_version(tmp.path()).is_err());
 }
 
+/// Line 1 is repaired in place; nothing is added to a marker that exists, so
+/// one with no install id keeps having none.
 #[test]
 fn a_malformed_layout_marker_is_repaired_not_appended_to() {
     let tmp = tempdir().unwrap();
@@ -646,74 +594,31 @@ fn a_malformed_layout_marker_is_repaired_not_appended_to() {
 
     ensure_store(&StoreScope::Home).unwrap();
 
-    assert_eq!(layout_version(tmp.path()).unwrap(), Some(LAYOUT_VERSION));
-    assert!(install_id(tmp.path()).unwrap().is_some());
+    assert_eq!(
+        fs::read_to_string(tmp.path().join(".layout")).unwrap(),
+        format!("{LAYOUT_VERSION}\n")
+    );
+    assert_eq!(install_id(tmp.path()).unwrap(), None);
 }
 
 #[test]
 fn layout_lines_this_module_does_not_own_are_preserved() {
     let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let project = tmp.path().to_path_buf();
-    let scope = StoreScope::Project(project.clone());
-    let root = ensure_store(&scope).unwrap();
-    // A future project id (P-12) must survive a repair of line 1.
-    fs::write(root.join(".layout"), "garbage\nproject_id=abc\n").unwrap();
+    let _guard = HomeStoreGuard::set(tmp.path());
+    fs::write(
+        tmp.path().join(".layout"),
+        "garbage\ninstall_id=abc\nproject_id=def\n",
+    )
+    .unwrap();
 
-    ensure_store(&scope).unwrap();
-
-    let text = fs::read_to_string(root.join(".layout")).unwrap();
-    let recorded = project.canonicalize().unwrap();
-    assert_eq!(
-        text,
-        format!("1\nproject_id=abc\nproject_root={}\n", recorded.display()),
-        "line 1 repaired, the foreign line kept, the recorded root added"
-    );
-}
-
-#[test]
-fn a_project_store_records_its_own_root_once() {
-    let tmp = tempdir().unwrap();
-    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
-    // without this it would canonicalize the owner's real store.
-    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
-    let project = tmp.path().canonicalize().unwrap();
-    let scope = StoreScope::Project(project.clone());
-    let root = ensure_store(&scope).unwrap();
+    ensure_store(&StoreScope::Home).unwrap();
 
     assert_eq!(
-        recorded_project_root(&root).unwrap().as_deref(),
-        Some(project.to_string_lossy().as_ref())
+        fs::read_to_string(tmp.path().join(".layout")).unwrap(),
+        "1\ninstall_id=abc\nproject_id=def\n",
+        "line 1 repaired, every other line kept, nothing added"
     );
-    assert_eq!(
-        recorded_project_root(&tmp.path().join("nowhere")).unwrap(),
-        None,
-        "a directory with no marker records nothing"
-    );
-
-    // The whole point: `ensure_store` runs on every content_dir call, and a
-    // line that healed itself to the current path would erase the difference a
-    // moved project is recognised by.
-    set_recorded_project_root(&root, "/somewhere/else").unwrap();
-    ensure_store(&scope).unwrap();
-    content_dir(&scope, ContentKind::Artifacts).unwrap();
-    assert_eq!(
-        recorded_project_root(&root).unwrap().as_deref(),
-        Some("/somewhere/else")
-    );
-
-    // And the rewrite keeps the rest of the marker intact.
-    assert_eq!(layout_version(&root).unwrap(), Some(LAYOUT_VERSION));
-}
-
-#[test]
-fn the_home_root_records_no_project_root() {
-    let tmp = tempdir().unwrap();
-    let _guard = HomeStoreGuard::set(&tmp.path().canonicalize().unwrap());
-    let root = ensure_store(&StoreScope::Home).unwrap();
-    assert_eq!(recorded_project_root(&root).unwrap(), None);
+    assert_eq!(install_id(tmp.path()).unwrap().as_deref(), Some("abc"));
 }
 
 #[test]
@@ -732,38 +637,26 @@ fn no_temp_file_survives_a_layout_write() {
 // ============================================================================
 
 #[test]
-fn a_project_content_dir_seeds_the_store_first() {
-    let tmp = tempdir().unwrap();
-    let project = tmp.path().to_path_buf();
-
-    let uploads = content_dir(&StoreScope::Project(project.clone()), ContentKind::Uploads).unwrap();
-
-    assert!(uploads.is_dir());
-    assert!(
-        project.join(".openalpaca").join(".gitignore").exists(),
-        "uploads must never exist before the .gitignore that excludes them from git"
-    );
-}
-
-#[test]
 fn content_dirs_have_the_same_shape_in_both_scopes() {
     let tmp = tempdir().unwrap();
     let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let project = tmp.path().join("proj");
+    fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    projects::register(&project).unwrap();
+    let scope = StoreScope::Project(project);
 
     for kind in [
         ContentKind::Artifacts,
         ContentKind::Uploads,
         ContentKind::Sessions,
         ContentKind::Memory,
-        ContentKind::Skills,
         ContentKind::Scratch,
-        ContentKind::Cache,
     ] {
         let home = content_dir(&StoreScope::Home, kind).unwrap();
-        let proj = content_dir(&StoreScope::Project(project.clone()), kind).unwrap();
+        let proj = content_dir(&scope, kind).unwrap();
         assert_eq!(home, tmp.path().join("home").join(kind.dir_name()));
-        assert_eq!(proj, project.join(".openalpaca").join(kind.dir_name()));
+        assert_eq!(proj, store_root(&scope).unwrap().join(kind.dir_name()));
         assert!(home.is_dir() && proj.is_dir(), "content_dir creates on use");
     }
 
@@ -906,8 +799,8 @@ fn log_tail_keeps_only_the_newest_lines_and_ignores_the_trailing_newline() {
 }
 
 /// Verbatim is the rule: a blank line *inside* the window is part of what was
-/// written — the legacy-root refusal is paragraphs — while the blank lines the
-/// window would open with are not worth a line of the panel.
+/// written — a message may be paragraphs — while the blank lines the window
+/// would open with are not worth a line of the panel.
 #[test]
 fn log_tail_keeps_inner_blank_lines_and_drops_the_leading_ones() {
     let refusal = "FATAL: first paragraph\n\n  Older install:  /x\n\nTo discard it, rename /x.\n";
@@ -995,4 +888,91 @@ fn read_log_tail_of_a_large_log_never_shows_a_line_cut_in_half() {
         assert_eq!(kept.len(), 99, "a line was cut: {kept:?}");
     }
     assert!(tail.len() as u64 <= LOG_TAIL_READ_BYTES);
+}
+
+// ============================================================================
+// create_below (R-F3)
+// ============================================================================
+
+#[test]
+fn create_below_makes_each_missing_level_and_keeps_the_ones_there() {
+    let tmp = tempdir().unwrap();
+    let base = tmp.path().join("projects").join("-repo");
+    fs::create_dir_all(base.join("uploads")).unwrap();
+    fs::write(base.join("uploads").join("kept.txt"), b"kept").unwrap();
+
+    let dir = create_below(&base, Path::new("uploads/2026-10-08")).unwrap();
+
+    assert_eq!(dir, base.join("uploads").join("2026-10-08"));
+    assert!(dir.is_dir());
+    assert_eq!(
+        fs::read(base.join("uploads").join("kept.txt")).unwrap(),
+        b"kept"
+    );
+    assert_eq!(
+        create_below(&base, Path::new("uploads/2026-10-08")).unwrap(),
+        dir,
+        "a second call finds every level there"
+    );
+    assert_eq!(create_below(&base, Path::new("")).unwrap(), base);
+}
+
+#[test]
+fn create_below_a_base_that_is_gone_is_not_found_and_creates_nothing() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    let gone = projects.join("-repo");
+
+    for rel in ["", "uploads", "artifacts/loose/2026-10-08"] {
+        let err = create_below(&gone, Path::new(rel)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{rel:?}: {err}");
+    }
+    assert!(!gone.exists(), "the base was re-created");
+    assert_eq!(fs::read_dir(&projects).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn create_below_refuses_a_level_that_is_a_link_or_a_file() {
+    let tmp = tempdir().unwrap();
+    let base = tmp.path().join("base");
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, base.join("uploads")).unwrap();
+    fs::write(base.join("artifacts"), b"a file").unwrap();
+    let linked_base = tmp.path().join("linked-base");
+    std::os::unix::fs::symlink(&base, &linked_base).unwrap();
+
+    for (b, rel) in [
+        (&base, "uploads/2026-10-08"),
+        (&base, "artifacts/loose"),
+        (&linked_base, "memory"),
+    ] {
+        let err = create_below(b, Path::new(rel)).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "{}/{rel}: {err}",
+            b.display()
+        );
+    }
+    assert_eq!(
+        fs::read_dir(&elsewhere).unwrap().count(),
+        0,
+        "followed a link"
+    );
+    assert!(!base.join("memory").exists());
+}
+
+#[test]
+fn create_below_takes_plain_names_only() {
+    let tmp = tempdir().unwrap();
+    for rel in ["../escape", "/abs", "a/../b"] {
+        let err = create_below(tmp.path(), Path::new(rel)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{rel}: {err}");
+    }
+    assert!(!tmp.path().join("a").exists());
+    assert!(!tmp.path().parent().unwrap().join("escape").exists());
 }

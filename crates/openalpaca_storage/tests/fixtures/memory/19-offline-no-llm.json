@@ -1,0 +1,58 @@
+{
+  "row": {
+    "id": 19,
+    "scenario": "No configured LLM, offline",
+    "required_outcome": "Management and retrieval work; extraction reported unavailable"
+  },
+  "design": ["§1: the default memory path has no model, no download, no network call; extraction is optional and never required to store, browse, search or delete", "§5: the default recall/search path invokes no model", "plan §5 targets: 0 network or model calls for create, read, search, update, forget or rebuild"],
+  "loads_in": ["slice-3"],
+  "notes_for_implementer": "The daemon has no provider enabled (`llm: none`) and the harness denies outbound networking (plan §6). Every memory operation completes with zero model calls and zero network calls; extraction after a turn reports itself unavailable — one visible line, no error on the turn, no retry loop — and writes nothing. The pinned reading: `extraction.unavailable` is reported, not silently skipped, and the turn's own `done` is unaffected.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice", "messages": ["8001"] },
+  "daemon": { "cwd": "home", "llm": "none", "network": "denied" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000019-0000-4000-8000-000000000001",
+          "title": "Router login",
+          "kind": "procedure",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Router login\n\nThe home router admin page is on the printer's VLAN.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_api": { "owner_id": "u_example_alice", "workspace": null, "surface": "user_surface", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": null, "task_id": null, "request_id": null, "source": "cli" } },
+    "alice_extraction": { "owner_id": "u_example_alice", "workspace": null, "surface": "extraction", "capabilities": { "read": false, "write": true, "forget": false }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "extraction" } }
+  },
+  "operations": [
+    { "step": 1, "op": "store", "context": "alice_api", "as": "offline_note", "input": { "title": "Printer VLAN", "body": "# Printer VLAN\n\nThe printer lives on VLAN 30.\n", "kind": "fact" }, "expect": { "created": true, "origin": "user", "model_calls": 0, "network_calls": 0 } },
+    { "step": 2, "op": "search", "context": "alice_api", "input": { "query": "printer vlan" }, "expect": { "ids_unordered": ["00000019-0000-4000-8000-000000000001", "@id:offline_note"], "model_calls": 0, "network_calls": 0 } },
+    { "step": 3, "op": "read", "context": "alice_api", "input": { "id": "@id:offline_note" }, "expect": { "model_calls": 0, "network_calls": 0 } },
+    { "step": 4, "op": "list", "context": "alice_api", "input": {}, "expect": { "count": 2, "model_calls": 0, "network_calls": 0 } },
+    { "step": 5, "op": "update", "context": "alice_api", "input": { "id": "@id:offline_note", "expected_revision": "@rev:offline_note", "action": "edit", "patch": { "tags": ["network"] } }, "expect": { "revision_changed": true, "model_calls": 0, "network_calls": 0 } },
+    { "step": 6, "op": "scan", "input": {}, "expect": { "model_calls": 0, "network_calls": 0 } },
+    { "step": 7, "op": "doctor", "input": {}, "expect": { "doctor": { "quarantined": [], "orphans": [] }, "model_calls": 0, "network_calls": 0 } },
+    { "step": 8, "op": "erase_cache", "input": {}, "expect": {} },
+    { "step": 9, "op": "restart", "input": {}, "expect": { "index_state": "ready", "model_calls": 0, "network_calls": 0, "files_absent": ["home/state/cache/fastembed"] } },
+    { "step": 10, "op": "search", "context": "alice_api", "input": { "query": "printer vlan" }, "expect": { "ids_unordered": ["00000019-0000-4000-8000-000000000001", "@id:offline_note"], "model_calls": 0, "network_calls": 0 } },
+    { "step": 11, "op": "extraction", "context": "alice_extraction", "input": { "typed": "I prefer dark mode everywhere.", "source": { "type": "message", "id": "8001" } }, "expect": { "extraction": { "count": 0, "unavailable": true }, "model_calls": 0, "network_calls": 0, "warnings": { "count": 1, "contains": ["extraction"] } } },
+    { "step": 12, "op": "forget", "context": "alice_api", "input": { "targets": [{ "id": "@id:offline_note", "expected_revision": "@rev:offline_note" }] }, "expect": { "status": { "@id:offline_note": "forgotten" }, "model_calls": 0, "network_calls": 0 } }
+  ],
+  "final_state": {
+    "files_absent": ["home/state/cache/fastembed"],
+    "files_exist": ["home/state/cache/memory-index-v1.sqlite"],
+    "network_calls": 0,
+    "model_calls": 0
+  }
+}

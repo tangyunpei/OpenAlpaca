@@ -57,6 +57,27 @@ pub(crate) fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
     }
 }
 
+/// A populated `USER.md`, the shape the persona layer renders as a
+/// `### USER PROFILE ###` block (plan 3.3: injected exactly once).
+pub(crate) const PROFILE_DOC: &str = r#"---
+title: "USER.md"
+summary: "User profile record"
+read_when:
+  - Bootstrapping a workspace manually
+---
+
+# USER.md -- About Your Human
+
+## Identity
+
+* Name: Alex
+* Timezone: PST (UTC-8)
+
+## Communication Style
+
+Prefers concise, technical responses. No filler or sycophancy.
+"#;
+
 /// Serializes every test in this crate that re-points `OPENALPACA_HOME_STORE`.
 ///
 /// The variable is process-global and every store accessor reads it on each
@@ -93,6 +114,76 @@ impl Drop for HomeStoreGuard {
     }
 }
 
+/// A guarded temp home store and one temp project folder registered under
+/// it (storage design, Stage 2): every test that writes, edits, lists or
+/// runs a command does it here — never in the repository, never in the
+/// process's current directory, never in `~/.openalpaca`. `_guard` is
+/// declared first so it drops first: the variable is restored before the
+/// folders go.
+pub(crate) struct GuardedProject {
+    _guard: HomeStoreGuard,
+    pub(crate) home: tempfile::TempDir,
+    pub(crate) project: tempfile::TempDir,
+    /// The project's canonical root, as `projects::register` recorded it.
+    pub(crate) root: std::path::PathBuf,
+}
+
+impl GuardedProject {
+    /// Two tempdirs: the home store pointed at the first, the second
+    /// registered as a project under it.
+    pub(crate) fn new() -> Self {
+        let home = tempfile::tempdir().expect("a temp home store");
+        let project = tempfile::tempdir().expect("a temp project folder");
+        let guard =
+            HomeStoreGuard::set(&home.path().canonicalize().expect("the temp home resolves"));
+        let root = openalpaca_storage::store::projects::register(
+            &project
+                .path()
+                .canonicalize()
+                .expect("the temp project resolves"),
+        )
+        .expect("the temp project registers under the temp home")
+        .root;
+        Self {
+            _guard: guard,
+            home,
+            project,
+            root,
+        }
+    }
+
+    /// A project turn: its owner, the project as the request's root (and as
+    /// memory's), and a conversation.
+    pub(crate) fn ctx(&self) -> crate::tools::registry::ToolContext {
+        let root = self.root.to_string_lossy().into_owned();
+        crate::tools::registry::ToolContext {
+            owner_id: Some("owner-test".to_string()),
+            workspace_id: Some(root.clone()),
+            request_workspace_root: Some(root),
+            conversation_id: Some("conv-test".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// A turn with no project: its conversation, and nothing else. A test
+    /// that needs an owner sets `owner_id` over it.
+    pub(crate) fn scratch_ctx(&self) -> crate::tools::registry::ToolContext {
+        crate::tools::registry::ToolContext {
+            conversation_id: Some("conv-test".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// The home store's root, canonical: what `store::home_root()` answers
+    /// while the guard holds.
+    pub(crate) fn home_root(&self) -> std::path::PathBuf {
+        self.home
+            .path()
+            .canonicalize()
+            .expect("the temp home resolves")
+    }
+}
+
 /// A provider that answers from a canned script and keeps every request it
 /// was handed — the offline seam the M2 utility-call tests assert against.
 ///
@@ -121,12 +212,12 @@ impl RecordingProvider {
         })
     }
 
-    /// A provider whose answer is nothing at all, because the output budget
-    /// was spent before a character was written.
-    pub(crate) fn spent_budget() -> std::sync::Arc<Self> {
+    /// The same, every answer stopped at its output ceiling
+    /// (`FinishReason::MaxTokens`): a model cut off mid-answer.
+    pub(crate) fn cut(reply: impl Into<String>) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             seen: std::sync::Mutex::new(Vec::new()),
-            reply: String::new(),
+            reply: reply.into(),
             finish_reason: openalpaca_llm::FinishReason::MaxTokens,
         })
     }
@@ -143,6 +234,17 @@ impl RecordingProvider {
     pub(crate) fn first_request_opt(&self) -> Option<openalpaca_llm::ChatRequest> {
         let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
         seen.first().cloned()
+    }
+
+    /// How many requests reached this provider — for a test whose point is
+    /// how many calls were made.
+    pub(crate) fn request_count(&self) -> usize {
+        self.seen.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    /// Every request that reached this provider, in arrival order.
+    pub(crate) fn requests(&self) -> Vec<openalpaca_llm::ChatRequest> {
+        self.seen.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
@@ -196,3 +298,86 @@ pub(crate) fn router_recording(
 /// The model the recording router defaults to: a compiled-in Anthropic id, so
 /// `ModelRegistry::with_defaults()` resolves it to the registered provider.
 pub(crate) const RECORDED_MODEL: &str = "claude-sonnet-4-6";
+
+/// Storage's `store::projects::register` refuses an unguarded home store only
+/// in a build that carries its `test-home-guard` feature, which this crate
+/// turns on through `[dev-dependencies]` (storage design, Stage 1, S1.9).
+#[test]
+fn the_storage_test_home_guard_is_armed_in_this_test_build() {
+    assert!(openalpaca_storage::store::projects::test_home_guard_armed());
+}
+
+/// R45 tests (storage design §11): a process a test's own command started,
+/// sent SIGKILL when this guard drops, so an assertion that fails before the
+/// code under test killed it leaves no orphan behind.
+#[cfg(unix)]
+pub(crate) struct KillOnFail(pub(crate) i32);
+
+#[cfg(unix)]
+impl Drop for KillOnFail {
+    fn drop(&mut self) {
+        // SAFETY: `kill` only sends a signal, to the pid this test read from
+        // the file its own command wrote; one already gone answers ESRCH.
+        unsafe {
+            libc::kill(self.0, libc::SIGKILL);
+        }
+    }
+}
+
+/// How long an R45 test waits for a killed process to be gone. The kill is
+/// immediate, but the system reaps an orphan asynchronously, and a loaded CI
+/// machine is slow.
+#[cfg(unix)]
+pub(crate) const GONE_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The pid a test's command wrote to `path`, waiting up to `within` for it.
+#[cfg(unix)]
+pub(crate) async fn pid_from_file(path: &std::path::Path, within: std::time::Duration) -> i32 {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse::<i32>()
+        {
+            return pid;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no pid in {} after {within:?}",
+            path.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Whether `pid` has ended: `kill(pid, 0)` answers ESRCH or, on Linux, the
+/// process is a zombie nobody has reaped yet (`kill` still finds one).
+#[cfg(unix)]
+pub(crate) fn process_is_gone(pid: i32) -> bool {
+    // SAFETY: signal 0 sends nothing; it only asks whether `pid` exists.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // `pid (comm) S …`: the state follows the last `)`.
+            return stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'));
+        }
+    }
+    false
+}
+
+/// Polls [`process_is_gone`] for up to `within`.
+#[cfg(unix)]
+pub(crate) async fn wait_until_gone(pid: i32, within: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        if process_is_gone(pid) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    process_is_gone(pid)
+}

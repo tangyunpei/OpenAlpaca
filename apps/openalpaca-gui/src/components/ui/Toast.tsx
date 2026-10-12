@@ -28,7 +28,9 @@ export function Toast({ message, className }: ToastProps) {
         aria-hidden
         className="block h-[6px] w-[6px] shrink-0 rounded-full bg-green-dot"
       />
-      <span className="text-base-plus leading-[1.45]">{message}</span>
+      <span className="min-w-0 text-base-plus leading-[1.45] wrap-anywhere">
+        {message}
+      </span>
     </div>
   );
 }

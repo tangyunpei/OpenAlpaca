@@ -1,0 +1,72 @@
+2026-10-03T04:03:29.900447Z  INFO openalpacad: OpenAlpaca Daemon starting...
+2026-10-03T04:03:29.908166Z  INFO openalpacad: Acquired singleton lock
+2026-10-03T04:03:29.908188Z  INFO openalpacad: Config base dir: <scratch>/program/track-d/store/config
+2026-10-03T04:03:29.908322Z  INFO openalpacad::bootstrap::config: Seeded default config: <scratch>/program/track-d/store/config/llm.toml
+2026-10-03T04:03:29.908389Z  INFO openalpacad::bootstrap::config: Seeded default config: <scratch>/program/track-d/store/config/daemon.toml
+2026-10-03T04:03:29.908444Z  INFO openalpacad::bootstrap::config: Seeded default config: <scratch>/program/track-d/store/config/mcp.toml
+2026-10-03T04:03:29.909007Z  INFO openalpacad::bootstrap::content: Seeded 9 default agent template file(s): <scratch>/program/track-d/store/config/agents
+2026-10-03T04:03:29.909732Z  INFO openalpacad::bootstrap::content: Seeded 8 default skill file(s): <scratch>/program/track-d/store/config/skills
+2026-10-03T04:03:29.909823Z  INFO openalpacad::bootstrap::content: Seeded 1 default tool config file(s): <scratch>/program/track-d/store/config/tools
+2026-10-03T04:03:29.913993Z  INFO openalpacad: Master key loaded from <scratch>/program/track-d/store/state/.master_key
+2026-10-03T04:03:29.914063Z  INFO openalpacad: Signal handlers installed (SIGINT + SIGTERM)
+2026-10-03T04:03:29.914519Z  INFO openalpacad: Listening on http://127.0.0.1:51021
+2026-10-03T04:03:29.919101Z  INFO openalpacad: Discovery written to: <scratch>/program/track-d/store/state/discovery.json
+2026-10-03T04:03:29.920750Z  INFO openalpaca_storage::database: Running migration 1: baseline
+2026-10-03T04:03:29.923128Z  INFO openalpaca_storage::database: Running migration 2: working_state
+2026-10-03T04:03:29.925091Z  INFO openalpaca_storage::database: Migrations complete, schema version: 2
+2026-10-03T04:03:29.925099Z  INFO openalpaca_storage::database: Database initialized: <scratch>/program/track-d/store/state/openalpaca.db
+2026-10-03T04:03:29.925105Z  INFO openalpacad: Database initialized: <scratch>/program/track-d/store/state/openalpaca.db
+2026-10-03T04:03:29.925613Z  INFO openalpacad: Local user ID: b63cfca8-7add-4831-85d5-af990b09f4ed, default lane: b63cfca8-7add-4831-85d5-af990b09f4ed:gui
+2026-10-03T04:03:29.925776Z  INFO openalpacad::bootstrap::persona: Soul bootstrap created template: <scratch>/program/track-d/store/config/orchestrator/templates/SOUL_temp.md
+2026-10-03T04:03:29.925901Z  INFO openalpacad::bootstrap::persona: Soul bootstrap created active file: <scratch>/program/track-d/store/config/orchestrator/SOUL.md
+2026-10-03T04:03:29.926138Z  INFO openalpacad::bootstrap::persona: Soul loaded: <scratch>/program/track-d/store/config/orchestrator/SOUL.md
+2026-10-03T04:03:29.926201Z  INFO openalpacad::bootstrap::persona: User bootstrap created template: <scratch>/program/track-d/store/config/orchestrator/templates/USER_temp.md
+2026-10-03T04:03:29.926302Z  INFO openalpacad::bootstrap::persona: User bootstrap created active file: <scratch>/program/track-d/store/config/orchestrator/USER.md
+2026-10-03T04:03:29.926393Z  INFO openalpacad::bootstrap::persona: User profile loaded: <scratch>/program/track-d/store/config/orchestrator/USER.md
+2026-10-03T04:03:29.926452Z  INFO openalpacad::bootstrap::persona: Identity bootstrap created template: <scratch>/program/track-d/store/config/orchestrator/templates/IDENTITY_temp.md
+2026-10-03T04:03:29.926542Z  INFO openalpacad::bootstrap::persona: Identity bootstrap created active file: <scratch>/program/track-d/store/config/orchestrator/IDENTITY.md
+2026-10-03T04:03:29.926599Z  INFO openalpacad::bootstrap::persona: Identity loaded: <scratch>/program/track-d/store/config/orchestrator/IDENTITY.md
+2026-10-03T04:03:29.926664Z  INFO openalpacad::bootstrap::persona: Bootstrap created template: <scratch>/program/track-d/store/config/orchestrator/templates/BOOTSTRAP_temp.md
+2026-10-03T04:03:29.926746Z  INFO openalpacad::bootstrap::persona: Bootstrap created active file: <scratch>/program/track-d/store/config/orchestrator/BOOTSTRAP.md
+2026-10-03T04:03:29.926819Z  INFO openalpacad::bootstrap::persona: Bootstrap loaded: <scratch>/program/track-d/store/config/orchestrator/BOOTSTRAP.md
+2026-10-03T04:03:29.927219Z  INFO openalpaca_core::daemon_config: Daemon config loaded from <scratch>/program/track-d/store/config/daemon.toml
+2026-10-03T04:03:29.927238Z  INFO openalpacad: Daemon config loaded from <scratch>/program/track-d/store/config/daemon.toml
+2026-10-03T04:03:29.927867Z  INFO openalpacad: Wake: watching paths: ["<scratch>/program/track-d/store/config/agents", "<scratch>/program/track-d/store/config/llm.toml", "<scratch>/program/track-d/store/config/daemon.toml", "<scratch>/program/track-d/store/config/mcp.toml", "<scratch>/program/track-d/store/config/orchestrator/SOUL.md", "<scratch>/program/track-d/store/config/orchestrator/USER.md", "<scratch>/program/track-d/store/config/orchestrator/IDENTITY.md", "<scratch>/program/track-d/store/config/orchestrator/BOOTSTRAP.md", "<scratch>/program/track-d/store/config/skills"]
+2026-10-03T04:03:29.927916Z  INFO openalpaca_wake::manager: Starting WakeManager...
+2026-10-03T04:03:29.928077Z  INFO openalpaca_wake::scheduler: WakeScheduler started
+2026-10-03T04:03:29.928310Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store/config/agents"
+2026-10-03T04:03:29.928427Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store/config/llm.toml"
+2026-10-03T04:03:29.928447Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store/config/daemon.toml"
+2026-10-03T04:03:29.928463Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store/config/mcp.toml"
+2026-10-03T04:03:29.928490Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store/config/orchestrator/SOUL.md"
+2026-10-03T04:03:29.928514Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store/config/orchestrator/USER.md"
+2026-10-03T04:03:29.928530Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store/config/orchestrator/IDENTITY.md"
+2026-10-03T04:03:29.928548Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store/config/orchestrator/BOOTSTRAP.md"
+2026-10-03T04:03:29.928786Z  INFO openalpaca_wake::watcher::filesystem: Watching path: "<scratch>/program/track-d/store/config/skills"
+2026-10-03T04:03:29.928794Z  INFO openalpaca_wake::manager: WakeManager running with 1 watchers
+2026-10-03T04:03:29.929631Z  INFO openalpacad::services::llm: OS keychain disabled (default). Using local encrypted storage.
+2026-10-03T04:03:29.929957Z  INFO openalpaca_llm::config::llm_config::router_builder: Auto-detected Claude Code CLI at "/opt/homebrew/bin/claude"
+2026-10-03T04:03:29.930090Z  INFO openalpacad::services::llm: LLM router loaded (default model: claude-haiku-4-5-20251001)
+2026-10-03T04:03:29.930124Z  INFO openalpacad::services::llm: LLM settings service initialized
+2026-10-03T04:03:29.930129Z  INFO openalpacad::services::llm: Refreshing available models from providers...
+2026-10-03T04:03:29.962451Z  INFO openalpacad::services::llm: TokenManager initialized with credential discovery
+2026-10-03T04:03:29.963280Z  INFO openalpacad::services: Skill catalog: loaded 4 skill(s) from <scratch>/program/track-d/store/config/skills
+2026-10-03T04:03:29.965843Z  INFO openalpaca_core::tools::registry: registered capability provider handle=ProviderHandle(0) total_providers=1
+2026-10-03T04:03:29.966378Z  INFO openalpacad::services::tools: Tool registry: 15 tools loaded
+2026-10-03T04:03:29.966761Z  INFO openalpacad::services::mcp: MCP server bootstrap complete connected=0 total=0
+2026-10-03T04:03:29.967166Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store/config/agents/explore_agent.md (singleton=false)
+2026-10-03T04:03:29.967306Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store/config/agents/review_agent.md (singleton=false)
+2026-10-03T04:03:29.967409Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store/config/agents/system_agent.md (singleton=false)
+2026-10-03T04:03:29.967496Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store/config/agents/research_agent.md (singleton=false)
+2026-10-03T04:03:29.967587Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store/config/agents/planning_agent.md (singleton=false)
+2026-10-03T04:03:29.967682Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store/config/agents/code_agent.md (singleton=false)
+2026-10-03T04:03:29.967771Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store/config/agents/general_agent.md (singleton=false)
+2026-10-03T04:03:29.967862Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store/config/agents/writing_agent.md (singleton=false)
+2026-10-03T04:03:29.967935Z  INFO openalpacad::services::agents: Loaded agent template: <scratch>/program/track-d/store/config/agents/lead_agent.md (singleton=true)
+2026-10-03T04:03:29.968239Z  INFO openalpaca_plugins::manager: scanning plugin directory dir=<scratch>/program/track-d/store/plugins
+2026-10-03T04:03:29.968464Z  INFO openalpaca_plugins::manager: plugin scan complete count=0
+2026-10-03T04:03:29.968608Z  INFO openalpacad::managers::connector: Starting enabled connectors...
+2026-10-03T04:03:29.968718Z  INFO openalpacad::managers::connector: Started 0 connectors
+2026-10-03T04:03:29.968784Z  INFO openalpacad::notification: NotificationDispatcher started
+2026-10-03T04:03:29.969467Z  INFO openalpacad: Daemon ready (instance: 950fc57d-bc30-4250-bacc-4baed134f2b0)
+2026-10-03T04:03:29.971456Z  INFO openalpacad::background: memory index rebuilt elapsed_ms=2

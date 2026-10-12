@@ -89,8 +89,9 @@ pub(super) fn run_interactive(repo: &ConfigRepository) -> Result<()> {
                     // deletes the database file, which this editor holds open,
                     // so it cannot be offered here: it is `openalpaca config
                     // reset --factory`, run with nothing holding the database.
+                    // The owner id is not configuration and stays.
                     if input == "yes" || input == "y" {
-                        repo.clear_all()?;
+                        repo.clear_all_except_identity()?;
                         let _ = ai_config::clear_ai_config();
                         let _ = daemon_config_cli::clear_daemon_config();
                         config_map.clear();

@@ -139,4 +139,81 @@ describe("formatToolArguments (§3.14)", () => {
   it("passes a bare string through", () => {
     expect(formatToolArguments("ls -la")).toBe("ls -la");
   });
+
+  /**
+   * A value's own line break would reach the box as layout, where it looks
+   * exactly like a soft wrap: `echo … wait` then `rm -rf ~` on the next line
+   * reads as one long echo while the shell runs two commands. A string with
+   * any control character JSON escapes is shown as JSON — `\n`, `\t`, `\r`
+   * written out — as every other approval surface shows it.
+   */
+  it("shows a value holding a line break, a tab or another control character as JSON", () => {
+    const command = "echo please wait\nrm -rf ~";
+    expect(formatToolArguments({ command })).toBe(
+      '{\n  "command": "echo please wait\\nrm -rf ~"\n}',
+    );
+    expect(formatToolArguments({ path: "/srv/allowed\tfile" })).toBe(
+      '{\n  "path": "/srv/allowed\\tfile"\n}',
+    );
+    expect(formatToolArguments("done\r x\u{1B}[2J")).toBe(
+      '"done\\r x\\u001b[2J"',
+    );
+    // Any C0 control, not only the three above: an ESC alone steps aside
+    // too, as JSON and every other approval surface write it out.
+    expect(formatToolArguments({ command: "a\u{1B}b" })).toBe(
+      '{\n  "command": "a\\u001bb"\n}',
+    );
+  });
+
+  /**
+   * Bare, a value has no mark where it ends: a trailing space is not seen,
+   * a leading one is a slight indent, and an empty value draws no box at all.
+   * `std::fs` does not trim, so `/srv/allowed ` is another file. JSON's quotes
+   * show the value's extent, as the CLI and the chat apps show it.
+   */
+  it("shows a value that is empty or starts or ends with a space as JSON", () => {
+    expect(formatToolArguments({ path: "/srv/allowed " })).toBe(
+      '{\n  "path": "/srv/allowed "\n}',
+    );
+    expect(formatToolArguments({ command: " /etc/passwd" })).toBe(
+      '{\n  "command": " /etc/passwd"\n}',
+    );
+    expect(formatToolArguments({ path: "" })).toBe('{\n  "path": ""\n}');
+    expect(formatToolArguments("ls -la ")).toBe('"ls -la "');
+    expect(formatToolArguments("")).toBe('""');
+    // A space inside the value keeps the bare form.
+    expect(formatToolArguments({ command: "ls  -la /tmp" })).toBe(
+      "ls  -la /tmp",
+    );
+  });
+
+  /**
+   * A combining mark sits on the character before it, and `trim` stops at
+   * it: `/srv/allowed ` and U+05C1 draws as `/srv/allowed` with a speck a
+   * space to the right, and it is another file. A mark that opens a value
+   * sits on nothing, and U+05C1 before ` /etc/passwd` makes a relative path.
+   * Either end a mark, the value keeps its quotes, which show the space.
+   */
+  it("shows a value that starts or ends with a combining mark as JSON", () => {
+    expect(formatToolArguments({ path: "/srv/allowed \u{5C1}" })).toBe(
+      '{\n  "path": "/srv/allowed \u{5C1}"\n}',
+    );
+    expect(formatToolArguments({ path: "/srv/allowed \u{5B4}" })).toBe(
+      '{\n  "path": "/srv/allowed \u{5B4}"\n}',
+    );
+    expect(formatToolArguments({ url: "https://a.example/ \u{323}" })).toBe(
+      '{\n  "url": "https://a.example/ \u{323}"\n}',
+    );
+    expect(formatToolArguments({ path: "\u{5C1} /etc/passwd" })).toBe(
+      '{\n  "path": "\u{5C1} /etc/passwd"\n}',
+    );
+    expect(formatToolArguments({ path: "\u{301}/etc/passwd" })).toBe(
+      '{\n  "path": "\u{301}/etc/passwd"\n}',
+    );
+    expect(formatToolArguments("ls -la \u{323}")).toBe('"ls -la \u{323}"');
+    // A mark inside the value keeps the bare form.
+    expect(formatToolArguments({ query: "cafe\u{301} menu" })).toBe(
+      "cafe\u{301} menu",
+    );
+  });
 });

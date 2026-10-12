@@ -9,7 +9,8 @@ mod types;
 
 pub use fallback::{flatten_messages, truncate_messages_for_cli};
 pub use types::{
-    LlmCapacityInfo, LlmRouterError, ProviderEntry, RequestContext, RoutedStream, RouterRequest,
+    LlmCapacityInfo, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream,
+    RouterRequest,
 };
 
 use crate::LlmProvider;
@@ -484,6 +485,56 @@ impl LlmRouter {
     /// [`CostTracker::use_registry`]).
     pub fn model_registry_shared(&self) -> Arc<ModelRegistry> {
         Arc::clone(&self.model_registry)
+    }
+
+    /// How much of `model`'s rate budget is left: the minimum over its
+    /// provider's keys, per bucket (Learning v2, design 09 §1.7).
+    ///
+    /// **Read-only.** It consumes no token, creates no rate limiter and
+    /// changes no provider table: a key whose limiter does not exist yet has
+    /// never been used, and reads as full. A keyless provider (L1) is read
+    /// through its keyless slot. `None` when the model is not routable.
+    pub async fn rate_headroom(&self, model: &str) -> Option<RateHeadroom> {
+        let provider_type = self.model_registry.resolve_provider(model)?;
+        // Cloned out, as in `key_statuses`: no shard lock across an await.
+        let entry = self.provider_entry(&provider_type)?;
+        let pool = entry.key_pool.load_full();
+        let mut keys = pool.key_rate_limits().await;
+        if keys.is_empty() && !entry.provider.requires_key() {
+            keys.push((keyless_slot(entry.provider.name()).id, None));
+        }
+        let config = self.rate_limiter_registry.config();
+        let mut tightest: Option<RateHeadroom> = None;
+        for (key_id, key_rpm) in keys {
+            let headroom = match self.rate_limiter_registry.get(&key_id) {
+                Some(limiter) => RateHeadroom {
+                    rpm_available: limiter.rpm_bucket.available().await,
+                    rpm_capacity: limiter.rpm_bucket.capacity().await,
+                    tpm_available: limiter.tpm_bucket.available().await,
+                    tpm_capacity: limiter.tpm_bucket.capacity().await,
+                },
+                None => {
+                    let rpm = f64::from(key_rpm.unwrap_or(config.default_rpm));
+                    let tpm = f64::from(config.default_tpm);
+                    RateHeadroom {
+                        rpm_available: rpm,
+                        rpm_capacity: rpm,
+                        tpm_available: tpm,
+                        tpm_capacity: tpm,
+                    }
+                }
+            };
+            tightest = Some(match tightest {
+                None => headroom,
+                Some(t) => RateHeadroom {
+                    rpm_available: t.rpm_available.min(headroom.rpm_available),
+                    rpm_capacity: t.rpm_capacity.min(headroom.rpm_capacity),
+                    tpm_available: t.tpm_available.min(headroom.tpm_available),
+                    tpm_capacity: t.tpm_capacity.min(headroom.tpm_capacity),
+                },
+            });
+        }
+        tightest
     }
 
     /// Get key statuses for a provider.

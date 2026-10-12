@@ -1,0 +1,116 @@
+{
+  "row": {
+    "id": 4,
+    "scenario": "A symlink, or a file, at `memory`, `owners/<key>` or `notes` in a project's folder under the home store",
+    "required_outcome": "The project partition is refused, the turn falls back to global with one WARN, nothing is written through the link"
+  },
+  "design": ["§3 rule 1: every component from the project's folder under `projects/` down to `notes` is checked with `symlink_metadata`; a link, junction or non-directory refuses the project partition and falls back to global with one WARN naming the component", "§6 write protocol: confined no-follow handles"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "Four registered repositories. In three, the project's folder under the home store's `projects/` has a symlink at one level of the partition path — `memory`, `memory/owners/<key>`, `memory/owners/<key>/notes` — pointing into `dir:outside` (a directory the owner never chose); in the fourth a regular file stands where `memory` should be a directory. The loader registers each repository, then makes the `home_links` and `home_files` (a `proj:` path needs the folder's name, which only registration decides). In every case a `fact` store — whose default scope is project — must land in the home partition, log exactly one WARN naming the offending component, and leave `dir:outside` empty; no repository gains anything. The two levels above `memory/` are pinned by a unit test with one home per case (`a_link_at_projects_or_at_the_projects_folder_refuses_the_partition`): the home store's `projects/` is shared by every project of one home, so a link there would refuse all four cases at once; and a link at a project's folder is a folder `store::projects` never opens (R11), so the root reads as unregistered — a debug line, not the one WARN a refused path gives. Slice 2 runs the same four cases through the partition open of `memory_files` and expects the refusal directly; slice 3 expects the fallback.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "directories": ["outside"],
+  "workspaces": [
+    { "name": "repo_link_memory", "marker": ".git" },
+    { "name": "repo_link_owner", "marker": ".git" },
+    { "name": "repo_link_notes", "marker": ".git" },
+    { "name": "repo_file_memory", "marker": ".git" }
+  ],
+  "home_links": [
+    { "path": "proj:repo_link_memory/memory", "target": "@dir:outside" },
+    { "path": "proj:repo_link_owner/memory/owners/32acea7eb739b08afd959db91e46d450", "target": "@dir:outside" },
+    { "path": "proj:repo_link_notes/memory/owners/32acea7eb739b08afd959db91e46d450/notes", "target": "@dir:outside" }
+  ],
+  "home_files": [
+    { "path": "proj:repo_file_memory/memory", "content": "not a directory\n" }
+  ],
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    { "name": "alice_home", "owner": "u_example_alice", "scope": "home", "notes": [] },
+    { "name": "p_link_memory", "owner": "u_example_alice", "scope": "project", "workspace": "repo_link_memory", "lazy": true },
+    { "name": "p_link_owner", "owner": "u_example_alice", "scope": "project", "workspace": "repo_link_owner", "lazy": true },
+    { "name": "p_link_notes", "owner": "u_example_alice", "scope": "project", "workspace": "repo_link_notes", "lazy": true },
+    { "name": "p_file_memory", "owner": "u_example_alice", "scope": "project", "workspace": "repo_file_memory", "lazy": true }
+  ],
+  "contexts": {
+    "in_link_memory": { "owner_id": "u_example_alice", "workspace": "ws:repo_link_memory", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" } },
+    "in_link_owner": { "owner_id": "u_example_alice", "workspace": "ws:repo_link_owner", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" } },
+    "in_link_notes": { "owner_id": "u_example_alice", "workspace": "ws:repo_link_notes", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" } },
+    "in_file_memory": { "owner_id": "u_example_alice", "workspace": "ws:repo_file_memory", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "store",
+      "context": "in_link_memory",
+      "as": "n1",
+      "input": { "title": "Link at memory", "body": "# Link at memory\n\nA fact.\n", "kind": "fact" },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "path_within": { "n1": "part:alice_home/notes" },
+        "warnings": { "count": 1, "contains": ["memory"] },
+        "files_absent": ["dir:outside/owners", "dir:outside/.gitignore", "ws:repo_link_memory/.openalpaca"]
+      }
+    },
+    {
+      "step": 2,
+      "op": "store",
+      "context": "in_link_owner",
+      "as": "n2",
+      "input": { "title": "Link at owner", "body": "# Link at owner\n\nA fact.\n", "kind": "fact" },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "path_within": { "n2": "part:alice_home/notes" },
+        "warnings": { "count": 1, "contains": ["owners/32acea7eb739b08afd959db91e46d450"] },
+        "files_absent": ["dir:outside/notes", "dir:outside/.history"]
+      }
+    },
+    {
+      "step": 3,
+      "op": "store",
+      "context": "in_link_notes",
+      "as": "n3",
+      "input": { "title": "Link at notes", "body": "# Link at notes\n\nA fact.\n", "kind": "fact" },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "path_within": { "n3": "part:alice_home/notes" },
+        "warnings": { "count": 1, "contains": ["notes"] },
+        "files_absent": ["proj:repo_link_notes/memory/owners/32acea7eb739b08afd959db91e46d450/.history"]
+      }
+    },
+    {
+      "step": 4,
+      "op": "store",
+      "context": "in_file_memory",
+      "as": "n4",
+      "input": { "title": "File at memory", "body": "# File at memory\n\nA fact.\n", "kind": "fact" },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "path_within": { "n4": "part:alice_home/notes" },
+        "warnings": { "count": 1, "contains": ["memory"] },
+        "file_content": { "proj:repo_file_memory/memory": "not a directory\n" }
+      }
+    },
+    {
+      "step": 5,
+      "op": "search",
+      "context": "in_link_notes",
+      "input": { "query": "fact" },
+      "expect": {
+        "ids_unordered": ["@id:n1", "@id:n2", "@id:n3", "@id:n4"],
+        "results": { "@id:n3": { "scope": "global" } },
+        "warnings": { "count": 1, "contains": ["notes"] }
+      }
+    }
+  ],
+  "final_state": {
+    "files_absent": ["dir:outside/notes", "dir:outside/owners", "dir:outside/memory", "dir:outside/.history", "dir:outside/MEMORY.md", "dir:outside/.gitignore", "ws:repo_link_memory/.openalpaca", "ws:repo_link_owner/.openalpaca", "ws:repo_link_notes/.openalpaca", "ws:repo_file_memory/.openalpaca"],
+    "snapshot_missing": ["p_link_memory", "p_link_owner", "p_link_notes", "p_file_memory"]
+  }
+}

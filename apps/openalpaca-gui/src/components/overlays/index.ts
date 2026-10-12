@@ -6,3 +6,5 @@ export * from "./ToastHost";
 export * from "./useCommandCatalog";
 export * from "./useCommandShortcuts";
 export * from "./StopDaemonDialog";
+export * from "./RepointProjectDialog";
+export * from "./DeleteProjectDataDialog";

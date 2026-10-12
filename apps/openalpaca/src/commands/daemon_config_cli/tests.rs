@@ -72,3 +72,81 @@ fn test_navigate_to_section_missing() {
     let root: toml::Value = toml::from_str("").unwrap();
     assert!(navigate_to_section(&root, &["execution", "agent_defaults"]).is_none());
 }
+
+/// Plan 3.4: the two extraction count keys live under `[orchestrator.costs]`
+/// beside the cost caps they bound with.
+#[test]
+fn test_find_mapping_extraction_count_keys() {
+    let per_call = find_mapping("daemon.orchestrator.extract_max_items_per_call").unwrap();
+    assert_eq!(per_call.section, &["orchestrator", "costs"]);
+    assert_eq!(per_call.field, "extract_max_items_per_call");
+    assert!(find_mapping("daemon.orchestrator.extract_every_n_turns").is_none());
+    let per_run = find_mapping("daemon.orchestrator.task_extract_max_items_per_run").unwrap();
+    assert_eq!(per_run.section, &["orchestrator", "costs"]);
+    assert_eq!(per_run.field, "task_extract_max_items_per_run");
+}
+
+/// Learning v2 (design 09 §1.10): the three `[orchestrator.learning]` keys,
+/// the daily call cap beside the cost caps, and the confidence floor under
+/// `[orchestrator.memory]`, where `DaemonConfig` reads it.
+#[test]
+fn test_find_mapping_learning_keys() {
+    for (key, section, field) in [
+        (
+            "daemon.orchestrator.learning.enabled",
+            &["orchestrator", "learning"],
+            "enabled",
+        ),
+        (
+            "daemon.orchestrator.learning.idle_secs",
+            &["orchestrator", "learning"],
+            "idle_secs",
+        ),
+        (
+            "daemon.orchestrator.learning.turns_per_flush",
+            &["orchestrator", "learning"],
+            "turns_per_flush",
+        ),
+        (
+            "daemon.orchestrator.extract_max_calls_per_day",
+            &["orchestrator", "costs"],
+            "extract_max_calls_per_day",
+        ),
+        (
+            "daemon.orchestrator.memory_confidence_threshold",
+            &["orchestrator", "memory"],
+            "memory_confidence_threshold",
+        ),
+    ] {
+        let mapping = find_mapping(key).unwrap_or_else(|| panic!("{key} has no mapping"));
+        assert_eq!(mapping.section, section, "{key}");
+        assert_eq!(mapping.field, field, "{key}");
+    }
+}
+
+/// Index-first recall (design 09 §13.2): `recall_mode` lives in
+/// `[orchestrator.memory]`, where `DaemonConfig` reads it.
+#[test]
+fn test_find_mapping_recall_mode() {
+    let mapping = find_mapping("daemon.orchestrator.recall_mode")
+        .expect("daemon.orchestrator.recall_mode has a mapping");
+    assert_eq!(mapping.section, &["orchestrator", "memory"]);
+    assert_eq!(mapping.field, "recall_mode");
+}
+
+/// Carry-over (design 11 §4 (b), §8): `carry_over_turns` lives in
+/// `[orchestrator.memory]`, where `DaemonConfig` reads it.
+#[test]
+fn test_find_mapping_carry_over_turns() {
+    let mapping = find_mapping("daemon.orchestrator.carry_over_turns")
+        .expect("daemon.orchestrator.carry_over_turns has a mapping");
+    assert_eq!(mapping.section, &["orchestrator", "memory"]);
+    assert_eq!(mapping.field, "carry_over_turns");
+}
+
+/// Conversation summaries (design 09 §13.3): `episode_max_per_day` is gone
+/// with its registry row (design 11 §8, CQ-2), and so is its mapping.
+#[test]
+fn test_no_mapping_for_episode_max_per_day() {
+    assert!(find_mapping("daemon.orchestrator.learning.episode_max_per_day").is_none());
+}

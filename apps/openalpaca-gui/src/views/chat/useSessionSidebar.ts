@@ -74,6 +74,11 @@ export interface SessionSidebarState {
    */
   windowProject: string | null;
   newChat: () => void;
+  /**
+   * "Start fresh" (design 11 §4 (b), owner decision CQ-5): "New chat" whose
+   * conversation is never given the previous one's working state.
+   */
+  startFresh: () => void;
   select: (id: string) => void;
   rename: (id: string, title: string) => void;
   archive: (id: string) => void;
@@ -109,6 +114,7 @@ export function useSessionSidebar(
 
   const projectPath = useProjectStore((s) => s.path);
   const selectedId = useSessionSelection((s) => s.selectedId);
+  const selectedWorkspaceId = useSessionSelection((s) => s.selectedWorkspaceId);
   const select = useSessionSelection((s) => s.select);
 
   /**
@@ -116,9 +122,9 @@ export function useSessionSidebar(
    * half has to be the daemon's answer, not the picker's raw text.
    *
    * `session.workspace_id` is what `MemoryScopeContext::for_request` resolved
-   * — a marker walk up to a `.git`/`.openalpaca` root, with symlinks
-   * canonicalized. `useProjectStore.path` is free text validated only for
-   * absoluteness. Comparing the two announced an override for every window
+   * — the nearest registered project root or git repository, with symlinks
+   * canonicalized. `useProjectStore.path` may be a path an earlier build
+   * stored as typed. Comparing the two announced an override for every window
    * pointed at a subdirectory of its own project (`/repo/apps/gui` vs `/repo`)
    * or at an uncanonicalized path (`/tmp/...` vs `/private/tmp/...`) — a claim
    * of a scope change in exactly the case where the daemon is provably not
@@ -167,9 +173,24 @@ export function useSessionSidebar(
     const pinned = (list.data?.sessions ?? []).find(
       (row) => row.id === selectedId,
     );
-    if (pinned === undefined || pinned.status === "active") return;
-    select(null);
-  }, [selectedId, busyId, list.data, list.isFetching, select]);
+    if (pinned === undefined) return;
+    if (pinned.status !== "active") {
+      select(null);
+      return;
+    }
+    // R6: the pin's project follows the row — a first turn binds it, a
+    // re-point moves it — so an upload goes where the next turn runs.
+    if (pinned.workspace_id !== selectedWorkspaceId) {
+      select(pinned.id, pinned.workspace_id);
+    }
+  }, [
+    selectedId,
+    selectedWorkspaceId,
+    busyId,
+    list.data,
+    list.isFetching,
+    select,
+  ]);
 
   /**
    * A **deleted** conversation is the one case the rule above cannot see.
@@ -226,13 +247,21 @@ export function useSessionSidebar(
    * never fire again, and an archive from another client would strand the
    * window on a `409`.
    */
-  const newChat = useCallback(() => {
-    if (create.isPending) return;
-    setActionError(null);
-    void create
-      .mutateAsync(projectPath === null ? {} : { workspacePath: projectPath })
-      .catch((error: unknown) => setActionError(sessionErrorMessage(error)));
-  }, [create, projectPath]);
+  const openChat = useCallback(
+    (inherit: boolean) => {
+      if (create.isPending) return;
+      setActionError(null);
+      void create
+        .mutateAsync({
+          ...(projectPath === null ? {} : { workspacePath: projectPath }),
+          ...(inherit ? {} : { inherit: false }),
+        })
+        .catch((error: unknown) => setActionError(sessionErrorMessage(error)));
+    },
+    [create, projectPath],
+  );
+  const newChat = useCallback(() => openChat(true), [openChat]);
+  const startFresh = useCallback(() => openChat(false), [openChat]);
 
   const onSelect = useCallback(
     (id: string) => {
@@ -243,13 +272,13 @@ export function useSessionSidebar(
       // announce a transition that did not happen.
       if (row.status === "active") {
         setActionError(null);
-        select(id);
+        select(id, row.workspace_id);
         return;
       }
       runVerb(
         id,
         () => activate.mutateAsync(id),
-        () => select(id),
+        () => select(id, row.workspace_id),
       );
     },
     [sessions, select, runVerb, activate],
@@ -307,6 +336,7 @@ export function useSessionSidebar(
     loadMore,
     windowProject,
     newChat,
+    startFresh,
     select: onSelect,
     rename,
     archive,

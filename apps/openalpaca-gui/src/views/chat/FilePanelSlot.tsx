@@ -8,7 +8,10 @@
  * through the very same renderers, with `previewPlan` making the same call
  * about what may be drawn.
  *
- * `Library ↗` carries the current tab across (§4.2 `openInLibrary`).
+ * `Library ↗` carries the current tab across (§4.2 `openInLibrary`), and the
+ * row's side: a file written into the project lands on the Library's results,
+ * on Preview.
+ * `Open` is handed over only for a row the daemon opens (`openable`, ST-18).
  */
 
 import { FilePanel, formatClock } from "@/components/chat";
@@ -21,13 +24,15 @@ import {
   useArtifactText,
   useArtifactVersions,
   useArtifacts,
+  useFoundAgain,
   useTogglePin,
 } from "@/hooks/useArtifacts";
+import { useArtifactFileActions } from "@/hooks/useFiles";
 import { artifactContentUrl } from "@/lib/api/artifacts";
 import { ApiError } from "@/lib/http";
 import { useUiStore } from "@/stores/ui";
 import { HistoryTab } from "@/views/library/HistoryTab";
-import { diffPair, previewPlan } from "@/views/library/preview";
+import { diffPair, previewNote, previewPlan } from "@/views/library/preview";
 
 import { fileLanguage } from "./artifact";
 
@@ -52,6 +57,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
 
   const plan = model === null ? null : previewPlan(model);
   const content = useArtifactText(artifactId, plan?.mode === "text");
+  useFoundAgain(model, content.isSuccess);
 
   const panelTab = useUiStore((s) => s.panelTab);
   const setPanelTab = useUiStore((s) => s.setPanelTab);
@@ -64,6 +70,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
   const openInLibrary = useUiStore((s) => s.openInLibrary);
   const focusRun = useUiStore((s) => s.focusRun);
   const togglePin = useTogglePin();
+  const fileActions = useArtifactFileActions();
   const pins = useUiStore((s) => s.pins);
   const pinned =
     model === null
@@ -90,6 +97,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
           version: model.version,
           agent: model.agent_template_id ?? model.agent_id,
           runId: model.task_title ?? model.task_id,
+          inProject: model.in_project,
         };
 
   const artifactNote =
@@ -123,11 +131,19 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
       onPickArtifact={pickPanelArtifact}
       onBackToWork={backToWork}
       onClose={closePanel}
-      onOpenInLibrary={openInLibrary}
+      onOpenInLibrary={() => openInLibrary(model?.in_project)}
       onJumpRun={
         model?.task_id == null
           ? undefined
           : () => focusRun(model.task_id as string)
+      }
+      onOpen={
+        model === null || !model.openable
+          ? undefined
+          : () => fileActions.open(model)
+      }
+      onReveal={
+        model === null ? undefined : () => fileActions.reveal(model.path)
       }
       pinned={pinned}
       onTogglePin={() => togglePin.mutate({ id: artifactId, pinned: !pinned })}
@@ -139,6 +155,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
             content={null}
             src={artifactContentUrl(model.id)}
             note={null}
+            failedNote={plan.failedNote}
           />
         ) : (
           <ArtifactPreview
@@ -149,15 +166,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
               language: fileLanguage(model.name),
             }}
             content={plan.mode === "text" ? (content.data ?? null) : null}
-            note={
-              plan.mode === "none"
-                ? plan.note
-                : content.error !== null
-                  ? content.error.message
-                  : content.isLoading
-                    ? "Reading the file…"
-                    : plan.note
-            }
+            note={previewNote(model, plan, content)}
           />
         )
       }

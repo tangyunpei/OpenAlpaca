@@ -20,10 +20,12 @@ import {
   shortRunId,
 } from "@/components/chat";
 import { languageFromName, toFileKind } from "@/components/ui";
+import { useArtifactFileActions } from "@/hooks/useFiles";
 import type { ArtifactKind } from "@/lib/api/artifacts";
 import { useUiStore } from "@/stores/ui";
 
 import { TranscriptArtifact } from "./TranscriptArtifact";
+import { TranscriptMemoryUsed } from "./TranscriptMemoryUsed";
 import type { TranscriptItem } from "./transcript-model";
 
 export interface TranscriptProps {
@@ -34,6 +36,7 @@ export interface TranscriptProps {
 export function Transcript({ items, dense }: TranscriptProps) {
   const openArtifact = useUiStore((s) => s.openArtifact);
   const focusRun = useUiStore((s) => s.focusRun);
+  const fileActions = useArtifactFileActions();
   return (
     <>
       {items.map((item) => {
@@ -88,6 +91,11 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 {/* U3: what the model never received, and why. Below the
                     chips, because the chips are what it *did* get. */}
                 <SkippedAttachmentsNote items={item.skipped} />
+                {/* Memory redesign 3.9: the notes this answer used — live
+                    only, like the note above. */}
+                {item.memoryUsed.length > 0 && (
+                  <TranscriptMemoryUsed items={item.memoryUsed} />
+                )}
               </AssistantMessage>
             );
 
@@ -120,8 +128,19 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 kind={toFileKind(item.entry.kind as ArtifactKind)}
                 language={languageFromName(item.entry.name)}
                 version={item.entry.version}
+                inProject={item.entry.inProject}
+                openable={item.entry.openable}
                 time={formatClock(item.entry.at)}
-                onOpen={() => openArtifact(item.entry.artifactId)}
+                onOpen={() =>
+                  fileActions.open({
+                    id: item.entry.artifactId,
+                    name: item.entry.name,
+                  })
+                }
+                onReveal={() => fileActions.reveal(item.entry.path)}
+                onOpenInLibrary={() =>
+                  openArtifact(item.entry.artifactId, item.entry.inProject)
+                }
               />
             );
 
@@ -131,7 +150,9 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 key={item.key}
                 toolName={item.entry.toolName}
                 toolArguments={item.entry.toolArguments}
+                preview={item.entry.preview}
                 agentName={item.entry.agentName}
+                queue={{ position: item.position, total: item.total }}
               />
             );
 

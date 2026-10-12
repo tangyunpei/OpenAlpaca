@@ -142,6 +142,46 @@ pub fn compose_constraints(
     })
 }
 
+/// The tool each of three builtins brings with it: the second provides the
+/// first's capability (R42), so a template granted the capability holds
+/// both — `file_list` beside `file_read` (whose not-found hint names it),
+/// `file_edit` beside `file_write` (a change inside a project file), and
+/// `artifact_read` beside `read_result` (a by-product's result names it to
+/// read the file back).
+pub const PAIRED_TOOLS: [(&str, &str); 3] = [
+    ("file_read", "file_list"),
+    ("file_write", "file_edit"),
+    ("read_result", "artifact_read"),
+];
+
+/// The partners ([`PAIRED_TOOLS`]) a skill's legacy `tools.allow` branch adds
+/// to the tools it resolved by name (residual X5; R42 and R-T6 on both skill
+/// paths): a name is a tool, not a capability, so a skill allowed
+/// `file_write` by name would hold `file_write` without the `file_edit` its
+/// capability brings, where a template or a `requires_capabilities` skill
+/// holds both. A partner is added only when its tool was resolved, the skill
+/// does not list the partner already, and `deny` names neither half — a
+/// skill that denies either is handed neither, as a template that denies
+/// the capability is. In [`PAIRED_TOOLS`]' order, for the caller to append
+/// after the names the skill listed.
+pub fn paired_tools<'a>(
+    resolved: impl IntoIterator<Item = &'a str>,
+    deny: &[String],
+) -> Vec<&'static str> {
+    let resolved: HashSet<&str> = resolved.into_iter().collect();
+    let denied = |name: &str| deny.iter().any(|d| d == name);
+    PAIRED_TOOLS
+        .iter()
+        .filter(|(named, partner)| {
+            resolved.contains(named)
+                && !resolved.contains(partner)
+                && !denied(named)
+                && !denied(partner)
+        })
+        .map(|(_, partner)| *partner)
+        .collect()
+}
+
 /// Filter tool definitions by constraints (deny list + allow list).
 ///
 /// A tool is kept if:

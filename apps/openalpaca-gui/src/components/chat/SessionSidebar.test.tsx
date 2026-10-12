@@ -18,6 +18,8 @@ function session(overrides: Partial<Session> = {}): Session {
     created_at: "2026-09-06 09:00:00",
     updated_at: "2026-09-06 10:00:00",
     ended_at: null,
+    working_state: null,
+    working_state_updated_at: null,
     active_task_count: 0,
     interrupted_task_count: 0,
     ...overrides,
@@ -42,6 +44,7 @@ function renderSidebar(props: Partial<Parameters<typeof SessionSidebar>[0]>) {
       onLoadMore={vi.fn()}
       onCollapse={vi.fn()}
       onNewChat={vi.fn()}
+      onStartFresh={vi.fn()}
       onSelect={vi.fn()}
       onRename={vi.fn()}
       onArchive={vi.fn()}
@@ -89,7 +92,10 @@ describe("SessionSidebar — the rows", () => {
     expect(screen.getByText(/6 Sep/)).toBeInTheDocument();
   });
 
-  /** `title` is `""` until the conversation is renamed — never render a blank row. */
+  /**
+   * `title` is `""` until something names the conversation — the daemon, from
+   * its first sentence (G5), or a rename — never render a blank row.
+   */
   it("falls back to a name for an untitled conversation", () => {
     renderSidebar({ sessions: [session({ title: "" })] });
     expect(
@@ -143,6 +149,42 @@ describe("SessionSidebar — the write verbs", () => {
     renderSidebar({ onNewChat });
     fireEvent.click(screen.getByRole("button", { name: "New chat" }));
     expect(onNewChat).toHaveBeenCalledTimes(1);
+  });
+
+  /** Design 11 §4 (b), CQ-5: "New chat" without the previous conversation. */
+  it("starts a chat fresh, and not while one is opening", () => {
+    const onStartFresh = vi.fn();
+    const onNewChat = vi.fn();
+    const { rerender } = renderSidebar({ onStartFresh, onNewChat });
+    fireEvent.click(screen.getByRole("button", { name: "Start fresh" }));
+    expect(onStartFresh).toHaveBeenCalledTimes(1);
+    expect(onNewChat).not.toHaveBeenCalled();
+
+    rerender(
+      <SessionSidebar
+        sessions={[]}
+        selectedId={null}
+        loading={false}
+        error={null}
+        busyId={null}
+        creating
+        actionError={null}
+        windowProject={null}
+        width={236}
+        loaded={0}
+        total={0}
+        loadingMore={false}
+        onLoadMore={vi.fn()}
+        onCollapse={vi.fn()}
+        onNewChat={onNewChat}
+        onStartFresh={onStartFresh}
+        onSelect={vi.fn()}
+        onRename={vi.fn()}
+        onArchive={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Start fresh" })).toBeDisabled();
   });
 
   it("renames through an inline field, committing on submit", () => {

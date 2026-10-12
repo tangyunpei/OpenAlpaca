@@ -1,0 +1,19 @@
+// D4 repro: does "Notes used in this answer" survive the history catching up?
+// Drives the real reducer and buildTranscript, as transcript-model.test.ts does.
+import { chatStreamReducer, initialChatStreamState } from "<repo>/apps/openalpaca-gui/src/lib/chat-stream";
+import { buildTranscript } from "<repo>/apps/openalpaca-gui/src/views/chat/transcript-model";
+
+const used = [{ id: "97ddf695-b603-4ce3-81e0-d5c230e1ca63", revision: "a".repeat(64), reason: "recall" }];
+const stream = [
+  { type: "open", streamId: "s1", laneKey: "user:gui" },
+  { type: "done", data: { content: "Jasmine green tea.", model: "m", tokens_in: 1, tokens_out: 1, duration_ms: 1, memory_used: used } },
+].reduce(chatStreamReducer as any, initialChatStreamState as any);
+const base = { reports: [], artifacts: [], confirmations: [], resolutions: [], steers: [], stream, pending: null } as any;
+const msg = (id: number, role: string, content: string) => ({ id, lane_key: "user:gui", role, content, created_at: "2026-10-03T04:33:10Z" });
+
+const before = buildTranscript({ ...base, history: [msg(1, "user", "Remind me, which tea do I like best?")] })
+  .filter((i: any) => i.kind === "assistant").map((i: any) => i.memoryUsed.length);
+const after = buildTranscript({ ...base, history: [msg(1, "user", "Remind me, which tea do I like best?"), msg(2, "assistant", "Jasmine green tea.")] })
+  .filter((i: any) => i.kind === "assistant").map((i: any) => i.memoryUsed.length);
+console.log("assistant rows' memoryUsed counts, done landed, history not yet refetched:", JSON.stringify(before));
+console.log("assistant rows' memoryUsed counts, after history refetch holds the stored row:", JSON.stringify(after));

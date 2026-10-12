@@ -36,12 +36,7 @@ toml_edit.workspace = true
 rand.workspace = true
 async-trait.workspace = true
 openalpaca_plugins = { workspace = true }
-openalpaca_llm = { workspace = true, features = [
-    "anthropic",
-    "openai",
-    "ollama",
-    "local-embeddings",
-] }
+openalpaca_llm = { workspace = true, features = ["anthropic", "openai", "ollama"] }
 teloxide = { workspace = true }
 twilight-http = { workspace = true }
 twilight-model = { workspace = true }
@@ -56,6 +51,9 @@ opener.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# test-home-guard: store::projects::register refuses an unguarded home store in
+# this crate's test builds (storage design, Stage 1).
+openalpaca_storage = { workspace = true, features = ["test-home-guard"] }
 # `McpClient::disconnected_for_tests` — a client shell for a `ToolBackend::Mcp`
 # with no live server, which the `GET /v1/tools` origin tests need.
 openalpaca_mcp = { path = "../../crates/openalpaca_mcp", features = ["test-utils"] }

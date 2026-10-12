@@ -1,0 +1,318 @@
+[
+  {
+    "id": "eq-001",
+    "category": "episodes",
+    "language": "en",
+    "question": "When I told you my ThinkPad runs Fedora, what else did I ask you in that conversation?",
+    "gold_answer": "How to see which kernel version I'm on, how to find the ten biggest directories under my home folder, and how to sort that output by size in human-readable units.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-002",
+    "turns": [
+      1,
+      2,
+      3
+    ]
+  },
+  {
+    "id": "eq-002",
+    "category": "episodes",
+    "language": "en",
+    "question": "In the conversation about the SIGILL crash under Rosetta, what fixed it and what else did I ask about?",
+    "gold_answer": "Switching to the native aarch64-apple-darwin toolchain fixed it (Rosetta isn't supported for Lantern). I also asked how to see which rustup toolchain a directory uses and what SIGILL means at the CPU level.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-003",
+    "turns": [
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  {
+    "id": "eq-003",
+    "category": "episodes",
+    "language": "en",
+    "question": "When we debugged the 'future is not Send' error in an axum handler, what was the cause and how did I decide to fix it?",
+    "gold_answer": "A MutexGuard held across an await; instead of switching to tokio::sync::Mutex I decided to scope the guard in a block.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-006",
+    "turns": [
+      5,
+      6,
+      7,
+      8
+    ]
+  },
+  {
+    "id": "eq-004",
+    "category": "episodes",
+    "language": "en",
+    "question": "In the conversation where I turned down MongoDB, what was the app, and what did I ask you to sketch for it?",
+    "gold_answer": "A small bookmarks app; I asked you to sketch a schema for its bookmarks table.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-012",
+    "turns": [
+      6,
+      7,
+      8
+    ]
+  },
+  {
+    "id": "eq-005",
+    "category": "episodes",
+    "language": "en",
+    "question": "What did we go over about pytest in the conversation about managing Moss with uv?",
+    "gold_answer": "Adding pytest as a dev dependency with uv (uv add --dev versus a dependency group), running a single test file with uv, showing print output and setting that in pyproject.toml, and a tmp_path fixture for a temporary content directory, including one shared across a test module.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-014",
+    "turns": [
+      1,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ]
+  },
+  {
+    "id": "eq-006",
+    "category": "episodes",
+    "language": "en",
+    "question": "What did we talk about for dinner the evening I set my personal cloud budget?",
+    "gold_answer": "A quick dinner recipe without shellfish because of my allergy; I asked whether it could be made with rice noodles and how long it keeps in the fridge.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-016",
+    "turns": [
+      1,
+      2,
+      3
+    ]
+  },
+  {
+    "id": "eq-007",
+    "category": "episodes",
+    "language": "en",
+    "question": "What psql help did I ask for in the conversation where I first noted the Lantern staging database, lantern_staging on pg-staging-1?",
+    "gold_answer": "A psql one-liner counting rows per status in the batches table, printed as CSV and written to a file instead of stdout.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-022",
+    "turns": [
+      1,
+      2,
+      3
+    ]
+  },
+  {
+    "id": "eq-008",
+    "category": "episodes",
+    "language": "en",
+    "question": "Which reading note did I ask you to outline for Moss, and what did I want changed in the outline?",
+    "gold_answer": "A note on Ted Chiang's Exhalation; I asked for shorter section titles.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-024",
+    "turns": [
+      7,
+      8
+    ]
+  },
+  {
+    "id": "eq-009",
+    "category": "episodes",
+    "language": "en",
+    "question": "In the conversation about the partner-region migration, did the region column become an enum, and how did we handle the backfill and the DATABASE_URL build error?",
+    "gold_answer": "A text column with a check constraint, not an enum; the backfill was a batched UPDATE rather than one transaction, and the sqlx DATABASE_URL error in CI was solved with sqlx offline mode.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-026",
+    "turns": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      9,
+      10
+    ]
+  },
+  {
+    "id": "eq-010",
+    "category": "episodes",
+    "language": "en",
+    "question": "What did we settle about the nightly backup script for ~/Vault?",
+    "gold_answer": "It should be written in POSIX sh or bash, not fish, and scheduled with launchd.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-027",
+    "turns": [
+      2,
+      3,
+      4
+    ]
+  },
+  {
+    "id": "eq-011",
+    "category": "episodes",
+    "language": "en",
+    "question": "In the conversation where Lantern moved to port 8790 locally, what alert did I ask you to draft and what did I ask about it?",
+    "gold_answer": "A Grafana alert rule for Lantern's SLO (/v1/reconcile p95 under 120 ms and an error rate under 0.1 %), and which evaluation interval to pick for it.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-030",
+    "turns": [
+      3,
+      4
+    ]
+  },
+  {
+    "id": "eq-012",
+    "category": "episodes",
+    "language": "en",
+    "question": "When we wrote the Moss README, did it get a table of contents, and what did we add to it?",
+    "gold_answer": "No table of contents; it got Usage and Deploy sections, a short, friendlier Contributing note saying issues are welcome, and a licence badge at the top.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-035",
+    "turns": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ]
+  },
+  {
+    "id": "eq-013",
+    "category": "episodes",
+    "language": "en",
+    "question": "Besides the dates, what did we discuss about my Stockholm trip, and what did I decide to do?",
+    "gold_answer": "The usual weather in early October, day trips from Stockholm and how long the ferry to the islands takes; I decided to pack a proper coat.",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-046",
+    "turns": [
+      2,
+      3,
+      4,
+      5
+    ]
+  },
+  {
+    "id": "eq-014",
+    "category": "episodes",
+    "language": "mixed",
+    "question": "我们做 JLPT N3 动词练习那次，结果怎么样？",
+    "gold_answer": "你出了五个 N3 动词考我，第三个我答错了，你又解释了一遍那个 nuance，然后又做了一轮，最后我说今天就到这。",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-018",
+    "turns": [
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  {
+    "id": "eq-015",
+    "category": "episodes",
+    "language": "mixed",
+    "question": "Lantern 本地 app 连不上数据库那次，最后问题出在哪？",
+    "gold_answer": "端口映射写错了；docker compose ps 显示 postgres 是 healthy 的，问题不在 Postgres 本身。",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-028",
+    "turns": [
+      1,
+      2,
+      3
+    ]
+  },
+  {
+    "id": "eq-016",
+    "category": "episodes",
+    "language": "zh",
+    "question": "聊 Moss 的 Markdown 管道那次，除了换掉 Pandoc，我还问了哪些关于脚注的问题？",
+    "gold_answer": "markdown-it-py 的插件怎么注册、脚注渲染出来的 HTML 是什么结构、怎么给脚注加返回链接；最后我说自己试试。",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-013",
+    "turns": [
+      2,
+      3,
+      4,
+      5
+    ]
+  },
+  {
+    "id": "eq-017",
+    "category": "episodes",
+    "language": "zh",
+    "question": "我让你帮我挑电饭煲那次，最后决定买哪个？",
+    "gold_answer": "给我妈陈红挑一个五百块以内的电饭煲；我问了你两个型号哪个更省电，然后说“就买第一个”——具体型号我自己没有说。",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-019",
+    "turns": [
+      2,
+      3,
+      4
+    ]
+  },
+  {
+    "id": "eq-018",
+    "category": "episodes",
+    "language": "zh",
+    "question": "聊半马训练那次，我问了你哪些问题？",
+    "gold_answer": "半马前三个月的训练该怎么加量、长距离跑那天吃什么，以及跑完膝盖有点酸是否正常。",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-021",
+    "turns": [
+      2,
+      3,
+      4
+    ]
+  },
+  {
+    "id": "eq-019",
+    "category": "episodes",
+    "language": "zh",
+    "question": "团队否决 Kafka 之后，关于 outbox 表我们讨论了什么？",
+    "gold_answer": "outbox 表一般要哪些字段，以及消费端怎么保证不重复处理。",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-044",
+    "turns": [
+      2,
+      3,
+      4
+    ]
+  },
+  {
+    "id": "eq-020",
+    "category": "episodes",
+    "language": "zh",
+    "question": "排 Lantern on-call 那次，关于值班我问了什么？",
+    "gold_answer": "值班前一天要准备什么、告警太多的时候怎么分优先级；最后说照这个清单来。",
+    "relies_on": [],
+    "expect_abstain": false,
+    "session": "cs-048",
+    "turns": [
+      2,
+      3,
+      4
+    ]
+  }
+]

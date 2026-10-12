@@ -51,8 +51,32 @@ export interface SkippedAttachmentRef {
 }
 
 /**
- * SSE `done`. `attachments_used`/`attachments_skipped`/`delegation` are
- * omitted when absent.
+ * One memory note the turn delivered (memory redesign, design §5 step 8): an
+ * automatic recall (`recall`), a pinned note (`pinned`), a note the recall
+ * listed in its index block without its text (`index`, design 09 §13.2), or
+ * one the model fetched with `memory_search`/`memory_read` in that turn
+ * (`tool`).
+ */
+export interface MemoryUsedRef {
+  id: string;
+  revision: string;
+  reason: "pinned" | "recall" | "index" | "tool" | (string & {});
+}
+
+/**
+ * The previous conversation a turn was given (design 11 §4 (b), §5): its
+ * session and its working state's topic — `""` when it left no state, only
+ * its last exchange.
+ */
+export interface ContinuedFrom {
+  session_id: string;
+  topic: string;
+}
+
+/**
+ * SSE `done`. `attachments_used`/`attachments_skipped`/`memory_used`/
+ * `delegation` are omitted when absent; `working_state_updated` and
+ * `continued_from` are always sent (absent only from an older daemon).
  *
  * Since U3 the two attachment lists are disjoint and `attachments_used` is
  * truthful: an attachment the adaptation withheld leaves it and appears in
@@ -66,7 +90,24 @@ export interface ChatStreamDone {
   duration_ms: number;
   attachments_used?: string[];
   attachments_skipped?: SkippedAttachmentRef[];
+  /**
+   * The memory notes this turn delivered. **Live only**, like
+   * `attachments_skipped`: nothing persists it and `GET /v1/chat/history`
+   * never serves it, so a reloaded transcript cannot say which notes an answer
+   * used — `GET /v1/memories/recently-used` is the after-the-fact read.
+   */
+  memory_used?: MemoryUsedRef[];
   delegation?: DelegationInfo;
+  /**
+   * The turn compacted, so its conversation's working state changed (design
+   * 11 §5): the session is worth re-reading.
+   */
+  working_state_updated?: boolean;
+  /**
+   * The previous conversation the turn was given, or `null`. **Live only**:
+   * the chat view says "Continuing from …" while the latest turn carries it.
+   */
+  continued_from?: ContinuedFrom | null;
 }
 
 /** SSE `confirmation_requested`. The WS twin adds `agent_id`/`lane_key`. */
@@ -85,6 +126,20 @@ export interface ChatConfirmationRequest {
    * another client's main-loop prompt looks exactly like this one's.
    */
   stream_id?: string | null;
+  /**
+   * What the card says about the call, written by the daemon and shown above
+   * the literal arguments: `memory_confirm`'s composed from the notes (design
+   * 09 §4.4); since storage design Stage 2 (R34, R49) `shell_execute`'s,
+   * `file_write`'s, `file_edit`'s and `send`'s, naming the folder the call acts
+   * in and quoting its path and strings, already escaped and cut by the daemon.
+   * `null`/absent for the ordinary card.
+   */
+  preview?: string | null;
+  /**
+   * The approval is good for this one call only (design 09 §4.2): offer no
+   * *Always allow*. Absent from an older daemon, which means `false`.
+   */
+  per_call?: boolean;
 }
 
 /**
@@ -202,6 +257,12 @@ export function chatStreamReducer(
         phase: "opening",
         streamId: action.streamId,
         laneKey: action.laneKey,
+        // A new turn, not a new conversation: the cards are session-level. A
+        // background run's prompt can land between Send and this frame, and
+        // clearing it here hid a card the daemon was still waiting on — the
+        // chat view's record of having seen it then kept the snapshot from
+        // drawing it again (G1, Round G).
+        pendingConfirmations: state.pendingConfirmations,
       };
 
     case "confirmation_resolved": {
@@ -398,6 +459,8 @@ export function attachChatStream(
         // The frame does not name a stream and does not have to: it *is* this
         // one (R1).
         stream_id: streamId,
+        preview: typeof payload.preview === "string" ? payload.preview : null,
+        per_call: payload.per_call === true,
       },
     });
     // Deliberately does NOT close — the same stream continues after the

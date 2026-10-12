@@ -2,6 +2,9 @@ mod common;
 mod identity;
 mod soul;
 mod user;
+mod writer;
+
+pub use writer::{UserDocumentRead, UserDocumentWriter, UserDocumentWritten};
 
 use crate::bus::EventBus;
 use crate::tools::builtins::annotations_for_builtin;

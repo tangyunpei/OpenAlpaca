@@ -9,6 +9,56 @@ pub struct OrchestratorConfig {
     pub prompt_budgets: PromptBudgetsConfig,
     pub routing: RoutingConfig,
     pub sessions: SessionsConfig,
+    pub learning: LearningConfig,
+}
+
+/// Background learning's cadence (`[orchestrator.learning]`, Learning v2,
+/// design 09 §1.10, owner decision MD-10).
+///
+/// Every turn is queued; a session's unlearned turns are extracted together
+/// when it has been idle about two minutes, when ten new turns have
+/// accumulated, when the user switches conversations, and before the daemon
+/// stops. Only MD-10's two numbers and the off switch are keys: the byte
+/// budget, the chunk and retry bounds and the quiet period are engineering
+/// constants (`memory::learning`), not owner-facing choices.
+///
+/// Named `#[serde(default = "...")]` functions shared with `Default`, as in
+/// [`RoutingConfig`], so a partial table cannot default `enabled` to `false`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningConfig {
+    /// The off switch. `false` queues nothing and flushes nothing; the
+    /// evaluation's question phase uses it.
+    #[serde(default = "default_learning_enabled")]
+    pub enabled: bool,
+    /// MD-10's "idle about 2 minutes": a session with unlearned turns whose
+    /// last turn is this old becomes due. `0` switches the idle trigger off.
+    /// Range 0..=3600.
+    #[serde(default = "default_learning_idle_secs")]
+    pub idle_secs: u64,
+    /// MD-10's "10 new turns": the Nth user-authored turn since the cursor
+    /// makes the session due at once. Range 1..=100.
+    #[serde(default = "default_learning_turns_per_flush")]
+    pub turns_per_flush: u32,
+}
+
+fn default_learning_enabled() -> bool {
+    true
+}
+fn default_learning_idle_secs() -> u64 {
+    120
+}
+fn default_learning_turns_per_flush() -> u32 {
+    10
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_learning_enabled(),
+            idle_secs: default_learning_idle_secs(),
+            turns_per_flush: default_learning_turns_per_flush(),
+        }
+    }
 }
 
 /// Session event log limits (`[orchestrator.sessions]`, plan §5.4).
@@ -210,21 +260,17 @@ pub struct MemoryConfig {
     pub summary_max_chars: usize,
     /// Character limit for message truncation in summary input.
     pub msg_trunc_chars: usize,
-    /// L2 distance threshold for semantic supersession (lower = stricter).
-    /// Memories within this distance are considered "same topic" and will be superseded.
-    pub supersession_distance_threshold: f64,
-    /// Jaccard word-overlap threshold for FTS-based supersession fallback.
-    /// Only memories with overlap >= this value are considered for supersession
-    /// when the embedder is unavailable. Range: 0.0–1.0.
-    pub fts_jaccard_threshold: f64,
-    /// Decay and pruning configuration.
-    pub decay: MemoryDecayConfig,
-    /// Minimum confidence for profile trait extraction (set action). Range: 0.0–1.0.
-    pub profile_confidence_threshold: f64,
-    /// Minimum confidence for profile trait update action. Range: 0.0–1.0.
-    pub profile_update_confidence_threshold: f64,
-    /// Minimum confidence for memory item extraction. Range: 0.0–1.0.
+    /// The extractor's acceptance floor (design §6): an item the model
+    /// scores under this is dropped and counted; the number is never stored.
+    /// Range: 0.0–1.0.
     pub memory_confidence_threshold: f64,
+    /// How each turn's automatic recall delivers what it finds (design 09
+    /// §13.2, MD-15): `index` (the default) or `excerpts`.
+    pub recall_mode: RecallMode,
+    /// A new conversation on a lane and project is given the previous one's
+    /// working state for its first this-many user turns, while it has none
+    /// of its own (design 11 §4 (b), owner decision CQ-5); `0` never.
+    pub carry_over_turns: usize,
 }
 
 impl Default for MemoryConfig {
@@ -234,41 +280,34 @@ impl Default for MemoryConfig {
             summary_min_new_older_messages: 12,
             summary_max_chars: 4000,
             msg_trunc_chars: 1500,
-            supersession_distance_threshold: 1.0,
-            fts_jaccard_threshold: 0.4,
-            decay: MemoryDecayConfig::default(),
-            profile_confidence_threshold: 0.8,
-            profile_update_confidence_threshold: 0.9,
             memory_confidence_threshold: 0.65,
+            recall_mode: RecallMode::default(),
+            carry_over_turns: 3,
         }
     }
 }
 
-/// Configuration for memory importance decay and pruning.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MemoryDecayConfig {
-    /// How often to run the decay task (seconds).
-    pub poll_interval_secs: u64,
-    /// Half-life in days: after this many days without access, importance drops by 50%.
-    pub half_life_days: f64,
-    /// Minimum importance floor. Memories below this are eligible for pruning.
-    pub min_importance: f64,
-    /// Soft cap on total non-KbChunk memories per owner. Excess is pruned by lowest importance.
-    pub soft_cap: usize,
-    /// Small importance boost applied each time a memory is accessed.
-    /// Reinforces frequently-used memories. Capped at 1.0 to prevent unbounded growth.
-    pub access_boost: f64,
+/// `[orchestrator.memory] recall_mode` (design 09 §13.2, MD-15): what the
+/// automatic per-turn recall puts in front of the model, always inside the
+/// same 8 KiB and always as quoted reference data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecallMode {
+    /// The pinned notes, the top 2 recalled notes as excerpts, then up to 8
+    /// further notes listed one line each, for the model to read with
+    /// `memory_read` — the owner-adopted default.
+    #[default]
+    Index,
+    /// The pinned notes and up to 8 recalled notes, every one as an excerpt:
+    /// the delivery before index-first recall.
+    Excerpts,
 }
 
-impl Default for MemoryDecayConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval_secs: 3600,
-            half_life_days: 30.0,
-            min_importance: 0.05,
-            soft_cap: 500,
-            access_boost: 0.05,
+impl RecallMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecallMode::Index => "index",
+            RecallMode::Excerpts => "excerpts",
         }
     }
 }
@@ -278,11 +317,11 @@ impl Default for MemoryDecayConfig {
 pub struct CostsConfig {
     /// Maximum daily cost (USD) for conversation summaries.
     pub summary_max_daily_cost_usd: f64,
-    /// Maximum daily cost (USD) for memory extractions.
+    /// Maximum cost (USD) per UTC day for chat learning's extraction calls,
+    /// read durably from `llm_usage_daily` (design 09 §1.8).
     pub extract_max_daily_cost_usd: f64,
-    /// Run extraction every N user turns.
-    pub extract_every_n_turns: usize,
-    /// Minimum content length (chars) to trigger extraction.
+    /// A learning chunk with less of the user's own text than this many bytes
+    /// is not sent, and the cursor moves past it (design 09 §1.6).
     pub extract_min_content_len: usize,
     /// Whether task output memory extraction is enabled.
     pub task_extract_enabled: bool,
@@ -290,6 +329,18 @@ pub struct CostsConfig {
     pub task_extract_max_daily_cost_usd: f64,
     /// Minimum content length (chars) for task output to trigger extraction.
     pub task_extract_min_content_len: usize,
+    /// Notes one chat-learning extraction call may write at most (design 09
+    /// §1.10; the per-turn 5 of design 03 §4 before it). The model's items
+    /// past this count are dropped and counted, never stored, and a small
+    /// model's output budget can lower it further (§1.6).
+    pub extract_max_items_per_call: usize,
+    /// Notes one task run's extraction may write at most (design §4: 10).
+    pub task_extract_max_items_per_run: usize,
+    /// Chat-learning extraction calls per UTC day (Learning v2, design 09
+    /// §1.8), read durably from `llm_usage_daily`. This is what bounds a $0
+    /// local model, where the cost cap never binds. `0` = no cap. Range
+    /// 0..=10000.
+    pub extract_max_calls_per_day: u32,
     /// Model ID for background summary generation (e.g. claude-haiku-4-5-20251001).
     /// If None, falls back to the router's default model.
     #[serde(default)]
@@ -305,11 +356,13 @@ impl Default for CostsConfig {
         Self {
             summary_max_daily_cost_usd: 0.50,
             extract_max_daily_cost_usd: 0.25,
-            extract_every_n_turns: 5,
             extract_min_content_len: 20,
             task_extract_enabled: true,
             task_extract_max_daily_cost_usd: 0.50,
             task_extract_min_content_len: 100,
+            extract_max_items_per_call: 12,
+            task_extract_max_items_per_run: 10,
+            extract_max_calls_per_day: 200,
             summary_model: None,
             extraction_model: None,
         }

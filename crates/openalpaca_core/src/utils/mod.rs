@@ -1,2 +1,2 @@
 pub mod social;
-pub(crate) mod text;
+pub mod text;

@@ -66,6 +66,49 @@ const LANGUAGE_ABBR: Record<string, string> = {
   cpp: "CPP",
 };
 
+/**
+ * Non-`text/*` types the daemon stores as `code` — `CODE_MIME_TYPES` in
+ * `crates/openalpaca_storage/src/models/artifact.rs`, kept equal by hand.
+ */
+const CODE_MIME_TYPES: ReadonlySet<string> = new Set([
+  "application/json",
+  "application/ld+json",
+  "application/yaml",
+  "application/x-yaml",
+  "application/toml",
+  "application/x-toml",
+  "application/xml",
+  "application/javascript",
+  "application/ecmascript",
+  "application/typescript",
+  "application/sql",
+  "application/x-python-code",
+  "application/x-sh",
+]);
+
+/**
+ * The kind the daemon stores for an upload of this type —
+ * `ArtifactKind::for_mime` (R25), the kind the Library then badges. A surface
+ * that knows a file's type but not its stored kind (a transcript file part)
+ * reads it here rather than guessing a badge of its own (G3a): `text/plain` is
+ * `code`, so a `.txt` reads `TXT` in both places, never `MD`.
+ */
+export function artifactKindForMime(
+  mimeType: string | null | undefined,
+): ArtifactKind {
+  const essence = (mimeType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  if (essence.startsWith("image/")) return "image";
+  if (essence === "text/html" || essence === "application/xhtml+xml")
+    return "html";
+  if (essence === "text/markdown" || essence === "text/x-markdown")
+    return "markdown";
+  if (essence === "text/csv" || essence === "text/tab-separated-values")
+    return "table";
+  if (essence.startsWith("text/") || CODE_MIME_TYPES.has(essence))
+    return "code";
+  return "binary";
+}
+
 export function toFileKind(kind: ArtifactKind): FileKind {
   switch (kind) {
     case "markdown":
@@ -88,7 +131,10 @@ export function fileAbbr(kind: FileKind, language?: string | null): string {
   const known = LANGUAGE_ABBR[key];
   if (known !== undefined) return known;
   const derived = key.slice(0, 3).toUpperCase();
-  return derived === "" ? KIND_ABBR.code : derived;
+  // The extension may be an agent's (a result file's own name): anything but
+  // letters and digits — a bidi override, a zero-width space — is never drawn
+  // on the badge (d7-app-3).
+  return /^[A-Z0-9]+$/.test(derived) ? derived : KIND_ABBR.code;
 }
 
 /** `findings.md` → `md`; used when only a filename is known. */

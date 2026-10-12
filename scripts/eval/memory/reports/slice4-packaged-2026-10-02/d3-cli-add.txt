@@ -1,0 +1,4 @@
+$ openalpaca memory add --kind preference --title "Tea in the afternoon" --tag track-d "Prefers green tea after 3 pm instead of coffee."
+✓ Saved 2d379a13-9957-40a4-a0c4-ae23cb8d42fb in the global partition (revision 80c92131c426).
+exit=0
+at 04:18:22Z

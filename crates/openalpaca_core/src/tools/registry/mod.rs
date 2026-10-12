@@ -7,6 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::orchestrator::skill::constraints::EffectiveToolSet;
 use crate::tools::extensions::{ExtensionId, ExtensionLedger};
+use crate::security::sanitizer::TraversalRule;
+use crate::tools::platform::{RunFailure, run_bounded, shell_command};
+use crate::tools::working_folder::{WorkingFolderRefusal, working_folder};
+use std::path::{Path, PathBuf};
 
 pub mod availability;
 pub use availability::{
@@ -29,23 +33,41 @@ pub use capabilities::{
 /// carried — `x-workspace-path` on `/v1/chat`, `workspace_path` on
 /// `/v1/command` — and each consumer reads exactly one of them:
 ///
-/// - `workspace_id` — the resolved root for **memory scoping**, CWD-derived when
+/// - `workspace_id` — the resolved root for **memory scoping**, `None` when
 ///   the request carried none (`memory/scope_context.rs`,
-///   `MemoryScopeContext::for_request`). Read by `memory_search`
-///   (`tools/builtins/memory_search.rs`) and by the paths that rebuild a
-///   `MemoryScopeContext` out of this one (`memory_ops`, `start_workflow`).
+///   `MemoryScopeContext::for_request`; never the daemon's CWD since R-S13, so
+///   it equals `request_workspace_root`). Set by the main loop, the skill tier
+///   and the lead. One builtin reads it: `start_workflow` forwards it, beside
+///   `request_workspace_root`, into the workflow it dispatches
+///   (`MemoryScopeContext::from_tool_context`, `start_workflow.rs`), where it
+///   is copied into the lead's and each subagent's `ToolContext` and read by
+///   nothing. No memory path reads it — the memory tools
+///   (`tools/builtins/memory_tools.rs`) and the per-turn recall
+///   (`prompt_ctx/sources/memory.rs`) take `request_workspace_root`, so the
+///   daemon's CWD never selects a partition (design MD-5) — so that forwarded
+///   copy is all that is left of it, and the collapse below removes it.
 /// - `request_workspace_root` — the same resolution, but only on the
-///   client-sent branch and never the home store (R22). Read by `artifact_write`
-///   and its `workspace_write` spill, and by nothing else: it is the only one of
-///   the three that may place bytes on disk.
+///   client-sent branch and never the home store (R22), and the only one of
+///   the three that may place bytes on disk. Read by `artifact_write` and its
+///   `workspace_write` spill (a project's by-products), by `artifact_read`
+///   and `send`'s `artifact_id`, which refuse a file of a project the turn
+///   is not in (R-T3), by `tools::working_folder` — the folder the file tools
+///   (`file_read`, `file_list`, `file_write`, `file_edit`),
+///   `shell_execute`, command tools and `send` act in (storage design §10,
+///   R26) — by the memory tools, which pick their partition with it
+///   (`MemoryService::context_for_tool`), by `start_workflow`, which forwards
+///   it into the run, and by `steer_workflow` and `queue_followup`, which
+///   persist it (F4).
 /// - `workspace_path` — the path **as sent**, unresolved, threaded only on the
-///   tool-mode main loop. Read by `steer_workflow` and `queue_followup`
-///   (`runner/lead_agent/tools.rs`), which persist it on the row so the re-entry
-///   turn resolves the same workspace again.
+///   tool-mode main loop and read by **no tool** since F4: `steer_workflow`
+///   (`tools/builtins/steer_workflow.rs`) and `queue_followup`
+///   (`runner/lead_agent/tools.rs`) persist `request_workspace_root`, which
+///   the lead's context — which never carried the as-sent path — has too.
 ///
-/// Collapsing them means one resolved root plus the two bits that actually
-/// differ (did a client send it; is it CWD-derived), so a new consumer cannot
-/// pick the wrong view — which is what R22 fixed once already.
+/// Collapsing them means one resolved root plus the bit that still differs
+/// (did a client send it — since R-S13 none of the three comes from the
+/// daemon's CWD), so a new consumer cannot pick the wrong view — which is what
+/// R22 fixed once already.
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     /// The id capability violations are reported against — the template id
@@ -61,9 +83,16 @@ pub struct ToolContext {
     pub agent_instance_id: Option<String>,
     pub task_id: Option<String>,
     pub owner_id: Option<String>,
-    /// Workspace root for **memory scoping**. Derived from the daemon's current
-    /// directory when the request carried no workspace, so it is never proof
-    /// that the turn belongs to a project — see `request_workspace_root`.
+    /// The root the request's path resolved to — the same value as
+    /// `request_workspace_root` — and `None` when it carried none; never the
+    /// daemon's current directory (R-S13). Named for memory scoping, but no
+    /// memory path reads it: the memory tools and the per-turn recall take
+    /// `request_workspace_root` (MD-5), and so does everything that places
+    /// content or names a working folder. Its one reader is `start_workflow`,
+    /// which forwards it into the run it starts
+    /// (`MemoryScopeContext::from_tool_context`), where it is copied into the
+    /// lead's and each subagent's context and read by nothing (the type's
+    /// own doc, above).
     pub workspace_id: Option<String>,
     /// The project root the originating *request* supplied (`x-workspace-path`
     /// on `/v1/chat`, `workspace_path` on `/v1/command`), resolved to its root.
@@ -71,9 +100,16 @@ pub struct ToolContext {
     /// none — never CWD-derived (ruling R22).
     ///
     /// The only field that may place content on disk: `artifact_write` and the
-    /// `workspace_write` spill read this and nothing else, so a chat turn's
-    /// deliverable lands in the home store rather than in whatever repository
-    /// the daemon happened to start in.
+    /// `workspace_write` spill read this and nothing else, so a by-product
+    /// lands in the turn's project's folder under `projects/` (with no
+    /// project, in the home store's own), never in whatever repository the
+    /// daemon happened to start in.
+    ///
+    /// It is also the turn's working folder (storage design §10, R26): the
+    /// file tools (`file_read`, `file_list`, `file_write`, `file_edit`),
+    /// `shell_execute`, command tools and `send` act in the registered project
+    /// it names; with none, in the scratch folder of
+    /// [`conversation_id`](Self::conversation_id).
     pub request_workspace_root: Option<String>,
     /// Skill invocation chain, oldest first. Empty at top level.
     pub skill_stack: Vec<String>,
@@ -95,8 +131,8 @@ pub struct ToolContext {
     /// The resource scope of the originating request. None where not threaded.
     pub scope: Option<crate::security::policy::Scope>,
     /// Filesystem workspace path of the originating request (from GUI/CLI),
-    /// when one was provided. Persisted with steering/follow-up items so
-    /// re-entry turns can restore the workspace scope (Routing V2).
+    /// when one was provided — as sent, unresolved. Read by no tool since F4:
+    /// the steering and follow-up writers persist `request_workspace_root`.
     pub workspace_path: Option<String>,
     /// The session whose event log carries this call's `tool_call` /
     /// `tool_result` records — and therefore its `tool_execution_log` index
@@ -110,14 +146,24 @@ pub struct ToolContext {
     /// produced it (`read_result`, T42) — a `results/` reference is scoped to
     /// this id and nothing wider.
     pub session_id: Option<String>,
-    /// The session log's emit side, for the one tool that must **write** to it
-    /// before it acts rather than after: `file_write` takes §5.7's pre-edit
-    /// image of a file it is about to overwrite, and has to know the image was
-    /// taken before it destroys the bytes.
+    /// The conversation (the `session` row) this call belongs to, whether or not
+    /// its loop writes a session log — what names a conversation's scratch folder
+    /// when the turn has no project (design §10, R44). Distinct from
+    /// [`session_id`](Self::session_id), whose `Some` means exactly "the session
+    /// writer indexes this call" and which the agentic loop overwrites from its
+    /// own log handle. Inherited by every context cloned from this one (nested
+    /// skills, plugin agents).
+    pub conversation_id: Option<String>,
+    /// The session log's emit side, for the tools that must **write** to it
+    /// before they act rather than after: `file_write` and `file_edit` copy a
+    /// project file they are about to replace or edit into
+    /// `sessions/<id>/snapshots/` (`tools/builtins/pre_edit.rs`, ST-17, R46),
+    /// and have to know the copy was kept before they change the bytes.
     ///
     /// Set from the same handle as [`session_id`](Self::session_id), so the
-    /// two always name one session. `None` off a session — and then no
-    /// snapshot is taken, because there is nowhere to put one.
+    /// two always name one session. `None` off a session — and then an
+    /// existing file is never replaced or edited, because there is nowhere to
+    /// keep its copy (R46); a new file is still written.
     pub session_log: Option<crate::session_log::SessionLogHandle>,
     /// The bus a tool announces its own side effects on — `artifact_write`'s
     /// `SystemEvent::ArtifactWritten` today (plan §4.9).
@@ -129,6 +175,63 @@ pub struct ToolContext {
     /// about it. `None` is not an error: a tool that finds no bus logs at
     /// `debug` and carries on.
     pub event_bus: Option<crate::bus::EventBus>,
+    /// A person approved **this call** on its confirmation card (design 09
+    /// §4.2 rule 1).
+    ///
+    /// A fact only one branch creates:
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// sets it where the broker returned an answer that approves, and
+    /// overwrites the field on every other path — a cache hit, `auto_approve`,
+    /// a call that needed no card, a context a caller built with it set — so
+    /// a tool that finds it here knows a human clicked Approve for exactly
+    /// these arguments. Nothing a model sends can supply it: tool schemas are
+    /// closed and this struct is never built from arguments.
+    pub human_approval: Option<HumanApproval>,
+    /// A person denied this call on its card (design 09 §4.3): set, under the
+    /// same discipline, only on the context the sandbox hands a tool's
+    /// [`BuiltInTool::on_confirmation_denied`] hook. `None` everywhere else.
+    pub human_denial: Option<HumanDenial>,
+}
+
+/// The fact that a person approved one call on its confirmation card
+/// (design 09 §4.2). Only the core crate constructs one — the sandbox, on
+/// the one branch where a person answered yes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HumanApproval {
+    request_id: String,
+}
+
+impl HumanApproval {
+    pub(crate) fn new(request_id: impl Into<String>) -> Self {
+        Self {
+            request_id: request_id.into(),
+        }
+    }
+
+    /// The confirmation request the person answered.
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+}
+
+/// The fact that a person denied one call on its card (design 09 §4.3).
+/// Constructed only by the sandbox, like [`HumanApproval`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HumanDenial {
+    request_id: String,
+}
+
+impl HumanDenial {
+    pub(crate) fn new(request_id: impl Into<String>) -> Self {
+        Self {
+            request_id: request_id.into(),
+        }
+    }
+
+    /// The confirmation request the person answered.
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
 }
 
 impl ToolContext {
@@ -223,6 +326,40 @@ pub trait BuiltInTool: Send + Sync {
         _ctx: &ToolContext,
     ) -> Result<String, String> {
         self.execute(arguments).await
+    }
+
+    /// What the confirmation card says about this call, written by the
+    /// daemon (design 09 §4.4). The sandbox asks just before it raises a
+    /// card: `Ok(Some(text))` rides the card as its preview, `Ok(None)` — the
+    /// default — raises the ordinary card with the literal arguments, and
+    /// `Err(reason)` refuses the call with **no card**, so a person is never
+    /// asked about something that would be refused after the click.
+    async fn confirmation_preview(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    /// Whether this tool's arguments reach a shell line or another program,
+    /// so the sanitizer's `../` rule still applies to them (R29, storage
+    /// design §11). `false`, the default, is every first-party builtin: its
+    /// path arguments carry their own `..` refusal, and its other arguments
+    /// are content. A skill script answers `true`.
+    fn arguments_reach_a_program(&self) -> bool {
+        false
+    }
+
+    /// Called when a person denied this call on its card (design 09 §4.3),
+    /// with `ctx.human_denial` set. What it returns is added to the refusal
+    /// the model reads. The default does nothing.
+    async fn on_confirmation_denied(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Option<String> {
+        None
     }
 }
 
@@ -547,8 +684,9 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name with per-invocation context.
-    /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends.
-    /// For Http/Command/Plugin backends, context is ignored (they don't need identity).
+    /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends; a
+    /// command tool runs in the call's working folder (storage design §10,
+    /// R26); Http, Plugin and MCP backends do not read the context.
     pub async fn execute_with_context(
         &self,
         tool_name: &str,
@@ -556,6 +694,47 @@ impl ToolRegistry {
         ctx: &ToolContext,
     ) -> Result<String, String> {
         self.dispatch(tool_name, arguments, Some(ctx)).await
+    }
+
+    /// The builtin behind `tool_name`, for the confirmation hooks below.
+    /// Only a builtin has them; every other backend answers the defaults.
+    fn builtin(&self, tool_name: &str) -> Option<Arc<dyn BuiltInTool>> {
+        self.tools
+            .get(tool_name)
+            .and_then(|entry| match &entry.backend {
+                ToolBackend::BuiltIn(handler) => Some(handler.clone()),
+                _ => None,
+            })
+    }
+
+    /// [`BuiltInTool::confirmation_preview`] of the tool registered as
+    /// `tool_name` (design 09 §4.4); `Ok(None)` for anything that is not a
+    /// builtin, or not registered.
+    pub async fn confirmation_preview(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        match self.builtin(tool_name) {
+            Some(handler) => handler.confirmation_preview(arguments, ctx).await,
+            None => Ok(None),
+        }
+    }
+
+    /// [`BuiltInTool::on_confirmation_denied`] of the tool registered as
+    /// `tool_name` (design 09 §4.3); `None` for anything that is not a
+    /// builtin.
+    pub async fn on_confirmation_denied(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Option<String> {
+        match self.builtin(tool_name) {
+            Some(handler) => handler.on_confirmation_denied(arguments, ctx).await,
+            None => None,
+        }
     }
 
     /// The single dispatch path — **and the single place the extension gate
@@ -617,12 +796,9 @@ impl ToolRegistry {
         // Pre-validate arguments against the tool's JSON Schema definition.
         validate_tool_arguments(&definition, arguments)?;
 
-        if ctx.is_some()
-            && matches!(
-                backend,
-                ToolBackend::Http { .. } | ToolBackend::Command { .. } | ToolBackend::Plugin(_)
-            )
-        {
+        // A command tool reads the context for its working folder (R26);
+        // these two do not.
+        if ctx.is_some() && matches!(backend, ToolBackend::Http { .. } | ToolBackend::Plugin(_)) {
             tracing::trace!(
                 tool_name,
                 agent_id = ?ctx.and_then(|c| c.agent_id.as_ref()),
@@ -648,7 +824,10 @@ impl ToolRegistry {
                 command,
                 args_template,
                 timeout_secs,
-            } => execute_command(command, args_template.as_deref(), *timeout_secs, arguments).await,
+            } => {
+                execute_command(command, args_template.as_deref(), *timeout_secs, arguments, ctx)
+                    .await
+            }
             ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
             ToolBackend::Mcp {
                 client,
@@ -1103,6 +1282,23 @@ impl ToolRegistry {
             })
             .collect()
     }
+
+    /// R29 (storage design §11): whether the sanitizer's `../` rule applies
+    /// to `tool_name`'s arguments. `Allow` only for a first-party builtin, a
+    /// `BuiltIn` whose handler says its arguments reach no program. `Refuse`
+    /// for a skill script, a `Command`, `Http`, `Plugin` or `Mcp` tool, and a
+    /// name that is not registered (fail closed). Identity is never read
+    /// from `author`, which a TOML tool sets for itself.
+    pub fn traversal_rule(&self, tool_name: &str) -> TraversalRule {
+        self.tools
+            .get(tool_name)
+            .map_or(TraversalRule::Refuse, |entry| match &entry.backend {
+                ToolBackend::BuiltIn(handler) if !handler.arguments_reach_a_program() => {
+                    TraversalRule::Allow
+                }
+                _ => TraversalRule::Refuse,
+            })
+    }
 }
 
 /// What `resolve_capabilities` found, and what it could not find (design §7.2).
@@ -1231,12 +1427,16 @@ async fn execute_http(
     }
 }
 
-/// Execute a command backend tool call.
+/// Execute a command backend tool call in the call's working folder
+/// (storage design §10, R26): the template's placeholders are substituted
+/// and checked first — a missing argument is named as such whatever the
+/// context — then the folder is resolved, and a call with none is refused.
 async fn execute_command(
     command: &str,
     args_template: Option<&str>,
     timeout_secs: u64,
     arguments: &serde_json::Value,
+    ctx: Option<&ToolContext>,
 ) -> Result<String, String> {
     let mut full_args = args_template.unwrap_or("").to_string();
     if let Some(obj) = arguments.as_object() {
@@ -1263,26 +1463,31 @@ async fn execute_command(
         ));
     }
 
+    let folder = command_folder(ctx)?;
     let timeout = std::time::Duration::from_secs(timeout_secs);
     let full_command = format!("{} {}", command, full_args);
+    let mut cmd = shell_command(&full_command);
+    cmd.current_dir(&folder);
+    // R45 (storage design §11): killed with the processes it started when
+    // its time runs out or its call is dropped.
+    let output = match run_bounded(cmd, timeout).await {
+        Ok(output) => output,
+        Err(RunFailure::TimedOut) => {
+            return Err(format!("Command timed out after {}s", timeout_secs));
+        }
+        Err(RunFailure::Spawn(e) | RunFailure::Io(e)) => {
+            return Err(format!("Failed to execute command: {}", e));
+        }
+    };
 
-    let output = tokio::time::timeout(timeout, {
-        crate::tools::platform::shell_command(&full_command).output()
-    })
-    .await
-    .map_err(|_| format!("Command timed out after {}s", timeout_secs))?
-    .map_err(|e| format!("Failed to execute command: {}", e))?;
-
-    // Cap output size to prevent memory pressure from commands producing
-    // unbounded stdout/stderr.
-    const MAX_OUTPUT_BYTES: usize = 512 * 1024; // 512 KB
-    let stdout_raw = &output.stdout;
-    let stderr_raw = &output.stderr;
-    let stdout = String::from_utf8_lossy(&stdout_raw[..stdout_raw.len().min(MAX_OUTPUT_BYTES)]);
-    let stderr = String::from_utf8_lossy(&stderr_raw[..stderr_raw.len().min(MAX_OUTPUT_BYTES)]);
+    // Each stream at most 512 KB: `run_bounded` kept no more than that and
+    // one byte while the command ran (R-T28), and the cut to the cap, with
+    // its line (residual X7), is here.
+    let stdout = crate::tools::platform::shown_output(&output.stdout, "stdout");
+    let stderr = crate::tools::platform::shown_output(&output.stderr, "stderr");
 
     if output.status.success() {
-        Ok(stdout.to_string())
+        Ok(stdout)
     } else {
         Err(format!(
             "Command failed (exit {}): {}{}",
@@ -1291,6 +1496,18 @@ async fn execute_command(
             stderr
         ))
     }
+}
+
+/// The folder a command tool runs in: the call's working folder, made ready
+/// (R26); a call with no context, or one the folder refuses, gets the
+/// refusal's sentence and runs nothing.
+fn command_folder(ctx: Option<&ToolContext>) -> Result<PathBuf, String> {
+    let ctx = ctx.ok_or_else(|| WorkingFolderRefusal::NoContext.to_string())?;
+    let folder = working_folder(ctx).map_err(|refusal| refusal.to_string())?;
+    folder
+        .ensure()
+        .map(Path::to_path_buf)
+        .map_err(|refusal| refusal.to_string())
 }
 
 /// Basic JSON Schema pre-validation for tool arguments.

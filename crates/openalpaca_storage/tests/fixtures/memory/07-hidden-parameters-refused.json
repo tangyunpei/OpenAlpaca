@@ -1,0 +1,168 @@
+{
+  "row": {
+    "id": 7,
+    "scenario": "The model supplies hidden owner, workspace or path parameters",
+    "required_outcome": "Refused; the trusted context is the sole authority"
+  },
+  "design": ["§3 rule 6: unknown fields are rejected; tool input carrying owner_id, workspace_id, an absolute path or trust fields is refused; every schema is additionalProperties: false", "§7a tool contracts"],
+  "loads_in": ["slice-3"],
+  "notes_for_implementer": "Alice's model-tool context targets Bob's notes by every hidden parameter a model could invent. Every call is refused as `invalid_input` by the tool's own strict validator (the registry's validator accepts unknown keys, F2), nothing is written, Bob's partition is not read, and the message names the offending property. Step 8 is the control: the same call without the hidden key succeeds and lands in Alice's partition with origin `extracted_user`. Step 9 pins that `pinned` is not a tool input (§7a `memory_store`).",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" },
+    { "id": "u_example_bob", "owner_key": "5c357145f3a583c080c9f1d8ee520e71" }
+  ],
+  "database": { "global_users": ["u_example_alice", "u_example_bob"], "local_user_id": "u_example_alice" },
+  "workspaces": [
+    { "name": "bobs_project", "marker": ".git" }
+  ],
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000007-0000-4000-8000-000000000001",
+          "title": "Alice's editor",
+          "kind": "preference",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Alice's editor\n\nAlice prefers vim.\n",
+          "origin": "user"
+        }
+      ]
+    },
+    {
+      "name": "bob_home",
+      "owner": "u_example_bob",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000007-0000-4000-8000-000000000002",
+          "title": "Bob's deploy notes location",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Bob's deploy notes location\n\nBob keeps his deploy notes in the vault folder.\n",
+          "origin": "user"
+        }
+      ]
+    },
+    {
+      "name": "bob_project",
+      "owner": "u_example_bob",
+      "scope": "project",
+      "workspace": "bobs_project",
+      "notes": [
+        {
+          "id": "00000007-0000-4000-8000-000000000003",
+          "title": "Bob's project deploy step",
+          "kind": "procedure",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Bob's project deploy step\n\nDeploy with the release script.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_tool": {
+      "owner_id": "u_example_alice",
+      "workspace": null,
+      "surface": "model_tool",
+      "capabilities": { "read": true, "write": true, "forget": true },
+      "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" }
+    },
+    "bob_tool": {
+      "owner_id": "u_example_bob",
+      "workspace": "ws:bobs_project",
+      "surface": "model_tool",
+      "capabilities": { "read": true, "write": true, "forget": true },
+      "attribution": { "lane_key": "u_example_bob:gui", "task_id": null, "request_id": null, "source": "gui" }
+    }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "tool_call",
+      "context": "alice_tool",
+      "input": { "tool": "memory_search", "arguments": { "query": "deploy notes", "owner_id": "u_example_bob" } },
+      "expect": { "refused": "invalid_input", "message_contains": ["owner_id"], "ids_absent": ["00000007-0000-4000-8000-000000000002"] }
+    },
+    {
+      "step": 2,
+      "op": "tool_call",
+      "context": "alice_tool",
+      "input": { "tool": "memory_search", "arguments": { "query": "deploy", "workspace_id": "@ws:bobs_project" } },
+      "expect": { "refused": "invalid_input", "message_contains": ["workspace_id"], "ids_absent": ["00000007-0000-4000-8000-000000000003"] }
+    },
+    {
+      "step": 3,
+      "op": "tool_call",
+      "context": "alice_tool",
+      "input": { "tool": "memory_read", "arguments": { "id": "00000007-0000-4000-8000-000000000002" } },
+      "expect": { "refused": "not_found", "message_not_contains": ["vault folder", "Bob"] }
+    },
+    {
+      "step": 4,
+      "op": "tool_call",
+      "context": "alice_tool",
+      "input": { "tool": "memory_read", "arguments": { "id": "@part:bob_home/notes/00000007-0000-4000-8000-000000000002--bob-s-deploy-notes-location.md" } },
+      "expect": { "refused": "invalid_input", "message_contains": ["id"], "message_not_contains": ["vault folder"] }
+    },
+    {
+      "step": 5,
+      "op": "tool_call",
+      "context": "alice_tool",
+      "input": { "tool": "memory_store", "arguments": { "title": "Planted", "body": "planted\n", "kind": "fact", "path": "@part:bob_home/notes/planted.md" } },
+      "expect": { "refused": "invalid_input", "message_contains": ["path"], "files_absent": ["part:bob_home/notes/planted.md"] }
+    },
+    {
+      "step": 6,
+      "op": "tool_call",
+      "context": "alice_tool",
+      "input": { "tool": "memory_store", "arguments": { "title": "Trusted?", "body": "trusted\n", "kind": "fact", "origin": "user" } },
+      "expect": { "refused": "invalid_input", "message_contains": ["origin"] }
+    },
+    {
+      "step": 7,
+      "op": "tool_call",
+      "context": "alice_tool",
+      "input": { "tool": "memory_forget", "arguments": { "targets": [{ "id": "00000007-0000-4000-8000-000000000002", "expected_revision": "@rev:00000007-0000-4000-8000-000000000002" }], "owner_id": "u_example_bob" } },
+      "expect": { "refused": "invalid_input", "message_contains": ["owner_id"], "notes_on_disk": [{ "partition": "bob_home", "id": "00000007-0000-4000-8000-000000000002" }] }
+    },
+    {
+      "step": 8,
+      "op": "tool_call",
+      "context": "alice_tool",
+      "as": "control",
+      "input": { "tool": "memory_store", "arguments": { "title": "Trusted?", "body": "trusted\n", "kind": "fact" } },
+      "expect": { "created": true, "scope": "global", "origin": "extracted_user", "path_within": { "control": "part:alice_home/notes" } }
+    },
+    {
+      "step": 9,
+      "op": "tool_call",
+      "context": "alice_tool",
+      "input": { "tool": "memory_store", "arguments": { "title": "Pin me", "body": "pin\n", "kind": "fact", "pinned": true } },
+      "expect": { "refused": "invalid_input", "message_contains": ["pinned"] }
+    },
+    {
+      "step": 10,
+      "op": "list",
+      "context": "bob_tool",
+      "input": {},
+      "expect": { "ids_unordered": ["00000007-0000-4000-8000-000000000002", "00000007-0000-4000-8000-000000000003"] }
+    }
+  ],
+  "final_state": {
+    "snapshot": {
+      "bob_home": { "notes": { "00000007-0000-4000-8000-000000000002": { "revision": "@current", "origin": "user" }, "@id:control": null } },
+      "alice_home": { "notes": { "@id:control": { "revision": "@current", "origin": "extracted_user" } } }
+    }
+  }
+}

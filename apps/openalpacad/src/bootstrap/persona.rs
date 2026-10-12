@@ -233,6 +233,15 @@ fn ensure_user_file(config_base_dir: &Path, template_path: &Path) -> Result<Path
     Ok(user_path)
 }
 
+/// Where the persona documents' backups go — the one answer the
+/// `update_persona` tool and `PUT /v1/persona/user` both use.
+pub fn persona_backup_dir(config_base_dir: &Path) -> PathBuf {
+    config_base_dir.join("orchestrator").join("backups")
+}
+
+/// How many backups of each persona document are kept.
+pub const PERSONA_MAX_BACKUPS: usize = 10;
+
 pub fn load_user_document_from_file(user_path: &Path) -> Result<UserDocument> {
     let content = std::fs::read_to_string(user_path)
         .with_context(|| format!("Failed to read {}", user_path.display()))?;

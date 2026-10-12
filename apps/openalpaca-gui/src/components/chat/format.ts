@@ -189,12 +189,60 @@ export function shortTitle(title: string, words = 3): string {
  * (§3.14). A shell tool sends `{ command: "cargo tree" }`; anything else is
  * pretty-printed rather than flattened, because the user is being asked to
  * approve exactly these bytes.
+ *
+ * The bare-string shortcut steps aside for a string holding a C0 control
+ * character (U+0000–U+001F) — a line break, a tab, a carriage return, ESC:
+ * the whole value is then pretty-printed, and JSON writes each one out
+ * (`\n`, `\t`, `\r`, `\u001b`) as every other approval surface does. DEL
+ * and the C1 controls, which JSON leaves raw, keep the bare form and are
+ * shown as `<U+XXXX>` by the card's escape. Drawn as layout instead, a
+ * command's own line break looks exactly like the box's soft wrap, so
+ * `echo … wait` over `rm -rf ~` reads as one echo while the shell runs two
+ * commands.
+ *
+ * It also steps aside for an empty value and for one that starts or ends
+ * with whitespace or a combining mark: bare, nothing marks where a value
+ * ends, so a trailing space (`/srv/allowed `, another file) is not seen, nor
+ * one a mark sits on (a speck, and `trim` stops at the mark), and an empty
+ * value draws no box at all. JSON's quotes show its extent, as on every
+ * other surface. The cost: a value whose last letter carries its accent as
+ * a mark (decomposed text, many Thai or Devanagari words) keeps its quotes.
  */
 const COMMAND_KEYS = ["command", "cmd", "script", "query", "path", "url"];
 
+/** What `JSON.stringify` writes out inside a string: U+0000–U+001F. */
+const JSON_ESCAPED_CONTROL = /[\u0000-\u001f]/u;
+
+/**
+ * An end nothing marks when the value is drawn bare: whitespace (what `trim`
+ * strips), or a combining mark, which sits on the character before it — a
+ * space among them — or, opening the value, on nothing.
+ */
+const UNMARKED_END = /^[\s\p{M}]|[\s\p{M}]$/u;
+
+/**
+ * A string the card may show bare: nothing in it JSON would write out, and
+ * both its ends visible (not empty, neither end whitespace or a mark).
+ */
+function showsBare(value: string): boolean {
+  return (
+    value !== "" &&
+    !UNMARKED_END.test(value) &&
+    !JSON_ESCAPED_CONTROL.test(value)
+  );
+}
+
+function pretty(args: unknown): string {
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    return String(args);
+  }
+}
+
 export function formatToolArguments(args: unknown): string {
   if (args === null || args === undefined) return "";
-  if (typeof args === "string") return args;
+  if (typeof args === "string") return showsBare(args) ? args : pretty(args);
   if (typeof args !== "object") return String(args);
 
   const record = args as Record<string, unknown>;
@@ -203,12 +251,8 @@ export function formatToolArguments(args: unknown): string {
     const only = keys[0];
     if (only !== undefined && COMMAND_KEYS.includes(only)) {
       const value = record[only];
-      if (typeof value === "string") return value;
+      if (typeof value === "string" && showsBare(value)) return value;
     }
   }
-  try {
-    return JSON.stringify(args, null, 2);
-  } catch {
-    return String(args);
-  }
+  return pretty(args);
 }

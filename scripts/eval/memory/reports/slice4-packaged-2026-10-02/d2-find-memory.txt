@@ -1,0 +1,10 @@
+$ find memory -type f (with sizes)
+79 -rw------- memory/owners/80a4c0bb8402f4b0597eae9792caa358/MEMORY.md
+exit=0
+$ find memory (all entries)
+drwx------ memory
+drwx------ memory/owners
+drwx------ memory/owners/80a4c0bb8402f4b0597eae9792caa358
+drwx------ memory/owners/80a4c0bb8402f4b0597eae9792caa358/.history
+-rw------- memory/owners/80a4c0bb8402f4b0597eae9792caa358/MEMORY.md
+drwx------ memory/owners/80a4c0bb8402f4b0597eae9792caa358/notes

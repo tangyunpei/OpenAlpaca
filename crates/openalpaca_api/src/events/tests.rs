@@ -182,6 +182,8 @@ fn test_artifact_written_wire_shape() {
         kind: "markdown".into(),
         version: 2,
         path: "/p/.openalpaca/artifacts/2026-09-05-run/01-quarterly-report.md".into(),
+        in_project: false,
+        openable: true,
         ts: Utc::now(),
         instance_id: "inst-1".into(),
     };
@@ -197,6 +199,8 @@ fn test_artifact_written_wire_shape() {
         value["path"],
         "/p/.openalpaca/artifacts/2026-09-05-run/01-quarterly-report.md"
     );
+    assert_eq!(value["in_project"], false);
+    assert_eq!(value["openable"], true);
     assert!(value["ts"].is_string());
     assert_eq!(value["instance_id"], "inst-1");
 }
@@ -214,6 +218,8 @@ fn test_artifact_written_keeps_task_and_agent_nullable() {
         kind: "markdown".into(),
         version: 1,
         path: "/h/.openalpaca/artifacts/loose/01-notes.md".into(),
+        in_project: false,
+        openable: true,
         ts: Utc::now(),
         instance_id: "inst-1".into(),
     };
@@ -235,6 +241,45 @@ fn test_artifact_written_keeps_task_and_agent_nullable() {
             assert_eq!(task_id, None);
             assert_eq!(agent_id, None);
             assert_eq!(version, 1);
+        }
+        other => panic!("Expected ArtifactWritten, got {other:?}"),
+    }
+}
+
+/// Stage 2: a result file in the project says so, and says Open is not
+/// offered for a script (ST-18). A frame from an older daemon carries neither
+/// field and reads as an openable by-product.
+#[test]
+fn test_artifact_written_carries_in_project_and_openable() {
+    let event = ServerEvent::ArtifactWritten {
+        artifact_id: "a-3".into(),
+        task_id: None,
+        agent_id: Some("code_agent".into()),
+        name: "scripts/build.sh".into(),
+        kind: "code".into(),
+        version: 1,
+        path: "/w/app/scripts/build.sh".into(),
+        in_project: true,
+        openable: false,
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["in_project"], true);
+    assert_eq!(value["openable"], false);
+
+    let older = r#"{"type":"artifact_written","artifact_id":"a-4","task_id":null,
+        "agent_id":null,"name":"01-notes.md","kind":"markdown","version":1,
+        "path":"/h/.openalpaca/artifacts/loose/01-notes.md",
+        "ts":"2026-10-08T10:00:00Z","instance_id":"inst-1"}"#;
+    match serde_json::from_str::<ServerEvent>(older).unwrap() {
+        ServerEvent::ArtifactWritten {
+            in_project,
+            openable,
+            ..
+        } => {
+            assert!(!in_project, "an older frame is a by-product");
+            assert!(openable, "and every by-product opens");
         }
         other => panic!("Expected ArtifactWritten, got {other:?}"),
     }

@@ -11,14 +11,30 @@
  * the tool does not run, and the card that was on screen settles into this row
  * rather than staying up for ever. It is a resolution — it just is not an
  * answer.
+ *
+ * So is an answer the daemon refused because it held no such prompt any more
+ * (G1, Round G): `Not waiting` — the card is settled with that sentence
+ * instead of staying up for a second click to be refused again.
+ *
+ * The note names the tool, and a tool's name is its third party's: the row
+ * shows it as the card did, a bidi override or a zero-width space in it as a
+ * styled `<U+XXXX>` (`lib/hidden-chars`), with no notice of its own — the
+ * card counted it. The note is escaped whole, on one line, when it is drawn:
+ * OpenAlpaca's own words in it carry nothing the escape touches, and the
+ * stored note keeps the name as the daemon sent it, which is what
+ * `noteToolRun` matches a `tool_executed` frame against.
  */
 
-export type Resolution = "approved" | "denied" | "timed_out";
+import { EscapedText } from "@/components/ui";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
+
+export type Resolution = "approved" | "denied" | "timed_out" | "not_waiting";
 
 /** The eyebrow label for each outcome. */
 function resolutionLabel(resolution: Resolution): string {
   if (resolution === "approved") return "Approved";
   if (resolution === "denied") return "Denied";
+  if (resolution === "not_waiting") return "Not waiting";
   return "Timed out";
 }
 
@@ -40,7 +56,9 @@ export function ResolutionRow({
       <span className="shrink-0 font-mono text-2xs-plus tracking-eyebrow text-tertiary uppercase">
         {resolutionLabel(resolution)}
       </span>
-      <span className="flex-1 text-base-plus text-secondary">{note}</span>
+      <span className="min-w-0 flex-1 text-base-plus wrap-anywhere text-secondary">
+        <EscapedText escaped={escapeHiddenLine(note)} />
+      </span>
       {time !== null && (
         <span className="shrink-0 font-mono text-xs text-faint">{time}</span>
       )}
@@ -59,12 +77,23 @@ export function timedOutResolutionNote(toolName: string): string {
   return `${toolName} timed out — not run. Nobody answered in time, so the agent continued without it.`;
 }
 
+/**
+ * What an answer to a prompt the daemon no longer held says (G1, Round G):
+ * `404 No pending confirmation`, in the person's terms — the CLI's
+ * `refusal_line` says the same of an id. Nothing was answered, so it names no
+ * outcome of the tool.
+ */
+export function notWaitingResolutionNote(toolName: string): string {
+  return `${toolName} was answered already or is no longer waiting, so nothing was changed.`;
+}
+
 /** The note a fresh resolution shows before any `tool_executed` arrives. */
 export function pendingResolutionNote(
   resolution: Resolution,
   toolName: string,
 ): string {
   if (resolution === "timed_out") return timedOutResolutionNote(toolName);
+  if (resolution === "not_waiting") return notWaitingResolutionNote(toolName);
   return resolution === "approved"
     ? `${toolName} approved · waiting for the tool to run…`
     : `${toolName} denied · the agent was told to skip it.`;

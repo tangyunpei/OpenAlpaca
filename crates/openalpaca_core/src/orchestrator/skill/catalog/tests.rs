@@ -755,3 +755,168 @@ fn clearing_a_plugins_tombstones_leaves_every_other_plugins_alone() {
     );
     assert_eq!(catalog.clear_plugin_tombstones("notion"), 0, "idempotent");
 }
+
+// ── Design 09 §12.3: the chat memory commands reserve three slash names ──
+
+const CLAIMS_REMEMBER_SKILL: &str = r#"---
+name: "Jot"
+description: "A skill that claims two reserved slash names"
+invoke:
+  slash: "/Remember"
+  aliases:
+    - "/forget"
+    - "/jot"
+---
+
+## Instructions
+
+Echo.
+"#;
+
+/// A skill that claims a reserved name still loads — it stays reachable by
+/// its other names and by the router — but the loader says, once, that the
+/// memory command answers that slash instead.
+#[test]
+#[tracing_test::traced_test]
+fn a_skill_claiming_a_reserved_slash_name_loads_with_one_warn() {
+    let tmp = TempDir::new().unwrap();
+    create_skill_dir(tmp.path(), "jot", CLAIMS_REMEMBER_SKILL);
+    create_skill_dir(tmp.path(), "code-review", REVIEW_SKILL);
+    // No explicit slash: reachable by its directory id, `/memories`.
+    create_skill_dir(
+        tmp.path(),
+        "memories",
+        "---\nname: \"Scrapbook\"\ndescription: \"By id only\"\n---\n\nEcho.\n",
+    );
+
+    let catalog = SkillCatalog::new();
+    assert_eq!(catalog.scan_directory(tmp.path(), SkillScope::Project), 3);
+    assert!(catalog.get_by_command("jot").is_some(), "still loaded");
+
+    logs_assert(|lines: &[&str]| {
+        let warns: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("reserved"))
+            .collect();
+        let jot: Vec<&&&str> = warns.iter().filter(|l| l.contains("'jot'")).collect();
+        let by_id: Vec<&&&str> = warns.iter().filter(|l| l.contains("'memories'")).collect();
+        match (jot.as_slice(), by_id.as_slice(), warns.len()) {
+            ([one], [other], 2)
+                if one.contains("/remember")
+                    && one.contains("/forget")
+                    && !one.contains("/jot")
+                    && other.contains("/memories") =>
+            {
+                Ok(())
+            }
+            _ => Err(format!(
+                "expected one WARN per claiming skill, saw {warns:?}"
+            )),
+        }
+    });
+}
+
+/// A plugin-contributed skill is loaded by the same rule.
+#[test]
+#[tracing_test::traced_test]
+fn a_plugin_skill_claiming_a_reserved_slash_name_is_warned_about() {
+    let catalog = SkillCatalog::new();
+    plugin_skill(&catalog, "ntriage", "/memories", "notion");
+    plugin_skill(&catalog, "npage", "/npage", "notion");
+    logs_assert(|lines: &[&str]| {
+        let warns: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("reserved"))
+            .collect();
+        match warns.as_slice() {
+            [one] if one.contains("'ntriage'") && one.contains("/memories") => Ok(()),
+            other => Err(format!("expected one WARN, saw {other:?}")),
+        }
+    });
+}
+
+/// `create-skill` refuses the reserved names: its instructions name them, and
+/// its two writing scripts exit non-zero before creating anything. The
+/// scripts resolve the project root from their own location, so each run is
+/// on a copy under a temp root — a failure here can never write into the
+/// checkout.
+#[cfg(unix)]
+#[test]
+fn create_skill_refuses_the_reserved_slash_names() {
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/skills/create-skill");
+    let instructions = std::fs::read_to_string(shipped.join("SKILL.md")).unwrap();
+    for name in crate::orchestrator::intent::RESERVED_SLASH_NAMES {
+        assert!(
+            instructions.contains(&format!("`{name}`"))
+                && instructions.contains(&format!("`/{name}`")),
+            "create-skill's instructions must name `{name}` and `/{name}` as reserved"
+        );
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let scripts = tmp.path().join("config/skills/create-skill/scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    for script in ["scaffold.sh", "write_skill_md.sh"] {
+        std::fs::copy(shipped.join("scripts").join(script), scripts.join(script)).unwrap();
+    }
+    let skills = tmp.path().join("config/skills");
+    let run = |script: &str, args: &[String]| {
+        std::process::Command::new("bash")
+            .arg(scripts.join(script))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    for name in crate::orchestrator::intent::RESERVED_SLASH_NAMES {
+        let out = run("scaffold.sh", &[format!("--id={name}")]);
+        assert!(
+            !out.status.success(),
+            "scaffold.sh accepted the id `{name}`"
+        );
+        let out = run(
+            "write_skill_md.sh",
+            &[
+                format!("--id={name}"),
+                "--name=X".into(),
+                "--description=Y".into(),
+            ],
+        );
+        assert!(
+            !out.status.success(),
+            "write_skill_md.sh accepted the id `{name}`"
+        );
+        let out = run(
+            "write_skill_md.sh",
+            &[
+                "--id=my-notes".into(),
+                "--name=X".into(),
+                "--description=Y".into(),
+                format!("--slash=/{}", name.to_uppercase()),
+            ],
+        );
+        assert!(
+            !out.status.success(),
+            "write_skill_md.sh accepted the slash command `/{name}`"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("reserved"),
+            "the refusal says why: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let created: Vec<_> = std::fs::read_dir(&skills)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(created, vec!["create-skill"], "nothing was created");
+
+    // An ordinary id still works.
+    let out = run("scaffold.sh", &["--id=my-notes".into()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(skills.join("my-notes").is_dir());
+}

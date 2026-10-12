@@ -11,6 +11,32 @@ const meta = (patch: Partial<PreviewMeta> = {}): PreviewMeta => ({
 });
 
 describe("ArtifactPreview dispatch (§3.25)", () => {
+  it("draws an agent's file name escaped, never raw (d7-app-3)", () => {
+    const name = "src/\u{202E}evil\u{200B}.rs";
+    const { unmount } = render(
+      <ArtifactPreview
+        meta={meta({ name, kind: "code" })}
+        content={"fn main() {}\n"}
+        size="compact"
+      />,
+    );
+    expect(screen.getByText("src/<U+202E>evil<U+200B>.rs")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("\u{202E}");
+    expect(document.body.textContent).not.toContain("\u{200B}");
+    unmount();
+
+    render(
+      <ArtifactPreview
+        meta={meta({ name, kind: "image" })}
+        content={null}
+        src={null}
+        size="compact"
+      />,
+    );
+    expect(screen.getByText("src/<U+202E>evil<U+200B>.rs")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("\u{202E}");
+  });
+
   it("renders a document from markdown", () => {
     render(
       <ArtifactPreview

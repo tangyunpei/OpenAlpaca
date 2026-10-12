@@ -7,11 +7,27 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
 /// Client-side commands plus the known daemon-forwarded commands
-/// (/cancel, /pause, /resume, /status, /steer, /tasks). Unknown slashes are
-/// forwarded to the daemon as-is, so skill commands work without completion.
+/// (/cancel, /pause, /resume, /status, /steer, /tasks, and the chat memory
+/// commands /remember, /forget, /memories). Unknown slashes are forwarded to
+/// the daemon as-is, so skill commands work without completion.
 const COMMANDS: &[&str] = &[
-    "/agents", "/cancel", "/clear", "/help", "/keys", "/model", "/models", "/pause", "/resume",
-    "/status", "/steer", "/tasks", "/usage", "/verbose",
+    "/agents",
+    "/cancel",
+    "/clear",
+    "/forget",
+    "/help",
+    "/keys",
+    "/memories",
+    "/model",
+    "/models",
+    "/pause",
+    "/remember",
+    "/resume",
+    "/status",
+    "/steer",
+    "/tasks",
+    "/usage",
+    "/verbose",
 ];
 
 pub struct ReplHelper;

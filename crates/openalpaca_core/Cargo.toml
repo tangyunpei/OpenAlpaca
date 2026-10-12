@@ -7,10 +7,11 @@ publish.workspace = true
 license.workspace = true
 
 [features]
-# Live steer-routing eval harness (tests/steer_routing_eval.rs): compiles the
-# real LLM providers into the test binary so `openalpaca_llm::build_router`
-# can serve a production llm.toml. Never enabled by default — the eval is
-# additionally #[ignore]d and gated on OPENALPACA_LIVE_EVAL=1.
+# The live eval harnesses (tests/steer_routing_eval.rs, tests/memory_eval.rs):
+# compiles the real LLM providers into the test binary so
+# `openalpaca_llm::build_router` can serve a production llm.toml. Never
+# enabled by default — each eval is additionally #[ignore]d and gated on
+# OPENALPACA_LIVE_EVAL=1.
 live-eval = ["openalpaca_llm/anthropic", "openalpaca_llm/openai", "openalpaca_llm/ollama"]
 
 [dependencies]
@@ -47,9 +48,20 @@ openalpaca_llm.workspace = true
 openalpaca_mcp = { path = "../openalpaca_mcp" }
 openalpaca_storage.workspace = true
 
+# R45 (storage design §11): `tools::platform::run_bounded` kills a timed-out
+# or dropped command's whole process group (`killpg`).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 # test-utils exposes McpClient::disconnected_for_tests for the MCP bridge tests.
 openalpaca_mcp = { path = "../openalpaca_mcp", features = ["test-utils"] }
+# test-home-guard: store::projects::register refuses an unguarded home store in
+# this crate's test builds (storage design, Stage 1).
+openalpaca_storage = { workspace = true, features = ["test-home-guard"] }
+# The memory service's scale tests read the search index's cache file itself
+# (its FTS segments, a page to damage) beside the service that holds it.
+rusqlite.workspace = true
 tracing-test.workspace = true
 # test-util enables tokio::test(start_paused) for the plugin-agent poll-loop tests.
 tokio = { workspace = true, features = ["test-util"] }

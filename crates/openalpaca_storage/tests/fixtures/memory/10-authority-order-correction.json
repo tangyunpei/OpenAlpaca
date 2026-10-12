@@ -1,0 +1,183 @@
+{
+  "row": {
+    "id": 10,
+    "scenario": "A user correction vs. a model-inferred related fact",
+    "required_outcome": "The authority order applies; similarity replaces nothing; a lower-authority `supersedes` link is reported, not honored"
+  },
+  "design": ["§4 Authority: user > extracted_user > imported > external > extracted_other; what a model tool call may do to a `user`-origin note", "§6 Derived supersession: same partition, at-least-equal authority, not a candidate", "§6 Promotion and correction: nothing is replaced by similarity", "§7a memory_store / memory_update refusals"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "Alice's home partition holds: A, the model's inference (`extracted_user`, emacs); U, the user's correction (`user`, vim) whose frontmatter supersedes A — an honored link (user ≥ extracted_user, same partition, U not a candidate); D, a hand-dropped file (`external`, recorded at its hash) whose frontmatter supersedes U — not honored (external < user), so U stays active and D is a conflict for `doctor`. Step 3 stores a textually similar note from a model tool call: it is created beside U, nothing is superseded. Steps 4–6 are the G2 refusals from a `ModelTool` context against the `user` note U. Step 7 shows the same edit through a user-directed surface succeeds and re-records U as `user`. The order in step 1 is determined by the design: U outranks D by authority, and D is active because a low-authority link does not hide it either way. One reading is pinned: the `conflict` flag of a search result marks the note that carries the un-honored link (D), not its target (U) — §6 says the link is reported by `doctor` and the GUI, and the search result's `conflict` boolean is the only §7a field the GUI can read it from. Owner decision LQ11 (design 03 §4, rev 7.4; 09 rev 3.33): `alice_tool` here is the file layer's direct policy (`ReplacePolicy::Direct`), so a `ModelTool` supersede or edit of the `user` note is still `authority_conflict` at this layer; on the service's tool path the same supersede, and an edit that changes the note's content, is written as a suggestion instead (`memory/service/tool_suggestion_tests.rs`).",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice", "messages": ["5001", "5002"] },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000010-0000-4000-8000-00000000000a",
+          "title": "Editor preference",
+          "kind": "preference",
+          "status": "active",
+          "fact_key": "editor.preference",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "sources": [{ "type": "message", "id": "5001" }],
+          "body": "# Editor preference\n\n## Knowledge\nThe user prefers emacs for editing.\n",
+          "origin": "extracted_user"
+        },
+        {
+          "id": "00000010-0000-4000-8000-00000000000b",
+          "title": "Editor preference",
+          "kind": "preference",
+          "status": "active",
+          "fact_key": "editor.preference",
+          "created_at": "2026-09-23T10:05:00Z",
+          "updated_at": "2026-09-23T10:05:00Z",
+          "sources": [{ "type": "message", "id": "5002" }],
+          "supersedes": ["00000010-0000-4000-8000-00000000000a"],
+          "body": "# Editor preference\n\n## Knowledge\nThe user prefers vim for editing, not emacs.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000010-0000-4000-8000-00000000000d",
+          "title": "Editor preference from a dropped file",
+          "kind": "preference",
+          "status": "active",
+          "created_at": "2026-09-23T10:06:00Z",
+          "updated_at": "2026-09-23T10:06:00Z",
+          "supersedes": ["00000010-0000-4000-8000-00000000000b"],
+          "body": "# Editor preference from a dropped file\n\nThe user prefers nano for editing.\n",
+          "origin": "external"
+        }
+      ],
+      "snapshot": {
+        "notes": {
+          "00000010-0000-4000-8000-00000000000a": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-09-23T10:00:00Z" },
+          "00000010-0000-4000-8000-00000000000b": { "revision": "@current", "origin": "user", "written_at": "2026-09-23T10:05:00Z" },
+          "00000010-0000-4000-8000-00000000000d": { "revision": "@current", "origin": "external", "written_at": "2026-09-23T10:06:00Z" }
+        },
+        "tombstones": [],
+        "pending": null
+      }
+    }
+  ],
+  "contexts": {
+    "alice_tool": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "alice_api": { "owner_id": "u_example_alice", "workspace": null, "surface": "user_surface", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": null, "task_id": null, "request_id": null, "source": "api" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "which editor for editing" },
+      "expect": {
+        "ids": ["00000010-0000-4000-8000-00000000000b", "00000010-0000-4000-8000-00000000000d"],
+        "ids_absent": ["00000010-0000-4000-8000-00000000000a"],
+        "results": {
+          "00000010-0000-4000-8000-00000000000b": { "origin": "user", "status": "active", "conflict": false, "superseded_by": [] },
+          "00000010-0000-4000-8000-00000000000d": { "origin": "external", "status": "active", "conflict": true }
+        }
+      }
+    },
+    {
+      "step": 2,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "which editor for editing", "historical": true },
+      "expect": {
+        "ids_unordered": ["00000010-0000-4000-8000-00000000000a", "00000010-0000-4000-8000-00000000000b", "00000010-0000-4000-8000-00000000000d"],
+        "results": { "00000010-0000-4000-8000-00000000000a": { "superseded_by": ["00000010-0000-4000-8000-00000000000b"] } }
+      }
+    },
+    {
+      "step": 3,
+      "op": "store",
+      "context": "alice_tool",
+      "as": "similar",
+      "input": { "title": "Editor keybindings", "body": "# Editor keybindings\n\nThe user prefers vim keybindings inside VS Code.\n", "kind": "preference" },
+      "expect": {
+        "created": true,
+        "origin": "extracted_user",
+        "superseded": [],
+        "snapshot": { "alice_home": { "notes": { "00000010-0000-4000-8000-00000000000b": { "revision": "@current", "origin": "user" } } } }
+      }
+    },
+    {
+      "step": 4,
+      "op": "store",
+      "context": "alice_tool",
+      "input": {
+        "title": "Editor preference",
+        "body": "# Editor preference\n\nThe user prefers helix.\n",
+        "kind": "preference",
+        "fact_key": "editor.preference",
+        "supersedes": { "id": "00000010-0000-4000-8000-00000000000b", "expected_revision": "@rev:00000010-0000-4000-8000-00000000000b" }
+      },
+      "expect": {
+        "refused": "authority_conflict",
+        "message_contains": ["00000010-0000-4000-8000-00000000000b", "Memory view", "openalpaca memory"],
+        "revision_changed": false,
+        "snapshot": { "alice_home": { "notes": { "00000010-0000-4000-8000-00000000000b": { "revision": "@current", "origin": "user" } } } }
+      }
+    },
+    {
+      "step": 5,
+      "op": "update",
+      "context": "alice_tool",
+      "input": { "id": "00000010-0000-4000-8000-00000000000b", "expected_revision": "@rev:00000010-0000-4000-8000-00000000000b", "action": "edit", "patch": { "body": "# Editor preference\n\nThe user prefers helix.\n" } },
+      "expect": { "refused": "authority_conflict", "revision_changed": false }
+    },
+    {
+      "step": 6,
+      "op": "update",
+      "context": "alice_tool",
+      "input": { "id": "00000010-0000-4000-8000-00000000000b", "expected_revision": "@rev:00000010-0000-4000-8000-00000000000b", "action": "archive", "reason": "model thinks it is stale" },
+      "expect": { "refused": "authority_conflict", "revision_changed": false, "status": "active" }
+    },
+    {
+      "step": 7,
+      "op": "update",
+      "context": "alice_api",
+      "input": { "id": "00000010-0000-4000-8000-00000000000b", "expected_revision": "@rev:00000010-0000-4000-8000-00000000000b", "action": "edit", "patch": { "aliases": ["vi", "neovim"] } },
+      "expect": {
+        "revision_changed": true,
+        "status": "active",
+        "snapshot": { "alice_home": { "notes": { "00000010-0000-4000-8000-00000000000b": { "revision": "@current", "origin": "user" } } } },
+        "history_has": [{ "partition": "alice_home", "id": "00000010-0000-4000-8000-00000000000b", "revision": "@current" }]
+      }
+    },
+    {
+      "step": 8,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "neovim" },
+      "expect": { "ids": ["00000010-0000-4000-8000-00000000000b"], "results": { "00000010-0000-4000-8000-00000000000b": { "match_includes": ["alias"] } } }
+    },
+    {
+      "step": 9,
+      "op": "doctor",
+      "input": {},
+      "expect": {
+        "doctor": {
+          "conflicts": [
+            { "type": "supersedes_authority", "note": "00000010-0000-4000-8000-00000000000d", "target": "00000010-0000-4000-8000-00000000000b" }
+          ]
+        }
+      }
+    }
+  ],
+  "final_state": {
+    "notes_on_disk": [
+      { "partition": "alice_home", "id": "00000010-0000-4000-8000-00000000000a" },
+      { "partition": "alice_home", "id": "00000010-0000-4000-8000-00000000000b" },
+      { "partition": "alice_home", "id": "00000010-0000-4000-8000-00000000000d" },
+      { "partition": "alice_home", "id": "@id:similar" }
+    ]
+  }
+}

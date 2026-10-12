@@ -15,6 +15,8 @@
 
 import { create } from "zustand";
 
+import type { NoteScope, NoteStatus } from "@/lib/api/memories";
+
 import {
   clampPaneWidth,
   loadPaneWidths,
@@ -24,8 +26,14 @@ import {
   type PaneWidths,
 } from "./pane-widths";
 
-export type View = "chat" | "work" | "library" | "settings";
+/**
+ * The five top-level views. `memory` is the fifth (memory redesign G30, owner
+ * decision): after Library, before Settings.
+ */
+export type View = "chat" | "work" | "library" | "memory" | "settings";
 export type ArtifactTab = "preview" | "diff" | "history";
+/** The Memory detail's tabs: the note rendered, its raw Markdown, and history. */
+export type MemoryTab = "note" | "raw" | "diff" | "history";
 export type ComposerMode = "steer" | "queue";
 
 /** Toast auto-dismiss, straight from the design. */
@@ -73,7 +81,24 @@ export interface UiState {
   openArtifactId: string | null;
   libraryTab: ArtifactTab;
   libraryKind: string;
+  /**
+   * The Library's side (storage design §13, ST-12): `false` lists by-products
+   * — drafts, hand-offs, uploads, a file saved with no project — the default;
+   * `true` lists the files agents wrote into a project, which are the
+   * project's own files and have no versions.
+   */
+  libraryResults: boolean;
   settingsSectionId: string;
+  /** Selected note in the Memory view. */
+  openMemoryId: string | null;
+  memoryTab: MemoryTab;
+  /**
+   * Which partition the Memory list shows. `project` is a *wish*: the view
+   * honours it only while the window's project resolves to a root, and shows
+   * the global partition otherwise.
+   */
+  memoryScope: NoteScope;
+  memoryStatus: NoteStatus;
 
   // Chat aside — `workOpen` and `panelArtifactId` are mutually exclusive modes
   workOpen: boolean;
@@ -111,10 +136,23 @@ export interface UiState {
   // ── actions ───────────────────────────────────────────────────────────────
   setView: (view: View) => void;
   focusRun: (runId: string) => void;
-  openArtifact: (artifactId: string) => void;
+  /**
+   * Into the Library on this row, on Preview. `inProject`, when the caller
+   * knows the row's side, shows that side's list too (storage design §13);
+   * absent, the side stays as the reader left it.
+   */
+  openArtifact: (artifactId: string, inProject?: boolean) => void;
   setLibraryTab: (tab: ArtifactTab) => void;
   setLibraryKind: (kind: string) => void;
+  setLibraryResults: (results: boolean) => void;
   setSettingsSection: (sectionId: string) => void;
+  /** From anywhere — a chat turn's "notes used", a link — onto its Note tab. */
+  openMemory: (noteId: string) => void;
+  /** The selected note went away (forgotten, undone). */
+  clearMemory: () => void;
+  setMemoryTab: (tab: MemoryTab) => void;
+  setMemoryScope: (scope: NoteScope) => void;
+  setMemoryStatus: (status: NoteStatus) => void;
 
   openWorkPane: () => void;
   closeWorkPane: () => void;
@@ -130,8 +168,11 @@ export interface UiState {
   togglePicker: () => void;
   closePicker: () => void;
   pickPanelArtifact: (artifactId: string) => void;
-  /** Carries the current tab across into the Library view. */
-  openInLibrary: () => void;
+  /**
+   * Carries the current tab across into the Library view. `inProject` is the
+   * panel row's side: a project file has Preview alone, so it lands there.
+   */
+  openInLibrary: (inProject?: boolean) => void;
 
   setModel: (model: string | null) => void;
   toggleModelPicker: () => void;
@@ -171,7 +212,12 @@ export const useUiStore = create<UiState>((set, get) => ({
   openArtifactId: null,
   libraryTab: "preview",
   libraryKind: "All",
+  libraryResults: false,
   settingsSectionId: "connection",
+  openMemoryId: null,
+  memoryTab: "note",
+  memoryScope: "global",
+  memoryStatus: "active",
 
   workOpen: true,
   panelArtifactId: null,
@@ -193,11 +239,23 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   setView: (view) => set({ view }),
   focusRun: (runId) => set({ view: "work", selectedRunId: runId }),
-  openArtifact: (artifactId) =>
-    set({ view: "library", openArtifactId: artifactId, libraryTab: "preview" }),
+  openArtifact: (artifactId, inProject) =>
+    set({
+      view: "library",
+      openArtifactId: artifactId,
+      libraryTab: "preview",
+      ...(inProject === undefined ? {} : { libraryResults: inProject }),
+    }),
   setLibraryTab: (libraryTab) => set({ libraryTab }),
   setLibraryKind: (libraryKind) => set({ libraryKind }),
+  setLibraryResults: (libraryResults) => set({ libraryResults }),
   setSettingsSection: (settingsSectionId) => set({ settingsSectionId }),
+  openMemory: (noteId) =>
+    set({ view: "memory", openMemoryId: noteId, memoryTab: "note" }),
+  clearMemory: () => set({ openMemoryId: null }),
+  setMemoryTab: (memoryTab) => set({ memoryTab }),
+  setMemoryScope: (memoryScope) => set({ memoryScope }),
+  setMemoryStatus: (memoryStatus) => set({ memoryStatus }),
 
   openWorkPane: () => set({ workOpen: true, panelArtifactId: null }),
   closeWorkPane: () => set({ workOpen: false }),
@@ -223,13 +281,15 @@ export const useUiStore = create<UiState>((set, get) => ({
       panelTab: "preview",
       pickerOpen: false,
     }),
-  openInLibrary: () =>
+  openInLibrary: (inProject) =>
     set((s) => ({
       view: "library",
       openArtifactId: s.panelArtifactId ?? s.openArtifactId,
-      libraryTab: s.panelTab,
+      // A project file has no Diff or History (R37): it opens on Preview.
+      libraryTab: inProject === true ? "preview" : s.panelTab,
       panelArtifactId: null,
       pickerOpen: false,
+      ...(inProject === undefined ? {} : { libraryResults: inProject }),
     })),
 
   setModel: (model) => set({ model, modelPickerOpen: false }),

@@ -40,6 +40,10 @@ impl Orchestrator {
         principal: &crate::security::policy::Principal,
         scope: &crate::security::policy::Scope,
         lane_key: &str,
+        // R-T27 — the session the gateway resolved this turn into
+        // (`HandleRequest::session_id`): the conversation the turn's tools act
+        // for. `None` for a handler reached with no gateway.
+        turn_session: Option<&str>,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -129,14 +133,15 @@ impl Orchestrator {
                 }
             }
         }
-        let tool_defs: Vec<_> = tool_names
-            .iter()
-            .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
-            .collect();
 
         // Per-request ToolContext for owner-scoped tools. Built before the
         // loop-override resolution because the tool-mode main loop hands it
         // to `main_loop_tool_set` (identity for steer/followup re-entry).
+        // R44 (storage design §10): the conversation this turn belongs to,
+        // read once — it names the turn's scratch folder when there is no
+        // project, and it is the session this turn narrates into (§5.5).
+        // The one the gateway resolved for this turn (R-T27), else the lane's.
+        let conversation_id = self.turn_conversation_id(turn_session, lane_key);
         let tool_ctx = ToolContext {
             // T4: the main loop is not an agent template, but it *is*
             // somebody, and a confirmation card that reads "unknown is blocked
@@ -145,33 +150,43 @@ impl Orchestrator {
             // lines), and it is what every event, audit row and artifact this
             // turn produces is now attributed to.
             agent_id: Some(MAIN_LOOP_AGENT_ID.to_string()),
-            task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),
             request_workspace_root: scope_ctx.request_workspace_root.clone(),
-            skill_stack: vec![],
-            effective_constraints: None,
+            conversation_id: conversation_id.clone(),
             lane_key: Some(lane_key.to_string()),
             source: Some(source.to_string()),
             request_id: Some(request_id),
             principal: Some(principal.clone()),
             scope: Some(scope.clone()),
-            // Threaded only on the tool-mode main loop, where steer/followup
-            // items persist it for re-entry scope; None elsewhere (other
-            // paths carry no tools that read it).
+            // Threaded only on the tool-mode main loop; read by no tool since
+            // F4 (steer/followup items persist `request_workspace_root`), and
+            // None elsewhere.
             workspace_path: match &loop_overrides {
                 Some(super::LoopOverrides::MainLoop { workspace_path, .. }) => {
                     workspace_path.clone()
                 }
                 _ => None,
             },
-            // No agent instance: this path is not a subagent lane.
-            agent_instance_id: None,
-            // Filled in by the sandbox at dispatch (T28), which owns the bus.
-            session_id: None,
-            session_log: None,
-            event_bus: None,
+            // Everything else is unset: no run (`task_id`), no skill chain, no
+            // agent instance (this path is not a subagent lane), and the bus
+            // and session handles the sandbox fills in at dispatch (T28).
+            ..Default::default()
         };
+
+        // The lead's ruling R-T14: whether this is a project turn is decided
+        // once, from the context the turn's tools read (`scope_from_context`'s
+        // project arm), and handed to every offer that depends on it.
+        let project_turn = crate::tools::builtins::is_project_turn(&tool_ctx);
+        // R48: on a project turn `file_edit` comes with `file_write`.
+        super::offer_file_edit_beside_file_write(&mut tool_names, project_turn);
+        // R42, R-T6: on a project turn the file readers come too, and
+        // `file_list` comes wherever `file_read` is.
+        super::offer_file_readers(&mut tool_names, project_turn);
+        let tool_defs: Vec<_> = tool_names
+            .iter()
+            .filter_map(|name| self.tool_registry.get(name).map(|t| t.definition.clone()))
+            .collect();
 
         // M6: whether the client behind this turn can answer a confirmation
         // at all. Only the main loop carries the declaration — every other
@@ -197,7 +212,7 @@ impl Orchestrator {
                         self.bus.clone(),
                         &routing,
                         self.db.clone(),
-                        self.embedder.clone(),
+                        self.memory_service(),
                         self.daemon_config.clone(),
                         self.skill_catalog.clone(),
                         self.llm_router.clone(),
@@ -254,20 +269,20 @@ impl Orchestrator {
             tool_names
         };
 
-        // §5.5: a main-loop turn narrates into the lane's active session, with
+        // §5.5: a main-loop turn narrates into its conversation's log, with
         // `task_id` absent — that absence is what tells a reader a record came
-        // from chat rather than from a run. The gateway resolved (and, on a
-        // project switch, created) this session moments ago for the same turn;
-        // this reads the answer back rather than re-deriving it, and a lane
-        // with no session simply has no log.
-        let session_log = match (self.shared_context.session_log(), self.db.as_ref()) {
-            (Some(service), Some(db)) => openalpaca_storage::ConversationRepository::new(db)
-                .active_session_id(lane_key)
-                .unwrap_or_else(|e| {
-                    tracing::warn!(lane_key, "Failed to resolve the lane's session log: {e}");
-                    None
-                })
-                .map(|id| service.open(&id, Some(lane_key), Some(source), None)),
+        // from chat rather than from a run. The conversation is the one the
+        // gateway resolved (and, on a project switch, created) for this turn
+        // and carried on the request (R-T27, `conversation_id` above), so the
+        // narration lands where the turn's rows and its tools do even when
+        // another window has made a new conversation active meanwhile; only a
+        // handler reached with no gateway reads the lane's active session, and
+        // a turn with no conversation simply has no log.
+        let session_log = match (
+            self.shared_context.session_log(),
+            conversation_id.as_deref(),
+        ) {
+            (Some(service), Some(id)) => Some(service.open(id, Some(lane_key), Some(source), None)),
             _ => None,
         };
 
@@ -494,6 +509,15 @@ impl Orchestrator {
                 priority: SectionPriority::Normal,
             });
         }
+        // Design 09 §13.1: the main loop's memory guidance, one line — only
+        // where the surface carries the layered read tools it names.
+        if main_loop_set.is_some() && tools_for_loop.iter().any(|d| d.name == "memory_search") {
+            raw_blocks.push(SystemBlock {
+                name: "memory_rules",
+                content: Arc::<str>::from(crate::tools::builtins::main_loop_memory_guidance()),
+                priority: SectionPriority::Normal,
+            });
+        }
 
         // bootstrap/skills_catalog block passing: pre-migration passed the
         // already-rendered strings via `builder.bootstrap(...)` /
@@ -543,11 +567,28 @@ impl Orchestrator {
             reserved_tokens: 0,
         };
         let bundle = self.context_manager.resolve(&ctx_request).await;
+        // Design 09 §4.5: a turn that offers `memory_confirm` — an attended
+        // GUI/CLI chat turn, never a connector's — is told which suggestions
+        // are waiting, read from the index with the turn's own read context.
+        let suggestions_block = match (&main_loop_set, self.memory_service()) {
+            (Some(set), Some(service)) if set.memory_confirm_offered => {
+                crate::prompt_ctx::sources::memory::memory_suggestions_block(service, &tool_ctx)
+                    .await
+            }
+            _ => None,
+        };
+        // Design §5: the memory delivery is per turn and outside the cached
+        // layer — rendered from the sections the manager kept, appended after
+        // compose (below) and reported as this turn's `memory_used`. The
+        // suggestions ride the same message and the same 8 KiB.
+        let memory_turn = crate::prompt_ctx::sources::memory::memory_turn_with(
+            &bundle,
+            suggestions_block.as_deref(),
+        );
 
         let dynamic_context_input = DynamicContextInput {
             context_bundle: Arc::new(bundle),
             query: Arc::from(query),
-            memory_retrieval_hash: [0u8; 32],
             path: ExecutionPath::SimpleQuery,
             reserved_tokens: 0,
             mode: DynamicContextMode::Default,
@@ -623,12 +664,19 @@ impl Orchestrator {
             crate::lane::LaneKey::from_str(lane_key)
                 .map(|k| self.lane_manager.get_or_create_conversation(k));
 
+        let summary_max_chars = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .memory
+            .summary_max_chars;
         let history_input = HistoryInput {
             lane_tip_fingerprint: lane_opt
                 .as_ref()
                 .map(|l| l.compute_tip_fingerprint())
                 .unwrap_or([0u8; 32]),
-            summary: ctx.summary.as_deref().map(Arc::<str>::from),
+            working_state: ctx.working_state_text(summary_max_chars),
+            previous: ctx.previous_text(summary_max_chars),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
             recent_messages: Arc::new(adapted_recent),
             current_user_turn,
@@ -669,6 +717,9 @@ impl Orchestrator {
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
         budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
+        if let Some(memory) = &memory_turn {
+            budget.register_section("memory", memory.token_estimate());
+        }
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // The messages vec came out of the compose engine above, which
@@ -676,17 +727,74 @@ impl Orchestrator {
             // + session summary + recent_messages + current_user_turn in the
             // same order the pre-migration manual assembly produced.
             let mut messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+            // Design 11 §5 (CQ-7): the previous conversation, when the
+            // request carries its block — `done.continued_from`.
+            self.record_continued_from(request_id, ctx, &messages);
+
+            // Design §5 step 8 (plan 3.3): what this turn recalled, as quoted
+            // data, right before the current user turn and ahead of the
+            // guidance blocks below — outside Layer 3, so a repeated question
+            // on this lane never reads the previous turn's notes out of the
+            // per-lane cache. Recorded as delivered here, once it is in the
+            // request: that is what `done.memory_used` names.
+            if let Some(memory) = &memory_turn {
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&memory.content));
+                if let Some(service) = self.memory_service() {
+                    service.record_delivery(
+                        &crate::memory::service::Attribution {
+                            lane_key: Some(lane_key.to_string()),
+                            task_id: None,
+                            request_id: Some(request_id),
+                            source: Some(source.to_string()),
+                        },
+                        &memory.used,
+                    );
+                }
+            }
 
             // Routing V2: model-relay contract for the tool-mode main loop —
             // how to relay start_workflow / steer / cap results in the
             // model's own words. Injected at the same per-turn assembly
             // point as the workflow-context block below.
+            //
+            // R28 (storage design §10): the model is told where its file
+            // tools and commands act — the project's folder, or this
+            // conversation's scratch folder — in one line ending the same
+            // message, not in a message of its own: one more per-turn
+            // message would take a slot in the compaction's recent floor
+            // (`summarize_older`'s `min_recent`), so a first-round compaction
+            // would summarise one conversation row more, or the turn's recall
+            // block. Read from the turn's own tool context, so the line and
+            // the tools can never name two folders; it creates nothing.
             if main_loop_set.is_some() {
+                let relay = crate::tools::builtins::main_loop_relay_guidance();
+                let guidance = match crate::tools::working_folder::working_folder_note(
+                    &tool_ctx,
+                    tools_for_loop.iter().map(|d| d.name.as_str()),
+                    crate::tools::working_folder::NoteReader::Loop,
+                ) {
+                    Some(note) => format!("{relay}\n{note}"),
+                    None => relay.to_string(),
+                };
                 let insert_at = messages.len().saturating_sub(1);
-                messages.insert(
-                    insert_at,
-                    ChatMessage::user(crate::tools::builtins::main_loop_relay_guidance()),
-                );
+                messages.insert(insert_at, ChatMessage::user(&guidance));
+            } else if !tools_for_loop.is_empty()
+                && let Some(note) = crate::tools::working_folder::working_folder_note(
+                    &tool_ctx,
+                    tools_for_loop.iter().map(|d| d.name.as_str()),
+                    crate::tools::working_folder::NoteReader::Loop,
+                )
+            {
+                // R28 on the arms that are not the main loop (the lead's
+                // ruling R-T22): a bootstrap turn and an attachment-only one
+                // still run the tools they were offered — `file_write` by its
+                // verb, on a project turn `file_edit` and the readers with it
+                // — in the same folder, so their model is told it too. No
+                // relay message is sent there, so the line is a message of
+                // its own, right before the user's.
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&note));
             }
 
             // Routing V2: workflow-context block for lanes with active
@@ -797,6 +905,54 @@ impl Orchestrator {
                 per_request_sandbox.set_confirmation_broker(broker.clone());
             }
 
+            // Design 11 §3.3, CQ-3: a compaction folds the older messages
+            // into the session's working state on `summary_model`, and the
+            // §3.2 cursor says which row that state then covers through. The
+            // rows behind the window that no state covers yet
+            // (`older_window`) are read first, so a compaction passes them
+            // too (design 11 rev 1.2).
+            let cursor = crate::orchestrator::working_state::Cursor::new(
+                ctx.working_state_through,
+                &ctx.recent_row_ids,
+                composed.history_head_dropped,
+                &ctx.older_window,
+                composed.messages.len(),
+            );
+            let mut writer = crate::orchestrator::working_state::WriterConfig::new(
+                &self.daemon_config.load(),
+                self.db.clone(),
+            );
+            // Rev 1.7 (F5): the rows the older messages may hold — as the
+            // list holds them, and those behind it — so the writer can leave
+            // out what a forget took back. Asked only if it is called.
+            if let (Some(db), Some(service)) = (self.db.clone(), self.memory_service()) {
+                let rows: Vec<(i64, String)> = ctx
+                    .recent_row_ids
+                    .iter()
+                    .copied()
+                    .zip(ctx.recent_messages.iter().map(|m| m.content.clone()))
+                    .chain(
+                        ctx.older_window
+                            .iter()
+                            .map(|(id, _, text)| (*id, text.clone())),
+                    )
+                    .collect();
+                writer.rows = Some(crate::orchestrator::working_state::WriterRows {
+                    check: crate::orchestrator::working_state::ForgetCheck {
+                        db,
+                        service,
+                        lane_key: lane_key.to_string(),
+                    },
+                    rows: Arc::new(rows),
+                });
+            }
+            let config_for_loop = LoopConfig {
+                writer,
+                working_state: ctx.working_state.clone(),
+                working_state_cursor: Some(cursor.clone()),
+                ..config_for_loop
+            };
+
             let call_start = std::time::Instant::now();
             let result = run_agentic_loop_routed(
                 router.as_ref(),
@@ -814,6 +970,13 @@ impl Orchestrator {
             )
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
+
+            // Design 11 §3.3: the state this turn's compaction wrote goes to
+            // the turn end, which writes it to the session row with no call.
+            if let Some((state, boundary)) = result.working_state.clone() {
+                self.compacted_turns
+                    .insert(request_id, (state, cursor.after(boundary)));
+            }
 
             // Routing V2: structured delegation from the start_workflow
             // result cell (SpawnSubagentTool result-cell precedent). The
@@ -1047,7 +1210,6 @@ impl Orchestrator {
         let dynamic_context_input = DynamicContextInput {
             context_bundle: Arc::new(ContextBundle::empty()),
             query: Arc::from(query),
-            memory_retrieval_hash: [0u8; 32],
             path: ExecutionPath::SimpleQuery,
             reserved_tokens: 0,
             mode: DynamicContextMode::Skip,
@@ -1066,7 +1228,8 @@ impl Orchestrator {
                 .as_ref()
                 .map(|l| l.compute_tip_fingerprint())
                 .unwrap_or([0u8; 32]),
-            summary: None,
+            working_state: None,
+            previous: None,
             summary_wrap_mode: SummaryWrapMode::Plain,
             recent_messages: Arc::new(ctx.recent_messages.clone()),
             current_user_turn: Some(ChatMessage::user(query)),

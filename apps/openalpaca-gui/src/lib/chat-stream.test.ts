@@ -191,6 +191,31 @@ describe("chatStreamReducer", () => {
     expect(state.pendingConfirmations).toHaveLength(0);
   });
 
+  /**
+   * …and a new *turn* is not one (G1, Round G). A background run's prompt can
+   * land between Send and the new stream's `open`; clearing it there hid a
+   * card the daemon was still waiting on, and the chat view's record of having
+   * seen it kept the snapshot from drawing it again until the view remounted.
+   */
+  it("keeps a pending confirmation across a new turn's open", () => {
+    const state = run([
+      {
+        type: "confirmation",
+        request: {
+          request_id: "r-run",
+          tool_name: "artifact_write",
+          tool_arguments: null,
+        },
+      },
+      open,
+    ]);
+    expect(state.pendingConfirmations.map((c) => c.request_id)).toEqual([
+      "r-run",
+    ]);
+    expect(state.phase).toBe("opening");
+    expect(state.streamId).toBe("s1");
+  });
+
   it("clears a resolved confirmation even after the stream finished", () => {
     const state = run([
       open,
@@ -323,6 +348,37 @@ describe("attachChatStream", () => {
     expect(actions.at(-1)).toEqual({ type: "done", data: doneData });
   });
 
+  /**
+   * Memory redesign 3.3/3.9: `done.memory_used` names the notes the turn
+   * delivered. Live only — nothing persists it — so the `done` frame is the one
+   * place this client can learn it, and the state keeps it on `result`.
+   */
+  it("keeps `memory_used` from the done frame on the result", () => {
+    const fake = fakeSource();
+    let state = initialChatStreamState;
+    attachChatStream(fake.source, {
+      streamId: "s1",
+      laneKey: "local:gui",
+      onAction: (a) => {
+        state = chatStreamReducer(state, a);
+      },
+    });
+
+    const used: ChatStreamDone = {
+      ...doneData,
+      memory_used: [
+        {
+          id: "55e811b6-3220-4758-a47b-034bd1023f38",
+          revision: "a".repeat(64),
+          reason: "recall",
+        },
+      ],
+    };
+    fake.emit("done", JSON.stringify(used));
+
+    expect(state.result?.memory_used).toEqual(used.memory_used);
+  });
+
   it("distinguishes a named server error from a transport failure", () => {
     const withData = fakeSource();
     const dataActions: ChatStreamAction[] = [];
@@ -398,6 +454,8 @@ describe("attachChatStream", () => {
       }),
     );
 
+    // A frame from a daemon that sends no `preview`/`per_call` reads as the
+    // ordinary card.
     expect(actions.at(-1)).toEqual({
       type: "confirmation",
       request: {
@@ -405,6 +463,31 @@ describe("attachChatStream", () => {
         tool_name: "shell_execute",
         tool_arguments: {},
         stream_id: "s1",
+        preview: null,
+        per_call: false,
+      },
+    });
+
+    // Design 09 §4.4: the daemon's preview and `per_call` ride along.
+    fake.emit(
+      "confirmation_requested",
+      JSON.stringify({
+        request_id: "r2",
+        tool_name: "memory_confirm",
+        tool_arguments: { id: "s" },
+        preview: "Replace your saved note “A” with “B”?",
+        per_call: true,
+      }),
+    );
+    expect(actions.at(-1)).toEqual({
+      type: "confirmation",
+      request: {
+        request_id: "r2",
+        tool_name: "memory_confirm",
+        tool_arguments: { id: "s" },
+        stream_id: "s1",
+        preview: "Replace your saved note “A” with “B”?",
+        per_call: true,
       },
     });
   });

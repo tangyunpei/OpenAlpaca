@@ -3,6 +3,7 @@ use super::{Orchestrator, principal_id};
 use crate::events::SystemEvent;
 use crate::gateway::HandleRequest;
 use crate::memory::scope_context::MemoryScopeContext;
+use crate::memory::service::ChatCommandTurn;
 use crate::security::gate::SecurityGate;
 use crate::security::policy::Principal;
 use crate::types::Capability;
@@ -55,6 +56,7 @@ impl Orchestrator {
             model_override,
             unattended,
             turn_sink,
+            session_id,
         } = request;
         let ack_start = Instant::now();
 
@@ -78,10 +80,10 @@ impl Orchestrator {
             _ => None,
         };
 
-        // Resolve the turn's workspace context. Memory scoping prefers the
-        // request-provided path (GUI/CLI) and falls back to the daemon CWD;
-        // `request_workspace_root` is set only on the request branch, so
-        // content writers never inherit the CWD (R22 — see `for_request`).
+        // Resolve the turn's workspace context from the request-provided path
+        // (GUI/CLI) alone: a turn that sent none has no project, and nothing
+        // is read from the daemon's working directory (R22, R-S13 — see
+        // `for_request`).
         let scope_ctx = MemoryScopeContext::for_request(workspace_path.as_deref());
 
         // 3. Try slash commands, task queries, and skill invocations first
@@ -138,6 +140,41 @@ impl Orchestrator {
             _ => {}
         }
 
+        // 3b. The chat memory commands (design 09 §12, MD-13): answered here
+        // with no model, before anything reads the lane or the model is
+        // chosen. The command's text is the message as typed, never the
+        // model input an attachment turn augments.
+        if let Intent::MemoryCommand { verb, args } = &intent {
+            self.bus.publish(SystemEvent::IntentClassified {
+                request_id,
+                intent_type: intent.intent_type().to_string(),
+                timestamp: Utc::now(),
+            });
+            let turn = ChatCommandTurn {
+                principal: principal.clone(),
+                source: source.clone(),
+                unattended,
+                request_workspace_root: scope_ctx
+                    .request_workspace_root
+                    .as_deref()
+                    .map(std::path::PathBuf::from),
+                lane_key: lane_key.clone(),
+                request_id,
+            };
+            let reply = self.handle_memory_command(*verb, args.clone(), turn).await;
+            // A1 — a memory command reaches no model, and saves only what was
+            // typed: the turn's files went nowhere.
+            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::MEMORY_COMMAND);
+            self.record_orchestration_stage(
+                request_id,
+                "memory_command".to_string(),
+                ack_start.elapsed().as_millis() as u64,
+                None,
+                None,
+            );
+            return Ok(reply);
+        }
+
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
         //
         // The dedup key is the **raw** message, not the model input. The
@@ -172,7 +209,10 @@ impl Orchestrator {
                 &principal,
                 &scope,
                 &lane_key,
-                workspace_path.clone(),
+                // F4 — the turn's resolved root, the same value every tool
+                // on this turn reads as `request_workspace_root`; never the
+                // path as sent.
+                scope_ctx.request_workspace_root.clone(),
             )
         } else if let Intent::SkillInvocation {
             ref skill_name,
@@ -189,6 +229,7 @@ impl Orchestrator {
                 skill_name,
                 query,
                 &lane_key,
+                session_id.as_deref(),
                 &ctx,
                 owner_id,
                 &scope_ctx,
@@ -231,6 +272,7 @@ impl Orchestrator {
                 &principal,
                 &scope,
                 &lane_key,
+                session_id.as_deref(),
                 &ctx,
                 owner_id,
                 &scope_ctx,
@@ -252,6 +294,7 @@ impl Orchestrator {
                 &principal,
                 &scope,
                 &lane_key,
+                session_id.as_deref(),
                 &ctx,
                 owner_id,
                 &scope_ctx,
@@ -306,6 +349,7 @@ impl Orchestrator {
                 &principal,
                 &scope,
                 &lane_key,
+                session_id.as_deref(),
                 &ctx,
                 owner_id,
                 &scope_ctx,
@@ -328,74 +372,48 @@ impl Orchestrator {
         // Emit OrchestrationStage event + persist the latency record
         self.record_orchestration_stage(request_id, mode, ack_ms, None, None);
 
-        // 6 + 7. Summary update and user trait extraction run concurrently
-        // in a background spawn (fire-and-forget, never blocks the response).
-        {
-            use super::extraction::extract_user_traits_background;
-            use super::summary::update_summary_background;
-
-            let needs_extraction = owner_id.is_some() && result.is_ok();
-
-            // Shared fields (both tasks need these)
-            let bg_db = self.db.clone();
-            let bg_router = self.llm_router.clone();
-            let bg_config = self.daemon_config.clone();
-            let bg_lane = lane_key.to_string();
-
-            // Extraction-only fields (clone only when needed)
-            let bg_counter = if needs_extraction { Some(self.extraction_turn_counter.clone()) } else { None };
-            let bg_embedder = if needs_extraction { self.embedder.clone() } else { None };
-            let bg_user_path = if needs_extraction { Some(self.user_path.clone()) } else { None };
-            let bg_user_doc = if needs_extraction { Some(self.user_document.clone()) } else { None };
-            let bg_persona_version = if needs_extraction { Some(self.persona_version.clone()) } else { None };
-            let bg_bus = if needs_extraction { Some(self.bus.clone()) } else { None };
-            let bg_intent = if needs_extraction { Some(intent_source_content.to_string()) } else { None };
-            let bg_owner = owner_id.map(|s| s.to_string());
-            let bg_response = result.as_ref().ok().cloned();
-
-            // NOTE: ctx is intentionally moved into this spawn — do not reference it after this block
-            tokio::spawn(async move {
-                // Clone shared fields for summary (extraction consumes the originals)
-                let sum_db = bg_db.clone();
-                let sum_router = bg_router.clone();
-                let sum_config = bg_config.clone();
-                let sum_lane = bg_lane.clone();
-
-                let summary_fut = async {
-                    if let (Some(db), Some(router)) = (sum_db, sum_router) {
-                        update_summary_background(db, router, sum_config, sum_lane, ctx).await;
-                    }
-                };
-
-                let extract_fut = async {
-                    if let (Some(response_text), Some(owner)) = (&bg_response, &bg_owner)
-                        && let (Some(db), Some(router)) = (bg_db, bg_router)
-                        && let (
-                            Some(counter),
-                            Some(user_path),
-                            Some(user_doc),
-                            Some(persona_ver),
-                            Some(bus),
-                            Some(intent),
-                        ) = (
-                            bg_counter,
-                            bg_user_path,
-                            bg_user_doc,
-                            bg_persona_version,
-                            bg_bus,
-                            bg_intent,
-                        )
-                    {
-                        extract_user_traits_background(
-                            db, router, bg_config, counter, bg_embedder,
-                            user_path, user_doc, persona_ver, bus,
-                            bg_lane, intent, response_text.clone(), owner.clone(),
-                        )
-                        .await;
-                    }
-                };
-
-                tokio::join!(summary_fut, extract_fut);
+        // 6. The working state's turn-end update (design 11 §2) runs after
+        // the answer, as a tracked background job (`BackgroundJobs`): never
+        // on the response path, and stopped by the shutdown token. Memory
+        // learning is not here any more: the gateway queues every persisted
+        // turn, and the learning queue extracts a session's turns together,
+        // off the reply path (Learning v2, design 09 §1.9).
+        // A main-loop turn that compacted hands its state over here (design
+        // 11 §3.3): written with no call.
+        let from_loop = self
+            .compacted_turns
+            .remove(&request_id)
+            .map(|(_, compacted)| compacted);
+        // Design 11 §5 (CQ-7): and its `done` frame says so.
+        if from_loop.is_some() {
+            self.continuity_map
+                .entry(request_id)
+                .or_default()
+                .working_state_updated = true;
+        }
+        if let (Some(db), Some(router)) = (self.db.clone(), self.llm_router.clone()) {
+            let config = self.daemon_config.clone();
+            let compacted_states = self.compacted_states.clone();
+            // Rev 1.7 (F5): where the refresh asks what a forget took back.
+            let forget = self
+                .memory_service()
+                .map(|service| super::working_state::ForgetCheck {
+                    db: db.clone(),
+                    service,
+                    lane_key: lane_key.to_string(),
+                });
+            // NOTE: ctx is intentionally moved into this job — do not reference it after this block
+            self.background.spawn(async move {
+                super::working_state::after_turn(
+                    db,
+                    router,
+                    config,
+                    compacted_states,
+                    ctx,
+                    from_loop,
+                    forget,
+                )
+                .await;
             });
         }
 

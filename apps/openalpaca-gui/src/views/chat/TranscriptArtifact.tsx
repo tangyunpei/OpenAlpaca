@@ -14,10 +14,8 @@
  */
 
 import { ArtifactCard } from "@/components/chat";
-import { toFileKind } from "@/components/ui";
 import { useArtifact, useTogglePin } from "@/hooks/useArtifacts";
 import { useFileMetadata } from "@/hooks/useFiles";
-import type { ArtifactKind } from "@/lib/api/artifacts";
 import { useUiStore } from "@/stores/ui";
 
 import { fileKind, fileLanguage, textPreview } from "./artifact";
@@ -45,12 +43,10 @@ export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
     attachment.filename ?? metadata.data?.filename ?? attachment.fileId;
   const mime = attachment.mimeType ?? metadata.data?.mime_type ?? null;
   const preview = textPreview(metadata.data?.extracted_text);
-  // An artifact link names its kind (GAP-23); a bare file id does not, and the
-  // filename and mime type are then the only signal there is.
-  const kind =
-    attachment.kind === null
-      ? fileKind(name, mime)
-      : toFileKind(attachment.kind as ArtifactKind);
+  // An artifact link names its kind (GAP-23); a file part and a just-sent
+  // file do not, and their type then gives the kind the daemon stored for it
+  // — the Library's badge (G3a).
+  const kind = fileKind(attachment.kind, mime);
 
   const note = knownFromServer
     ? "Open to preview this file."

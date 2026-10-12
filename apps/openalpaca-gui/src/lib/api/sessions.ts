@@ -87,6 +87,12 @@ export interface CreateSessionInput {
    */
   workspacePath?: string;
   title?: string;
+  /**
+   * `false` is "Start fresh" (design 11 §4 (b), owner decision CQ-5): the new
+   * conversation is never given the previous one's working state. Omitted —
+   * the default — it is, for its first turns.
+   */
+  inherit?: boolean;
 }
 
 /**
@@ -107,6 +113,7 @@ export async function createSession(
         ? {}
         : { workspace_path: input.workspacePath }),
       ...(input.title === undefined ? {} : { title: input.title }),
+      ...(input.inherit === undefined ? {} : { inherit: input.inherit }),
     },
   });
 }

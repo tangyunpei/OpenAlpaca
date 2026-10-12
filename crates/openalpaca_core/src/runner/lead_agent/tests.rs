@@ -64,6 +64,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -88,6 +89,132 @@ fn test_lead_agent_registry_contains_coordination_tools() {
     assert!(tools.contains(&"check_subagent_status".to_string()));
     assert!(tools.contains(&"wait_for_subagents".to_string()));
     assert!(tools.contains(&"web_search".to_string()));
+}
+
+/// R29's tripwire (storage design §11), the lead's per-request half (S1's
+/// M2): every handler a lead's run registers per request — the four
+/// coordination tools, `invoke_skill`, and `post_update` and
+/// `queue_followup` with steering on — built as the run builds them, says
+/// its arguments reach no program, so the sanitizer's `../` rule stays off
+/// them as it is off every first-party builtin. The run assembles them by
+/// hand, so a new one is added here and to the name list.
+#[test]
+fn every_per_request_lead_tool_says_its_arguments_reach_no_program() {
+    use crate::tools::registry::{RegisteredTool, ToolBackend};
+
+    let router = Arc::new(openalpaca_llm::LlmRouter::new(
+        std::collections::HashMap::new(),
+        openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+        std::collections::HashMap::new(),
+        Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+        )),
+        "test-model".to_string(),
+    ));
+    let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let bus = EventBus::default();
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = Arc::new(SpawnSubagentTool::new(
+        router.clone(),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        bus.clone(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        daemon_config.clone(),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        MemoryScopeContext::global_only(),
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
+        None,
+    ));
+    let registry = ToolRegistry::default();
+    register_coordination_tools(
+        &registry,
+        spawn_tool.clone(),
+        Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool))),
+        Arc::new(CheckSubagentStatusTool {
+            tracker: tracker.clone(),
+        }),
+        Arc::new(WaitForSubagentsTool {
+            tracker,
+            steering: None,
+        }),
+        spawn_subagent_tool_definition_from_templates(&[]),
+        Some(spawn_subagents_batch_tool_definition(&[])),
+        check_subagent_status_tool_definition(),
+        wait_for_subagents_tool_definition(),
+    );
+    registry
+        .register(RegisteredTool {
+            definition: crate::tools::builtins::invoke_skill_tool_definition(),
+            backend: ToolBackend::BuiltIn(Arc::new(crate::tools::builtins::InvokeSkillTool::new(
+                Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+                Arc::new(ToolRegistry::default()),
+                router,
+                bus.clone(),
+                None,
+                daemon_config,
+                1.0,
+            ))),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "builtin".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    register_workflow_tools(
+        &registry,
+        Arc::new(PostUpdateTool::new(
+            None,
+            bus.clone(),
+            "task-1".to_string(),
+            "user-1:gui".to_string(),
+            "gui".to_string(),
+        )),
+        Arc::new(QueueFollowupTool::new(
+            None,
+            bus,
+            "task-1".to_string(),
+            "user-1:gui".to_string(),
+            "user-1".to_string(),
+            false,
+        )),
+    );
+
+    let mut names = registry.registered_tool_names();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "check_subagent_status",
+            "invoke_skill",
+            "post_update",
+            "queue_followup",
+            "spawn_subagent",
+            "spawn_subagents_batch",
+            "wait_for_subagents",
+        ]
+    );
+    for name in &names {
+        match registry.get(name).map(|tool| tool.backend) {
+            Some(ToolBackend::BuiltIn(handler)) => assert!(
+                !handler.arguments_reach_a_program(),
+                "{name} keeps the ../ rule"
+            ),
+            _ => panic!("{name} is not a builtin"),
+        }
+    }
 }
 
 // ── SubagentTracker tests ────────────────────────────────────────
@@ -126,8 +253,9 @@ fn test_tracker_fail() {
     tracker.fail("run-1", "Some error".to_string());
 
     match tracker.get("run-1") {
-        Some(SubagentStatus::Failed { error }) => {
+        Some(SubagentStatus::Failed { error, output }) => {
             assert_eq!(error, "Some error");
+            assert!(output.is_empty(), "fail() keeps no output: {output:?}");
         }
         other => panic!("Expected Failed, got {:?}", other),
     }
@@ -255,6 +383,344 @@ fn test_tracker_summary_with_queued() {
     assert!(summary.contains("waiting for execution slot"));
 }
 
+// ── F2: the summary shows each answer's head and tail within the bound ──
+
+/// The per-answer budget is a function of the loop's inline bound and the
+/// number of tracked entries: `(bound − 1 KiB) / entries − 768`, floored
+/// at 512 and capped at 8 KiB. The default bound and a batch of 8 give
+/// 3,200 bytes an answer; one answer alone gets the cap; at the clamp
+/// minimum 4,096 a batch of 8 sits on the floor.
+#[test]
+fn the_summarys_per_answer_budget_follows_the_bound_and_the_entry_count() {
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 8), 3_200);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 1), 8_192);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 2), 8_192);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 4), 7_168);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 16), 1_216);
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 25), 512);
+    assert_eq!(super::tracker::answer_budget(4_096, 8), 512);
+    // Zero entries never divide by zero (the empty summary returns earlier).
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 0), 8_192);
+}
+
+/// Eight 20 KB answers through the tool itself — header included — stay
+/// under the default 32 KiB bound, and every answer's opening and closing
+/// words reach the lead.
+#[tokio::test]
+async fn wait_for_subagents_keeps_eight_twenty_kilobyte_answers_under_the_inline_bound() {
+    let tracker = Arc::new(SubagentTracker::new());
+    for i in 1..=8 {
+        let run_id = format!("run-{i}");
+        tracker.register(&run_id);
+        tracker.complete(
+            &run_id,
+            format!("HEAD-{i} {} TAIL-{i}", "x".repeat(20 * 1024)),
+            true,
+        );
+    }
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: None,
+    };
+    let result = tool.execute(&serde_json::json!({})).await.unwrap();
+
+    assert!(
+        result.len() <= 32 * 1024,
+        "the whole summary must fit the inline bound, got {} bytes",
+        result.len()
+    );
+    assert!(
+        result.starts_with("All subagents finished. 8 completed, 0 failed.\n\n"),
+        "got: {}",
+        crate::utils::text::byte_prefix(&result, 80)
+    );
+    for i in 1..=8 {
+        assert!(result.contains(&format!("HEAD-{i} ")), "head {i} missing");
+        assert!(result.contains(&format!(" TAIL-{i}")), "tail {i} missing");
+    }
+    assert_eq!(result.matches("the tail follows").count(), 8);
+}
+
+/// A CJK answer is cut on character boundaries: with one entry the budget
+/// is the 8,192-byte cap, half is 4,096, not a multiple of 3, so the head
+/// rounds down to 4,095 bytes (1,365 characters) and the tail rounds up to
+/// start at 10,905, 4,095 bytes too. The whole line is pinned.
+#[test]
+fn a_cjk_answer_is_cut_on_character_boundaries_in_the_summary() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    tracker.complete("run-1", "語".repeat(5000), true);
+
+    assert_eq!(
+        tracker.summary(),
+        format!(
+            "- **run-1**: completed — {}\n\n[... 6810 of 15000 bytes elided; the tail follows ...]\n\n{}",
+            "語".repeat(1365),
+            "語".repeat(1365)
+        )
+    );
+}
+
+/// An answer within its budget is shown whole — 3,000 bytes under the
+/// 8,192-byte cap one entry gets.
+#[test]
+fn an_answer_within_its_budget_is_shown_whole_in_the_summary() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    let answer = format!("Report: {}", "r".repeat(2992));
+    tracker.complete("run-1", answer.clone(), true);
+
+    assert_eq!(
+        tracker.summary(),
+        format!("- **run-1**: completed — {answer}")
+    );
+}
+
+/// The bound is the tracker's, set at construction: an 8 KiB bound gives
+/// one entry (8192 − 1024) − 768 = 6,400 bytes, head 3,200 and tail 3,200.
+#[test]
+fn a_tracker_built_with_a_smaller_bound_cuts_to_it() {
+    let tracker = SubagentTracker::with_inline_bytes(8 * 1024);
+    tracker.register("run-1");
+    tracker.complete("run-1", "y".repeat(10_000), true);
+
+    assert_eq!(
+        tracker.summary(),
+        format!(
+            "- **run-1**: completed — {}\n\n[... 3600 of 10000 bytes elided; the tail follows ...]\n\n{}",
+            "y".repeat(3200),
+            "y".repeat(3200)
+        )
+    );
+}
+
+/// Review focus — more entries than the bound can hold (60 here, past the
+/// 25 where the budget floors at 512 bytes): the summary is still produced,
+/// still names every entry and shows each answer's opening and end, and is
+/// longer than the bound, which the loop's own cut or spill then handles as
+/// for any oversized tool result. Nothing is dropped silently.
+#[test]
+fn a_batch_past_the_bound_still_lists_every_entry() {
+    let tracker = SubagentTracker::new();
+    for i in 1..=60 {
+        let run_id = format!("run-{i}");
+        tracker.register(&run_id);
+        tracker.complete(
+            &run_id,
+            format!("BEGIN-{i} {} END-{i}.", "z".repeat(4000)),
+            true,
+        );
+    }
+    assert_eq!(super::tracker::answer_budget(32 * 1024, 60), 512);
+    let summary = tracker.summary();
+    // Each entry is about 595 bytes (prefix, 256-byte head, notice, 256-byte
+    // tail, newline): 60 of them are about 35,700 bytes, past the bound.
+    for i in 1..=60 {
+        assert!(
+            summary.contains(&format!("- **run-{i}**: completed — BEGIN-{i} ")),
+            "entry {i} missing"
+        );
+        assert!(summary.contains(&format!(" END-{i}.")), "tail {i} missing");
+    }
+    assert!(
+        summary.len() > 32 * 1024,
+        "past the floor the summary may exceed the bound: {} bytes",
+        summary.len()
+    );
+}
+
+// ── F2: a failed subagent's answer is kept whole ──
+
+/// The tracker keeps a failed subagent's whole final content beside its
+/// error — 1,221 characters here, past the 500 the old error string held,
+/// in a script where 500 chars were 1,500 bytes.
+#[test]
+fn a_failed_subagents_whole_answer_is_kept() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    let answer = format!("{}\n最後の行: /tmp/report.md", "見出し".repeat(400));
+    assert!(answer.chars().count() > 500);
+
+    tracker.fail_with_output(
+        "run-1",
+        "Agent 'writer' failed: MaxRounds.".to_string(),
+        answer.clone(),
+    );
+
+    match tracker.get("run-1") {
+        Some(SubagentStatus::Failed { error, output }) => {
+            assert_eq!(error, "Agent 'writer' failed: MaxRounds.");
+            assert_eq!(output, answer);
+        }
+        other => panic!("Expected Failed, got {:?}", other),
+    }
+    assert!(tracker.all_done());
+}
+
+/// The summary shows a failed entry's error, then the answer's head and tail
+/// under the same budget a completed answer gets: one entry, the 8,192-byte
+/// cap, head 4,096 and a tail of 4,096 that ends on the path.
+#[test]
+fn the_summary_shows_a_failed_answers_error_and_its_head_and_tail() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    let output = format!("{}/tmp/report.md", "A".repeat(10_000));
+    tracker.fail_with_output(
+        "run-1",
+        "Agent 'writer' failed: MaxRounds.".to_string(),
+        output,
+    );
+
+    assert_eq!(
+        tracker.summary(),
+        format!(
+            "- **run-1**: failed — Agent 'writer' failed: MaxRounds. Last output: {}\n\n[... 1822 of 10014 bytes elided; the tail follows ...]\n\n{}/tmp/report.md",
+            "A".repeat(4096),
+            "A".repeat(4082)
+        )
+    );
+}
+
+/// A failure with no output reads as it did before, and a long error text
+/// is cut to 512 bytes — 256 head, 256 tail — so a provider's or a plugin's
+/// message cannot eat the batch's budget.
+#[test]
+fn a_failed_entry_with_no_output_shows_its_error_alone_and_a_long_error_is_cut() {
+    let tracker = SubagentTracker::new();
+    tracker.register("run-1");
+    tracker.fail(
+        "run-1",
+        "Cancelled before starting (parent task was cancelled)".to_string(),
+    );
+    assert_eq!(
+        tracker.summary(),
+        "- **run-1**: failed — Cancelled before starting (parent task was cancelled)"
+    );
+
+    let tracker = SubagentTracker::new();
+    tracker.register("run-2");
+    tracker.fail("run-2", "E".repeat(2000));
+    let summary = tracker.summary();
+    assert_eq!(
+        summary,
+        format!(
+            "- **run-2**: failed — {}\n\n[... 1488 of 2000 bytes elided; the tail follows ...]\n\n{}",
+            "E".repeat(256),
+            "E".repeat(256)
+        )
+    );
+    assert!(!summary.contains("Last output:"));
+}
+
+// ── F2: check_subagent_status returns a failed subagent's whole answer ──
+
+/// The tool returns the kept output whole — 3,015 characters, 9,015 bytes
+/// here — after the error; the loop, not the tool, bounds what the model
+/// sees.
+#[tokio::test]
+async fn check_subagent_status_returns_a_failed_subagents_whole_answer() {
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-f");
+    let output = format!("{}\n/tmp/report.md", "結果".repeat(1500));
+    tracker.fail_with_output(
+        "run-f",
+        "Agent 'writer' failed: MaxRounds.".to_string(),
+        output.clone(),
+    );
+    let tool = CheckSubagentStatusTool {
+        tracker: tracker.clone(),
+    };
+
+    let err = tool
+        .execute(&serde_json::json!({"subagent_run_id": "run-f"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "Subagent 'run-f' failed: Agent 'writer' failed: MaxRounds.\nIts last output follows:\n{output}"
+        )
+    );
+}
+
+/// A failure that carries no answer names the error alone, as before.
+#[tokio::test]
+async fn check_subagent_status_on_a_failure_with_no_output_names_the_error_alone() {
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-g");
+    tracker.fail(
+        "run-g",
+        "Cancelled before starting (parent task was cancelled)".to_string(),
+    );
+    let tool = CheckSubagentStatusTool {
+        tracker: tracker.clone(),
+    };
+
+    let err = tool
+        .execute(&serde_json::json!({"subagent_run_id": "run-g"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "Subagent 'run-g' failed: Cancelled before starting (parent task was cancelled)"
+    );
+}
+
+// ── F2: the descriptions and the prompt say what the tools return ──
+
+#[test]
+fn check_subagent_status_description_says_it_returns_the_whole_answer() {
+    assert_eq!(
+        check_subagent_status_tool_definition().description,
+        "Check one spawned subagent by its run_id. Queued or running: says so. \
+         Completed: returns the subagent's whole answer — a long one arrives as a stub \
+         naming a result_ref; page it with read_result. A run that keeps no conversation \
+         log has no stub to give: there a long answer is cut after its first part, and \
+         the cut says how much it shows. Failed: returns the error and the subagent's \
+         whole last output, as its head and tail when long. wait_for_subagents shows only \
+         the head and the tail of each answer; call this for the one you need in full."
+    );
+}
+
+#[test]
+fn wait_for_subagents_description_says_it_shows_each_answers_head_and_tail() {
+    assert_eq!(
+        wait_for_subagents_tool_definition().description,
+        "Wait for ALL previously spawned subagents to complete, including any that are \
+         queued for execution. Returns a summary of all results: each subagent's answer as \
+         its head and its tail, with a notice naming the bytes between them, sized so that \
+         a batch of eight fits one tool result. Read one answer in full with \
+         check_subagent_status. Use this after spawning all subagents to collect all \
+         outputs before synthesizing a response."
+    );
+}
+
+#[test]
+fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
+    let engine = crate::compose::ComposeEngine::new(16);
+    let prompt =
+        build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000, None, None);
+    assert!(
+        prompt.contains(
+            "check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
+             queued, running, completed, or failed. Completed: returns the whole answer — a long one \
+             arrives as a stub to page with read_result, or, in a run that keeps no conversation log, \
+             cut after its first part with a note of how much it shows. Failed: returns the error and \
+             the last output, as head and tail when long."
+        ),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(
+            "wait_for_subagents: Block until ALL spawned subagents finish, including any that are \
+             queued for execution. Returns a summary of all results: each answer's head and tail, \
+             with a notice of what lies between — read one in full with check_subagent_status. \
+             Call this after spawning all subagents."
+        ),
+        "{prompt}"
+    );
+}
+
 #[tokio::test]
 async fn test_check_subagent_status_tool() {
     let tracker = Arc::new(SubagentTracker::new());
@@ -375,6 +841,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -432,6 +899,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let batch_tool = Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())));
     let check_tool = Arc::new(CheckSubagentStatusTool {
@@ -488,6 +956,7 @@ async fn test_batch_spawn_empty_array_error() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -529,6 +998,7 @@ async fn test_batch_spawn_exceeds_max_error() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -591,7 +1061,8 @@ fn test_lead_agent_registry_exposes_command_backend_tools() {
 #[test]
 fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
     let engine = crate::compose::ComposeEngine::new(16);
-    let prompt = build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000);
+    let prompt =
+        build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000, None, None);
     assert!(
         prompt.contains("spawn_subagents_batch"),
         "Lead agent prompt should mention spawn_subagents_batch tool"
@@ -771,12 +1242,30 @@ async fn test_queue_followup_system_owner_maps_to_system_principal() {
     assert_eq!(principal, crate::security::policy::Principal::System);
 }
 
+/// F4 — the row records the turn's project root, which is what the follow-up
+/// runner hands back to the gateway (`apps/openalpacad/src/followup.rs:44`),
+/// never the path the client sent. The turn sent a directory two levels
+/// below the `.git` marker; the row holds the canonical root.
 #[tokio::test]
-async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
-    // Main-loop variant (Routing V2 Phase 2): identity + workspace path come
-    // from the invocation's ToolContext, no source task recorded.
+async fn a_queue_followup_from_the_main_loop_stores_the_turns_resolved_project_root() {
     let dir = tempfile::tempdir().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+    let sent = project.path().join("src").join("lib");
+    std::fs::create_dir_all(&sent).unwrap();
+    let sent = sent.to_string_lossy().to_string();
+    // The root as the resolver spells it (`store::projects::resolve`):
+    // canonical, which on macOS turns `/var/folders/…` into
+    // `/private/var/folders/…`.
+    let root = project
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
     let tool = QueueFollowupTool::for_main_loop(
         Some(db.clone()),
         EventBus::default(),
@@ -784,12 +1273,18 @@ async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
         "fallback-owner".to_string(),
         false,
     );
+    // The context the main loop builds (`simple_query_handler.rs:150-163`):
+    // the turn's scope context resolves the root; the path as sent rides
+    // beside it.
+    let scope = MemoryScopeContext::for_request(Some(sent.as_str()));
+    assert_eq!(scope.request_workspace_root.as_deref(), Some(root.as_str()));
     let ctx = crate::tools::registry::ToolContext {
         owner_id: Some("junpei".to_string()),
         principal: Some(crate::security::policy::Principal::User {
             global_id: "junpei".to_string(),
         }),
-        workspace_path: Some("/ws/project".to_string()),
+        request_workspace_root: scope.request_workspace_root.clone(),
+        workspace_path: Some(sent.clone()),
         ..Default::default()
     };
     tool.execute_with_context(&serde_json::json!({"description": "Do it later"}), &ctx)
@@ -800,7 +1295,11 @@ async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
     let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].source_task_id, None);
-    assert_eq!(rows[0].workspace_path.as_deref(), Some("/ws/project"));
+    assert_eq!(
+        rows[0].workspace_path.as_deref(),
+        Some(root.as_str()),
+        "the row must hold the resolved root, not the path as sent ({sent})"
+    );
     let principal: crate::security::policy::Principal =
         serde_json::from_str(&rows[0].principal_json).unwrap();
     assert_eq!(
@@ -808,6 +1307,127 @@ async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
         crate::security::policy::Principal::User {
             global_id: "junpei".to_string()
         }
+    );
+}
+
+/// F4 — the lead's context carries no `workspace_path` (`run_lead_agent`'s
+/// `tool_ctx`, `runner/lead_agent/mod.rs`) and does carry
+/// `request_workspace_root`, the run's project. A follow-up a workflow queues
+/// must run in that project; until this fix the row held NULL and the
+/// follow-up turn ran with none.
+#[tokio::test]
+async fn a_queue_followup_from_the_lead_stores_the_runs_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+    let root = MemoryScopeContext::for_request(project.path().to_str())
+        .request_workspace_root
+        .expect("a directory carrying .git resolves to itself");
+    assert_eq!(
+        root,
+        project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    );
+
+    // The lead's `QueueFollowupTool::new` call (in `run_lead_agent`):
+    // identity from the task's `created_by`, the run as `source_task_id`.
+    let tool = QueueFollowupTool::new(
+        Some(db.clone()),
+        EventBus::default(),
+        "task-1".to_string(),
+        "junpei:cli".to_string(),
+        "junpei".to_string(),
+        false,
+    );
+    // The context exactly as `run_lead_agent` builds it (its `tool_ctx`):
+    // no principal, no scope, no workspace_path — and the run's root.
+    let ctx = crate::tools::registry::ToolContext {
+        agent_id: Some("lead_agent::abc".to_string()),
+        agent_instance_id: Some("lead_agent::abc".to_string()),
+        task_id: Some("task-1".to_string()),
+        owner_id: Some("junpei".to_string()),
+        workspace_id: Some(root.clone()),
+        request_workspace_root: Some(root.clone()),
+        lane_key: Some("junpei:cli".to_string()),
+        source: Some("cli".to_string()),
+        ..Default::default()
+    };
+    tool.execute_with_context(
+        &serde_json::json!({"description": "Also update the docs"}),
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source_task_id.as_deref(), Some("task-1"));
+    assert_eq!(
+        rows[0].workspace_path.as_deref(),
+        Some(root.as_str()),
+        "a follow-up promised by a workflow must re-enter in the run's project"
+    );
+    // No principal on the lead's context: the constructor's `created_by` stands in.
+    let principal: crate::security::policy::Principal =
+        serde_json::from_str(&rows[0].principal_json).unwrap();
+    assert_eq!(
+        principal,
+        crate::security::policy::Principal::User {
+            global_id: "junpei".to_string()
+        }
+    );
+}
+
+/// Review focus — a turn whose path no longer exists (a CLI started in a
+/// directory since deleted, a row from an older build): the path cannot
+/// be canonicalised, so the resolver matches it against registered
+/// project roots only (storage design §3); the guarded home store
+/// registers none, so it yields no root and the row holds NULL — the
+/// same as a path under no project. Nothing panics,
+/// nothing is stored as sent.
+#[tokio::test]
+async fn a_queue_followup_from_a_path_that_no_longer_exists_stores_no_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gone = tempfile::tempdir().unwrap();
+    let sent = gone.path().join("deleted").join("project");
+    let sent = sent.to_string_lossy().to_string();
+    drop(gone);
+    assert!(!std::path::Path::new(&sent).exists());
+
+    let tool = QueueFollowupTool::for_main_loop(
+        Some(db.clone()),
+        EventBus::default(),
+        "junpei:cli".to_string(),
+        "junpei".to_string(),
+        false,
+    );
+    let scope = MemoryScopeContext::for_request(Some(sent.as_str()));
+    assert_eq!(scope.request_workspace_root, None);
+    let ctx = crate::tools::registry::ToolContext {
+        owner_id: Some("junpei".to_string()),
+        request_workspace_root: scope.request_workspace_root.clone(),
+        workspace_path: Some(sent.clone()),
+        ..Default::default()
+    };
+    tool.execute_with_context(&serde_json::json!({"description": "Later"}), &ctx)
+        .await
+        .unwrap();
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("junpei:cli").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].workspace_path, None,
+        "a vanished path is no project, not a stored string"
     );
 }
 
@@ -936,6 +1556,55 @@ async fn test_wait_for_subagents_closed_empty_inbox_does_not_interrupt() {
     assert!(result.contains("All subagents finished"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn wait_for_subagents_returns_when_the_last_subagent_finishes_just_after_its_check() {
+    // The lost wakeup: the last completion lands after `all_done()` read
+    // the map and before the wait listens for a change. `notify_waiters`
+    // keeps no permit, so a waiter that registers only afterwards sleeps
+    // until the 600 s cap. The hook puts the completion in that window;
+    // under a paused clock a lost wakeup reaches the 5 s timeout at once.
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1");
+    tracker.after_next_unfinished_check(|t| t.complete("run-1", "done".to_string(), true));
+    let tool = WaitForSubagentsTool {
+        tracker,
+        steering: None,
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tool.execute(&serde_json::json!({})),
+    )
+    .await
+    .expect("a completion just after the check must end the wait, not the 600 s cap")
+    .unwrap();
+    assert!(result.contains("All subagents finished"), "got: {result}");
+    assert!(result.contains("1 completed"), "got: {result}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_for_subagents_returns_when_the_last_subagent_finishes_while_it_waits() {
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("run-1");
+    let tool = Arc::new(WaitForSubagentsTool {
+        tracker: tracker.clone(),
+        steering: None,
+    });
+    let waiter = {
+        let tool = tool.clone();
+        tokio::spawn(async move { tool.execute(&serde_json::json!({})).await })
+    };
+    tokio::task::yield_now().await;
+    tracker.complete("run-1", "done".to_string(), true);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("a completion while the wait listens must end it")
+        .unwrap()
+        .unwrap();
+    assert!(result.contains("All subagents finished"), "got: {result}");
+}
+
 // ── Plugin-backed subagent spawning ─────────────────────────────────
 
 /// Stub plugin executor: accepts the spawn, records the instructions,
@@ -1044,6 +1713,7 @@ async fn test_spawn_subagent_executes_plugin_backed_template() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     );
 
     let msg = spawn_tool
@@ -1292,13 +1962,34 @@ async fn run_lead_for_test(
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     bus: EventBus,
 ) -> LeadAgentResult {
-    run_lead_agent(
+    run_lead_as(
         &lead_subagent(),
+        provider,
+        tool_registry,
+        skill_catalog,
+        daemon_config,
+        bus,
+    )
+    .await
+}
+
+/// [`run_lead_for_test`] with a lead of the caller's choosing.
+async fn run_lead_as(
+    lead: &SubAgent,
+    provider: Arc<ScriptedProvider>,
+    tool_registry: Arc<ToolRegistry>,
+    skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
+    daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    bus: EventBus,
+) -> LeadAgentResult {
+    run_lead_agent(
+        lead,
         "do the thing",
         scripted_router(provider),
         tool_registry,
         Arc::new(SharedContext::new()),
         bus,
+        None,
         None,
         None,
         "task-1",
@@ -1318,8 +2009,18 @@ async fn run_lead_for_test(
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         false,
+        None,
     )
     .await
+}
+
+/// A registry holding the builtins, as the daemon's global one does.
+fn registry_with_builtins() -> Arc<ToolRegistry> {
+    let registry = Arc::new(ToolRegistry::default());
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    registry
 }
 
 #[tokio::test]
@@ -1370,6 +2071,190 @@ async fn test_lead_loop_request_carries_extension_defs_and_invoke_skill() {
         "lead system prompt missing extension guidance"
     );
     assert!(system.content.contains("invoke_skill"));
+}
+
+/// R42 and §15: the lead's hand-built surface carries `file_read`,
+/// `file_list` and `artifact_read` in code — its template names none of
+/// them — and no tool that writes or edits a file or runs a command, so it
+/// delegates result files. What the surface offers the sandbox admits: a
+/// `file_list` call reaches the tool, which answers that this run has no
+/// working folder, instead of the allow list's refusal.
+#[tokio::test]
+async fn the_lead_reads_files_and_by_products_and_writes_no_file() {
+    let provider = ScriptedProvider::new(vec![
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-1".to_string(),
+                name: "file_list".to_string(),
+                arguments: serde_json::json!({"path": "."}),
+            }],
+        ),
+        scripted_response("done", vec![]),
+    ]);
+
+    let result = run_lead_for_test(
+        provider.clone(),
+        registry_with_builtins(),
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(result.success, "finish: {:?}", result.loop_result.finish_reason);
+    let names = provider.tool_names(0);
+    for offered in ["file_read", "file_list", "artifact_read"] {
+        assert!(names.iter().any(|n| n == offered), "{offered}: {names:?}");
+    }
+    for withheld in ["file_write", "file_edit", "shell_execute"] {
+        assert!(!names.iter().any(|n| n == withheld), "{withheld}: {names:?}");
+    }
+    let results = tool_results_seen(&provider, 1);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].contains("neither a project nor a conversation"),
+        "the tool ran: {:?}",
+        results[0]
+    );
+    assert!(!results[0].contains("not in allow list"), "{:?}", results[0]);
+}
+
+/// The sandbox denies by tool name, so a lead template that denies
+/// `file_read` would still be handed — and admitted — `file_list`, which
+/// comes with it, if the surface did not keep it off. It is handed neither
+/// file reader, and still `artifact_read`.
+#[tokio::test]
+async fn a_lead_that_denies_file_read_is_handed_neither_file_reader() {
+    let agent = crate::test_util::make_agent("lead_agent", vec!["orchestration", "memory_read"]);
+    let mut template = crate::test_util::template_from_agent(&agent);
+    template.frontmatter.denied_capabilities = vec!["file_read".to_string()];
+    let lead = template.to_subagent("lead-1", "task-1");
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+
+    let result = run_lead_as(
+        &lead,
+        provider.clone(),
+        registry_with_builtins(),
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(result.success, "finish: {:?}", result.loop_result.finish_reason);
+    let names = provider.tool_names(0);
+    for withheld in ["file_read", "file_list"] {
+        assert!(!names.iter().any(|n| n == withheld), "{withheld}: {names:?}");
+    }
+    assert!(names.iter().any(|n| n == "artifact_read"), "{names:?}");
+}
+
+/// R48, §15: the lead holds no file-writing or editing tool. Its surface is
+/// assembled by hand, never resolved from a capability, so a registry that
+/// carries both leaves both off it.
+#[tokio::test]
+async fn the_lead_is_never_handed_file_edit_or_file_write() {
+    let registry = Arc::new(ToolRegistry::default());
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let result = run_lead_for_test(
+        provider.clone(),
+        registry,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(result.success, "finish: {:?}", result.loop_result.finish_reason);
+    let names = provider.tool_names(0);
+    assert!(names.iter().any(|n| n == "spawn_subagent"), "{names:?}");
+    for absent in ["file_edit", "file_write"] {
+        assert!(
+            !names.iter().any(|n| n == absent),
+            "the lead must not hold {absent}: {names:?}"
+        );
+    }
+}
+
+/// The lead's ruling R-T24 (the whole-stage review's d6-surfaces-2): R42 and
+/// §15 say the lead writes no file and runs no command, and the tests above
+/// check only what it is offered. Its sandbox admits the template's
+/// capability strings widened by its surface, matched by name (CLAUDE.md's
+/// settled rule, which stays), over a clone of the registry that holds every
+/// writing backend — so "writes none" holds because the **shipped**
+/// `lead_agent.md` names no writing tool. A scripted `file_write` and a
+/// scripted `shell_execute` from that template are refused by the allow
+/// list before either tool runs.
+#[tokio::test]
+async fn the_shipped_lead_template_refuses_a_file_write_and_a_shell_command() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents/lead_agent.md");
+    let body = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let template = crate::agent::template::parse_agent_markdown(&body)
+        .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    assert_eq!(template.frontmatter.id, "lead_agent");
+    let lead = template.to_subagent("lead-1", "task-1");
+
+    let call = |id: &str, name: &str, arguments: serde_json::Value| {
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments,
+            }],
+        )
+    };
+    let provider = ScriptedProvider::new(vec![
+        call(
+            "call-1",
+            "file_write",
+            serde_json::json!({"path": "notes.md", "content": "written by the lead"}),
+        ),
+        call(
+            "call-2",
+            "shell_execute",
+            serde_json::json!({"command": "echo ran"}),
+        ),
+        scripted_response("done", vec![]),
+    ]);
+
+    let result = run_lead_as(
+        &lead,
+        provider.clone(),
+        registry_with_builtins(),
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    for (round, tool) in [(1, "file_write"), (2, "shell_execute")] {
+        let results = tool_results_seen(&provider, round);
+        let last = results
+            .last()
+            .unwrap_or_else(|| panic!("no result for {tool}"));
+        assert!(
+            last.contains(&format!(
+                "Capability '{tool}' not in allow list for agent 'lead-1'"
+            )),
+            "{tool} is refused by the allow list: {last:?}"
+        );
+        assert!(!last.contains("ran"), "{tool} ran: {last:?}");
+    }
 }
 
 #[tokio::test]
@@ -1612,6 +2497,7 @@ async fn a_subagent_lane_is_narrated_into_the_runs_session_log() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     );
 
     spawn_tool
@@ -1722,6 +2608,7 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
         EventBus::default(),
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -1742,6 +2629,7 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
             inline_note: None,
         }),
         false,
+        None,
     )
     .await;
 
@@ -1801,6 +2689,7 @@ async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
         EventBus::default(),
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -1821,6 +2710,7 @@ async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
             inline_note: Some(note),
         }),
         false,
+        None,
     )
     .await;
 
@@ -1871,6 +2761,7 @@ async fn the_resume_record_names_the_trim_and_the_rounds_it_dropped() {
         EventBus::default(),
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -1891,6 +2782,7 @@ async fn the_resume_record_names_the_trim_and_the_rounds_it_dropped() {
             inline_note: None,
         }),
         false,
+        None,
     )
     .await;
     assert!(handle.flush().await);
@@ -1962,6 +2854,7 @@ async fn the_lead_is_budgeted_against_the_model_that_answers() {
         bus.clone(),
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -1979,6 +2872,7 @@ async fn the_lead_is_budgeted_against_the_model_that_answers() {
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         false,
+        None,
     )
     .await;
     assert!(
@@ -2048,6 +2942,7 @@ async fn an_unattended_run_tells_the_model_the_tool_cannot_be_approved() {
         EventBus::default(),
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -2068,6 +2963,7 @@ async fn an_unattended_run_tells_the_model_the_tool_cannot_be_approved() {
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         true,
+        None,
     )
     .await;
     let elapsed = started.elapsed();
@@ -2227,6 +3123,7 @@ async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
         EventBus::default(),
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -2244,6 +3141,7 @@ async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
         false,
+        None,
     )
     .await;
     assert!(
@@ -2398,6 +3296,7 @@ async fn spawn_and_finish(
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     );
 
     spawn_tool
@@ -2700,6 +3599,7 @@ async fn spawn_subagent_survives_a_multibyte_objective_preview() {
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         false,
+        None,
     );
 
     // 40 Chinese characters = 120 bytes; byte 80 lands inside the 27th.
@@ -2719,4 +3619,1174 @@ async fn spawn_subagent_survives_a_multibyte_objective_preview() {
     let err = result.expect_err("self-spawn is refused");
     assert!(err.contains("cannot spawn itself"), "{err}");
     assert!(logs_contain("Lead agent spawning subagent"));
+}
+
+// ── Memory injection scope (audit finding F1), through the service ────
+
+/// One owner with a global note and one note in each of two projects, all
+/// three matching the task description these tests prime with; the
+/// temp home store and the in-memory index the service runs on.
+struct LeadMemoryScene {
+    _env: crate::test_util::HomeStoreGuard,
+    root: tempfile::TempDir,
+    service: Arc<MemoryService>,
+    global: openalpaca_storage::memory_files::NoteId,
+    proj_a: openalpaca_storage::memory_files::NoteId,
+    proj_b: openalpaca_storage::memory_files::NoteId,
+}
+
+const LEAD_OWNER: &str = "user-1";
+
+impl LeadMemoryScene {
+    fn project(&self, name: &str) -> std::path::PathBuf {
+        self.root.path().join("ws").join(name).canonicalize().unwrap()
+    }
+
+    fn workspace(&self, name: &str) -> MemoryScopeContext {
+        let root = self.project(name).to_string_lossy().into_owned();
+        MemoryScopeContext {
+            workspace_id: Some(root.clone()),
+            request_workspace_root: Some(root),
+        }
+    }
+}
+
+fn lead_memory_scene() -> LeadMemoryScene {
+    use crate::memory::service::StoreInput;
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let env = crate::test_util::HomeStoreGuard::set(&home.canonicalize().unwrap());
+    let db = openalpaca_storage::Database::open(&root.path().join("db.sqlite")).unwrap();
+    openalpaca_storage::IdentityRepository::new(&db)
+        .create_global_user(LEAD_OWNER, None)
+        .unwrap();
+    let service = MemoryService::new(
+        Some(db),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    );
+    service.rebuild_index().unwrap();
+    for name in ["projA", "projB"] {
+        let dir = root.path().join("ws").join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        openalpaca_storage::store::projects::register(&dir.canonicalize().unwrap()).unwrap();
+    }
+    let store = |workspace: Option<&std::path::Path>, title: &str, body: &str, kind: NoteKind| {
+        let hint = match workspace {
+            Some(path) => WorkspaceHint::Path(path),
+            None => WorkspaceHint::None,
+        };
+        let ctx = service
+            .context(
+                LEAD_OWNER,
+                hint,
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap();
+        service
+            .store(
+                &ctx,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(kind),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+    };
+    let proj_a_dir = root.path().join("ws").join("projA").canonicalize().unwrap();
+    let proj_b_dir = root.path().join("ws").join("projB").canonicalize().unwrap();
+    let global = store(
+        None,
+        "Status reports",
+        "# Status reports\n\nThe owner prefers terse status reports.\n",
+        NoteKind::Preference,
+    );
+    let proj_a = store(
+        Some(&proj_a_dir),
+        "Project A status reports",
+        "# Project A status reports\n\nprojA status reports are posted to the release channel.\n",
+        NoteKind::Fact,
+    );
+    let proj_b = store(
+        Some(&proj_b_dir),
+        "Project B status reports",
+        "# Project B status reports\n\nprojB status reports are weekly.\n",
+        NoteKind::Fact,
+    );
+    LeadMemoryScene {
+        _env: env,
+        root,
+        service: Arc::new(service),
+        global,
+        proj_a,
+        proj_b,
+    }
+}
+
+fn delivered_ids(
+    delivery: &Option<(String, Vec<crate::memory::service::MemoryUsed>)>,
+) -> Vec<openalpaca_storage::memory_files::NoteId> {
+    let (_, used) = delivery.as_ref().expect("something was delivered");
+    used.iter().map(|u| u.id).collect()
+}
+
+/// A workflow started with no workspace — a connector lane, a scheduled
+/// skill, the GUI with no project open — primes the lead with the owner's
+/// **global** partition only: no project's notes reach it.
+#[test]
+fn lead_memory_without_workspace_reads_the_global_partition_only() {
+    let scene = lead_memory_scene();
+    let ctx = lead_memory_context(
+        &scene.service,
+        LEAD_OWNER,
+        &MemoryScopeContext::global_only(),
+        "task-1",
+        "user-1:cli",
+        "cli",
+    )
+    .expect("the owner is a global_user row");
+    assert_eq!(ctx.project_root, None);
+    assert_eq!(ctx.attribution.task_id.as_deref(), Some("task-1"));
+
+    let delivery = lead_memory_delivery(&scene.service, &ctx, "status reports", RecallMode::Index);
+    assert_eq!(delivered_ids(&delivery), vec![scene.global]);
+    let (block, _) = delivery.unwrap();
+    assert!(block.starts_with("<memory_context>\n"), "{block}");
+    assert!(block.contains(crate::memory::service::TRUST_LABEL));
+    assert!(!block.contains(&scene.proj_a.to_string()));
+    assert!(!block.contains(&scene.proj_b.to_string()));
+}
+
+/// The workspace branch: a run inside project A reads that project's notes
+/// and the global ones, and nothing from project B.
+#[test]
+fn lead_memory_with_workspace_reads_its_project_and_global() {
+    let scene = lead_memory_scene();
+    let ctx = lead_memory_context(
+        &scene.service,
+        LEAD_OWNER,
+        &scene.workspace("projA"),
+        "task-1",
+        "user-1:cli",
+        "cli",
+    )
+    .unwrap();
+    assert_eq!(ctx.project_root.as_deref(), Some(scene.project("projA").as_path()));
+
+    let delivery = lead_memory_delivery(&scene.service, &ctx, "status reports", RecallMode::Index);
+    let mut ids = delivered_ids(&delivery);
+    ids.sort();
+    let mut expected = vec![scene.global, scene.proj_a];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert!(!ids.contains(&scene.proj_b));
+}
+
+/// Design 09 §13.2: the lead's opening recall is delivered the way
+/// `[orchestrator.memory] recall_mode` says, like every turn's. Under
+/// `index`, a task three notes match is primed with the top 2 as excerpts
+/// and the third listed under the index block's header, reported with
+/// reason `index`; under `excerpts`, all three are excerpts.
+#[test]
+fn lead_memory_follows_the_recall_mode() {
+    use crate::memory::service::{INDEX_BLOCK_HEADER, StoreInput, UsedReason};
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let scene = lead_memory_scene();
+    let owner = scene
+        .service
+        .context(
+            LEAD_OWNER,
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    for (title, body) in [
+        (
+            "Status report format",
+            "# Status report format\n\nStatus reports lead with the blockers.\n",
+        ),
+        (
+            "Status report audience",
+            "# Status report audience\n\nStatus reports go to the whole team.\n",
+        ),
+    ] {
+        scene
+            .service
+            .store(
+                &owner,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Preference),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    let ctx = lead_memory_context(
+        &scene.service,
+        LEAD_OWNER,
+        &MemoryScopeContext::global_only(),
+        "task-1",
+        "user-1:cli",
+        "cli",
+    )
+    .unwrap();
+
+    let (block, used) =
+        lead_memory_delivery(&scene.service, &ctx, "status reports", RecallMode::Index).unwrap();
+    assert_eq!(block.matches(INDEX_BLOCK_HEADER).count(), 1, "{block}");
+    let reasons: Vec<UsedReason> = used.iter().map(|u| u.reason).collect();
+    assert_eq!(
+        reasons,
+        [UsedReason::Recall, UsedReason::Recall, UsedReason::Index]
+    );
+
+    let (block, used) =
+        lead_memory_delivery(&scene.service, &ctx, "status reports", RecallMode::Excerpts).unwrap();
+    assert!(!block.contains(INDEX_BLOCK_HEADER), "{block}");
+    assert_eq!(used.len(), 3);
+    assert!(used.iter().all(|u| u.reason == UsedReason::Recall));
+}
+
+/// A `System` run (`/v1/command process`) and an unlinked `provider:id`
+/// owner have no partition (design §3): the lead is primed with nothing,
+/// and nothing is created for them.
+#[test]
+fn a_run_whose_owner_is_not_a_global_user_row_has_no_memory_context() {
+    let scene = lead_memory_scene();
+    for owner in ["system", "telegram:12345", ""] {
+        assert!(
+            lead_memory_context(
+                &scene.service,
+                owner,
+                &MemoryScopeContext::global_only(),
+                "task-1",
+                "user-1:cli",
+                "cli",
+            )
+            .is_none(),
+            "{owner}"
+        );
+    }
+}
+
+/// **Plan 3.3, one profile injection.** The lead prompt carries the daemon's
+/// `USER.md` exactly once — rendered by the persona layer's own block, right
+/// after the lead persona — and nothing at all when there is no document.
+#[test]
+fn the_lead_prompt_carries_the_user_document_exactly_once() {
+    let engine = crate::compose::ComposeEngine::new(16);
+    let doc = crate::middleware::user::parse_user_markdown(
+        crate::test_util::PROFILE_DOC,
+    )
+    .unwrap();
+    let prompt = build_lead_agent_prompt_from_templates(
+        &engine,
+        "Test persona",
+        &[],
+        200_000,
+        Some(&doc),
+        Some(1000),
+    );
+    assert_eq!(prompt.matches("### USER PROFILE ###").count(), 1, "{prompt}");
+    assert!(prompt.contains("Name: Alex"), "{prompt}");
+    let persona_at = prompt.find("Test persona").unwrap();
+    let profile_at = prompt.find("### USER PROFILE ###").unwrap();
+    let role_at = prompt.find("<role>").unwrap();
+    assert!(persona_at < profile_at && profile_at < role_at, "{prompt}");
+
+    let without =
+        build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000, None, None);
+    assert_eq!(without.matches("### USER PROFILE ###").count(), 0);
+}
+
+/// End to end: the lead's first request carries its profile once in the
+/// system prompt, its memory as one quoted-data user message before the
+/// objective, and the delivery lands in the ring under the task id.
+#[tokio::test]
+async fn a_lead_run_is_primed_with_its_memory_once_and_its_profile_once() {
+    let scene = lead_memory_scene();
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let doc = crate::middleware::user::parse_user_markdown(
+        crate::test_util::PROFILE_DOC,
+    )
+    .unwrap();
+    let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "write the status reports",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        Some(scene.service.clone()),
+        Some(doc),
+        "task-1",
+        LEAD_OWNER,
+        "user-1:cli",
+        "cli",
+        &daemon_config,
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        None,
+    )
+    .await;
+    assert!(result.success);
+
+    let seen = provider.seen_messages.lock().unwrap();
+    let messages = &seen[0];
+    assert!(matches!(messages[0].role, openalpaca_llm::Role::System));
+    assert_eq!(
+        messages[0].content.matches("### USER PROFILE ###").count(),
+        1,
+        "{}",
+        messages[0].content
+    );
+    let profile_copies: usize = messages
+        .iter()
+        .map(|m| m.content.matches("### USER PROFILE ###").count())
+        .sum();
+    assert_eq!(profile_copies, 1);
+    assert!(matches!(messages[1].role, openalpaca_llm::Role::User));
+    assert!(messages[1].content.starts_with("<memory_context>\n"), "{}", messages[1].content);
+    assert!(messages[1].content.contains(&scene.global.to_string()));
+    assert!(!messages[1].content.contains(&scene.proj_a.to_string()));
+    assert_eq!(messages[2].content, "write the status reports");
+
+    let ring = scene.service.recently_used(10);
+    assert_eq!(ring.len(), 1);
+    assert_eq!(ring[0].id, scene.global);
+    assert_eq!(ring[0].task_id.as_deref(), Some("task-1"));
+    assert_eq!(ring[0].lane_key.as_deref(), Some("user-1:cli"));
+}
+
+/// The lead's opening memory message on `scene` for "write the status
+/// reports", through the real run under `config`.
+async fn lead_opening_memory(scene: &LeadMemoryScene, config: DaemonConfig) -> String {
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let daemon_config = Arc::new(ArcSwap::from_pointee(config));
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "write the status reports",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        Some(scene.service.clone()),
+        None,
+        "task-1",
+        LEAD_OWNER,
+        "user-1:cli",
+        "cli",
+        &daemon_config,
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        None,
+    )
+    .await;
+    assert!(result.success);
+    let seen = provider.seen_messages.lock().unwrap();
+    let message = &seen[0][1];
+    assert!(
+        message.content.starts_with("<memory_context>\n"),
+        "{}",
+        message.content
+    );
+    message.content.clone()
+}
+
+/// End to end, the lead reads `[orchestrator.memory] recall_mode` from the
+/// daemon config it is started with (L10b review, finding 3): three notes
+/// match, so the two modes differ — the default `index` primes the run with
+/// the index block's header, `excerpts` without it.
+#[tokio::test]
+async fn a_lead_run_is_primed_in_the_configured_recall_mode() {
+    use crate::memory::service::{INDEX_BLOCK_HEADER, StoreInput};
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let scene = lead_memory_scene();
+    let owner = scene
+        .service
+        .context(
+            LEAD_OWNER,
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    for (title, body) in [
+        (
+            "Status report format",
+            "# Status report format\n\nStatus reports lead with the blockers.\n",
+        ),
+        (
+            "Status report audience",
+            "# Status report audience\n\nStatus reports go to the whole team.\n",
+        ),
+    ] {
+        scene
+            .service
+            .store(
+                &owner,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Preference),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    let index = lead_opening_memory(&scene, DaemonConfig::default()).await;
+    assert_eq!(index.matches(INDEX_BLOCK_HEADER).count(), 1, "{index}");
+
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.recall_mode = RecallMode::Excerpts;
+    let excerpts = lead_opening_memory(&scene, config).await;
+    assert!(!excerpts.contains(INDEX_BLOCK_HEADER), "{excerpts}");
+    assert_eq!(excerpts.matches("[/memory]\n").count(), 3, "{excerpts}");
+}
+
+// ── Design 09 §6.2: a subagent's notes reach *recently used* ──────────
+
+/// A provider for a lead that spawns one worker, and a worker that searches
+/// memory once and then answers. It keeps the tools the worker was offered.
+struct SubagentSearchesMemory {
+    lead: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent_tools: std::sync::Mutex<Vec<String>>,
+    lead_tools: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for SubagentSearchesMemory {
+    fn name(&self) -> &str {
+        "subagent-searches-memory"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let is_subagent = request
+            .messages
+            .first()
+            .is_some_and(|m| m.content.contains("You are a subagent"));
+        let queue = if is_subagent {
+            let mut offered = self
+                .subagent_tools
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if offered.is_empty() {
+                offered.extend(request.tools.iter().map(|t| t.name.clone()));
+            }
+            &self.subagent
+        } else {
+            let mut offered = self.lead_tools.lock().unwrap_or_else(|p| p.into_inner());
+            if offered.is_empty() {
+                offered.extend(request.tools.iter().map(|t| t.name.clone()));
+            }
+            &self.lead
+        };
+        let next = queue.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+        Ok(next.unwrap_or_else(|| scripted_response("done", vec![])))
+    }
+}
+
+/// Design 09 §6.2 (LR15), on the real spawn path: a subagent reaches memory
+/// only through its own memory tools, and its `memory_search` lands in the
+/// recently-used ring carrying the run's `task_id` — `ToolContext.task_id`
+/// is set for every subagent and the service copies it into the delivery's
+/// attribution. The worker's template names no memory capability, so the
+/// search is there by the ambient grant (§5). The lead is given no memory
+/// service, so nothing it recalls can put a row in the ring.
+#[tokio::test]
+async fn a_subagents_memory_search_records_its_task_id_in_the_ring() {
+    let scene = lead_memory_scene();
+    let shared = Arc::new(SharedContext::new());
+    let worker = crate::test_util::make_agent("worker", vec![]);
+    shared
+        .agent_registry
+        .register_template(crate::test_util::template_from_agent(&worker));
+    // The read surface is registered globally in production; mirror that.
+    let registry = ToolRegistry::default();
+    for tool in crate::tools::builtins::memory_read_tools(scene.service.clone()) {
+        registry.register(tool).unwrap();
+    }
+
+    let provider = Arc::new(SubagentSearchesMemory {
+        lead: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-1".to_string(),
+                        name: "spawn_subagent".to_string(),
+                        arguments: serde_json::json!({
+                            "agent_id": "worker",
+                            "objective": "find out how the owner wants status reports",
+                        }),
+                    }],
+                ),
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-2".to_string(),
+                        name: "wait_for_subagents".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                ),
+                scripted_response("terse, as noted", vec![]),
+            ]
+            .into(),
+        ),
+        subagent: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "sub-call-1".to_string(),
+                        name: "memory_search".to_string(),
+                        arguments: serde_json::json!({ "query": "status reports" }),
+                    }],
+                ),
+                scripted_response("The owner prefers terse status reports.", vec![]),
+            ]
+            .into(),
+        ),
+        subagent_tools: std::sync::Mutex::new(Vec::new()),
+        lead_tools: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "how should the status reports read?",
+        Arc::new(router),
+        Arc::new(registry),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        LEAD_OWNER,
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    let offered = provider.subagent_tools.lock().unwrap().clone();
+    assert!(
+        offered.iter().any(|t| t == "memory_search"),
+        "the worker was offered memory_search: {offered:?}"
+    );
+    // Design 09 §13.1: the search answers an index, so the read that
+    // follows it — and the timeline — come with it, on the worker's surface
+    // (the `memory_read` capability's) and on the lead's hand-built one.
+    let lead_offered = provider.lead_tools.lock().unwrap().clone();
+    for name in ["memory_search", "memory_read", "memory_timeline"] {
+        assert!(
+            offered.iter().any(|t| t == name),
+            "the worker was offered {name}: {offered:?}"
+        );
+        assert!(
+            lead_offered.iter().any(|t| t == name),
+            "the lead was offered {name}: {lead_offered:?}"
+        );
+    }
+
+    let ring = scene.service.recently_used(10);
+    assert_eq!(ring.len(), 1, "{ring:?}");
+    assert_eq!(ring[0].id, scene.global);
+    assert_eq!(ring[0].reason, crate::memory::service::UsedReason::Tool);
+    assert_eq!(ring[0].task_id.as_deref(), Some("task-1"));
+    // Subagents are lane-detached: the row names the run, not a lane.
+    assert!(ring[0].lane_key.is_none(), "{:?}", ring[0].lane_key);
+}
+
+// ── Design 11 §4, CQ-6: the chat's working state reaches the lead ────
+
+/// The lead run over `db`, started from `session_id`, answering "done"; the
+/// messages of its one request.
+async fn lead_first_request(
+    db: &openalpaca_storage::Database,
+    session_id: Option<&str>,
+) -> Vec<openalpaca_llm::ChatMessage> {
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "Book the Alfama hotel",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        Some(db.clone()),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:gui",
+        "gui",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        session_id,
+    )
+    .await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+    provider.seen_messages.lock().unwrap()[0].clone()
+}
+
+/// Owner decision CQ-6: a run started from a conversation is given that
+/// conversation's working state — one block, right after its objective, as
+/// `WorkingState::render` writes it; a run from a conversation with no state,
+/// or from none, is given no block.
+#[tokio::test]
+async fn the_lead_is_given_the_chats_working_state_after_its_objective() {
+    use crate::orchestrator::working_state::{BLOCK_PREFIX, VERSION, WorkingState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let session = repo
+        .get_or_create_active_session("user-1:gui", "gui", None)
+        .unwrap();
+    let blocks = |messages: &[openalpaca_llm::ChatMessage]| {
+        messages
+            .iter()
+            .filter(|m| m.content.starts_with(BLOCK_PREFIX))
+            .count()
+    };
+    assert_eq!(
+        blocks(&lead_first_request(&db, Some(&session.id)).await),
+        0,
+        "a conversation with no state gives no block"
+    );
+
+    let state = WorkingState {
+        v: VERSION,
+        topic: "Lisbon trip".to_string(),
+        goal: "Book the October trip".to_string(),
+        done: vec!["Flight booked".to_string()],
+        asked: Vec::new(),
+        decisions: vec!["A hotel in Alfama, not Baixa".to_string()],
+        open: Vec::new(),
+        next: "Book the Alfama hotel".to_string(),
+        refs: Vec::new(),
+    };
+    assert!(
+        repo.update_working_state(&session.id, 0, &serde_json::to_string(&state).unwrap(), 0)
+            .unwrap()
+    );
+    let updated_at = repo
+        .get_session(&session.id)
+        .unwrap()
+        .unwrap()
+        .working_state_updated_at
+        .unwrap();
+
+    let messages = lead_first_request(&db, Some(&session.id)).await;
+    let objective = messages
+        .iter()
+        .position(|m| m.content == "Book the Alfama hotel")
+        .expect("the objective");
+    assert_eq!(blocks(&messages), 1, "one working-state block");
+    assert_eq!(
+        messages[objective + 1].content,
+        state.render(&updated_at, 4000),
+        "the block follows the objective"
+    );
+    assert_eq!(
+        blocks(&lead_first_request(&db, None).await),
+        0,
+        "no conversation, no block"
+    );
+}
+
+/// R44 + R28 (storage design §10), the lead: a run started from a
+/// conversation with no project is told that conversation's scratch folder
+/// after its objective — the line is read from the lead's own tool context,
+/// so naming the conversation proves the context carries it — and a run
+/// with neither a project nor a conversation is told nothing.
+#[tokio::test]
+async fn a_lead_with_no_project_is_told_its_conversations_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+
+    let messages = lead_first_request(&db, Some("conv-lead")).await;
+
+    let folder = home_root.join("scratch").join("conv-lead");
+    let objective = messages
+        .iter()
+        .position(|m| m.content == "Book the Alfama hotel")
+        .expect("the objective");
+    let at = messages
+        .iter()
+        .position(|m| {
+            m.content.starts_with("<working_folder>This conversation has no project.")
+                && m.content.contains(&folder.display().to_string())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no working-folder note: {:?}",
+                messages.iter().map(|m| &m.content).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(at, objective + 1, "with no chat state, the line follows the objective");
+    assert!(!home_root.join("scratch").exists(), "a note makes no folder");
+
+    let none = lead_first_request(&db, None).await;
+    assert!(
+        !none.iter().any(|m| m.content.starts_with("<working_folder>")),
+        "a run with neither a project nor a conversation is told nothing"
+    );
+}
+
+/// R28 with the lead's ruling R-T22 (the whole-stage review's
+/// d6-surfaces-1), the lead in a project: it reads the project with
+/// `file_read` and `file_list` and holds no tool that writes a file or runs
+/// a command (R42), so its line names those two and tells it a file for the
+/// project is a subagent's to write — not, as before, that its `file_write`,
+/// `file_edit`, `send` and shell act there. Its `artifact_write`, by
+/// template, says the same of result files.
+#[tokio::test]
+async fn a_lead_in_a_project_is_told_a_subagent_writes_its_files() {
+    let gp = crate::test_util::GuardedProject::new();
+    let root = gp.root.display().to_string();
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "Write the release notes",
+        scripted_router(provider.clone()),
+        registry_with_builtins(),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:gui",
+        "gui",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::for_request(Some(root.as_str())),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some("conv-lead"),
+    )
+    .await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+
+    let messages = provider.seen_messages.lock().unwrap()[0].clone();
+    let note = messages
+        .iter()
+        .find(|m| m.content.starts_with("<working_folder>"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no working-folder note: {:?}",
+                messages.iter().map(|m| &m.content).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        note.content,
+        format!(
+            "<working_folder>Your working folder is the project folder {root}. Paths in \
+             file_read and file_list are relative to it. You hold no tool that writes a file in \
+             the project: a file for the project is written by a subagent whose template grants \
+             file_write.</working_folder>"
+        )
+    );
+}
+
+/// Tells the lead's rounds from a subagent's, as `LeadAndSubagentProvider`
+/// does, and keeps the message list of every subagent request.
+struct RecordsTheSubagent {
+    lead: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for RecordsTheSubagent {
+    fn name(&self) -> &str {
+        "records-the-subagent"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let is_subagent = request
+            .messages
+            .first()
+            .is_some_and(|m| m.content.contains("You are a subagent"));
+        if is_subagent {
+            self.subagent_requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(request.messages.as_ref().clone());
+            return Ok(scripted_response("seventeen", vec![]));
+        }
+        let next = self
+            .lead
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .pop_front();
+        Ok(next.unwrap_or_else(|| scripted_response("done", vec![])))
+    }
+}
+
+/// R44 + R28: a subagent's tool context carries the run's conversation —
+/// handed down by `SpawnSubagentTool` — and its model is told the same
+/// scratch folder, right before its objective.
+#[tokio::test]
+async fn a_subagent_carries_the_runs_conversation_and_is_told_its_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let shared = Arc::new(SharedContext::new());
+    let worker = crate::test_util::make_agent("worker", vec!["memory_read"]);
+    shared
+        .agent_registry
+        .register_template(crate::test_util::template_from_agent(&worker));
+    let provider = Arc::new(RecordsTheSubagent {
+        lead: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-1".to_string(),
+                        name: "spawn_subagent".to_string(),
+                        arguments: serde_json::json!({
+                            "agent_id": "worker",
+                            "objective": "count the alpacas",
+                        }),
+                    }],
+                ),
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-2".to_string(),
+                        name: "wait_for_subagents".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                ),
+                scripted_response("all done", vec![]),
+            ]
+            .into(),
+        ),
+        subagent_requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some("conv-sub"),
+    )
+    .await;
+    assert!(result.success, "finish: {:?}", result.loop_result.finish_reason);
+
+    let requests = provider.subagent_requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "the subagent answered in one round");
+    let messages = &requests[0];
+    let folder = home_root.join("scratch").join("conv-sub");
+    let note = &messages[messages.len() - 2].content;
+    // R-T22: the worker holds no file tool and no shell (an empty
+    // registry), so its line names its folder and nothing more.
+    assert_eq!(
+        note,
+        &format!(
+            "<working_folder>This conversation has no project. Your working folder is its \
+             scratch folder {}.</working_folder>",
+            folder.display()
+        ),
+        "the line right before the objective names the run's scratch folder"
+    );
+    assert!(
+        messages.last().unwrap().content.contains("count the alpacas"),
+        "the objective is last"
+    );
+}
+
+/// A lead whose rounds are scripted and whose summariser call — told apart
+/// by the working-state prompt's system text — answers `state`; every
+/// summariser prompt and every lead request is kept.
+struct LeadCompactionProvider {
+    rounds: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    state: String,
+    writer_prompts: std::sync::Mutex<Vec<String>>,
+    lead_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for LeadCompactionProvider {
+    fn name(&self) -> &str {
+        "lead-compaction"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let (system, _) = crate::orchestrator::working_state::render_prompt(None, "");
+        if request
+            .messages
+            .first()
+            .is_some_and(|m| m.content == system)
+        {
+            self.writer_prompts
+                .lock()
+                .unwrap()
+                .push(request.messages[1].content.clone());
+            return Ok(scripted_response(&self.state, vec![]));
+        }
+        self.lead_requests
+            .lock()
+            .unwrap()
+            .push(request.messages.as_ref().clone());
+        let next = self.rounds.lock().unwrap().pop_front();
+        Ok(next.unwrap_or_else(|| scripted_response("done", vec![])))
+    }
+}
+
+/// Design 11 §3.3 with CQ-6: the lead's compaction folds its older messages
+/// into the chat's working state it was handed — the summariser reads that
+/// state as the previous one — and the list then holds the new state's block
+/// alone, the chat's taken out.
+#[tokio::test]
+async fn the_leads_compaction_folds_into_the_chats_working_state() {
+    use crate::orchestrator::working_state::{BLOCK_PREFIX, VERSION, WorkingState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let session = repo
+        .get_or_create_active_session("user-1:gui", "gui", None)
+        .unwrap();
+    let chat = WorkingState {
+        v: VERSION,
+        topic: "Lisbon trip".to_string(),
+        goal: "Book the October trip".to_string(),
+        done: vec!["Flight booked".to_string()],
+        asked: Vec::new(),
+        decisions: vec!["A hotel in Alfama, not Baixa".to_string()],
+        open: Vec::new(),
+        next: "Book the Alfama hotel".to_string(),
+        refs: Vec::new(),
+    };
+    let chat_json = serde_json::to_string(&chat).unwrap();
+    assert!(
+        repo.update_working_state(&session.id, 0, &chat_json, 0)
+            .unwrap()
+    );
+
+    let check = |content: &str| {
+        scripted_response(
+            content,
+            vec![openalpaca_llm::ToolCall {
+                id: "call".to_string(),
+                name: "check_subagent_status".to_string(),
+                arguments: serde_json::json!({ "subagent_run_id": "none" }),
+            }],
+        )
+    };
+    // Two short rounds, then one whose ~7 500 tokens put the next round past
+    // the 8 192-token window's summary tier.
+    let provider = Arc::new(LeadCompactionProvider {
+        rounds: std::sync::Mutex::new(
+            vec![check("first"), check("second"), check(&"x".repeat(30_000))].into(),
+        ),
+        state: r#"{"topic":"Lisbon hotel booking","goal":"Book the October trip","done":["Flight booked","Checked the subagents"],"decisions":["A hotel in Alfama, not Baixa"],"open":[],"next":"Book the Alfama hotel","refs":[]}"#.to_string(),
+        writer_prompts: std::sync::Mutex::new(Vec::new()),
+        lead_requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Ollama,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    router.model_registry().register(
+        "qwen3:8b".to_string(),
+        openalpaca_llm::routing::model_registry::ModelInfo {
+            provider: openalpaca_llm::ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "Book the Alfama hotel",
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        Some(db.clone()),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:gui",
+        "gui",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some(&session.id),
+    )
+    .await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+
+    let prompts = provider.writer_prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 1, "one summariser call");
+    assert!(
+        prompts[0].contains(&format!("<previous_state>\n{chat_json}\n</previous_state>")),
+        "the chat's state is the previous one: {}",
+        prompts[0]
+    );
+    let requests = provider.lead_requests.lock().unwrap().clone();
+    let last = requests.last().unwrap();
+    let blocks: Vec<&str> = last
+        .iter()
+        .filter(|m| m.content.starts_with(BLOCK_PREFIX))
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(blocks.len(), 1, "one state block after the compaction");
+    assert!(
+        blocks[0].contains("Topic: Lisbon hotel booking"),
+        "{}",
+        blocks[0]
+    );
 }

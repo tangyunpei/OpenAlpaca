@@ -37,6 +37,13 @@ enum ServerEvent {
         kind: String,
         version: u32,
         path: String,
+        /// A result file in the project (Stage 2), not a by-product. Absent on
+        /// a frame from an older daemon.
+        #[serde(default)]
+        in_project: bool,
+        #[allow(dead_code)]
+        #[serde(default = "openable_by_default")]
+        openable: bool,
         ts: DateTime<Utc>,
         #[allow(dead_code)]
         instance_id: String,
@@ -138,6 +145,44 @@ enum ServerEvent {
     Unknown,
 }
 
+fn openable_by_default() -> bool {
+    true
+}
+
+/// The bracketed tag `tail` prints after an artifact's name: its kind and
+/// version for a by-product, `in the project` for a result file, which has no
+/// versions (ST-12).
+fn artifact_tag(kind: &str, version: u32, in_project: bool) -> String {
+    if in_project {
+        "[in the project]".to_string()
+    } else {
+        format!("[{kind} v{version}]")
+    }
+}
+
+/// What `tail` prints for a written file: its name, the [`artifact_tag`] and
+/// its path, uncoloured. The name and the path are the agent's choice — a
+/// result file's name is its path in the project — and `tail` prints them at
+/// a terminal, where a raw ESC rewrites the line and a bidi override
+/// reorders it, so each goes through `utils::text::escape_hidden_line`:
+/// every hidden character, a line break among them, as `<U+XXXX>` (S4a's
+/// deferred (1)). No count line: `tail` is not an approval surface.
+fn artifact_parts(
+    name: &str,
+    kind: &str,
+    version: u32,
+    path: &str,
+    in_project: bool,
+) -> (String, String, String) {
+    use openalpaca_core::utils::text::escape_hidden_line;
+
+    (
+        escape_hidden_line(name).text,
+        artifact_tag(kind, version, in_project),
+        escape_hidden_line(path).text,
+    )
+}
+
 pub async fn run(count: usize) -> Result<()> {
     // Read discovery file
     let disc = discovery::read_discovery()?.context("Daemon is not running (no discovery file)")?;
@@ -215,6 +260,20 @@ pub async fn run(count: usize) -> Result<()> {
     Ok(())
 }
 
+/// An id as `tail` shows it: its first eight characters in brackets, `...`
+/// when more were left out. Cut by characters, never by bytes (residual
+/// X22): `&id[..8]` panicked on an id shorter than eight bytes or one whose
+/// eighth byte fell inside a character.
+fn short_id(id: &str) -> String {
+    let mut chars = id.chars();
+    let head: String = chars.by_ref().take(8).collect();
+    if chars.next().is_some() {
+        format!("[{head}...]")
+    } else {
+        format!("[{head}]")
+    }
+}
+
 fn print_event(event: &ServerEvent) {
     match event {
         ServerEvent::Heartbeat { ts, instance_id } => {
@@ -223,7 +282,7 @@ fn print_event(event: &ServerEvent) {
                 "{} 💓 {} {}",
                 time.dimmed(),
                 "heartbeat".cyan(),
-                format!("[{}...]", &instance_id[..8]).dimmed()
+                short_id(instance_id).dimmed()
             );
         }
         ServerEvent::CommandReceived {
@@ -238,7 +297,7 @@ fn print_event(event: &ServerEvent) {
                 time.dimmed(),
                 "command".magenta(),
                 command.bold(),
-                format!("[{}...]", &request_id[..8]).dimmed()
+                short_id(request_id).dimmed()
             );
         }
         ServerEvent::ArtifactWritten {
@@ -246,16 +305,18 @@ fn print_event(event: &ServerEvent) {
             kind,
             version,
             path,
+            in_project,
             ts,
             ..
         } => {
             let time = ts.format("%H:%M:%S").to_string();
+            let (name, tag, path) = artifact_parts(name, kind, *version, path, *in_project);
             println!(
                 "{} 📄 {} {} {} {}",
                 time.dimmed(),
                 "artifact".green(),
                 name.bold(),
-                format!("[{kind} v{version}]").cyan(),
+                tag.cyan(),
                 path.dimmed()
             );
         }
@@ -428,6 +489,21 @@ fn print_event(event: &ServerEvent) {
 mod tests {
     use super::*;
 
+    /// Residual X22: an id is shown by its first eight characters, never
+    /// cut by bytes — a short id is shown whole and a non-ASCII one is cut
+    /// between characters, where `&id[..8]` panicked on both.
+    #[test]
+    fn an_id_is_shortened_by_characters_and_a_short_one_is_shown_whole() {
+        assert_eq!(short_id("3f2a9c1e-7b40-4d6a"), "[3f2a9c1e...]");
+        assert_eq!(short_id("3f2a9c1e"), "[3f2a9c1e]");
+        assert_eq!(short_id("abc"), "[abc]");
+        assert_eq!(short_id(""), "[]");
+        assert_eq!(
+            short_id("\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}"),
+            "[\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}\u{754c}...]"
+        );
+    }
+
     /// T28 — `artifact_written` has a real arm, so `openalpaca tail` names the
     /// deliverable instead of printing "unknown event".
     #[test]
@@ -489,6 +565,88 @@ mod tests {
         ));
         // The print arm must survive both halves being absent.
         print_event(&event);
+    }
+
+    /// Stage 2: `tail` says a result file was written in the project, where a
+    /// by-product says its kind and version (a result file has no versions).
+    #[test]
+    fn a_result_file_is_tagged_in_the_project() {
+        assert_eq!(artifact_tag("markdown", 2, false), "[markdown v2]");
+        assert_eq!(artifact_tag("code", 1, true), "[in the project]");
+
+        let frame = r#"{
+            "type": "artifact_written",
+            "artifact_id": "a-3",
+            "task_id": null,
+            "agent_id": "code_agent",
+            "name": "src/main.rs",
+            "kind": "code",
+            "version": 1,
+            "path": "/w/app/src/main.rs",
+            "in_project": true,
+            "openable": true,
+            "ts": "2026-10-08T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::ArtifactWritten {
+                in_project: true,
+                ..
+            }
+        ));
+        print_event(&event);
+    }
+
+    /// A written file's name and path are the agent's choice, printed at a
+    /// terminal, where a raw ESC rewrites the line and a bidi override
+    /// reorders it (S4a's deferred (1)): every hidden character in them, a
+    /// line break among them, is shown as `<U+XXXX>`. The tag is the
+    /// daemon's own.
+    #[test]
+    fn a_written_files_name_and_path_show_hidden_characters_escaped() {
+        use openalpaca_core::utils::text::needs_escape;
+
+        let (name, tag, path) = artifact_parts(
+            "src/\u{202E}gnp.exe\u{1b}[2K",
+            "code",
+            1,
+            "/w/app/src/\u{202E}gnp.exe\u{200B}\nnotes.md",
+            true,
+        );
+
+        assert_eq!(name, "src/<U+202E>gnp.exe<U+001B>[2K");
+        assert_eq!(tag, "[in the project]");
+        assert_eq!(path, "/w/app/src/<U+202E>gnp.exe<U+200B><U+000A>notes.md");
+        for shown in [&name, &path] {
+            assert!(!shown.chars().any(needs_escape), "{shown:?}");
+            assert!(!shown.contains('\n'), "{shown:?}");
+        }
+    }
+
+    /// A frame from an older daemon has no `in_project`: a by-product.
+    #[test]
+    fn an_older_artifact_frame_is_a_by_product() {
+        let frame = r#"{
+            "type": "artifact_written",
+            "artifact_id": "a-4",
+            "task_id": null,
+            "agent_id": null,
+            "name": "01-notes.md",
+            "kind": "markdown",
+            "version": 1,
+            "path": "/h/.openalpaca/artifacts/loose/01-notes.md",
+            "ts": "2026-10-08T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        assert!(matches!(
+            serde_json::from_str::<ServerEvent>(frame).unwrap(),
+            ServerEvent::ArtifactWritten {
+                in_project: false,
+                ..
+            }
+        ));
     }
 
     /// GAP-09 — a lane transition has its own arm, so `openalpaca tail` shows

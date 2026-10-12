@@ -1,10 +1,12 @@
 # OpenAlpaca GUI Manual
 
 OpenAlpaca GUI (`openalpaca-gui`) is a Tauri 2 desktop app — a React 19 +
-TypeScript + Tailwind 4 frontend in a webview, with a small Rust shell whose
-only job is finding (or starting) the local daemon. Everything on screen comes
-from the daemon over HTTP, one WebSocket and one SSE stream; the webview itself
-never reads the database, the config files or `discovery.json`.
+TypeScript + Tailwind 4 frontend in a webview, with a small Rust shell that
+finds (or starts) the local daemon, waits for it to stop, reads its log and
+shows a file in its folder (*Connection lifecycle* lists its five commands).
+Everything on screen comes from the daemon over HTTP, one WebSocket and one SSE
+stream; the webview itself never reads the database, the config files or
+`discovery.json`.
 
 One rule shapes the whole app and is worth stating before the tour: **nothing is
 invented.** Where the daemon has no answer the GUI renders the empty state plus
@@ -81,10 +83,15 @@ does not choose this layout — it asks the storage crate for it
 ```text
 ~/.openalpaca/
   state/      openalpaca.db, discovery.json, openalpacad.lock, .master_key,
-              backups/, logs/
+              backups/, logs/, memory-control/ (one snapshot per memory
+              partition), cache/memory-index-v1.sqlite (the search index)
   config/     the runtime config a GUI- or CLI-managed daemon reads
   plugins/    plugin directories, plus .permissions.toml, .config/<name>.toml,
               .data/<name>/ and .trash/ — all invisible to the plugin scan
+  memory/     your memory notes: owners/<owner-key>/notes/*.md
+  projects/   one folder per project: project.json (its id and path),
+              artifacts/, uploads/, memory/
+  scratch/    one working folder per conversation with no project
   artifacts/ uploads/ sessions/ …   content, home scope
 ```
 
@@ -92,18 +99,13 @@ When the GUI spawns the daemon it sets the child's working directory to that
 root and `OPENALPACA_CONFIG_DIR` to `<root>/config`, and appends the daemon's
 output to `<root>/state/logs/daemon.log` — the same file, under the same
 rotation (16 MB, three older generations kept), that `openalpaca daemon start`
-writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at keeps
-its own store at `<project>/.openalpaca/`.
-
-Nothing is moved into this root for you. If a development build's data directory
-(`~/Library/Application Support/OpenAlpaca` on macOS) is still on the machine,
-the daemon says so. It refuses to start only when that directory holds a
-database, a `.master_key` or a `config/` **and** this root has no database yet —
-rather than come up on an empty database beside it; the app then shows the
-daemon's own message in Settings → Connection, read from `daemon.log`. Otherwise
-it starts, and logs one warning per boot while that directory still holds a
-database, `.master_key`, `config/`, `plugins/` or `assets/`. See [If You Have Data From an Older
-Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
+writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you choose keeps its
+data in the home store, in its folder under `projects/` — its artifacts, uploads
+and memory notes beside a `project.json` with its id and path; nothing of
+OpenAlpaca's is written inside the project's own folder — an agent writes
+there only with your approval, each write and each command asking first. A
+conversation with no project works in its own folder under `scratch/`, which
+goes when the conversation is deleted.
 
 ## Connection lifecycle
 
@@ -118,10 +120,10 @@ whole bridge (`src-tauri/src/lib.rs`):
   `state/logs/daemon.log`, and the command polls for up to about five seconds
   (25 × 200 ms) for a daemon that both advertises itself and accepts
   connections. **If none does, the error says why:** it ends with the last
-  lines this spawn wrote to the log — the daemon's own refusal, verbatim (an
-  older schema, an older install's data still on the machine, another daemon
-  holding the lock) — or says the daemon wrote nothing at all. Only this
-  spawn's lines are quoted, never an earlier run's.
+  lines this spawn wrote to the log — the daemon's own refusal, verbatim (a
+  database this build does not know, another daemon holding the lock) — or
+  says the daemon wrote nothing at all. Only this spawn's lines are quoted,
+  never an earlier run's.
 - `get_connection_info` — the reconnect path. It re-reads discovery and checks
   the expiry without spawning anything.
 - `await_daemon_stopped` — waits until a daemon asked to stop is really gone:
@@ -129,6 +131,19 @@ whole bridge (`src-tauri/src/lib.rs`):
   nothing.
 - `read_daemon_log_tail` — the end of `state/logs/daemon.log`, read straight
   from the file, so it answers when no daemon is serving anything.
+- `reveal_path` — shows an artifact's file in its folder: Finder with the file
+  selected on macOS (`open -R`), Explorer with it selected on Windows, the
+  folder in the file manager on Linux (`xdg-open`). It takes no path on trust:
+  the path is resolved, symlinks included, and only a regular file under the
+  home root (`OPENALPACA_HOME_STORE` moves it), or under the root of one of your
+  projects, is shown — every store file lives under the home root, a project's
+  in its folder under `projects/`, and a file an agent wrote into a project
+  lives in that project. A project whose folder is gone or has moved admits
+  nothing through its old path, and its refusal says so:
+  `<root>: this project's folder is gone or has moved; re-point the project to read its files.`
+  The program gets the path as an argument of its own, never through a shell,
+  and a refusal is one sentence, shown as a toast. Behind `Reveal in Finder`
+  (Library, below).
 
 The first two return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
 guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
@@ -179,16 +194,18 @@ headers.
 
 ## The shell
 
-One rail, always mounted, and one of four views beside it
+One rail, always mounted, and one of five views beside it
 (`src/App.tsx`, `src/components/shell/`).
 
 The **nav rail** is 196px and never scrolls. It holds, top to bottom: the
-window traffic lights, the brand, `Chat` / `Work` / `Library`, a "Running now"
-list, and at the bottom the ⌘K button, a connection row and `Settings`. The
-Work item carries a badge counting `GET /v1/tasks?status=active` — whose SQL is
+window traffic lights, the brand, `Chat` / `Work` / `Library` / `Memory`, a
+"Running now" list, and at the bottom the ⌘K button, a connection row and
+`Settings`. The Work item carries a badge counting
+`GET /v1/tasks?status=active` — whose SQL is
 `status IN ('queued','running','paused')`, so the badge and the list agree.
-Library carries **no** count: there is no count on the rail's budget, and a `0`
-beside Library would be a claim about your library the app cannot make.
+Library and Memory carry **no** count: there is no count on the rail's budget,
+and a `0` beside either would be a claim about your library or your memory the
+app cannot make.
 
 **Narrow windows.** The app window will not go below 1000×640, which is what
 the Work, Library and Settings views need — none of their columns collapses.
@@ -204,7 +221,9 @@ one for you either.
 The composer keeps pace. When the row cannot hold both the message box and
 `Attach` / the model button / `Send`, the three controls move to a line of
 their own below the box. A long model id (a local `hf.co/…:Q8_0` tag) is shown
-elided, with the full id on its tooltip.
+elided, with the full id on its tooltip — and when a column re-opened by hand
+leaves even that line too narrow, the model button gives up more of its label so
+`Send` stays inside the composer.
 
 **Resizable panes.** Four columns are draggable and their widths persist
 per-machine in `localStorage` (`oa-pane-widths`): the chat aside (300–600,
@@ -226,7 +245,7 @@ cards. It affects nothing else.
 | ↵ | approve a pending tool confirmation (only while blocked, in chat, palette closed) |
 | ⌘N | new background job |
 | ⌘⇧S | steer the active run |
-| ⌘1 / ⌘2 / ⌘3 | Chat / Work / Library |
+| ⌘1 / ⌘2 / ⌘3 / ⌘4 | Chat / Work / Library / Memory |
 | ⌘⇧D | toggle compact density |
 | ⌘, | Settings → Tools |
 
@@ -245,9 +264,17 @@ something is open in it — an aside (`src/views/chat/`).
 active at a time; the sidebar is the surface that makes that visible. The live
 one sits on top, archived ones below it by `updated_at`, each labelled with the
 project it is bound to, with `New chat`, rename, archive, delete (a two-step
-confirm — there is no undo) and a `Show more` when the list has further pages.
+confirm — there is no undo; the conversation's episode notes, below, go with
+it) and a `Show more` when the list has further pages. `Start fresh`, under
+`New chat`, opens a conversation that is **not** given the previous one's
+working state (below); `New chat` opens one that is.
 Clicking a row resumes it. A row whose runs were cut short by a daemon restart
-carries an `N interrupted` badge.
+carries an `N interrupted` badge. A conversation is named after the first
+thing you typed in it — its first line, cut to 60 characters with `…` — once
+that turn is done; a message that starts with `/` (a slash command) or one of
+attachments alone does not name it, and until something does the row reads
+`Untitled conversation`. A
+rename is yours: nothing renames the conversation after it.
 
 Two rules the sidebar displays rather than enforces:
 
@@ -292,7 +319,15 @@ Besides messages, the transcript carries:
 - a row for each steer or queued follow-up you sent (neither is a chat turn,
   so the daemon stores neither);
 - the tool confirmation banner, and the row that replaces it once it settles;
-- a card for each file a run wrote, and chips for the files a finished run
+- a `File written` card for each file an agent wrote — for a file written into
+  the project the eyebrow reads `File written · in the project` and no version
+  is drawn; `Open` opens it in its default app (for a file in the project only
+  when the Library keeps its kind — text, Markdown or PDF, code or config, a
+  table, a raster image, HTML, an archive or an office document; a script, an
+  `.svg`, a `Makefile` or a dotfile gets `Reveal in Finder` alone),
+  `Reveal in Finder` shows it in its folder (inside the app's own window only),
+  `Open in Library` shows it in the Library (under `Results in the project` for
+  a file in the project) — and chips for the by-products a finished run
   produced;
 - a card under your own message for each file **you** attached, live and after
   a reload. The daemon also writes a text rendering into the message
@@ -321,7 +356,113 @@ is pending the textarea is **not rendered at all** — `Approve`, `Deny` and
 stops asking about that tool for the rest of the current turn or run — the
 chat turn, the workflow's lead, or the one subagent that raised the prompt.
 It is not remembered beyond that, and one agent's approval does not cover
-another's.
+another's; its "added to the allowlist" note appears only once the daemon has
+taken the answer. An answer is sent once: while it is on its way the buttons
+are disabled and a second ↵ or Esc does nothing.
+
+**More than one prompt pending.** A lead running subagents in parallel can
+raise several prompts at once. `Approve`, `Deny`, `Always allow`, ↵ and the
+palette's `Approve pending …` row always answer the **oldest** one, while the
+transcript scrolls to the newest card. So with more than one pending, the card
+they answer is outlined in red, like the composer's own answer box, and says
+`Approve and Deny in the composer answer this card first — 1 of 2 pending,
+oldest first.`; each other card says its place and that the composer answers
+the card outlined in red first. The composer's bar and the palette's row add
+`oldest of 2 pending`. Answer the outlined card, and the next one takes its
+place.
+
+**Hidden characters on an approval.** The card shows the exact values that will
+run, so every hidden character in the tool's name, its arguments and the asking
+agent's name — a bidi override such as U+202E, a zero-width or control
+character, a tag or a variation selector, any space but a plain one (a no-break,
+ideographic or braille blank), an object replacement character (U+FFFC, which
+macOS draws as blank space), a code point Unicode has not assigned or leaves to
+private use (which has no agreed appearance: macOS draws some as blank space,
+and Apple's system fonts some as nothing), and in the two names also a line
+break or a tab — is shown in its place as a highlighted `<U+XXXX>`, never drawn
+raw. A line directly under the arguments counts them for the whole request:
+`Note: this request contains 2 hidden characters, shown as <U+…>.` On the card,
+a `<U+…>` that is not highlighted was typed into the value as text and is not
+counted. The arguments are laid out left to right, isolated from the card around
+them, and a value with no space in it wraps at the card's edge instead of
+running past it. A single command is shown bare unless it holds a line break, a
+tab or another C0 control character (U+0000–U+001F); then the request is shown
+as JSON, which writes each one out (`\n`, `\t`), as the CLI and the chat apps
+show it — drawn as a real line break, it would look just like the box's own
+wrapping. A command that is empty, or starts or ends with a space or with a
+combining mark (an accent stored as a character of its own, which sits on
+the space before it and draws as a speck), is shown as JSON too, so its quotes
+show where it ends. DEL and the C1 controls (U+007F–U+009F), which JSON does not
+write out, leave a command bare and are shown as a highlighted `<U+XXXX>`. The
+composer's bar, the palette's `Approve pending …` row and the run card's
+`Waiting on you: …` name the tool the same way, and because they show only its
+name, they say when the request holds hidden characters anywhere and that its
+card shows them: `its card shows 2 hidden characters`. The row an answer leaves,
+the Always-allow toast and the run's Event log name the tool the same way with
+no count (the palette row, the toast and the Event log show the escape as plain
+text). The `From OpenAlpaca` text is the daemon's own and is shown as it wrote
+it. A memory suggestion's is a summary cut short for reading, from which the
+daemon leaves out every hidden character of the titles, texts and reason it
+quotes, and when it left any out, its last line says how many: `This preview
+leaves out 2 hidden characters; the Memory view shows them as <U+…>.` (The
+suggestion's exact text is in the Memory view, which shows each one.) The
+previews of the file tools and `send` quote a path, a text or a recipient with
+each hidden character written as `<U+XXXX>` and their count on a line under
+it. Only what you see changes: approving answers
+the request the daemon sent. Three things no escape changes: right-to-left
+letters inside a value can still reorder the digits and punctuation next to
+them; a character that merely looks like another (a Cyrillic `а` for a Latin
+`a`) is shown as written; and so is a letter that a particular font happens to
+draw as an empty cell, since what is hidden is decided by Unicode's classes —
+control, format, default-ignorable, unassigned and private-use characters, and
+every blank but the plain space — not by what a font draws.
+
+**A suggestion raised in chat.** When a change to a note you saved is waiting
+for you — one learning found in what you said, or one the assistant saved in
+chat (see *Suggestions* under the Memory view) — the assistant may ask you
+about it in the conversation — at most one per turn, when the topic
+comes up or the conversation pauses. It uses the same card, headed
+`Confirmation required · memory_confirm`, and the card's text is composed
+by OpenAlpaca from the two notes, never from the call's arguments (the new
+text is the assistant's own when it saved the change itself, and the card says
+so): under a `From OpenAlpaca` label it reads
+*"Replace your saved note “X” with “B”?"*, then your text, the new text, what
+else it changes (a `Changes:` line naming each of your note's key, aliases,
+tags or validity it changes, the validity always whole), why (none for the assistant's own change), where it came from — "from what you said on <date>", or "suggested by the
+assistant on <date>" for a change the assistant saved itself — and that your
+note is kept as history. The literal
+arguments (three ids) stay below it. **Approve** makes the new note yours —
+exactly as **Replace** in the Memory view does; the model saying yes, or any
+setting that approves tools automatically, never does. **Deny** dismisses the
+suggestion for good, as **Keep mine** does, and nothing else you said is
+forgotten. There is **no `Always allow`** on this card: each answer is for that
+one suggestion. A card nobody answers leaves the suggestion waiting in the
+Memory view, and it is not raised again in the app's or the CLI's chat until the
+daemon restarts. Only a suggestion that cites a message you typed — one
+learning took from your own words, or one the assistant saved in chat — is
+ever raised in chat — one
+OpenAlpaca inferred from its own replies or a tool's output waits in the
+Memory view — and only in the app's and the CLI's chat, never on Telegram,
+Discord or iMessage.
+
+**Memory commands.** Three messages are answered by the daemon itself, with
+no model, like `/status`: `/remember <text>` saves the text as a note **you
+wrote** — what `Add note` in the Memory view saves, with the first line as its
+title — and answers *"Saved as a note you wrote: “…” (<id>, <scope>). It is used
+from your next message."*; `/forget <id>` forgets that note (a unique prefix of
+at least 8 hex characters will do), while `/forget <words>` forgets nothing and
+lists up to five notes that match, so you can pick one; `/memories` lists your
+ten most recently updated notes and how many suggestions wait in the Memory
+view, and `/memories <words>` searches. `/remember` takes `--kind <kind>`
+(`fact` by default) and `--global` or `--project`; without them a preference
+is global and the other kinds go to the window's project. Answers are short
+lines — id, title, kind and scope — and never a note's body. The note's
+change reaches the Memory view at once (a `memory_changed` frame). Files
+attached to such a message are not saved and are reported *not sent to the
+model*. The commands work in this window and the CLI's chat only; on Telegram,
+Discord or iMessage the daemon answers that they work in the app and the CLI,
+and changes nothing. The full syntax is in the
+[CLI manual](CLI_Manual.md#memory-commands).
 
 **Attaching files.** Three ways in, all the same path: the `Attach` button
 left of the model button opens a file picker, you can paste an image into the
@@ -347,6 +488,11 @@ name, its size and one of three states:
   chat: files belong to the conversation you attached them in. Re-attach them
   if you meant them for the new one. The text you had typed is *not* cleared —
   it stays with the window.
+- A file is filed under the project of the conversation it is for: a
+  conversation you picked from the list that has a project takes its files
+  there, even when this window's project is another one, because its turns run
+  there; with none picked, or one no turn has bound yet, the window's project
+  takes them.
 - Ten files per turn (the daemon's `[upload] max_files_per_message` default).
   An eleventh pick is refused in the window with the same sentence the daemon
   would have answered with.
@@ -369,6 +515,8 @@ It also depends on the turn. Some turns reach no model at all, or reach one
 with a prompt of their own, and answer without your files:
 
 - a task command (`/tasks`, `/status`) or a `/steer`;
+- a memory command (`/remember`, `/forget`, `/memories`), which saves only the
+  text you typed;
 - a short social message (`thanks`, `ok`), which is answered from a small
   prompt of its own;
 - a message that is just a quoted send to a connector;
@@ -381,8 +529,25 @@ like an ordinary message.
 When a file does not reach the model, the turn shows a muted note under the
 answer naming each file and the daemon's reason, and the file is **not** listed
 among the ones the turn used. The note is live only — the daemon stores no
-record of a skip on the message — so a reloaded transcript shows the answer
-without it.
+record of a skip on the message — so it stays under the answer, through later
+turns, only while the chat view keeps that conversation: switching to another
+conversation, leaving for another view and coming back, or reloading shows the
+answer without it.
+
+**"Notes used in this answer."** When the daemon handed the model any of your
+memory notes for a turn, a muted note under the answer lists them by title,
+each marked `recalled` (found for the question automatically), `pinned`,
+`listed` (found automatically too, but named to the model in one line without
+its text, for it to open if it needed it), or `looked up` (the model searched
+or read it itself), and each opens in the
+Memory view — so a note that steered an answer the wrong way is one click from
+being corrected or forgotten. It comes from the turn's `done` frame
+(`memory_used`) and, like the skipped-attachment note, it is **live only**:
+nothing stores which notes shaped an answer, so it stays under the answer,
+through later turns, only while the chat view keeps that conversation —
+switching to another conversation, leaving for another view (opening one of
+its notes in Memory is one) and coming back, or reloading shows the answer
+without it. A note deleted since is named by its id rather than guessed.
 
 **A thinking model shows its thinking.** A local reasoning model can spend ten
 seconds or more before its first token. While the turn is thinking, the
@@ -398,11 +563,34 @@ stores, so a reloaded transcript shows the answer alone.
 **A confirmation outlives the turn that started it.** A workflow asks for
 approval minutes after the chat turn that launched it has finished, so the
 prompt is held against the *conversation*, not against that turn's stream: the
-card appears whenever the daemon raises it, and the run card in the Work pane
+card appears whenever the daemon raises it — sending the next message does not
+clear it, even when it lands just as that message is sent — and the run card in the Work pane
 says `Waiting on you: <tool>` while it waits. A confirmation raised on another
 lane never blocks this composer, and the card names who is asking — the agent
 template for a workflow's prompt, and `Alpaca` for one the assistant raised in
 the chat itself.
+
+**What a card says.** A card shows the tool's arguments — each hidden character
+written as `<U+XXXX>`, as described above — and, over them under
+`From OpenAlpaca`, what the daemon says about the call. A shell command's card
+names the folder it runs in — the project folder, or the conversation's scratch
+folder — and says the command can reach files outside it: read the command
+before you approve it. A `file_write` card says where the file lands — written
+or replaced in the project folder (a replaced file's old content is kept in the
+conversation's log), or saved as a by-product in OpenAlpaca's artifact store. A
+`file_edit` card names the file, the number of replacements and the line of the
+first, and quotes the text to find and the text to put in its place, each cut
+after 1,000 bytes with the cut named. When the path reaches its file through a
+link inside the project, both cards name the file that changes beside it:
+`docs/notes.md (a link to scripts/release.sh)`. A file `send`'s card names the
+file, its size, the channel, the recipient and the name it is sent as; a
+message `send`'s card shows its arguments alone. Hidden characters in a path,
+the file a link leads to, a quoted text or a recipient are written as
+`<U+XXXX>`, with their count under them. A call the daemon would refuse anyway
+— a project folder that is gone or has moved, a path outside the working folder
+or inside `.git`, a file too large to keep a copy of — is refused before any
+card is raised, and the agent is told why. Reading a file or listing a folder
+never raises a card, and neither does saving a draft with `artifact_write`.
 
 **A prompt nobody answers settles anyway.** The daemon waits five minutes per
 prompt by default (`[execution.agent_defaults] confirmation_timeout_secs` in
@@ -425,8 +613,9 @@ on how it ended:
 | You denied it here | `Denied · <tool> denied · the agent was told to skip it.` |
 | Nobody answered in time | `Timed out · <tool> timed out — not run. Nobody answered in time, so the agent continued without it.` |
 | It was answered somewhere else (another window, `openalpaca tasks confirmations approve`), or the run went away | the card clears, with no row — the window does not claim an answer you did not give |
+| You answered a card the daemon was no longer waiting on — it was answered somewhere else, timed out or withdrawn, or the daemon restarted, and this window had not heard yet | `Not waiting · <tool> was answered already or is no longer waiting, so nothing was changed.` The daemon refuses the answer (`404`); the card clears at once, the window re-reads what is still waiting, and the next card, if any, takes the composer. No `Approved` or `Denied` row is written, and `Always allow` adds nothing to any allowlist |
 
-`Approved`, `Denied` and `Timed out` rows stay in the transcript for as long
+`Approved`, `Denied`, `Timed out` and `Not waiting` rows stay in the transcript for as long
 as the window is open, in the order they happened — switching to Work, the
 Library or Settings and coming back leaves them where they were. They belong
 to the conversation they happened in, so switching conversations drops them,
@@ -440,9 +629,16 @@ of which come from stored history.
 live-only with no replay, so a reloaded window, a second window, or an app
 restarted while a background run is blocked would otherwise never see the
 prompt. The window reads `GET /v1/chat/confirmations`, the daemon's list of
-what is *still waiting*, on load and again whenever the socket reconnects, and
-draws a card for each prompt that belongs to this lane. A card this window has
-already retired is not brought back by it. When that read *fails*, the
+what is *still waiting*, on load, every time the chat view is opened and again
+whenever the socket reconnects, and draws a card for each prompt that belongs
+to this lane. Only a read made since the chat view was opened draws anything:
+a list read before you went to Work, the Library or Settings is never used to
+bring back a card you answered before you left, and a prompt raised while you
+were in another view appears as soon as you come back. A card this window has
+already retired is not brought back by it, and neither is a prompt the daemon
+has said is over — by taking or refusing an answer, or by announcing its
+resolution — even when a read that left before that lands after it. When that
+read *fails*, the
 transcript says so — "Could not check for pending approvals: …" — rather than
 looking like a daemon with nothing waiting; live prompts keep arriving
 regardless.
@@ -478,9 +674,34 @@ routable model" message rather than a guess.
 
 **The aside** is one slot with two modes, never both: the Work pane (run cards
 for every run that is not `done`) or the file panel (one artifact, with the
-same Preview / Diff / History renderers the Library uses, at compact size).
+same Preview / Diff / History renderers the Library uses, at compact size, and
+the Library header's `Open` and `Reveal in Finder` beside its pin).
 `‹ Work` restores the pane, `›` collapses the aside, and with the aside closed
 the header grows a "running now" pill as the way back in.
+
+**The working state.** Above the Work pane, a collapsible **Working state**
+card shows where the conversation's work stands — the same record the model
+reads in place of the turns that no longer fit its window: the topic, the
+goal, what is done, what you asked and had answered, what was decided, what is
+still open, the next step, and
+the runs and files the work refers to (a `task …` entry opens that run in Work
+— the Work view when the id is a short one — and an `artifact …` entry the
+Library), with when it was last updated. The daemon's summariser writes it
+when a long turn is compacted, when older turns scroll out of the model's
+window, and when the conversation closes (half an hour of quiet, or switching
+to another); until then the card says *"Nothing summarised yet — the whole
+conversation is still in view"*. Its text is the summariser's, so a hidden
+character in it is drawn as `<U+XXXX>`. The card reads the conversation list,
+which refreshes after every turn; a state the daemon writes later — a refresh
+behind the turn, a close — shows at the list's next refresh.
+
+**Continuing from a previous conversation.** A new conversation on the same
+project is given the previous one — its working state and its last exchange —
+for its first three turns (the daemon's `carry_over_turns`), until it has a
+state of its own. While a turn carries it, a muted line above the transcript
+says *"Continuing from: <topic> (ended <date>)"*. It comes from the turn's
+`done` frame and is live only. `Start fresh` opens a conversation that is
+never given it.
 
 ## Work
 
@@ -502,19 +723,24 @@ action group or, for a finished run, a terminal banner, then three cards:
   cancelled span is drawn neutral with its state spelled out, because the
   design's lane vocabulary has no colour for "failed" and painting it green
   would be a lie.
-- **Output** — this run's files from `GET /v1/artifacts?task_id=`, each of
-  which opens. A run whose files can only be read out of its free-form outcome
-  blob shows them without pretending they open.
+- **Output** — this run's by-products from `GET /v1/artifacts?task_id=`, each
+  of which opens. A run whose files can only be read out of its free-form
+  outcome blob shows them without pretending they open. The files the run
+  wrote into its project are listed apart, after it, in a card drawn only
+  when there are some, under `Written in the project` — up to 500, each of
+  which opens; past that the card says how many more the Library lists.
 - **Event log** — this run's own persisted log,
   `GET /v1/events/history?task_id=`, including the tool calls the live socket
   could never attribute to a run. Each row wears one of five tags (`tool`,
   `steer`, `artifact`, `spawn`, `run`) and a sentence built from the stored
-  row. A tool prompt reads `<tool> · awaiting approval`, and how it ended is
-  its own row: `<tool> · approved`, `denied`, `timed out`, or `withdrawn` (the
-  run went away before anyone answered). A row the window cannot fill a
-  sentence for shows the daemon's raw `event_type` instead of a guess. The card
-  refetches whenever a live frame names this run, so a denial or a timeout
-  appears without waiting for the next unrelated event.
+  row. A file the run wrote reads `<name> · v<n>`, or `<name> · in the project`
+  for one it wrote into its project. A tool prompt reads
+  `<tool> · awaiting approval`, and how it ended is its own row:
+  `<tool> · approved`, `denied`, `timed out`, or `withdrawn` (the run went away
+  before anyone answered). A row the window cannot fill a sentence for shows
+  the daemon's raw `event_type` instead of a guess. The card refetches whenever
+  a live frame names this run, so a denial or a timeout appears without
+  waiting for the next unrelated event.
 
 Every card distinguishes "nothing happened" from "the read failed" and says
 which.
@@ -549,21 +775,53 @@ than re-querying, because two of the labels cover more than one artifact kind
 while `?kind=` takes exactly one, and because that keeps `total` meaning one
 thing.
 
+By default the list shows by-products — drafts, pictures and hand-offs agents
+saved, your uploads, and every file saved in a conversation with no project.
+The `Results in the project` chip shows instead the files agents wrote into
+your projects (`?in_project=true`): each row is named by the file's path in its
+project, carries a `project` tag, and its subtitle starts with the project's
+folder name; it points at the real file. Such a file has no versions: what
+OpenAlpaca keeps of it is the content it had before `file_write` or `file_edit`
+replaced or edited it, in the conversation's log
+(`~/.openalpaca/sessions/<id>/snapshots/`; a shell command's changes keep no
+copy), and any longer history is the project's own — git's, where the project
+is a repository. Its detail has no History or Diff, only Preview, and its row
+follows the file when you edit it yourself. A result file the daemon could not
+find the last time it was read stays listed with a `missing` tag
+(`?include_missing=true`): the Preview reads it again, and once the file is
+back it is shown. The tag goes the next time the file is read — at once when
+the Preview reads it as text; when an image loads, or an `Open` or an
+`Export` finds the file, at the list's next refresh. While its project is
+missing the Preview of a file it reads as text shows the daemon's sentence,
+`<root>: this project's folder is gone or has moved; re-point the project to read its files.`,
+and the tag stays until the project is re-pointed and the file read again. The
+header's count is the shown side's own.
+
 Pins are server state (`PUT /v1/artifacts/{id}/pin`). The client keeps a
 `localStorage` mirror so the star flips instantly, and every server answer
 overwrites it, so the mirror cannot drift into claiming a pin the daemon does
 not have.
 
-The right column has a pinned header — `☆ Pin`, `Export`, `Reveal` — over
-three tabs:
+The right column has a pinned header — `☆ Pin`, `Export`, `Open`, `Reveal in
+Finder` — over three tabs:
 
 - **Preview.** An image is loaded straight by the browser from
   `…/content?token=`. HTML and SVG are shown as **source** by choice:
   rendering agent-authored markup inside the webview is a security review, not
   a missing route. Binary bytes are not characters, so nothing is drawn and the
-  row points at Export. Anything over 512 KiB is refused before the fetch. A
-  row whose bytes were deleted under the daemon says so — a blank pane would
-  claim "nothing here", which is a different statement.
+  row points at Export and Open. Anything over 512 KiB is refused before the
+  fetch. A row whose bytes were deleted under the daemon says so — a blank pane
+  would claim "nothing here", which is a different statement. For a result
+  file marked `missing` the Preview reads it again first: a file that is not
+  back says it is no longer at its path in the project, a missing project's
+  shows the daemon's sentence, and a kind the Preview does not read (binary, or
+  over 512 KiB) says it could not be read the last time it was asked for — not
+  at its path in the project, or its project's folder gone or moved — and what
+  it is. An image is read by loading it, which tells the app no reason, so one
+  that does not load says the same, and that the image is loaded again the
+  next time the Preview is opened; an open Preview also tries again once the
+  row comes back without its mark. Neither note sends you to Export or Open,
+  which fail the same way while the file cannot be found.
 - **Diff.** `GET …/diff` for the newest pair. The `+ / −` counters are counted
   from the patch rather than read off the response, so they cannot disagree with
   the lines under them. A refusal is stated in its own words: `NOT_DIFFABLE`
@@ -575,14 +833,194 @@ three tabs:
   hashes an artifact's head on every read and records bytes that do not match
   its row as a version nobody in OpenAlpaca wrote. The row says so.
 
-`Reveal` is labelled as the design labels it, but the only route behind it
-(`POST /v1/files/{id}/open`) opens the file with the host's default
-application rather than revealing it in Finder; the toast says so.
+Under the name, the header draws the artifact's `summary`, when it is not
+blank, on one muted line — cut with an ellipsis, whole on its tooltip — which
+for a by-product an agent saved with `file_write` in a conversation with no
+project is the path it was written as (`notes/tea.md`, `Makefile`), a path the
+stored name may not show. A file written into the project has none: its name
+is already its path there.
+
+`Open` opens the file in its default application through the daemon
+(`POST /v1/files/{id}/open`), on the machine the daemon runs on, and the toast
+reads `<name> opened in its default app`. (The design labelled this button
+`Reveal`; it always opened the file.) For a result file in the project `Open`
+is drawn only when the Library keeps its kind — text, Markdown or PDF, code or
+config, a table, a raster image, HTML, an archive or an office document; a
+script, a `.command`, an `.svg`, a `Makefile` or a dotfile gets
+`Reveal in Finder` alone, and the daemon refuses to open one
+(`409 OPEN_NOT_OFFERED`). The daemon decides that again on what the file is
+when you click: a result file replaced since by a folder, or by a link to a
+script or an app in the project, is refused the same way, and the toast says
+so. `Export` saves a result file under its base name (`main.rs`, not
+`src/main.rs`). For a result file of a missing project, `Open` and `Export` are
+refused with the daemon's sentence above, as the toast. A by-product is opened
+at its file in OpenAlpaca's store, never through a link out of its folder
+there, and a file that is no longer there — a by-product, or a result file in
+its project — is refused with the daemon's own sentence, as the toast. A
+by-product is opened only when what it resolves to is a kind the Library
+keeps, as for a result file: one whose stored file was replaced since by a
+link to a script in its folder is refused (`409 OPEN_NOT_OFFERED`), and the
+toast says so; one stored under the store's fallback extension `.bin` (text
+whose extension no kind keeps, say) is not offered `Open` at all. `Reveal in
+Finder` still shows either.
+
+`Reveal in Finder` — `Show in folder` on Windows and Linux — shows the file in
+its folder instead, through the app's own shell (`reveal_path`, above): Finder
+comes forward with the file selected. It is drawn only inside the app's window,
+never in the Vite preview, which has no shell to ask. A file that is gone, is
+not a regular file, or is in neither an OpenAlpaca store nor one of your
+projects is refused, and the toast is the shell's own sentence — for a file of
+a project whose folder is gone or has moved, the same sentence as the
+Preview's. The `File written` card in the chat and the file panel in the chat's
+aside carry the same two buttons.
+
+## Memory
+
+What OpenAlpaca remembers about you, as notes you can read, correct and
+forget (`src/views/memory/`). Each note is a Markdown file in the store — the
+same file `openalpaca memory show --raw` prints and any editor can open — and
+every action here is yours: a note you add, edit or confirm is recorded as
+written by you, which a model's tool call can never edit, archive or replace.
+The view reads the daemon's `/v1/memories*` routes and **never polls**: every
+change the daemon makes to memory, from any window, the CLI, a chat turn or an
+edit on disk, arrives as a `memory_changed` frame and refreshes what is on
+screen.
+
+Two columns, in the Library's shape. The left one, top to bottom:
+
+- **Global / This project.** Which partition the list shows. `This project` is
+  the project Settings → Connection points at, as the daemon resolved it (the
+  git repository the path lies in, or a folder chosen with `Use`); with no
+  project, or a path inside none, the button is off and says why, and a
+  request for it shows Global with a line saying so rather than switching
+  silently.
+- **Search notes…** A keyword search of that partition. It matches whole words
+  and the beginnings of words (`prefer` finds `prefers`) — part of a word only
+  in a note's title, aliases and tags, or in Chinese, Japanese, Korean, Thai,
+  Hindi, Tamil and similar scripts —
+  searches a one- or two-character Chinese term by a scan, and never asks a
+  model, so a question worded very differently from the note can miss it. When the index is being
+  rebuilt the results say they came from a slower file scan, and a search that
+  stopped at its limit says there may be more.
+- **Active / Candidates / Archived** chips, while nothing is searched.
+  Candidates are what is not used in answers until you confirm it: what the
+  assistant *inferred* — from its own reply or from a run's output — rather
+  than heard from you, and the suggestions below.
+- **Suggestions**, first above the active list, when learning is waiting on
+  you. When something you said changes a note **you saved** (or edited by
+  hand), OpenAlpaca does not overwrite it: it asks — *"Replace “X” (saved by
+  you) with “B”?"* — showing your note and the new text side by side (the new
+  one can turn out to say the same thing; the old one is labelled *Current*
+  rather than *Yours* when OpenAlpaca learned it; a text longer than the card
+  shows — your note past its first 600 bytes, the new one past 4 KiB — ends
+  with how much is not shown, `... (1400 more characters not shown)`, and the
+  note's detail has the rest), why it thinks so, and *"From
+  what you said on <date>"* (*"Edited by you · suggested on <date>"* once you
+  edited the suggestion itself). The assistant can make a suggestion too: when
+  it saves in chat a change to a note you saved — rather than overwrite your
+  note, which it may not — the card reads *"Suggested by Alpaca on <date>"*
+  and gives no *Why* (its text may copy your note's, whose reason is that
+  note's), and the candidate's detail *"Suggested by Alpaca — would replace “X”"*;
+  its origin, in the detail's header and under *Where this came from*, still
+  reads *Learned from what you said*, as every note the assistant saves in chat
+  does. **Replace** makes the new note yours and keeps the old
+  one as history (*"Replaced — “X” is kept as history"*); if you edited the old
+  note after the suggestion was made, the Replace is refused rather than
+  retiring your edit unseen. A suggestion whose note was already replaced or
+  archived some other way leaves this card; its Replace in the note's detail is
+  refused too, and the detail's Keep mine clears it. A suggestion that changes
+  your note's key, aliases, tags or validity says so, one row per field — your
+  note's values, then the new ones — so a change of those alone is not two
+  identical texts. Forgetting the note dismisses its suggestions with it;
+  forgetting a suggestion leaves your note in force. **Keep mine** dismisses the suggestion and leaves
+  your note as it was (*"Kept your note"*). Neither forgets anything else you
+  said in the same message. A suggestion is never used in answers while it
+  waits; one that was only inferred from the conversation says so.
+- **Recently learned**, above the active list: the notes learned in the last
+  seven days from what you said, each reading `Learned from what you said ·
+  Undo` — or `Learned from what you said · replaced “A” · Undo` when it replaced
+  an older learned note, which it does without asking because you never saved
+  that one. Undo is one click, because you never asked for the note, and it
+  takes back only that: a replaced note comes back (*"Undone — “A” is back"*),
+  and whatever else the same message taught stays learned. Once you have edited
+  or confirmed such a note it is yours, and it leaves the list. A learned note
+  that would never be used — one a note you saved on the same subject outranks
+  — is not listed as learned.
+- The notes, each with its kind, who wrote it and when, and a tag for a derived
+  state (`candidate`, `archived`, `superseded`, `conflict`), and `Add note` in the header (title, kind
+  and body, saved to the partition the list shows; a note already there word
+  for word is opened rather than written twice).
+- **Episode notes** are among them: `Conversation on <date>: <topic>`, kind
+  `episode`, *Inferred from the conversation* — what a conversation discussed,
+  decided and left open, written after it has been quiet for 30 minutes, when
+  you switch to another conversation or when the daemon stops, once it has at
+  least 4 new turns of yours. They are records for finding, never used in an
+  answer on their own: the search here and the assistant's own memory search
+  find them. `Forget` removes the one note and nothing it cites, and deleting
+  or clearing its conversation removes it too.
+
+The right column is one note: a pinned head — title, kind, scope, who wrote it,
+when, and tags for a candidate, a conflict or a file changed on disk — with
+`Confirm` (a candidate; `Replace` and `Keep mine` for a suggestion — Replace
+checks the note it replaces as above, Keep mine dismisses the suggestion as on
+the card), `Archive` (an active note; a suggestion is replaced or kept, never
+archived) and `Forget`, which arms on the first click and forgets on the
+second (forgetting a candidate or a suggestion takes nothing you saved out of
+answers — not even a candidate from the same run or conversation that you have
+since confirmed); then four tabs:
+
+- **Note** — the Markdown rendered as text elements, never as HTML (a note is a
+  file anyone can edit, so a `<script>` in one is just text), and where it came
+  from: the runs and messages it cites (a run opens in Work), the notes it
+  replaces or that replace it, its file, and whether the daemon can vouch for
+  the bytes.
+- **Raw** — the body as written, and `Edit`. A save sends only what changed,
+  against the version you opened. If the note changed meanwhile — another
+  window, a chat turn, an editor on disk — the save is refused and the view
+  says *"This note changed since you opened it. Reload to see the current
+  version — your text is kept."* `Reload` shows the current version above your
+  draft, and the next save goes against what you have now seen. Should a read
+  ever come back cut at 32 KiB, the editor is disabled: edit the file itself.
+  (A note over 32 KiB does not load at all — `doctor` lists it as oversized.)
+- **Diff** — the current text against one of the kept versions.
+- **History** — the last five versions the daemon wrote, newest first, each
+  with `Compare`. An edit made outside the app is not one of them, and the tab
+  says so.
+
+In a chat, `/remember`, `/forget` and `/memories` do the same without leaving
+the conversation (see *Memory commands* under Chat); a note saved with
+`/remember` is yours, exactly as one added here.
+
+**Hidden characters where you decide.** The Suggestions card, a Recently learned
+row and a candidate's detail ask you to decide on text learning or a file wrote,
+so every hidden character in it — a bidi override, a zero-width or control
+character, a variation selector, any space but a plain one, an object
+replacement character, a code point Unicode has not assigned or leaves to
+private use, and in a title, the reason, an alias, a tag or the fact key also a
+line break or a tab — is shown as a highlighted `<U+XXXX>` (as plain `<U+XXXX>`
+in a candidate's rendered text and in the line naming the note it would
+replace), and a line under the texts counts them: `Note: this request contains 2
+hidden characters, shown as <U+…>.` The card counts both titles, both texts,
+the reason and the values of what it changes; a row its title and the title of the note it replaced; a candidate
+its title, the title of the note it would replace, its text, and the aliases,
+tags and fact key Confirm adopts with it, which its Note tab shows under the
+text. A text holding an escape wraps at its edge — a candidate's code blocks
+included — rather than being cut or scrolling sideways, and a candidate's table
+is drawn as its rows, one wrapping line each with its cells joined by ` · ` and
+every cell kept, so no escape a count names is out of sight. Any other note is
+shown as written — a joiner or a right-to-left mark can be what it says — and so
+is the Raw tab, which is the editor. Replace, Keep mine, Confirm and Undo answer
+the note as read.
+
+An empty list says *"Nothing remembered yet. Ask Alpaca to remember something,
+or add a note."* After a forget, the detail says, in the daemon's words, what a
+forget does not erase: the transcript messages and runs the note cited, the
+session logs and any backup.
 
 ## Settings
 
-A 220px section nav over a 660px-max body — the eight sections of
-`src/views/settings/sections.ts`. A nav count that has not loaded is omitted
+A 220px section nav over a 660px-max body — the nine sections of
+`src/views/settings/sections.ts` (the design's eight, and Persona). A nav count that has not loaded is omitted
 rather than shown as `0`, because a zero is a claim.
 
 ### Connection
@@ -656,23 +1094,92 @@ and `openalpaca daemon start` — write `daemon.log` and claim it, so the path i
 merely found an older daemon's leftover log; the button is inert there, because
 a path to a file this daemon did not write is worse than no path.
 
-**The project.** One absolute path, typed, kept on this machine. The daemon
-reads it as `x-workspace-path` on `POST /v1/chat`; runs started from here record
-that project and the files they produce land in `<project>/.openalpaca/`. With
-no project chosen the GUI sends no header and everything goes to the home
-store. There is no project list and no browse dialog, because the daemon has no
-project concept to enumerate.
+**The project.** The Project card holds this window's project. Type a folder
+and press `Use`: the daemon resolves it (`POST /v1/workspaces`) — the nearest
+recorded project or git repository at or above it, else the folder itself,
+which is how a folder with no git becomes a project — and records it, and the
+window keeps the root the daemon answered and the project's id, not the text
+you typed. The card names the root this window's turns go to
+(`GET /v1/status`). When the stored path lies in no project, the card says so
+and what to do: "`<path>` is in no project: no git repository holds it and it
+was not chosen with Use. Its folder may have moved: Use its new folder, or
+Re-point… its project in the list below. If the folder is still there, press
+Use to make it one." A project re-pointed from somewhere else — `openalpaca
+store rebase`, or another window — is followed once its old path resolves to
+no project (the folder moved away): the window finds its project's id listed
+at the new root, takes that root, and says "This window's project
+was re-pointed to `<root>`: its turns go there now." A path an earlier build
+stored carries no id and is not followed; press `Use` on the new folder. The
+window sends that root as `x-workspace-path` on `POST /v1/chat`; runs started
+here record
+the project: the by-products they save are kept in its folder under
+`projects/` in the home store, and a file an agent writes into the project's
+own folder, after asking, stays there as the project's own file. `Clear`
+drops the window's project; with none, the GUI sends no header and everything
+goes to the home store's own folders. A relative path is refused before
+anything is sent. A refusal — the home store, or a path that is not a
+directory — is the daemon's sentence under the field, and the window keeps its
+project.
 
-**If the project directory moved**, the panel offers a re-base. A project store
-records the root it was seeded at, so a store standing at a path it does not
-name is a project that moved; the offer names the old path and counts the four
-things still addressed under it — artifacts, conversations, runs and workspace
-memories — and `Re-base` moves all four in one transaction
-(`PATCH /v1/workspaces`). Nothing re-bases on its own. A re-base does not wait
-for runs: while a run under the old root is still in flight the daemon refuses
-the call outright (`409 WORKSPACE_BUSY`) and changes nothing, so the panel says
-how many are in flight and holds the button until they finish — retry once they
-do.
+**Projects.** Under the card, every project the daemon knows
+(`GET /v1/workspaces`): its path, its folder under `projects/`, a `this window`
+tag on this window's own, and a `missing` tag on one whose folder is gone,
+renamed by case only, or moved with a link left at its old path — its data is
+kept until you re-point it or delete its data, and until then no agent's file
+tool or command runs there. The list is read when the panel opens and after
+each change made here; a project a chat turn records elsewhere appears the
+next time it is read.
+
+**`Re-point…`** tells the daemon where a moved project's folder is now. The
+dialog counts what is recorded at the old path (`GET /v1/workspaces?path=`) —
+conversations, messages, runs, files, queued follow-ups — and says when runs
+there are still in flight; type the new folder or press `Choose…`, then
+`Re-point` (`PATCH /v1/workspaces`), which stays off while a run there is
+queued, running or paused, and after a count that could not be read — the dialog says
+why. Should the daemon read the project's path as another project, or as
+none, the dialog says so instead of drawing the counts, and `Re-point` stays
+off: it would move the wrong project, or nothing. (The daemon matches a root
+as the list prints it to its own project first, so this is a safeguard.) The project's folder under
+`projects/` is renamed for the new path and every record of the old path is
+rewritten in one transaction; its memory notes are keyed by the project's id
+and come with it untouched. Nothing re-points on its own. The daemon refuses
+rather than merges: while a run there is queued, running or paused, or one
+starts while the re-point waits (`WORKSPACE_BUSY` — retry once it finishes),
+when the project was re-pointed or its data deleted elsewhere while this one
+waited, or its own re-point has not finished — a crash, or a live rename
+that failed (both
+`WORKSPACE_BUSY`; the second until the daemon's next start), onto a path that
+is not a directory, onto the home store, and onto a path that is already a
+project, that records name, or that another project's unfinished re-point
+holds (`WORKSPACE_EXISTS`, which names both ways out — or, for a path of an
+unfinished re-point, the daemon's next start, which finishes it); the dialog
+stays open with the daemon's sentence. A window on that project follows it to
+the new path.
+
+**`Delete data…`** deletes everything OpenAlpaca holds for a project. On open
+the dialog asks for the plan (`POST /v1/workspaces/purge` with
+`dry_run: true`) and draws it as served: each entry marked `delete` or `keep`,
+with what it holds and its retention class, the counts, and what another
+conversation keeps — an upload whole, a by-product as its newest version.
+Should the plan the daemon answers be another project's, the dialog draws none
+of it, says whose it is, and keeps `Delete data` off. `Delete data` — there is no word to type —
+then deletes the project's conversations (with their scratch folders), runs,
+uploads and by-products,
+the records of the files its agents wrote into the project (never the files),
+the memory notes of every owner, and its folder under `projects/`; a file a
+surviving conversation still shows is moved to `uploads/kept/` or
+`artifacts/kept/` in the home store and stays readable. The project's own
+folder is never touched. While a run
+there is queued, running or paused, or the project's own re-point has not
+finished, the daemon refuses even the plan (`WORKSPACE_BUSY`), and the dialog
+says why with `Delete data` off; the delete itself is refused the same way
+when a run starts, or the project is re-pointed or deleted elsewhere, while it
+waits. There is no undo. A window on that project is left with none. When the
+daemon answers that it did not remove the project's folder under `projects/`
+— not every memory partition could be dropped, its removal stopped part-way,
+or it was already gone; the answer does not say which — the toast reads
+"OpenAlpaca could not finish removing the data of `<root>`; run Delete data…
+again to finish.", and the window keeps the project.
 
 ### Models & keys
 
@@ -812,6 +1319,18 @@ row. `Reload`, `Update` and `Uninstall` live in the row's overflow menu instead,
 because nothing is wrong and the last two change what is *installed* rather than
 whether it is on; both open an inline strip that has to be confirmed.
 
+A row awaiting consent shows the plugin's id, its version and what it asks
+for — its declared capabilities (a plugin you denied included, since
+`Approve` grants what it declares now), or those an update added — with
+every hidden character (a bidi override, a zero-width or control character, a
+variation selector, any space but a plain one, an object replacement character,
+a code point Unicode has not assigned or leaves to private use, a line break or
+a tab) as a highlighted `<U+XXXX>`, and a line under them counts them: `Note:
+this request contains 1 hidden character, shown as <U+…>.` The id and the
+version wrap at the row's edge rather than being cut or pushing `Approve` aside.
+`Approve` grants exactly those strings, and it answers for the plugin by the id
+the daemon listed.
+
 `Add extension` installs either kind:
 
 - **A plugin is a directory.** The form takes an absolute path, picked or
@@ -884,6 +1403,22 @@ is invented and nothing is hidden. The panel states that this persisted log is n
 socket, which carries more variants than the daemon stores and cannot be
 replayed. A single run reads its own slice through `?task_id=` on the same
 route, in the Work detail.
+
+### Persona
+
+`USER.md` — the standing instructions about you that every conversation
+carries — in one text box, read and saved through `GET|PUT /v1/persona/user`.
+It is yours to write: the assistant no longer adds what it learns to this file
+(that goes to Memory, which the section links to), so what is here is what the
+onboarding conversation wrote and what you wrote. The lines an older build's
+learner put here are still in it until you delete them.
+
+`Save` is on only when the text differs from what was loaded, `Revert` drops the
+draft. The save carries the version you opened; if the file changed meanwhile
+— the onboarding conversation, `openalpaca persona edit user`, another window —
+it is refused and the section says *"USER.md changed since you opened it.
+Reload to see the current version — your text is kept."* `Reload` shows the
+current file above your draft, and the next save goes against it.
 
 ## Surfaces the daemon does not serve
 

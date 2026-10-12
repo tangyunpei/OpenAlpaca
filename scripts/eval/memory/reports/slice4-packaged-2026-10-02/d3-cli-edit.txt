@@ -1,0 +1,3 @@
+$ VISUAL=edit-cli.sh openalpaca memory edit f085d45c --global
+✓ Note f085d45c-cfc6-46ac-b167-b46cb36af0d8 saved (revision 7273266538bd).
+exit=0

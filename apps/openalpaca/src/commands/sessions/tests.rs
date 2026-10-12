@@ -126,6 +126,7 @@ fn a_lane_key_yields_its_source() {
 #[test]
 fn a_workspace_argument_resolves_up_to_the_project_root() {
     let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
     let root = tmp.path().canonicalize().unwrap().join("repo");
     std::fs::create_dir_all(root.join("crates/deep")).unwrap();
     std::fs::create_dir(root.join(".git")).unwrap();
@@ -134,15 +135,66 @@ fn a_workspace_argument_resolves_up_to_the_project_root() {
     assert_eq!(resolved, root.to_string_lossy());
 }
 
+/// R23: a missing project — its folder gone (ST-7) — is addressed by its
+/// root, and by a path inside it, as the daemon resolves them.
+/// Canonicalizing first refused it: "No such directory".
+#[test]
+fn a_missing_projects_root_resolves_to_that_project() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+    let root = tmp.path().canonicalize().unwrap().join("moved-away");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    openalpaca_storage::store::projects::register(&root).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let resolved = resolve_workspace_filter(&root.to_string_lossy()).unwrap();
+    assert_eq!(resolved, root.to_string_lossy());
+    let inside = resolve_workspace_filter(&root.join("src").to_string_lossy()).unwrap();
+    assert_eq!(inside, root.to_string_lossy());
+}
+
+/// d0-st23-1 (ST-23): a chosen folder — no `.git` — moved with a link left
+/// at its old root filters by that root as written, the `workspace_id` its
+/// conversations hold. Canonicalizing first followed the link to a folder
+/// no project records and answered "not inside a project".
+#[cfg(unix)]
+#[test]
+fn a_chosen_folder_moved_behind_a_link_filters_by_its_old_root() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+    let root = tmp.path().canonicalize().unwrap().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    openalpaca_storage::store::projects::choose(&root).unwrap();
+    let moved = root.with_file_name("notes-moved");
+    std::fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+
+    let resolved = resolve_workspace_filter(&root.to_string_lossy()).unwrap();
+    assert_eq!(resolved, root.to_string_lossy());
+}
+
+/// A relative path is read against this shell's directory; one that is not
+/// there names nothing the daemon could resolve either.
+#[test]
+fn a_relative_path_that_is_not_there_is_still_an_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+
+    let err = resolve_workspace_filter("no/such/folder-r23").unwrap_err();
+    assert!(err.to_string().contains("No such directory"), "{err:#}");
+}
+
 #[test]
 fn a_directory_under_no_project_is_an_error_not_an_empty_filter() {
     let tmp = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::EnvSandbox::enter(tmp.path());
     let loose = tmp.path().canonicalize().unwrap().join("loose");
     std::fs::create_dir(&loose).unwrap();
 
-    // A temp dir has no `.git`/`.openalpaca` above it inside the sandbox root,
-    // so either outcome is possible depending on the machine; what must never
-    // happen is a filter on a path the daemon could not have stored.
+    // A temp dir has no `.git` and no registered project above it inside the
+    // sandbox root, so either outcome is possible depending on the machine;
+    // what must never happen is a filter on a path the daemon could not have
+    // stored.
     if let Ok(resolved) = resolve_workspace_filter(&loose.to_string_lossy()) {
         assert_ne!(
             resolved,
@@ -181,8 +233,9 @@ fn a_row_prints_the_id_status_title_workspace_and_stamp() {
     assert!(row(|_| {}).table_row().contains("2026-09-06 10:00"));
 }
 
-/// `title` is `""` until a conversation is renamed. A blank cell would read as
-/// a missing field rather than an unnamed conversation.
+/// `title` is `""` until something names a conversation — the daemon, from
+/// its first sentence (G5), or a rename. A blank cell would read as a missing
+/// field rather than an unnamed conversation.
 #[test]
 fn an_unrenamed_conversation_prints_a_name() {
     plain();

@@ -148,6 +148,36 @@ fn storage_bytes_split_upload_from_produced_in_one_query() {
     assert_eq!(split.upload_bytes, repo.total_storage_bytes().unwrap());
 }
 
+/// **R38, the lead's ruling R-T9.** `GET /v1/status`'s `produced_bytes` is
+/// what the store holds: a result file's bytes are in the user's project
+/// folder, so its pointer row is counted in neither number.
+#[test]
+fn produced_bytes_count_by_products_only() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    repo.insert(&asset("upload-1", 300)).unwrap();
+    repo.insert(&asset("produced-1", 5_000)).unwrap();
+    mark(&db, "produced-1", "produced", 0, 0);
+    crate::ArtifactStore::new(&db)
+        .record_project_file(crate::NewProjectFile {
+            owner_id: "owner-1",
+            project_root: "/w/app",
+            rel_path: "src/big.rs",
+            content: &[b'x'; 700],
+            task_id: None,
+            agent_id: None,
+        })
+        .unwrap();
+
+    let split = repo.storage_bytes_by_origin().unwrap();
+    assert_eq!(split.upload_bytes, 300);
+    assert_eq!(
+        split.produced_bytes, 5_000,
+        "a result file's 700 bytes are the user's, not the store's"
+    );
+    assert_eq!(split.upload_bytes, repo.total_storage_bytes().unwrap());
+}
+
 #[test]
 fn readers_tolerate_the_new_columns() {
     let db = test_db();
@@ -404,4 +434,52 @@ fn produced_counts_cover_a_page_of_runs() {
     assert_eq!(counts.get("task-2"), Some(&1));
     assert_eq!(counts.get("task-3"), None, "a run with no output is absent");
     assert!(repo.produced_counts_for_tasks(&[]).unwrap().is_empty());
+}
+
+/// **R38.** A run's count, its chips and its connector delivery read
+/// by-products only; the files it wrote into the project are listed apart,
+/// oldest first, by their project-relative path.
+#[test]
+fn a_runs_result_files_are_listed_apart_from_its_by_products() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    repo.insert(&asset("produced-1", 10)).unwrap();
+    produced_by(&db, "produced-1", "task-1", "markdown");
+    let store = crate::ArtifactStore::new(&db);
+    for rel in ["src/a.rs", "docs/b.md"] {
+        store
+            .record_project_file(crate::NewProjectFile {
+                owner_id: "owner-1",
+                project_root: "/w/app",
+                rel_path: rel,
+                content: rel.as_bytes(),
+                task_id: Some("task-1"),
+                agent_id: Some("writing_agent::a1"),
+            })
+            .unwrap();
+    }
+
+    assert_eq!(
+        repo.produced_ids_for_task("task-1").unwrap(),
+        vec!["produced-1".to_string()]
+    );
+    let produced = repo.produced_for_task("task-1").unwrap();
+    assert_eq!(produced.len(), 1, "{produced:?}");
+    assert_eq!(produced[0].id, "produced-1");
+    assert_eq!(
+        repo.produced_counts_for_tasks(&["task-1".to_string()])
+            .unwrap()
+            .get("task-1"),
+        Some(&1)
+    );
+    let results = repo.project_files_for_task("task-1").unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|r| r.filename.as_str())
+            .collect::<Vec<_>>(),
+        ["src/a.rs", "docs/b.md"]
+    );
+    assert_eq!(results[0].agent_id.as_deref(), Some("writing_agent::a1"));
+    assert!(repo.project_files_for_task("task-none").unwrap().is_empty());
 }

@@ -2,6 +2,7 @@
 //!
 //! Provides the single path module (`store`), the discovery mechanism,
 //! the singleton lock, the daemon-liveness primitive (`daemon_lifecycle`),
+//! a project's re-point and its recovery (`project_life`),
 //! and the SQLite database for daemon/GUI/CLI coordination.
 
 pub mod artifacts;
@@ -10,8 +11,11 @@ mod content_io;
 pub mod daemon_lifecycle;
 pub mod database;
 pub mod discovery;
+pub mod memory_files;
+pub mod memory_index;
 pub mod migrations;
 pub mod models;
+pub mod project_life;
 pub mod repository;
 mod sql;
 pub mod store;
@@ -22,8 +26,8 @@ pub(crate) mod test_util;
 
 pub use artifacts::{
     ArtifactDiff, ArtifactError, ArtifactQuery, ArtifactRecord, ArtifactStore, ArtifactVersionRow,
-    HomeScopeRows, NewArtifact, PurgeCounts, PurgeKept, PurgeOutcome, PurgePlan, PurgeSession,
-    RebaseCounts, USER_EDIT_NOTE, VerifyReport, WorkspaceRows,
+    NewArtifact, NewProjectFile, PurgeCounts, PurgeSession, RebaseCounts, USER_EDIT_NOTE,
+    VerifyReport, WorkspaceRows,
 };
 pub use database::Database;
 pub use models::EventLog;
@@ -31,9 +35,8 @@ pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 pub use models::{ArtifactKind, ArtifactOrigin};
 pub use models::{OutcomeKind, Task, TaskStatus};
 pub use models::{AttachmentRef, FileAsset, FileAssetStatus, MessageArtifact};
-pub use models::{Conversation, ConversationMessage};
+pub use models::{Conversation, ConversationMessage, LearningRow};
 pub use models::{ExternalIdentity, GlobalUser, LinkToken};
-pub use models::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 pub use models::MessageFeedback;
 pub use models::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};
 pub use models::SkillHealthMetrics;
@@ -41,12 +44,13 @@ pub use repository::{
     ARTIFACT_ROLE, ATTACHMENT_ROLE, ConfigRepository, ConversationRepository,
     EventLogRepository, FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING,
     FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository,
-    LlmUsageRepository, MemoryRepository,
+    LlmUsageRepository,
     MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository,
     ProducedArtifact,
     SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes,
     SubAgentRepository, SubagentSpanRepository, TaskRepository, resolve_skill_key,
 };
+pub use repository::learning_cursor::{LearningCursor, LearningCursorRepository};
 pub use repository::llm_usage::{LlmUsageDaily, ProviderCallUsage};
 pub use repository::subagent_span::{
     NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, TemplateRunCount,

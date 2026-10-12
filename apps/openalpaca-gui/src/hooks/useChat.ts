@@ -40,11 +40,17 @@ import {
   sendChatMessage,
   startChatStream,
   type ChatConfirmationRequest,
+  type ChatStreamAction,
   type ChatStreamHandle,
   type ChatStreamState,
   type SendChatOptions,
 } from "@/lib/chat-stream";
+import {
+  isConfirmationOver,
+  noteConfirmationOver,
+} from "@/lib/confirmations-over";
 import { daemonEvents, type ServerEvent } from "@/lib/events";
+import { ApiError } from "@/lib/http";
 import { qk } from "@/lib/query-keys";
 
 /**
@@ -84,6 +90,13 @@ export function useChatHistory(
  * composer is the rule T1 wrote. The cadence follows the stake — every 10 s
  * while a card is up and the composer is paused, every 30 s otherwise, when it
  * is only a seed for a prompt this window has not heard about.
+ *
+ * Read on **every** mount, however fresh the cache (G1, Round G). The chat
+ * view is swapped out whenever another view opens, and a cached list younger
+ * than `staleTime` used to be handed to the remount as if it were current: a
+ * prompt answered just before the trip came back as a card, and one raised
+ * while chat was away stayed invisible until the next 30 s poll. The caller
+ * seeds only from a read made during its own mount (`useChatSession`).
  */
 export const CONFIRMATIONS_POLL_MS = 30_000;
 export const CONFIRMATIONS_POLL_BLOCKED_MS = 10_000;
@@ -98,7 +111,18 @@ export function usePendingConfirmations(
     refetchInterval: blocked
       ? CONFIRMATIONS_POLL_BLOCKED_MS
       : CONFIRMATIONS_POLL_MS,
+    refetchOnMount: "always",
   });
+}
+
+/**
+ * The answer route's `404`: the daemon holds no such prompt — it was answered
+ * already (here, elsewhere, from the CLI), it timed out, it was withdrawn, or
+ * the daemon restarted (`ConfirmationBroker::respond`, both arms). It is a
+ * resolution, not a failure to retry (G1, Round G).
+ */
+export function isNoLongerPending(error: unknown): boolean {
+  return error instanceof ApiError && error.isNotFound;
 }
 
 /** The daemon-wide frame a pending confirmation arrives on. */
@@ -128,7 +152,14 @@ export interface ChatStreamController {
   blocked: boolean;
   active: boolean;
   send: (options: SendChatOptions) => Promise<void>;
-  /** Approve/deny the oldest pending confirmation, or a named one. */
+  /**
+   * Approve/deny the oldest pending confirmation, or a named one.
+   *
+   * Both of the daemon's answers retire the card: `200` (it took this answer)
+   * and `404` (it holds no such prompt — {@link isNoLongerPending}), which
+   * also re-reads the pending list, since the card was drawn from a view of
+   * it that was wrong.
+   */
   respond: UseMutationResult<void, Error, RespondToConfirmationInput>;
   /**
    * Take on a confirmation this client learned about off-stream (S9) — from
@@ -136,15 +167,18 @@ export interface ChatStreamController {
    * listening when it was raised can know it exists.
    *
    * Deduped by `request_id` in the reducer, so seeding what is already on
-   * screen changes nothing.
+   * screen changes nothing; and a prompt the daemon has said is over is never
+   * adopted again (`lib/confirmations-over`).
    */
   adoptConfirmation: (request: ChatConfirmationRequest) => void;
   /**
    * Drop a pending confirmation this client is not going to answer (G1).
    *
-   * The daemon publishes no "this prompt expired" frame, so a prompt whose run
-   * has finished — it timed out, or somebody else answered it — would sit on
-   * screen for ever. The caller that knows the run is over says so.
+   * The daemon announces every resolution (T1), but a modal card must not rest
+   * on one frame: one dropped, or sent while the socket was down, would leave
+   * the card on screen for ever. The caller that infers the prompt is over —
+   * its turn ended, its run finished, the snapshot stopped listing it — says
+   * so, and an inference is never recorded as the daemon's word.
    */
   dismissConfirmation: (requestId: string) => void;
   /** Drop the local stream state (new lane, cleared transcript). */
@@ -158,10 +192,26 @@ export interface ChatStreamController {
 export function useChatStream(
   options: ChatStreamOptions = {},
 ): ChatStreamController {
-  const [state, dispatch] = useReducer(
+  const [state, dispatchToReducer] = useReducer(
     chatStreamReducer,
     initialChatStreamState,
   );
+  /**
+   * Every action reaches the reducer through here, and this is the one place a
+   * card is adopted: the SSE frame, its WebSocket twin and the snapshot seed
+   * all arrive as `confirmation`. A prompt the daemon has already said is over
+   * — a frame or a read that left before the answer and lands after it — is
+   * dropped rather than drawn again (G1, Round G). The reducer stays pure: it
+   * still dedupes against the cards on screen only.
+   */
+  const dispatch = useCallback((action: ChatStreamAction) => {
+    if (
+      action.type === "confirmation" &&
+      isConfirmationOver(action.request.request_id)
+    )
+      return;
+    dispatchToReducer(action);
+  }, []);
   const handleRef = useRef<ChatStreamHandle | null>(null);
   const client = useQueryClient();
 
@@ -190,6 +240,14 @@ export function useChatStream(
   useEffect(
     () =>
       daemonEvents.onEvent((event) => {
+        // The daemon's word that a prompt is over, whosever it was: recorded
+        // before any filter, because a snapshot that left before this frame
+        // may still list it (G1, Round G). Retiring the card on screen is the
+        // chat session's business.
+        if (event.type === "tool_confirmation_resolved") {
+          noteConfirmationOver(event.request_id);
+          return;
+        }
         if (event.type !== "tool_confirmation_requested") return;
         const accepts = acceptsRef.current;
         if (accepts !== undefined && !accepts(event, streamIdRef.current))
@@ -203,10 +261,14 @@ export function useChatStream(
             // Which turn raised it, so a terminal frame can retire this
             // window's own prompts and leave another client's alone (R1).
             stream_id: event.stream_id,
+            // Design 09 §4.4: the daemon's own text for the card, and
+            // whether the approval is good for this call only.
+            preview: event.preview ?? null,
+            per_call: event.per_call === true,
           },
         });
       }),
-    [],
+    [dispatch],
   );
 
   // A finished turn changes the transcript, and may have started a workflow.
@@ -219,6 +281,13 @@ export function useChatStream(
     if (state.result?.delegation) {
       void client.invalidateQueries({ queryKey: qk.tasks.all() });
     }
+    // The session row moved with the turn, and the sidebar and the aside read
+    // it from the session list: its title, which the daemon writes from an
+    // untitled conversation's first sentence as it stores it (G5, Round G),
+    // and its working state when the turn compacted (design 11 §5). Not left
+    // to the socket's `chat_stream_ended`: a window whose socket is down
+    // would keep showing "Untitled conversation".
+    void client.invalidateQueries({ queryKey: qk.sessions.all() });
   }, [state.phase, state.result, client]);
 
   // The same re-read for the *other* terminal frame (T1). A failed turn
@@ -229,39 +298,66 @@ export function useChatStream(
     void client.invalidateQueries({ queryKey: qk.chat.confirmations() });
   }, [state.phase, client]);
 
-  const send = useCallback(async (options: SendChatOptions) => {
-    handleRef.current?.close();
-    handleRef.current = null;
+  const send = useCallback(
+    async (options: SendChatOptions) => {
+      handleRef.current?.close();
+      handleRef.current = null;
 
-    const { stream_id, lane_key } = await sendChatMessage(options);
-    // Immediately — the worker sleeps 100 ms and there is no replay.
-    handleRef.current = await startChatStream({
-      streamId: stream_id,
-      laneKey: lane_key,
-      onAction: dispatch,
-    });
-  }, []);
+      const { stream_id, lane_key } = await sendChatMessage(options);
+      // Immediately — the worker sleeps 100 ms and there is no replay.
+      handleRef.current = await startChatStream({
+        streamId: stream_id,
+        laneKey: lane_key,
+        onAction: (action) => {
+          // On the stream this action comes only from the daemon's own
+          // `confirmation_resolved` frame (G1, Round G).
+          if (action.type === "confirmation_resolved")
+            noteConfirmationOver(action.requestId);
+          dispatch(action);
+        },
+      });
+    },
+    [dispatch],
+  );
 
   const respond = useMutation<void, Error, RespondToConfirmationInput>({
     mutationFn: (input) => respondToConfirmation(input),
     onSuccess: (_data, input) => {
+      noteConfirmationOver(input.requestId);
       dispatch({ type: "confirmation_resolved", requestId: input.requestId });
+    },
+    onError: (error, input) => {
+      if (!isNoLongerPending(error)) return;
+      // A card nobody can answer any more must not stay up for a second
+      // click to repeat the 404 — and the list it was drawn from was wrong,
+      // so it is read again (G1, Round G).
+      noteConfirmationOver(input.requestId);
+      dispatch({ type: "confirmation_resolved", requestId: input.requestId });
+      void client.invalidateQueries({ queryKey: qk.chat.confirmations() });
     },
   });
 
-  const adoptConfirmation = useCallback((request: ChatConfirmationRequest) => {
-    dispatch({ type: "confirmation", request });
-  }, []);
+  const adoptConfirmation = useCallback(
+    (request: ChatConfirmationRequest) => {
+      dispatch({ type: "confirmation", request });
+    },
+    [dispatch],
+  );
 
-  const dismissConfirmation = useCallback((requestId: string) => {
-    dispatch({ type: "confirmation_resolved", requestId });
-  }, []);
+  // An inference, not the daemon's word — the turn ended, the run finished,
+  // the snapshot stopped listing it — so it is never recorded as over (T18).
+  const dismissConfirmation = useCallback(
+    (requestId: string) => {
+      dispatch({ type: "confirmation_resolved", requestId });
+    },
+    [dispatch],
+  );
 
   const reset = useCallback(() => {
     handleRef.current?.close();
     handleRef.current = null;
     dispatch({ type: "reset" });
-  }, []);
+  }, [dispatch]);
 
   return {
     state,

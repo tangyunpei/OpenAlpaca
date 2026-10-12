@@ -559,6 +559,17 @@ impl KeyPool {
         shortest
     }
 
+    /// Every key's id and its own requests-per-minute limit, if it sets one —
+    /// what a rate limiter is built from. Read-only.
+    pub async fn key_rate_limits(&self) -> Vec<(String, Option<u32>)> {
+        let mut out = Vec::with_capacity(self.keys.len());
+        for key_lock in &self.keys {
+            let key = key_lock.read().await;
+            out.push((key.id.clone(), key.rate_limit));
+        }
+        out
+    }
+
     /// Get the status of all keys.
     pub async fn key_statuses(&self) -> Vec<KeyStatus> {
         let mut statuses = Vec::with_capacity(self.keys.len());

@@ -195,6 +195,23 @@ export function useArtifactText(
   });
 }
 
+/**
+ * R37 from the app's side (d7-app-1): a read that finds a result file the
+ * daemon marked missing clears the mark there, so the row and every list are
+ * read again and the `missing` tag goes. `found` is the read's success; a
+ * row that is not marked asks for nothing.
+ */
+export function useFoundAgain(artifact: Artifact | null, found: boolean): void {
+  const client = useQueryClient();
+  const id = artifact?.id ?? null;
+  const marked = artifact?.missing === true;
+  useEffect(() => {
+    if (id === null || !marked || !found) return;
+    void client.invalidateQueries({ queryKey: qk.artifacts.detail(id) });
+    void client.invalidateQueries({ queryKey: qk.artifacts.lists() });
+  }, [client, id, marked, found]);
+}
+
 export interface PinVariables {
   id: string;
   pinned: boolean;

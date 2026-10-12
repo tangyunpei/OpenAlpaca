@@ -72,6 +72,11 @@ fn test_known_daemon_commands_forward() {
         "/cancel abc123",
         "/pause",
         "/resume abc123",
+        // The chat memory commands (design 09 §12): the daemon answers them.
+        "/remember I prefer tabs",
+        "/forget 1a2b3c4d",
+        "/memories",
+        "/memories deploy",
     ] {
         assert!(
             SlashCommand::parse(cmd).is_forward(),
@@ -94,4 +99,27 @@ fn test_parse_local_command_with_args_stays_local() {
         SlashCommand::parse("/model extra"),
         SlashCommand::Model
     ));
+}
+
+/// A model id is whatever a provider's catalogue lists — a remote Ollama's
+/// `/api/tags` or a gateway's `/models` — and `/models` prints it into the
+/// terminal the next inline `[y/N]` prompt uses. At a terminal a control
+/// character in it is shown as `<U+XXXX>`, so it cannot change a palette
+/// colour or set a scroll region the prompt's reset leaves alone; a pipe
+/// gets the id as the daemon sent it.
+#[test]
+fn a_models_row_shows_a_control_character_in_the_id_at_a_terminal() {
+    colored::control::set_override(false);
+    let model = serde_json::json!({
+        "id": "x\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r",
+        "provider": "ollama\u{1b}[?7l",
+    });
+    assert_eq!(
+        model_row(&model, true),
+        "  x<U+001B>]4;3;#000000<U+0007><U+001B>[1;2r (ollama<U+001B>[?7l)"
+    );
+    assert_eq!(
+        model_row(&model, false),
+        "  x\u{1b}]4;3;#000000\u{7}\u{1b}[1;2r (ollama\u{1b}[?7l)"
+    );
 }

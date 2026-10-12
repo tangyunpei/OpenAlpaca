@@ -100,11 +100,6 @@ static MAPPINGS: &[TomlMapping] = &[
         field: "extract_max_daily_cost_usd",
     },
     TomlMapping {
-        schema_key: "daemon.orchestrator.extract_every_n_turns",
-        section: &["orchestrator", "costs"],
-        field: "extract_every_n_turns",
-    },
-    TomlMapping {
         schema_key: "daemon.orchestrator.extract_min_content_len",
         section: &["orchestrator", "costs"],
         field: "extract_min_content_len",
@@ -136,37 +131,54 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "costs"],
         field: "task_extract_min_content_len",
     },
-    // Orchestrator: Supersession
+    // Orchestrator: Extraction counts (memory redesign, plan 3.4)
     TomlMapping {
-        schema_key: "daemon.orchestrator.supersession_distance_threshold",
+        schema_key: "daemon.orchestrator.extract_max_items_per_call",
+        section: &["orchestrator", "costs"],
+        field: "extract_max_items_per_call",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.task_extract_max_items_per_run",
+        section: &["orchestrator", "costs"],
+        field: "task_extract_max_items_per_run",
+    },
+    // Orchestrator: Learning v2 (design 09 §1.10)
+    TomlMapping {
+        schema_key: "daemon.orchestrator.learning.enabled",
+        section: &["orchestrator", "learning"],
+        field: "enabled",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.learning.idle_secs",
+        section: &["orchestrator", "learning"],
+        field: "idle_secs",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.learning.turns_per_flush",
+        section: &["orchestrator", "learning"],
+        field: "turns_per_flush",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.extract_max_calls_per_day",
+        section: &["orchestrator", "costs"],
+        field: "extract_max_calls_per_day",
+    },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.memory_confidence_threshold",
         section: &["orchestrator", "memory"],
-        field: "supersession_distance_threshold",
+        field: "memory_confidence_threshold",
     },
+    // Orchestrator: index-first recall (design 09 §13.2)
     TomlMapping {
-        schema_key: "daemon.orchestrator.fts_jaccard_threshold",
+        schema_key: "daemon.orchestrator.recall_mode",
         section: &["orchestrator", "memory"],
-        field: "fts_jaccard_threshold",
+        field: "recall_mode",
     },
-    // Orchestrator: Decay
+    // Orchestrator: carry-over (design 11 §4 (b))
     TomlMapping {
-        schema_key: "daemon.orchestrator.decay_poll_interval_secs",
-        section: &["orchestrator", "memory", "decay"],
-        field: "poll_interval_secs",
-    },
-    TomlMapping {
-        schema_key: "daemon.orchestrator.decay_half_life_days",
-        section: &["orchestrator", "memory", "decay"],
-        field: "half_life_days",
-    },
-    TomlMapping {
-        schema_key: "daemon.orchestrator.decay_min_importance",
-        section: &["orchestrator", "memory", "decay"],
-        field: "min_importance",
-    },
-    TomlMapping {
-        schema_key: "daemon.orchestrator.decay_soft_cap",
-        section: &["orchestrator", "memory", "decay"],
-        field: "soft_cap",
+        schema_key: "daemon.orchestrator.carry_over_turns",
+        section: &["orchestrator", "memory"],
+        field: "carry_over_turns",
     },
     // Execution: Agent Defaults (cont.)
     TomlMapping {
@@ -273,17 +285,6 @@ static MAPPINGS: &[TomlMapping] = &[
         schema_key: "daemon.server.stale_timeout_secs",
         section: &["server", "chat_streams"],
         field: "stale_timeout_secs",
-    },
-    // Server: Embedding Indexer
-    TomlMapping {
-        schema_key: "daemon.server.embedding_poll_interval_secs",
-        section: &["server", "embedding_indexer"],
-        field: "poll_interval_secs",
-    },
-    TomlMapping {
-        schema_key: "daemon.server.embedding_batch_size",
-        section: &["server", "embedding_indexer"],
-        field: "batch_size",
     },
 ];
 

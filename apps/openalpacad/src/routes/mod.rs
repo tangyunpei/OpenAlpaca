@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openalpaca_core::memory::scope_context::MemoryScopeContext;
+use openalpaca_storage::store::projects::ProjectError;
 use serde::Serialize;
 
 pub mod agents;
@@ -23,7 +24,9 @@ pub mod extensions;
 pub mod files;
 mod files_types;
 pub mod followups;
+pub mod memories;
 pub mod orchestrator_latency;
+pub mod persona;
 pub mod sessions;
 pub mod settings;
 mod settings_types;
@@ -83,6 +86,7 @@ pub use followups::{cancel_followup_handler, list_followups_handler, queue_follo
 pub use orchestrator_latency::{
     orchestrator_latency_aggregate_handler, orchestrator_latency_handler,
 };
+pub use persona::{get_persona_user_handler, put_persona_user_handler};
 pub use settings::{
     delete_key, get_cli_backends, get_daemon_providers, get_discovered_credentials,
     get_key_status, get_llm_settings, get_llm_usage, get_llm_usage_daily,
@@ -95,6 +99,14 @@ pub use sessions::{
     delete_session_handler, get_session_events_handler, get_session_handler,
     get_session_messages_handler, list_sessions_handler, patch_session_handler,
 };
+pub use memories::{
+    create_memory_handler, delete_memory_handler, forget_memories_handler,
+    get_memory_handler, get_memory_history_handler, list_memories_handler,
+    memory_doctor_handler, recently_learned_memories_handler,
+    recently_used_memories_handler, search_memories_handler, suggestions_memories_handler,
+    sync_memories_handler, timeline_memories_handler, undo_memory_handler,
+    update_memory_handler,
+};
 pub use skills::{list_skills_handler, skill_health_handler};
 pub use status::status_handler;
 pub use tasks::{
@@ -102,7 +114,10 @@ pub use tasks::{
     rerun_task_handler, steer_task_handler, task_action_handler,
 };
 pub use tools::list_tools_handler;
-pub use workspaces::{get_workspace_handler, purge_workspace_handler, rebase_workspace_handler};
+pub use workspaces::{
+    choose_workspace_handler, get_workspace_handler, purge_workspace_handler,
+    rebase_workspace_handler,
+};
 
 // ── Shared error envelope ────────────────────────────────────────────
 //
@@ -350,32 +365,65 @@ pub(crate) fn decode_workspace_header(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
-/// Resolve a client-sent workspace path the way a chat turn would.
+/// Resolve a client-sent workspace path the way a chat turn would — and
+/// record nothing.
 ///
 /// One resolver, no second opinion: `MemoryScopeContext::for_request` owns the
-/// rule (marker walk, canonicalisation, and the `$HOME`-is-not-a-project fold),
-/// so a route never resolves a header a second way. `None` — no header, a path
-/// under no marker, or one that resolves to the home store — means *no
-/// project*, and content placement falls back to the home store. Never the
-/// daemon's working directory (ruling R22).
+/// rule (`openalpaca_storage::store::projects::resolve`: the nearest registered
+/// project or `.git`, never the home store — R13), so a route never resolves a
+/// header a second way. `None` means *no project*: no header, a path under no
+/// project, or one that is, lies inside or contains the home store. Content
+/// placement then falls back to the home store. Never the daemon's working
+/// directory (ruling R22). The routes that only read call this — the status
+/// poll, sessions, follow-ups, steering, the workspace routes — and a read
+/// never records a project (storage design §3).
 pub(crate) fn request_project_root(workspace_path: Option<&str>) -> Option<String> {
     let path = workspace_path?;
     MemoryScopeContext::for_request(Some(path)).request_workspace_root
 }
 
-/// [`request_project_root`], answering from the filesystem every time.
-///
-/// The marker walk behind it memoises `canonical start path → root` for the
-/// process lifetime (`memory::workspace`), which is right for a chat turn — a
-/// project's markers do not move while the daemon runs — and wrong for the three
-/// `/v1/workspaces` routes, whose whole job is to answer about a directory the
-/// user is *changing*. `422 WORKSPACE_NOT_A_ROOT` tells the caller to "give it a
-/// project marker of its own first"; the cached answer made that instruction
-/// impossible to follow until the daemon restarted, because the refusal's own
-/// call wrote the entry. Same rule, same fold — no cache.
-pub(crate) fn request_project_root_uncached(workspace_path: Option<&str>) -> Option<String> {
-    let path = workspace_path?;
-    MemoryScopeContext::for_request_uncached(Some(path)).request_workspace_root
+/// [`request_project_root`] for a route that accepts work for the root — an
+/// upload, a memory write (storage design §3): the root is also recorded
+/// under `projects/`, through `MemoryScopeContext::for_turn`, the same call a
+/// chat turn makes. A root that cannot be recorded is answered by
+/// [`registration_refusal`], and the caller does nothing more.
+#[allow(clippy::result_large_err)]
+pub(crate) fn register_request_project(
+    workspace_path: Option<&str>,
+) -> Result<Option<String>, Response> {
+    let Some(path) = workspace_path else {
+        return Ok(None);
+    };
+    MemoryScopeContext::for_turn(Some(path))
+        .map(|scope| scope.request_workspace_root)
+        .map_err(|e| registration_refusal(path, &e))
+}
+
+/// How a route answers a root it could not record — the same on every route
+/// that records one: the home store, a folder inside it or one around it is
+/// `409 WORKSPACE_IS_HOME` in `ProjectError`'s words, the status `PATCH` and
+/// `POST /v1/workspaces` give it; anything else (I/O, no free folder name)
+/// is `500 WORKSPACE_REGISTER_FAILED`. Through `MemoryScopeContext::for_turn`
+/// the first cannot happen today — the resolver answers no project for such a
+/// root before anything registers it (R13) — so it is written down here
+/// rather than left for a later caller to find.
+fn registration_refusal(path: &str, e: &anyhow::Error) -> Response {
+    match e
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ProjectError>())
+    {
+        Some(home @ ProjectError::IsHome { .. }) => {
+            api_error(StatusCode::CONFLICT, home.code(), home.to_string())
+        }
+        _ => {
+            tracing::warn!(path, "could not record the request's project: {e:#}");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "WORKSPACE_REGISTER_FAILED",
+                format!("could not record the project for {path}: {e:#}"),
+            )
+        }
+    }
 }
 
 // ── Paging bounds, shared (R26) ──────────────────────────────────────────
@@ -551,5 +599,104 @@ mod tests {
         assert_eq!(page_offset(None), 0);
         assert_eq!(page_offset(Some(-5)), 0);
         assert_eq!(page_offset(Some(7)), 7);
+    }
+
+    /// Storage design §3: a route that only reads resolves a header and
+    /// records nothing; a route that accepts work for the root records it,
+    /// through the same call a chat turn makes.
+    #[test]
+    fn only_register_request_project_records_the_headers_project() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize");
+        let home_store = root.join("home").join(".openalpaca");
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_store);
+        let repo = root.join("work").join("app");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+        let sent = repo.join("src");
+        std::fs::create_dir_all(&sent).expect("src");
+        let sent = sent.to_string_lossy().into_owned();
+        let expected = repo.to_string_lossy().into_owned();
+
+        assert_eq!(request_project_root(Some(&sent)), Some(expected.clone()));
+        assert!(
+            !home_store.join("projects").exists(),
+            "a read records nothing"
+        );
+
+        let Ok(recorded) = register_request_project(Some(&sent)) else {
+            panic!("the project is recorded");
+        };
+        assert_eq!(recorded, Some(expected));
+        assert!(
+            openalpaca_storage::store::projects::lookup(&repo)
+                .expect("lookup")
+                .is_some()
+        );
+        let Ok(none) = register_request_project(None) else {
+            panic!("no header is no project");
+        };
+        assert_eq!(none, None);
+    }
+
+    #[tokio::test]
+    async fn a_project_that_cannot_be_recorded_is_a_500_naming_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize");
+        let home_store = root.join("home").join(".openalpaca");
+        std::fs::create_dir_all(&home_store).expect("home store");
+        std::fs::write(home_store.join("projects"), "not a directory\n").expect("blocker");
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_store);
+        let repo = root.join("work").join("app");
+        std::fs::create_dir_all(repo.join(".git")).expect("repo");
+        let sent = repo.to_string_lossy().into_owned();
+
+        let Err(response) = register_request_project(Some(&sent)) else {
+            panic!("`projects` is a file, so nothing can be recorded");
+        };
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["error"]["code"], "WORKSPACE_REGISTER_FAILED");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.starts_with(&format!("could not record the project for {sent}: ")),
+            "{message}"
+        );
+    }
+
+    /// The lead's R-S7: a root that cannot be recorded is answered the same
+    /// on every route that records one — the home store as `409
+    /// WORKSPACE_IS_HOME` in `ProjectError`'s words, however deep in the
+    /// chain, anything else as `500 WORKSPACE_REGISTER_FAILED` naming the path.
+    #[tokio::test]
+    async fn a_root_that_cannot_be_recorded_is_answered_the_same_on_every_route() {
+        async fn answer(response: Response) -> (StatusCode, serde_json::Value) {
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            (status, serde_json::from_slice(&bytes).expect("json"))
+        }
+
+        let home = ProjectError::IsHome {
+            path: "/Users/me".to_string(),
+        };
+        let wrapped = anyhow::Error::new(home.clone()).context("registering /Users/me");
+        let (status, body) = answer(registration_refusal("/Users/me", &wrapped)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "WORKSPACE_IS_HOME");
+        assert_eq!(body["error"]["message"], home.to_string());
+
+        let io = anyhow::anyhow!("disk full").context("writing project.json");
+        let (status, body) = answer(registration_refusal("/work/app", &io)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "WORKSPACE_REGISTER_FAILED");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.starts_with("could not record the project for /work/app: "),
+            "{message}"
+        );
     }
 }

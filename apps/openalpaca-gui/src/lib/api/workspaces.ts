@@ -1,63 +1,150 @@
 /**
- * `/v1/workspaces` — the project a store belongs to, and re-basing it when the
- * directory moved (plan §4.8, P-12).
+ * `/v1/workspaces` — the projects the daemon knows, and their life cycle
+ * (storage design §6, §9; owner decisions ST-6, ST-7, ST-19, ST-20).
  *
- * A project's path is its identity in four places — its artifacts, its
- * conversations, its runs and its workspace memories — so moving the directory
- * strands all four at once. The daemon can re-attach them in one transaction,
- * but only when someone tells it where the project went, and the picker is the
- * only place that knows: the owner points it at the new path.
+ * A project is a folder under `<home>/projects/` whose `project.json` records
+ * its permanent id and its root (ST-13). Only the daemon can resolve a path
+ * to one — canonicalize it, walk up to a registered root or a git
+ * repository — so this window never guesses: it asks, and keeps the root
+ * the daemon answered.
  *
- * The detection is exact rather than guessed. A project store records the root
- * it was seeded at (`.openalpaca/.layout`), so a store standing at a path it
- * does not name is a project that moved — `moved: true` — and `recorded_root`
- * is where its history still lives. Nothing here re-bases on its own: the
- * `PATCH` happens when the owner asks for it.
+ * Nothing is written inside a project folder (ST-1), so nothing travels with
+ * a moved folder: a project whose root is gone, or no longer leads to its own
+ * folder (renamed by case only, or moved with a link left at the old path),
+ * is `missing` (ST-7, ST-23) until its owner re-points it or deletes its
+ * data. Every refusal below is an
+ * `ApiError` carrying the daemon's code and a sentence written for the
+ * owner, which the caller shows as written.
  */
 
 import { apiFetch } from "../http";
 
-/** The four members of §4.8's one transaction, counted. */
+/** One project as its folder under `projects/` records it. */
+export interface Project {
+  /** The permanent id, a v4 UUID (ST-13). */
+  id: string;
+  /**
+   * The root as recorded — the path every row of the project holds, canonical
+   * when it was recorded (R14); a `missing` project's may no longer be its own
+   * canonical form (ST-23).
+   */
+  root: string;
+  /** Its folder's name under `<home>/projects/` (R4–R7). Never parsed back. */
+  name: string;
+  /**
+   * The root is not a directory any more, or no longer leads to its own
+   * folder — renamed by case only, or moved with a link left at the old path
+   * (ST-7, ST-23); its data is kept.
+   */
+  missing: boolean;
+}
+
+/** What is recorded under one root, by the five path columns (R14). */
 export interface WorkspaceCounts {
+  /** `file_assets` rows: uploads and by-products. */
   artifacts: number;
   sessions: number;
   tasks: number;
-  memories: number;
+  /** `conversation_messages` rows. */
+  messages: number;
+  /** Queued `lane_followups`. */
+  followups: number;
 }
 
+/** `GET /v1/workspaces?path=` — what one path is. */
 export interface Workspace {
-  /** The root the daemon resolved the requested path to. */
-  path: string;
-  /** Whether a `.openalpaca` store directory stands there. */
-  store_present: boolean;
   /**
-   * The root that store records for itself, or `null` when there is no store
-   * or it predates the marker. `null` is "nothing to say", not "not moved".
+   * The path asked about: as sent when it is a root a project records (that
+   * project is the answer, matched before anything is resolved); otherwise
+   * canonicalized (as written when it is gone).
    */
-  recorded_root: string | null;
-  /** `store_present` and `recorded_root` names a *different* path. */
-  moved: boolean;
-  /** What is addressed under `path` right now. */
+  path: string;
+  /** The project root it resolves to; `null` when it is in no project. */
+  root: string | null;
+  /** The project's id; `null` for a root nobody has used yet, or no project. */
+  id: string | null;
+  /** The project's folder under `projects/`; `null` as `id` is. */
+  name: string | null;
+  /**
+   * The root is not a directory, or no longer leads to its own folder (ST-7,
+   * ST-23); `false` when `root` is `null`.
+   */
+  missing: boolean;
+  /** What is recorded under `root`; zeros when `root` is `null`. */
   rows: WorkspaceCounts;
-  /** Runs there that are `running` or `paused`; a re-base waits for them. */
+  /** Runs under `root` that are `running` or `paused`. */
   active_tasks: number;
+  /** Runs under `root` waiting to start. */
+  queued_tasks: number;
 }
 
-export interface WorkspaceRebase {
+/** `PATCH /v1/workspaces`'s answer. */
+export interface ProjectRepoint {
   old_path: string;
   new_path: string;
-  /** What actually moved. */
+  /** What the one transaction rewrote. */
   moved: WorkspaceCounts;
-  /** Whether the store directory itself was moved, rather than already there. */
-  store_moved: boolean;
+  /** The project now: its new root and its folder's new name. */
+  project: Project;
 }
 
-/** Total rows across the four members — what a confirmation counts. */
+/** One line of the delete's plan, in the daemon's words. */
+export interface DeletePlanEntry {
+  entry: string;
+  holds: string;
+  retention: string;
+  action: "delete" | "keep";
+}
+
+/** What the delete removes (the plan) or removed. */
+export interface DeleteCounts {
+  sessions: number;
+  messages: number;
+  tool_calls: number;
+  followups: number;
+  tasks: number;
+  spans: number;
+  run_events: number;
+  uploads: number;
+  /** By-products. */
+  artifacts: number;
+  memory_notes: number;
+}
+
+/** `POST /v1/workspaces/purge`'s answer: the plan on a dry run, what went otherwise. */
+export interface ProjectDataDeletion {
+  dry_run: boolean;
+  applied: boolean;
+  project: Project;
+  entries: DeletePlanEntry[];
+  counts: DeleteCounts;
+  /** Files another conversation still links, moved to the root store (ST-19). */
+  kept: { uploads: number; artifacts: number };
+  /** `null` on a dry run. */
+  removed: {
+    session_dirs: number;
+    memory_partitions: number;
+    project_folder: boolean;
+  } | null;
+}
+
+/** Every row a re-point rewrites, summed. */
 export function totalRows(counts: WorkspaceCounts): number {
-  return counts.artifacts + counts.sessions + counts.tasks + counts.memories;
+  return (
+    counts.artifacts +
+    counts.sessions +
+    counts.tasks +
+    counts.messages +
+    counts.followups
+  );
 }
 
-/** `GET /v1/workspaces?path=` — 400 for a relative or missing path. */
+/** `GET /v1/workspaces` — every project the home store records, by folder name. */
+export async function listProjects(signal?: AbortSignal): Promise<Project[]> {
+  return await apiFetch<Project[]>("/v1/workspaces", { signal });
+}
+
+/** `GET /v1/workspaces?path=` — `400 INVALID_PATH` for a relative or empty path. */
 export async function getWorkspace(
   path: string,
   signal?: AbortSignal,
@@ -69,19 +156,50 @@ export async function getWorkspace(
 }
 
 /**
- * `PATCH /v1/workspaces` — the one transaction.
- *
- * Rejects with an `ApiError` carrying the daemon's own code:
- * `WORKSPACE_NOT_FOUND` (404), `WORKSPACE_BUSY`, `WORKSPACE_EXISTS` and
- * `WORKSPACE_MOVE_BLOCKED` (409). Each is a refusal with a reason, and the
- * caller shows the reason rather than a generic failure.
+ * `POST /v1/workspaces` — `Use`: the project a folder is in, made one when it
+ * is in none (R10). Inside a git repository the answer is the repository;
+ * otherwise the folder itself is registered. Refusals: `WORKSPACE_IS_HOME`
+ * (409), `WORKSPACE_NOT_A_DIRECTORY` (422), `INVALID_PATH` (400),
+ * `WORKSPACE_REGISTER_FAILED` (500).
  */
-export async function rebaseWorkspace(
+export async function chooseProject(path: string): Promise<Project> {
+  return await apiFetch<Project>("/v1/workspaces", {
+    method: "POST",
+    body: { path },
+  });
+}
+
+/**
+ * `PATCH /v1/workspaces` — re-point a project at the folder it is in now
+ * (§6). Refusals: `WORKSPACE_NOT_FOUND` (404); `WORKSPACE_BUSY`,
+ * `WORKSPACE_EXISTS` and `WORKSPACE_IS_HOME` (409);
+ * `WORKSPACE_NOT_A_DIRECTORY` (422); `INVALID_PATH` (400).
+ */
+export async function repointProject(
   oldPath: string,
   newPath: string,
-): Promise<WorkspaceRebase> {
-  return await apiFetch<WorkspaceRebase>("/v1/workspaces", {
+): Promise<ProjectRepoint> {
+  return await apiFetch<ProjectRepoint>("/v1/workspaces", {
     method: "PATCH",
     body: { old_path: oldPath, new_path: newPath },
+  });
+}
+
+/**
+ * `POST /v1/workspaces/purge` — everything OpenAlpaca holds for a project
+ * (ST-19). `dryRun` answers the plan and deletes nothing. The daemon defaults
+ * to a dry run; the flag is sent either way, so a missing argument can never
+ * be the deletion. Refusals: `WORKSPACE_NOT_FOUND` (404), `WORKSPACE_BUSY`
+ * (409), `INVALID_PATH` (400), and `WORKSPACE_NOT_A_ROOT` (422) for a path
+ * inside a project rather than its root — the app sends a listed project's
+ * root, so it never meets that one.
+ */
+export async function deleteProjectData(
+  path: string,
+  dryRun: boolean,
+): Promise<ProjectDataDeletion> {
+  return await apiFetch<ProjectDataDeletion>("/v1/workspaces/purge", {
+    method: "POST",
+    body: { path, dry_run: dryRun },
   });
 }

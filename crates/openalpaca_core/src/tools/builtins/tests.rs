@@ -2,9 +2,10 @@ use super::*;
 
 #[test]
 fn test_builtin_tools_count_without_db() {
-    let tools = builtin_tools(None, None, None, None, None);
-    // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
-    assert_eq!(tools.len(), 9);
+    let tools = builtin_tools(None, None, None);
+    // 10 base tools (incl. artifact_write, read_result, file_edit, file_list
+    // and artifact_read) + 2 workspace tools
+    assert_eq!(tools.len(), 12);
 }
 
 #[test]
@@ -12,14 +13,15 @@ fn test_builtin_tools_count_with_db() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-    let tools = builtin_tools(Some(db), None, Some(dc), None, None);
-    // 8 base tools (with memory_search) + 2 workspace tools
-    assert_eq!(tools.len(), 10);
+    let tools = builtin_tools(Some(db), Some(dc), None);
+    // 10 base tools + 2 workspace tools: the memory tools are the service's
+    // (`memory_read_tools`), not this list's.
+    assert_eq!(tools.len(), 12);
 }
 
 #[test]
 fn test_all_tools_have_valid_definitions() {
-    for tool in builtin_tools(None, None, None, None, None) {
+    for tool in builtin_tools(None, None, None) {
         assert!(!tool.definition.name.is_empty());
         assert!(!tool.definition.description.is_empty());
         assert!(tool.definition.parameters.is_object());
@@ -41,9 +43,9 @@ fn test_builtin_tools_with_persona_context_includes_update_persona() {
         max_backups: None,
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-    let tools = builtin_tools_with_persona_context(Some(db), None, ctx, Some(dc), None, None, None);
-    // 10 base (8 + 2 workspace) + 1 update_persona = 11 (no send since connector_send_provider is None)
-    assert_eq!(tools.len(), 11, "Should have 11 tools (10 base + update_persona)");
+    let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, None);
+    // 12 base (10 + 2 workspace) + 1 update_persona = 13 (no send since connector_send_provider is None)
+    assert_eq!(tools.len(), 13, "Should have 13 tools (12 base + update_persona)");
     assert!(
         tools.iter().any(|t| t.definition.name == "update_persona"),
         "update_persona tool must be present"
@@ -68,13 +70,21 @@ fn test_all_tools_have_strict_enabled() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
-    let tools = builtin_tools_with_persona_context(
-        Some(db), None, ctx, Some(dc), None, None, Some(provider),
-    );
+    let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, Some(provider));
+    // A tool with an optional parameter is deliberately not strict-marked:
+    // strict mode requires every key, and `strict_mode_compatible` would drop
+    // the flag anyway (R8). `file_edit`'s `replace_all` defaults to false;
+    // `artifact_read`'s `offset` and `limit` are optional (S5).
+    const NOT_STRICT: &[&str] = &["file_edit", "artifact_read"];
     for tool in &tools {
+        let expected = if NOT_STRICT.contains(&tool.definition.name.as_str()) {
+            None
+        } else {
+            Some(true)
+        };
         assert_eq!(
-            tool.definition.strict, Some(true),
-            "Tool '{}' should have strict: Some(true)",
+            tool.definition.strict, expected,
+            "Tool '{}' strict flag",
             tool.definition.name
         );
     }
@@ -90,7 +100,7 @@ fn test_all_tools_have_strict_enabled() {
 
 #[test]
 fn test_all_tool_descriptions_are_detailed() {
-    let tools = builtin_tools(None, None, None, None, None);
+    let tools = builtin_tools(None, None, None);
     for tool in &tools {
         assert!(
             tool.definition.description.len() > 100,
@@ -118,9 +128,7 @@ fn test_complex_tools_have_input_examples() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
-    let tools = builtin_tools_with_persona_context(
-        Some(db), None, ctx, Some(dc), None, None, Some(provider),
-    );
+    let tools = builtin_tools_with_persona_context(Some(db), ctx, Some(dc), None, Some(provider));
 
     let tools_needing_examples = ["update_persona", "send"];
     for tool in &tools {
@@ -147,18 +155,24 @@ async fn test_shell_execute_timeout_is_300s() {
     // The shell_execute tool has a 300s defense-in-depth timeout.
     // We verify this by running a quick command through the tool and
     // checking the tool produces correct output (it wouldn't if the
-    // timeout were misconfigured to 0).
+    // timeout were misconfigured to 0). Stage 2 (R26): a command runs in
+    // its conversation's working folder, so the call carries one — a
+    // guarded project made for the test.
     use crate::tools::registry::ToolBackend;
 
+    let gp = crate::test_util::GuardedProject::new();
     let tool = shell_execute::shell_execute_tool();
     match &tool.backend {
         ToolBackend::BuiltIn(handler) => {
             let result: Result<String, String> = handler
-                .execute(&serde_json::json!({"command": "echo test_timeout"}))
+                .execute_with_context(
+                    &serde_json::json!({"command": "echo test_timeout"}),
+                    &gp.ctx(),
+                )
                 .await;
             assert!(
                 result.is_ok(),
-                "shell_execute should succeed for quick commands"
+                "shell_execute should succeed for quick commands: {result:?}"
             );
             assert!(result.unwrap().contains("test_timeout"));
         }
@@ -166,32 +180,17 @@ async fn test_shell_execute_timeout_is_300s() {
     }
 }
 
-// --- Issue 5: Workspace root override vs current_dir() ---
-
+/// S4a: `file_write` acts in each call's working folder, so the registry
+/// captures no startup folder — the base set is twelve tools since artifact_read (S5).
 #[test]
-fn test_builtin_tools_uses_explicit_workspace_root() {
-    let dir = tempfile::tempdir().unwrap();
-    let ws_root = dir.path().to_path_buf();
-
-    // Pass an explicit workspace root — should not fall back to current_dir()
-    let tools = builtin_tools(None, None, None, None, Some(ws_root.clone()));
-    // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
-    assert_eq!(tools.len(), 9);
-
-    // Verify tools were created (they compile and register without error
-    // when given an explicit workspace root).
-    let tool_names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
-    assert!(tool_names.contains(&"file_read"));
-    assert!(tool_names.contains(&"file_write"));
-}
-
-#[test]
-fn test_builtin_tools_falls_back_to_current_dir_when_none() {
-    // When workspace_root is None, should fall back to current_dir()
-    // This must not panic even if current_dir() is available.
-    let tools = builtin_tools(None, None, None, None, None);
-    // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
-    assert_eq!(tools.len(), 9);
+fn builtin_tools_register_the_file_tools_with_no_startup_root() {
+    let tools = builtin_tools(None, None, None);
+    // 10 base tools (incl. artifact_write, read_result, file_edit, file_list
+    // and artifact_read) + 2 workspace tools
+    assert_eq!(tools.len(), 12);
+    let names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
+    assert!(names.contains(&"file_read"));
+    assert!(names.contains(&"file_write"));
 }
 
 // --- json_to_cli_args ---
@@ -240,15 +239,153 @@ fn annotations_for_builtin_unknown_returns_none() {
 
 #[test]
 fn annotations_for_builtin_destructive_tools_tagged() {
-    for name in ["file_write", "workspace_write", "artifact_write", "shell_execute", "update_persona", "send"] {
+    for name in ["file_write", "shell_execute", "update_persona", "send"] {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.destructive_hint, Some(true), "{name} should be destructive");
     }
 }
 
+/// ST-15 (storage design §12): `artifact_write` and `workspace_write` write
+/// only under ~/.openalpaca, so they carry no destructive hint, and an agent
+/// with no confirmation list of its own is never asked about them, while
+/// `file_write` and `shell_execute` still are. Decided by tool name, before
+/// the tool runs, so `file_write` saving a by-product still asks.
+#[test]
+fn annotations_for_builtin_by_product_writers_never_prompt() {
+    use crate::agent::subagent::AgentConstraints;
+    use crate::security::sandbox::{SandboxPolicy, effective_confirmation_set};
+    use crate::tools::ToolRegistry;
+
+    for name in ["artifact_write", "workspace_write"] {
+        let ann = annotations_for_builtin(name).unwrap();
+        assert_eq!(ann.destructive_hint, Some(false), "{name} must not prompt");
+        assert_eq!(ann.read_only_hint, Some(false), "{name} still writes");
+        assert_eq!(ann.open_world_hint, Some(false), "{name} writes under ~/.openalpaca only");
+    }
+
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let policy = SandboxPolicy::from_constraints("writing_agent", &AgentConstraints::default());
+    let set = effective_confirmation_set(&policy, &registry);
+    for name in ["artifact_write", "workspace_write"] {
+        assert!(!set.contains(&name.to_string()), "{name} asks; the set is {set:?}");
+    }
+    for name in ["file_write", "shell_execute"] {
+        assert!(set.contains(&name.to_string()), "{name} must ask; the set is {set:?}");
+    }
+}
+
+// --- ST-16: reading never asks (storage design §12) ---
+
+/// ST-16: `file_read` and `read_result` are read-only and raise no card, with
+/// a broker attached and no confirmation list, so the set is the one derived
+/// from the annotations `builtin_tools` registers them with. `file_write`
+/// under the same policy does raise one, which is what makes the two "no
+/// card" findings mean something. The one-second timeout lets that card lapse
+/// unanswered, so nothing is written. A read that started asking would fail
+/// here in a second instead of hanging the suite.
+#[tokio::test]
+async fn reading_tools_raise_no_card_under_a_broker() {
+    use crate::bus::EventBus;
+    use crate::events::SystemEvent;
+    use crate::security::capabilities::Allowlist;
+    use crate::security::confirmation::ConfirmationBroker;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::test_util::GuardedProject;
+    use crate::tools::ToolRegistry;
+    use openalpaca_llm::ToolCall;
+
+    let gp = GuardedProject::new();
+    std::fs::write(gp.root.join("notes.txt"), "read me\n").unwrap();
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let bus = EventBus::default();
+    let mut events = bus.subscribe();
+    let mut sandbox = SandboxManager::with_defaults(Arc::new(registry), bus);
+    let broker = Arc::new(ConfirmationBroker::new());
+    sandbox.set_confirmation_broker(broker.clone());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent".to_string(),
+        allowed_capabilities: Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: Some(1),
+        auto_approve: false,
+        unattended: false,
+    };
+    let call = |name: &str, arguments: serde_json::Value| ToolCall {
+        id: format!("tc-{name}"),
+        name: name.to_string(),
+        arguments,
+    };
+    let carded = |events: &mut tokio::sync::broadcast::Receiver<SystemEvent>| {
+        let mut tools = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let SystemEvent::ToolConfirmationRequested { tool_name, .. } = event {
+                tools.push(tool_name);
+            }
+        }
+        tools
+    };
+
+    let read = sandbox
+        .execute_tool(
+            &call("file_read", serde_json::json!({"path": "notes.txt"})),
+            &policy,
+            &gp.ctx(),
+        )
+        .await;
+    assert_eq!(read, Ok("read me\n".to_string()));
+    // The tool's own refusal: the sandbox let the call through with no card,
+    // and the call has no session to page from.
+    let paged = sandbox
+        .execute_tool(
+            &call(
+                "read_result",
+                serde_json::json!({"result_ref": "file:results/000001-a1b2c3d4-shell_execute.txt"}),
+            ),
+            &policy,
+            &gp.ctx(),
+        )
+        .await;
+    assert_eq!(
+        paged,
+        Err("read_result is scoped to a session, and this call has none".to_string())
+    );
+    assert_eq!(carded(&mut events), Vec::<String>::new(), "a read raised a card");
+    assert_eq!(broker.pending_count(), 0);
+
+    let write = sandbox
+        .execute_tool(
+            &call("file_write", serde_json::json!({"path": "out.md", "content": "x"})),
+            &policy,
+            &gp.ctx(),
+        )
+        .await;
+    assert!(write.is_err(), "the unanswered card lapses: {write:?}");
+    assert_eq!(carded(&mut events), vec!["file_write".to_string()]);
+    assert!(!gp.root.join("out.md").exists(), "an unanswered write never runs");
+}
+
 #[test]
 fn annotations_for_builtin_readonly_tools_tagged() {
-    for name in ["file_read", "workspace_read", "memory_search", "web_fetch", "web_search"] {
+    for name in [
+        "file_read",
+        "file_list",
+        "artifact_read",
+        "workspace_read",
+        "memory_search",
+        "web_fetch",
+        "web_search",
+    ] {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.read_only_hint, Some(true), "{name} should be read_only");
     }
@@ -264,6 +401,175 @@ fn annotations_for_builtin_open_world_correct() {
         let ann = annotations_for_builtin(name).unwrap();
         assert_eq!(ann.open_world_hint, Some(false), "{name} should NOT be open_world");
     }
+}
+
+/// R42: `file_list` comes with the `file_read` capability — a template that
+/// names `file_read` resolves both — and, read-only, it never asks (ST-16).
+#[test]
+fn file_list_comes_with_the_file_read_capability_and_is_read_only() {
+    let tools = builtin_tools(None, None, None);
+    let found = tools
+        .iter()
+        .find(|t| t.definition.name == "file_list")
+        .expect("file_list is a builtin");
+    assert_eq!(
+        found.provides_capabilities,
+        vec!["file_read".to_string(), "file_list".to_string()]
+    );
+    let annotations = found.annotations.as_ref().expect("annotated");
+    assert_eq!(annotations.read_only_hint, Some(true));
+    assert_eq!(annotations.destructive_hint, Some(false));
+    assert_eq!(found.definition.strict, Some(true));
+}
+
+/// R42: `artifact_read` comes with the `read_result` capability — which all
+/// nine shipped templates name — and, read-only, it never asks (ST-16).
+#[test]
+fn artifact_read_comes_with_the_read_result_capability_and_is_read_only() {
+    let tools = builtin_tools(None, None, None);
+    let found = tools
+        .iter()
+        .find(|t| t.definition.name == "artifact_read")
+        .expect("artifact_read is a builtin");
+    assert_eq!(
+        found.provides_capabilities,
+        vec!["read_result".to_string(), "artifact_read".to_string()]
+    );
+    let annotations = found.annotations.as_ref().expect("annotated");
+    assert_eq!(annotations.read_only_hint, Some(true));
+    assert_eq!(annotations.destructive_hint, Some(false));
+}
+
+// --- ST-16: the read tools Stage 2 adds never ask ---
+
+/// ST-16 (storage design §12): `file_list` and `artifact_read` are read-only
+/// and never raise an approval card. They are outside the confirmation set
+/// the sandbox derives from the registered annotations, and run through the
+/// sandbox with a broker and an `unattended` policy — under which a tool that
+/// needed approval is refused at once — they run, and nothing waits on the
+/// broker or reaches the bus as a confirmation request.
+#[tokio::test]
+async fn file_list_and_artifact_read_run_with_no_approval_card() {
+    use crate::bus::EventBus;
+    use crate::security::capabilities::Allowlist;
+    use crate::security::confirmation::ConfirmationBroker;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy, effective_confirmation_set};
+    use crate::tools::ToolRegistry;
+
+    let gp = crate::test_util::GuardedProject::new();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&db_dir.path().join("test.db")).unwrap();
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(Some(db), None, None) {
+        registry.register(tool).unwrap();
+    }
+    let registry = Arc::new(registry);
+    let bus = EventBus::new(64);
+    let mut rx = bus.subscribe();
+    let mut sandbox = SandboxManager::with_defaults(registry.clone(), bus);
+    let broker = Arc::new(ConfirmationBroker::new());
+    sandbox.set_confirmation_broker(broker.clone());
+    let policy = SandboxPolicy {
+        agent_id: "explore_agent::a1".to_string(),
+        allowed_capabilities: Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 30,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: Some(300),
+        auto_approve: false,
+        unattended: true,
+    };
+
+    let set = effective_confirmation_set(&policy, &registry);
+    for name in ["file_list", "artifact_read"] {
+        assert!(!set.contains(&name.to_string()), "{name} never asks: {set:?}");
+    }
+
+    std::fs::write(gp.root.join("README.md"), "hi").unwrap();
+    let listed = sandbox
+        .execute_tool(
+            &openalpaca_llm::ToolCall {
+                id: "tu-list".to_string(),
+                name: "file_list".to_string(),
+                arguments: serde_json::json!({"path": "."}),
+            },
+            &policy,
+            &gp.ctx(),
+        )
+        .await
+        .expect("file_list runs on an unattended turn");
+    assert!(listed.contains("README.md  2 bytes"), "{listed}");
+
+    let refused = sandbox
+        .execute_tool(
+            &openalpaca_llm::ToolCall {
+                id: "tu-read".to_string(),
+                name: "artifact_read".to_string(),
+                arguments: serde_json::json!({"artifact_id": "no-such-id"}),
+            },
+            &policy,
+            &gp.ctx(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.contains("no artifact 'no-such-id' of yours"),
+        "the tool ran and answered, not the approval gate: {refused}"
+    );
+    assert!(!refused.contains("needs your approval"), "{refused}");
+
+    assert_eq!(broker.pending_count(), 0, "nothing was raised");
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                crate::events::SystemEvent::ToolConfirmationRequested { .. }
+            ),
+            "no card was raised: {event:?}"
+        );
+    }
+}
+
+/// ST-22 / R49: `file_edit` is a builtin, asks exactly as `file_write` does
+/// (destructive, local), is not strict-marked (`replace_all` is optional —
+/// interfaces §7.4), and the sanitizer's `../` rule does not read its strings
+/// (R29: a first-party builtin's arguments are content); and `file_write`'s
+/// description points at it for a change to part of a file (the lead's
+/// ruling R-T13).
+#[test]
+fn file_edit_is_registered_asking_like_file_write() {
+    use crate::security::sanitizer::TraversalRule;
+    use crate::tools::ToolRegistry;
+
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let edit = registry.get("file_edit").expect("file_edit is a builtin");
+    let write = registry.get("file_write").expect("file_write is a builtin");
+    let (edit_ann, write_ann) = (edit.annotations.unwrap(), write.annotations.unwrap());
+    assert_eq!(edit_ann.destructive_hint, Some(true));
+    assert_eq!(edit_ann.destructive_hint, write_ann.destructive_hint);
+    assert_eq!(edit_ann.read_only_hint, write_ann.read_only_hint);
+    assert_eq!(edit_ann.idempotent_hint, write_ann.idempotent_hint);
+    assert_eq!(edit_ann.open_world_hint, write_ann.open_world_hint);
+    assert_eq!(edit.definition.strict, None);
+    assert_eq!(
+        edit.definition.parameters["required"],
+        serde_json::json!(["path", "old_string", "new_string"])
+    );
+    assert_eq!(registry.traversal_rule("file_edit"), TraversalRule::Allow);
+    assert!(
+        write
+            .definition
+            .description
+            .contains("To change part of an existing file in the project, use file_edit."),
+        "{}",
+        write.definition.description
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +601,10 @@ mod workspace_artifact_spill {
             let home = TempDir::new().unwrap();
             let env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
             let project = TempDir::new().unwrap();
+            // A project scope is a registered project's (design §3, R12) —
+            // registered under this fixture's home, never the developer's.
+            openalpaca_storage::store::projects::register(&project.path().canonicalize().unwrap())
+                .unwrap();
             let db_dir = TempDir::new().unwrap();
             let db = Database::open(&db_dir.path().join("test.db")).unwrap();
             let now = chrono::Utc::now();
@@ -437,7 +747,13 @@ mod workspace_artifact_spill {
         assert_eq!(asset.owner_id, OWNER);
         let path = PathBuf::from(&asset.storage_path);
         assert!(
-            path.starts_with(fx.project_root().join(".openalpaca").join("artifacts")),
+            path.starts_with(
+                openalpaca_storage::store::store_root(
+                    &openalpaca_storage::store::StoreScope::Project(fx.project_root())
+                )
+                .unwrap()
+                .join("artifacts")
+            ),
             "spilled to {}",
             path.display()
         );
@@ -486,8 +802,13 @@ mod workspace_artifact_spill {
                 assert_eq!(kind, "markdown");
                 assert_eq!(version, 1);
                 assert!(
-                    PathBuf::from(&path)
-                        .starts_with(fx.project_root().join(".openalpaca").join("artifacts")),
+                    PathBuf::from(&path).starts_with(
+                        openalpaca_storage::store::store_root(
+                            &openalpaca_storage::store::StoreScope::Project(fx.project_root())
+                        )
+                        .unwrap()
+                        .join("artifacts")
+                    ),
                     "announced {path}"
                 );
             }
@@ -628,9 +949,14 @@ mod workspace_artifact_spill {
     async fn a_failed_spill_degrades_loudly_and_keeps_the_content() {
         let fx = Fixture::new();
         let body = long_body();
-        // A file where the store root must be a directory — `ensure_store`
-        // cannot create `<project>/.openalpaca`, so `put` fails.
-        std::fs::write(fx.project_root().join(".openalpaca"), b"not a directory").unwrap();
+        // A file where the project's `artifacts/` must be a directory, so
+        // `put` fails — on either side of the flip.
+        let store = openalpaca_storage::store::store_root(
+            &openalpaca_storage::store::StoreScope::Project(fx.project_root()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("artifacts"), b"not a directory").unwrap();
 
         let out = fx
             .tool()
@@ -720,9 +1046,9 @@ mod workspace_artifact_spill {
         assert_eq!(entry.content, "# Tiny\n");
     }
 
-    /// The spill resolves its store exactly like the tool (R22): a connector
-    /// turn carries a CWD-derived `workspace_id` and no request root, and its
-    /// bytes belong in the home store.
+    /// The spill resolves its store exactly like the tool (R22): a context
+    /// with a `workspace_id` and no request root — a connector turn's before
+    /// R-S13 — still puts its bytes in the home store.
     #[tokio::test]
     async fn a_connector_turn_spills_into_the_home_store() {
         let fx = Fixture::new();
@@ -754,6 +1080,41 @@ mod workspace_artifact_spill {
             "a connector turn's spill must not land in the daemon's project: {}",
             asset.storage_path
         );
+    }
+
+    /// Design §2 / plan 3.2: `workspace_write`'s key is a path in the
+    /// artifact store, and the store's own entries are refused before the
+    /// task is even looked up.
+    #[tokio::test]
+    async fn workspace_write_refuses_store_owned_keys() {
+        let fx = Fixture::new();
+        let tool = builtin_tools(Some(fx.db.clone()), None, None)
+            .into_iter()
+            .find(|t| t.definition.name == "workspace_write")
+            .unwrap();
+        let ToolBackend::BuiltIn(backend) = tool.backend else {
+            panic!("builtin");
+        };
+        let ctx = ToolContext {
+            task_id: Some(TASK_ID.to_string()),
+            agent_id: Some("agent".to_string()),
+            owner_id: Some(OWNER.to_string()),
+            ..Default::default()
+        };
+        for key in ["state/memory-control/x.json", "MEMORY.md", ".history/x", "memory/.gitignore"] {
+            let err = backend
+                .execute_with_context(&serde_json::json!({"key": key, "content": "x"}), &ctx)
+                .await
+                .expect_err(key);
+            assert!(
+                err.contains("state/") || err.contains("memory") || err.contains(".history") || err.contains("MEMORY.md"),
+                "{key}: {err}"
+            );
+        }
+        backend
+            .execute_with_context(&serde_json::json!({"key": "notes/plan.md", "content": "x"}), &ctx)
+            .await
+            .unwrap();
     }
 }
 
@@ -1134,7 +1495,7 @@ mod read_result {
     /// tool that has to exist on every surface, decided allowlist or not.
     #[test]
     fn it_is_registered_with_the_builtins() {
-        let tools = builtin_tools(None, None, None, None, None);
+        let tools = builtin_tools(None, None, None);
         let found = tools
             .iter()
             .find(|t| t.definition.name == "read_result")
@@ -1146,4 +1507,486 @@ mod read_result {
             "paging a spilled result reads and nothing more"
         );
     }
+}
+
+// --- Memory redesign (plan slice 3, row 3.2): annotations and descriptions ---
+
+/// Design §7, *Capabilities*: `memory_forget` and `memory_update` carry
+/// `destructive_local_annotations()` so the sandbox derives its confirmation
+/// set from them; `memory_store`, `memory_search`, `memory_read`,
+/// `memory_list` and `memory_timeline` do not prompt.
+#[test]
+fn memory_tool_annotations_decide_the_confirmation_prompt() {
+    for name in ["memory_forget", "memory_update"] {
+        let ann = annotations_for_builtin(name).unwrap_or_else(|| panic!("{name} has annotations"));
+        assert_eq!(ann.destructive_hint, Some(true), "{name} prompts");
+        assert_eq!(ann.open_world_hint, Some(false));
+    }
+    for name in [
+        "memory_search",
+        "memory_read",
+        "memory_list",
+        "memory_timeline",
+    ] {
+        let ann = annotations_for_builtin(name).unwrap_or_else(|| panic!("{name} has annotations"));
+        assert_eq!(ann.read_only_hint, Some(true), "{name} is read-only");
+        assert_ne!(ann.destructive_hint, Some(true));
+    }
+    assert!(
+        !annotations_for_builtin("memory_store")
+            .and_then(|a| a.destructive_hint)
+            .unwrap_or(false),
+        "a plain save never prompts (design §7: a tool-issued supersede is bounded by authority instead)"
+    );
+}
+
+/// `memory_search.rs:140` used to promise "hybrid search combining full-text
+/// search and vector similarity"; the redesign is lexical (design §1, §5)
+/// and the description must not claim more.
+#[test]
+fn memory_tool_descriptions_promise_no_semantic_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let service = std::sync::Arc::new(crate::memory::service::MemoryService::new(
+        Some(db),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    ));
+    let mut definitions: Vec<ToolDefinition> = memory_read_tools(service.clone())
+        .into_iter()
+        .map(|t| t.definition)
+        .collect();
+    definitions.push(memory_store_tool_definition());
+    definitions.push(memory_update_tool_definition());
+    definitions.push(memory_forget_tool_definition());
+    assert_eq!(definitions.len(), 7);
+    for def in &definitions {
+        let text = def.description.to_lowercase();
+        for banned in ["semantic", "vector", "hybrid", "similarity", "embedding"] {
+            assert!(
+                !text.contains(banned),
+                "{} promises {banned:?}: {}",
+                def.name,
+                def.description
+            );
+        }
+        assert_eq!(
+            def.parameters.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "{} must close its schema (design §3 rule 6)",
+            def.name
+        );
+        assert_eq!(def.strict, Some(true), "{}", def.name);
+    }
+}
+
+/// What OpenAI's strict mode accepts, restated here on its own from its
+/// documentation (the function-calling guide, *Strict mode*; the
+/// structured-outputs guide, *Supported schemas*) so that it checks the
+/// provider's `strict_mode_compatible` rather than copies it: the root is an
+/// object; every node says what it is (a `type`, an `enum`, a `const`, an
+/// `anyOf` or a `$ref`); every object is closed and requires every property;
+/// every array has one `items`; and a node carries only keywords from the
+/// documented list, each where it applies — anything else is refused.
+/// `Err` names the first breach.
+fn openai_strict_accepts(schema: &serde_json::Value) -> Result<(), String> {
+    use serde_json::Value;
+
+    const FORMATS: [&str; 9] = [
+        "date-time",
+        "time",
+        "date",
+        "duration",
+        "email",
+        "hostname",
+        "ipv4",
+        "ipv6",
+        "uuid",
+    ];
+
+    fn check(path: &str, schema: &Value, root: &Value) -> Result<(), String> {
+        let node = schema
+            .as_object()
+            .ok_or_else(|| format!("{path}: not a schema object"))?;
+        let types: Vec<&str> = match node.get("type") {
+            Some(Value::String(t)) => vec![t.as_str()],
+            Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        let is = |t: &str| types.contains(&t);
+        if !types.is_empty()
+            && !types.iter().all(|t| {
+                [
+                    "string", "number", "integer", "boolean", "object", "array", "null",
+                ]
+                .contains(t)
+            })
+        {
+            return Err(format!("{path}: a type strict mode does not know"));
+        }
+        if !["type", "enum", "const", "anyOf", "$ref"]
+            .iter()
+            .any(|k| node.contains_key(*k))
+        {
+            return Err(format!("{path}: says nothing of what it is"));
+        }
+        for (key, value) in node {
+            let belongs = match key.as_str() {
+                "type" | "description" | "title" | "enum" | "const" | "anyOf" => true,
+                "$ref" => node.len() == 1,
+                "$defs" | "definitions" => path == "$",
+                "properties" | "required" | "additionalProperties" => is("object"),
+                "items" | "minItems" | "maxItems" => is("array"),
+                "pattern" => is("string"),
+                "format" => is("string") && FORMATS.contains(&value.as_str().unwrap_or("")),
+                "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf" => {
+                    is("number") || is("integer")
+                }
+                _ => false,
+            };
+            if !belongs {
+                return Err(format!("{path}: `{key}` is not accepted here"));
+            }
+        }
+        if let Some(target) = node.get("$ref").and_then(Value::as_str) {
+            let found = target == "#"
+                || ["$defs", "definitions"].iter().any(|defs| {
+                    target
+                        .strip_prefix(&format!("#/{defs}/"))
+                        .is_some_and(|name| root[*defs].get(name).is_some())
+                });
+            if !found {
+                return Err(format!("{path}: `$ref` {target} names no local definition"));
+            }
+        }
+        if is("object") {
+            if node.get("additionalProperties") != Some(&Value::Bool(false)) {
+                return Err(format!("{path}: additionalProperties is not false"));
+            }
+            let properties = node
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("{path}: no properties"))?;
+            let required: Vec<&str> = node
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|r| r.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let mut sorted = required.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let mut keys: Vec<&str> = properties.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            if sorted != keys || sorted.len() != required.len() {
+                return Err(format!(
+                    "{path}: required {required:?} is not every key {keys:?}"
+                ));
+            }
+            for (key, property) in properties {
+                check(&format!("{path}.{key}"), property, root)?;
+            }
+        }
+        if is("array") {
+            let items = node
+                .get("items")
+                .ok_or_else(|| format!("{path}: an array with no items"))?;
+            check(&format!("{path}[]"), items, root)?;
+        }
+        if let Some(branches) = node.get("anyOf") {
+            for (i, branch) in branches.as_array().into_iter().flatten().enumerate() {
+                check(&format!("{path}|{i}"), branch, root)?;
+            }
+        }
+        for defs in ["$defs", "definitions"] {
+            for (name, definition) in node
+                .get(defs)
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+            {
+                check(&format!("{path}/{defs}/{name}"), definition, root)?;
+            }
+        }
+        Ok(())
+    }
+
+    if schema.get("type") != Some(&Value::String("object".into())) {
+        return Err("$: the root is not an object".into());
+    }
+    check("$", schema, schema)
+}
+
+/// R8: every builtin definition — the registered ones and the per-request
+/// main-loop and skill ones — goes through the OpenAI tool serializer the
+/// OpenAI and Ollama providers use, and `strict: true` goes out exactly where
+/// OpenAI's strict mode accepts the schema. A strict-marked schema that
+/// breaks its rules is refused with a 400 for the whole request, so a future
+/// builtin with an optional property or an open object must lose `strict`
+/// here rather than every tool-carrying turn on OpenAI. The schema itself is
+/// always sent as written.
+#[test]
+fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() {
+    use crate::bus::EventBus;
+    use openalpaca_llm::providers::openai_tools::openai_function_tool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let ctx = PersonaToolContext {
+        soul_path: dir.path().join("SOUL.md"),
+        user_path: dir.path().join("USER.md"),
+        identity_path: dir.path().join("IDENTITY.md"),
+        backup_dir: dir.path().join("backups"),
+        bus: EventBus::new(16),
+        max_backups: None,
+    };
+    let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
+    let mut definitions: Vec<ToolDefinition> =
+        builtin_tools_with_persona_context(Some(db.clone()), ctx, Some(dc), None, Some(provider))
+            .into_iter()
+            .map(|t| t.definition)
+            .collect();
+    let service = std::sync::Arc::new(crate::memory::service::MemoryService::new(
+        Some(db),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    ));
+    definitions.extend(memory_read_tools(service).into_iter().map(|t| t.definition));
+    definitions.extend([
+        memory_store_tool_definition(),
+        memory_update_tool_definition(),
+        memory_forget_tool_definition(),
+        memory_confirm_tool_definition(),
+        invoke_skill_tool_definition(),
+        start_workflow_tool_definition(),
+        steer_workflow_tool_definition(),
+        task_status_tool_definition(),
+    ]);
+
+    let mut kept = Vec::new();
+    let mut marked = 0;
+    for def in &definitions {
+        let entry = openai_function_tool(def);
+        let function = &entry["function"];
+        assert_eq!(entry["type"], "function", "{}", def.name);
+        assert_eq!(
+            function["parameters"], def.parameters,
+            "{} is sent as written",
+            def.name
+        );
+        let sent_strict = function.get("strict") == Some(&serde_json::json!(true));
+        if def.strict != Some(true) {
+            assert!(!sent_strict, "{} is not strict-marked", def.name);
+            continue;
+        }
+        marked += 1;
+        match openai_strict_accepts(&def.parameters) {
+            Ok(()) => {
+                assert!(sent_strict, "{}: a compliant schema keeps strict", def.name);
+                kept.push(def.name.clone());
+            }
+            Err(breach) => assert!(
+                !sent_strict,
+                "{} would be refused by OpenAI's strict mode ({breach}), yet goes out strict",
+                def.name
+            ),
+        }
+    }
+    // The walk saw what it is meant to: all 22 strict-marked builtins, and
+    // the two schemas already written in strict mode's shape (memory_confirm's and
+    // file_list's) keep their flag.
+    assert_eq!(marked, 22, "strict-marked builtins seen");
+    assert!(kept.contains(&"memory_confirm".to_string()), "{kept:?}");
+    assert!(kept.contains(&"file_list".to_string()), "{kept:?}");
+
+    // The serializer and this restatement agree beyond today's builtins:
+    // closed, fully required schemas carrying a keyword strict mode refuses
+    // (the review's probe) lose the flag, and ones using only documented
+    // keywords keep it.
+    let closed = |properties: serde_json::Value| {
+        let keys: Vec<String> = properties.as_object().unwrap().keys().cloned().collect();
+        serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "required": keys,
+            "additionalProperties": false,
+        })
+    };
+    let with_defs = |mut schema: serde_json::Value| {
+        schema["$defs"] = serde_json::json!({ "n": closed(serde_json::json!({})) });
+        schema
+    };
+    let refused = [
+        closed(
+            serde_json::json!({ "v": { "type": "array", "items": { "type": "string" }, "uniqueItems": true } }),
+        ),
+        closed(
+            serde_json::json!({ "v": { "type": "array", "items": { "type": "string" }, "minContains": 1 } }),
+        ),
+        serde_json::json!({ "type": "object", "properties": {}, "required": [], "additionalProperties": false, "minProperties": 0 }),
+        serde_json::json!({ "type": "object", "properties": {}, "required": [], "additionalProperties": false, "maxProperties": 3 }),
+        closed(serde_json::json!({ "v": { "type": "string", "default": "x" } })),
+        with_defs(closed(
+            serde_json::json!({ "v": { "$ref": "#/$defs/n", "title": "N" } }),
+        )),
+        closed(serde_json::json!({ "v": { "type": "string", "format": "uri" } })),
+        with_defs(closed(
+            serde_json::json!({ "v": { "$ref": "#/$defs/n", "description": "N" } }),
+        )),
+    ];
+    let accepted = [
+        closed(serde_json::json!({
+            "when": { "type": ["string", "null"], "format": "date-time" },
+            "code": { "type": "string", "pattern": "^[a-z]+$" },
+            "count": { "type": "integer", "minimum": 0, "maximum": 9 },
+            "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 5 },
+        })),
+        with_defs(closed(serde_json::json!({ "v": { "$ref": "#/$defs/n" } }))),
+    ];
+    for (schema, compliant) in refused
+        .into_iter()
+        .map(|s| (s, false))
+        .chain(accepted.into_iter().map(|s| (s, true)))
+    {
+        assert_eq!(
+            openai_strict_accepts(&schema).is_ok(),
+            compliant,
+            "{schema}"
+        );
+        let def = ToolDefinition {
+            name: "probe".to_string(),
+            description: "probe".to_string(),
+            parameters: schema.clone(),
+            strict: Some(true),
+            input_examples: None,
+        };
+        let sent =
+            openai_function_tool(&def)["function"].get("strict") == Some(&serde_json::json!(true));
+        assert_eq!(sent, compliant, "{schema}");
+    }
+}
+
+// --- R29: which tools keep the `../` rule (storage design §11) ---
+
+/// R29's tripwire over the builtins the daemon registers globally: each says
+/// its arguments reach no program, so the sanitizer's `../` rule is off it
+/// and its own path checks carry the `..` refusal. The per-request builtins
+/// are walked beside the code that builds them (S1's M2): the main loop's
+/// (`main_loop::tests::every_per_request_main_loop_tool_says_its_arguments_reach_no_program`,
+/// with the memory read tools the daemon registers globally) and the lead's
+/// (`runner::lead_agent::tests::every_per_request_lead_tool_says_its_arguments_reach_no_program`).
+/// Not walked by any of them: the `invoke_skill:<id>` adapters a skill's
+/// `depends_on` registers on its own run (`SkillInvocationBuiltInAdapter`,
+/// whose argument is a query for the nested skill) and a skill's script
+/// tools, which keep the rule
+/// (`a_skill_script_says_its_arguments_reach_a_program`).
+#[test]
+fn every_first_party_builtin_says_its_arguments_reach_no_program() {
+    use crate::bus::EventBus;
+    use crate::tools::registry::ToolBackend;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = PersonaToolContext {
+        soul_path: dir.path().join("SOUL.md"),
+        user_path: dir.path().join("USER.md"),
+        identity_path: dir.path().join("IDENTITY.md"),
+        backup_dir: dir.path().join("backups"),
+        bus: EventBus::new(16),
+        max_backups: None,
+    };
+    let provider: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
+    let tools = builtin_tools_with_persona_context(None, ctx, None, None, Some(provider));
+    assert!(
+        tools.iter().any(|t| t.definition.name == "send"),
+        "send is on the list"
+    );
+    for tool in &tools {
+        match &tool.backend {
+            ToolBackend::BuiltIn(handler) => assert!(
+                !handler.arguments_reach_a_program(),
+                "{} keeps the ../ rule",
+                tool.definition.name
+            ),
+            _ => panic!("{} is not a builtin", tool.definition.name),
+        }
+    }
+}
+
+#[test]
+fn a_skill_script_says_its_arguments_reach_a_program() {
+    let skill = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(skill.path().join("scripts")).unwrap();
+    std::fs::write(skill.path().join("scripts/noop.sh"), "exit 0\n").unwrap();
+    let script = ScriptToolBuiltIn::new(
+        skill.path(),
+        &crate::middleware::skill::ScriptConfig {
+            file: "noop.sh".to_string(),
+            name: "noop".to_string(),
+            description: "Does nothing".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            interpreter: Some("sh".to_string()),
+            timeout_secs: 5,
+        },
+    )
+    .unwrap();
+    assert!(script.arguments_reach_a_program());
+}
+
+// --- R45: a skill script is killed with what it started (storage design §11) ---
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_skill_script_that_times_out_takes_the_processes_it_started_with_it() {
+    use crate::test_util::{GONE_WITHIN, KillOnFail, pid_from_file, wait_until_gone};
+    use std::time::Duration;
+
+    let skill = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(skill.path().join("scripts")).unwrap();
+    std::fs::write(
+        skill.path().join("scripts/hang.sh"),
+        "for a in \"$@\"; do case \"$a\" in --pidfile=*) P=\"${a#--pidfile=}\" ;; esac; done\n\
+         sleep 30 &\n\
+         echo $! > \"$P\"\n\
+         wait\n",
+    )
+    .unwrap();
+    let tool = ScriptToolBuiltIn::new(
+        skill.path(),
+        &crate::middleware::skill::ScriptConfig {
+            file: "hang.sh".to_string(),
+            name: "hang".to_string(),
+            description: "Starts a sleep and waits on it".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            interpreter: Some("sh".to_string()),
+            timeout_secs: 1,
+        },
+    )
+    .unwrap();
+    let pidfile = skill.path().join("pid");
+
+    let err = tool
+        .execute(&serde_json::json!({"pidfile": pidfile.to_str().unwrap()}))
+        .await
+        .unwrap_err();
+    let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
+    let _kill = KillOnFail(pid);
+    assert_eq!(err, "Script timed out after 1s");
+    assert!(
+        wait_until_gone(pid, GONE_WITHIN).await,
+        "the script's background sleep {pid} outlived its timeout"
+    );
+}
+
+/// The lead's ruling R-T14: a project turn is one whose request carries a
+/// non-blank, absolute root — `scope_from_context`'s project arm, the reading
+/// every store path makes of it. One predicate for every offer.
+#[test]
+fn a_project_turn_is_a_non_blank_absolute_root() {
+    let with = |root: Option<&str>| ToolContext {
+        request_workspace_root: root.map(str::to_string),
+        ..Default::default()
+    };
+    let absolute = std::env::temp_dir().to_string_lossy().into_owned();
+    assert!(is_project_turn(&with(Some(&absolute))));
+    assert!(!is_project_turn(&with(None)));
+    assert!(!is_project_turn(&with(Some("   "))));
+    assert!(!is_project_turn(&with(Some("relative/path"))));
 }

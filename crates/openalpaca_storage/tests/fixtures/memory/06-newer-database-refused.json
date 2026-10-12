@@ -1,0 +1,34 @@
+{
+  "row": {
+    "id": 6,
+    "scenario": "Any slice-0-or-later build meets a newer database",
+    "required_outcome": "Refused with the store revision's §1.4 text; bytes unchanged; the message names the factory reset exactly once"
+  },
+  "design": ["plan slice 0.5 (landed on this branch): refuse any schema_version above the newest registered migration, before any statement runs", "tasks/store-revision/design.md §1.3–§1.4 (SQ-1, SQ-1a): the same refusal answers a database from before the schema was re-baselined at version 1, so it names both builds and the factory reset"],
+  "loads_in": ["slice-0", "slice-3"],
+  "notes_for_implementer": "Not a memory-library fixture: it is the database opener's test, already landed by slice 0.5, and restated here so the matrix is complete. A fresh database is created through `Database::open`, closed, its `schema_version` stamped to 99 with a plain `rusqlite` connection, then hashed and opened again. The message is verbatim from the store revision's §1.4 with `<file>` the absolute path, `<n>` 99 and `<newest>` the newest registered migration; the test reads `<newest>` from `migrations::MIGRATIONS.last().version` rather than a literal. `openalpaca config reset --factory` appears exactly once.",
+  "owners": [],
+  "partitions": [],
+  "directories": ["db"],
+  "operations": [
+    {
+      "step": 1,
+      "op": "open_database",
+      "input": { "stamped_version": 99, "path": "dir:db/openalpaca.db" },
+      "expect": {
+        "refused": "fixture:newer_schema",
+        "message_contains": [
+          "is at schema version 99, which this build does not know",
+          "Nothing was changed. If a newer OpenAlpaca build created this database, use that build.",
+          "If it was created by a build from before the schema was re-baselined at version 1, it cannot be read or upgraded: run `openalpaca config reset --factory` to start again"
+        ],
+        "message_contains_once": ["openalpaca config reset --factory"],
+        "message_not_contains": ["Unsupported legacy schema version"],
+        "file_unchanged": ["dir:db/openalpaca.db"]
+      }
+    }
+  ],
+  "final_state": {
+    "file_unchanged": ["dir:db/openalpaca.db"]
+  }
+}

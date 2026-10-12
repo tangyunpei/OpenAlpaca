@@ -43,6 +43,10 @@ impl Orchestrator {
         skill_name: &str,
         query: &str,
         lane_key: &str,
+        // R-T27 — the session the gateway resolved this turn into
+        // (`HandleRequest::session_id`): the conversation the turn's tools act
+        // for. `None` for a handler reached with no gateway.
+        turn_session: Option<&str>,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -99,6 +103,7 @@ impl Orchestrator {
                     executor.clone(),
                     query,
                     lane_key,
+                    turn_session,
                     owner_id,
                     scope_ctx,
                     stream_id,
@@ -197,7 +202,7 @@ impl Orchestrator {
             } else if !skill_doc.frontmatter.tools.allow.is_empty() {
                 // Legacy fallback: direct tool name matching
                 let names = &skill_doc.frontmatter.tools.allow;
-                let resolved: Vec<openalpaca_llm::ToolDefinition> = names
+                let mut resolved: Vec<openalpaca_llm::ToolDefinition> = names
                     .iter()
                     .filter_map(|name| {
                         self.tool_registry.get(name).map(|t| t.definition.clone())
@@ -226,6 +231,22 @@ impl Orchestrator {
                             skill_name,
                             unattributed
                         );
+                    }
+                }
+                // R42 / R-T6 on this tier (d6-surfaces-3, residual X5): a
+                // name is a tool, not a capability, so `file_read` alone
+                // would leave out the `file_list` that comes with it — the
+                // tool file_read's not-found hint sends the model to — and
+                // `file_write` and `read_result` their partners likewise. A
+                // skill that denies either half of a pair is not handed the
+                // partner, as a template that denies the capability is not.
+                let partners = super::constraints::paired_tools(
+                    resolved.iter().map(|d| d.name.as_str()),
+                    &skill_doc.frontmatter.tools.deny,
+                );
+                for partner in partners {
+                    if let Some(tool) = self.tool_registry.get(partner) {
+                        resolved.push(tool.definition.clone());
                     }
                 }
                 resolved
@@ -435,6 +456,11 @@ impl Orchestrator {
             .orchestrator
             .sessions
             .tool_result_inline_bytes;
+        // Design 11, CQ-3: compaction's writer runs on `summary_model`.
+        config_for_loop.writer = crate::orchestrator::working_state::WriterConfig::new(
+            &self.daemon_config.load(),
+            self.db.clone(),
+        );
 
         // **K1 — the skill tier streams like any other turn.** Set the same
         // way the main loop sets it (`query_handler/simple_query_handler.rs`),
@@ -568,11 +594,14 @@ impl Orchestrator {
             reserved_tokens: 0,
         };
         let bundle = self.context_manager.resolve(&ctx_request).await;
+        // Design §5: the memory delivery is per turn and outside the cached
+        // layer — the same rule as the main loop
+        // (`query_handler/simple_query_handler.rs`).
+        let memory_turn = crate::prompt_ctx::sources::memory::memory_turn(&bundle);
 
         let dynamic_context_input = DynamicContextInput {
             context_bundle: Arc::new(bundle),
             query: Arc::from(query),
-            memory_retrieval_hash: [0u8; 32],
             path: ExecutionPath::SkillInvocation {
                 skill_id: skill_name.to_string(),
             },
@@ -625,9 +654,16 @@ impl Orchestrator {
             _ => Some(ChatMessage::user(query)),
         };
 
+        let summary_max_chars = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .memory
+            .summary_max_chars;
         let history_input = HistoryInput {
             lane_tip_fingerprint: [0u8; 32],
-            summary: ctx.summary.as_deref().map(Arc::<str>::from),
+            working_state: ctx.working_state_text(summary_max_chars),
+            previous: ctx.previous_text(summary_max_chars),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
             recent_messages: Arc::new(adapted_recent),
             current_user_turn,
@@ -670,6 +706,9 @@ impl Orchestrator {
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
         budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
+        if let Some(memory) = &memory_turn {
+            budget.register_section("memory", memory.token_estimate());
+        }
 
         // --- Context Budget Telemetry ---
         {
@@ -717,7 +756,29 @@ impl Orchestrator {
             // already stitched system_prompt + dynamic_context blocks/messages
             // + session summary + recent_messages + current_user_turn in the
             // same order the pre-migration manual assembly produced.
-            let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+            let mut messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+            // Design 11 §5 (CQ-7): the previous conversation, when the
+            // request carries its block — `done.continued_from`.
+            self.record_continued_from(request_id, ctx, &messages);
+
+            // Design §5 step 8 (plan 3.3): this turn's memory, right before
+            // the current user turn, outside the cached layer; recorded as
+            // delivered once it is in the request.
+            if let Some(memory) = &memory_turn {
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&memory.content));
+                if let Some(service) = self.memory_service() {
+                    service.record_delivery(
+                        &crate::memory::service::Attribution {
+                            lane_key: Some(lane_key.to_string()),
+                            task_id: None,
+                            request_id: Some(request_id),
+                            source: Some(source.to_string()),
+                        },
+                        &memory.used,
+                    );
+                }
+            }
 
             // Per-request sandbox with ToolContext
             let tool_ctx = ToolContext {
@@ -726,25 +787,34 @@ impl Orchestrator {
                 // `agent_id="unknown"`, so a refused tool could not be traced
                 // back to what invoked it.
                 agent_id: Some(format!("skill:{skill_name}")),
-                task_id: None,
                 owner_id: owner_id.map(|s| s.to_string()),
                 workspace_id: scope_ctx.workspace_id.clone(),
                 request_workspace_root: scope_ctx.request_workspace_root.clone(),
                 skill_stack: vec![skill_name.to_string()],
-                effective_constraints: None,
                 lane_key: Some(lane_key.to_string()),
                 source: Some(source.to_string()),
                 request_id: Some(request_id),
-                principal: None,
-                scope: None,
-                workspace_path: None,
-                // No agent instance: this path is not a subagent lane.
-                agent_instance_id: None,
-                // Filled in by the sandbox at dispatch (T28), which owns the bus.
-                session_id: None,
-                session_log: None,
-                event_bus: None,
+                // R44 (storage design §10): the turn's conversation, which
+                // names its scratch folder when it has no project — the one
+                // the gateway resolved for this turn (R-T27), else the lane's.
+                conversation_id: self.turn_conversation_id(turn_session, lane_key),
+                // No run, no principal or scope, no workspace path, no agent
+                // instance (this path is not a subagent lane); the bus and
+                // session handles are the sandbox's to fill in at dispatch
+                // (T28).
+                ..Default::default()
             };
+            // R28 (storage design §10): the skill's model is told its working
+            // folder, right before the current user turn like the memory
+            // block above. Read from the tool context the skill's tools get.
+            if let Some(note) = crate::tools::working_folder::working_folder_note(
+                &tool_ctx,
+                tools_for_loop.iter().map(|d| d.name.as_str()),
+                crate::tools::working_folder::NoteReader::Loop,
+            ) {
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&note));
+            }
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
                 || !skill_doc.frontmatter.depends_on.is_empty();
             let registry = if needs_clone {
@@ -1154,6 +1224,10 @@ impl Orchestrator {
         executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
         query: &str,
         lane_key: &str,
+        // R-T27 — the session the gateway resolved this turn into
+        // (`HandleRequest::session_id`): the conversation the turn's tools act
+        // for. `None` for a handler reached with no gateway.
+        turn_session: Option<&str>,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
         stream_id: Option<&str>,
@@ -1227,24 +1301,20 @@ impl Orchestrator {
         let tool_ctx = ToolContext {
             // V5, as on the file-skill tier above.
             agent_id: Some(format!("skill:{skill_name}")),
-            task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),
             request_workspace_root: scope_ctx.request_workspace_root.clone(),
             skill_stack: vec![skill_name.to_string()],
-            effective_constraints: None,
             lane_key: Some(lane_key.to_string()),
             source: Some(source.to_string()),
             request_id: Some(request_id),
-            principal: None,
-            scope: None,
-            workspace_path: None,
-            // No agent instance: this path is not a subagent lane.
-            agent_instance_id: None,
-            // Filled in by the sandbox at dispatch (T28), which owns the bus.
-            session_id: None,
-            session_log: None,
-            event_bus: None,
+            // R44 (storage design §10): as on the file-skill tier — the
+            // turn's conversation, for its scratch folder. A plugin skill
+            // takes a query string, not messages, so no R28 line reaches it.
+            conversation_id: self.turn_conversation_id(turn_session, lane_key),
+            // As on the file-skill tier above: everything else unset, and
+            // the bus and session handles filled in by the sandbox (T28).
+            ..Default::default()
         };
 
         let callback = SandboxToolCallback {

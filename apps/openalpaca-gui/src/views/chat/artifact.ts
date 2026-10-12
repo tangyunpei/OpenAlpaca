@@ -7,56 +7,28 @@
  * row, its versions and its bytes. Nothing here is synthesised.
  */
 
-import { languageFromName, type FileKind } from "@/components/ui";
+import {
+  artifactKindForMime,
+  languageFromName,
+  toFileKind,
+  type FileKind,
+} from "@/components/ui";
+import type { ArtifactKind } from "@/lib/api/artifacts";
 
-const EXTENSION_KIND: Record<string, FileKind> = {
-  md: "md",
-  markdown: "md",
-  txt: "md",
-  html: "html",
-  htm: "html",
-  csv: "table",
-  tsv: "table",
-  log: "term",
-  out: "term",
-  json: "code",
-  yaml: "code",
-  yml: "code",
-  toml: "code",
-  rs: "code",
-  ts: "code",
-  tsx: "code",
-  js: "code",
-  jsx: "code",
-  py: "code",
-  go: "code",
-  sh: "code",
-  sql: "code",
-  css: "code",
-  png: "image",
-  jpg: "image",
-  jpeg: "image",
-  gif: "image",
-  webp: "image",
-  svg: "image",
-};
-
-/** Extension first (it is the more specific signal), then the mime type. */
-export function fileKind(filename: string, mimeType?: string | null): FileKind {
-  const extension = languageFromName(filename);
-  if (extension !== null) {
-    const byExtension = EXTENSION_KIND[extension];
-    if (byExtension !== undefined) return byExtension;
-  }
-  const mime = (mimeType ?? "").toLowerCase();
-  if (mime.startsWith("image/")) return "image";
-  if (mime === "text/html") return "html";
-  if (mime === "text/csv") return "table";
-  if (mime === "text/markdown") return "md";
-  if (mime.startsWith("text/")) return "md";
-  if (mime === "application/json") return "code";
-  // Opaque bytes have no badge of their own; tool output is the nearest truth.
-  return "term";
+/**
+ * The badge a transcript file reads: the Library's mapping (G3a). The kind the
+ * daemon stored when the server named it (an artifact link), else the kind an
+ * upload of that type is stored with — what the Library badges that row — so
+ * a `.txt` reads `TXT` here as it does there. The language half of the badge
+ * is the filename's in both places (`fileLanguage`).
+ */
+export function fileKind(
+  kind: string | null,
+  mimeType?: string | null,
+): FileKind {
+  return toFileKind(
+    (kind as ArtifactKind | null) ?? artifactKindForMime(mimeType),
+  );
 }
 
 export function fileLanguage(filename: string): string | null {

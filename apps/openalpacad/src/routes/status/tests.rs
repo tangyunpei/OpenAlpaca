@@ -110,6 +110,28 @@ async fn reports_the_project_the_request_names() {
     assert_eq!(body["project_root"], project.to_string_lossy().as_ref());
 }
 
+/// Storage design §3: a read never records a project. The status poll
+/// resolves the header — a git repository nobody has used — and names its
+/// root, and `projects/` stays as it was.
+#[tokio::test]
+async fn the_status_poll_names_a_project_without_recording_it() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let home_store = root.join("home").join(".openalpaca");
+    let _guard = HomeStoreGuard::set(&home_store);
+    let db = test_db(&tmp);
+    let project = root.join("checkout");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+
+    let body = body_for(&db, &headers_with(project.to_str())).await;
+    assert_eq!(body["project_root"], project.to_string_lossy().as_ref());
+    assert_eq!(
+        openalpaca_storage::store::projects::lookup(&project).unwrap(),
+        None
+    );
+    assert!(!home_store.join("projects").exists());
+}
+
 #[tokio::test]
 async fn a_path_that_is_no_project_reports_null() {
     let tmp = TempDir::new().unwrap();
@@ -590,6 +612,8 @@ async fn busy_counts_live_runs_pending_prompts_and_connected_clients() {
         lane_key: None,
         task_id: Some("running".to_string()),
         agent_instance_id: None,
+        preview: None,
+        per_call: false,
         timestamp: Utc::now(),
     });
 

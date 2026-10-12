@@ -26,8 +26,8 @@ pub struct ChatSendRequest {
     pub model: Option<String>,
     /// M6 — **this client cannot answer a tool confirmation.** The CLI's
     /// one-shot (`--message`) and piped paths set it: they exit when the turn
-    /// ends, and a workflow's `artifact_write` asks for approval minutes
-    /// later, with nobody on the other end. Today that cost 300 seconds per
+    /// ends, and a workflow's `file_write` or `shell_execute` asks for
+    /// approval minutes later, with nobody on the other end. Today that cost 300 seconds per
     /// tool call and then failed anyway.
     ///
     /// Declared, never detected: a client that says nothing keeps today's
@@ -178,6 +178,12 @@ pub struct PendingConfirmation {
     /// The agent template that asked.
     pub agent_id: String,
     pub lane_key: Option<String>,
+    /// The daemon-authored text of the card (design 09 §4.4), `null` for the
+    /// ordinary card — so a card restored after a reload says what the live
+    /// one said. Like `tool_arguments`, served by this unscoped read (T22).
+    pub preview: Option<String>,
+    /// The approval is good for this call only: no *Always allow*.
+    pub per_call: bool,
     /// When the prompt was raised, RFC 3339.
     pub raised_at: String,
 }

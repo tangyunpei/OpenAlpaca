@@ -7,11 +7,22 @@
  * calls included, and they survive a restart. What is left here is the
  * projection — one persisted row onto the design's `LogTag` palette (§3.28).
  *
- * Two rules hold the projection honest:
+ * Three rules hold the projection honest:
  *
  * - **Nothing is invented.** A row whose `detail` is missing the field a
  *   sentence would name falls back to the raw `event_type` rather than to a
  *   plausible-looking phrase.
+ * - **A tool is named as the approval card names it.** A tool's name is its
+ *   third party's (an MCP `<server>__<tool>`, a plugin `<plugin>::<tool>`), and
+ *   the prompt's own rows sit here beside the rest of the run: a bidi override,
+ *   a zero-width space or a line break in it is shown as `<U+XXXX>`
+ *   (`lib/hidden-chars`), in plain text since a row is a string. The CLI's
+ *   `tasks log` escapes the same rows, as JSON `\u` escapes in its detail. A
+ *   `security_violation`'s reason repeats the name, so it is escaped the same
+ *   way, and so is a written file's name, which is the agent's (a file
+ *   written into the project is named by the path it chose); the rows' other
+ *   fields (a span's label, progress narration, titles, model ids) are as
+ *   they came.
  * - **Nothing is silently dropped, except a known duplicate.** No daemon emits
  *   `dag_node_status` any more — P9 deleted the variant in Phase 8 (T53) — but
  *   rows an older one wrote still read back from `event_log`, and each mirrors
@@ -19,6 +30,8 @@
  *   not render pairs of the same transition; `subagent_span` is the single
  *   source of `spawn` rows.
  */
+
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 
 import type { EventLogRecord } from "./types";
 
@@ -97,6 +110,12 @@ function str(detail: Record<string, unknown>, key: string): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
+/** The row's `tool_name` as the approval card shows it, or `null`. */
+function toolName(detail: Record<string, unknown>): string | null {
+  const tool = str(detail, "tool_name");
+  return tool === null ? null : escapeHiddenLine(tool).text;
+}
+
 /**
  * The wire outcome → the word the row wears.
  *
@@ -144,10 +163,16 @@ function textFor(record: EventLogRecord): string {
       return str(detail, "message") ?? record.event_type;
     case "workflow_steered":
       return "steering message delivered";
+    // The name is the agent's — a file written into the project is named by
+    // the path it chose — so it is escaped as a tool's name is.
     case "artifact_written": {
-      const name = str(detail, "name");
+      const raw = str(detail, "name");
       const version = num(detail, "version");
-      if (name === null) return record.event_type;
+      if (raw === null) return record.event_type;
+      const name = escapeHiddenLine(raw).text;
+      // A file written into the project (storage design §13) has no versions:
+      // the row says where it is instead.
+      if (detail["in_project"] === true) return `${name} · in the project`;
       return version === null ? name : `${name} · v${version}`;
     }
     case "subagent_span": {
@@ -157,12 +182,12 @@ function textFor(record: EventLogRecord): string {
       return `${label} · ${state}`;
     }
     case "tool_executed": {
-      const tool = str(detail, "tool_name");
+      const tool = toolName(detail);
       if (tool === null) return record.event_type;
       return detail["success"] === false ? `${tool} · failed` : tool;
     }
     case "tool_confirmation_requested": {
-      const tool = str(detail, "tool_name");
+      const tool = toolName(detail);
       return tool === null ? record.event_type : `${tool} · awaiting approval`;
     }
     // How the prompt ended (T1). The outcome is the one sentence on this card
@@ -170,23 +195,27 @@ function textFor(record: EventLogRecord): string {
     // row's separate `result` blob, and without it a denial or a timeout read
     // back as the bare literal `tool_confirmation_resolved`.
     case "tool_confirmation_resolved": {
-      const tool = str(detail, "tool_name");
+      const tool = toolName(detail);
       const outcome = str(blob(record.result), "outcome");
       if (tool === null || outcome === null) return record.event_type;
       return `${tool} · ${outcomeWord(outcome)}`;
     }
     case "tool_auto_approved": {
-      const tool = str(detail, "tool_name");
+      const tool = toolName(detail);
       return tool === null ? record.event_type : `${tool} · auto-approved`;
     }
+    // The daemon's reason repeats the tool's name (and may name the agent):
+    // it is shown on one line, escaped as the name is.
     case "security_violation": {
-      const tool = str(detail, "tool_name");
+      const tool = toolName(detail);
       const reason = str(detail, "reason");
       if (tool === null) return record.event_type;
-      return reason === null ? `${tool} · denied` : `${tool} · ${reason}`;
+      return reason === null
+        ? `${tool} · denied`
+        : `${tool} · ${escapeHiddenLine(reason).text}`;
     }
     case "circuit_breaker_tripped": {
-      const tool = str(detail, "tool_name");
+      const tool = toolName(detail);
       const failures = num(detail, "consecutive_failures");
       if (tool === null) return record.event_type;
       return failures === null

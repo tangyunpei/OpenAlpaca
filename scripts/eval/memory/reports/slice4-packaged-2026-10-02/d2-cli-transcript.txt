@@ -1,0 +1,141 @@
+# D2 CLI round-trip — 2026-10-03T04:03:50Z
+# CLI: <repo>/target/release/openalpaca (sha256 d285864642bbc6d01baef278e06f1d35c0552875e09710a05a752ae8b528c07c)
+# CWD: <scratch>/program/track-d/live
+# OPENALPACA_HOME_STORE=<scratch>/program/track-d/store
+# OPENALPACA_CONFIG_DIR=<scratch>/program/track-d/store/config
+# OPENALPACA_MANAGED_LOG=1  NO_COLOR=1  stdin=/dev/null
+# daemon: sandboxed (no-network.sb); this CLI is not
+
+$ openalpaca daemon status
+✓ Daemon is running
+
+  Status: ok
+  Version: 0.1.0
+  PID: 60493
+  Instance: 950fc57d
+  URL: http://127.0.0.1:51021
+[exit 0]
+
+$ openalpaca memory list
+No notes.
+[exit 0]
+
+$ openalpaca memory add --kind fact --title Espresso grinder setting --alias coffee mill --tag track-d The owner's espresso grinder is set to 14 for the morning shot.
+✓ Saved 8bce7aec-7229-4a50-8772-1420173d4328 in the global partition (revision 17d66fc0d3eb).
+[exit 0]
+
+$ openalpaca memory list
+ID       KIND       SCOPE   STATUS     ORIGIN          UPDATED              TITLE
+8bce7aec fact       global  active     user            2026-10-03T04:03:50Z Espresso grinder setting
+[exit 0]
+
+# resolved note id (from memory list --format json): 8bce7aec-7229-4a50-8772-1420173d4328
+
+$ openalpaca memory list --format json
+{
+  "items": [
+    {
+      "created_at": "2026-10-03T04:03:50Z",
+      "effective_status": "active",
+      "id": "8bce7aec-7229-4a50-8772-1420173d4328",
+      "kind": "fact",
+      "origin": "user",
+      "pinned": false,
+      "revision": "17d66fc0d3eb1e6491206a1ad1f484376a98e6cd19df7a9e9e3d704758bbe778",
+      "scope": "global",
+      "status": "active",
+      "supersedes": [],
+      "title": "Espresso grinder setting",
+      "updated_at": "2026-10-03T04:03:50Z"
+    }
+  ],
+  "next_cursor": null
+}
+[exit 0]
+
+$ openalpaca memory search espresso
+8bce7aec  Espresso grinder setting  [fact/global/active/user] verified
+    lines 22-22, matched on term
+    The owner's espresso grinder is set to 14 for the morning shot.
+[exit 0]
+
+$ openalpaca memory search coffee mill
+8bce7aec  Espresso grinder setting  [fact/global/active/user] verified
+    lines 22-22, matched on alias, term
+    The owner's espresso grinder is set to 14 for the morning shot.
+[exit 0]
+
+$ openalpaca memory search grind
+8bce7aec  Espresso grinder setting  [fact/global/active/user] verified
+    lines 22-22, matched on prefix
+    The owner's espresso grinder is set to 14 for the morning shot.
+[exit 0]
+
+$ openalpaca memory show 8bce7aec-7229-4a50-8772-1420173d4328
+Espresso grinder setting
+id 8bce7aec-7229-4a50-8772-1420173d4328  revision 17d66fc0d3eb  fact/global/active  origin user  freshness verified
+aliases coffee mill  tags track-d
+
+The owner's espresso grinder is set to 14 for the morning shot.
+[exit 0]
+
+$ openalpaca memory show 8bce7aec-7229-4a50-8772-1420173d4328 --raw
+---
+schema: 1
+id: 8bce7aec-7229-4a50-8772-1420173d4328
+title: Espresso grinder setting
+kind: fact
+status: active
+fact_key: null
+aliases:
+  - coffee mill
+tags:
+  - track-d
+created_at: 2026-10-03T04:03:50Z
+updated_at: 2026-10-03T04:03:50Z
+observed_at: null
+valid_from: null
+valid_to: null
+review_after: null
+pinned: false
+sources: []
+supersedes: []
+---
+The owner's espresso grinder is set to 14 for the morning shot.[exit 0]
+
+$ openalpaca memory timeline 8bce7aec-7229-4a50-8772-1420173d4328
+2026-10-03T04:03:50Z 8bce7aec fact       global  active     Espresso grinder setting
+[exit 0]
+
+$ openalpaca memory sync
+Scanned 1 note file(s); 0 changed on disk; index ready.
+[exit 0]
+
+$ openalpaca memory forget 8bce7aec-7229-4a50-8772-1420173d4328 --yes
+  8bce7aec-7229-4a50-8772-1420173d4328  Espresso grinder setting  (revision 17d66fc0d3eb)
+✓ 8bce7aec-7229-4a50-8772-1420173d4328 forgotten.
+  The note files, their history and their index rows are gone, and the sources they cited will not be re-extracted. Session logs and any external backup are separate data and are not touched by a forget.
+[exit 0]
+
+$ openalpaca memory list
+No notes.
+[exit 0]
+
+$ openalpaca memory search espresso
+Nothing matched.
+[exit 0]
+
+$ openalpaca memory show 8bce7aec-7229-4a50-8772-1420173d4328
+Error: MEMORY_NOT_FOUND: note 8bce7aec-7229-4a50-8772-1420173d4328 not found (HTTP 404)
+[exit 1]
+
+$ openalpaca daemon status
+✓ Daemon is running
+
+  Status: ok
+  Version: 0.1.0
+  PID: 60493
+  Instance: 950fc57d
+  URL: http://127.0.0.1:51021
+[exit 0]
+

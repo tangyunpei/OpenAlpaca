@@ -336,3 +336,388 @@ fn every_shipped_template_grants_read_result() {
     }
     assert!(seen >= 9, "every shipped template was checked, not {seen}");
 }
+
+/// Storage design §15 and R42. `writing_agent` gains `file_read` in the
+/// shipped template — it is asked to change documents, so it reads them
+/// first. And `file_list` comes with `file_read`, `artifact_read` with
+/// `read_result`: every shipped template that names `file_read` is handed
+/// both file readers and every one (all nine name `read_result`) is handed
+/// `artifact_read`, with no other template edit. Walked as the subagent spawn
+/// walks a template: `to_subagent`, then `resolve_agent_tools` over the
+/// builtins.
+#[test]
+fn shipped_templates_are_handed_the_stage_2_readers_by_the_capabilities_they_name() {
+    use crate::tools::ToolRegistry;
+    use crate::tools::builtins::builtin_tools;
+
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let registry = std::sync::Arc::new(registry);
+
+    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&agents).expect("the shipped templates are in the checkout") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_agent_markdown(&body)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        let agent = doc.to_subagent("a1", "task-1");
+        let surface: Vec<String> = crate::tools::resolve_agent_tools(&agent, &registry, None)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let has = |name: &str| surface.iter().any(|n| n == name);
+        let names_file_read = doc.frontmatter.capabilities.iter().any(|c| c == "file_read");
+
+        assert_eq!(has("file_read"), names_file_read, "{}: {surface:?}", path.display());
+        assert_eq!(has("file_list"), names_file_read, "{}: {surface:?}", path.display());
+        assert!(has("artifact_read"), "{}: {surface:?}", path.display());
+        if doc.frontmatter.id == "writing_agent" {
+            assert!(names_file_read, "writing_agent reads files (§15)");
+        }
+        seen += 1;
+    }
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
+/// Owner decision T34 (`tasks/api-fix-plan.md` §0; storage design §12 R30,
+/// Stage 0 fix F1). The shipped `system_agent` template used to end its
+/// frontmatter with `require_confirmation_for: ["file_delete"]`. An explicit,
+/// non-empty list is returned as written by `effective_confirmation_set`
+/// (`security/sandbox/mod.rs`; since R-T35 with `file_edit` added beside a
+/// `file_write` it names) instead of the set derived from the tools'
+/// `destructive_hint` annotations, and no tool is named `file_delete`, so
+/// that agent's `shell_execute` and `file_write` never prompted — live, the
+/// lead delegated to it a shell write the person had just denied another
+/// agent. The template is read from the checkout and walked exactly as the
+/// subagent spawn walks it: `to_subagent`, then `SandboxPolicy::from_constraints`,
+/// then the effective set over a registry holding the builtins.
+///
+/// Only `shell_execute`, `file_write` and `file_edit` (ST-22) are pinned,
+/// plus one read that must not prompt: ST-15 took `artifact_write` and
+/// `workspace_write` out of the derived set
+/// (`annotations_for_builtin_by_product_writers_never_prompt`), so the whole
+/// set is not asserted.
+#[test]
+fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
+    use crate::security::sandbox::{SandboxPolicy, effective_confirmation_set};
+    use crate::tools::ToolRegistry;
+    use crate::tools::builtins::builtin_tools;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/agents/system_agent.md");
+    let body = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let doc = parse_agent_markdown(&body)
+        .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    assert_eq!(doc.frontmatter.id, "system_agent");
+
+    // The registry the spawn checks against: the builtins, with the
+    // annotations `builtin_tools` registers them with.
+    let registry = ToolRegistry::default();
+    for tool in builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+
+    let agent = doc.to_subagent("system_agent::t34", "task-1");
+    let policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+    let set = effective_confirmation_set(&policy, &registry);
+
+    for name in ["shell_execute", "file_write", "file_edit"] {
+        assert!(
+            set.contains(&name.to_string()),
+            "{name} must prompt for system_agent; the effective set is {set:?}"
+        );
+    }
+    assert!(
+        !set.contains(&"file_read".to_string()),
+        "a read never prompts; the effective set is {set:?}"
+    );
+}
+
+/// R48 (storage design §13): `file_edit` comes with the `file_write`
+/// capability. Every shipped template that grants `file_write` is handed
+/// `file_edit` beside it and its sandbox admits the call; every one that
+/// denies `file_write` — and the lead's, which grants neither — is handed
+/// neither, and its sandbox refuses `file_edit` by name. Each template is
+/// walked exactly as the subagent spawn walks it: `to_subagent`,
+/// `resolve_agent_tools`, `SandboxPolicy::from_constraints`,
+/// `admit_tool_surface`.
+#[test]
+fn file_edit_comes_with_the_file_write_capability_in_every_shipped_template() {
+    use crate::security::capabilities::CapabilityManager;
+    use crate::security::sandbox::SandboxPolicy;
+    use crate::tools::ToolRegistry;
+    use crate::tools::builtins::builtin_tools;
+
+    let registry = std::sync::Arc::new(ToolRegistry::default());
+    for tool in builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
+    for (id, writes) in [
+        ("code_agent", true),
+        ("general_agent", true),
+        ("system_agent", true),
+        ("writing_agent", true),
+        ("explore_agent", false),
+        ("planning_agent", false),
+        ("research_agent", false),
+        ("review_agent", false),
+        ("lead_agent", false),
+    ] {
+        let path = agents.join(format!("{id}.md"));
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let doc = parse_agent_markdown(&body)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        let agent = doc.to_subagent(&format!("{id}::r48"), "task-1");
+
+        let surface = crate::tools::resolve_agent_tools(&agent, &registry, None);
+        let names: Vec<&str> = surface.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names.contains(&"file_write"),
+            writes,
+            "{id}: file_write on {names:?}"
+        );
+        assert_eq!(
+            names.contains(&"file_edit"),
+            writes,
+            "{id}: file_edit on {names:?}"
+        );
+
+        let mut policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+        policy.admit_tool_surface(&surface);
+        assert_eq!(
+            CapabilityManager::check_agent_capability(
+                &agent.id,
+                "file_edit",
+                &policy.allowed_capabilities,
+                &policy.denied_capabilities,
+            )
+            .is_ok(),
+            writes,
+            "{id}: the sandbox admits file_edit"
+        );
+    }
+}
+
+// ── Design 09 §5 (LQ3): memory search for every built-in agent ──────────
+
+/// Whether the gate admits `memory_read` for `agent`, from the resolved
+/// allowlist — what a subagent's call is checked against, not the raw
+/// frontmatter.
+fn memory_read_admitted(agent: &crate::agent::subagent::SubAgent) -> bool {
+    use crate::security::capabilities::{Allowlist, CapabilityManager};
+
+    CapabilityManager::check_agent_capability(
+        &agent.id,
+        "memory_read",
+        &Allowlist::from_agent_constraints(&agent.constraints),
+        &agent.constraints.denied_capabilities,
+    )
+    .is_ok()
+}
+
+fn memory_read_entries(agent: &crate::agent::subagent::SubAgent) -> (usize, usize) {
+    (
+        agent
+            .capabilities
+            .iter()
+            .filter(|c| c.name == "memory_read")
+            .count(),
+        agent
+            .constraints
+            .allowed_capabilities
+            .iter()
+            .filter(|c| *c == "memory_read")
+            .count(),
+    )
+}
+
+/// An installed template written before memory search reached every agent.
+const PLAIN_AGENT: &str = r#"---
+id: "notes_agent"
+name: "Notes Agent"
+description: "A template that does not name memory_read"
+capabilities:
+  - "file_read"
+---
+"#;
+
+/// A template that names `memory_read` itself.
+const NAMING_AGENT: &str = r#"---
+id: "recall_agent"
+name: "Recall Agent"
+description: "A template that names memory_read"
+capabilities:
+  - "file_read"
+  - "memory_read"
+---
+"#;
+
+/// A plugin agent's executor that is never driven: these tests only build
+/// the subagent.
+struct IdlePluginExecutor;
+
+#[async_trait::async_trait]
+impl openalpaca_api::plugin_traits::PluginAgentExecutor for IdlePluginExecutor {
+    async fn spawn(
+        &self,
+        _instance_id: &str,
+        _task_id: &str,
+        _instructions: &str,
+        _context: &serde_json::Value,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    async fn step(
+        &self,
+        _instance_id: &str,
+        _tool_results: Option<&serde_json::Value>,
+    ) -> Result<(String, String, Vec<serde_json::Value>), String> {
+        Ok(("complete".to_string(), String::new(), vec![]))
+    }
+
+    async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn plugin_id(&self) -> &str {
+        "acme"
+    }
+
+    fn agent_id(&self) -> &str {
+        "notes_agent"
+    }
+}
+
+fn from_plugin(mut template: AgentTemplate) -> AgentTemplate {
+    template.source = AgentSource::Plugin {
+        plugin_id: "acme".to_string(),
+        executor: Arc::new(IdlePluginExecutor),
+    };
+    template
+}
+
+/// Design 09 §5: every shipped template names `memory_read` — the three
+/// that did not (writing, research, system) among them — and the gate reads
+/// it from the resolved allowlist, so a fresh install's agents can all
+/// search memory.
+#[test]
+fn all_nine_templates_name_memory_read() {
+    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&agents).expect("the shipped templates are in the checkout") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_agent_markdown(&body)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        assert!(
+            doc.frontmatter
+                .capabilities
+                .iter()
+                .any(|c| c == "memory_read"),
+            "{} must name memory_read",
+            path.display()
+        );
+        let agent = doc.to_subagent("a1", "task-1");
+        assert_eq!(
+            memory_read_entries(&agent),
+            (1, 1),
+            "{}: listed once, never appended a second time",
+            path.display()
+        );
+        assert!(memory_read_admitted(&agent), "{}", path.display());
+        seen += 1;
+    }
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
+/// Design 09 §5 (LQ3): the owner's installed `config/agents/` is never
+/// re-seeded, so an internal template that does not name `memory_read` is
+/// granted it on the way to a subagent — in its capabilities, which tool
+/// resolution reads, and in its allowlist, which the gate reads — as
+/// `workspace_read`/`workspace_write` are.
+#[test]
+fn an_internal_template_is_granted_memory_read_ambiently() {
+    let doc = parse_agent_markdown(PLAIN_AGENT).unwrap();
+    assert!(
+        !doc.frontmatter
+            .capabilities
+            .iter()
+            .any(|c| c == "memory_read")
+    );
+    let agent = doc.to_subagent("notes-1", "task-1");
+    assert_eq!(memory_read_entries(&agent), (1, 1));
+    assert!(memory_read_admitted(&agent));
+    // The template itself is not rewritten: the grant lives on the subagent.
+    assert_eq!(doc.frontmatter.capabilities, vec!["file_read"]);
+
+    let named = parse_agent_markdown(NAMING_AGENT)
+        .unwrap()
+        .to_subagent("recall-1", "task-1");
+    assert_eq!(memory_read_entries(&named), (1, 1), "no second copy");
+}
+
+/// Design 09 §5: `denied_capabilities` still wins — a template that denies
+/// `memory_read`, in any case, is granted nothing, and the gate refuses it.
+#[test]
+fn an_ambient_grant_respects_denied_capabilities() {
+    for denied in ["memory_read", "Memory_Read"] {
+        let md = format!(
+            "---\nid: \"quiet_agent\"\nname: \"Quiet Agent\"\ndescription: \"Denies memory\"\n\
+             capabilities:\n  - \"file_read\"\ndenied_capabilities:\n  - \"{denied}\"\n---\n"
+        );
+        let agent = parse_agent_markdown(&md)
+            .unwrap()
+            .to_subagent("quiet-1", "task-1");
+        assert!(
+            !agent
+                .capabilities
+                .iter()
+                .any(|c| c.name.eq_ignore_ascii_case("memory_read")),
+            "denied {denied:?}: nothing is appended to the capabilities"
+        );
+        assert!(
+            !agent
+                .constraints
+                .allowed_capabilities
+                .iter()
+                .any(|c| c == "memory_read"),
+            "denied {denied:?}: nothing is appended to the allowlist"
+        );
+        assert!(!memory_read_admitted(&agent), "denied {denied:?}");
+    }
+}
+
+/// Design 09 §5 (LQ3): a plugin-contributed template gets `memory_read`
+/// only by naming it. Its subagent's tool results go back to the plugin's
+/// own process, and the memory read tools never prompt, so an ambient grant
+/// would hand every note the owner has to third-party code by default.
+#[test]
+fn a_plugin_template_gets_no_ambient_memory_read() {
+    let plain = from_plugin(parse_agent_markdown(PLAIN_AGENT).unwrap());
+    let agent = plain.to_subagent("acme-1", "task-1");
+    assert_eq!(memory_read_entries(&agent), (0, 0));
+    assert!(!memory_read_admitted(&agent));
+    // The workspace tools stay ambient for a plugin template, as before.
+    for ws in ["workspace_read", "workspace_write"] {
+        assert!(agent.capabilities.iter().any(|c| c.name == ws), "{ws}");
+    }
+
+    // A plugin template that names it keeps it, exactly as today.
+    let named = from_plugin(parse_agent_markdown(NAMING_AGENT).unwrap());
+    let agent = named.to_subagent("acme-2", "task-1");
+    assert_eq!(memory_read_entries(&agent), (1, 1));
+    assert!(memory_read_admitted(&agent));
+}

@@ -107,12 +107,13 @@ If you add a surface whose route does not exist, add a registry entry and render
 
 ### Tauri shell (`src-tauri/src/lib.rs`)
 
-Four commands. The first two return `{ baseUrl, token, instanceId }`:
+Five commands. The first two return `{ baseUrl, token, instanceId }`:
 
 - `ensure_daemon_running` — the boot path. It reads `discovery.json` and probes the daemon's listen address with a TCP connect (300 ms). A live daemon is used as-is, even when the file's own 24 h expiry has lapsed. A dead or missing one is replaced: the shell spawns `openalpacad` detached and polls every 200 ms, for up to 5 s, until the new daemon accepts connections. A stale file left by a crashed daemon therefore never gets returned. A daemon that does not come up is reported with the end of what this spawn wrote to `daemon.log` (up to 40 lines), or with the fact that it wrote nothing.
 - `get_connection_info` — the reconnect path. It reads `discovery.json` and rejects it if the token has expired. It does not probe liveness.
 - `read_daemon_log_tail(lines)` — the last `lines` lines of `state/logs/daemon.log`, `""` when there is none. It reads the file directly, so it answers when nothing serves `/v1/*`; it backs Settings → Connection's `Show daemon log`.
 - `await_daemon_stopped` — after the webview has asked the daemon to shut down (`POST /v1/command`), waits up to 15 s for its process to exit and then for its singleton lock to be free, and returns `{ outcome, pid, waitedMs }` (`outcome`: `not_running`, `stopped`, `lock_still_held` or `still_alive`). It signals nothing: the shell never kills a process.
+- `reveal_path(path)` — shows an artifact's file in its folder: Finder with the file selected on macOS (`open -R`), Explorer with it selected on Windows, the folder in the file manager on Linux (`xdg-open`). It takes no path on trust: `store::revealable_path` resolves it, symlinks included, and admits only a regular file under the home root `OPENALPACA_HOME_STORE` names — where every store file lives, a project's in its folder under `projects/` — or under the root of a project `projects/` records, where a file an agent wrote into the project lives (storage design §13, ST-18), unless that project is missing (its root then admits no file, ST-23). The program gets the path as an argument of its own, never through a shell, and a refusal is one sentence, which the webview shows as a toast. It backs `Reveal in Finder` (`Show in folder` off macOS) in the Library, on the `File written` card and in the file panel.
 
 Spawning, in detail:
 
@@ -120,7 +121,7 @@ Spawning, in detail:
 - The shell creates `~/.openalpaca/` and `~/.openalpaca/config/` first (`store::ensure_store`, `store::ensure_runtime_config_dir`). The daemon ignores an `OPENALPACA_CONFIG_DIR` that does not exist, so the directory has to be there before the spawn.
 - The child runs with its working directory at the store root and `OPENALPACA_CONFIG_DIR` set to that config directory. Its stdin is null; its stdout and stderr are appended to `state/logs/daemon.log` — the file `openalpaca daemon start` writes, rotated the same way (16 MB, three older generations) — and it is started with `store::MANAGED_LOG_ENV` set, so `GET /v1/status` reports that file as its `log_path` (T30). It is detached (`setsid` on Unix, `DETACHED_PROCESS` on Windows), so it outlives the app; on Unix a thread waits on it so that it is reaped when it exits.
 
-The webview never reads `discovery.json` itself. `src/lib/connection.ts` wraps the four commands, caches the connection info the first two return, and treats a changed `instanceId` as a daemon restart: every id the client holds is dead, so it re-bootstraps and drops all server-derived state.
+The webview never reads `discovery.json` itself. `src/lib/connection.ts` wraps the first four, caches the connection info the first two return, and treats a changed `instanceId` as a daemon restart: every id the client holds is dead, so it re-bootstraps and drops all server-derived state. `reveal_path` is called from `src/lib/reveal.ts`.
 
 ### Frontend (`src/`)
 
@@ -281,7 +282,7 @@ A **user** row's text is the message's `content`, never `display_text`. For a tu
 - Dev server: port 1420, strict (`tauri.conf.json` `devUrl` points at it); `src-tauri/` is excluded from the watcher.
 - Per-machine `localStorage` keys:
   - `oa-pane-widths` — the resizable column widths.
-  - `oa-project` — the chosen project path.
+  - `oa-project` — the chosen project's root and id, as JSON; the window follows a project re-pointed elsewhere by its id.
   - `oa-pins` — a **cache** of artifact pins. The pin itself is daemon state (`PUT /v1/artifacts/{id}/pin`); every server answer overwrites the cache.
 
 ## Tests

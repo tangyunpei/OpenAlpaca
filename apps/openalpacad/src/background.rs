@@ -6,135 +6,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::events::EventBroadcaster;
 
-/// Spawn background embedding indexer task.
-///
-/// Periodically scans for memories missing embeddings and indexes them.
-/// Re-reads poll interval and batch size from ArcSwap each tick for hot-reload support.
-pub fn spawn_embedding_indexer(
-    embedder: Arc<dyn openalpaca_llm::Embedder>,
-    db: Database,
-    daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
-    cancel: CancellationToken,
-) {
-    tokio::spawn(async move {
-        loop {
-            let ei_cfg = daemon_config.load();
-            let poll_secs = ei_cfg.server.embedding_indexer.poll_interval_secs;
-            let batch_size = ei_cfg.server.embedding_indexer.batch_size;
-            tokio::select! {
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)) => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("Embedding indexer shutting down");
-                    break;
-                }
-            }
-            let repo = openalpaca_storage::MemoryRepository::new(&db);
-
-            let owner_ids = match repo.list_owner_ids() {
-                Ok(ids) => ids,
-                Err(e) => {
-                    tracing::warn!("Embedding indexer: failed to list owners: {e}");
-                    continue;
-                }
-            };
-
-            let mut total_count = 0usize;
-            for owner_id in &owner_ids {
-                let missing = match repo.list_missing_embeddings(owner_id, batch_size) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                if missing.is_empty() {
-                    continue;
-                }
-
-                let texts: Vec<&str> = missing.iter().map(|(_, c)| c.as_str()).collect();
-                match embedder.embed(&texts).await {
-                    Ok(embeddings) => {
-                        for ((id, _), embedding) in missing.iter().zip(embeddings.iter()) {
-                            if embedding.len() == embedder.dimensions() as usize {
-                                if let Err(e) = repo.insert_embedding(*id, embedding) {
-                                    tracing::warn!(
-                                        "Failed to insert embedding for memory #{id}: {e}"
-                                    );
-                                }
-                                total_count += 1;
-                            }
-                        }
-                    }
-                    Err(e) => tracing::warn!("Embedding batch failed for owner {owner_id}: {e}"),
-                }
-            }
-            if total_count > 0 {
-                tracing::info!(
-                    "Indexed {total_count} embeddings across {} owners",
-                    owner_ids.len()
-                );
-            }
-        }
-    });
-}
-
-/// Spawn background memory decay task.
-///
-/// Periodically applies importance decay and prunes low-importance memories.
-pub fn spawn_memory_decay(
-    db: Database,
-    daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
-    cancel: CancellationToken,
-) {
-    tokio::spawn(async move {
-        loop {
-            let dcfg = daemon_config.load();
-            let decay_cfg = &dcfg.orchestrator.memory.decay;
-            let poll_secs = decay_cfg.poll_interval_secs;
-
-            // Wait for next poll interval, or exit on shutdown
-            tokio::select! {
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)) => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("Memory decay task shutting down");
-                    break;
-                }
-            }
-
-            let half_life = dcfg.orchestrator.memory.decay.half_life_days;
-            let min_importance = dcfg.orchestrator.memory.decay.min_importance;
-            let soft_cap = dcfg.orchestrator.memory.decay.soft_cap;
-
-            let repo = openalpaca_storage::MemoryRepository::new(&db);
-
-            let owner_ids = match repo.list_owner_ids() {
-                Ok(ids) => ids,
-                Err(e) => {
-                    tracing::warn!("Memory decay: failed to list owners: {e}");
-                    continue;
-                }
-            };
-
-            let mut total_decayed = 0usize;
-            let mut total_pruned = 0usize;
-
-            for owner_id in &owner_ids {
-                match repo.apply_importance_decay(owner_id, half_life, min_importance) {
-                    Ok(n) => total_decayed += n,
-                    Err(e) => tracing::warn!("Memory decay failed for {owner_id}: {e}"),
-                }
-                match repo.prune_low_importance(owner_id, min_importance, soft_cap) {
-                    Ok(n) => total_pruned += n,
-                    Err(e) => tracing::warn!("Memory pruning failed for {owner_id}: {e}"),
-                }
-            }
-
-            if total_decayed > 0 || total_pruned > 0 {
-                tracing::info!(
-                    "Memory lifecycle: decayed {total_decayed} memories, pruned {total_pruned}"
-                );
-            }
-        }
-    });
-}
-
 /// Spawn daemon-level heartbeat task.
 ///
 /// Re-reads interval from ArcSwap each tick for hot-reload support.
@@ -377,6 +248,125 @@ fn sweep_orphaned_uploads(db: &Database, grace_hours: i64) -> usize {
     cleaned
 }
 
+/// The memory index's boot rebuild, off the request path (scale slice S6):
+/// a cache that was missing, damaged or of another schema version is
+/// rebuilt on a blocking worker started with the daemon's background tasks
+/// — the socket is already bound — while recall and search read the note
+/// files (design §5). A valid cache has nothing owed and this returns at
+/// once. One that fails stays owed, and the reconciliation timer tries
+/// again.
+pub fn spawn_memory_index_rebuild(
+    service: Arc<openalpaca_core::memory::service::MemoryService>,
+) {
+    if !service.rebuild_pending() {
+        return;
+    }
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        match tokio::task::spawn_blocking(move || service.run_pending_rebuild()).await {
+            Ok(Ok(true)) => tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "memory index rebuilt"
+            ),
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => tracing::warn!(
+                "memory index rebuild failed; recall and search read the note files, and the \
+                 reconciliation timer tries again: {e}"
+            ),
+            // A panic: the rebuild stays owed all the same (its run guard).
+            Err(e) => tracing::warn!(
+                "memory index rebuild task failed; recall and search read the note files, and \
+                 the reconciliation timer tries again: {e}"
+            ),
+        }
+    });
+}
+
+/// The memory reconciliation timer (memory redesign, design §5 *Freshness
+/// without a watcher*): every [`MEMORY_RECONCILE_INTERVAL`], a bounded stat
+/// scan of every partition the owner's control snapshots know — a file
+/// edited, added or removed behind the service's back is re-recorded
+/// `external`, the index follows, and each finding is one `memory_changed`
+/// with no surface (§7b P13). It first runs any whole rebuild the index is
+/// still owed (scale slice S6). The first scan runs one interval after
+/// boot: the cache was opened (and, if owed, is being rebuilt by
+/// [`spawn_memory_index_rebuild`]), and a partition is also stat-scanned
+/// before every read, so nothing waits on this.
+pub fn spawn_memory_reconciliation(
+    service: Arc<openalpaca_core::memory::service::MemoryService>,
+    owner_id: String,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(MEMORY_RECONCILE_INTERVAL) => {}
+                _ = cancel.cancelled() => {
+                    tracing::info!("Memory reconciliation task shutting down");
+                    break;
+                }
+            }
+            let service = service.clone();
+            let owner = owner_id.clone();
+            let outcome =
+                tokio::task::spawn_blocking(move || service.reconcile_owner(&owner)).await;
+            match outcome {
+                Ok(Ok(report)) if !report.changes.is_empty() => {
+                    tracing::info!(
+                        scanned = report.scanned,
+                        changed = report.changes.len(),
+                        "memory reconciliation: external changes recorded"
+                    );
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("memory reconciliation failed: {e}"),
+                Err(e) => tracing::warn!("memory reconciliation task failed: {e}"),
+            }
+        }
+    });
+}
+
+/// Learning v2's sweeper (design 09 §1.5): every 15 s, a session with
+/// unlearned turns that has been idle `[orchestrator.learning] idle_secs`, or
+/// that is no longer its lane's active conversation, becomes due, and a due
+/// session starts when no chat turn has been in flight for 20 s. No bus
+/// subscriber: the switch is read from `session.status`.
+pub fn spawn_learning_sweeper(
+    queue: Arc<openalpaca_core::memory::learning::LearningQueue>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(openalpaca_core::memory::learning::SWEEP_INTERVAL) => {}
+                _ = cancel.cancelled() => break,
+            }
+            queue.sweep().await;
+        }
+    });
+}
+
+/// Learning v2's boot catch-up, the durable half of the stop drain (design
+/// 09 §1.5): 30 s after start, every session with unlearned user turns is
+/// due, and they are learned one at a time when the daemon is quiet.
+pub fn spawn_learning_catch_up(
+    queue: Arc<openalpaca_core::memory::learning::LearningQueue>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(openalpaca_core::memory::learning::BOOT_CATCHUP_DELAY) => {
+                queue.catch_up().await;
+            }
+            _ = cancel.cancelled() => {}
+        }
+    });
+}
+
+/// Design §5: the reconciliation scan runs "at service start, every 30 s,
+/// before management reads, and on `sync`".
+pub const MEMORY_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Spawn telemetry cleanup task.
 ///
 /// Runs once per day, removing old skill_execution_log rows (>90 days)
@@ -507,6 +497,58 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "the row must outlive a failed removal, or the bytes are unreachable"
+        );
+    }
+
+    /// R39: the orphan sweep deletes an upload's bytes with its row; a result
+    /// file's pointer row is no upload — its file is the user's — so a row
+    /// past the grace period and linked to no message is left, file and all
+    /// (fails when the pointer insert omits `origin`, whose default is
+    /// `upload`).
+    #[test]
+    fn the_orphan_sweep_leaves_a_pointer_rows_file() {
+        let gp = crate::test_util::GuardedProject::new();
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let file = gp.root.join("docs").join("plan.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"# Plan\n").unwrap();
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let root = gp.root.to_string_lossy().into_owned();
+        let (row, _) = openalpaca_storage::ArtifactStore::new(&db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "owner-1",
+                project_root: &root,
+                rel_path: "docs/plan.md",
+                content: b"# Plan\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        // Past any grace period, and linked to no message.
+        db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE file_assets SET created_at = datetime('now', '-48 hours')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(sweep_orphaned_uploads(&db, 24), 0);
+
+        assert_eq!(std::fs::read(&file).unwrap(), b"# Plan\n");
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), mtime);
+        assert!(
+            !file.starts_with(gp.home_root()),
+            "the user's folder, not the store"
+        );
+        assert!(
+            FileAssetRepository::new(&db)
+                .get_by_id(&row.id)
+                .unwrap()
+                .is_some(),
+            "the row stays"
         );
     }
 }

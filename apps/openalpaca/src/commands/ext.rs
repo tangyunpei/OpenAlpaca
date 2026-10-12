@@ -43,6 +43,7 @@
 //! same characters are harmless, because the split there is a separate pass.
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal as _;
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
@@ -587,26 +588,80 @@ struct ManifestSummary {
 }
 
 fn print_manifest(manifest: &ManifestSummary) {
-    println!("{} {} v{}", "Plugin:".dimmed(), manifest.name, manifest.version);
+    print!(
+        "{}",
+        manifest_text(manifest, std::io::stdout().is_terminal())
+    );
+}
+
+/// What [`print_manifest`] prints, painted, one line each: on a terminal
+/// first [`crate::output::TERMINAL_RESET`], as before every approval
+/// prompt, then the manifest and, directly under it, the notice.
+///
+/// This is what a person reads before `openalpaca ext approve <id>`, and
+/// what approving grants is these strings — the name, the capabilities, the
+/// keys — which the plugin's author wrote. So every hidden character in them
+/// is shown as `<U+XXXX>` (`openalpaca_core::utils::text::escape_hidden_line`:
+/// each field is one line, so a line break in a description cannot print a
+/// forged `Asks for:` list under it) and one line counts them in the words
+/// every approval surface uses. Display only: nothing is sent from here.
+fn manifest_text(manifest: &ManifestSummary, tty: bool) -> String {
+    use openalpaca_core::utils::text::{escape_hidden_line, hidden_notice};
+    use std::fmt::Write as _;
+
+    let mut hidden = 0;
+    let mut shown = |text: &str| {
+        let escaped = escape_hidden_line(text);
+        hidden += escaped.hidden;
+        escaped.text
+    };
+    let mut out = String::from(crate::output::terminal_reset(tty));
+    // Writing into a `String` cannot fail.
+    let _ = writeln!(
+        out,
+        "{} {} v{}",
+        "Plugin:".dimmed(),
+        shown(&manifest.name),
+        shown(&manifest.version)
+    );
     if !manifest.description.is_empty() {
-        println!("{} {}", "Description:".dimmed(), manifest.description);
+        let _ = writeln!(
+            out,
+            "{} {}",
+            "Description:".dimmed(),
+            shown(&manifest.description)
+        );
     }
     if !manifest.entry.is_empty() {
-        println!("{} {}", "Entry:".dimmed(), manifest.entry);
+        let _ = writeln!(out, "{} {}", "Entry:".dimmed(), shown(&manifest.entry));
     }
-    let declared: Vec<&str> = manifest
+    let declared: Vec<String> = manifest
         .types
         .iter()
         .filter(|(_, on)| **on)
-        .map(|(name, _)| name.as_str())
+        .map(|(name, _)| shown(name))
         .collect();
     if !declared.is_empty() {
-        println!("{} {}", "Contributes:".dimmed(), declared.join(", "));
+        let _ = writeln!(out, "{} {}", "Contributes:".dimmed(), declared.join(", "));
     }
-    print_names("Asks for:", &manifest.capabilities);
-    print_names("Virtual capabilities:", &manifest.virtual_capabilities);
-    print_names("Needs configuring:", &manifest.required_config_keys);
-    print_names("Kept as secrets:", &manifest.sensitive_config_keys);
+    for (label, names) in [
+        ("Asks for:", &manifest.capabilities),
+        ("Virtual capabilities:", &manifest.virtual_capabilities),
+        ("Needs configuring:", &manifest.required_config_keys),
+        ("Kept as secrets:", &manifest.sensitive_config_keys),
+    ] {
+        if names.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "{}", label.dimmed());
+        for name in names {
+            let _ = writeln!(out, "  - {}", shown(name));
+        }
+    }
+    if let Some(notice) = hidden_notice(hidden) {
+        let _ = writeln!(out, "{}", notice.yellow());
+    }
+    out
 }
 
 async fn install(path: &str, dry_run: bool) -> Result<()> {
@@ -630,26 +685,79 @@ async fn install(path: &str, dry_run: bool) -> Result<()> {
     let response: InstallResponse = client
         .post("/v1/extensions/plugin", &source_body(path))
         .await?;
+    print!(
+        "{}",
+        install_text(&response, std::io::stdout().is_terminal())
+    );
+    Ok(())
+}
+
+/// What `ext install` prints once the daemon has installed the plugin: the
+/// manifest ([`manifest_text`]), then the id twice — `ok installed <id>` and
+/// the `ext approve <id>` that starts it.
+///
+/// The id is printed as the manifest prints the plugin's name, which it is
+/// (`install` refuses a manifest whose name is not its directory's), through
+/// [`under_manifest`]: raw, an ESC sequence in it moved the cursor up over
+/// the escaped manifest and its notice and erased them, and a U+202E
+/// reordered the command the person is told to run.
+fn install_text(response: &InstallResponse, tty: bool) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
     if let Some(manifest) = &response.manifest {
-        print_manifest(manifest);
+        out.push_str(&manifest_text(manifest, tty));
     }
-    println!(
+    let mut uncounted = 0;
+    let id = under_manifest(
+        &response.extension.id,
+        response
+            .manifest
+            .as_ref()
+            .is_some_and(|m| m.name == response.extension.id),
+        &mut uncounted,
+    );
+    // Writing into a `String` cannot fail.
+    let _ = writeln!(
+        out,
         "{} installed {} ({})",
         "ok".green(),
-        response.extension.id,
+        id,
         status_color(&response.extension.state),
     );
     // Install grants nothing: the plugin is on disk with the toggle at its
     // default and no consent decision, so this is the one thing left to do.
-    println!(
+    let _ = writeln!(
+        out,
         "   {}",
-        format!(
-            "nothing is running yet — `openalpaca ext approve {}` starts it",
-            response.extension.id
-        )
-        .dimmed()
+        format!("nothing is running yet — `openalpaca ext approve {id}` starts it").dimmed()
     );
-    Ok(())
+    push_notice(&mut out, uncounted);
+    out
+}
+
+/// A value of the plugin's printed on a line under its manifest — its id, a
+/// capability an update added — escaped as [`manifest_text`] escapes every
+/// field (`escape_hidden_line`).
+/// `counted` says the manifest printed the same value, whose hidden
+/// characters its notice has counted; otherwise they are added to
+/// `uncounted`, which [`push_notice`] prints under the last such line, so
+/// no escape goes uncounted and none is counted twice.
+fn under_manifest(value: &str, counted: bool, uncounted: &mut usize) -> String {
+    let escaped = openalpaca_core::utils::text::escape_hidden_line(value);
+    if !counted {
+        *uncounted += escaped.hidden;
+    }
+    escaped.text
+}
+
+/// The notice for what [`under_manifest`] escaped and no manifest counted,
+/// in the words every approval surface uses; nothing when there is none.
+fn push_notice(out: &mut String, uncounted: usize) {
+    if let Some(notice) = openalpaca_core::utils::text::hidden_notice(uncounted) {
+        out.push_str(&notice.yellow().to_string());
+        out.push('\n');
+    }
 }
 
 async fn update(id: &str, path: &str) -> Result<()> {
@@ -657,38 +765,91 @@ async fn update(id: &str, path: &str) -> Result<()> {
     let response: InstallResponse = client
         .put(&format!("/v1/extensions/plugin/{id}"), &source_body(path))
         .await?;
+    print!(
+        "{}",
+        update_text(&response, std::io::stdout().is_terminal())
+    );
+    Ok(())
+}
 
+/// What `ext update` prints once the daemon has replaced the plugin's tree:
+/// the new manifest ([`manifest_text`]), `ok updated <id>` and, when the new
+/// tree asks for a different set of capabilities, what it now also asks for,
+/// that consent was taken back and the `ext approve <id>` that restores it;
+/// then any warning.
+///
+/// Everything of the plugin's under the manifest goes through
+/// [`under_manifest`], as [`install_text`] prints the id: the id (the new
+/// manifest's name — `update` refuses one that is not) and each added
+/// capability (one of the new manifest's `capabilities`). Printed raw, a
+/// capability holding an ESC sequence and line breaks erased the escaped
+/// manifest and its notice and printed a forged one, and the person then
+/// approved the real set with `ext approve <id>`. A warning is the daemon's
+/// prose, not a value approved: its control characters are shown as
+/// `<U+XXXX>` (`escape_controls`, uncounted), so it cannot drive the
+/// terminal either.
+fn update_text(response: &InstallResponse, tty: bool) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
     if let Some(manifest) = &response.manifest {
-        print_manifest(manifest);
+        out.push_str(&manifest_text(manifest, tty));
     }
-    println!(
+    let mut uncounted = 0;
+    let id = under_manifest(
+        &response.extension.id,
+        response
+            .manifest
+            .as_ref()
+            .is_some_and(|m| m.name == response.extension.id),
+        &mut uncounted,
+    );
+    // Writing into a `String` cannot fail.
+    let _ = writeln!(
+        out,
         "{} updated {} -> {} (enabled: {})",
         "ok".green(),
-        response.extension.id,
+        id,
         status_color(&response.extension.state),
         response.extension.toggle(),
     );
     if response.consent_reset {
         if !response.added_capabilities.is_empty() {
-            println!(
+            let added: Vec<String> = response
+                .added_capabilities
+                .iter()
+                .map(|capability| {
+                    let counted = response
+                        .manifest
+                        .as_ref()
+                        .is_some_and(|m| m.capabilities.contains(capability));
+                    under_manifest(capability, counted, &mut uncounted)
+                })
+                .collect();
+            let _ = writeln!(
+                out,
                 "   {} {}",
                 "now also asks for:".yellow(),
-                response.added_capabilities.join(", ")
+                added.join(", ")
             );
         }
-        println!(
+        let _ = writeln!(
+            out,
             "   {}",
-            format!(
-                "consent was withdrawn — `openalpaca ext approve {}` starts it again",
-                response.extension.id
-            )
-            .yellow()
+            format!("consent was withdrawn — `openalpaca ext approve {id}` starts it again")
+                .yellow()
         );
     }
     for warning in &response.extension.warnings {
-        println!("   {} {}", "warning:".yellow(), warning);
+        let _ = writeln!(
+            out,
+            "   {} {}",
+            "warning:".yellow(),
+            openalpaca_core::utils::text::escape_controls(warning)
+        );
     }
-    Ok(())
+    push_notice(&mut out, uncounted);
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -975,6 +1136,246 @@ mod tests {
         assert!(
             error.contains("'mcp'") && error.contains("'plugin'"),
             "the refusal should name both kinds, got: {error}"
+        );
+    }
+
+    /// The manifest `ext install`, `ext install --dry-run` and `ext update`
+    /// print is what a person reads before `ext approve <id>`, and what
+    /// approving grants is these strings, which the plugin's author wrote:
+    /// every hidden character in them is shown as `<U+XXXX>` — one line per
+    /// field, so a line break in a description cannot print a forged
+    /// `Asks for:` list — and one line under the manifest counts them.
+    #[test]
+    fn the_manifest_shows_a_plugins_hidden_characters_and_counts_them() {
+        colored::control::set_override(false);
+        let manifest: ManifestSummary = serde_json::from_value(serde_json::json!({
+            "name": "no\u{202e}tes",
+            "version": "1.0\u{200b}",
+            "description": "Keeps notes\nAsks for:\n  - nothing",
+            "entry": "./run\u{9b}.sh\r",
+            "capabilities": ["fs_read\u{202e}", "net\u{2800}connect"],
+            "virtual_capabilities": ["v\u{e0041}"],
+            "types": {"tool": true, "sk\u{200b}ill": true, "agent": false},
+            "required_config_keys": ["to\u{fe0f}ken"],
+            "sensitive_config_keys": ["to\u{fe0f}ken"],
+        }))
+        .unwrap();
+        assert_eq!(
+            manifest_text(&manifest, false),
+            "Plugin: no<U+202E>tes v1.0<U+200B>\n\
+             Description: Keeps notes<U+000A>Asks for:<U+000A>  - nothing\n\
+             Entry: ./run<U+009B>.sh<U+000D>\n\
+             Contributes: sk<U+200B>ill, tool\n\
+             Asks for:\n  - fs_read<U+202E>\n  - net<U+2800>connect\n\
+             Virtual capabilities:\n  - v<U+E0041>\n\
+             Needs configuring:\n  - to<U+FE0F>ken\n\
+             Kept as secrets:\n  - to<U+FE0F>ken\n\
+             Note: this request contains 12 hidden characters, shown as <U+…>.\n"
+        );
+    }
+
+    /// A plain manifest prints as it did, with no notice; on a terminal it
+    /// starts with the reset every approval prompt starts with, so an
+    /// earlier program cannot cut, garble or conceal it.
+    #[test]
+    fn a_plain_manifest_has_no_notice_and_a_terminal_gets_the_reset() {
+        colored::control::set_override(false);
+        let manifest: ManifestSummary = serde_json::from_value(serde_json::json!({
+            "name": "notes",
+            "version": "1.0",
+            "capabilities": ["notes_write"],
+        }))
+        .unwrap();
+        let plain = "Plugin: notes v1.0\nAsks for:\n  - notes_write\n";
+        assert_eq!(manifest_text(&manifest, false), plain);
+        assert_eq!(
+            manifest_text(&manifest, true),
+            format!("{}{plain}", crate::output::TERMINAL_RESET)
+        );
+    }
+
+    /// A plugin id holding `ESC [ 9 A`, `ESC [ J` (cursor up nine lines,
+    /// erase below), a U+202E and a U+200B: the id is the manifest's name —
+    /// `install` refuses a manifest whose name is not its directory's, and
+    /// the daemon refuses no such character in either.
+    const PLANTED_ID: &str = "no\u{1b}[9A\u{1b}[J\u{202e}tes\u{200b}";
+    const SHOWN_ID: &str = "no<U+001B>[9A<U+001B>[J<U+202E>tes<U+200B>";
+
+    fn install_response(id: &str, with_manifest: bool) -> InstallResponse {
+        serde_json::from_value(serde_json::json!({
+            "extension": {
+                "kind": "plugin",
+                "id": id,
+                "enabled": true,
+                "state": "unapproved",
+                "reason": "never_seen",
+            },
+            "manifest": with_manifest.then(|| serde_json::json!({
+                "name": id,
+                "version": "1.0",
+                "capabilities": ["notes_write"],
+            })),
+        }))
+        .unwrap()
+    }
+
+    /// `ext install` prints the escaped manifest and, under it, the id twice
+    /// — `ok installed <id>` and the `ext approve <id>` it tells the person
+    /// to run. Printed raw, an ESC sequence in the id moved the cursor up
+    /// over the escaped manifest and its notice and erased them, and a
+    /// U+202E reordered the command. Both lines show the id as the manifest
+    /// does; it is the manifest's name, so the notice has counted it.
+    #[test]
+    fn install_shows_the_plugin_id_escaped_under_its_manifest() {
+        colored::control::set_override(false);
+        let text = install_text(&install_response(PLANTED_ID, true), false);
+        for raw in ['\u{1b}', '\u{202e}', '\u{200b}'] {
+            assert!(!text.contains(raw), "{raw:?} in {text:?}");
+        }
+        assert_eq!(
+            text,
+            format!(
+                "Plugin: {SHOWN_ID} v1.0\n\
+                 Asks for:\n  - notes_write\n\
+                 Note: this request contains 4 hidden characters, shown as <U+…>.\n\
+                 ok installed {SHOWN_ID} (unapproved)\n   \
+                 nothing is running yet — `openalpaca ext approve {SHOWN_ID}` starts it\n"
+            )
+        );
+        // On a terminal the reset is the only ESC the output holds.
+        let tty = install_text(&install_response(PLANTED_ID, true), true);
+        let rest = tty
+            .strip_prefix(crate::output::TERMINAL_RESET)
+            .expect("the output starts with the reset");
+        assert!(!rest.contains('\u{1b}'), "{rest:?}");
+    }
+
+    /// With no manifest to count the id, the lines that print it count it
+    /// themselves, under the last of them; a plain id prints as it always
+    /// did, with no notice.
+    #[test]
+    fn install_counts_the_id_itself_when_no_manifest_printed_it() {
+        colored::control::set_override(false);
+        assert_eq!(
+            install_text(&install_response(PLANTED_ID, false), false),
+            format!(
+                "ok installed {SHOWN_ID} (unapproved)\n   \
+                 nothing is running yet — `openalpaca ext approve {SHOWN_ID}` starts it\n\
+                 Note: this request contains 4 hidden characters, shown as <U+…>.\n"
+            )
+        );
+        assert_eq!(
+            install_text(&install_response("notes", false), false),
+            "ok installed notes (unapproved)\n   \
+             nothing is running yet — `openalpaca ext approve notes` starts it\n"
+        );
+    }
+
+    /// `ext update` prints the id under the new manifest too — `ok updated
+    /// <id>` and, when consent was taken back, the `ext approve <id>` that
+    /// restores it — escaped like the manifest's name, which it is.
+    #[test]
+    fn update_shows_the_plugin_id_escaped_under_its_manifest() {
+        colored::control::set_override(false);
+        let mut response = install_response(PLANTED_ID, true);
+        response.consent_reset = true;
+        let text = update_text(&response, false);
+        for raw in ['\u{1b}', '\u{202e}', '\u{200b}'] {
+            assert!(!text.contains(raw), "{raw:?} in {text:?}");
+        }
+        assert_eq!(
+            text,
+            format!(
+                "Plugin: {SHOWN_ID} v1.0\n\
+                 Asks for:\n  - notes_write\n\
+                 Note: this request contains 4 hidden characters, shown as <U+…>.\n\
+                 ok updated {SHOWN_ID} -> unapproved (enabled: on)\n   \
+                 consent was withdrawn — `openalpaca ext approve {SHOWN_ID}` starts it again\n"
+            )
+        );
+    }
+
+    /// A capability an update adds, holding cursor-up-twelve and
+    /// erase-below and then a forged manifest that leaves `shell_exec` out.
+    const FORGED_CAP: &str = "x\u{1b}[12A\u{1b}[J\nPlugin: notes v2.0\nAsks for:\n  - notes_read\n";
+    const SHOWN_CAP: &str = "x<U+001B>[12A<U+001B>[J<U+000A>Plugin: notes v2.0<U+000A>Asks for:<U+000A>  - notes_read<U+000A>";
+
+    fn update_response(
+        manifest_caps: &[&str],
+        added: &[&str],
+        warnings: &[&str],
+    ) -> InstallResponse {
+        serde_json::from_value(serde_json::json!({
+            "extension": {
+                "kind": "plugin",
+                "id": "notes",
+                "enabled": true,
+                "state": "unapproved",
+                "reason": "capabilities_grew",
+                "warnings": warnings,
+            },
+            "manifest": {
+                "name": "notes",
+                "version": "2.0",
+                "capabilities": manifest_caps,
+            },
+            "added_capabilities": added,
+            "consent_reset": true,
+        }))
+        .unwrap()
+    }
+
+    /// `ext update` repeats what the new tree asks for beyond what was
+    /// approved, and any warning, on the lines under the manifest. Printed
+    /// raw, a capability holding `ESC [ 12 A`, `ESC [ J` and line breaks
+    /// erased the escaped manifest and its notice and printed a forged one
+    /// without `shell_exec`, and `ext approve notes` then granted the real
+    /// set. Each added capability is escaped as the manifest escapes it —
+    /// it is one of the manifest's, whose notice has counted it — and a
+    /// warning, the daemon's prose, has its control characters shown as
+    /// `<U+XXXX>` (`escape_controls`, uncounted). No raw ESC is left.
+    #[test]
+    fn update_shows_the_added_capabilities_and_warnings_escaped() {
+        colored::control::set_override(false);
+        let response = update_response(
+            &["notes_read", "shell_exec", FORGED_CAP],
+            &["shell_exec", FORGED_CAP],
+            &["the install provenance was not recorded: \u{1b}[2Jgone"],
+        );
+        let text = update_text(&response, false);
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert_eq!(
+            text,
+            format!(
+                "Plugin: notes v2.0\n\
+                 Asks for:\n  - notes_read\n  - shell_exec\n  - {SHOWN_CAP}\n\
+                 Note: this request contains 6 hidden characters, shown as <U+…>.\n\
+                 ok updated notes -> unapproved (enabled: on)\n   \
+                 now also asks for: shell_exec, {SHOWN_CAP}\n   \
+                 consent was withdrawn — `openalpaca ext approve notes` starts it again\n   \
+                 warning: the install provenance was not recorded: <U+001B>[2Jgone\n"
+            )
+        );
+        let tty = update_text(&response, true);
+        let rest = tty
+            .strip_prefix(crate::output::TERMINAL_RESET)
+            .expect("the output starts with the reset");
+        assert!(!rest.contains('\u{1b}'), "{rest:?}");
+    }
+
+    /// An added capability the manifest did not print is counted by the
+    /// lines that print it, under the last of them.
+    #[test]
+    fn update_counts_an_added_capability_no_manifest_printed() {
+        colored::control::set_override(false);
+        let text = update_text(&update_response(&[], &["sh\u{200b}ell"], &[]), false);
+        assert_eq!(
+            text,
+            "Plugin: notes v2.0\n\
+             ok updated notes -> unapproved (enabled: on)\n   \
+             now also asks for: sh<U+200B>ell\n   \
+             consent was withdrawn — `openalpaca ext approve notes` starts it again\n\
+             Note: this request contains 1 hidden character, shown as <U+…>.\n"
         );
     }
 

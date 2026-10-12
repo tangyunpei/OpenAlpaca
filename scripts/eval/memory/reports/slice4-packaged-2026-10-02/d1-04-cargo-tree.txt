@@ -1,0 +1,72 @@
+### cargo tree -p openalpacad -e normal -i fastembed
+error: package ID specification `fastembed` did not match any packages
+exit=101
+### cargo tree -p openalpacad -e normal -i ort
+error: package ID specification `ort` did not match any packages
+
+help: a package with a similar name exists: `crc`
+exit=101
+### cargo tree -p openalpacad -e normal -i ort-sys
+error: package ID specification `ort-sys` did not match any packages
+
+help: a package with a similar name exists: `dirs-sys`
+exit=101
+### cargo tree -p openalpacad -e normal -i tokenizers
+error: package ID specification `tokenizers` did not match any packages
+exit=101
+### cargo tree -p openalpacad -e normal -i hf-hub
+error: package ID specification `hf-hub` did not match any packages
+exit=101
+### cargo tree -p openalpacad -e normal -i sqlite-vec
+error: package ID specification `sqlite-vec` did not match any packages
+
+help: a package with a similar name exists: `rsqlite-vfs`
+exit=101
+### cargo tree -p openalpaca -e normal -i fastembed
+error: package ID specification `fastembed` did not match any packages
+exit=101
+### cargo tree -p openalpaca -e normal -i ort
+error: package ID specification `ort` did not match any packages
+
+help: a package with a similar name exists: `ctr`
+exit=101
+### cargo tree -p openalpaca -e normal -i ort-sys
+error: package ID specification `ort-sys` did not match any packages
+
+help: a package with a similar name exists: `dirs-sys`
+exit=101
+### cargo tree -p openalpaca -e normal -i tokenizers
+error: package ID specification `tokenizers` did not match any packages
+exit=101
+### cargo tree -p openalpaca -e normal -i hf-hub
+error: package ID specification `hf-hub` did not match any packages
+exit=101
+### cargo tree -p openalpaca -e normal -i sqlite-vec
+error: package ID specification `sqlite-vec` did not match any packages
+
+help: a package with a similar name exists: `rsqlite-vfs`
+exit=101
+### cargo tree -p openalpaca_gui -e normal -i fastembed
+error: package ID specification `fastembed` did not match any packages
+exit=101
+### cargo tree -p openalpaca_gui -e normal -i ort
+error: package ID specification `ort` did not match any packages
+
+help: a package with a similar name exists: `url`
+exit=101
+### cargo tree -p openalpaca_gui -e normal -i ort-sys
+error: package ID specification `ort-sys` did not match any packages
+
+help: a package with a similar name exists: `atk-sys`
+exit=101
+### cargo tree -p openalpaca_gui -e normal -i tokenizers
+error: package ID specification `tokenizers` did not match any packages
+exit=101
+### cargo tree -p openalpaca_gui -e normal -i hf-hub
+error: package ID specification `hf-hub` did not match any packages
+exit=101
+### cargo tree -p openalpaca_gui -e normal -i sqlite-vec
+error: package ID specification `sqlite-vec` did not match any packages
+
+help: a package with a similar name exists: `rsqlite-vfs`
+exit=101

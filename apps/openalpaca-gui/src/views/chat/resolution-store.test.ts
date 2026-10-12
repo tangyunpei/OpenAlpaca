@@ -10,6 +10,11 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 
+import {
+  executedResolutionNote,
+  pendingResolutionNote,
+} from "@/components/chat";
+
 import { useResolutions } from "./resolution-store";
 import type { ResolutionEntry } from "./transcript-model";
 
@@ -110,6 +115,24 @@ describe("noteToolRun", () => {
     const rows = useResolutions.getState().rows;
     expect(note(rows[0])).toMatch(/waiting/);
     expect(note(rows[1])).toMatch(/returned in 0\.4s/);
+  });
+
+  /**
+   * Display only: a row keeps the tool's name as the daemon sent it, so a
+   * name with hidden characters in it still finds its row. `ResolutionRow`
+   * escapes the note when it draws it; nothing here ever sees an escape.
+   */
+  it("upgrades a row whose tool name hides characters, matching the name as sent", () => {
+    const tool = "srv__rm\u{202E}fdp\u{200B}";
+    useResolutions
+      .getState()
+      .add(waiting({ note: pendingResolutionNote("approved", tool) }));
+    useResolutions
+      .getState()
+      .noteToolRun(tool, MAIN_LOOP, executedResolutionNote(tool, true, "1.4s"));
+    expect(note(useResolutions.getState().rows[0])).toBe(
+      `${tool} approved · returned in 1.4s, the agent resumed.`,
+    );
   });
 
   it("leaves a denial alone — nothing is going to run", () => {

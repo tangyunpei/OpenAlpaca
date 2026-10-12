@@ -161,6 +161,55 @@ describe("RunCard (§3.19)", () => {
     expect(screen.queryByText(/Waiting on you/)).toBeNull();
   });
 
+  /** The tool is a third party's name: shown as the approval card shows it. */
+  it("names the tool a blocked run waits on with its hidden characters shown as escapes", () => {
+    card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: "srv\u{202E}__x\u{200B}\t" },
+    );
+    const line = screen.getByText(/Waiting on you:/);
+    expect(line.textContent).toBe(
+      "Waiting on you: srv<U+202E>__x<U+200B><U+0009> — approve or deny it in the chat.",
+    );
+    expect(line.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
+  });
+
+  /**
+   * The line shows the name alone and sends the person to the chat: when the
+   * request holds hidden characters anywhere, it says how many and that the
+   * card there shows them.
+   */
+  it("counts the whole request's hidden characters and points at its card", () => {
+    const { unmount } = card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: "shell_execute", blockedHidden: 2 },
+    );
+    expect(screen.getByText(/Waiting on you:/).textContent).toBe(
+      "Waiting on you: shell_execute — approve or deny it in the chat; its card shows 2 hidden characters.",
+    );
+    unmount();
+
+    card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: "shell_execute", blockedHidden: 0 },
+    );
+    expect(screen.getByText(/Waiting on you:/).textContent).toBe(
+      "Waiting on you: shell_execute — approve or deny it in the chat.",
+    );
+  });
+
+  /** A name with no break opportunity wraps; the card clips what overflows. */
+  it("wraps a tool name too long for the card instead of clipping it", () => {
+    card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: `srv__${"x".repeat(200)}` },
+    );
+    expect(screen.getByText(/Waiting on you:/)).toHaveClass(
+      "min-w-0",
+      "wrap-anywhere",
+    );
+  });
+
   it("hides the parallel-work block on a run that is not running or paused", () => {
     card({ status: "queued" });
     expect(screen.queryByText("Parallel work")).not.toBeInTheDocument();

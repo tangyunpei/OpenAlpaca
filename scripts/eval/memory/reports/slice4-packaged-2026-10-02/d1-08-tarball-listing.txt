@@ -1,0 +1,50 @@
+### ls -l archive + .sha256
+-rw-r--r--@ 1 owner  staff  55129775 Oct  2 21:02 <repo>/dist/openalpaca-macos-aarch64-apple-darwin-v0.1.0.tar.gz
+-rw-r--r--@ 1 owner  staff       118 Oct  2 21:02 <repo>/dist/openalpaca-macos-aarch64-apple-darwin-v0.1.0.tar.gz.sha256
+2c18d2cb44cad41c66645c4b917d4b98f6d128d4a9627f03ae79f5680f217125  openalpaca-macos-aarch64-apple-darwin-v0.1.0.tar.gz
+### shasum -a 256 (recomputed)
+2c18d2cb44cad41c66645c4b917d4b98f6d128d4a9627f03ae79f5680f217125  <repo>/dist/openalpaca-macos-aarch64-apple-darwin-v0.1.0.tar.gz
+### tar -tzvf
+drwxr-xr-x  0 owner staff       0 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/
+drwxr-xr-x  0 owner staff       0 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/bin/
+-rwxr-xr-x  0 owner staff    5299 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/uninstall.sh
+drwxr-xr-x  0 owner staff       0 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/config/
+drwxr-xr-x  0 owner staff       0 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/libexec/
+-rwxr-xr-x  0 owner staff   11432 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/install.sh
+drwxr-xr-x  0 owner staff       0 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/
+-rw-r--r--  0 owner staff     152 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/manifest.json
+drwxr-xr-x  0 owner staff       0 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/
+drwxr-xr-x  0 owner staff       0 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/Contents/
+drwxr-xr-x  0 owner staff       0 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/Contents/MacOS/
+drwxr-xr-x  0 owner staff       0 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/Contents/Resources/
+-rw-r--r--  0 owner staff     993 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/Contents/Info.plist
+-rw-r--r--  0 owner staff   98451 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/Contents/Resources/icon.icns
+-rwxr-xr-x  0 owner staff 57975440 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/Contents/MacOS/openalpacad
+-rwxr-xr-x  0 owner staff  9608656 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/Contents/MacOS/openalpaca_gui
+-rwxr-xr-x  0 owner staff 57978128 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/libexec/openalpacad
+-rw-r--r--  0 owner staff     3985 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/config/daemon.toml
+-rw-r--r--  0 owner staff     1288 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/config/mcp.toml
+-rw-r--r--  0 owner staff     1940 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/config/llm.toml
+-rwxr-xr-x  0 owner staff 15474624 Oct  2 21:02 openalpaca-macos-aarch64-apple-darwin-v0.1.0/bin/openalpaca
+exit=0
+### manifest.json
+{
+  "name": "openalpaca",
+  "version": "0.1.0",
+  "target": "aarch64-apple-darwin",
+  "built_at_utc": "2026-10-03T04:02:10Z",
+  "git_sha": "8fde2925"
+}
+### sha256 of the binaries inside the archive
+d285864642bbc6d01baef278e06f1d35c0552875e09710a05a752ae8b528c07c  <scratch>/program/track-d/untar/openalpaca-macos-aarch64-apple-darwin-v0.1.0/bin/openalpaca
+cdfef8e75fcadc449b0a7402875e909fbd76c6e0165670406f26f96e85585afb  <scratch>/program/track-d/untar/openalpaca-macos-aarch64-apple-darwin-v0.1.0/libexec/openalpacad
+bdaa22a21ea3e6ac0087b9f3cbff98a862edfcafbe534af58431fa236eb6ad34  <scratch>/program/track-d/untar/openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/Contents/MacOS/openalpacad
+627108aa5547d6015af467c98daf7e2df0904189f4acc7d25add0040589c2757  <scratch>/program/track-d/untar/openalpaca-macos-aarch64-apple-darwin-v0.1.0/gui/openalpaca-gui.app/Contents/MacOS/openalpaca_gui
+### config files in archive contain any key material? (grep -E 'sk-|secret_encrypted = "[^"]+"')
+grep exit=1
+
+### strings -a tarball libexec/openalpacad (sha cdfef8e7…, the -p openalpaca -p openalpacad build) | grep -i -E 'onnxruntime|fastembed|sqlite-vec|sqlite_vec|vec0|hf-hub|hf_hub|huggingface|tokenizers|multilingual-e5|\.onnx'
+count=1
+   1 -- with files, so this baseline creates none of them and needs no sqlite-vec.
+### find untarred tree for model/tokenizer/onnx/dylib files
+(none above = none)

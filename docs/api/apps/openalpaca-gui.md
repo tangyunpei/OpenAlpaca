@@ -72,6 +72,16 @@
 | POST | `/v1/lanes/{lane_key}/followups` | `followups.ts` | `apps/openalpaca-gui/src/lib/api/followups.ts` |
 | GET | `/v1/llm/usage/daily` | `usage.ts` | `apps/openalpaca-gui/src/lib/api/usage.ts` |
 | GET | `/v1/llm/usage` | `usage.ts` | `apps/openalpaca-gui/src/lib/api/usage.ts` |
+| GET | `/v1/memories/recently-learned` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| GET | `/v1/memories/search` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| GET | `/v1/memories/suggestions` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| GET | `/v1/memories/{id}/history` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| POST | `/v1/memories/{id}/undo` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| GET | `/v1/memories/{id}` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| POST | `/v1/memories/{id}` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| DELETE | `/v1/memories/{id}` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| GET | `/v1/memories` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
+| POST | `/v1/memories` | `memories.ts` | `apps/openalpaca-gui/src/lib/api/memories.ts` |
 | POST | `/v1/models/refresh` | `settings.ts` | `apps/openalpaca-gui/src/lib/api/settings.ts` |
 | GET | `/v1/models` | `settings.ts` | `apps/openalpaca-gui/src/lib/api/settings.ts` |
 | GET | `/v1/orchestrator/config` | `orchestrator.ts` | `apps/openalpaca-gui/src/lib/api/orchestrator.ts` |
@@ -79,6 +89,8 @@
 | GET | `/v1/orchestrator/decisions` | `orchestrator.ts` | `apps/openalpaca-gui/src/lib/api/orchestrator.ts` |
 | GET | `/v1/orchestrator/latency/aggregate` | `orchestrator.ts` | `apps/openalpaca-gui/src/lib/api/orchestrator.ts` |
 | GET | `/v1/orchestrator/latency` | `orchestrator.ts` | `apps/openalpaca-gui/src/lib/api/orchestrator.ts` |
+| GET | `/v1/persona/user` | `persona.ts` | `apps/openalpaca-gui/src/lib/api/persona.ts` |
+| PUT | `/v1/persona/user` | `persona.ts` | `apps/openalpaca-gui/src/lib/api/persona.ts` |
 | POST | `/v1/sessions/{id}/activate` | `sessions.ts` | `apps/openalpaca-gui/src/lib/api/sessions.ts` |
 | POST | `/v1/sessions/{id}/archive` | `sessions.ts` | `apps/openalpaca-gui/src/lib/api/sessions.ts` |
 | GET | `/v1/sessions/{id}/messages` | `sessions.ts` | `apps/openalpaca-gui/src/lib/api/sessions.ts` |
@@ -110,7 +122,9 @@
 | POST | `/v1/tasks` | `tasks.ts` | `apps/openalpaca-gui/src/lib/api/tasks.ts` |
 | GET | `/v1/tools` | `tools.ts` | `apps/openalpaca-gui/src/lib/api/tools.ts` |
 | GET | `/v1/usage/summary` | `usage.ts` | `apps/openalpaca-gui/src/lib/api/usage.ts` |
+| POST | `/v1/workspaces/purge` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
 | GET | `/v1/workspaces` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
+| POST | `/v1/workspaces` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
 | PATCH | `/v1/workspaces` | `workspaces.ts` | `apps/openalpaca-gui/src/lib/api/workspaces.ts` |
 
 ## Request/Query Types
@@ -126,7 +140,7 @@
 
 - WebSocket client source: `apps/openalpaca-gui/src/lib/events.ts`.
 - Parsed `ServerEvent` discriminators:
-- `agent_config_changed`, `agent_status`, `artifact_written`, `chat_stream_ended`, `chat_stream_started`, `circuit_breaker_tripped`, `command_received`, `connector_status`, `daemon_config_changed`, `daemon_shutting_down`, `extension_capability_withdrawn`, `extension_capability_withheld`, `extension_state_changed`, `followup_cancelled`, `followup_queued`, `heartbeat`, `key_status_changed`, `llm_call_completed`, `orchestrator_config_changed`, `security_violation`, `session_changed`, `skill_catalog_updated`, `skill_completed`, `skill_failed`, `skill_invocation_started`, `soul_updated`, `subagent_span`, `task_status`, `tool_confirmation_requested`, `tool_confirmation_resolved`, `tool_executed`, `wake`, `workflow_progress`, `workflow_started`, `workflow_steered`
+- `agent_config_changed`, `agent_status`, `artifact_written`, `chat_stream_ended`, `chat_stream_started`, `circuit_breaker_tripped`, `command_received`, `connector_status`, `daemon_config_changed`, `daemon_shutting_down`, `extension_capability_withdrawn`, `extension_capability_withheld`, `extension_state_changed`, `followup_cancelled`, `followup_queued`, `heartbeat`, `key_status_changed`, `llm_call_completed`, `memory_changed`, `orchestrator_config_changed`, `security_violation`, `session_changed`, `skill_catalog_updated`, `skill_completed`, `skill_failed`, `skill_invocation_started`, `soul_updated`, `subagent_span`, `task_status`, `tool_confirmation_requested`, `tool_confirmation_resolved`, `tool_executed`, `wake`, `workflow_progress`, `workflow_started`, `workflow_steered`
 
 ## Related Links
 
@@ -136,7 +150,7 @@
 ## Tauri Commands
 
 - Source: `apps/openalpaca-gui/src-tauri/src/lib.rs`
-- Commands: `await_daemon_stopped`, `ensure_daemon_running`, `get_connection_info`, `read_daemon_log_tail`
+- Commands: `await_daemon_stopped`, `ensure_daemon_running`, `get_connection_info`, `read_daemon_log_tail`, `reveal_path`
 
 ## API Module Map
 
@@ -194,11 +208,35 @@
 - Exported functions: `cancelFollowup`, `listFollowups`, `queueFollowup`
 - Endpoints: `GET /v1/lanes/{lane_key}/followups`, `POST /v1/lanes/{lane_key}/followups`, `DELETE /v1/lanes/{lane_key}/followups/{id}`
 
+### `memories.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/memories.test.ts`
+- Exported functions: none
+- Endpoints: none
+
+### `memories.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/memories.ts`
+- Exported functions: `createMemory`, `forgetMemory`, `getMemory`, `getMemoryHistory`, `listMemories`, `listRecentlyLearned`, `listSuggestions`, `searchMemories`, `undoMemory`, `updateMemory`
+- Endpoints: `GET /v1/memories`, `GET /v1/memories/search`, `GET /v1/memories/recently-learned`, `GET /v1/memories/suggestions`, `GET /v1/memories/{id}`, `GET /v1/memories/{id}/history`, `POST /v1/memories`, `POST /v1/memories/{id}`, `POST /v1/memories/{id}/undo`, `DELETE /v1/memories/{id}`
+
 ### `orchestrator.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/orchestrator.ts`
 - Exported functions: `getDispatchDecisions`, `getLatencyAggregates`, `getLatencyRecords`, `getOrchestratorConfig`, `updateOrchestratorConfig`
 - Endpoints: `GET /v1/orchestrator/config`, `PUT /v1/orchestrator/config`, `GET /v1/orchestrator/latency`, `GET /v1/orchestrator/latency/aggregate`, `GET /v1/orchestrator/decisions`
+
+### `persona.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/persona.test.ts`
+- Exported functions: none
+- Endpoints: none
+
+### `persona.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/persona.ts`
+- Exported functions: `getPersonaUser`, `putPersonaUser`, `sha256Hex`
+- Endpoints: `PUT /v1/persona/user`, `GET /v1/persona/user`
 
 ### `run-events.test.ts`
 
@@ -284,8 +322,14 @@
 - Exported functions: `getLlmUsage`, `getLlmUsageDaily`, `getUsageSummary`
 - Endpoints: `GET /v1/llm/usage`, `GET /v1/llm/usage/daily`, `GET /v1/usage/summary`
 
+### `workspaces.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/workspaces.test.ts`
+- Exported functions: none
+- Endpoints: none
+
 ### `workspaces.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/workspaces.ts`
-- Exported functions: `getWorkspace`, `rebaseWorkspace`
-- Endpoints: `GET /v1/workspaces`, `PATCH /v1/workspaces`
+- Exported functions: `chooseProject`, `deleteProjectData`, `getWorkspace`, `listProjects`, `repointProject`
+- Endpoints: `GET /v1/workspaces`, `POST /v1/workspaces`, `PATCH /v1/workspaces`, `POST /v1/workspaces/purge`

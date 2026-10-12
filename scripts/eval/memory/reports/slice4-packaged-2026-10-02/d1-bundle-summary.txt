@@ -1,0 +1,76 @@
+# D1 — the bundle at HEAD, inspected
+
+Written 2026-10-03 (UTC) by the D1/D2 subagent. Every claim below points at a file of raw output under `evidence/build/`.
+
+**The spec was not there.** `track-d/SPEC.md` and `maps/slices34.md` did not exist when this step ran: `program/` held only `track-b/`, and a search of `<tmp> found no `SPEC.md`, no `slices34.md` and no `track-d`. The steps follow the task text instead. Where the task leaves something open, the step follows plan 04 §2 (*Gates*) and §6 (the no-network mechanism and its evidence) and the earlier record of this check, 08 §4.
+
+## Build under test
+
+| | |
+|---|---|
+| git | `8fde2925c2ce1b981ac9a92bfcf412cba8c72446` (`feat/markdown-memory`); the work tree is clean apart from the untracked `tasks/deps-upgrade/` (`build/git-sha.txt`) |
+| toolchain | rustc 1.93.0, bun 1.3.13, macOS 27.0.1 (26A434), aarch64-apple-darwin |
+| `Cargo.lock` sha256 | `1ffa8e996552bef5e9dc63392996cf95996a036414933d5acf783e972eadb417` |
+
+## Commands and exit codes
+
+| # | Command (from the repo; `CARGO_TERM_COLOR=never`) | Exit | Log |
+|---|---|---|---|
+| 1 | `cargo build --release -p openalpaca -p openalpacad` | 0 (53 s, no warnings) | `build/01-cargo-build-release.log` |
+| 2 | `cd apps/openalpaca-gui && bun install` | 0 (no changes) | `build/02-bun-install.log` |
+| 3 | `bunx tauri build --bundles app` (its `beforeBuildCommand` runs `prepare-sidecar --release`, which ran `cargo build -p openalpacad --release` and copied the binary, then `bun run build`) | 0 | `build/03-tauri-build.log` |
+| 4 | `cargo tree --offline -p {openalpacad,openalpaca,openalpaca_gui} -e normal -i {fastembed,ort,ort-sys,tokenizers,hf-hub,sqlite-vec}`: 18 checks | 101 on all 18 ("did not match any packages") | `build/04-cargo-tree.txt` |
+| 5 | `grep` of `Cargo.lock` for the same six crate names and `onnxruntime*` | 1 (no match) | `build/05-cargo-lock-grep.txt` |
+| 6 | `bash scripts/release/package-macos.sh`. It was read first and **installs nothing**: it builds, stages under `target/release-package/`, copies `install.sh`/`uninstall.sh` into the staging directory **without running them**, and tars to `dist/`. Both output directories are git-ignored | 0 (the cargo step took 0.17 s; the sidecar was up to date; it bundled again) | `build/07-package-macos.log` |
+| 7 | inspection: `find`/`stat`, `shasum`, `file`, `otool -L`, `strings -a`, `plutil` | 0 | `build/06-bundle-inspection.txt` |
+| 8 | the tarball: `tar -tzvf`, the sha256 checked again, `manifest.json`, the extracted binaries hashed | 0 | `build/08-tarball.txt` |
+
+## The `.app` (`target/release/bundle/macos/openalpaca-gui.app`, 66,108 KiB, 4 files)
+
+| File | Bytes | sha256 |
+|---|---|---|
+| `Contents/Info.plist` | 993 | — |
+| `Contents/MacOS/openalpaca_gui` | 9,608,656 | `627108aa5547d6015af467c98daf7e2df0904189f4acc7d25add0040589c2757` |
+| `Contents/MacOS/openalpacad` | 57,975,440 | `bdaa22a21ea3e6ac0087b9f3cbff98a862edfcafbe534af58431fa236eb6ad34` (= `src-tauri/bin/openalpacad-aarch64-apple-darwin`) |
+| `Contents/Resources/icon.icns` | 98,451 | — |
+
+- **No model, tokenizer, ONNX or ORT file:** `find -iname` for `*.onnx`, `*tokenizer*`, `*onnxruntime*`, `libort*`, `*.dylib`, `*.safetensors` and `*.bin` matched nothing, in the `.app` or in the extracted tarball.
+- **Linked libraries** (`otool -L`): the bundled daemon links only system libraries and frameworks (CoreFoundation, CoreServices, Security, IOKit, libobjc, liblzma, libbz2, libiconv, libSystem). The CLI links the same set without CoreServices, liblzma and libbz2. Nothing is linked from outside `/usr/lib` or `/System`.
+- `CFBundleIdentifier` `com.tangyunpei.openalpaca-gui`, version 0.1.0, executable `openalpaca_gui`. It is not codesigned (a known limitation the script states).
+
+## Strings greps
+
+The pattern was `onnxruntime|fastembed|sqlite-vec|sqlite_vec|vec0|hf-hub|hf_hub|huggingface|tokenizers|multilingual-e5|\.onnx` (case-insensitive) over `strings -a`:
+
+| Binary | Matches |
+|---|---|
+| `.app` `openalpacad` (bdaa22a2…) | **1**: `-- with files, so this baseline creates none of them and needs no sqlite-vec.` This is the baseline SQL's own comment, which is embedded with `include_str!`. It is text, not code. |
+| tarball `libexec/openalpacad` (cdfef8e7…) | **1**: the same comment |
+| `openalpaca` CLI (d2858646…) | **1**: the same comment |
+| `openalpaca_gui` (627108aa…) | **0** |
+
+08 §4 also found two superseded home-README texts (`home-5.txt`, `home-6.txt`). They are gone at this HEAD, because SQ-2 (b) removed the README refresh.
+
+## `cargo tree` and `Cargo.lock`
+
+All 18 inverse-tree checks report that the package is absent from the graph (exit 101), for the daemon, the CLI and the GUI backend alike. `Cargo.lock` has no entry for `fastembed`, `ort`, `ort-sys`, `tokenizers`, `hf-hub`, `sqlite-vec` or `onnxruntime*`.
+
+## The tarball
+
+`dist/openalpaca-macos-aarch64-apple-darwin-v0.1.0.tar.gz`: 55,129,775 bytes, sha256 `2c18d2cb44cad41c66645c4b917d4b98f6d128d4a9627f03ae79f5680f217125` (it matches the `.sha256` file). `manifest.json`: version 0.1.0, aarch64-apple-darwin, git_sha `8fde2925`, built 2026-10-03T04:02:10Z. The archive holds:
+
+```
+bin/openalpaca                                   15,474,624  (d2858646…)
+libexec/openalpacad                              57,978,128  (cdfef8e7…)
+gui/openalpaca-gui.app/Contents/MacOS/openalpacad 57,975,440 (bdaa22a2…)
+gui/openalpaca-gui.app/Contents/MacOS/openalpaca_gui 9,608,656
+gui/openalpaca-gui.app/Contents/Info.plist, Resources/icon.icns
+config/{daemon.toml 3,985, llm.toml 1,940, mcp.toml 1,288}   (release templates; no key material, grep exit 1)
+install.sh 11,432, uninstall.sh 5,299, manifest.json 152
+```
+
+The archive was 52,712,993 bytes at `95a26295` (08 §4) and is +2.4 MB now. The daemon is 54,894,912 → 57,975,440 bytes (+3.1 MB, from the Learning v2 and continuity work since).
+
+## Two different daemon builds ship in one archive (an observation; nothing was changed)
+
+`libexec/openalpacad` and the `.app`'s `openalpacad` are **not the same binary**. They differ by 2,688 bytes and in sha256. `package-macos.sh` installs `target/release/openalpacad` from `cargo build -p openalpaca -p openalpacad`. The sidecar comes from `prepare-sidecar`'s own `cargo build -p openalpacad`, and cargo's feature unification resolves the shared crates differently for the two invocations: the `-p openalpacad`-only build recompiled `openalpaca_llm`, `openalpaca_core`, `openalpaca_connectors` and `openalpaca_plugins` (`build/03-tauri-build.log` lines 4–10). Both builds come from the same commit. D2 ran the `.app`'s binary (`bdaa22a2…`), as the task says. The CLI-managed daemon that `install.sh` would set up is the other build. This was already the case before this branch and is reported, not fixed.

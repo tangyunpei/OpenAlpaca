@@ -1,0 +1,140 @@
+{
+  "row": {
+    "id": 11,
+    "scenario": "\"Used X before June, now Y\"",
+    "required_outcome": "The current answer is Y; a historical query cites X with the right validity bounds"
+  },
+  "design": ["§4 Times: valid_from/valid_to define a half-open effective-time interval; current recall excludes notes whose interval has ended; a historical query evaluates the requested date", "§5 step 5: effective validity is filtered before the limit", "§7a memory_search `historical`, `as_of`"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "X (Webpack) is valid until 2026-06-01T00:00:00Z; Y (Vite) is valid from that instant and supersedes X (both `user`, same partition, same fact_key `build.bundler`, so the link is honored and there is no same-key conflict). Two readings are pinned here because the design leaves them implicit: (1) `as_of` alone does not include superseded or archived notes — `historical: true` is the only switch for that (§5 step 6), so step 3 returns nothing; (2) `as_of` exactly at a bound follows the half-open interval, so at 2026-06-01T00:00:00Z X has ended and Y has begun (step 6). Slice 2 runs the searches against the index with the validity and supersession filters.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000011-0000-4000-8000-000000000001",
+          "title": "Bundler",
+          "kind": "decision",
+          "status": "active",
+          "fact_key": "build.bundler",
+          "aliases": ["webpack"],
+          "created_at": "2026-01-10T09:00:00Z",
+          "updated_at": "2026-01-10T09:00:00Z",
+          "observed_at": "2026-01-10T09:00:00Z",
+          "valid_from": null,
+          "valid_to": "2026-06-01T00:00:00Z",
+          "body": "# Bundler\n\n## Knowledge\nThe project bundles with Webpack.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000011-0000-4000-8000-000000000002",
+          "title": "Bundler",
+          "kind": "decision",
+          "status": "active",
+          "fact_key": "build.bundler",
+          "aliases": ["vite"],
+          "created_at": "2026-06-02T09:00:00Z",
+          "updated_at": "2026-06-02T09:00:00Z",
+          "observed_at": "2026-06-02T09:00:00Z",
+          "valid_from": "2026-06-01T00:00:00Z",
+          "valid_to": null,
+          "supersedes": ["00000011-0000-4000-8000-000000000001"],
+          "body": "# Bundler\n\n## Knowledge\nThe project bundles with Vite since June 2026; Webpack was used before.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_tool": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "which bundler" },
+      "expect": {
+        "ids": ["00000011-0000-4000-8000-000000000002"],
+        "ids_absent": ["00000011-0000-4000-8000-000000000001"],
+        "results": { "00000011-0000-4000-8000-000000000002": { "valid_from": "2026-06-01T00:00:00Z", "valid_to": null, "conflict": false } }
+      }
+    },
+    {
+      "step": 2,
+      "op": "recall",
+      "context": "alice_tool",
+      "input": { "message": "what bundler do we use now?" },
+      "expect": { "ids": ["00000011-0000-4000-8000-000000000002"], "ids_absent": ["00000011-0000-4000-8000-000000000001"] }
+    },
+    {
+      "step": 3,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "which bundler", "as_of": "2026-03-01T00:00:00Z" },
+      "expect": { "ids_unordered": [], "count": 0 }
+    },
+    {
+      "step": 4,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "which bundler", "historical": true, "as_of": "2026-03-01T00:00:00Z" },
+      "expect": {
+        "ids": ["00000011-0000-4000-8000-000000000001"],
+        "ids_absent": ["00000011-0000-4000-8000-000000000002"],
+        "results": {
+          "00000011-0000-4000-8000-000000000001": {
+            "valid_from": null,
+            "valid_to": "2026-06-01T00:00:00Z",
+            "superseded_by": ["00000011-0000-4000-8000-000000000002"],
+            "excerpt_contains": "Webpack"
+          }
+        }
+      }
+    },
+    {
+      "step": 5,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "which bundler", "historical": true },
+      "expect": {
+        "ids": ["00000011-0000-4000-8000-000000000002", "00000011-0000-4000-8000-000000000001"],
+        "results": { "00000011-0000-4000-8000-000000000001": { "superseded_by": ["00000011-0000-4000-8000-000000000002"] } }
+      }
+    },
+    {
+      "step": 6,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "which bundler", "historical": true, "as_of": "2026-06-01T00:00:00Z" },
+      "expect": { "ids": ["00000011-0000-4000-8000-000000000002"], "ids_absent": ["00000011-0000-4000-8000-000000000001"] }
+    },
+    {
+      "step": 7,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "which bundler", "historical": true, "as_of": "2026-05-31T23:59:59Z" },
+      "expect": { "ids": ["00000011-0000-4000-8000-000000000001"], "ids_absent": ["00000011-0000-4000-8000-000000000002"] }
+    },
+    {
+      "step": 8,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "webpack" },
+      "expect": { "ids": ["00000011-0000-4000-8000-000000000002"], "results": { "00000011-0000-4000-8000-000000000002": { "match_includes": ["term"] } } }
+    },
+    {
+      "step": 9,
+      "op": "doctor",
+      "input": {},
+      "expect": { "doctor": { "conflicts": [] } }
+    }
+  ]
+}

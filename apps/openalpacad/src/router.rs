@@ -178,14 +178,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/artifacts/{id}/pin",
             put(crate::routes::pin_artifact_handler),
         )
-        // Workspaces (plan §4.8, "Project moved"). One root per call: the GET
-        // describes it, the PATCH re-bases everything addressed under it.
+        // Workspaces (design §6, §9): list or describe (GET), choose a folder
+        // (POST), re-point a project (PATCH).
         .route(
             "/v1/workspaces",
-            get(crate::routes::get_workspace_handler).patch(crate::routes::rebase_workspace_handler),
+            get(crate::routes::get_workspace_handler)
+                .post(crate::routes::choose_workspace_handler)
+                .patch(crate::routes::rebase_workspace_handler),
         )
-        // Purge deletes a project's conversations, runs and uploads, and
-        // answers the plan it followed. `dry_run` defaults to true.
+        // Delete a project's data (ST-19): its conversations, runs, by-products,
+        // uploads and every owner's notes, never its own folder. Answers the plan
+        // it followed; `dry_run` defaults to true.
         .route(
             "/v1/workspaces/purge",
             post(crate::routes::purge_workspace_handler),
@@ -298,6 +301,70 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/orchestrator/config",
             put(crate::routes::update_orchestrator_config),
+        )
+        // The user-directed USER.md editor (memory redesign, design §7a;
+        // MD-3): the PUT takes `If-Match` and answers 409 on a stale one.
+        .route(
+            "/v1/persona/user",
+            get(crate::routes::get_persona_user_handler)
+                .put(crate::routes::put_persona_user_handler),
+        )
+        // Memory (memory redesign, design §7a; plan 3.8): the user-directed
+        // surface over the memory service — a write here records origin
+        // `user`. A single-note mutation takes its revision as `If-Match` and
+        // nowhere else (428 without one, 409 on a stale one). The literal
+        // segments below are matched before `{id}`.
+        .route(
+            "/v1/memories",
+            get(crate::routes::list_memories_handler).post(crate::routes::create_memory_handler),
+        )
+        .route(
+            "/v1/memories/search",
+            get(crate::routes::search_memories_handler),
+        )
+        .route(
+            "/v1/memories/timeline",
+            get(crate::routes::timeline_memories_handler),
+        )
+        .route(
+            "/v1/memories/recently-learned",
+            get(crate::routes::recently_learned_memories_handler),
+        )
+        .route(
+            "/v1/memories/recently-used",
+            get(crate::routes::recently_used_memories_handler),
+        )
+        .route(
+            "/v1/memories/doctor",
+            get(crate::routes::memory_doctor_handler),
+        )
+        // Learning v2 (design 09 §3.5): the pending suggestions — a learned
+        // change to a note the user saved, waiting for Replace or Keep mine.
+        .route(
+            "/v1/memories/suggestions",
+            get(crate::routes::suggestions_memories_handler),
+        )
+        .route(
+            "/v1/memories/forget",
+            post(crate::routes::forget_memories_handler),
+        )
+        .route(
+            "/v1/memories/sync",
+            post(crate::routes::sync_memories_handler),
+        )
+        .route(
+            "/v1/memories/{id}",
+            get(crate::routes::get_memory_handler)
+                .post(crate::routes::update_memory_handler)
+                .delete(crate::routes::delete_memory_handler),
+        )
+        .route(
+            "/v1/memories/{id}/history",
+            get(crate::routes::get_memory_history_handler),
+        )
+        .route(
+            "/v1/memories/{id}/undo",
+            post(crate::routes::undo_memory_handler),
         )
         // Daemon config routes
         .route(

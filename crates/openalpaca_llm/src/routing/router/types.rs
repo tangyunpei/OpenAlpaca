@@ -53,6 +53,18 @@ pub struct RoutedStream {
     pub stream: ChatStream,
 }
 
+/// How much of a model's rate budget is left right now (Learning v2, design
+/// 09 §1.7): the minimum over its provider's keys, per bucket. Background
+/// work reads it before it spends any, so a chat round that starts meanwhile
+/// still finds the key's buckets at least half full.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateHeadroom {
+    pub rpm_available: f64,
+    pub rpm_capacity: f64,
+    pub tpm_available: f64,
+    pub tpm_capacity: f64,
+}
+
 /// Errors from the LLM router.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum LlmRouterError {

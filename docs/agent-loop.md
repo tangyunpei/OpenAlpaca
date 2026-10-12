@@ -43,8 +43,10 @@ Two details of the budget checks:
   `max_cost_per_task` overrides either (the shipped `lead_agent`
   template sets `3.0`). There is no overall daily budget for turns or
   workflows. Three background jobs that run outside this loop — memory
-  extraction, conversation summaries and task-output extraction — each
-  carry a small daily ceiling under `[orchestrator.costs]`.
+  extraction, the conversation's working state and task-output extraction —
+  each carry a small daily ceiling under `[orchestrator.costs]`. The
+  working-state writer's call at a compaction (below) is one of them: it
+  runs under the summariser's label and ceiling, not under the loop's cap.
 - **The round cap can stretch, within a ceiling.** The effective cap is
   `max_rounds` plus any steering bonus and the answer guard's one bonus
   round, never more than `2 × max_rounds`.
@@ -106,18 +108,25 @@ lead-agent workflow does not use this line; it has its own fallback (see
 **Lead tool surface** (`runner/lead_agent/mod.rs::run_lead_agent`):
 coordination tools (`spawn_subagent`, `spawn_subagents_batch` when
 enabled, `check_subagent_status`, `wait_for_subagents`, plus
-`post_update` + `queue_followup` under steering) + workspace tools +
-`memory_search`, plus `artifact_write` and `read_result` when the lead's
-own template declares those capabilities (the shipped `lead_agent`
-template does), unioned with the same extension set as the main loop —
-every installed MCP-bridged (`<server>__<tool>`) and plugin-provided
-(`<plugin>::<tool>`) tool whose extension is enabled — and a per-request
-`invoke_skill` instance, so the lead can run catalog
-skills and connected integrations itself or delegate them. The lead's
-`SandboxPolicy` allowlist is extended from the final tool definitions at
-run time (template denials still win); subagents stay template-scoped —
-they get only the capabilities their own template declares, never the
-lead's blanket grant.
+`post_update` + `queue_followup` under steering) + workspace tools + the
+memory reads `memory_search`, `memory_read` and `memory_timeline` (a
+search answers an index, so the read that follows it comes with it),
+plus `artifact_write` and `read_result` when the lead's own template
+declares those capabilities (the shipped `lead_agent` template does),
+`file_read`, `file_list` and `artifact_read` always — in code, so a
+template seeded before them gets them too, while one that denies a tool
+or its capability keeps it off; the lead reads the project and its
+by-products, holds neither `file_write`, `file_edit` nor
+`shell_execute`, and delegates the files a job is to produce to a
+subagent that writes them. That surface is unioned with the same
+extension set as the main loop — every installed MCP-bridged
+(`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool whose
+extension is enabled — and a per-request `invoke_skill` instance, so the
+lead can run catalog skills and connected integrations itself or
+delegate them. The lead's `SandboxPolicy` allowlist is extended from the
+final tool definitions at run time (template denials still win);
+subagents stay template-scoped — they get only the capabilities their
+own template declares, never the lead's blanket grant.
 
 Subagents can be plugin-backed: when the spawned template's source is
 `AgentSource::Plugin` (contributed by a plugin manifest), the spawn path
@@ -207,11 +216,22 @@ captured):
 the base picks (keyword-suggested tools under
 `tool_selection = "core_union"`, or the whole registry under `"full"`)
 unioned with a per-request set —
-`start_workflow`, `task_status`, `memory_store` + `memory_forget`
-(DB-gated), the globally-registered `memory_search` definition,
+`start_workflow`, `task_status`, `memory_store` + `memory_update` +
+`memory_forget` (when the daemon has a memory service), the
+globally-registered `memory_search`, `memory_read`, `memory_list` and
+`memory_timeline` definitions (and, with them, a two-line `<memory_rules>`
+block in the system prompt: search returns an index, pick ids, read only
+those, several at once; and before saving a fact that changes an earlier
+one, search for the note it changes and name it in `supersedes`),
 `read_result` (only when the daemon has both a session log and a
 database — the one case where a result can spill, see
-[Tool Results and the Spill](#tool-results-and-the-spill)), every
+[Tool Results and the Spill](#tool-results-and-the-spill)),
+`artifact_read` (every turn with a database), `file_read` (every turn
+with a project; with none, by keyword) with `file_list`
+wherever `file_read` is, `file_edit` beside a keyword-suggested
+`file_write` on a project turn (the query handler's offers,
+`offer_file_readers` and `offer_file_edit_beside_file_write` in
+`query_handler/mod.rs`, from one `is_project_turn` per turn), every
 installed extension tool whose extension is enabled (MCP-bridged
 `<server>__<tool>` and plugin-provided `<plugin>::<tool>`; a disabled
 server or plugin contributes nothing on either surface), and
@@ -223,6 +243,21 @@ enabled, `steer_workflow` + `queue_followup` join the surface.
 Per-request instances go into a per-request registry clone, never the
 global registry. Budgets come from `main_loop_max_rounds` /
 `main_loop_max_tools_per_round`.
+
+**Working folder**: each turn's context carries one `<working_folder>`
+line naming the project folder, or the conversation's scratch folder,
+that the file tools and the shell act in — at the end of the main loop's
+relay-rules message; as a message of its own right before the user's on
+a turn that runs tools outside the main loop (onboarding, a message with
+only attachments); right before the turn for a file-based skill, for a
+skill another skill invokes and for a subagent; and for the lead after
+its objective and the chat's working state. The line names only the file
+tools that loop holds, says a shell command starts there only when it
+holds `shell_execute`, and on a project turn tells a loop that holds no
+tool writing a file so — the lead, that a subagent whose template grants
+`file_write` writes the project's files. A plugin's skills and agents
+are not told. See [Daemon Manual → The Working
+Folder](Daemon_Manual.md#the-working-folder).
 
 **Workflow context**: lanes with active workflows get a per-turn
 `<active_workflows>` block (`query_handler/workflow_context.rs`) — task
@@ -264,7 +299,10 @@ Lead-only and text-only — subagents never see an inbox.
   (`workflows_for_lane`) registers unconditionally — it also backs the
   per-lane cap and the workflow-context block.
 - **Producers**: the `/steer ` prefix (deterministic) and the
-  `steer_workflow` tool (model-routed). Push results: `Ok` reports queue
+  `steer_workflow` tool (model-routed). Both put the turn's resolved
+  project root on the `SteeringMsg` (`request_workspace_root`, never the
+  path as sent — F4), which a message left undelivered at exit keeps on
+  its `unprocessed_steering` row. Push results: `Ok` reports queue
   depth; `Full` directs the model to offer `queue_followup`; `Closed`
   means the workflow already detached.
 - **Two drain points** in the loop body (`runner/agentic_loop/mod.rs`):
@@ -326,7 +364,10 @@ and the task outcome record.
 
 `queue_followup` (lead-agent tool, plus a main-loop variant on
 workflow-attached lanes) writes `followup` rows into `lane_followups`
-with the originating principal/scope/workspace. When a
+with the originating principal and the turn's resolved project root
+(`ToolContext.request_workspace_root`, F4) as `workspace_path` — the
+lead's context carries the run's project, so a follow-up a workflow
+promised re-enters in that project; the main loop's carries the turn's. When a
 workflow finalizes and `followup_autostart = true` (default), the spawn
 claims the lane's next `followup` row (`FollowupRepository::claim_next`
 — which never claims `unprocessed_steering`; those rows are surfaced by
@@ -448,15 +489,49 @@ that passes none (the social fast path, tests) never compacts.
   | ≥ 70% | `DropMultimedia` | Replaces image, audio and document parts with one-line text placeholders. |
   | ≥ 75% | `DiscardSocial` | Removes small-talk user messages and the replies to them. Keeps the system message, the first query and the last `min_recent_messages` (default 4). |
   | ≥ 80% | `HeuristicSummary` | Replaces older rounds with a compact summary built without a model (`runner/agentic_loop/context.rs::compress_context`). |
-  | ≥ 85% | `LlmSummary` | Extracts memories and summarises older messages with an LLM call. Cancellable: a cancel restores the messages untouched. |
+  | ≥ 85% | `LlmSummary` | Folds the older messages into the conversation's **working state** with one model call (below). Cancellable: a cancel restores the messages untouched. |
 
+- **The `LlmSummary` tier writes the working state** (design
+  `tasks/memory-redesign/11-continuity-design.md`, owner decisions CQ-1,
+  CQ-3). One call — there is no memory-extraction call any more — reads the
+  previous state and the older messages `messages[2..len − min_recent_messages]`
+  and answers the state, a fixed-shape JSON object: `topic`, `goal`, `done`,
+  `asked`, `decisions`, `open`, `next`, `refs`. It replaces those messages with the
+  rendered state at `messages[2]` (a previous state block among them is taken
+  out, so the list never holds two) and is carried out on
+  `LoopResult.working_state`. The call is the one working-state writer the
+  turn end and a conversation's close use too
+  (`orchestrator/working_state.rs`): `[orchestrator.costs] summary_model`
+  (unset: the router's default), no reasoning, 1,536 output tokens, recorded
+  under the label `orchestrator_summary` and checked first against
+  `summary_max_daily_cost_usd` — so its cost counts against that daily
+  ceiling, not against the turn's or the workflow's cap. An answer that is not
+  a state falls back to the heuristic summary. `[execution.context]
+  compaction_model` is gone; a hand-edited file's key is ignored.
+- **The main loop's state reaches the session row.** At turn end the state a
+  main-loop compaction wrote goes to `session.working_state` with no further
+  call, its `working_state_through` never past a row the writer read;
+  otherwise the turn end refreshes the state only when `[orchestrator.memory]
+  summary_min_new_older_messages` (12) rows have scrolled out of the recent
+  window past what it covers. The next turn's history layer starts with the
+  state as quoted data, which the assembly's 75 % trim never takes; after a
+  compaction the recent window starts after the rows the state covers,
+  keeping `min_recent_messages` rows verbatim, so a small window does not
+  re-send and re-compact the same rows. A lead is given the chat's state
+  after its objective and folds into it; what a lead, a skill or a subagent
+  compacts never reaches the session row.
 - **Never compacted away.** `<user_interjection>` steering messages are
-  exempt from discard and truncation.
+  exempt from discard and truncation. A working-state block is never cut:
+  the heuristic summary keeps it whole ahead of its own, and `LlmSummary`
+  replaces it with the state it writes.
 - **Narration.** Each compaction publishes
   `SystemEvent::CompactionTriggered` (utilization and message counts) and,
   with a session log attached, writes a `compaction` record with the tier,
-  the token counts before and after, and the running total of dropped
-  tokens.
+  the token counts before and after, the running total of dropped tokens
+  and, for `LlmSummary`, the state (`working_state`) and the last row it
+  covers (`state_through`) — which a resumed lead's replay splices in place of
+  the rounds it drops. A main-loop turn that compacted says so on its `done`
+  frame (`working_state_updated: true`).
 
 ## Tool Results and the Spill
 
@@ -548,8 +623,12 @@ started:
 2. **The rules** — `<workflow_relay_rules>` and `start_workflow`'s own
    description agree that a run starts ONLY through a call in this turn,
    that a task id may be stated only when that call returned it, and that
-   an explicit workflow request or an ask to write or save an artifact IS
-   that call.
+   an explicit workflow request IS that call. Since the storage design's
+   Stage 2 the relay rules alone — `start_workflow`'s description carries
+   no file clause — also say that writing a file, editing one or running
+   a command in the project is the chat's own when those tools are on its
+   surface, and that a file asked for with no writing tool on the surface
+   is `start_workflow`'s (R-T7).
 3. **The guard** — because prompting is not a guarantee.
 
 The guard's trigger is three **facts**, not a reading of the sentence. It

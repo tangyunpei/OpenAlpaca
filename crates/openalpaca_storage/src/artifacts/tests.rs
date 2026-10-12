@@ -23,6 +23,9 @@ impl Fixture {
         let home = tempdir().unwrap();
         let env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
         let project = tempdir().unwrap();
+        // A project scope is a registered project's (design §3, R12) —
+        // registered under this fixture's home, never the developer's.
+        crate::store::projects::register(&project.path().canonicalize().unwrap()).unwrap();
         let db_dir = tempdir().unwrap();
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
         Self {
@@ -38,8 +41,9 @@ impl Fixture {
         ArtifactStore::new(&self.db)
     }
 
-    /// The canonical project root — canonical because `project_root` is the
-    /// canonical-path string everywhere (§4.8) and macOS's `/var` is a symlink.
+    /// The canonical project root — canonical because the fixture registers
+    /// its project there, so `project_root` records that string (§4.8; R-T19:
+    /// the root `lookup` finds), and macOS's `/var` is a symlink.
     fn project_root(&self) -> PathBuf {
         self.project.path().canonicalize().unwrap()
     }
@@ -52,9 +56,39 @@ impl Fixture {
         self._home.path().canonicalize().unwrap()
     }
 
-    /// `<project>/.openalpaca/artifacts` — the root `rel_path` is relative to.
+    /// The project's `artifacts/` — the root `rel_path` is relative to.
     fn artifacts_root(&self) -> PathBuf {
-        self.project_root().join(".openalpaca").join("artifacts")
+        crate::store::store_root(&self.scope())
+            .unwrap()
+            .join("artifacts")
+    }
+
+    /// A result file the user has: real bytes in the project folder, and its
+    /// pointer row written by R35's method — never a hand `INSERT` (R39).
+    /// Returns the row, the file, and its modification time as written.
+    fn result_file(
+        &self,
+        rel: &str,
+        bytes: &[u8],
+    ) -> (ArtifactRecord, PathBuf, std::time::SystemTime) {
+        let path = self.project_root().join(rel);
+        fs::create_dir_all(path.parent().expect("a file has a parent")).unwrap();
+        fs::write(&path, bytes).unwrap();
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let root = self.project_root().to_string_lossy().into_owned();
+        let (record, inserted) = self
+            .store()
+            .record_project_file(NewProjectFile {
+                owner_id: OWNER,
+                project_root: &root,
+                rel_path: rel,
+                content: bytes,
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        assert!(inserted, "{rel} is a new result file");
+        (record, path, mtime)
     }
 
     /// A `file_assets` row written by neither `ArtifactStore` nor this owner's
@@ -142,26 +176,33 @@ impl Fixture {
             .unwrap();
     }
 
-    fn memory(&self, content: &str, scope_id: &str) {
-        self.memory_owned(content, scope_id, OWNER);
-    }
-
-    fn memory_owned(&self, content: &str, scope_id: &str, owner: &str) {
+    /// A `file_assets` row addressed under an arbitrary `root` at `rel` —
+    /// the way another project's artifact looks from here.
+    fn asset_under(&self, id: &str, root: &str, rel: &str) {
         self.db
             .with_connection(|conn| {
                 conn.execute(
-                    "INSERT INTO memory
-                        (owner_id, kind, scope, scope_id, source, content, content_hash)
-                     VALUES (?1, 'fact', 'workspace', ?2, 'test', ?3, ?3)",
-                    rusqlite::params![owner, scope_id, content],
+                    "INSERT INTO file_assets
+                        (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                         status, origin, project_root, rel_path)
+                     VALUES (?1, ?2, 'sha', 'notes.md', 'text/markdown', 0, ?3, 'ready',
+                             'produced', ?4, ?5)",
+                    rusqlite::params![
+                        id,
+                        OWNER,
+                        format!("{root}/.openalpaca/artifacts/{rel}"),
+                        root,
+                        rel
+                    ],
                 )?;
                 Ok(())
             })
             .unwrap();
     }
 
-    /// `(sessions, tasks, memories)` still naming `root`.
-    fn members_at(&self, root: &str) -> (i64, i64, i64) {
+    /// `(sessions, tasks)` still naming `root` — the two members that are not
+    /// artifact rows.
+    fn members_at(&self, root: &str) -> (i64, i64) {
         self.db
             .with_connection(|conn| {
                 let one = |sql: &str| -> Result<i64> {
@@ -170,7 +211,6 @@ impl Fixture {
                 Ok((
                     one("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
                     one("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
-                    one("SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1")?,
                 ))
             })
             .unwrap()
@@ -767,56 +807,147 @@ fn a_create_that_fails_releases_the_name_it_reserved() {
     assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "a\n");
 }
 
-/// Placement identity *is* address identity. A `<project>/.openalpaca`
-/// symlinked at another store — the home store here — puts both scopes' bytes
-/// in one directory, so they must share one sequence space; keying the address
-/// off the path the caller named would restart it at `01` and hand two
-/// different artifacts the same name. `confine_to_root` cannot catch that: the
-/// symlink is *at* the root it canonicalizes, not under it.
+/// R15: a project artifact's bytes land in the project's folder under the
+/// home store's `projects/`, and its row records the turn's project root —
+/// never the directory the bytes reached. Nothing lands in the project.
+#[test]
+fn a_project_artifact_lands_under_projects_and_records_the_turns_root() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\n");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    let folder = f
+        .home_root()
+        .join(crate::store::projects::PROJECTS_DIR)
+        .join(crate::store::projects::folder_name(&f.project_root()));
+    assert_eq!(
+        PathBuf::from(&record.storage_path),
+        folder
+            .join("artifacts")
+            .join("loose")
+            .join("2026-09-01")
+            .join("01-notes.md")
+    );
+    assert_eq!(record.project_root.as_deref(), f.project_root().to_str());
+    assert!(!f.project_root().join(".openalpaca").exists(), "ST-1");
+}
+
+/// The lead's ruling R-T19 (ST-23 with R15): a by-product and an upload
+/// filed in a turn at the old root of a project whose folder moved with a
+/// link left there record that root — the project `lookup` finds, whose
+/// folder under `projects/` holds their bytes — and never the folder the
+/// link reaches, though a project is registered there. That project's own
+/// rows keep its canonical root, through another link to it too.
 #[cfg(unix)]
 #[test]
-fn a_symlinked_store_root_cannot_open_a_second_sequence_space() {
+fn a_write_at_a_missing_projects_old_root_records_that_root_and_never_the_folder_it_reaches() {
     let f = Fixture::new();
-    std::os::unix::fs::symlink(f.home_root(), f.project_root().join(".openalpaca")).unwrap();
+    // The root as it is recorded, and its folder, taken before the move:
+    // `project_root()` canonicalizes, which after the move would answer the
+    // moved folder.
+    let root = f.project_root();
+    let own = crate::store::projects::lookup(&root).unwrap().unwrap();
+    let aside = tempdir().unwrap();
+    let base = aside.path().canonicalize().unwrap();
+    let moved = base.join("app-moved");
+    fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+    // A turn in the moved folder registers it as a project of its own.
+    let theirs = crate::store::projects::register(&moved).unwrap();
+    assert_ne!(theirs.id, own.id);
+    let address = |id: &str| -> Option<String> {
+        f.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT project_root FROM file_assets WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap()
+    };
+    let recorded = root.to_string_lossy().into_owned();
+    let reached = moved.to_string_lossy().into_owned();
 
-    let home_scope = StoreScope::Home;
-    let mut first = NewArtifact::new(OWNER, &home_scope, ArtifactKind::Markdown, "Alpha", b"hello");
-    first.created = at(1);
-    let (home, _) = f.store().put(first).unwrap();
+    let old = StoreScope::Project(root.clone());
+    let mut new = NewArtifact::new(OWNER, &old, ArtifactKind::Markdown, "Notes", b"a\n");
+    new.created = at(1);
+    let (artifact, _) = f.store().put(new).unwrap();
+    let upload = crate::uploads::UploadStore::new(&f.db)
+        .put(crate::uploads::NewUpload {
+            owner_id: OWNER,
+            filename: "notes.txt",
+            mime_type: "text/plain",
+            data: b"up\n",
+            scope: &old,
+            created: at(1),
+        })
+        .unwrap();
 
-    let project_scope = f.scope();
-    let mut second = NewArtifact::new(
-        OWNER,
-        &project_scope,
-        ArtifactKind::Markdown,
-        "Beta",
-        b"other bytes",
-    );
-    second.created = at(1);
-    let (project, _) = f.store().put(second).unwrap();
-
-    assert!(
-        home.storage_path.ends_with("/01-alpha.md"),
-        "{}",
-        home.storage_path
-    );
-    assert!(
-        project.storage_path.ends_with("/02-beta.md"),
-        "the second write shares the first's sequence space: {}",
-        project.storage_path
-    );
-    assert_eq!(fs::read_to_string(&home.storage_path).unwrap(), "hello");
+    assert_eq!(artifact.project_root.as_deref(), Some(recorded.as_str()));
     assert_eq!(
-        fs::read_to_string(&project.storage_path).unwrap(),
-        "other bytes"
+        address(&upload.asset.id).as_deref(),
+        Some(recorded.as_str())
     );
+    for path in [&artifact.storage_path, &upload.asset.storage_path] {
+        assert!(
+            Path::new(path).starts_with(&own.dir),
+            "its bytes are in its own folder: {path}"
+        );
+    }
 
-    // One directory, one address space: the row records the store the bytes
-    // reached, not the path the caller named.
+    // The project registered where the link leads keeps its canonical root,
+    // and a write through another link to it records that root too.
+    let alias = base.join("alias");
+    std::os::unix::fs::symlink(&moved, &alias).unwrap();
+    for scope in [
+        StoreScope::Project(moved.clone()),
+        StoreScope::Project(alias),
+    ] {
+        let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Plan", b"b\n");
+        new.created = at(1);
+        let (row, _) = f.store().put(new).unwrap();
+        assert_eq!(row.project_root.as_deref(), Some(reached.as_str()));
+        assert!(
+            Path::new(&row.storage_path).starts_with(&theirs.dir),
+            "{}",
+            row.storage_path
+        );
+    }
+}
+
+/// R15/R12: a row whose own columns do not name its store falls back to
+/// its scope's store, and that fallback creates nothing — for a project no
+/// folder under `projects/` records, nothing at all.
+#[test]
+fn resolving_a_row_whose_columns_do_not_name_its_store_creates_nothing() {
+    let f = Fixture::new();
+    let stray = tempdir().unwrap();
+    let stray_root = stray.path().canonicalize().unwrap();
+    f.db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                 storage_path, status, origin, project_root, rel_path)
+             VALUES ('stray-row', ?1, 'sha', 'notes.md', 'text/markdown', 1, '/nowhere/x.md',
+                     'ready', 'produced', ?2, 'loose/2026-09-01/01-notes.md')",
+            rusqlite::params![OWNER, stray_root.to_string_lossy()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(f.store().resolve_content("stray-row", None).is_err());
     assert!(
-        project.project_root.is_none(),
-        "the bytes reached the home store: {:?}",
-        project.project_root
+        !stray_root.join(".openalpaca").exists(),
+        "nothing in the folder"
+    );
+    assert!(
+        !f.home_root()
+            .join(crate::store::projects::PROJECTS_DIR)
+            .join(crate::store::projects::folder_name(&stray_root))
+            .exists(),
+        "and nothing under projects/"
     );
 }
 
@@ -858,6 +989,24 @@ fn assert_no_tmp_leftovers(dir: &Path) {
         "tmp leftovers in {}: {leftovers:?}",
         dir.display()
     );
+}
+
+/// R39: the user's file is exactly as they had it — its bytes, and its
+/// modification time, which any write (even of the same bytes) would move.
+fn assert_untouched(path: &Path, bytes: &[u8], mtime: std::time::SystemTime) {
+    assert_eq!(fs::read(path).unwrap(), bytes, "the user's bytes");
+    assert_eq!(
+        fs::metadata(path).unwrap().modified().unwrap(),
+        mtime,
+        "the user's modification time"
+    );
+}
+
+fn file_asset_count(f: &Fixture) -> i64 {
+    f.db.with_connection(|conn| {
+        Ok(conn.query_row("SELECT COUNT(*) FROM file_assets", [], |row| row.get(0))?)
+    })
+    .unwrap()
 }
 
 /// Runs one crash injection against an artifact that already has v1, and
@@ -1484,109 +1633,160 @@ fn set_pinned_round_trips_and_rejects_an_unknown_id() {
 }
 
 // ============================================================================
-// rebase_project
+// repoint_rows
 // ============================================================================
 
+/// §6 step 2: one transaction moves the five path columns from the old root
+/// to the new one and rewrites both `storage_path` prefixes — the project's
+/// folder under `projects/`, and (a pointer row's) the project's own
+/// path — each only on rows whose `project_root` is the old root, and only
+/// where the prefix is followed by a separator.
 #[test]
-fn rebase_project_rewrites_only_rows_under_the_old_root() {
+fn repoint_rows_rewrites_the_five_columns_and_both_storage_path_prefixes() {
     let f = Fixture::new();
-    let other = tempdir().unwrap();
-    let other_root = other.path().canonicalize().unwrap();
+    let (old, new) = ("/w/app", "/w/app-moved");
+    let (old_dir, new_dir) = ("/h/projects/-w-app", "/h/projects/-w-app-moved");
+    f.db.with_connection(|conn| {
+        conn.execute_batch(
+            "INSERT INTO session (id, lane_key, source, workspace_id) VALUES
+                 ('s-1', 'u:gui', 'gui', '/w/app'), ('s-2', 'u:cli', 'cli', '/elsewhere');
+             INSERT INTO task (id, title, created_by, source_lane, workspace_id)
+                 VALUES ('t-1', 't', 'u', 'u:gui', '/w/app');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id, workspace_root)
+                 VALUES ('u:gui', 'user', 'hi', 's-1', '/w/app');
+             INSERT INTO lane_followups (lane_key, kind, content, principal_json, workspace_path)
+                 VALUES ('u:gui', 'followup', 'next', '{}', '/w/app');
+             INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                                      storage_path, origin, project_root, rel_path) VALUES
+                 ('by-product', 'owner-1', 'a', 'n.md', 'text/markdown', 1,
+                  '/h/projects/-w-app/artifacts/loose/2026-09-01/01-n.md', 'produced',
+                  '/w/app', 'loose/2026-09-01/01-n.md'),
+                 ('pointer', 'owner-1', 'b', 'main.rs', 'text/plain', 1,
+                  '/w/app/src/main.rs', 'produced', '/w/app', NULL),
+                 ('lookalike', 'owner-1', 'c', 'x.md', 'text/markdown', 1,
+                  '/h/projects/-w-app-old/artifacts/x.md', 'produced', '/w/app', 'x.md'),
+                 ('other-project', 'owner-1', 'd', 'y.md', 'text/markdown', 1,
+                  '/h/projects/-w-app/artifacts/y.md', 'produced', '/w/other', 'y.md');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
 
-    let scope = f.scope();
-    let mut mine = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
-    mine.created = at(1);
-    let (mine, _) = f.store().put(mine).unwrap();
-
-    let other_scope = StoreScope::Project(other_root.clone());
-    let mut theirs = NewArtifact::new(OWNER, &other_scope, ArtifactKind::Markdown, "Notes", b"b");
-    theirs.created = at(1);
-    let (theirs, _) = f.store().put(theirs).unwrap();
-
-    let home_scope = StoreScope::Home;
-    let mut homely = NewArtifact::new(OWNER, &home_scope, ArtifactKind::Markdown, "Notes", b"c");
-    homely.created = at(1);
-    let (homely, _) = f.store().put(homely).unwrap();
-
-    let old = f.project_root().to_string_lossy().to_string();
-    let new_root = "/tmp/moved-project";
-    let moved = f.store().rebase_project(&old, new_root).unwrap();
-    assert_eq!(
-        moved.file_assets, 1,
-        "only the rows under the old root move"
-    );
-
-    let mine_after = f.store().get(&mine.id, OWNER).unwrap().unwrap();
-    assert_eq!(mine_after.project_root.as_deref(), Some(new_root));
-    assert_eq!(
-        mine_after.storage_path,
-        format!("{new_root}/.openalpaca/artifacts/loose/2026-09-01/01-notes.md")
-    );
-    assert_eq!(
-        mine_after.rel_path.as_deref(),
-        Some("loose/2026-09-01/01-notes.md"),
-        "the relative address is untouched — that is the point"
-    );
-
-    let theirs_after = f.store().get(&theirs.id, OWNER).unwrap().unwrap();
-    assert_eq!(
-        theirs_after.project_root.as_deref(),
-        Some(other_root.to_string_lossy().as_ref())
-    );
-    assert_eq!(theirs_after.storage_path, theirs.storage_path);
-
-    let home_after = f.store().get(&homely.id, OWNER).unwrap().unwrap();
-    assert!(home_after.project_root.is_none());
-    assert_eq!(home_after.storage_path, homely.storage_path);
-}
-
-#[test]
-fn rebase_project_moves_all_four_members_together() {
-    let f = Fixture::new();
-    let old = f.project_root().to_string_lossy().to_string();
-    let new_root = "/tmp/moved-project";
-
-    let scope = f.scope();
-    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
-    produced.created = at(1);
-    f.store().put(produced).unwrap();
-    // The other origin: an upload placed in the project store moves with it.
-    let upload_path = f.artifacts_root().join("loose/2026-09-01/99-uploaded.md");
-    f.foreign_row("upload-1", "loose/2026-09-01/99-uploaded.md", &upload_path);
-
-    f.session("session-1", &old);
-    f.task_in("task-1", &old, "completed");
-    f.task_in("task-2", &old, "queued");
-    f.memory("a workspace fact", &old);
-    // Bystanders under another root.
-    f.session("session-2", "/elsewhere");
-    f.memory("someone else's fact", "/elsewhere");
-
-    let counts = f.store().rebase_project(&old, new_root).unwrap();
+    // `t-1` reads the column's default, `queued`: the run check is the
+    // re-point's (`project_life`), this test is the rewrite's.
+    let counts = f
+        .store()
+        .repoint_rows(old, new, old_dir, new_dir, InFlightRuns::Ignore)
+        .unwrap();
     assert_eq!(
         counts,
         RebaseCounts {
-            file_assets: 2,
+            file_assets: 3,
             sessions: 1,
-            tasks: 2,
-            memories: 1,
+            tasks: 1,
+            messages: 1,
+            followups: 1,
         }
     );
 
-    assert_eq!(f.members_at(&old), (0, 0, 0), "nothing is left behind");
-    assert_eq!(f.members_at(new_root), (1, 2, 1));
+    let address = |id: &str| -> (Option<String>, String) {
+        f.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT project_root, storage_path FROM file_assets WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap()
+    };
     assert_eq!(
-        f.members_at("/elsewhere"),
-        (1, 0, 1),
-        "bystanders untouched"
+        address("by-product"),
+        (
+            Some(new.to_string()),
+            "/h/projects/-w-app-moved/artifacts/loose/2026-09-01/01-n.md".to_string()
+        )
     );
+    assert_eq!(
+        address("pointer"),
+        (
+            Some(new.to_string()),
+            "/w/app-moved/src/main.rs".to_string()
+        )
+    );
+    assert_eq!(
+        address("lookalike"),
+        (
+            Some(new.to_string()),
+            "/h/projects/-w-app-old/artifacts/x.md".to_string()
+        ),
+        "a prefix not followed by a separator is not the project's"
+    );
+    assert_eq!(
+        address("other-project"),
+        (
+            Some("/w/other".to_string()),
+            "/h/projects/-w-app/artifacts/y.md".to_string()
+        ),
+        "another project's row is not touched"
+    );
+    let count = |sql: &str| -> i64 {
+        f.db.with_connection(|conn| Ok(conn.query_row(sql, [], |r| r.get(0))?))
+            .unwrap()
+    };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM session WHERE workspace_id = '/w/app-moved'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM session WHERE workspace_id = '/elsewhere'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM task WHERE workspace_id = '/w/app-moved'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM conversation_messages WHERE workspace_root = '/w/app-moved'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM lane_followups WHERE workspace_path = '/w/app-moved'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM file_assets WHERE project_root = '/w/app'"),
+        0
+    );
+}
 
-    let moved_upload = f.store().get("upload-1", OWNER).unwrap().unwrap();
-    assert_eq!(moved_upload.project_root.as_deref(), Some(new_root));
+/// `workspace_rows` counts what `repoint_rows` moves: a root named only by a
+/// message and a follow-up is a root rows name.
+#[test]
+fn workspace_rows_counts_messages_and_followups_too() {
+    let f = Fixture::new();
+    f.db.with_connection(|conn| {
+        conn.execute_batch(
+            "INSERT INTO conversation_messages (lane_key, role, content, workspace_root)
+                 VALUES ('u:gui', 'user', 'hi', '/w/app');
+             INSERT INTO lane_followups (lane_key, kind, content, principal_json, workspace_path)
+                 VALUES ('u:gui', 'followup', 'next', '{}', '/w/app');",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let rows = f.store().workspace_rows("/w/app", None).unwrap();
     assert_eq!(
-        moved_upload.storage_path,
-        format!("{new_root}/.openalpaca/artifacts/loose/2026-09-01/99-uploaded.md")
+        rows.counts,
+        RebaseCounts {
+            file_assets: 0,
+            sessions: 0,
+            tasks: 0,
+            messages: 1,
+            followups: 1,
+        }
     );
+    assert!(!rows.counts.is_empty());
 }
 
 /// I8: the mark says "nothing is at `storage_path`", and the re-base is what
@@ -1594,7 +1794,7 @@ fn rebase_project_moves_all_four_members_together() {
 /// described. Otherwise a project moved by hand and then re-based stays hidden
 /// from the Library for good.
 #[test]
-fn rebase_project_clears_the_missing_mark_it_re_addresses() {
+fn repoint_rows_clears_the_missing_mark_it_re_addresses() {
     let f = Fixture::new();
     let scope = f.scope();
     let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
@@ -1613,7 +1813,19 @@ fn rebase_project_clears_the_missing_mark_it_re_addresses() {
     );
 
     let old = f.project_root().to_string_lossy().to_string();
-    f.store().rebase_project(&old, "/tmp/moved-project").unwrap();
+    let store_dir = crate::store::store_root(&f.scope())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    f.store()
+        .repoint_rows(
+            &old,
+            "/tmp/moved-project",
+            &store_dir,
+            "/tmp/moved-dir",
+            InFlightRuns::Refuse,
+        )
+        .unwrap();
 
     let after = f.store().get(&record.id, OWNER).unwrap().unwrap();
     assert!(
@@ -1628,7 +1840,7 @@ fn rebase_project_clears_the_missing_mark_it_re_addresses() {
 }
 
 #[test]
-fn a_failing_member_rolls_the_whole_rebase_back() {
+fn a_failing_member_rolls_the_whole_repoint_back() {
     let f = Fixture::new();
     let old = f.project_root().to_string_lossy().to_string();
     let new_root = "/tmp/already-a-project";
@@ -1639,16 +1851,30 @@ fn a_failing_member_rolls_the_whole_rebase_back() {
     let (produced, _) = f.store().put(produced).unwrap();
     f.session("session-1", &old);
     f.task_in("task-1", &old, "completed");
-    f.memory("the same fact", &old);
 
-    // The collision: `idx_memory_content_hash` is
-    // (owner_id, scope, scope_id, content_hash), so re-keying this memory onto
-    // a root that already holds the same content violates it. That is the
-    // failure the one transaction exists for — two projects' memories must not
-    // silently merge, and the other three members must not move without it.
-    f.memory("the same fact", new_root);
+    // The collision: `idx_file_assets_addr` is
+    // (COALESCE(project_root, ''), in_project, rel_path), so re-keying this
+    // by-product onto a root that already holds one at the same address
+    // violates it. That is the failure the one transaction
+    // exists for — two projects must not silently merge, and the other two
+    // members, which the transaction has already rewritten by the time the
+    // artifact statement runs, must not stay moved without it.
+    f.asset_under("theirs", new_root, produced.rel_path.as_deref().unwrap());
 
-    let err = f.store().rebase_project(&old, new_root).unwrap_err();
+    let store_dir = crate::store::store_root(&f.scope())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let err = f
+        .store()
+        .repoint_rows(
+            &old,
+            new_root,
+            &store_dir,
+            "/tmp/elsewhere-dir",
+            InFlightRuns::Refuse,
+        )
+        .unwrap_err();
     assert!(
         err.to_string().to_lowercase().contains("unique"),
         "expected the unique-index violation, got: {err}"
@@ -1664,8 +1890,12 @@ fn a_failing_member_rolls_the_whole_rebase_back() {
         Some(old.as_str()),
         "the artifact row rolled back with the rest"
     );
-    assert_eq!(f.members_at(&old), (1, 1, 1));
-    assert_eq!(f.members_at(new_root), (0, 0, 1), "only its own memory");
+    assert_eq!(
+        f.members_at(&old),
+        (1, 1),
+        "the session and the run were re-keyed before the collision and rolled back"
+    );
+    assert_eq!(f.members_at(new_root), (0, 0));
 }
 
 #[test]
@@ -1691,7 +1921,6 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
     f.session("session-1", &root);
     f.task_in("done", &root, "completed");
     f.task_in("queued", &root, "queued");
-    f.memory("a fact", &root);
 
     let rows = f.store().workspace_rows(&root, None).unwrap();
     assert_eq!(
@@ -1700,12 +1929,13 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
             file_assets: 1,
             sessions: 1,
             tasks: 2,
-            memories: 1,
+            messages: 0,
+            followups: 0,
         }
     );
     assert_eq!(
         rows.active_tasks, 0,
-        "a queued run has resolved nothing yet — its row moves with the rest"
+        "a queued run is counted apart from the running ones"
     );
 
     f.task_in("live", &root, "running");
@@ -1748,7 +1978,7 @@ fn busy_tasks_counts_queued_running_and_paused_but_not_a_finished_run() {
 }
 
 #[test]
-fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
+fn workspace_rows_scopes_the_one_member_that_has_an_owner() {
     let f = Fixture::new();
     let root = f.project_root().to_string_lossy().to_string();
     let scope = f.scope();
@@ -1759,22 +1989,18 @@ fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
     let mut theirs = NewArtifact::new("owner-2", &scope, ArtifactKind::Markdown, "Theirs", b"b");
     theirs.created = at(1);
     f.store().put(theirs).unwrap();
-    f.memory("mine", &root);
-    f.memory_owned("theirs", &root, "owner-2");
     f.session("session-1", &root);
     f.task_in("task-1", &root, "completed");
 
     let all = f.store().workspace_rows(&root, None).unwrap();
     assert_eq!(all.counts.file_assets, 2);
-    assert_eq!(all.counts.memories, 2);
     assert_eq!(all.other_owners, 0, "an unscoped count leaves nobody out");
 
     let mine = f.store().workspace_rows(&root, Some(OWNER)).unwrap();
     assert_eq!(mine.counts.file_assets, 1);
-    assert_eq!(mine.counts.memories, 1);
     assert_eq!(
-        mine.other_owners, 2,
-        "one artifact and one memory belong to somebody else"
+        mine.other_owners, 1,
+        "one artifact belongs to somebody else"
     );
     // `session` and `task` carry no owner, so their counts are the root's
     // either way — which is why the route refuses rather than half-scopes.
@@ -1783,321 +2009,7 @@ fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
 
     let nobody = f.store().workspace_rows(&root, Some("owner-3")).unwrap();
     assert_eq!(nobody.counts.file_assets, 0);
-    assert_eq!(nobody.other_owners, 4);
-}
-
-// ============================================================================
-// purge_project
-// ============================================================================
-
-/// A run under `root` with one row of every table keyed off it, plus the
-/// bystanders that must survive: the same rows under another root, and a run
-/// with no workspace at all that was started from a purged conversation.
-fn seed_for_purge(f: &Fixture, root: &str) {
-    f.session("session-1", root);
-    f.session("session-2", "/elsewhere");
-    f.task_in("task-1", root, "completed");
-    f.task_in("task-2", "/elsewhere", "completed");
-    f.memory("a workspace fact", root);
-
-    f.db
-        .with_connection(|conn| {
-            conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, session_id, task_id)
-                 VALUES ('session-1', 'user', 'hi', 'session-1', 'task-1')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, session_id)
-                 VALUES ('session-2', 'user', 'hi', 'session-2')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO tool_execution_log (agent_id, tool_name, success, duration_ms,
-                                                 session_id, task_id)
-                 VALUES ('a', 'read', 1, 3, 'session-1', 'task-1')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO lane_followups (lane_key, kind, content, principal_json, session_id)
-                 VALUES ('session-1', 'followup', 'later', '{}', 'session-1')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO subagent_span
-                    (id, task_id, template_id, agent_instance_id, label, started_at)
-                 VALUES ('span-1', 'task-1', 't', 'i', 'review', '2026-09-01T00:00:00Z')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO event_log (event_type, task_id) VALUES ('started', 'task-1')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO dispatch_decisions (request_id, task_id, mode, reason)
-                 VALUES ('r-1', 'task-1', 'lead', 'because')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO llm_call_log (task_id, provider, model)
-                 VALUES ('task-1', 'anthropic', 'sonnet')",
-                [],
-            )?;
-            // A run outside the root, started from a conversation inside it.
-            conn.execute(
-                "INSERT INTO task (id, title, created_by, source_lane, session_id)
-                 VALUES ('task-loose', 'loose', 'test', 'test', 'session-1')",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
-fn purge_project_takes_the_conversations_the_runs_and_the_uploads() {
-    let f = Fixture::new();
-    let root = f.project_root().to_string_lossy().to_string();
-    seed_for_purge(&f, &root);
-
-    // The two origins of `file_assets`: one goes, one stays.
-    let scope = f.scope();
-    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
-    produced.created = at(1);
-    let (produced, _) = f.store().put(produced).unwrap();
-    let upload_path = f.artifacts_root().join("loose/2026-09-01/99-uploaded.md");
-    f.foreign_row("upload-1", "loose/2026-09-01/99-uploaded.md", &upload_path);
-
-    let plan = f.store().purge_plan(&root).unwrap();
-    let outcome = f.store().purge_project(&root).unwrap();
-    assert_eq!(
-        plan.counts, outcome.counts,
-        "the dry run and the real call must agree"
-    );
-    assert_eq!(
-        outcome.counts,
-        PurgeCounts {
-            sessions: 1,
-            messages: 1,
-            tool_calls: 1,
-            followups: 1,
-            tasks: 1,
-            spans: 1,
-            run_events: 1,
-            uploads: 1,
-        }
-    );
-    assert_eq!(outcome.session_ids, vec!["session-1".to_string()]);
-    assert_eq!(
-        outcome.upload_paths,
-        vec![upload_path.to_string_lossy().to_string()]
-    );
-
-    // The bystanders under the other root are all still there.
-    assert_eq!(f.members_at("/elsewhere"), (1, 1, 0));
-    let count = |sql: &str| -> i64 {
-        f.db.with_connection(|conn| Ok(conn.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    };
-    assert_eq!(count("SELECT COUNT(*) FROM conversation_messages"), 1);
-    assert_eq!(count("SELECT COUNT(*) FROM tool_execution_log"), 0);
-    assert_eq!(count("SELECT COUNT(*) FROM lane_followups"), 0);
-    assert_eq!(count("SELECT COUNT(*) FROM subagent_span"), 0);
-    assert_eq!(count("SELECT COUNT(*) FROM event_log"), 0);
-    assert_eq!(count("SELECT COUNT(*) FROM dispatch_decisions"), 0);
-    assert_eq!(count("SELECT COUNT(*) FROM llm_call_log"), 0);
-
-    // The keeps, named in the plan and true in the table.
-    assert_eq!(plan.kept, PurgeKept { artifacts: 1, memories: 1 });
-    assert!(f.store().get(&produced.id, OWNER).unwrap().is_some());
-    assert_eq!(
-        count("SELECT COUNT(*) FROM memory WHERE scope = 'workspace'"),
-        1
-    );
-
-    // The run outside the root keeps its row and loses the link, exactly as
-    // `delete_session` does it.
-    assert_eq!(
-        count("SELECT COUNT(*) FROM task WHERE id = 'task-loose' AND session_id IS NULL"),
-        1
-    );
-}
-
-/// Upload dedup is store-blind (`UploadStore::put` matches on sha + owner
-/// across every store), so one row can be the attachment of a message in
-/// another project's transcript. The purge must leave that row — the store
-/// never deletes what another reader still names.
-#[test]
-fn a_purge_keeps_an_upload_a_surviving_message_still_links() {
-    let f = Fixture::new();
-    let root = f.project_root().to_string_lossy().to_string();
-    seed_for_purge(&f, &root);
-
-    let mine = f.artifacts_root().join("loose/2026-09-01/98-mine.md");
-    f.foreign_row("upload-mine", "loose/2026-09-01/98-mine.md", &mine);
-    let shared = f.artifacts_root().join("loose/2026-09-01/99-shared.md");
-    f.foreign_row("upload-shared", "loose/2026-09-01/99-shared.md", &shared);
-    f.db
-        .with_connection(|conn| {
-            let here: i64 = conn.query_row(
-                "SELECT id FROM conversation_messages WHERE session_id = 'session-1'",
-                [],
-                |r| r.get(0),
-            )?;
-            let elsewhere: i64 = conn.query_row(
-                "SELECT id FROM conversation_messages WHERE session_id = 'session-2'",
-                [],
-                |r| r.get(0),
-            )?;
-            for (message, file) in [
-                (here, "upload-mine"),
-                (here, "upload-shared"),
-                (elsewhere, "upload-shared"),
-            ] {
-                conn.execute(
-                    "INSERT INTO conversation_message_attachments (message_id, file_id)
-                     VALUES (?1, ?2)",
-                    rusqlite::params![message, file],
-                )?;
-            }
-            Ok(())
-        })
-        .unwrap();
-
-    let plan = f.store().purge_plan(&root).unwrap();
-    let outcome = f.store().purge_project(&root).unwrap();
-    assert_eq!(
-        plan.counts, outcome.counts,
-        "the dry run and the real call must agree"
-    );
-    assert_eq!(
-        outcome.counts.uploads, 1,
-        "only the row this project's transcript alone named"
-    );
-    assert_eq!(
-        outcome.upload_paths,
-        vec![mine.to_string_lossy().to_string()],
-        "the caller unlinks exactly the blobs whose rows went"
-    );
-
-    let surviving: Vec<String> = f
-        .db
-        .with_connection(|conn| {
-            let mut stmt = conn
-                .prepare("SELECT id FROM file_assets WHERE origin = 'upload' ORDER BY id")?;
-            let ids = stmt
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok(ids)
-        })
-        .unwrap();
-    assert_eq!(surviving, vec!["upload-shared".to_string()]);
-}
-
-#[test]
-fn a_purged_run_leaves_the_turn_that_started_it_readable() {
-    // Migration 038 in as many words: `conversation_messages.task_id` is not a
-    // foreign key so that a purge cannot take the transcript with it.
-    let f = Fixture::new();
-    let root = f.project_root().to_string_lossy().to_string();
-    f.task_in("task-1", &root, "completed");
-    f.db
-        .with_connection(|conn| {
-            conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, task_id)
-                 VALUES ('home-lane', 'assistant', 'done', 'task-1')",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-
-    f.store().purge_project(&root).unwrap();
-
-    let (content, task_id): (String, Option<String>) = f
-        .db
-        .with_connection(|conn| {
-            Ok(conn.query_row(
-                "SELECT content, task_id FROM conversation_messages",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
-    assert_eq!(content, "done");
-    assert_eq!(
-        task_id.as_deref(),
-        Some("task-1"),
-        "the id dangles rather than being nulled or cascaded"
-    );
-}
-
-#[test]
-fn purging_a_root_nothing_names_changes_nothing() {
-    let f = Fixture::new();
-    let root = f.project_root().to_string_lossy().to_string();
-    seed_for_purge(&f, &root);
-
-    let outcome = f.store().purge_project("/nowhere").unwrap();
-    assert!(outcome.counts.is_empty());
-    assert!(outcome.session_ids.is_empty());
-    assert_eq!(f.members_at(&root), (1, 1, 1));
-}
-
-#[test]
-fn project_roots_lists_every_root_the_four_members_name() {
-    let f = Fixture::new();
-    let root = f.project_root().to_string_lossy().to_string();
-    f.session("session-1", &root);
-    f.task_in("task-1", "/b-root", "completed");
-    f.memory("a fact", "/a-root");
-    // The home scope is not a project and never appears, whether it is
-    // recorded as `NULL` or as `''` — nothing writes `''` today, but the two
-    // halves of a `--all` plan must still partition the table.
-    f.session("session-home", "");
-
-    assert_eq!(
-        f.store().project_roots().unwrap(),
-        vec!["/a-root".to_string(), "/b-root".to_string(), root]
-    );
-    assert_eq!(
-        f.store().home_scope_rows().unwrap().sessions,
-        1,
-        "the '' session is home scope, not a missing root"
-    );
-}
-
-#[test]
-fn the_home_scope_counts_what_a_project_purge_leaves_alone() {
-    let f = Fixture::new();
-    let scope = StoreScope::Home;
-    let mut homely = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"c");
-    homely.created = at(1);
-    f.store().put(homely).unwrap();
-    f.db
-        .with_connection(|conn| {
-            conn.execute(
-                "INSERT INTO session (id, lane_key, source) VALUES ('s-home', 's-home', 'gui')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO file_assets
-                    (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, origin)
-                 VALUES ('u-home', 'owner-1', 'sha', 'n.txt', 'text/plain', 1, '/tmp/n', 'upload')",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-
-    assert_eq!(
-        f.store().home_scope_rows().unwrap(),
-        HomeScopeRows {
-            sessions: 1,
-            uploads: 1
-        },
-        "the produced home artifact is not an upload and is not counted"
-    );
+    assert_eq!(nobody.other_owners, 2);
 }
 
 // ============================================================================
@@ -2971,4 +2883,660 @@ fn line_counts_are_absent_for_a_binary_kind() {
     assert_eq!(rows[0].version, 2);
     assert_eq!(rows[0].added_lines, None);
     assert_eq!(rows[0].removed_lines, None);
+}
+
+// ============================================================================
+// Stage 2 — result files (ST-12): the column, the filter, Open (ST-18)
+// ============================================================================
+
+/// Every record reads `in_project` — `false` for a by-product — a by-product
+/// always opens (ST-18), and `list` filters on the column. A result file's
+/// side of each is pinned in S4a.3, against rows R35's method writes (R39:
+/// no hand `INSERT`).
+#[test]
+fn a_by_product_is_outside_the_project_and_opens() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+    let (by_product, _) = f.store().put(new).unwrap();
+
+    assert!(!by_product.in_project);
+    assert!(by_product.openable(), "a by-product stored under a kind's extension opens");
+    let ids = |in_project: Option<bool>| -> Vec<String> {
+        let mut q = ArtifactQuery::new(OWNER);
+        q.in_project = in_project;
+        f.store()
+            .list(&q)
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    };
+    assert_eq!(ids(Some(false)), vec![by_product.id.clone()]);
+    assert!(ids(Some(true)).is_empty(), "no result file yet");
+    assert_eq!(ids(None), vec![by_product.id.clone()], "absent: both");
+}
+
+/// ST-18 on a by-product follows the file Open would hand to an app: a
+/// by-product whose text no kind admits is stored under the fallback `.bin`
+/// (FW-1), which no default app may be given, so it is not offered Open —
+/// the route refuses it too (`by_product_path`, the second residual pass's
+/// Y.3) — while an upload is still offered, staged as a copy under its name.
+#[test]
+fn a_by_product_stored_as_bin_is_not_offered_open() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Code, "deploy", b"echo hi\n");
+    new.name_hint = Some("deploy.sh");
+    new.created = at(1);
+    let (stored, _) = f.store().put(new).unwrap();
+
+    assert!(
+        stored.storage_path.ends_with(".bin"),
+        "text no kind admits is stored as .bin: {}",
+        stored.storage_path
+    );
+    assert!(!stored.in_project);
+    assert!(!stored.openable(), "a .bin by-product is Reveal only (ST-18)");
+}
+
+// ============================================================================
+// R35 — the pointer row (ST-12)
+// ============================================================================
+
+/// The row R35 writes: produced, ready, in the project, the real file's
+/// address, no version row, nothing under `.versions/` or the project's
+/// `artifacts/`, and the file untouched.
+#[test]
+fn recording_a_result_file_writes_its_pointer_row_and_no_version() {
+    let f = Fixture::new();
+    f.task("3f2a1b7c-0000-4000-8000-000000000000", "Build the parser");
+    let path = f.project_root().join("src").join("main.rs");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"fn main() {}\n").unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    let root = f.project_root().to_string_lossy().into_owned();
+
+    let (row, inserted) = f
+        .store()
+        .record_project_file(NewProjectFile {
+            owner_id: OWNER,
+            project_root: &root,
+            rel_path: "src/main.rs",
+            content: b"fn main() {}\n",
+            task_id: Some("3f2a1b7c-0000-4000-8000-000000000000"),
+            agent_id: Some("code_agent::a1"),
+        })
+        .unwrap();
+
+    assert!(inserted);
+    assert!(row.in_project);
+    assert_eq!(row.origin, ArtifactOrigin::Produced);
+    assert_eq!(row.project_root.as_deref(), Some(root.as_str()));
+    assert_eq!(row.rel_path.as_deref(), Some("src/main.rs"));
+    assert_eq!(row.name, "src/main.rs");
+    assert_eq!(row.storage_path, path.to_string_lossy());
+    assert_eq!(row.kind, Some(ArtifactKind::Code));
+    assert_eq!(row.mime_type, "text/plain");
+    assert_eq!(row.sha256, sha256_hex(b"fn main() {}\n"));
+    assert_eq!(row.size_bytes, 13);
+    assert_eq!(
+        row.task_id.as_deref(),
+        Some("3f2a1b7c-0000-4000-8000-000000000000")
+    );
+    assert_eq!(row.agent_id.as_deref(), Some("code_agent::a1"));
+    assert_eq!((row.version, row.version_count, row.pinned), (1, 0, false));
+    assert!(row.summary.is_none());
+    assert!(row.metadata().is_none(), "no metadata");
+    assert!(
+        row.metadata_json.is_none(),
+        "and no head stamp: the first read hashes what is on disk (d5-results-3)"
+    );
+    let asset = FileAssetRepository::new(&f.db)
+        .get_by_id(&row.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        asset.status.as_str(),
+        "ready",
+        "the extractor never reads it"
+    );
+    assert!(
+        f.store().versions(&row.id).unwrap().is_empty(),
+        "no artifact_versions row"
+    );
+    assert!(
+        !f.artifacts_root().exists(),
+        "nothing is written under the project's artifacts/"
+    );
+    assert!(!f.project_root().join("src").join(".versions").exists());
+    assert_untouched(&path, b"fn main() {}\n", mtime);
+}
+
+/// R39: a second `file_write` of a path updates its own pointer row — never a
+/// by-product that shares its address (fails when the lookup ignores
+/// `in_project`).
+#[test]
+fn a_second_file_write_of_a_path_updates_only_its_own_row() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+    let (by_product, _) = f.store().put(new).unwrap();
+    let rel = by_product.rel_path.clone().unwrap();
+    assert_eq!(rel, "loose/2026-09-01/01-notes.md");
+
+    let (first, path, _) = f.result_file(&rel, b"first\n");
+    fs::write(&path, b"second, longer\n").unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    let root = f.project_root().to_string_lossy().into_owned();
+    let (second, inserted) = f
+        .store()
+        .record_project_file(NewProjectFile {
+            owner_id: OWNER,
+            project_root: &root,
+            rel_path: &rel,
+            content: b"second, longer\n",
+            task_id: None,
+            agent_id: None,
+        })
+        .unwrap();
+
+    assert!(!inserted, "the second write updates");
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.sha256, sha256_hex(b"second, longer\n"));
+    assert_eq!(second.size_bytes, 15);
+    assert_eq!(
+        (second.version, second.version_count),
+        (1, 0),
+        "no version: a result file's history is git's (ST-12)"
+    );
+    let untouched = f.store().get(&by_product.id, OWNER).unwrap().unwrap();
+    assert!(!untouched.in_project);
+    assert_eq!(untouched.storage_path, by_product.storage_path);
+    assert_eq!(untouched.sha256, by_product.sha256);
+    assert_eq!(fs::read(&by_product.storage_path).unwrap(), b"a draft\n");
+    assert_eq!(file_asset_count(&f), 2);
+    assert_untouched(&path, b"second, longer\n", mtime);
+}
+
+/// R39: a result file whose path equals an upload's address is a row of its
+/// own, and the upload's row is left alone (fails when the index or the
+/// lookup ignores `in_project`).
+#[test]
+fn a_pointer_path_equal_to_an_uploads_address_leaves_the_upload_row_alone() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let upload = crate::UploadStore::new(&f.db)
+        .put(crate::NewUpload {
+            owner_id: OWNER,
+            filename: "report.txt",
+            mime_type: "text/plain",
+            data: b"uploaded\n",
+            scope: &scope,
+            created: at(1),
+        })
+        .unwrap()
+        .asset;
+    let upload_row = f.store().get(&upload.id, OWNER).unwrap().unwrap();
+    let rel = upload_row.rel_path.clone().unwrap();
+    assert_eq!(rel, "2026-09-01/01-report.txt");
+
+    let (result, path, mtime) = f.result_file(&rel, b"the user's report\n");
+
+    assert_ne!(result.id, upload.id);
+    assert!(result.in_project);
+    let after = f.store().get(&upload.id, OWNER).unwrap().unwrap();
+    assert_eq!(after.origin, ArtifactOrigin::Upload);
+    assert!(!after.in_project);
+    assert_eq!(after.storage_path, upload_row.storage_path);
+    assert_eq!(after.sha256, upload_row.sha256);
+    assert_eq!(fs::read(&upload_row.storage_path).unwrap(), b"uploaded\n");
+    assert_untouched(&path, b"the user's report\n", mtime);
+}
+
+/// A pointer row another owner recorded is never updated by this one.
+#[test]
+fn a_result_file_another_owner_recorded_is_never_taken_over() {
+    let f = Fixture::new();
+    let (theirs, path, mtime) = f.result_file("docs/plan.md", b"theirs\n");
+    let root = f.project_root().to_string_lossy().into_owned();
+
+    let err = f
+        .store()
+        .record_project_file(NewProjectFile {
+            owner_id: "owner-2",
+            project_root: &root,
+            rel_path: "docs/plan.md",
+            content: b"mine\n",
+            task_id: None,
+            agent_id: None,
+        })
+        .unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("belongs to another owner"),
+        "{err:#}"
+    );
+    let row = f.store().get(&theirs.id, OWNER).unwrap().unwrap();
+    assert_eq!(row.sha256, theirs.sha256);
+    assert_untouched(&path, b"theirs\n", mtime);
+}
+
+/// R35's guards on a result file's address (S4a's deferred (4)): a project
+/// root that is not absolute, and a path that is empty, absolute, or climbs
+/// out with `..` — after its `.` components are dropped — are each refused,
+/// and nothing is recorded for any of them.
+#[test]
+fn a_result_file_with_no_address_in_its_project_is_refused_and_records_nothing() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().into_owned();
+    const PLAIN: &str = "must be relative and plain";
+    let cases = [
+        ("relative/root", "docs/plan.md", "must be an absolute path"),
+        (root.as_str(), "", PLAIN),
+        (root.as_str(), ".", PLAIN),
+        (root.as_str(), "./", PLAIN),
+        (root.as_str(), "/etc/passwd", PLAIN),
+        (root.as_str(), "../outside.md", PLAIN),
+        (root.as_str(), "docs/../plan.md", PLAIN),
+        (root.as_str(), "docs/./../../outside.md", PLAIN),
+    ];
+
+    for (project_root, rel_path, refusal) in cases {
+        let err = f
+            .store()
+            .record_project_file(NewProjectFile {
+                owner_id: OWNER,
+                project_root,
+                rel_path,
+                content: b"x\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains(refusal),
+            "{project_root} {rel_path:?}: {err:#}"
+        );
+    }
+    assert_eq!(file_asset_count(&f), 0);
+}
+
+/// d5-results-3: recording a result file stamps nothing, so the first read
+/// hashes what is on disk. Recorded with bytes A while the disk holds B —
+/// two subagents writing one path and recording in the other order, or a
+/// formatter rewriting the file right after the agent's write — the first
+/// read reports B's hash and size. A stamp of B taken at record time made
+/// every read skip the hash and keep A's for as long as the file stood.
+#[test]
+fn a_result_file_recorded_with_other_bytes_than_the_disk_holds_reads_back_the_disks() {
+    let f = Fixture::new();
+    let on_disk: &[u8] = b"B: what the last writer left, a longer file\n";
+    let path = f.project_root().join("README.md");
+    fs::write(&path, on_disk).unwrap();
+    let root = f.project_root().to_string_lossy().into_owned();
+    let (row, _) = f
+        .store()
+        .record_project_file(NewProjectFile {
+            owner_id: OWNER,
+            project_root: &root,
+            rel_path: "README.md",
+            content: b"A: short\n",
+            task_id: None,
+            agent_id: None,
+        })
+        .unwrap();
+    assert_eq!(row.sha256, sha256_hex(b"A: short\n"), "what was handed in");
+
+    assert_eq!(f.store().resolve_content(&row.id, None).unwrap(), path);
+
+    let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert_eq!(after.sha256, sha256_hex(on_disk));
+    assert_eq!(after.size_bytes, on_disk.len() as i64);
+}
+
+/// S4a's deferred (4): a result file's path is normalised lexically before it
+/// is recorded — `docs/./plan.md`, `docs//plan.md` and `./docs/plan.md` are
+/// `docs/plan.md` — so one file has one row, its name, address and storage
+/// path in one spelling, whatever spelling the caller passed.
+#[test]
+fn a_result_files_path_is_recorded_in_one_spelling() {
+    let f = Fixture::new();
+    let (first, path, _) = f.result_file("docs/plan.md", b"# Plan\n");
+    let root = f.project_root().to_string_lossy().into_owned();
+
+    for spelling in ["docs/./plan.md", "docs//plan.md", "./docs/plan.md"] {
+        let (row, inserted) = f
+            .store()
+            .record_project_file(NewProjectFile {
+                owner_id: OWNER,
+                project_root: &root,
+                rel_path: spelling,
+                content: b"# Plan\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        assert!(!inserted, "{spelling}: the row docs/plan.md already has");
+        assert_eq!(row.id, first.id, "{spelling}");
+        assert_eq!(row.rel_path.as_deref(), Some("docs/plan.md"), "{spelling}");
+        assert_eq!(row.name, "docs/plan.md", "{spelling}");
+        assert_eq!(row.storage_path, path.to_string_lossy(), "{spelling}");
+    }
+    assert_eq!(file_asset_count(&f), 1);
+}
+
+/// ST-12, ST-18: a result file's record says it is in the project, Open is
+/// offered only when a kind keeps its extension, and `list` filters on the
+/// column — against rows R35's method wrote.
+#[test]
+fn a_result_files_record_says_so_and_the_list_filters_on_it() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+    let (by_product, _) = f.store().put(new).unwrap();
+    let (code, code_path, code_mtime) = f.result_file("src/main.rs", b"fn main() {}\n");
+    let (script, script_path, script_mtime) = f.result_file("scripts/build.sh", b"echo hi\n");
+
+    assert!(code.in_project && script.in_project);
+    assert!(code.openable(), "a kind keeps .rs");
+    assert!(!script.openable(), "a shell script is Reveal only (ST-18)");
+    let ids = |in_project: Option<bool>| -> Vec<String> {
+        let mut q = ArtifactQuery::new(OWNER);
+        q.in_project = in_project;
+        let mut ids: Vec<String> = f
+            .store()
+            .list(&q)
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids(Some(false)), vec![by_product.id.clone()]);
+    let mut results = vec![code.id.clone(), script.id.clone()];
+    results.sort();
+    assert_eq!(ids(Some(true)), results);
+    assert_eq!(ids(None).len(), 3, "absent: both");
+    assert_untouched(&code_path, b"fn main() {}\n", code_mtime);
+    assert_untouched(&script_path, b"echo hi\n", script_mtime);
+}
+
+/// The lead's ruling R-T20: a by-product's folder is its store's
+/// `artifacts/`, an upload's its store's `uploads/` — the home store's or the
+/// project's folder under `projects/` — and a result file has none (its bytes
+/// are in the project, R37).
+#[test]
+fn a_rows_content_root_is_its_stores_artifacts_or_uploads_folder_and_a_result_file_has_none() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+    let (by_product, _) = f.store().put(new).unwrap();
+    let home = StoreScope::Home;
+    let mut mine = NewArtifact::new(OWNER, &home, ArtifactKind::Markdown, "mine", b"mine\n");
+    mine.created = at(1);
+    let (home_by_product, _) = f.store().put(mine).unwrap();
+    let upload = crate::UploadStore::new(&f.db)
+        .put(crate::NewUpload {
+            owner_id: OWNER,
+            filename: "report.txt",
+            mime_type: "text/plain",
+            data: b"uploaded\n",
+            scope: &scope,
+            created: at(1),
+        })
+        .unwrap()
+        .asset;
+    let upload = f.store().get(&upload.id, OWNER).unwrap().unwrap();
+    let (result, _, _) = f.result_file("src/main.rs", b"fn main() {}\n");
+
+    assert_eq!(by_product.content_root().unwrap(), f.artifacts_root());
+    assert_eq!(
+        home_by_product.content_root().unwrap(),
+        f.home_root().join("artifacts")
+    );
+    assert_eq!(
+        upload.content_root().unwrap(),
+        crate::store::store_root(&scope).unwrap().join("uploads")
+    );
+    let err = result.content_root().unwrap_err();
+    assert!(
+        format!("{err:#}").contains("is a result file in its project"),
+        "{err:#}"
+    );
+}
+
+/// R39: `put` never adopts a pointer row whose path is artifact-shaped — the
+/// by-product is a new row under the store, at the name the result file's row
+/// holds, and the result file's row and file are untouched (fails when
+/// `put`'s scan, or its name reservation, ignores `in_project`).
+#[test]
+fn put_never_adopts_a_pointer_row_at_an_artifact_shaped_path() {
+    let f = Fixture::new();
+    let (pointer, file, mtime) =
+        f.result_file("loose/2026-09-01/01-notes.md", b"the user's notes\n");
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "notes", b"a draft\n");
+    new.created = at(1);
+
+    let (by_product, created) = f.store().put(new).unwrap();
+
+    assert!(
+        created,
+        "a new by-product, not a version of the result file"
+    );
+    assert_ne!(by_product.id, pointer.id);
+    assert!(!by_product.in_project);
+    assert_eq!(
+        by_product.rel_path.as_deref(),
+        Some("loose/2026-09-01/01-notes.md"),
+        "the name the result file's row holds is not stepped past"
+    );
+    assert!(Path::new(&by_product.storage_path).starts_with(f.artifacts_root()));
+    assert_eq!(fs::read(&by_product.storage_path).unwrap(), b"a draft\n");
+    let after = f.store().get(&pointer.id, OWNER).unwrap().unwrap();
+    assert!(after.in_project);
+    assert_eq!(after.storage_path, pointer.storage_path);
+    assert_eq!(after.sha256, pointer.sha256);
+    assert_eq!(after.version, 1);
+    assert!(f.store().versions(&pointer.id).unwrap().is_empty());
+    assert_untouched(&file, b"the user's notes\n", mtime);
+}
+
+// ============================================================================
+// R37 — every reader goes through the resolver; no version is ever written
+// ============================================================================
+
+/// R39: a user's edit of a result file records no version — the read-time
+/// check refreshes the row's hash and size and nothing else, and the sweep
+/// passes result files over, neither recording an edit nor marking a deleted
+/// one missing (fails when `verify` or the read check ignores `in_project`).
+#[test]
+fn a_users_edit_of_a_result_file_records_no_version() {
+    let f = Fixture::new();
+    let (row, path, _) = f.result_file("docs/plan.md", b"# Plan\n");
+    let (gone, gone_path, _) = f.result_file("docs/old.md", b"# Old\n");
+    // The user edits one file in their editor and deletes another.
+    fs::write(&path, b"# Plan, revised by hand\n").unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::remove_file(&gone_path).unwrap();
+    let root = f.project_root().to_string_lossy().into_owned();
+
+    let report = f.store().verify(Some(&root)).unwrap();
+    assert!(report.user_edits.is_empty(), "{report:?}");
+    assert_eq!(
+        report.missing, 0,
+        "the sweep never marks a result file: {report:?}"
+    );
+    assert!(
+        f.store()
+            .get(&gone.id, OWNER)
+            .unwrap()
+            .unwrap()
+            .missing_since
+            .is_none()
+    );
+
+    let served = f.store().resolve_content(&row.id, None).unwrap();
+    assert_eq!(served, path.canonicalize().unwrap());
+    let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert_eq!(after.sha256, sha256_hex(b"# Plan, revised by hand\n"));
+    assert_eq!(after.size_bytes, 24);
+    assert_eq!((after.version, after.version_count), (1, 0));
+    assert!(
+        f.store().versions(&row.id).unwrap().is_empty(),
+        "no version row"
+    );
+    assert!(!f.project_root().join("docs").join(".versions").exists());
+    assert_untouched(&path, b"# Plan, revised by hand\n", mtime);
+}
+
+/// R37: a result file the user moved away reads as gone and is marked
+/// missing; once it is back, the next read clears the mark.
+#[test]
+fn a_result_file_found_again_clears_its_missing_mark() {
+    let f = Fixture::new();
+    let (row, path, _) = f.result_file("notes/todo.md", b"- one\n");
+    let aside = f.project_root().join("todo.md.aside");
+    fs::rename(&path, &aside).unwrap();
+
+    let err = f.store().resolve_content(&row.id, None).unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<ArtifactError>(),
+            Some(ArtifactError::Gone { .. })
+        ),
+        "{err:#}"
+    );
+    assert!(f.store().get(&row.id, OWNER).unwrap().unwrap().missing());
+
+    fs::rename(&aside, &path).unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(f.store().resolve_content(&row.id, None).unwrap(), path);
+    assert!(
+        !f.store().get(&row.id, OWNER).unwrap().unwrap().missing(),
+        "found again"
+    );
+    assert_untouched(&path, b"- one\n", mtime);
+}
+
+/// R37: a result file has no older version to read or diff. (Passes before
+/// this task too: it pins R37's "no History or Diff" at the store.)
+#[test]
+fn a_result_file_has_no_older_version_to_read_or_diff() {
+    let f = Fixture::new();
+    let (row, _, _) = f.result_file("src/lib.rs", b"pub fn a() {}\n");
+    assert!(f.store().versions(&row.id).unwrap().is_empty());
+    for err in [
+        f.store().resolve_content(&row.id, Some(2)).unwrap_err(),
+        f.store().diff_paths(&row.id, 1, 2).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                err.downcast_ref::<ArtifactError>(),
+                Some(ArtifactError::VersionNotFound { version: 2, .. })
+            ),
+            "{err:#}"
+        );
+    }
+}
+
+/// R37 with R31's rule: a result file replaced by a link out of the project
+/// is neither hashed into the row nor read.
+#[cfg(unix)]
+#[test]
+fn a_result_file_replaced_by_a_link_out_of_the_project_is_not_read() {
+    let f = Fixture::new();
+    let (row, path, _) = f.result_file("docs/plan.md", b"# Plan\n");
+    let outside = tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    fs::write(&secret, b"not the project's\n").unwrap();
+    fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&secret, &path).unwrap();
+
+    let err = f.store().resolve_content(&row.id, None).unwrap_err();
+
+    assert!(format!("{err:#}").contains("escapes"), "{err:#}");
+    let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert_eq!(
+        after.sha256, row.sha256,
+        "nothing outside the project was hashed in"
+    );
+    assert!(f.store().versions(&row.id).unwrap().is_empty());
+    assert_eq!(fs::read(&secret).unwrap(), b"not the project's\n");
+}
+
+/// The lead's ruling R-T18 (R37 with ST-23): a result file of a project whose
+/// folder moved with a link left at its old root is not read, refreshed or
+/// served through that link — the project is missing, and the file is
+/// marked as an absent file is. The refusal is the project's (R-T26):
+/// `ProjectMissing`, naming the root and the re-point — never `Gone`, whose
+/// "no longer exists" is false here, the file being right there through the
+/// link. Once the folder is back at its root the next read finds the file
+/// again and clears the mark.
+#[cfg(unix)]
+#[test]
+fn a_result_file_of_a_project_moved_behind_a_link_is_not_read_through_its_old_root() {
+    let f = Fixture::new();
+    let (row, path, _) = f.result_file("docs/plan.md", b"# Plan\n");
+    // The root as it is recorded, taken before the move: `project_root()`
+    // canonicalizes, which after the move would answer the moved folder.
+    let root = f.project_root();
+    let aside = tempdir().unwrap();
+    let moved = aside.path().join("app-moved");
+    fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+    // The user edits the file where it is now.
+    fs::write(
+        moved.join("docs").join("plan.md"),
+        b"# Plan, moved and edited\n",
+    )
+    .unwrap();
+    assert!(
+        path.is_file(),
+        "the old path still opens the file, through the link"
+    );
+
+    let err = f.store().resolve_content(&row.id, None).unwrap_err();
+
+    let recorded = root.to_string_lossy().into_owned();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>(),
+        Some(&ArtifactError::ProjectMissing {
+            id: row.id.clone(),
+            root: recorded.clone(),
+        }),
+        "{err:#}"
+    );
+    let typed = err.downcast_ref::<ArtifactError>().unwrap();
+    assert_eq!(typed.code(), "ARTIFACT_PROJECT_MISSING");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "{recorded}: this project's folder is gone or has moved; re-point the project to \
+             read its files."
+        )
+    );
+    let after = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert_eq!(
+        after.sha256, row.sha256,
+        "nothing read through the link was hashed in"
+    );
+    assert_eq!(after.size_bytes, row.size_bytes);
+    assert!(after.missing(), "it reads as gone");
+
+    // The folder comes back to its root: found again.
+    fs::remove_file(&root).unwrap();
+    fs::rename(&moved, &root).unwrap();
+    assert_eq!(f.store().resolve_content(&row.id, None).unwrap(), path);
+    let back = f.store().get(&row.id, OWNER).unwrap().unwrap();
+    assert!(!back.missing(), "found again");
+    assert_eq!(back.sha256, sha256_hex(b"# Plan, moved and edited\n"));
 }

@@ -6,11 +6,13 @@
 //! - Waiting until a daemon the webview asked to stop is really gone
 //! - Reading the end of the daemon log, so a daemon that would not start can
 //!   say why
+//! - Showing an artifact in its folder (Finder, Explorer, the file manager)
 
 use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
 use openalpaca_storage::store;
 use serde::Serialize;
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
 use std::time::Duration;
 
@@ -60,12 +62,12 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
         }
     }
 
-    // It did not come up. The daemon's own reason — a legacy-schema database,
-    // an older install's data, a store it cannot create, another daemon
-    // holding the lock — is in its log, and nothing else can say it: with no
-    // daemon serving `GET /v1/status` there is nobody to ask where the log
-    // is. Only what *this* spawn wrote is read, so an earlier run's last
-    // words are never presented as this one's.
+    // It did not come up. The daemon's own reason — a database this build
+    // does not know, a store it cannot create, another daemon holding the
+    // lock — is in its log, and nothing else can
+    // say it: with no daemon serving `GET /v1/status` there is nobody to ask
+    // where the log is. Only what *this* spawn wrote is read, so an earlier
+    // run's last words are never presented as this one's.
     let log_path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
     let tail = store::read_log_tail(&log_path, log_start, TIMEOUT_TAIL_LINES).unwrap_or_default();
     if tail.is_empty() {
@@ -172,6 +174,83 @@ async fn await_daemon_stopped() -> Result<DaemonStopReport, String> {
     .map_err(|e| format!("Could not wait for the daemon to stop: {e}"))
 }
 
+/// Show a file in its folder: Finder with the file selected on macOS
+/// (`open -R`), Explorer with it selected on Windows (`explorer /select,`),
+/// and the folder holding it in the file manager elsewhere (`xdg-open`).
+///
+/// The path comes from the webview — an artifact's `path` as the daemon served
+/// it — so the shell does not take it on trust: `store::revealable_path`
+/// resolves it, symlinks included, and admits only a regular file in an
+/// OpenAlpaca store or under the root of a project `projects/` records, where
+/// a file an agent wrote into the project lives (storage design §13, ST-18:
+/// Reveal answers for such a file whatever its kind). The platform program
+/// gets that resolved path as an argument of its own, never through a shell.
+/// This shows the file; opening it stays the daemon's route
+/// (`POST /v1/files/{id}/open`). An error is one sentence, which the webview
+/// shows as it is.
+///
+/// The check (it reads `projects/`) and the program both run on the blocking
+/// pool, so a slow disk or file manager never stalls another `invoke`.
+#[tauri::command]
+async fn reveal_path(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path =
+            store::revealable_path(Path::new(&path)).map_err(|refusal| refusal.to_string())?;
+        reveal_in_folder(&path)
+    })
+    .await
+    .map_err(|e| format!("Could not show the file in its folder: {e}."))?
+}
+
+/// Run the platform's reveal for an already admitted path and wait for it.
+fn reveal_in_folder(path: &Path) -> Result<(), String> {
+    let (program, args) = if cfg!(target_os = "macos") {
+        ("open", vec!["-R".into(), path.as_os_str().to_owned()])
+    } else if cfg!(windows) {
+        // `/select,` and the path as two arguments, so a path with a space is
+        // quoted on its own: `explorer /select, "C:\a b\c.md"`.
+        (
+            "explorer",
+            vec![
+                "/select,".into(),
+                without_verbatim_prefix(path).into_os_string(),
+            ],
+        )
+    } else {
+        let folder = path.parent().unwrap_or(path);
+        ("xdg-open", vec![folder.as_os_str().to_owned()])
+    };
+    let status = Command::new(program)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("Could not show {} in its folder: {e}.", path.display()))?;
+    // Explorer exits 1 even when it opened the window, so on Windows only a
+    // failure to start it counts.
+    if status.success() || cfg!(windows) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{program} could not show {} in its folder ({status}).",
+            path.display()
+        ))
+    }
+}
+
+/// `C:\…` for a canonical `\\?\C:\…`, which Explorer does not understand;
+/// any other path as it is.
+fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    if let Some(Component::Prefix(prefix)) = components.next()
+        && let Prefix::VerbatimDisk(drive) = prefix.kind()
+    {
+        let mut plain = PathBuf::from(format!("{}:\\", char::from(drive)));
+        plain.extend(components.filter(|c| !matches!(c, Component::RootDir)));
+        return plain;
+    }
+    path.to_path_buf()
+}
+
 /// Liveness probe: can we open a TCP connection to the daemon's listen address?
 /// A stale discovery.json (dead daemon) fails this, so callers respawn instead
 /// of returning a dead endpoint.
@@ -234,10 +313,10 @@ fn spawn_daemon() -> anyhow::Result<u64> {
     let config_dir = store::ensure_runtime_config_dir()?;
 
     // The sidecar's output used to go to /dev/null on both platforms, so a
-    // daemon that refused to boot — a legacy-schema database, an older
-    // install's data, a store it cannot create, a master key it cannot read,
-    // another daemon already holding the lock — told the user nothing beyond
-    // "did not become ready within timeout". It now writes the same
+    // daemon that refused to boot — a database this build does not know, a
+    // store it cannot create, a master key it cannot read, another daemon
+    // already holding the lock — told the user nothing
+    // beyond "did not become ready within timeout". It now writes the same
     // `daemon.log` the CLI launcher writes, under the same rotation, and marks
     // itself as that file's owner so `GET /v1/status` hands the path back
     // (T30: `MANAGED_LOG_ENV` means "the launcher pointed stdio at the file
@@ -342,7 +421,8 @@ pub fn run() {
             get_connection_info,
             ensure_daemon_running,
             await_daemon_stopped,
-            read_daemon_log_tail
+            read_daemon_log_tail,
+            reveal_path
         ])
         .run(tauri::generate_context!())
         .expect("Error while running Tauri application");

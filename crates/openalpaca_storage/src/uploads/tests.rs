@@ -7,7 +7,7 @@
 use super::*;
 use crate::FileAssetRepository;
 use crate::store::store_root;
-use crate::store::tests::{HomeStoreGuard, interim_blob_path};
+use crate::store::tests::HomeStoreGuard;
 use chrono::TimeZone;
 use std::path::PathBuf;
 use tempfile::{TempDir, tempdir};
@@ -36,6 +36,9 @@ impl Fixture {
         let home = tempdir().unwrap();
         let env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
         let project = tempdir().unwrap();
+        // A project scope is a registered project's (design §3, R12) —
+        // registered under this fixture's home, never the developer's.
+        crate::store::projects::register(&project.path().canonicalize().unwrap()).unwrap();
         let db_dir = tempdir().unwrap();
         let db = Database::open(&db_dir.path().join("test.db")).unwrap();
         Self {
@@ -59,8 +62,9 @@ impl Fixture {
         self._home.path().canonicalize().unwrap()
     }
 
-    /// The canonical project root — canonical because `project_root` is the
-    /// canonical-path string everywhere (§4.8) and macOS's `/var` is a symlink.
+    /// The canonical project root — canonical because the fixture registers
+    /// its project there, so `project_root` records that string (§4.8; R-T19:
+    /// the root `lookup` finds), and macOS's `/var` is a symlink.
     fn project_root(&self) -> PathBuf {
         self.project.path().canonicalize().unwrap()
     }
@@ -208,9 +212,7 @@ fn a_project_scoped_upload_lands_in_the_project_store() {
     let stored = fx.put_in(&scope, "owner-1", "Quarterly Report.PDF", b"pdf-bytes");
 
     let expected = fx
-        .project_root()
-        .join(".openalpaca")
-        .join("uploads")
+        .uploads_root(&scope)
         .join("2026-09-05")
         .join("01-quarterly-report.pdf");
     assert_eq!(PathBuf::from(&stored.asset.storage_path), expected);
@@ -311,11 +313,7 @@ fn a_traversal_shaped_name_is_slugified_into_the_day_directory() {
 
     let stored = fx.put_in(&scope, "owner-1", "../../../etc/passwd.png", b"not-a-png");
 
-    let day_dir = fx
-        .project_root()
-        .join(".openalpaca")
-        .join("uploads")
-        .join("2026-09-05");
+    let day_dir = fx.uploads_root(&scope).join("2026-09-05");
     assert_eq!(
         PathBuf::from(&stored.asset.storage_path),
         day_dir.join("01-passwd.png")
@@ -373,40 +371,34 @@ fn a_stray_file_at_the_next_slot_is_never_overwritten() {
     assert_eq!(std::fs::read(&stored.asset.storage_path).unwrap(), b"hello");
 }
 
-/// Placement identity *is* address identity. A `<project>/.openalpaca` symlinked
-/// at another store — the home store here — puts both scopes' bytes in one
-/// directory, so they must share one sequence space; keying the sequence off the
-/// path the caller named would restart it at `01` and rename over a live file
-/// whose row still points at it. `confine_to_root` cannot catch that: the
-/// symlink is *at* the root it canonicalizes, not under it.
-#[cfg(unix)]
+/// R15 for uploads: the bytes land in the project's folder under the home
+/// store's `projects/`; the row records the turn's project root.
 #[test]
-fn a_symlinked_store_root_cannot_open_a_second_sequence_space() {
+fn a_project_upload_lands_under_projects_and_records_the_turns_root() {
     let fx = Fixture::new();
-    std::os::unix::fs::symlink(fx.home_root(), fx.project_root().join(".openalpaca")).unwrap();
-
-    let home = fx.put("owner-1", "notes.txt", b"hello");
-    let project = fx.put_in(&fx.project_scope(), "owner-2", "notes.txt", b"other bytes");
-
-    assert!(
-        home.asset.storage_path.ends_with("/01-notes.txt"),
-        "{}",
-        home.asset.storage_path
+    let stored = fx.put_in(
+        &fx.project_scope(),
+        "owner-1",
+        "Quarterly Report.PDF",
+        b"pdf-bytes",
     );
-    assert!(
-        project.asset.storage_path.ends_with("/02-notes.txt"),
-        "the second write shares the first's sequence space: {}",
-        project.asset.storage_path
-    );
-    assert_eq!(std::fs::read(&home.asset.storage_path).unwrap(), b"hello");
+
+    let folder = fx
+        .home_root()
+        .join(crate::store::projects::PROJECTS_DIR)
+        .join(crate::store::projects::folder_name(&fx.project_root()));
     assert_eq!(
-        std::fs::read(&project.asset.storage_path).unwrap(),
-        b"other bytes"
+        PathBuf::from(&stored.asset.storage_path),
+        folder
+            .join("uploads")
+            .join("2026-09-05")
+            .join("01-quarterly-report.pdf")
     );
-
-    // One directory, one address space: the row records the store the bytes
-    // reached, not the path the caller named.
-    assert_eq!(fx.address(&project.asset.id).0, None);
+    assert_eq!(
+        fx.address(&stored.asset.id).0.as_deref(),
+        fx.project_root().to_str()
+    );
+    assert!(!fx.project_root().join(".openalpaca").exists(), "ST-1");
 }
 
 // ============================================================================
@@ -446,18 +438,50 @@ fn a_duplicate_sha_for_the_same_owner_writes_nothing() {
     );
 }
 
-/// Dedup is the sha256 query, so it is store-blind: the same bytes uploaded
-/// again with a *project* this time still resolve to the row that already
-/// exists. Placement never gets a second opinion about identity.
+/// R17: dedup answers only inside the turn's own project. The same bytes
+/// uploaded at home, in this project and in another project are three rows,
+/// each addressed to its own store — one project's turn is never handed
+/// another's row (nor a home row, nor the other way round). Inside one store
+/// dedup still holds.
 #[test]
-fn a_duplicate_sha_deduplicates_across_stores() {
+fn a_duplicate_sha_is_scoped_to_the_turns_project() {
     let fx = Fixture::new();
-    let home = fx.put("owner-1", "notes.txt", b"hello");
-    let second = fx.put_in(&fx.project_scope(), "owner-1", "notes.txt", b"hello");
+    let other = tempdir().unwrap();
+    let other_root = other.path().canonicalize().unwrap();
+    crate::store::projects::register(&other_root).unwrap();
+    let other_scope = StoreScope::Project(other_root.clone());
 
-    assert!(second.deduped);
-    assert_eq!(second.asset.id, home.asset.id);
-    assert_eq!(second.asset.storage_path, home.asset.storage_path);
+    let home = fx.put("owner-1", "notes.txt", b"hello");
+    let project = fx.put_in(&fx.project_scope(), "owner-1", "notes.txt", b"hello");
+    let elsewhere = fx.put_in(&other_scope, "owner-1", "notes.txt", b"hello");
+
+    assert!(
+        !project.deduped,
+        "a home row never answers a project's turn"
+    );
+    assert!(
+        !elsewhere.deduped,
+        "one project's row never answers another's turn"
+    );
+    assert_ne!(project.asset.id, home.asset.id);
+    assert_ne!(elsewhere.asset.id, project.asset.id);
+    assert_eq!(fx.address(&home.asset.id).0, None);
+    assert_eq!(
+        fx.address(&project.asset.id).0.as_deref(),
+        fx.project_root().to_str()
+    );
+    assert_eq!(
+        fx.address(&elsewhere.asset.id).0.as_deref(),
+        other_root.to_str()
+    );
+
+    // Inside one store, dedup still holds — at home and in a project.
+    let again_home = fx.put("owner-1", "other-name.txt", b"hello");
+    assert!(again_home.deduped);
+    assert_eq!(again_home.asset.id, home.asset.id);
+    let again_project = fx.put_in(&fx.project_scope(), "owner-1", "x.txt", b"hello");
+    assert!(again_project.deduped);
+    assert_eq!(again_project.asset.id, project.asset.id);
 }
 
 #[test]
@@ -587,56 +611,6 @@ fn a_re_upload_heals_a_row_already_marked_missing() {
         None,
         "the mark described the address the re-write replaced"
     );
-}
-
-// ============================================================================
-// The rows that predate D2
-// ============================================================================
-
-/// Rows written before D2 keep their content-addressed `storage_path` forever:
-/// nothing moves them any more (D-D retired the boot re-home). A `put` must go
-/// on leaving them where they are, must go on resolving them, and must go on
-/// deduping to them — this is a permanent shape of the table, not a transient
-/// one.
-#[test]
-fn pre_d2_content_addressed_rows_still_resolve_and_still_dedup() {
-    let fx = Fixture::new();
-
-    // A row exactly as the pre-D2 writer left it: sharded under state/assets,
-    // no project_root, no rel_path.
-    let sha = crate::content_io::sha256_hex(b"legacy");
-    let legacy_path = interim_blob_path(&sha);
-    std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-    std::fs::write(&legacy_path, b"legacy").unwrap();
-    fx.repo()
-        .insert(&FileAsset {
-            id: "legacy-1".to_string(),
-            owner_id: "owner-1".to_string(),
-            sha256: sha,
-            filename: "legacy.bin".to_string(),
-            mime_type: "application/octet-stream".to_string(),
-            size_bytes: 6,
-            storage_path: legacy_path.to_string_lossy().to_string(),
-            status: FileAssetStatus::Ready,
-            extracted_text: None,
-            extract_error: None,
-            metadata_json: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-        })
-        .unwrap();
-
-    // A new upload does not disturb it.
-    fx.put("owner-1", "new.txt", b"new bytes");
-    let legacy = fx.repo().get_by_id("legacy-1").unwrap().expect("row");
-    assert_eq!(legacy.storage_path, legacy_path.to_string_lossy());
-    assert_eq!(std::fs::read(&legacy_path).unwrap(), b"legacy");
-
-    // And re-uploading its bytes dedups to it — nothing is re-placed.
-    let again = fx.put("owner-1", "legacy-again.bin", b"legacy");
-    assert!(again.deduped);
-    assert_eq!(again.asset.id, "legacy-1");
-    assert_eq!(again.asset.storage_path, legacy_path.to_string_lossy());
 }
 
 // ============================================================================

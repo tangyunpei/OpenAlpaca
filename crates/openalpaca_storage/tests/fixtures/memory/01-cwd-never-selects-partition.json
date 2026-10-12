@@ -1,0 +1,152 @@
+{
+  "row": {
+    "id": 1,
+    "scenario": "Global or connector request, daemon started by hand inside project A",
+    "required_outcome": "No A memories: the daemon's CWD never selects a partition"
+  },
+  "design": ["§3 rule 1 (MD-5)", "§3 rule 2 (default write scope)", "§7a MemoryAccessContext per-surface table (connector lanes: none → global)"],
+  "loads_in": ["slice-3"],
+  "notes_for_implementer": "The daemon's CWD is project_a, which holds a project partition with a note. Three requests that name no workspace — a connector lane, a scheduled skill and a bare /v1/memories call with no x-workspace-path header — must see and write only the home partition. The store in step 4 is kind `fact`, whose default scope is `project`; with no project resolved it lands in global, and nothing under ws:project_a changes.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "workspaces": [
+    { "name": "project_a", "marker": ".git" }
+  ],
+  "daemon": { "cwd": "ws:project_a", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000001-0000-4000-8000-000000000001",
+          "title": "Color theme preference",
+          "kind": "preference",
+          "status": "active",
+          "fact_key": "ui.theme",
+          "aliases": ["dark mode"],
+          "tags": ["ui"],
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Color theme preference\n\n## Knowledge\nThe user prefers a dark color theme in every editor.\n",
+          "origin": "user"
+        }
+      ]
+    },
+    {
+      "name": "alice_project_a",
+      "owner": "u_example_alice",
+      "scope": "project",
+      "workspace": "project_a",
+      "notes": [
+        {
+          "id": "00000001-0000-4000-8000-000000000002",
+          "title": "Package manager for project A",
+          "kind": "procedure",
+          "status": "active",
+          "fact_key": "build.package_manager",
+          "tags": ["build"],
+          "created_at": "2026-09-23T10:01:00Z",
+          "updated_at": "2026-09-23T10:01:00Z",
+          "body": "# Package manager for project A\n\n## Knowledge\nProject A installs with pnpm, never npm.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "connector_lane": {
+      "owner_id": "u_example_alice",
+      "workspace": null,
+      "surface": "model_tool",
+      "capabilities": { "read": true, "write": true, "forget": true },
+      "attribution": { "lane_key": "u_example_alice:telegram", "task_id": null, "request_id": null, "source": "telegram" }
+    },
+    "scheduled_skill": {
+      "owner_id": "u_example_alice",
+      "workspace": null,
+      "surface": "model_tool",
+      "unattended": true,
+      "capabilities": { "read": true, "write": false, "forget": false },
+      "attribution": { "lane_key": null, "task_id": null, "request_id": null, "source": "scheduled_skill" }
+    },
+    "api_no_header": {
+      "owner_id": "u_example_alice",
+      "workspace": null,
+      "surface": "user_surface",
+      "capabilities": { "read": true, "write": true, "forget": true },
+      "attribution": { "lane_key": null, "task_id": null, "request_id": null, "source": "api" }
+    }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "search",
+      "context": "connector_lane",
+      "input": { "query": "pnpm package manager" },
+      "expect": { "ids_unordered": [], "ids_absent": ["00000001-0000-4000-8000-000000000002"] }
+    },
+    {
+      "step": 2,
+      "op": "recall",
+      "context": "connector_lane",
+      "input": { "message": "which package manager do we use, and what theme do I like?" },
+      "expect": {
+        "ids_unordered": ["00000001-0000-4000-8000-000000000001"],
+        "ids_absent": ["00000001-0000-4000-8000-000000000002"],
+        "memory_used": [{ "id": "00000001-0000-4000-8000-000000000001", "reason": "recall" }]
+      }
+    },
+    {
+      "step": 3,
+      "op": "list",
+      "context": "scheduled_skill",
+      "input": {},
+      "expect": { "ids_unordered": ["00000001-0000-4000-8000-000000000001"] }
+    },
+    {
+      "step": 4,
+      "op": "store",
+      "context": "connector_lane",
+      "as": "fact_from_lane",
+      "input": {
+        "title": "Standup time",
+        "body": "# Standup time\n\nThe team standup is at 09:30.\n",
+        "kind": "fact"
+      },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "origin": "extracted_user",
+        "path_within": { "fact_from_lane": "part:alice_home/notes" },
+        "notes_on_disk": [{ "partition": "alice_home", "id": "@id:fact_from_lane" }],
+        "notes_not_on_disk": [{ "partition": "alice_project_a", "id": "@id:fact_from_lane" }],
+        "snapshot": { "alice_project_a": { "notes": { "@id:fact_from_lane": null } } }
+      }
+    },
+    {
+      "step": 5,
+      "op": "list",
+      "context": "api_no_header",
+      "input": {},
+      "expect": {
+        "ids_unordered": ["00000001-0000-4000-8000-000000000001", "@id:fact_from_lane"],
+        "ids_absent": ["00000001-0000-4000-8000-000000000002"]
+      }
+    }
+  ],
+  "final_state": {
+    "snapshot": {
+      "alice_project_a": {
+        "notes": { "00000001-0000-4000-8000-000000000002": { "revision": "@current", "origin": "user" } }
+      }
+    },
+    "notes_on_disk": [
+      { "partition": "alice_project_a", "id": "00000001-0000-4000-8000-000000000002" },
+      { "partition": "alice_home", "id": "@id:fact_from_lane" }
+    ]
+  }
+}

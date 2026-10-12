@@ -323,6 +323,73 @@ fn apply_keepalive_injects_send_when_hinted() {
     assert!(tool_names.contains(&"send".to_string()));
 }
 
+// --- R48: file_edit beside file_write on a project turn ---
+
+use super::offer_file_edit_beside_file_write;
+
+#[test]
+fn a_project_turn_that_suggests_file_write_is_offered_file_edit_once() {
+    let parser = crate::orchestrator::intent::IntentParser;
+    let mut tool_names = parser.suggest_tools("edit src/main.rs so the retry count is 5");
+    assert!(
+        tool_names.contains(&"file_write".to_string()),
+        "{tool_names:?}"
+    );
+    offer_file_edit_beside_file_write(&mut tool_names, true);
+    offer_file_edit_beside_file_write(&mut tool_names, true);
+    assert_eq!(
+        tool_names.iter().filter(|n| *n == "file_edit").count(),
+        1,
+        "{tool_names:?}"
+    );
+}
+
+#[test]
+fn a_turn_with_no_project_is_not_offered_file_edit() {
+    let mut tool_names = vec!["file_write".to_string()];
+    offer_file_edit_beside_file_write(&mut tool_names, false);
+    assert_eq!(tool_names, vec!["file_write".to_string()]);
+}
+
+#[test]
+fn a_project_turn_that_does_not_suggest_file_write_is_not_offered_file_edit() {
+    let mut tool_names = vec!["web_search".to_string()];
+    offer_file_edit_beside_file_write(&mut tool_names, true);
+    assert_eq!(tool_names, vec!["web_search".to_string()]);
+}
+
+// --- R42 and the lead's rulings R-T6, R-T14: the file readers ---
+
+use super::offer_file_readers;
+
+#[test]
+fn a_project_turn_is_offered_file_read_and_file_list_once() {
+    let mut tool_names = vec!["web_search".to_string()];
+    offer_file_readers(&mut tool_names, true);
+    offer_file_readers(&mut tool_names, true);
+    assert_eq!(tool_names, ["web_search", "file_read", "file_list"]);
+}
+
+#[test]
+fn file_list_comes_wherever_file_read_is() {
+    let parser = crate::orchestrator::intent::IntentParser;
+    let mut tool_names = parser.suggest_tools("read file notes.md");
+    assert!(tool_names.contains(&"file_read".to_string()), "{tool_names:?}");
+    offer_file_readers(&mut tool_names, false);
+    assert_eq!(
+        tool_names.iter().filter(|n| *n == "file_list").count(),
+        1,
+        "{tool_names:?}"
+    );
+}
+
+#[test]
+fn a_turn_with_no_project_and_no_file_read_is_offered_no_reader() {
+    let mut tool_names = vec!["web_search".to_string()];
+    offer_file_readers(&mut tool_names, false);
+    assert_eq!(tool_names, ["web_search"]);
+}
+
 // --- end-to-end conflict path: intent + keep-alive → tool_choice ---
 
 #[test]

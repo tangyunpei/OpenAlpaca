@@ -15,7 +15,6 @@ pub enum ContextKind {
     ConversationSummary,
     SkillReference,
     WorkspaceArtifact,
-    UserProfile,
 }
 
 impl ContextKind {
@@ -25,7 +24,6 @@ impl ContextKind {
             Self::ConversationSummary => "conversation_summary",
             Self::SkillReference => "skill_reference",
             Self::WorkspaceArtifact => "workspace_artifact",
-            Self::UserProfile => "user_profile",
         }
     }
 }
@@ -45,11 +43,12 @@ pub enum TrustLevel {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum ContextKey {
-    Memory(i64),
+    /// One recalled memory note: its id, the revision that was read and why
+    /// it was selected — the turn's `memory_used` entry (design §7a).
+    Memory(crate::memory::service::MemoryUsed),
     ConversationSummary,
     SkillSource(String, String),
     WorkspaceArtifact(String),
-    UserProfile,
     Package(String),
 }
 
@@ -79,5 +78,14 @@ impl ContextBundle {
             total_tokens: 0,
             available_budget: 0,
         }
+    }
+
+    /// The memory sections the manager kept, in rank order. They are not
+    /// part of the cached dynamic-context layer (design §5): the caller
+    /// appends them per turn through `prompt_ctx::sources::memory::memory_turn`.
+    pub fn memory_sections(&self) -> impl Iterator<Item = &ContextSection> {
+        self.sections
+            .iter()
+            .filter(|s| s.kind == ContextKind::Memory)
     }
 }

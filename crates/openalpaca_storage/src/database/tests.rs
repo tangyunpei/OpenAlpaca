@@ -8,7 +8,17 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+}
+
+/// The version a fresh database opens at: the newest registered migration.
+/// `BASELINE_VERSION` keeps meaning "the oldest openable schema" (design 09
+/// §8.9), so a fresh database's version is read from here, never from it.
+fn newest_version() -> i32 {
+    migrations::MIGRATIONS
+        .last()
+        .expect("at least the baseline is registered")
+        .version
 }
 
 #[test]
@@ -31,7 +41,7 @@ fn reopening_a_current_database_preserves_its_data_and_version() {
     }
 
     let db = Database::open(&db_path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    assert_eq!(db.schema_version().unwrap(), newest_version());
     db.with_connection(|conn| {
         let (title, content): (String, String) = conn.query_row(
             "SELECT s.title, m.content FROM session s
@@ -47,109 +57,121 @@ fn reopening_a_current_database_preserves_its_data_and_version() {
             .prepare("SELECT version FROM schema_version ORDER BY version")?
             .query_map([], |row| row.get::<_, i32>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(versions, vec![migrations::BASELINE_VERSION]);
+        let registered: Vec<i32> = migrations::MIGRATIONS.iter().map(|m| m.version).collect();
+        assert_eq!(versions, registered);
         Ok(())
     })
     .unwrap();
 }
 
 #[test]
-fn an_unsupported_old_database_is_refused_without_changing_its_schema_or_data() {
+fn a_database_newer_than_this_build_is_refused_without_changing_its_schema_or_data() {
     let dir = tempdir().unwrap();
-    for version in [1, migrations::BASELINE_VERSION - 1] {
-        let db_path = dir.path().join(format!("legacy-{version}.db"));
-        let original_schema = {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
-                 CREATE TABLE legacy_data (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
-                 INSERT INTO legacy_data (id, content) VALUES (7, 'Do not discard');",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?1)",
-                [version],
-            )
-            .unwrap();
-            conn.prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
-                .unwrap()
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
-
-        let error = Database::open(&db_path)
-            .err()
-            .unwrap_or_else(|| panic!("legacy version {version} must be refused"));
-        let message = format!("{error:#}");
-        assert!(
-            message.contains(&format!("Unsupported legacy schema version {version}")),
-            "opening an old database must deliberately refuse it: {message}"
-        );
-        // The remedy deletes the file, so the refusal has to say which file.
-        // The store root is overridable, and a developer reading this line in a
-        // log has no other way to find out.
-        let named = std::path::absolute(&db_path).unwrap();
-        assert!(
-            message.contains(&named.display().to_string()),
-            "the refusal must name the database file by its full path ({}): {message}",
-            named.display()
-        );
-        assert!(
-            message.contains(&format!("schema version {}", migrations::BASELINE_VERSION)),
-            "the refusal must name the version this build starts at: {message}"
-        );
-        // Guard and verb are pinned together on purpose: this refusal is the
-        // only place a user is told how to get out of it, and the verb it names
-        // is the only form of `openalpaca config` that opens no database
-        // (`apps/openalpaca/src/commands/config_factory_reset.rs`). If that verb
-        // is ever renamed or made to open the database again, this line fails
-        // before the manuals go stale.
-        assert!(
-            message.contains("openalpaca config reset --factory"),
-            "the refusal must name the verb that rescues the database: {message}"
-        );
-
+    let newest = migrations::MIGRATIONS.last().unwrap().version;
+    let version = 99;
+    assert!(
+        version > newest,
+        "the fixture must be newer than every registered migration"
+    );
+    let db_path = dir.path().join("future.db");
+    let original_schema = {
         let conn = Connection::open(&db_path).unwrap();
-        let schema = conn
-            .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+             CREATE TABLE future_data (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+             INSERT INTO future_data (id, content) VALUES (7, 'Do not discard');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [version],
+        )
+        .unwrap();
+        conn.prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
             .unwrap()
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(
-            schema, original_schema,
-            "refusal must leave the schema intact"
-        );
-        let rows = conn
-            .prepare("SELECT id, content FROM legacy_data ORDER BY id")
             .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(rows, vec![(7, "Do not discard".to_string())]);
-        let versions = conn
-            .prepare("SELECT version FROM schema_version ORDER BY version")
-            .unwrap()
-            .query_map([], |row| row.get::<_, i32>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(
-            versions,
-            vec![version],
-            "refusal must not advance the version"
-        );
-    }
+    };
+
+    let error = Database::open(&db_path)
+        .err()
+        .unwrap_or_else(|| panic!("schema version {version} must be refused"));
+    let message = format!("{error:#}");
+    // The whole text is pinned (store revision §1.4): it names the file by its
+    // full path (the store root is overridable, so nothing else identifies
+    // it), the version the file is at and the newest version this build
+    // knows, then both builds that could have written it — a newer one (use
+    // it) and one from before the schema was re-baselined at version 1, which
+    // is what every pre-squash store reads as (the factory reset).
+    let named = std::path::absolute(&db_path).unwrap();
+    assert_eq!(
+        message,
+        format!(
+            "Database `{}` is at schema version {version}, which this build does not know \
+             (it creates schema version 1 and knows versions up to {newest}). Nothing was \
+             changed. If a newer OpenAlpaca build created this database, use that build. If \
+             it was created by a build from before the schema was re-baselined at version 1, \
+             it cannot be read or upgraded: run `openalpaca config reset --factory` to start \
+             again (it deletes the database and `llm.toml`'s keys; see the Installation \
+             Manual, \"Switching to the Markdown Memory Build\").",
+            named.display()
+        ),
+        "opening a database above this build must refuse it with exactly this text"
+    );
+    // Pinned on their own as well, so the rules survive a rewording of the
+    // sentence. The verb is named once — this refusal names its own remedy and
+    // nothing repeats it — and never with the old legacy wording, which no
+    // longer exists.
+    assert_eq!(
+        message.matches("openalpaca config reset --factory").count(),
+        1,
+        "the refusal must name the factory reset exactly once: {message}"
+    );
+    assert!(
+        !message.contains("Unsupported legacy"),
+        "the refusal must not use the retired legacy wording: {message}"
+    );
+
+    let conn = Connection::open(&db_path).unwrap();
+    let schema = conn
+        .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        schema, original_schema,
+        "refusal must leave the schema intact"
+    );
+    let rows = conn
+        .prepare("SELECT id, content FROM future_data ORDER BY id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(rows, vec![(7, "Do not discard".to_string())]);
+    let versions = conn
+        .prepare("SELECT version FROM schema_version ORDER BY version")
+        .unwrap()
+        .query_map([], |row| row.get::<_, i32>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        versions,
+        vec![version],
+        "refusal must not touch the version"
+    );
 }
 
 #[test]
@@ -211,82 +233,37 @@ fn test_foreign_keys_enforced() {
     assert!(result.is_err(), "Expected foreign key constraint error");
 }
 
+/// The memory redesign's schema (plan 3.5): a fresh database gets the
+/// baseline directly, and that baseline creates none of the old engine's
+/// tables — `memory`, its FTS index, the `vec0` table or the triggers that
+/// kept them in step — so opening one never needs the sqlite-vec extension.
+/// `learning_cursor` is named without the `memory_` prefix for exactly this
+/// check (design 09 §1.3).
 #[test]
-fn test_sqlite_vec_available() {
+fn a_fresh_database_opens_at_the_newest_version_with_no_memory_tables() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
+    assert_eq!(db.schema_version().unwrap(), newest_version());
     db.with_connection(|conn| {
-        // 1. Verify extension loaded
-        let version: String = conn.query_row("SELECT vec_version()", [], |row| row.get(0))?;
+        let leftovers = conn
+            .prepare(
+                "SELECT type || ':' || name FROM sqlite_master
+                  WHERE name = 'memory' OR name LIKE 'memory!_%' ESCAPE '!'
+                  ORDER BY 1",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         assert!(
-            !version.is_empty(),
-            "vec_version() should return a version string"
+            leftovers.is_empty(),
+            "the baseline must create no memory table, index or trigger: {leftovers:?}"
         );
-
-        // 2. Verify the schema includes the vector table
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_vec')",
+        // The rest of the schema is still there.
+        let sessions: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session'",
             [],
             |row| row.get(0),
         )?;
-        assert!(exists, "memory_vec table should exist");
-
-        // 3. Insert a zero vector (768 floats x 4 bytes = 3072 bytes of zeroblob)
-        conn.execute(
-            "INSERT INTO memory_vec(memory_id, embedding) VALUES (1, vec_f32(zeroblob(3072)))",
-            [],
-        )?;
-
-        // 4. Verify round-trip
-        let count: i64 = conn.query_row("SELECT count(*) FROM memory_vec", [], |row| row.get(0))?;
-        assert_eq!(count, 1);
-
-        Ok(())
-    })
-    .unwrap();
-}
-
-#[test]
-fn test_fts_update_sync() {
-    let dir = tempdir().unwrap();
-    let db = Database::open(&dir.path().join("test.db")).unwrap();
-
-    db.with_connection(|c| {
-        // Insert v2 memory with "old" keyword
-        c.execute(
-            "INSERT INTO memory(owner_id, kind, scope, scope_id, source, content, content_hash)
-             VALUES ('owner-1', 'fact', 'global', '', 'conversation', 'old keyword here', 'hash1')",
-            [],
-        )?;
-        Ok(())
-    })
-    .unwrap();
-
-    // Update content to "new" keyword
-    db.with_connection(|c| {
-        c.execute(
-            "UPDATE memory SET content = 'new keyword here', content_hash = 'hash2' WHERE owner_id='owner-1'",
-            [],
-        )?;
-        Ok(())
-    })
-    .unwrap();
-
-    // Verify FTS sync: old should not match, new should match
-    db.with_connection(|c| {
-        let old_hits: i64 = c.query_row(
-            "SELECT count(*) FROM memory_fts WHERE content MATCH 'old'",
-            [],
-            |r| r.get(0),
-        )?;
-        assert_eq!(old_hits, 0, "Old keyword should NOT be found after update");
-
-        let new_hits: i64 = c.query_row(
-            "SELECT count(*) FROM memory_fts WHERE content MATCH 'new'",
-            [],
-            |r| r.get(0),
-        )?;
-        assert!(new_hits >= 1, "New keyword should be found after update");
+        assert_eq!(sessions, 1);
         Ok(())
     })
     .unwrap();
@@ -303,6 +280,23 @@ fn insert_asset(
     conn.execute(
         "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, project_root, rel_path)
          VALUES (?1, 'owner-1', 'sha-' || ?1, 'f.md', 'text/markdown', 10, '/tmp/' || ?1, ?2, ?3)",
+        rusqlite::params![id, project_root, rel_path],
+    )
+}
+
+/// A minimal pointer row (migration 4, R35): a result file's address with
+/// `in_project = 1`, for the index tests.
+fn insert_result(
+    conn: &rusqlite::Connection,
+    id: &str,
+    project_root: &str,
+    rel_path: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                                  storage_path, status, origin, project_root, rel_path, in_project)
+         VALUES (?1, 'owner-1', 'sha-' || ?1, ?3, 'text/markdown', 10, ?2 || '/' || ?3,
+                 'ready', 'produced', ?2, ?3, 1)",
         rusqlite::params![id, project_root, rel_path],
     )
 }
@@ -335,6 +329,7 @@ fn test_artifact_schema_columns_defaults_and_indexes() {
             "pinned",
             "summary",
             "missing_since",
+            "in_project",
         ] {
             assert!(
                 assets.contains(&expected.to_string()),
@@ -360,6 +355,15 @@ fn test_artifact_schema_columns_defaults_and_indexes() {
         assert_eq!(version_count, 1);
         assert_eq!(pinned, 0);
         assert_eq!(kind, None);
+        let in_project: i64 = conn.query_row(
+            "SELECT in_project FROM file_assets WHERE id = 'a1'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            in_project, 0,
+            "a row is outside the project unless R35's method wrote it"
+        );
 
         let task = columns("task")?;
         assert!(
@@ -425,6 +429,16 @@ fn test_artifact_address_is_unique_but_null_rel_path_is_free() {
             "duplicate (project_root, rel_path) should violate idx_file_assets_addr"
         );
 
+        // Migration 4 (R35): a result file's pointer row at the same address
+        // is a row of its own — the index carries `in_project` — and is still
+        // unique among result files.
+        insert_result(conn, "r1", "/proj", "notes/plan.md")?;
+        let dup_result = insert_result(conn, "r2", "/proj", "notes/plan.md");
+        assert!(
+            dup_result.is_err(),
+            "a second pointer row at one address should violate idx_file_assets_addr"
+        );
+
         // Same rel_path under a different project => allowed.
         insert_asset(conn, "a3", Some("/other"), Some("notes/plan.md"))?;
 
@@ -443,7 +457,10 @@ fn test_artifact_address_is_unique_but_null_rel_path_is_free() {
         insert_asset(conn, "a8", Some("/proj"), None)?;
 
         let count: i64 = conn.query_row("SELECT count(*) FROM file_assets", [], |r| r.get(0))?;
-        assert_eq!(count, 6, "a2 and a5 should be the only rejected inserts");
+        assert_eq!(
+            count, 7,
+            "a2, a5 and r2 should be the only rejected inserts"
+        );
 
         Ok(())
     })
@@ -659,10 +676,11 @@ fn test_session_schema_and_links() {
             "status",
             "message_count",
             "last_message_at",
-            "summary",
-            "summary_version",
-            "last_summarized_message_id",
-            "summary_updated_at",
+            "working_state",
+            "working_state_version",
+            "working_state_through",
+            "working_state_updated_at",
+            "episode_note_id",
             "ended_at",
             "created_at",
             "updated_at",
@@ -898,10 +916,14 @@ fn deleting_a_database_that_is_not_there_succeeds() {
     );
 }
 
+/// A pre-squash store reads as a version above this build's (store revision
+/// §1.3), so it is stamped `newest + 1` here: refused, its files deleted —
+/// what `openalpaca config reset --factory` does — and then it opens fresh.
 #[test]
 fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("openalpaca.db");
+    let refused = newest_version() + 1;
     {
         let conn = Connection::open(&db_path).unwrap();
         conn.execute_batch(
@@ -912,7 +934,7 @@ fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted()
         .unwrap();
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
-            [migrations::BASELINE_VERSION - 1],
+            [refused],
         )
         .unwrap();
     }
@@ -920,14 +942,13 @@ fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted()
     std::fs::write(dir.path().join("openalpaca.db-shm"), b"stale").unwrap();
     assert!(
         Database::open(&db_path).is_err(),
-        "the version-{} database must be refused before the delete",
-        migrations::BASELINE_VERSION - 1
+        "the version-{refused} database must be refused before the delete"
     );
 
     delete_database_files(&db_path).unwrap();
 
     let db = Database::open(&db_path).expect("a deleted database must open fresh");
-    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    assert_eq!(db.schema_version().unwrap(), newest_version());
     let legacy_tables: i64 = db
         .with_connection(|conn| {
             Ok(conn.query_row(
@@ -941,4 +962,482 @@ fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted()
         legacy_tables, 0,
         "the legacy rows must not survive the delete"
     );
+}
+
+// ── Learning v2's columns, in the baseline (design 09 §1.3, §13.3) ──────────
+
+/// A fresh database carries Learning v2's schema from the baseline itself:
+/// `conversation_messages.request_id` and `.workspace_root`, and the
+/// per-session `learning_cursor` with its six columns. Nothing seeds a
+/// cursor: a session with no row reads as the zero cursor, and a row written
+/// with only its session gets the same zeros from the column defaults.
+#[test]
+fn a_fresh_database_has_the_learning_columns_and_cursor_table() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("fresh.db")).unwrap();
+    db.with_connection(|conn| {
+        let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
+            conn.prepare(&format!("PRAGMA table_info({table})"))?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect()
+        };
+
+        let messages = columns("conversation_messages")?;
+        for column in ["request_id", "workspace_root"] {
+            assert!(
+                messages.contains(&column.to_string()),
+                "conversation_messages.{column} must exist: {messages:?}"
+            );
+        }
+        assert_eq!(
+            columns("learning_cursor")?,
+            [
+                "session_id",
+                "extracted_through",
+                "attempts",
+                "last_error",
+                "updated_at",
+                "episode_through",
+            ]
+        );
+
+        conn.execute_batch(
+            "INSERT INTO session (id, lane_key, source) VALUES ('talked', 'u:gui', 'gui');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('u:gui', 'user', 'one', 'talked');",
+        )?;
+        let cursors: i64 =
+            conn.query_row("SELECT COUNT(*) FROM learning_cursor", [], |row| row.get(0))?;
+        assert_eq!(cursors, 0, "nothing seeds a cursor row");
+        let stamped: i64 = conn.query_row(
+            "SELECT COUNT(request_id) + COUNT(workspace_root) FROM conversation_messages",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stamped, 0, "both columns are optional and default to NULL");
+
+        conn.execute(
+            "INSERT INTO learning_cursor (session_id) VALUES ('talked')",
+            [],
+        )?;
+        let row = conn.query_row(
+            "SELECT extracted_through, attempts, last_error, episode_through, updated_at
+               FROM learning_cursor WHERE session_id = 'talked'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
+        assert_eq!((row.0, row.1, row.2, row.3), (0, 0, None, 0));
+        assert!(row.4.is_some(), "updated_at defaults to the insert time");
+        Ok(())
+    })
+    .unwrap();
+}
+
+// ── The working state, migration 2 (design 11 §2, §6; owner decision CQ-9) ──
+
+/// `session`'s columns from migration 2 on, in order: the working state's
+/// five stand where the session summary's four stood.
+const SESSION_COLUMNS_V2: [&str; 17] = [
+    "id",
+    "lane_key",
+    "source",
+    "title",
+    "workspace_id",
+    "status",
+    "message_count",
+    "last_message_at",
+    "working_state",
+    "working_state_version",
+    "working_state_through",
+    "working_state_updated_at",
+    "episode_note_id",
+    "inherit",
+    "ended_at",
+    "created_at",
+    "updated_at",
+];
+
+fn session_columns(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    conn.prepare("PRAGMA table_info(session)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect()
+}
+
+/// `session`'s indexes as `sqlite_master` holds them: name and statement.
+fn session_indexes(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    conn.prepare(
+        "SELECT name, sql FROM sqlite_master
+          WHERE type = 'index' AND tbl_name = 'session' AND sql IS NOT NULL
+          ORDER BY name",
+    )?
+    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+    .collect()
+}
+
+/// A fresh database runs the baseline and migration 2 and opens with the
+/// working state's columns and none of the summary's; a session written with
+/// only its identity has the empty state, version 0, nothing covered, and no
+/// time or summary note.
+#[test]
+fn a_fresh_database_has_the_working_state_columns() {
+    let dir = tempdir().unwrap();
+    assert!(
+        migrations::MIGRATIONS
+            .iter()
+            .any(|m| m.version == 2 && m.name == "working_state"),
+        "migration 2 is registered"
+    );
+    let db = Database::open(&dir.path().join("fresh.db")).unwrap();
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+    db.with_connection(|conn| {
+        assert_eq!(session_columns(conn)?, SESSION_COLUMNS_V2);
+        conn.execute(
+            "INSERT INTO session (id, lane_key, source) VALUES ('s', 'u:gui', 'gui')",
+            [],
+        )?;
+        let state = conn.query_row(
+            "SELECT working_state, working_state_version, working_state_through,
+                    working_state_updated_at, episode_note_id
+               FROM session WHERE id = 's'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
+        assert_eq!(state, (String::new(), 0, 0, None, None));
+        let inherit: i64 =
+            conn.query_row("SELECT inherit FROM session WHERE id = 's'", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(
+            inherit, 1,
+            "a conversation carries the previous one's state by default"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// A store a version-1 build wrote — the baseline alone, a session whose
+/// summary covers a row — is migrated in place: the table is rebuilt
+/// with every other column's value kept, the working state starts empty with
+/// nothing covered (the free-text summary is not a state), the four indexes
+/// come back exactly as the baseline wrote them, and the messages are
+/// untouched.
+#[test]
+fn a_version_1_database_migrates_to_the_working_state_in_place() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("v1.db");
+    let v1_indexes = {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, lane_key, source, title, workspace_id, status,
+                                  message_count, last_message_at, summary, summary_version,
+                                  last_summarized_message_id, summary_updated_at, ended_at,
+                                  created_at, updated_at)
+             VALUES ('s-old', 'u:gui', 'gui', 'Lisbon trip', '/home/u/trips', 'archived',
+                     2, '2026-09-27 10:01:00', 'They planned a trip to Lisbon.', 3, 1,
+                     '2026-09-27 10:05:00', '2026-09-27 11:00:00',
+                     '2026-09-27 09:00:00', '2026-09-27 11:00:00'),
+                    ('s-now', 'u:gui', 'gui', '', NULL, 'active',
+                     0, NULL, '', 0, 0, NULL, NULL,
+                     '2026-09-28 09:00:00', '2026-09-28 09:00:00');
+             INSERT INTO conversation_messages (lane_key, role, content, session_id)
+             VALUES ('u:gui', 'user', 'Plan my Lisbon trip.', 's-old'),
+                    ('u:gui', 'assistant', 'Happy to help.', 's-old');",
+        )
+        .unwrap();
+        let version: i32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 1, "the fixture is a version-1 store");
+        session_indexes(&conn).unwrap()
+    };
+    assert_eq!(v1_indexes.len(), 4, "{v1_indexes:?}");
+
+    let db = Database::open(&db_path).unwrap();
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+    db.with_connection(|conn| {
+        let versions = conn
+            .prepare("SELECT version FROM schema_version ORDER BY version")?
+            .query_map([], |row| row.get::<_, i32>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let registered: Vec<i32> = migrations::MIGRATIONS.iter().map(|m| m.version).collect();
+        assert_eq!(versions, registered, "migration 2 ran in place");
+        assert_eq!(session_columns(conn)?, SESSION_COLUMNS_V2);
+        assert_eq!(
+            session_indexes(conn)?,
+            v1_indexes,
+            "the rebuild must re-create every index the baseline made"
+        );
+        let leftover: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'session_new'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(leftover, 0);
+
+        type Kept = (
+            String,
+            String,
+            Option<String>,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        );
+        let kept: Vec<Kept> = conn
+            .prepare(
+                "SELECT id, title, workspace_id, status, message_count, last_message_at,
+                        ended_at, created_at, updated_at
+                   FROM session ORDER BY id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(
+            kept,
+            [
+                (
+                    "s-now".to_string(),
+                    String::new(),
+                    None,
+                    "active".to_string(),
+                    0,
+                    None,
+                    None,
+                    "2026-09-28 09:00:00".to_string(),
+                    "2026-09-28 09:00:00".to_string(),
+                ),
+                (
+                    "s-old".to_string(),
+                    "Lisbon trip".to_string(),
+                    Some("/home/u/trips".to_string()),
+                    "archived".to_string(),
+                    2,
+                    Some("2026-09-27 10:01:00".to_string()),
+                    Some("2026-09-27 11:00:00".to_string()),
+                    "2026-09-27 09:00:00".to_string(),
+                    "2026-09-27 11:00:00".to_string(),
+                ),
+            ]
+        );
+        let states = conn
+            .prepare(
+                "SELECT working_state, working_state_version, working_state_through,
+                        working_state_updated_at, episode_note_id
+                   FROM session ORDER BY id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(states, vec![(String::new(), 0, 0, None, None); 2]);
+
+        let messages: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversation_messages WHERE session_id = 's-old'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(messages, 2);
+        assert!(
+            conn.execute(
+                "INSERT INTO session (id, lane_key, source) VALUES ('s-two', 'u:gui', 'gui')",
+                [],
+            )
+            .is_err(),
+            "one active session per lane holds after the rebuild"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// R25 (migration 3): a `file_assets` row whose bytes lie inside a project's
+/// own folder — the in-project store this build never reads again (ST-1,
+/// ST-9) — is deleted with its versions and every attachment link, another
+/// conversation's included; the message keeps its text. A row in the new
+/// layout, a row with no project, and a row whose path only starts like the
+/// project's (`/w/app` beside `/w/app-old/…`) stay. Both separators count.
+#[test]
+fn migration_3_deletes_the_rows_whose_bytes_lie_inside_a_projects_own_folder() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("v2.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[1].sql).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session (id, lane_key, source) VALUES
+                 ('s-a', 'u:gui', 'gui'), ('s-b', 'u:cli', 'cli');
+             INSERT INTO conversation_messages (id, lane_key, role, content, session_id) VALUES
+                 (1, 'u:gui', 'user', 'see the file', 's-a'),
+                 (2, 'u:cli', 'user', 'the same file, another conversation', 's-b');
+             INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                                      storage_path, origin, project_root, rel_path) VALUES
+                 ('inside', 'u', 'a', 'notes.md', 'text/markdown', 1,
+                  '/w/app/.openalpaca/artifacts/loose/2026-09-01/01-notes.md', 'produced',
+                  '/w/app', 'loose/2026-09-01/01-notes.md'),
+                 ('inside-windows', 'u', 'b', 'a.txt', 'text/plain', 1,
+                  'C:\\w\\app\\.openalpaca\\uploads\\2026-09-01\\01-a.txt', 'upload',
+                  'C:\\w\\app', '2026-09-01/01-a.txt'),
+                 ('new-layout', 'u', 'c', 'notes.md', 'text/markdown', 1,
+                  '/h/.openalpaca/projects/-w-app/artifacts/loose/2026-09-01/02-notes.md',
+                  'produced', '/w/app', 'loose/2026-09-01/02-notes.md'),
+                 ('no-project', 'u', 'd', 'b.txt', 'text/plain', 1,
+                  '/h/.openalpaca/uploads/2026-09-01/01-b.txt', 'upload', NULL,
+                  '2026-09-01/01-b.txt'),
+                 ('lookalike', 'u', 'e', 'c.txt', 'text/plain', 1,
+                  '/w/app-old/notes/c.txt', 'upload', '/w/app', '2026-09-01/01-c.txt');
+             INSERT INTO artifact_versions (artifact_id, version, rel_path, sha256, size_bytes)
+                 VALUES ('inside', 1, 'loose/2026-09-01/.versions/01-notes/v1.md', 'a0', 1);
+             INSERT INTO conversation_message_attachments (message_id, file_id) VALUES
+                 (1, 'inside'), (2, 'inside'), (2, 'no-project');",
+        )
+        .unwrap();
+        let version: i32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 2, "the fixture is a version-2 store");
+    }
+
+    let db = Database::open(&db_path).unwrap();
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+    db.with_connection(|conn| {
+        let ids = conn
+            .prepare("SELECT id FROM file_assets ORDER BY id")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(ids, ["lookalike", "new-layout", "no-project"]);
+        let versions: i64 =
+            conn.query_row("SELECT COUNT(*) FROM artifact_versions", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(versions, 0, "the deleted row's versions went by cascade");
+        let links = conn
+            .prepare(
+                "SELECT message_id, file_id FROM conversation_message_attachments
+                  ORDER BY message_id, file_id",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(
+            links,
+            [(2, "no-project".to_string())],
+            "every link to a deleted row went, another conversation's included"
+        );
+        let messages: i64 =
+            conn.query_row("SELECT COUNT(*) FROM conversation_messages", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(messages, 2, "the messages keep their text");
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// Migration 4 (ST-12, R35): every row a version-3 store holds reads
+/// `in_project = 0` — a by-product or an upload, never a result file — and
+/// the address index is rebuilt with the column, so a result file may share
+/// its path with a by-product's or an upload's address.
+#[test]
+fn a_version_3_database_migrates_to_4_with_every_row_outside_the_project() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("v3.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        for migration in &migrations::MIGRATIONS[..3] {
+            conn.execute_batch(migration.sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+                                      storage_path, origin, project_root, rel_path) VALUES
+                 ('upload', 'u', 'a', 'a.txt', 'text/plain', 1,
+                  '/h/.openalpaca/projects/-w-app/uploads/2026-09-01/01-a.txt', 'upload',
+                  '/w/app', '2026-09-01/01-a.txt'),
+                 ('by-product', 'u', 'b', '01-notes.md', 'text/markdown', 1,
+                  '/h/.openalpaca/projects/-w-app/artifacts/loose/2026-09-01/01-notes.md',
+                  'produced', '/w/app', 'loose/2026-09-01/01-notes.md');",
+        )
+        .unwrap();
+        let version: i32 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 3, "the fixture is a version-3 store");
+    }
+
+    let db = Database::open(&db_path).unwrap();
+    assert_eq!(db.schema_version().unwrap(), newest_version());
+    db.with_connection(|conn| {
+        let versions = conn
+            .prepare("SELECT version FROM schema_version ORDER BY version")?
+            .query_map([], |row| row.get::<_, i32>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(
+            versions.contains(&4),
+            "migration 4 ran in place: {versions:?}"
+        );
+        let rows = conn
+            .prepare("SELECT id, in_project FROM file_assets ORDER BY id")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(
+            rows,
+            [("by-product".to_string(), 0), ("upload".to_string(), 0)]
+        );
+        let index: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_file_assets_addr'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(index.contains("in_project"), "{index}");
+        // A result file at the upload's address is a row of its own.
+        insert_result(conn, "result", "/w/app", "2026-09-01/01-a.txt")?;
+        Ok(())
+    })
+    .unwrap();
 }

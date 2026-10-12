@@ -1,39 +1,51 @@
 /**
- * The moved-project offer behind the picker (plan §4.8, P-12).
+ * The projects the daemon knows, and their life cycle (storage design §6,
+ * §9): one read per question, and three writes, each taken only on the
+ * owner's say-so in Settings → Connection.
  *
- * Two questions, in order, and neither is asked speculatively:
- *
- *   1. Does the chosen path hold a store that records a **different** root?
- *      That is `GET /v1/workspaces?path=<chosen>`, and `moved` is the answer.
- *   2. If so, what is still attached to the root it names? That is the same
- *      route again, on `recorded_root`, and it is what the offer counts.
- *
- * The second query is enabled only when the first says `moved`, so a window
- * pointed at a project that never moved makes exactly one request and gets
- * nothing to show.
- *
- * `useRebaseWorkspace` is the write, and it is never called on its own: the
- * card asks, the owner confirms, and only then does the `PATCH` go out. The
- * whole `workspaces` domain plus everything the re-base re-addressed is
- * invalidated afterwards, because artifacts, sessions and tasks all just
- * changed the root they answer for.
+ * Every write changes what other surfaces answer: a project's root is the
+ * address of its conversations, runs, files and notes (R14), and
+ * `GET /v1/status.project_root` — what the Memory view's `This project` and
+ * the conversation sidebar read — is the daemon's resolution of a window's
+ * path, which `Use` and a delete can flip for a folder with no git. So each
+ * write invalidates those domains as well as its own; a dry run is a read
+ * and invalidates nothing.
  */
 
 import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
   type UseMutationResult,
   type UseQueryResult,
 } from "@tanstack/react-query";
 
 import {
+  chooseProject,
+  deleteProjectData,
   getWorkspace,
-  rebaseWorkspace,
+  listProjects,
+  repointProject,
+  type Project,
+  type ProjectDataDeletion,
+  type ProjectRepoint,
   type Workspace,
-  type WorkspaceRebase,
 } from "@/lib/api/workspaces";
 import { qk } from "@/lib/query-keys";
+
+/**
+ * `GET /v1/workspaces`. Re-read on every mount: no event announces a project
+ * a chat turn or an upload registered, and the list changes too rarely to
+ * poll.
+ */
+export function useProjects(): UseQueryResult<Project[]> {
+  return useQuery({
+    queryKey: qk.workspaces.list(),
+    queryFn: ({ signal }) => listProjects(signal),
+    refetchOnMount: "always",
+  });
+}
 
 /** `GET /v1/workspaces?path=`. Disabled until there is a path to ask about. */
 export function useWorkspace(
@@ -44,79 +56,72 @@ export function useWorkspace(
     queryFn: ({ signal }) =>
       path === null ? null : getWorkspace(path, signal),
     enabled: path !== null,
-    // A moved directory is not something that changes while the panel is open,
+    // What is recorded under a root changes only when work is filed there,
     // and a failed lookup should not retry against a path the owner mistyped.
     staleTime: 30_000,
     retry: false,
   });
 }
 
-export interface MovedProject {
-  /** The root the store still records — where the history is. */
-  from: string;
-  /** The path the owner chose, and where the store now stands. */
-  to: string;
-  /** What is attached to `from`, and what a re-base would move. */
-  rows: Workspace["rows"];
-  /** Runs under `from` that are still in flight; the daemon refuses until 0. */
-  activeTasks: number;
-}
-
 /**
- * The offer, or `null` when there is nothing to offer.
- *
- * `pending` is true only while the *first* question is outstanding — the panel
- * says "checking" then, rather than showing a project as settled before it has
- * been asked about.
+ * What a re-point re-addresses and a delete removes. The follow-up queue is
+ * among them (R24): a delete takes a queued follow-up that names the
+ * project, and a re-point rewrites its path, and neither is announced by a
+ * `followup_*` frame.
  */
-export function useMovedProject(path: string | null): {
-  moved: MovedProject | null;
-  pending: boolean;
-  error: Error | null;
-} {
-  const chosen = useWorkspace(path);
-  const recorded =
-    chosen.data?.moved === true ? chosen.data.recorded_root : null;
-  const previous = useWorkspace(recorded);
-
-  const moved: MovedProject | null =
-    chosen.data?.moved === true &&
-    chosen.data.recorded_root !== null &&
-    previous.data != null
-      ? {
-          from: chosen.data.recorded_root,
-          to: chosen.data.path,
-          rows: previous.data.rows,
-          activeTasks: previous.data.active_tasks,
-        }
-      : null;
-
-  return {
-    moved,
-    pending: chosen.isPending && path !== null,
-    error: (chosen.error ?? previous.error) as Error | null,
-  };
+function invalidateProjectData(client: QueryClient): void {
+  for (const key of [
+    qk.workspaces.all(),
+    qk.artifacts.all(),
+    qk.sessions.all(),
+    qk.tasks.all(),
+    qk.memory.all(),
+    qk.followups.all(),
+    qk.statusAll(),
+  ]) {
+    void client.invalidateQueries({ queryKey: key });
+  }
 }
 
-/** `PATCH /v1/workspaces` — the one transaction, on the owner's say-so. */
-export function useRebaseWorkspace(): UseMutationResult<
-  WorkspaceRebase,
+/** `POST /v1/workspaces` — `Use`. */
+export function useChooseProject(): UseMutationResult<Project, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (path: string) => chooseProject(path),
+    onSuccess: () => {
+      for (const key of [qk.workspaces.all(), qk.statusAll()]) {
+        void client.invalidateQueries({ queryKey: key });
+      }
+    },
+  });
+}
+
+/** `PATCH /v1/workspaces` — `Re-point…`, on the owner's press. */
+export function useRepointProject(): UseMutationResult<
+  ProjectRepoint,
   Error,
   { from: string; to: string }
 > {
   const client = useQueryClient();
   return useMutation({
     mutationFn: ({ from, to }: { from: string; to: string }) =>
-      rebaseWorkspace(from, to),
-    onSuccess: () => {
-      for (const key of [
-        qk.workspaces.all(),
-        qk.artifacts.all(),
-        qk.sessions.all(),
-        qk.tasks.all(),
-      ]) {
-        void client.invalidateQueries({ queryKey: key });
-      }
+      repointProject(from, to),
+    onSuccess: () => invalidateProjectData(client),
+  });
+}
+
+/** `POST /v1/workspaces/purge` — the plan (`dryRun`), then `Delete data`. */
+export function useDeleteProjectData(): UseMutationResult<
+  ProjectDataDeletion,
+  Error,
+  { path: string; dryRun: boolean }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ path, dryRun }: { path: string; dryRun: boolean }) =>
+      deleteProjectData(path, dryRun),
+    onSuccess: (_answer, { dryRun }) => {
+      if (!dryRun) invalidateProjectData(client);
     },
   });
 }

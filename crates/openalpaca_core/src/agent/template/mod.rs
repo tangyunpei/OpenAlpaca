@@ -519,6 +519,30 @@ impl AgentTemplate {
                 allowed_capabilities.push(ws_tool.to_string());
             }
         }
+
+        // Memory search for every built-in agent (design 09 §5, owner answer
+        // LQ3): the owner's installed `config/agents/` is never re-seeded, so
+        // an internal template that neither names `memory_read` nor denies it
+        // is granted it here — in `capabilities` (tool resolution reads those)
+        // and in the allowlist (the gate reads that), as the workspace tools
+        // are above. A plugin-contributed template gets it only by naming it:
+        // its tool results go back to the plugin's own process, and the memory
+        // read tools never prompt, so an ambient grant would hand the owner's
+        // notes to third-party code by default. What a subagent may read is
+        // still the run owner's partitions, read-only.
+        let names_memory_read =
+            |list: &[String]| list.iter().any(|c| c.eq_ignore_ascii_case("memory_read"));
+        if matches!(self.source, AgentSource::Internal)
+            && !names_memory_read(&fm.capabilities)
+            && !names_memory_read(&fm.denied_capabilities)
+        {
+            capabilities.push(Capability {
+                name: "memory_read".to_string(),
+                category: "ambient".to_string(),
+                proficiency: 1.0,
+            });
+            allowed_capabilities.push("memory_read".to_string());
+        }
         // Lead agents get the coordination tools registered per-request in
         // runner/lead_agent — the allowlist must admit them or every
         // spawn/check/wait call is denied by check_agent_capability.

@@ -19,26 +19,23 @@
 //!
 //! built from `crate::store::{upload_dir, upload_file_name, confine_to_root}` —
 //! this module never joins a literal directory name onto a store root. The
-//! store is the *request's*: `POST /v1/files/upload` resolves its
-//! `x-workspace-path` through `MemoryScopeContext::for_request` and passes the
+//! store is the *request's*: `POST /v1/files/upload` resolves and records its
+//! `x-workspace-path` (`routes::register_request_project`) and passes the
 //! project; a connector attachment carries no project signal at all and passes
 //! [`StoreScope::Home`].
 //!
 //! The address of record is `project_root` + `rel_path` (relative to
 //! `<store>/uploads`); `storage_path` stays the resolved absolute path, so the
-//! content and open routes need no change. Rows written before D2 — content-addressed
-//! blobs under `state/assets/` — are **left exactly where they are**. Nothing moves
-//! them: their `storage_path` is absolute, so they keep resolving, and a `put` never
-//! moves an existing row's bytes. Such a row has no `rel_path`; every code path that
-//! reads one must keep tolerating that.
+//! content and open routes need no change.
 //!
-//! **Dedup is a sha256 query scoped to this owner's uploads, never the path.**
-//! Two uploads of the same bytes by the same owner resolve to the first row and
-//! write nothing — including when that first row is a pre-D2 content-addressed
-//! one. The same bytes from a different owner get their own row and their own
-//! file, and a byte-identical *produced* artifact never answers at all: it is
-//! not an upload, and handing it back would put it under the upload quota and
-//! on the end of a chat message.
+//! **Dedup is a sha256 query scoped to this owner's uploads in this store,
+//! never the path** (R17: `project_root` is part of the query). Two uploads of
+//! the same bytes by the same owner into one store — the home store, or one
+//! project — resolve to the first row and write nothing; into two stores they
+//! are two rows and two files. The same bytes from a different owner get their
+//! own row and their own file, and a byte-identical *produced* artifact never
+//! answers at all: it is not an upload, and handing it back would put it under
+//! the upload quota and on the end of a chat message.
 //!
 //! A match is an answer only while its bytes are still there. When the matched
 //! row's file is gone, the upload is placed and written as usual and that row is
@@ -67,13 +64,13 @@
 //! number came round again. Claiming the name with `O_EXCL` first turns that
 //! into a bumped sequence (or, past [`MAX_HEAD_PROBES`], an `IO_ERROR`).
 //!
-//! ## The address is the store the bytes reached
+//! ## The address is the turn's project
 //!
-//! `project_root` and the sequence lookup are both derived from the
-//! *canonicalized* store root (`store::project_root_at`), never from the path
-//! the caller named. A `<project>/.openalpaca` symlinked at another store
-//! therefore addresses that store, and shares its sequence space, instead of
-//! restarting at `01` over its live files.
+//! `project_root` and the sequence lookup both take the turn's project root
+//! (`store::project_root_of`, R15): the root of the project `lookup` finds —
+//! canonical, but for a missing project's recorded root (R-T19) — never the
+//! directory the bytes reached, which under ST-1 is the project's folder under
+//! the home store's `projects/` for every project.
 //!
 //! Everything from the dedup query to the committed row runs inside one
 //! `with_connection` transaction, which holds the database mutex for its whole
@@ -98,8 +95,8 @@ use crate::models::file_asset::{FileAsset, FileAssetStatus};
 use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::repository::file_asset::{FILE_ASSET_COLUMNS, row_to_file_asset};
 use crate::store::{
-    ContentKind, StoreScope, confine_to_root, content_dir, leading_sequence, project_root_at,
-    relative_to, upload_dir, upload_file_name,
+    ContentKind, StoreScope, confine_to_root, content_dir, create_below, leading_sequence,
+    project_folder_gone, project_root_of, relative_to, upload_dir, upload_file_name,
 };
 
 // ============================================================================
@@ -212,30 +209,24 @@ impl<'a> UploadStore<'a> {
         let size_bytes = new.data.len() as i64;
 
         // Placement, by the §4.2 grammar. Creates directories only — `upload_dir`
-        // goes through `content_dir`, which seeds a project store (and its
-        // `.gitignore`) before `uploads/` can exist inside it.
+        // goes through `content_dir`, which creates nothing for a project no
+        // folder under `projects/` records (R12).
         let uploads_root = content_dir(new.scope, ContentKind::Uploads).map_err(path_error)?;
         let uploads_root = uploads_root.canonicalize().map_err(path_error)?;
         let dir = upload_dir(new.scope, new.created).map_err(path_error)?;
         let rel_dir = relative_to(&uploads_root, &dir).map_err(path_error)?;
-        // The address is the store the bytes *reach*, not the path the caller
-        // named — see `project_root_at`. Both the row and the sequence lookup
-        // take it, so two scopes that resolve to one directory share one
-        // sequence space instead of both starting at `01`.
-        let store_root = uploads_root
-            .parent()
-            .with_context(|| format!("{} has no parent store root", uploads_root.display()))
-            .map_err(path_error)?;
-        let project_root = project_root_at(store_root).map_err(path_error)?;
+        // R15: the address is the turn's project (`project_root_of`), never
+        // the directory the bytes reached. Both the row and the sequence
+        // lookup take it.
+        let project_root = project_root_of(new.scope).map_err(path_error)?;
         let project_key = project_root.clone().unwrap_or_default();
 
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
 
-            // Dedup: the owner- and origin-scoped sha256 query, never the path.
-            // A pre-D2 content-addressed row answers it just as well as a new
-            // one — it carries `origin = 'upload'` from 036's column default.
-            let existing = load_by_sha256(&tx, &sha256, new.owner_id)?;
+            // Dedup: the owner-, origin- and store-scoped sha256 query (R17),
+            // never the path.
+            let existing = load_by_sha256(&tx, &sha256, new.owner_id, project_root.as_deref())?;
             // I7: a dedup hit is only an answer while its bytes are there. A row
             // whose file is gone — marked `missing_since` or not; a removed
             // project directory leaves no mark at all — would otherwise discard
@@ -253,8 +244,19 @@ impl<'a> UploadStore<'a> {
             // through and create a new row. A hit whose bytes are gone falls
             // through too, and is re-addressed in place below.
 
-            fs::create_dir_all(&dir)
-                .map_err(|e| io_error(format!("Failed to create storage directory: {e}")))?;
+            // Below the canonical uploads root, one level at a time: a
+            // project's folder the delete removed since `content_dir` read it
+            // is `NotRegistered`, never re-created with no `project.json`.
+            create_below(&uploads_root, Path::new(&rel_dir)).map_err(|e| {
+                let message = format!("Failed to create storage directory {}: {e}", dir.display());
+                match new.scope {
+                    StoreScope::Project(root) => match project_folder_gone(e, root) {
+                        Ok(gone) => gone.context(UploadError::Io(message)),
+                        Err(_) => io_error(message),
+                    },
+                    StoreScope::Home => io_error(message),
+                }
+            })?;
 
             let seq = next_sequence(&tx, &project_key, &rel_dir)?;
             let (head_name, head_path) = reserve_head(&uploads_root, &dir, seq, new.filename)?;
@@ -346,8 +348,8 @@ impl<'a> UploadStore<'a> {
 // Internals
 // ============================================================================
 
-/// The dedup answer: this owner's own *upload* row for these bytes, if it has
-/// one.
+/// The dedup answer: this owner's own *upload* row for these bytes **in this
+/// store**, if it has one.
 ///
 /// Every predicate is in the SQL, because `idx_file_assets_sha256` is not
 /// unique and `LIMIT 1` picks a row rather than *the* row. Filtering the owner
@@ -355,13 +357,28 @@ impl<'a> UploadStore<'a> {
 /// failed the check, and wrote a new row and a new file every single time.
 /// `origin` is here for the same reason: a produced artifact can be
 /// byte-identical to an upload, and answering with it would hand the uploader a
-/// row that is not an upload.
-fn load_by_sha256(conn: &Connection, sha256: &str, owner_id: &str) -> Result<Option<FileAsset>> {
+/// row that is not an upload. `project_root` is here because dedup is scoped to
+/// the turn's project (R17): matched across every store, one project's turn was
+/// handed a row that belongs to another, and a delete of that project took the
+/// file out of the other's transcript. `COALESCE(project_root, '')` is the
+/// address baseline every writer shares (`store::project_root_of`).
+fn load_by_sha256(
+    conn: &Connection,
+    sha256: &str,
+    owner_id: &str,
+    project_root: Option<&str>,
+) -> Result<Option<FileAsset>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {FILE_ASSET_COLUMNS} FROM file_assets
-         WHERE sha256 = ?1 AND owner_id = ?2 AND origin = 'upload' LIMIT 1"
+         WHERE sha256 = ?1 AND owner_id = ?2 AND origin = 'upload'
+           AND COALESCE(project_root, '') = ?3
+         LIMIT 1"
     ))?;
-    let mut rows = stmt.query(rusqlite::params![sha256, owner_id])?;
+    let mut rows = stmt.query(rusqlite::params![
+        sha256,
+        owner_id,
+        project_root.unwrap_or("")
+    ])?;
     match rows.next()? {
         Some(row) => Ok(Some(row_to_file_asset(row)?)),
         None => Ok(None),

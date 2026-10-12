@@ -12,10 +12,12 @@
 //! stays the resolved absolute path so the existing content routes need no
 //! change. Bytes are placed by the §4.2 grammar
 //! (`crate::store::{run_dir, loose_dir, artifact_file_name, version_file_path}`) —
-//! this module never joins a literal directory name onto a store root. R24: the
-//! `project_root` half of the address comes from the *canonicalized* store root
-//! ([`crate::store::project_root_at`]), never from the scope the caller named,
-//! so two scopes whose bytes land in one directory address one sequence space.
+//! this module never joins a literal directory name onto a store root. R15: the
+//! `project_root` half of the address is the turn's project root
+//! ([`crate::store::project_root_of`]: the root of the project `lookup`
+//! finds — canonical, but for a missing project's recorded root, R-T19),
+//! never the directory the bytes reached — every project's bytes land under
+//! the home store's `projects/`.
 //!
 //! ## Write protocol (§4.2 + R24), as implemented by [`ArtifactStore::put`]
 //!
@@ -180,7 +182,8 @@ use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::sql::escape_like;
 use crate::store::{
     ContentKind, StoreScope, artifact_extension, artifact_file_name, confine_to_root, content_dir,
-    leading_sequence, loose_dir, project_root_at, relative_to, run_dir, version_file_path,
+    create_below, kind_for_file_name, leading_sequence, loose_dir, project_folder_gone,
+    project_root_of, relative_to, run_dir, store_root, version_file_path,
 };
 
 /// `[execution.artifacts] max_versions_per_artifact` (plan §4.6). The config key
@@ -245,6 +248,14 @@ pub enum ArtifactError {
     NotFound { id: String },
     /// The row exists but its bytes are gone — §4.9's **410** `ARTIFACT_GONE`.
     Gone { id: String, path: String },
+    /// A result file of a project whose recorded root no longer leads to its
+    /// own folder — gone, renamed by case only, or moved with a link left at
+    /// the old path (ST-23) — is never read through that root (R-T18), and
+    /// the refusal is the project's, not the file's (the lead's ruling
+    /// R-T26): **410** `ARTIFACT_PROJECT_MISSING`, naming the root as
+    /// recorded and the re-point. The row is marked missing, as an absent
+    /// head is.
+    ProjectMissing { id: String, root: String },
     /// The artifact exists but has no such version.
     VersionNotFound { id: String, version: u32 },
     /// §4.9: `kind ∈ {image, binary}` → **409** `NOT_DIFFABLE`.
@@ -275,6 +286,7 @@ impl ArtifactError {
         match self {
             Self::NotFound { .. } => "ARTIFACT_NOT_FOUND",
             Self::Gone { .. } => "ARTIFACT_GONE",
+            Self::ProjectMissing { .. } => "ARTIFACT_PROJECT_MISSING",
             Self::VersionNotFound { .. } => "ARTIFACT_VERSION_NOT_FOUND",
             Self::NotDiffable { .. } => "NOT_DIFFABLE",
             Self::DiffTooLarge { .. } => "DIFF_TOO_LARGE",
@@ -290,6 +302,9 @@ impl fmt::Display for ArtifactError {
             Self::Gone { id, path } => {
                 write!(f, "artifact {id} is gone: {path} no longer exists")
             }
+            Self::ProjectMissing { root, .. } => f.write_str(
+                &crate::store::projects::missing_project_sentence(Path::new(root)),
+            ),
             Self::VersionNotFound { id, version } => {
                 write!(f, "artifact {id} has no version {version}")
             }
@@ -391,6 +406,23 @@ impl<'a> NewArtifact<'a> {
     }
 }
 
+/// One result file an agent wrote into its project (ST-12, R35) — the file
+/// is already on disk; this is what its pointer row records.
+#[derive(Debug, Clone)]
+pub struct NewProjectFile<'a> {
+    pub owner_id: &'a str,
+    /// The project's canonical root (`store::project_root_of`'s string).
+    pub project_root: &'a str,
+    /// The file relative to `project_root`, `/`-separated — `store::relative_to`
+    /// of the **resolved** path, so a write through a link inside the root
+    /// records where it landed.
+    pub rel_path: &'a str,
+    /// The bytes now in the file; hashed here, before the connection is taken.
+    pub content: &'a [u8],
+    pub task_id: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
+}
+
 /// One `file_assets` row as the artifact surface reads it. Faithful to the
 /// table: the client-facing `Artifact` of §4.9 is this plus `task_title`, which
 /// lives on `task` and is joined at the route layer.
@@ -411,7 +443,8 @@ pub struct ArtifactRecord {
     pub storage_path: String,
     /// `NULL` => the home store (§4.8: the home root *is* the baseline).
     pub project_root: Option<String>,
-    /// The head's path relative to `<store>/artifacts`.
+    /// The head's path relative to `<store>/artifacts`; for a result file
+    /// (`in_project`), the file's path relative to `project_root`.
     pub rel_path: Option<String>,
     pub task_id: Option<String>,
     pub agent_id: Option<String>,
@@ -424,6 +457,11 @@ pub struct ArtifactRecord {
     /// Set the first time the bytes were found absent; cleared by the next
     /// successful `put`.
     pub missing_since: Option<String>,
+    /// `file_assets.in_project` (migration 4): a result file an agent wrote
+    /// into its project (ST-12) — `project_root` is that project, `rel_path`
+    /// the file's path in it, `storage_path` the real file — with no
+    /// versions. `false` for every by-product and upload.
+    pub in_project: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -432,6 +470,46 @@ impl ArtifactRecord {
     /// §4.8: list rows carry `missing: true`.
     pub fn missing(&self) -> bool {
         self.missing_since.is_some()
+    }
+
+    /// ST-18: whether Open is offered — decided, like the route's own check,
+    /// on the file Open would hand to the default app
+    /// ([`crate::store::opens_in_default_app`]): a result file by its name in
+    /// the project (`.sh`, `.command`, `Makefile` get Reveal only); a
+    /// by-product by its stored file's name, so one whose text no kind admits
+    /// — stored under the fallback `.bin` (FW-1) — is Reveal only, as Open's
+    /// route refuses it (the second residual pass, Y.3); an upload always,
+    /// since Open stages a copy under its name.
+    pub fn openable(&self) -> bool {
+        if self.in_project {
+            return crate::store::opens_in_default_app(&self.name);
+        }
+        match self.origin {
+            ArtifactOrigin::Produced => Path::new(&self.storage_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(crate::store::opens_in_default_app),
+            ArtifactOrigin::Upload => true,
+        }
+    }
+
+    /// The folder a by-product's or an upload's bytes lie under — its store's
+    /// `artifacts/` or `uploads/`, the home store's or a project's folder
+    /// under `projects/` — recovered from the row's own address columns, as
+    /// the Library's read finds it before it confines a head there
+    /// (`confine_to_root`). A reader outside this module that names a stored
+    /// file by its row confines it here (the lead's ruling R-T20: `send` by
+    /// `artifact_id`), so a link put at the file never leads out of that
+    /// folder. A result file has none: its bytes are the user's, in its
+    /// project (R37).
+    pub fn content_root(&self) -> Result<PathBuf> {
+        if self.in_project {
+            bail!(
+                "{} is a result file in its project, not a file in the store",
+                self.id
+            );
+        }
+        artifacts_root_for(self)
     }
 
     /// The **writer's** metadata — `metadata_json` parsed, with
@@ -546,6 +624,9 @@ pub struct ArtifactQuery {
     /// index is built on — so `Some(String::new())` selects the home store.
     pub project_root: Option<String>,
     pub pinned: Option<bool>,
+    /// `Some(false)`: by-products and uploads only; `Some(true)`: result
+    /// files in the project only (ST-12); `None`: both.
+    pub in_project: Option<bool>,
     /// Substring match over the head file name and the summary.
     pub q: Option<String>,
     /// §4.8: default `false`.
@@ -564,6 +645,7 @@ impl ArtifactQuery {
             origin: None,
             project_root: None,
             pinned: None,
+            in_project: None,
             q: None,
             include_missing: false,
             limit: None,
@@ -593,19 +675,24 @@ pub struct ArtifactVersionRow {
     pub created_at: String,
 }
 
-/// How many rows each member of §4.8's one transaction carried — the same four
-/// counts whether they were moved ([`ArtifactStore::rebase_project`]) or merely
+/// How many rows each member of §6's one transaction carried — the same five
+/// counts whether they were moved ([`ArtifactStore::repoint_rows`]) or merely
 /// counted ([`ArtifactStore::workspace_rows`]).
+///
+/// Memory is not a member: a project's notes are files in its folder, keyed
+/// by the project (design §5), not rows keyed by its path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RebaseCounts {
     /// `file_assets` rows, **both** origins.
     pub file_assets: usize,
-    /// `session.workspace_id` (migration 039).
+    /// `session.workspace_id`.
     pub sessions: usize,
-    /// `task.workspace_id` (migration 036).
+    /// `task.workspace_id`.
     pub tasks: usize,
-    /// `memory.scope_id` where `scope = 'workspace'`.
-    pub memories: usize,
+    /// `conversation_messages.workspace_root`.
+    pub messages: usize,
+    /// `lane_followups.workspace_path`.
+    pub followups: usize,
 }
 
 impl RebaseCounts {
@@ -615,29 +702,37 @@ impl RebaseCounts {
     }
 }
 
+/// Whether [`ArtifactStore::repoint_rows`] refuses while a run of the old
+/// root is in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InFlightRuns {
+    /// A live re-point: a `queued`, `running` or `paused` run under the old
+    /// root refuses it ([`crate::project_life::RunsInFlight`]).
+    Refuse,
+    /// R24's boot recovery, before the previous process's runs are swept.
+    Ignore,
+}
+
 /// What [`ArtifactStore::workspace_rows`] found under one root.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkspaceRows {
     pub counts: RebaseCounts,
     /// Runs under this root that are `running` or `paused`. Both hold live
     /// in-process state — a loop, a steering inbox, a resolved store — that a
-    /// row rewrite cannot reach, so a rebase waits for them. A `queued` run
-    /// does not count here: it has not resolved anything yet, and its row
-    /// moves with the rest of a re-base. (A purge's own busy predicate is
-    /// stricter than this field — see [`ArtifactStore::busy_tasks`] — because
-    /// a purge *deletes* the row a queued run is about to resolve, rather than
-    /// rewriting it.)
+    /// row rewrite cannot reach.
     pub active_tasks: usize,
-    /// Runs under this root that are `queued` — dispatched, not started. They
-    /// do not block a re-base (the row moves with the rest of one) and they *do*
-    /// block a purge ([`ArtifactStore::busy_tasks`] counts them), so a caller
-    /// reading this number can tell a root that is merely busy-soon from one
-    /// that is running. Reported rather than folded into `active_tasks`: the two
-    /// answer different questions.
+    /// Runs under this root that are `queued` — dispatched, not started yet.
+    /// A dispatch registers the project and resolves its scope **before** it
+    /// inserts the `queued` row and spawns the run (`dispatcher::lead_agent`),
+    /// so a queued run has already resolved the project by this root: it
+    /// blocks a re-point (the route and `repoint_rows`' own transaction count
+    /// it) as it blocks a purge ([`ArtifactStore::busy_tasks`]). Reported
+    /// apart from `active_tasks` so a caller can tell a run about to start
+    /// from one that is running.
     pub queued_tasks: usize,
-    /// Rows under this root that belong to **another** owner — `file_assets`
-    /// and `memory`, the two members that carry an `owner_id` at all. Always
-    /// `0` for an unscoped count.
+    /// Rows under this root that belong to **another** owner — `file_assets`,
+    /// the one member that carries an `owner_id` at all. Always `0` for an
+    /// unscoped count.
     ///
     /// A re-base is owner-scoped, and this is how: a root holding rows the
     /// caller cannot see is a `404`, not a transaction that quietly rewrites
@@ -645,8 +740,8 @@ pub struct WorkspaceRows {
     pub other_owners: usize,
 }
 
-/// How many rows of each kind a purge removed, or would remove
-/// ([`ArtifactStore::purge_plan`] / [`ArtifactStore::purge_project`]).
+/// How many rows of each kind a project's data deletion removed, or would
+/// remove (`project_life::delete_plan` / `delete_project_data`).
 ///
 /// Every member is named on the way out, zeroes included — "nothing else went"
 /// is the half a reader is checking for.
@@ -654,11 +749,13 @@ pub struct WorkspaceRows {
 pub struct PurgeCounts {
     /// `session` rows with `workspace_id = root`.
     pub sessions: usize,
-    /// `conversation_messages` rows belonging to those sessions.
+    /// `conversation_messages` rows of those sessions, or whose own
+    /// `workspace_root` is this root.
     pub messages: usize,
     /// `tool_execution_log` rows keyed by one of those sessions or runs.
     pub tool_calls: usize,
-    /// `lane_followups` rows keyed by one of those sessions.
+    /// `lane_followups` rows of those sessions, or whose `workspace_path` is
+    /// this root.
     pub followups: usize,
     /// `task` rows with `workspace_id = root`.
     pub tasks: usize,
@@ -666,39 +763,20 @@ pub struct PurgeCounts {
     pub spans: usize,
     /// `event_log` rows keyed by one of those runs.
     pub run_events: usize,
-    /// `file_assets` rows with `origin = 'upload'` addressed under this root.
+    /// `file_assets` rows with `origin = 'upload'` addressed under this root
+    /// that no message the delete leaves still links.
     pub uploads: usize,
+    /// `file_assets` rows that are not uploads — the project's by-products —
+    /// addressed under this root and linked by no message the delete leaves.
+    /// A result file's pointer row is not one (it goes uncounted).
+    pub artifacts: usize,
 }
 
 impl PurgeCounts {
-    /// Would a purge of this root remove anything at all?
+    /// Would deleting this project's data remove any row at all?
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
-}
-
-/// The rows a purge deliberately leaves where they are (§4.5, §1.3 rule 3).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PurgeKept {
-    /// `file_assets` rows with `origin = 'produced'` — never garbage-collected.
-    pub artifacts: usize,
-    /// `memory` rows scoped to this workspace — the user's, not the store's.
-    pub memories: usize,
-}
-
-/// What the **home** scope holds of the two kinds a project purge removes.
-///
-/// Not a project and never purged by one (§1.1): a conversation with no project
-/// and an upload that carried no project signal belong to the home store, and
-/// `store purge --all` names them as kept rather than sweeping them up.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HomeScopeRows {
-    /// `session` rows with `workspace_id IS NULL` or `workspace_id = ''` —
-    /// together with [`ArtifactStore::project_roots`]'s `root <> ''`, the two
-    /// partition every session in the table.
-    pub sessions: usize,
-    /// `file_assets` upload rows with no `project_root`.
-    pub uploads: usize,
 }
 
 /// One session a purge would take with it, with the lane it belongs to so a
@@ -707,29 +785,6 @@ pub struct HomeScopeRows {
 pub struct PurgeSession {
     pub id: String,
     pub lane_key: String,
-}
-
-/// What a purge of one root would do, read without changing anything —
-/// the body of `--dry-run` and the preflight of the real call.
-#[derive(Debug, Clone, Default)]
-pub struct PurgePlan {
-    pub counts: PurgeCounts,
-    pub kept: PurgeKept,
-    /// The sessions bound to this root, for the caller's in-flight guard.
-    pub sessions: Vec<PurgeSession>,
-}
-
-/// What a purge actually removed — the counts, plus the bytes the caller must
-/// now remove, gathered **inside** the transaction so the list can never name
-/// a row the transaction did not delete.
-#[derive(Debug, Clone, Default)]
-pub struct PurgeOutcome {
-    pub counts: PurgeCounts,
-    /// The ids whose `sessions/<id>/` directory in the home store is now
-    /// rowless.
-    pub session_ids: Vec<String>,
-    /// `storage_path` of every upload row that went.
-    pub upload_paths: Vec<String>,
 }
 
 /// What one [`ArtifactStore::verify`] pass found.
@@ -894,15 +949,13 @@ impl<'a> ArtifactStore<'a> {
         };
         let rel_dir = relative_to(&artifacts_root, &dir)?;
         let ext = artifact_extension(new.kind, new.mime_type, new.name_hint);
-        // R24: the address is the store the bytes *reach*, not the path the
-        // caller named — see `store::project_root_at`. Both the row and the
-        // directory scan below take it, so two scopes that resolve to one
-        // directory share one sequence space (and one identity) instead of both
-        // starting at `01` over each other's files.
-        let store_root = artifacts_root
-            .parent()
-            .with_context(|| format!("{} has no parent store root", artifacts_root.display()))?;
-        let project_root = project_root_at(store_root)?;
+        // R15: the address is the turn's project (`store::project_root_of`),
+        // never the directory the bytes reached — every project's bytes land
+        // under `<home>/projects/`. Both the row and the directory scan below
+        // take it; two scopes naming one project — the project `lookup` finds,
+        // whose folder holds the bytes — record its one root, so they share
+        // one sequence space and one identity (R-T19).
+        let project_root = project_root_of(new.scope)?;
         let project_key = project_root.clone().unwrap_or_default();
         let mime = new
             .mime_type
@@ -953,8 +1006,17 @@ impl<'a> ArtifactStore<'a> {
             let version = previous_version.map_or(1, |previous| previous + 1);
 
             // --- The §4.2 write protocol -------------------------------------
-            fs::create_dir_all(&dir)
-                .with_context(|| format!("failed to create {}", dir.display()))?;
+            // Below the canonical artifacts root, one level at a time: a
+            // project's folder the delete removed since `content_dir` read it
+            // is `NotRegistered`, never re-created with no `project.json`.
+            create_below(&artifacts_root, Path::new(&rel_dir)).map_err(|e| match new.scope {
+                StoreScope::Project(root) => project_folder_gone(e, root).unwrap_or_else(|e| {
+                    anyhow::Error::new(e).context(format!("failed to create {}", dir.display()))
+                }),
+                StoreScope::Home => {
+                    anyhow::Error::new(e).context(format!("failed to create {}", dir.display()))
+                }
+            })?;
             // R24: claim the name with `O_EXCL` before a byte is written. Only
             // a *new* artifact reserves — superseding one already owns the name
             // its own row addresses, and step 3 moves that file aside itself.
@@ -1145,6 +1207,128 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
+    /// R35: record a result file an agent wrote into its project — the pointer
+    /// row keyed on (`project_root`, `in_project = 1`, `rel_path`), inserted or
+    /// updated in one transaction. Returns the row and `true` when it inserted.
+    ///
+    /// Never calls [`Self::put`], whose protocol would move the user's file
+    /// into `.versions/` and reclaim an empty file at the target name; writes
+    /// no `artifact_versions` row; touches no file. `origin` is `produced` and
+    /// `status` `ready` on insert **and** on update — the column default
+    /// `upload` is what the orphan sweep deletes, and `uploaded` is what the
+    /// extractor reads. A row another owner recorded at the same address is
+    /// refused, never updated.
+    pub fn record_project_file(&self, file: NewProjectFile<'_>) -> Result<(ArtifactRecord, bool)> {
+        let root = Path::new(file.project_root);
+        if !root.is_absolute() {
+            bail!(
+                "a result file's project root must be an absolute path, got {}",
+                file.project_root
+            );
+        }
+        // One spelling per file (S4a's deferred (4)): normalised lexically —
+        // `.` components and repeated separators dropped, nothing resolved —
+        // so `docs/./plan.md` and `docs//plan.md` address the row
+        // `docs/plan.md` has; `..`, an absolute path and nothing at all are
+        // refused.
+        let rel_path = plain_relative_path(file.rel_path).with_context(|| {
+            format!(
+                "a result file's path must be relative and plain, got '{}'",
+                file.rel_path
+            )
+        })?;
+        let rel_path = rel_path.as_str();
+        let storage_path = root.join(rel_path);
+        let sha256 = sha256_hex(file.content);
+        let size_bytes = file.content.len() as i64;
+        let kind = kind_for_file_name(rel_path).unwrap_or(ArtifactKind::Code);
+        // No head stamp (d5-results-3): the hash above is of the bytes the
+        // tool meant to write, and the file may already hold others — another
+        // writer's, recorded first, or a formatter's. A stamp of what stands
+        // there now would make R37's read-time check skip the hash for good;
+        // with none, the first read hashes and stamps what is on disk.
+        let metadata_json: Option<String> = None;
+
+        self.db.with_connection(|conn| {
+            use rusqlite::OptionalExtension;
+            let tx = conn.unchecked_transaction()?;
+            let existing: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT id, owner_id FROM file_assets
+                      WHERE COALESCE(project_root, '') = ?1 AND in_project = 1 AND rel_path = ?2",
+                    rusqlite::params![file.project_root, rel_path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let inserted = existing.is_none();
+            let id = match existing {
+                Some((id, owner)) if owner != file.owner_id => bail!(
+                    "the result file {id} at {}/{} belongs to another owner",
+                    file.project_root,
+                    rel_path
+                ),
+                Some((id, _)) => {
+                    tx.execute(
+                        "UPDATE file_assets SET
+                            sha256 = ?1, size_bytes = ?2, storage_path = ?3, filename = ?4,
+                            kind = ?5, mime_type = ?6, task_id = ?7, agent_id = ?8,
+                            metadata_json = ?9, origin = ?10, status = ?11,
+                            missing_since = NULL, updated_at = datetime('now')
+                          WHERE id = ?12",
+                        rusqlite::params![
+                            sha256,
+                            size_bytes,
+                            storage_path.to_string_lossy(),
+                            rel_path,
+                            kind.as_str(),
+                            default_mime(kind),
+                            file.task_id,
+                            file.agent_id,
+                            metadata_json,
+                            ArtifactOrigin::Produced.as_str(),
+                            FileAssetStatus::Ready.as_str(),
+                            id,
+                        ],
+                    )?;
+                    id
+                }
+                None => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    tx.execute(
+                        "INSERT INTO file_assets
+                            (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                             status, metadata_json, origin, kind, task_id, agent_id,
+                             project_root, rel_path, in_project, version, version_count, pinned)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                                 ?15, 1, 1, 0, 0)",
+                        rusqlite::params![
+                            id,
+                            file.owner_id,
+                            sha256,
+                            rel_path,
+                            default_mime(kind),
+                            size_bytes,
+                            storage_path.to_string_lossy(),
+                            FileAssetStatus::Ready.as_str(),
+                            metadata_json,
+                            ArtifactOrigin::Produced.as_str(),
+                            kind.as_str(),
+                            file.task_id,
+                            file.agent_id,
+                            file.project_root,
+                            rel_path,
+                        ],
+                    )?;
+                    id
+                }
+            };
+            let record = load_by_id(&tx, &id)?
+                .with_context(|| format!("result file {id} vanished inside its own transaction"))?;
+            tx.commit()?;
+            Ok((record, inserted))
+        })
+    }
+
     /// The head record, owner-scoped.
     pub fn get(&self, id: &str, owner_id: &str) -> Result<Option<ArtifactRecord>> {
         self.db.with_connection(|conn| {
@@ -1187,6 +1371,10 @@ impl<'a> ArtifactStore<'a> {
         if let Some(pinned) = q.pinned {
             clauses.push("pinned = ?");
             args.push(Value::Integer(i64::from(pinned)));
+        }
+        if let Some(in_project) = q.in_project {
+            clauses.push("in_project = ?");
+            args.push(Value::Integer(i64::from(in_project)));
         }
         if let Some(text) = &q.q {
             clauses.push("(filename LIKE ? ESCAPE '\\' OR IFNULL(summary, '') LIKE ? ESCAPE '\\')");
@@ -1235,6 +1423,12 @@ impl<'a> ArtifactStore<'a> {
     /// recorded as a version with `author_agent_id = NULL` before the path is
     /// resolved. [`Self::resolve_content_with_edit`] is the same call for a
     /// caller that wants to announce that.
+    ///
+    /// A result file in the project (a pointer row, R37) is the user's own
+    /// file: a read that finds it changed refreshes the row's hash and size
+    /// and records no version, and its path is confined under the project
+    /// ([`ArtifactError::ProjectMissing`] for a project whose root no longer
+    /// leads to its own folder, R-T18 and R-T26).
     pub fn resolve_content(&self, id: &str, version: Option<u32>) -> Result<PathBuf> {
         self.resolve_content_with_edit(id, version)
             .map(|(path, _)| path)
@@ -1278,10 +1472,61 @@ impl<'a> ArtifactStore<'a> {
     /// asks again).
     pub fn check_head(&self, id: &str) -> Result<Option<ArtifactRecord>> {
         let probe = self.probe_head(id)?;
+        // R37: a result file is the user's; its row follows the file and never
+        // records a version.
+        if let Some(record) = &probe.project_file {
+            self.refresh_project_file(record)?;
+            return Ok(None);
+        }
         let Some(observation) = probe.observe() else {
             return Ok(None);
         };
         self.record_head_observation(id, observation)
+    }
+
+    /// R37's read-time check for a result file: the row follows the file and
+    /// no version is written. The file is reached through the project root
+    /// its row records ([`project_file_path`]); the hash runs with the
+    /// connection free and only when the stamp moved; and the row is updated
+    /// compare-and-set on `sha256`, so a write that landed meanwhile wins. An
+    /// absent file, one that leaves the root, or one of a missing project
+    /// (R-T18) is left to [`resolve_version_path`], which answers for it.
+    fn refresh_project_file(&self, record: &ArtifactRecord) -> Result<()> {
+        let Some(path) = project_file_path(record) else {
+            return Ok(());
+        };
+        let Some(stamp) = stamp_at(&path) else {
+            return Ok(());
+        };
+        if record.head_stamp() == Some(stamp) {
+            return Ok(());
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Cannot read the result file {}: {e}", path.display());
+                }
+                return Ok(());
+            }
+        };
+        let sha256 = hash_head(&bytes);
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE file_assets
+                    SET sha256 = ?1, size_bytes = ?2, metadata_json = ?3,
+                        updated_at = datetime('now')
+                  WHERE id = ?4 AND in_project = 1 AND sha256 = ?5",
+                rusqlite::params![
+                    sha256,
+                    bytes.len() as i64,
+                    metadata_with_stamp(record.metadata_json.as_deref(), Some(stamp)),
+                    record.id,
+                    record.sha256,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Phase 1: the row and the cheap gate, under the lock and off metadata
@@ -1314,6 +1559,7 @@ impl<'a> ArtifactStore<'a> {
             };
             if record.sha256 != observation.row_sha256
                 || record.origin != ArtifactOrigin::Produced
+                || record.in_project
                 || record.missing_since.is_some()
             {
                 return Ok(None);
@@ -1469,90 +1715,112 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
-    /// Re-base everything addressed under `old_root` onto `new_root` — §4.8's
-    /// "Project moved", as **one transaction** over its four members.
+    /// §6 step 2: one transaction moves every row naming `old_root` in the
+    /// five path columns to `new_root`, and rewrites `storage_path` on the
+    /// rows whose `project_root` is `old_root` — `old_dir` (the project's
+    /// folder under `projects/`) becomes `new_dir`, and, for a pointer row (a
+    /// result file in the project), `old_root` becomes `new_root`. A prefix
+    /// counts only when a `/` or a `\` follows it, compared with `substr`,
+    /// never `LIKE` (whose `_` and `%` a path may hold). `rel_path` is the
+    /// address and does not change.
+    /// (`a_re_point_rewrites_a_pointer_rows_path_and_leaves_the_file`,
+    /// `project_life/tests.rs`, pins the second prefix.)
     ///
-    /// A project's path is its identity in four places, all of them holding the
-    /// same canonical-path string, so all four move together or none does:
+    /// `missing_since` is cleared with the address it described: the mark
+    /// says "nothing is at `storage_path`", and this rewrites `storage_path`.
+    /// No stat pass inside the transaction (R32) — the read path re-stamps.
     ///
-    /// | Member | Column |
-    /// |---|---|
-    /// | `file_assets` (**both** origins — an upload placed in a project store moved with it) | `project_root`, and the `storage_path` prefix |
-    /// | `session` (039) | `workspace_id` |
-    /// | `task` (036) | `workspace_id` |
-    /// | `memory` (`memory/workspace.rs`: the id *is* the canonical root) | `scope_id`, where `scope = 'workspace'` |
+    /// `file_assets` goes **last**: `idx_file_assets_addr` is
+    /// `(COALESCE(project_root, ''), in_project, rel_path)`, the one unique key
+    /// a re-point can violate, and the failure that rolls the transaction back
+    /// must have the other four to roll back. Path-scoped, not owner-scoped:
+    /// `session` and `task` carry no `owner_id`; the route refuses a root
+    /// holding another owner's rows ([`WorkspaceRows::other_owners`]) before
+    /// calling this.
+    /// Idempotent: run again after it committed, it matches nothing.
     ///
-    /// `rel_path` is deliberately untouched: it is the address, and it did not
-    /// change. Only the root prefix does.
-    ///
-    /// This lives on `ArtifactStore` because §4.8 puts it here — the artifact
-    /// address is the member with the most to lose from a half-applied move —
-    /// but the other three are not artifact rows and are updated by their own
-    /// statements, not through their repositories: a transaction is the whole
-    /// point, and each repository call would open its own.
-    ///
-    /// Rows only. Moving the store *directory*, when the caller is asking for a
-    /// move rather than recording one that already happened, is
-    /// [`crate::store::project_move::move_project_store`].
-    ///
-    /// **Path-scoped, not owner-scoped**, and deliberately: `session` and `task`
-    /// carry no `owner_id`, so a half-scoped transaction would leave a project
-    /// whose artifacts moved and whose runs did not. The route is what makes it
-    /// owner-safe — it refuses a root holding rows the caller does not own
-    /// ([`WorkspaceRows::other_owners`]) rather than rewrite them here.
-    pub fn rebase_project(&self, old_root: &str, new_root: &str) -> Result<RebaseCounts> {
+    /// [`InFlightRuns::Refuse`] (a re-point someone asked for) first counts
+    /// the runs under `old_root` that are `queued`, `running` or `paused`
+    /// and, finding any, returns [`crate::project_life::RunsInFlight`]
+    /// inside the error, moving nothing: the route counts them before it
+    /// waits for the project's memory slot, and a run dispatched meanwhile
+    /// has already resolved the project by its old root — this moves its row,
+    /// not the process. Every write of the daemon goes through the one
+    /// connection this transaction holds, so none starts between the count
+    /// and the commit. [`InFlightRuns::Ignore`] is R24's boot recovery, which
+    /// runs before the previous process's dead runs are swept and still read
+    /// `running`.
+    pub fn repoint_rows(
+        &self,
+        old_root: &str,
+        new_root: &str,
+        old_dir: &str,
+        new_dir: &str,
+        runs: InFlightRuns,
+    ) -> Result<RebaseCounts> {
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
-            // `missing_since` is cleared with the address it described: the
-            // mark says "nothing is at `storage_path`", and `storage_path` is
-            // exactly what this statement rewrites. No stat pass inside the
-            // transaction (R32) — the read path is the authority on absence and
-            // re-stamps on the next head read if the bytes are still away.
+            if runs == InFlightRuns::Refuse {
+                let in_flight = tx.query_row(
+                    "SELECT COUNT(*) FROM task
+                      WHERE workspace_id = ?1 AND status IN ('queued', 'running', 'paused')",
+                    rusqlite::params![old_root],
+                    |row| row.get::<_, i64>(0),
+                )? as usize;
+                if in_flight > 0 {
+                    return Err(anyhow::Error::new(crate::project_life::RunsInFlight {
+                        root: old_root.to_string(),
+                        runs: in_flight,
+                    }));
+                }
+            }
+            let roots = rusqlite::params![old_root, new_root];
+            let sessions = tx.execute(
+                "UPDATE session SET workspace_id = ?2, updated_at = datetime('now')
+                  WHERE workspace_id = ?1",
+                roots,
+            )?;
+            let tasks = tx.execute(
+                "UPDATE task SET workspace_id = ?2, updated_at = datetime('now')
+                  WHERE workspace_id = ?1",
+                roots,
+            )?;
+            let messages = tx.execute(
+                "UPDATE conversation_messages SET workspace_root = ?2 WHERE workspace_root = ?1",
+                roots,
+            )?;
+            let followups = tx.execute(
+                "UPDATE lane_followups SET workspace_path = ?2, updated_at = datetime('now')
+                  WHERE workspace_path = ?1",
+                roots,
+            )?;
             let file_assets = tx.execute(
                 "UPDATE file_assets
                     SET project_root = ?2,
                         storage_path = CASE
-                            WHEN substr(storage_path, 1, length(?1)) = ?1
+                            WHEN substr(storage_path, 1, length(?3) + 1) IN (?3 || '/', ?3 || '\\')
+                            THEN ?4 || substr(storage_path, length(?3) + 1)
+                            WHEN substr(storage_path, 1, length(?1) + 1) IN (?1 || '/', ?1 || '\\')
                             THEN ?2 || substr(storage_path, length(?1) + 1)
                             ELSE storage_path END,
                         missing_since = NULL,
                         updated_at = datetime('now')
                   WHERE project_root = ?1",
-                rusqlite::params![old_root, new_root],
-            )?;
-            let sessions = tx.execute(
-                "UPDATE session SET workspace_id = ?2, updated_at = datetime('now')
-                  WHERE workspace_id = ?1",
-                rusqlite::params![old_root, new_root],
-            )?;
-            let tasks = tx.execute(
-                "UPDATE task SET workspace_id = ?2, updated_at = datetime('now')
-                  WHERE workspace_id = ?1",
-                rusqlite::params![old_root, new_root],
-            )?;
-            // The memory repository has no re-key path of its own, so this is
-            // the statement. `idx_memory_content_hash` is
-            // (owner_id, scope, scope_id, content_hash): re-keying onto a
-            // scope that already holds the same content would violate it, and
-            // that is exactly when the whole transaction must roll back rather
-            // than merge two projects' memories.
-            let memories = tx.execute(
-                "UPDATE memory SET scope_id = ?2, updated_at = datetime('now')
-                  WHERE scope = 'workspace' AND scope_id = ?1",
-                rusqlite::params![old_root, new_root],
+                rusqlite::params![old_root, new_root, old_dir, new_dir],
             )?;
             tx.commit()?;
             Ok(RebaseCounts {
                 file_assets,
                 sessions,
                 tasks,
-                memories,
+                messages,
+                followups,
             })
         })
     }
 
-    /// What is recorded under `root` right now — the same four members
-    /// [`Self::rebase_project`] moves, plus the runs that are still in flight
+    /// What is recorded under `root` right now — the same five members
+    /// [`Self::repoint_rows`] moves, plus the runs that are still in flight
     /// there.
     ///
     /// The preflight of `PATCH /v1/workspaces` and the body of its `--dry-run`:
@@ -1560,13 +1828,13 @@ impl<'a> ArtifactStore<'a> {
     /// one out from under a running task would rewrite the row without moving
     /// the process.
     ///
-    /// `owner_id` scopes the two members that carry one — `file_assets` and
-    /// `memory` — and fills [`WorkspaceRows::other_owners`] with what it
-    /// therefore left out. `session` and `task` have no owner column at all, so
-    /// their counts are the root's whether or not a caller is named; that
-    /// asymmetry is exactly why a root holding another owner's rows is refused
-    /// rather than partly re-based. `None` counts every owner, which is what
-    /// describing a root (rather than writing it) asks for.
+    /// `owner_id` scopes the one member that carries one — `file_assets` — and
+    /// fills [`WorkspaceRows::other_owners`] with what it therefore left out.
+    /// `session` and `task` have no owner column at all, so their counts are
+    /// the root's whether or not a caller is named; that asymmetry is exactly
+    /// why a root holding another owner's rows is refused rather than partly
+    /// re-based. `None` counts every owner, which is what describing a root
+    /// (rather than writing it) asks for.
     pub fn workspace_rows(&self, root: &str, owner_id: Option<&str>) -> Result<WorkspaceRows> {
         self.db.with_connection(|conn| {
             let count = |sql: &str| -> Result<usize> {
@@ -1582,28 +1850,19 @@ impl<'a> ArtifactStore<'a> {
                     })? as usize,
                 )
             };
-            let (file_assets, memories, other_owners) = match owner_id {
+            let (file_assets, other_owners) = match owner_id {
                 Some(_) => (
                     owned(
                         "SELECT COUNT(*) FROM file_assets
                           WHERE project_root = ?1 AND owner_id = ?2",
                     )?,
                     owned(
-                        "SELECT COUNT(*) FROM memory
-                          WHERE scope = 'workspace' AND scope_id = ?1 AND owner_id = ?2",
-                    )?,
-                    owned(
-                        "SELECT (SELECT COUNT(*) FROM file_assets
-                                  WHERE project_root = ?1 AND owner_id <> ?2)
-                              + (SELECT COUNT(*) FROM memory
-                                  WHERE scope = 'workspace' AND scope_id = ?1 AND owner_id <> ?2)",
+                        "SELECT COUNT(*) FROM file_assets
+                          WHERE project_root = ?1 AND owner_id <> ?2",
                     )?,
                 ),
                 None => (
                     count("SELECT COUNT(*) FROM file_assets WHERE project_root = ?1")?,
-                    count(
-                        "SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1",
-                    )?,
                     0,
                 ),
             };
@@ -1612,7 +1871,12 @@ impl<'a> ArtifactStore<'a> {
                     file_assets,
                     sessions: count("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
                     tasks: count("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
-                    memories,
+                    messages: count(
+                        "SELECT COUNT(*) FROM conversation_messages WHERE workspace_root = ?1",
+                    )?,
+                    followups: count(
+                        "SELECT COUNT(*) FROM lane_followups WHERE workspace_path = ?1",
+                    )?,
                 },
                 active_tasks: count(
                     "SELECT COUNT(*) FROM task
@@ -1626,15 +1890,13 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
-    /// Runs under `root` that are `queued`, `running` or `paused` — the
-    /// purge's own busy predicate, stricter than
+    /// Runs under `root` that are `queued`, `running` or `paused` — what the
+    /// delete and the re-point both refuse on, stricter than
     /// [`WorkspaceRows::active_tasks`] on purpose: a `queued` run has not
-    /// reached `running` yet, but it already named this root when it was
-    /// dispatched and is about to resolve the project's store the moment it
-    /// starts, so purging out from under it would delete the transcript it is
-    /// about to write into. The re-base predicate stays `active_tasks` —
-    /// `running`/`paused` only — because a queued run's row moves with the
-    /// rest of the transaction and loses nothing by being rewritten.
+    /// reached `running` yet, but its dispatch already resolved the project
+    /// by this root, so purging out from under it would delete the transcript
+    /// it is about to write into, and re-pointing it would move its row and
+    /// not the process.
     pub fn busy_tasks(&self, root: &str) -> Result<usize> {
         self.db.with_connection(|conn| {
             Ok(conn.query_row(
@@ -1646,318 +1908,12 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
-    /// Every distinct project root any of the four members names, sorted.
-    ///
-    /// `store purge --all` iterates this; the home scope is deliberately absent
-    /// (its rows carry `NULL`, and the home store is not a project).
-    pub fn project_roots(&self) -> Result<Vec<String>> {
-        self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT root FROM (
-                     SELECT project_root AS root FROM file_assets
-                     UNION SELECT workspace_id FROM session
-                     UNION SELECT workspace_id FROM task
-                     UNION SELECT scope_id FROM memory WHERE scope = 'workspace'
-                 ) WHERE root IS NOT NULL AND root <> ''
-                 ORDER BY root",
-            )?;
-            let roots = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok(roots)
-        })
-    }
-
-    /// What the home scope holds of the two kinds a project purge removes —
-    /// the "and these stay where they are" line of `--all`.
-    ///
-    /// `session.workspace_id` is counted as home-scope on `NULL` **or** `''`:
-    /// [`Self::project_roots`] excludes `''` from every root it names
-    /// (`root <> ''`), and the two must partition the table between them —
-    /// nothing today ever writes `''` (the column is an `Option<String>`), but
-    /// a row that did should read as "no project" rather than falling into
-    /// neither half of a `--all` plan.
-    pub fn home_scope_rows(&self) -> Result<HomeScopeRows> {
-        self.db.with_connection(|conn| {
-            let count = |sql: &str| -> Result<usize> {
-                Ok(conn.query_row(sql, [], |row| row.get::<_, i64>(0))? as usize)
-            };
-            Ok(HomeScopeRows {
-                sessions: count(
-                    "SELECT COUNT(*) FROM session
-                      WHERE workspace_id IS NULL OR workspace_id = ''",
-                )?,
-                uploads: count(
-                    "SELECT COUNT(*) FROM file_assets
-                      WHERE origin = 'upload' AND (project_root IS NULL OR project_root = '')",
-                )?,
-            })
-        })
-    }
-
-    /// What a purge of `root` would remove and what it would leave — read-only.
-    ///
-    /// The counting mirrors [`Self::purge_project`]'s statements one for one, so
-    /// a `--dry-run` and the real call cannot disagree about what is there. The
-    /// two kept members are counted for the same reason the deleted ones are:
-    /// "your artifacts and your memories stay" is a claim, and a plan that
-    /// prints it should have looked.
-    pub fn purge_plan(&self, root: &str) -> Result<PurgePlan> {
-        self.db.with_connection(|conn| {
-            let count = |sql: &str| -> Result<usize> {
-                Ok(
-                    conn.query_row(sql, rusqlite::params![root], |row| row.get::<_, i64>(0))?
-                        as usize,
-                )
-            };
-            let mut stmt =
-                conn.prepare("SELECT id, lane_key FROM session WHERE workspace_id = ?1")?;
-            let sessions = stmt
-                .query_map(rusqlite::params![root], |row| {
-                    Ok(PurgeSession {
-                        id: row.get(0)?,
-                        lane_key: row.get(1)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<PurgeSession>>>()?;
-
-            Ok(PurgePlan {
-                counts: PurgeCounts {
-                    sessions: sessions.len(),
-                    messages: count(
-                        "SELECT COUNT(*) FROM conversation_messages
-                          WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                    )?,
-                    tool_calls: count(
-                        "SELECT COUNT(*) FROM tool_execution_log
-                          WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)
-                             OR task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                    )?,
-                    followups: count(
-                        "SELECT COUNT(*) FROM lane_followups
-                          WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                    )?,
-                    tasks: count("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
-                    spans: count(
-                        "SELECT COUNT(*) FROM subagent_span
-                          WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                    )?,
-                    run_events: count(
-                        "SELECT COUNT(*) FROM event_log
-                          WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                    )?,
-                    // The one statement that cannot be copied verbatim from
-                    // `purge_project`: there the attachment rows of this
-                    // project's messages have already cascaded away, so the
-                    // surviving links are simply whatever
-                    // `conversation_message_attachments` still holds. Nothing
-                    // has been deleted here, so the same set is named the long
-                    // way — linked from a message this purge will *not* take.
-                    uploads: count(
-                        "SELECT COUNT(*) FROM file_assets
-                          WHERE origin = 'upload' AND project_root = ?1
-                            AND id NOT IN (
-                                SELECT a.file_id FROM conversation_message_attachments a
-                                  JOIN conversation_messages m ON m.id = a.message_id
-                                 WHERE m.session_id IS NULL
-                                    OR m.session_id NOT IN
-                                       (SELECT id FROM session WHERE workspace_id = ?1))",
-                    )?,
-                },
-                kept: PurgeKept {
-                    artifacts: count(
-                        "SELECT COUNT(*) FROM file_assets
-                          WHERE origin = 'produced' AND project_root = ?1",
-                    )?,
-                    memories: count(
-                        "SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1",
-                    )?,
-                },
-                sessions,
-            })
-        })
-    }
-
-    /// Delete one project's conversations, runs and uploads — **one
-    /// transaction**, rows only.
-    ///
-    /// | Goes | Because |
-    /// |---|---|
-    /// | `session` (`workspace_id`), its `conversation_messages`, `tool_execution_log` and `lane_followups` rows | the transcript is the thing being purged |
-    /// | `task` (`workspace_id`), its `subagent_span`, `event_log`, `dispatch_decisions` and `llm_call_log` rows | the run history of this project |
-    /// | `file_assets` where `origin = 'upload'`, `project_root` is this root and no message still links it | copies of what was handed to a turn |
-    ///
-    /// | Stays | Because |
-    /// |---|---|
-    /// | `file_assets` where `origin = 'produced'` | produced artifacts are never garbage-collected (§4.5) |
-    /// | an upload row a surviving message still attaches | dedup is store-blind, so the row can be another project's attachment |
-    /// | `memory` scoped to this workspace | the user's, not the store's |
-    ///
-    /// `task.session_id` on a run *outside* this root is nulled rather than
-    /// cascaded, exactly as [`ConversationRepository::delete_session`] does
-    /// (`crate::repository::conversation`). `conversation_messages.task_id` is
-    /// left dangling on purpose — migration 038 says so in as many words: a
-    /// purged run must leave the turn that started it readable.
-    ///
-    /// Rows only. The `sessions/<id>/` directories and the upload blobs are the
-    /// caller's to remove, **after** this commits — which is why the outcome
-    /// carries the exact list the transaction deleted rather than a list read
-    /// beforehand.
-    ///
-    /// **Path-scoped, not owner-scoped**, for the same reason
-    /// [`Self::rebase_project`] is: `session` and `task` carry no `owner_id`, so
-    /// a half-scoped transaction would delete a project's transcripts and leave
-    /// its uploads. The route is what makes it owner-safe — it refuses a root
-    /// holding rows the caller does not own ([`WorkspaceRows::other_owners`]).
-    ///
-    /// [`ConversationRepository::delete_session`]: crate::repository::ConversationRepository::delete_session
-    pub fn purge_project(&self, root: &str) -> Result<PurgeOutcome> {
-        self.db.with_connection(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let outcome = Self::purge_within(&tx, root)?;
-            tx.commit()?;
-            Ok(outcome)
-        })
-    }
-
-    /// [`Self::purge_project`] for **several** roots in one transaction — what
-    /// `POST /v1/workspaces/purge {"all": true}` runs.
-    ///
-    /// `--all` was all-or-nothing only for its refusals: every root was checked
-    /// before the first deletion, and then each was purged in a transaction of
-    /// its own, so a failure on the third root left the first two purged and the
-    /// `500` named none of them. One transaction makes the verb's promise true
-    /// at both ends. The outcomes come back in the order the roots were given,
-    /// so the caller can still remove each root's bytes on its own.
-    pub fn purge_projects(&self, roots: &[String]) -> Result<Vec<PurgeOutcome>> {
-        self.db.with_connection(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let mut outcomes = Vec::with_capacity(roots.len());
-            for root in roots {
-                outcomes.push(Self::purge_within(&tx, root)?);
-            }
-            tx.commit()?;
-            Ok(outcomes)
-        })
-    }
-
-    /// The statements both purge entry points run, inside a transaction the
-    /// caller owns and commits.
-    ///
-    /// The extra block keeps the body at the indentation it had inside
-    /// `with_connection`'s closure, so the extraction reads as a move rather
-    /// than a rewrite — every multi-line SQL literal below is byte for byte
-    /// what it was.
-    fn purge_within(tx: &rusqlite::Transaction<'_>, root: &str) -> Result<PurgeOutcome> {
-        {
-            // Read what is about to go, inside the transaction: this list is
-            // what the caller will remove from disk, and a list gathered before
-            // the transaction could name a session the transaction did not
-            // delete (or miss one it did).
-            let session_ids: Vec<String> = {
-                let mut stmt = tx.prepare("SELECT id FROM session WHERE workspace_id = ?1")?;
-                let ids = stmt
-                    .query_map(rusqlite::params![root], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?;
-                ids
-            };
-            // Every statement below binds the same one parameter.
-            let bind = rusqlite::params![root];
-
-            // Session-keyed rows first: the sub-selects below read `session`,
-            // so its own rows go last of the group.
-            let messages = tx.execute(
-                "DELETE FROM conversation_messages
-                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let tool_calls = tx.execute(
-                "DELETE FROM tool_execution_log
-                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)
-                     OR task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let followups = tx.execute(
-                "DELETE FROM lane_followups
-                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            // A run under another root that was started from one of these
-            // conversations keeps its row and loses the link.
-            tx.execute(
-                "UPDATE task SET session_id = NULL, updated_at = datetime('now')
-                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let sessions = tx.execute("DELETE FROM session WHERE workspace_id = ?1", bind)?;
-
-            // Run-keyed rows, then the runs. `subagent_span` would cascade from
-            // `task` on its own; deleting it here is what makes the count
-            // honest.
-            let spans = tx.execute(
-                "DELETE FROM subagent_span
-                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let run_events = tx.execute(
-                "DELETE FROM event_log
-                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            tx.execute(
-                "DELETE FROM dispatch_decisions
-                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            tx.execute(
-                "DELETE FROM llm_call_log
-                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
-                bind,
-            )?;
-            let tasks = tx.execute("DELETE FROM task WHERE workspace_id = ?1", bind)?;
-
-            // Uploads last, and only the ones nothing still links. Dedup is
-            // store-blind (`UploadStore::put` matches on sha + owner across
-            // every store), so one row can be the attachment of a message in
-            // another project's transcript. The messages of *this* project are
-            // already gone above and their attachment rows cascaded with them,
-            // so a surviving `conversation_message_attachments` row names a
-            // surviving transcript — and the store never deletes what another
-            // reader still names. `upload_paths` is read from the same filtered
-            // set so the caller unlinks exactly the blobs whose rows went.
-            const UNLINKED: &str = "origin = 'upload' AND project_root = ?1
-                 AND id NOT IN (SELECT file_id FROM conversation_message_attachments)";
-            let upload_paths: Vec<String> = {
-                let mut stmt =
-                    tx.prepare(&format!("SELECT storage_path FROM file_assets WHERE {UNLINKED}"))?;
-                let paths = stmt
-                    .query_map(bind, |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?;
-                paths
-            };
-            let uploads = tx.execute(&format!("DELETE FROM file_assets WHERE {UNLINKED}"), bind)?;
-
-            Ok(PurgeOutcome {
-                counts: PurgeCounts {
-                    sessions,
-                    messages,
-                    tool_calls,
-                    followups,
-                    tasks,
-                    spans,
-                    run_events,
-                    uploads,
-                },
-                session_ids,
-                upload_paths,
-            })
-        }
-    }
-
     /// Re-stat every produced row under `project_root` (`Some("")` = the home
     /// store, `None` = every root), stamping `missing_since` on those whose
     /// bytes are gone and recording as a version every head whose bytes were
-    /// edited outside OpenAlpaca (§4.8).
+    /// edited outside OpenAlpaca (§4.8). A result file's pointer row
+    /// (`in_project = 1`) is never swept: it has no versions, and a read
+    /// answers for its file (R37).
     ///
     /// [`VerifyReport::missing`] is how many rows *are* missing — not how many
     /// this pass newly marked — so a status caller gets the same answer every
@@ -1970,8 +1926,9 @@ impl<'a> ArtifactStore<'a> {
     /// it had already recorded and the next one resumes from there.
     pub fn verify(&self, project_root: Option<&str>) -> Result<VerifyReport> {
         let records: Vec<ArtifactRecord> = self.db.with_connection(|conn| {
-            let mut sql =
-                format!("SELECT {RECORD_COLUMNS} FROM file_assets WHERE origin = 'produced'");
+            let mut sql = format!(
+                "SELECT {RECORD_COLUMNS} FROM file_assets WHERE origin = 'produced' AND in_project = 0"
+            );
             if project_root.is_some() {
                 sql.push_str(" AND COALESCE(project_root, '') = ?1");
             }
@@ -2034,7 +1991,8 @@ impl<'a> ArtifactStore<'a> {
 /// order. Named explicitly so a later migration cannot shift the indexes.
 const RECORD_COLUMNS: &str = "id, owner_id, origin, kind, filename, mime_type, size_bytes, \
      sha256, storage_path, project_root, rel_path, task_id, agent_id, agent_template_id, \
-     version, version_count, pinned, summary, metadata_json, missing_since, created_at, updated_at";
+     version, version_count, pinned, summary, metadata_json, missing_since, created_at, updated_at, \
+     in_project";
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord> {
     let origin: String = row.get(2)?;
@@ -2062,6 +2020,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord> {
         missing_since: row.get(19)?,
         created_at: row.get(20)?,
         updated_at: row.get(21)?,
+        in_project: row.get::<_, i64>(22)? != 0,
     })
 }
 
@@ -2122,18 +2081,43 @@ fn resolve_version_path(
         }
     };
 
-    let root = artifacts_root_for(record)?;
+    // R37: a result file lives under the project root its row records — the
+    // real folder, not a store. Everything else lives under its store's
+    // `artifacts/`.
+    let root = if record.in_project {
+        PathBuf::from(
+            record
+                .project_root
+                .as_deref()
+                .with_context(|| format!("result file {id} has no project root"))?,
+        )
+    } else {
+        artifacts_root_for(record)?
+    };
     let candidate = root.join(&rel);
+    // The lead's ruling R-T18 (R37 with ST-23): a result file of a project
+    // whose root no longer leads to its own folder — gone, renamed by case
+    // only, or moved with a link left at the old path — is not there to read.
+    // It is never reached through that link or the old spelling: it is
+    // refused with the project's own error (R-T26, `ProjectMissing` — never
+    // `Gone`, whose "no longer exists" is false for both ST-23 shapes) and
+    // marked as an absent head is, until the person re-points the project and
+    // a read finds it again (below).
+    let in_missing_project = record.in_project && crate::store::projects::root_is_missing(&root);
     // Belt and braces (the rel_path came out of our own grammar). A deleted
     // project has no root to canonicalize against — that is a gone artifact,
     // not a confinement failure.
-    let path = match confine_to_root(&root, &candidate) {
-        Ok(path) => path,
-        Err(_) if !root.exists() => candidate,
-        Err(e) => return Err(e),
+    let path = if in_missing_project {
+        candidate
+    } else {
+        match confine_to_root(&root, &candidate) {
+            Ok(path) => path,
+            Err(_) if !root.exists() => candidate,
+            Err(e) => return Err(e),
+        }
     };
 
-    if !path.exists() {
+    if in_missing_project || !path.exists() {
         if is_head && record.missing_since.is_none() {
             conn.execute(
                 "UPDATE file_assets SET missing_since = datetime('now'),
@@ -2141,10 +2125,24 @@ fn resolve_version_path(
                 rusqlite::params![id],
             )?;
         }
+        if in_missing_project {
+            return Err(anyhow::Error::new(ArtifactError::ProjectMissing {
+                id: id.to_string(),
+                root: root.to_string_lossy().into_owned(),
+            }));
+        }
         return Err(anyhow::Error::new(ArtifactError::Gone {
             id: id.to_string(),
             path: path.to_string_lossy().to_string(),
         }));
+    }
+    // R37: a result file the user put back is found again.
+    if is_head && record.in_project && record.missing_since.is_some() {
+        conn.execute(
+            "UPDATE file_assets SET missing_since = NULL, updated_at = datetime('now')
+              WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
     }
     Ok(path)
 }
@@ -2166,6 +2164,9 @@ pub struct HeadProbe {
     /// The row's `sha256` when the probe was taken — phase 3's compare-and-set.
     row_sha256: String,
     work: Option<HeadWork>,
+    /// R37: a result file's row — [`ArtifactStore::check_head`] refreshes it
+    /// and records nothing.
+    project_file: Option<ArtifactRecord>,
 }
 
 /// What [`HeadProbe::observe`] has to read, once the gate says the head is
@@ -2194,7 +2195,16 @@ fn probe_for(record: &ArtifactRecord) -> HeadProbe {
     let nothing = HeadProbe {
         row_sha256: record.sha256.clone(),
         work: None,
+        project_file: None,
     };
+    // R37: a result file's bytes are the user's and never a version — not
+    // here, and not in `put`'s inline check either.
+    if record.in_project {
+        return HeadProbe {
+            project_file: Some(record.clone()),
+            ..nothing
+        };
+    }
     if record.origin != ArtifactOrigin::Produced || record.missing_since.is_some() {
         return nothing;
     }
@@ -2219,7 +2229,40 @@ fn probe_for(record: &ArtifactRecord) -> HeadProbe {
             is_text: is_text_kind_of(record),
             stamp: Some(stamp),
         }),
+        project_file: None,
     }
+}
+
+/// `rel` as one `/`-separated spelling (S4a's deferred (4)), lexically —
+/// nothing on disk is read: its `.` components and repeated separators
+/// dropped. `None` when it holds a `..` or is absolute, or when nothing is
+/// left.
+fn plain_relative_path(rel: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for component in Path::new(rel).components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_str()?),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// A result file's bytes, confined under the project root its row records —
+/// `confine_to_root` canonicalizes an existing path whole, the last component
+/// included (R31's rule), so a link out of the root is refused. `None` when
+/// the row carries no address, when its project is missing — the root no
+/// longer leads to its own folder, so nothing is read through a link left at
+/// the old path or through the old spelling (the lead's ruling R-T18; ST-23)
+/// — or when the path leaves the root.
+fn project_file_path(record: &ArtifactRecord) -> Option<PathBuf> {
+    let root = PathBuf::from(record.project_root.as_deref()?);
+    if crate::store::projects::root_is_missing(&root) {
+        return None;
+    }
+    let rel = record.rel_path.as_deref()?;
+    confine_to_root(&root, &root.join(rel)).ok()
 }
 
 impl HeadProbe {
@@ -2444,11 +2487,13 @@ struct DirRow {
 
 /// Every produced head addressed directly under `rel_dir` — the scan that both
 /// identifies the artifact being superseded and yields the next `NN-` sequence.
+/// A result file's pointer row (`in_project = 1`) addresses the user's folder,
+/// never this store, and is never one of them (R35).
 fn dir_rows(conn: &Connection, project_key: &str, rel_dir: &str) -> Result<Vec<DirRow>> {
     let prefix = format!("{rel_dir}/");
     let mut stmt = conn.prepare(
         "SELECT id, owner_id, rel_path, version FROM file_assets
-         WHERE origin = 'produced' AND COALESCE(project_root, '') = ?1
+         WHERE origin = 'produced' AND in_project = 0 AND COALESCE(project_root, '') = ?1
            AND rel_path IS NOT NULL AND rel_path LIKE ?2 ESCAPE '\\'",
     )?;
     let mut rows = stmt.query(rusqlite::params![
@@ -2582,15 +2627,17 @@ fn reclaim_empty_orphan(path: &Path) -> bool {
 /// Does any row of this store address `rel` — a head in `file_assets` or a
 /// retained version in `artifact_versions`? Scoped to `project_key`, because
 /// `rel_path` alone repeats in every store: that pair *is* the address (§4.3).
+/// A result file's pointer row (`in_project = 1`) is an address in the user's
+/// folder, not this store's, and reserves nothing here (R35).
 fn rel_path_is_referenced(conn: &Connection, project_key: &str, rel: &str) -> Result<bool> {
     let referenced: bool = conn.query_row(
         "SELECT EXISTS (
              SELECT 1 FROM file_assets
-              WHERE COALESCE(project_root, '') = ?1 AND rel_path = ?2
+              WHERE COALESCE(project_root, '') = ?1 AND rel_path = ?2 AND in_project = 0
              UNION ALL
              SELECT 1 FROM artifact_versions v
                JOIN file_assets f ON f.id = v.artifact_id
-              WHERE COALESCE(f.project_root, '') = ?1 AND v.rel_path = ?2
+              WHERE COALESCE(f.project_root, '') = ?1 AND v.rel_path = ?2 AND f.in_project = 0
          )",
         rusqlite::params![project_key, rel],
         |row| row.get(0),
@@ -2734,8 +2781,12 @@ fn write_bytes_steps(
             // head path.
             rotated_rel = Some(relative_to(artifacts_root, &version_path)?);
         } else if head_path.exists() {
+            // `.versions/…` below the head's own directory, never above it.
             if let Some(parent) = version_path.parent() {
-                fs::create_dir_all(parent)
+                let below = parent.strip_prefix(dir).with_context(|| {
+                    format!("{} is not under {}", parent.display(), dir.display())
+                })?;
+                create_below(dir, below)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
             fs::rename(head_path, &version_path).with_context(|| {
@@ -2809,7 +2860,10 @@ fn prune_versions(conn: &Connection, id: &str, max_versions: u32) -> Result<Vec<
 }
 
 /// `<store>/artifacts` for a record, recovered from its own two address
-/// columns so a changed `OPENALPACA_HOME_STORE` cannot silently re-point a row.
+/// columns so a changed `OPENALPACA_HOME_STORE` cannot silently re-point a
+/// row. A row whose columns do not carry it falls back to its scope's store
+/// through [`store_root`] — which creates nothing, and for a project no
+/// folder under `projects/` records is R12's `NotRegistered`.
 fn artifacts_root_for(record: &ArtifactRecord) -> Result<PathBuf> {
     if let Some(rel) = record.rel_path.as_deref()
         && let Some(prefix) = record.storage_path.strip_suffix(rel)
@@ -2823,7 +2877,7 @@ fn artifacts_root_for(record: &ArtifactRecord) -> Result<PathBuf> {
         Some(root) => StoreScope::Project(PathBuf::from(root)),
         None => StoreScope::Home,
     };
-    content_dir(&scope, ContentKind::Artifacts)
+    Ok(store_root(&scope)?.join(ContentKind::Artifacts.dir_name()))
 }
 
 /// `file_assets.mime_type` is NOT NULL, so a caller that supplies none gets the

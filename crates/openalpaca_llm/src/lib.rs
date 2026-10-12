@@ -1,7 +1,6 @@
 pub mod cli_backend;
 pub mod config;
 pub mod context_management;
-pub mod embedder;
 pub mod error;
 pub mod keys;
 pub mod providers;
@@ -19,17 +18,16 @@ pub use cli_backend::{
     detect_cli_backends,
 };
 pub use config::llm_config::{
-    EmbeddingsConfig, EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig,
-    ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig,
-    TimeoutsConfig, WebSearchConfig, build_router, build_router_with_secret_store,
-    collect_secret_refs, migrate_llm_secrets, read_config, resolve_key_from_config,
-    reverse_migrate_llm_secrets, write_config,
+    EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig, ModelConfigEntry,
+    OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig, TimeoutsConfig,
+    WebSearchConfig, build_router, build_router_with_secret_store, collect_secret_refs,
+    migrate_llm_secrets, read_config, resolve_key_from_config, reverse_migrate_llm_secrets,
+    write_config,
 };
 pub use config::settings_service::{
     ConfigWriter, LlmSettingsService, OrchestratorConfigResponse, ProviderEnabledOutcome,
     SetProviderEnabledError, UpdateOrchestratorRequest,
 };
-pub use embedder::{EmbedError, Embedder, build_embedder, build_embedder_with_runtime};
 pub use error::LlmError;
 pub use keys::credential_discovery::{
     CredentialDiscoveryConfig, CredentialSource, DiscoveredCredential, DiscoveredCredentialInfo,
@@ -53,8 +51,8 @@ pub use routing::rate_limiter::{
     CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
 };
 pub use routing::router::{
-    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RoutedStream,
-    RouterRequest,
+    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext,
+    RoutedStream, RouterRequest,
 };
 pub use streaming::collect_stream;
 pub use types::*;

@@ -48,6 +48,34 @@ impl Orchestrator {
         ))
     }
 
+    /// R44 (storage design §10): the conversation a turn on `lane_key`
+    /// belongs to. It names the scratch folder a turn with no project works
+    /// in. The lead's ruling R-T27: `turn_session` — the session the gateway
+    /// resolved (or opened) for this very turn and carried on
+    /// `HandleRequest::session_id` — when there is one, because the lane's
+    /// active session can change while the turn runs (another window's turn
+    /// on the same lane, a New conversation click). Only a handler reached
+    /// with no gateway falls back to the lane's active session: `None` with
+    /// no database or no session; a read that fails is one WARN and `None`,
+    /// and a tool that then needs a folder refuses with
+    /// `WorkingFolderRefusal::NoConversation`.
+    pub(in crate::orchestrator) fn turn_conversation_id(
+        &self,
+        turn_session: Option<&str>,
+        lane_key: &str,
+    ) -> Option<String> {
+        if let Some(id) = turn_session {
+            return Some(id.to_string());
+        }
+        let db = self.db.as_ref()?;
+        openalpaca_storage::ConversationRepository::new(db)
+            .active_session_id(lane_key)
+            .unwrap_or_else(|e| {
+                tracing::warn!(lane_key, "Failed to resolve the lane's conversation: {e}");
+                None
+            })
+    }
+
     /// Invoke a skill with route-telemetry capture and IntentClassified emission.
     ///
     /// Used by the deterministic skill tier in `handle_message_internal`.
@@ -59,6 +87,10 @@ impl Orchestrator {
         skill_name: &str,
         query: &str,
         lane_key: &str,
+        // R-T27 — the session the gateway resolved this turn into
+        // (`HandleRequest::session_id`): the conversation the turn's tools act
+        // for. `None` for a handler reached with no gateway.
+        turn_session: Option<&str>,
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
@@ -136,6 +168,7 @@ impl Orchestrator {
             skill_name,
             query,
             lane_key,
+            turn_session,
             ctx,
             owner_id,
             scope_ctx,

@@ -83,7 +83,6 @@ fn make_orchestrator(
         gate,
         registry,
         Some(db.clone()),
-        None,
         Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
         Arc::new(crate::orchestrator::skill_router::SkillRouter::new(
             0.65, 0.45,

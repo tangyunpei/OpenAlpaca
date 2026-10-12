@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { fileAbbr, languageFromName, toFileKind } from "./file-kind";
+import {
+  artifactKindForMime,
+  fileAbbr,
+  languageFromName,
+  toFileKind,
+} from "./file-kind";
 
 describe("file kinds", () => {
   it("maps the proposed artifact API's kinds onto the design's seven", () => {
@@ -29,10 +34,72 @@ describe("file kinds", () => {
     expect(fileAbbr("code", "kotlin")).toBe("KOT");
   });
 
+  it("says SRC when the extension holds anything but letters and digits (d7-app-3)", () => {
+    // A result file's name is the agent's, and its extension is drawn on the
+    // badge: a bidi override or a zero-width space there is never drawn.
+    expect(fileAbbr("code", "\u{202E}xyz")).toBe("SRC");
+    expect(fileAbbr("code", "x\u{200B}y")).toBe("SRC");
+    expect(fileAbbr("code", "a-b")).toBe("SRC");
+    expect(fileAbbr("code", "kt2")).toBe("KT2");
+  });
+
   it("says SRC rather than guessing when the language is unknown", () => {
     expect(fileAbbr("code")).toBe("SRC");
     expect(fileAbbr("code", null)).toBe("SRC");
     expect(fileAbbr("code", "")).toBe("SRC");
+  });
+
+  // Every row of `artifact_kind_for_mime_follows_the_r25_table` and
+  // `artifact_kind_for_mime_ignores_parameters_and_case`
+  // (`crates/openalpaca_storage/src/models/artifact.rs`): the kind the daemon
+  // stores for an upload, which the Library badges (G3a).
+  it.each([
+    ["image/png", "image"],
+    ["image/jpeg", "image"],
+    ["image/svg+xml", "image"],
+    ["text/html", "html"],
+    ["application/xhtml+xml", "html"],
+    ["text/markdown", "markdown"],
+    ["text/x-markdown", "markdown"],
+    ["text/csv", "table"],
+    ["text/tab-separated-values", "table"],
+    ["text/plain", "code"],
+    ["text/x-python", "code"],
+    ["text/yaml", "code"],
+    ["application/json", "code"],
+    ["application/yaml", "code"],
+    ["application/toml", "code"],
+    ["application/xml", "code"],
+    ["application/javascript", "code"],
+    ["application/pdf", "binary"],
+    ["application/zip", "binary"],
+    ["application/octet-stream", "binary"],
+    ["audio/mpeg", "binary"],
+    ["", "binary"],
+    ["text/HTML; charset=utf-8", "html"],
+    ["  text/markdown  ", "markdown"],
+  ] as const)("projects %s to the daemon's %s", (mime, kind) => {
+    expect(artifactKindForMime(mime)).toBe(kind);
+  });
+
+  // The port's `CODE_MIME_TYPES` is the daemon's list, kept equal by hand:
+  // every entry of the Rust `CODE_MIME_TYPES` is stored as `code`.
+  it.each([
+    "application/json",
+    "application/ld+json",
+    "application/yaml",
+    "application/x-yaml",
+    "application/toml",
+    "application/x-toml",
+    "application/xml",
+    "application/javascript",
+    "application/ecmascript",
+    "application/typescript",
+    "application/sql",
+    "application/x-python-code",
+    "application/x-sh",
+  ])("stores %s as code, as the daemon's list does", (mime) => {
+    expect(artifactKindForMime(mime)).toBe("code");
   });
 
   it("reads a language off a filename", () => {

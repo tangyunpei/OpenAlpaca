@@ -1,12 +1,13 @@
 /**
  * The complete icon set (DESIGN_SPEC §6).
  *
- * Four inline SVGs — that is every icon in the design. No icon library is
+ * Four inline SVGs — that is every icon in the design — plus a fifth for the
+ * Memory view the design predates (memory redesign G30). No icon library is
  * installed on purpose: everything else the UI draws as an "icon" (`✓ ★ ☆ ‹ ›
  * ▴ ▾ ↗ ↵ ⏎ ⇧ ⌘ · — →`) is a text glyph rendered in IBM Plex and must stay
  * text so it inherits colour, size and font metrics.
  *
- * All four share `viewBox="0 0 24 24"`, `fill="none"`, `stroke="currentColor"`,
+ * All five share `viewBox="0 0 24 24"`, `fill="none"`, `stroke="currentColor"`,
  * `stroke-width="1.8"` and are sized by the `size` prop: 15 in the nav rail,
  * 14 for the settings gear.
  */
@@ -72,6 +73,16 @@ export function LibraryIcon(props: IconProps) {
   return (
     <Svg {...props}>
       <path d="M4 4h5l2 3h9v13H4z" />
+    </Svg>
+  );
+}
+
+/** Memory — a page with its corner folded and three lines of text. */
+export function MemoryIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3h9l4 4v14H6z" />
+      <path d="M15 3v4h4M9 11h6M9 14.5h6M9 18h4" />
     </Svg>
   );
 }

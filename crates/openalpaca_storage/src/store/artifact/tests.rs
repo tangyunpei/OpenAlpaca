@@ -530,6 +530,78 @@ fn no_kind_grants_a_universally_blocked_active_content_extension() {
     }
 }
 
+/// G2: a `file_write` saved as an artifact takes its kind from its own
+/// extension, read off R21's sets in the kinds' declared order — so the
+/// extension always survives `artifact_extension`, and one no kind admits
+/// maps to nothing.
+#[test]
+fn kind_for_file_name_reads_the_r21_sets_in_declared_order() {
+    for (name, kind) in [
+        ("reports/pasta-night.md", ArtifactKind::Markdown),
+        ("NOTES.TXT", ArtifactKind::Markdown),
+        ("src/main.rs", ArtifactKind::Code),
+        ("data.json", ArtifactKind::Code),
+        ("run.log", ArtifactKind::Terminal),
+        ("table.csv", ArtifactKind::Table),
+        ("chart.png", ArtifactKind::Image),
+        ("index.html", ArtifactKind::Html),
+        ("bundle.zip", ArtifactKind::Binary),
+    ] {
+        assert_eq!(kind_for_file_name(name), Some(kind), "{name}");
+        let ext = Path::new(name)
+            .extension()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert_eq!(
+            artifact_extension(kind, None, Some(name)),
+            ext,
+            "{name} keeps its extension"
+        );
+    }
+    for name in [
+        "Makefile",
+        "build.sh",
+        "logo.svg",
+        "setup.exe",
+        "reports.d/notes",
+    ] {
+        assert_eq!(kind_for_file_name(name), None, "{name}");
+    }
+}
+
+/// ST-18: Open hands a result file to the system's default app only when a
+/// kind keeps its extension (R21's sets); a script, an SVG, an executable and
+/// every name with no extension — `Makefile`, `Dockerfile`, a dotfile — get
+/// Reveal only.
+#[test]
+fn only_a_name_a_kind_keeps_opens_in_the_default_app() {
+    for name in [
+        "docs/plan.md",
+        "src/main.rs",
+        "data.json",
+        "chart.png",
+        "index.html",
+        "report.pdf",
+        "config.env",
+    ] {
+        assert!(opens_in_default_app(name), "{name}");
+    }
+    for name in [
+        "scripts/build.sh",
+        "Run.command",
+        "logo.svg",
+        "setup.exe",
+        "Makefile",
+        "Dockerfile",
+        ".env",
+        "src/.gitignore",
+    ] {
+        assert!(!opens_in_default_app(name), "{name}");
+    }
+}
+
 // ============================================================================
 // D2 upload placement
 // ============================================================================
@@ -549,15 +621,19 @@ fn upload_dir_is_uploads_date() {
 #[test]
 fn upload_dir_confines_to_the_uploads_root_for_a_project_scope() {
     let tmp = tempdir().unwrap();
-    let project = fs::canonicalize(tmp.path()).unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home"));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    crate::store::projects::register(&project).unwrap();
+    let scope = StoreScope::Project(project);
     let created = Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap();
 
-    let dir = upload_dir(&StoreScope::Project(project.clone()), created).unwrap();
+    let dir = upload_dir(&scope, created).unwrap();
     assert_eq!(
         dir,
-        project
-            .join(".openalpaca")
-            .join("uploads")
+        content_dir(&scope, ContentKind::Uploads)
+            .unwrap()
             .join("2026-09-02")
     );
 }
@@ -581,7 +657,11 @@ fn upload_file_name_grammar() {
 #[test]
 fn full_grammar_matches_the_worked_example_in_the_plan() {
     let tmp = tempdir().unwrap();
-    let project = fs::canonicalize(tmp.path()).unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home"));
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    crate::store::projects::register(&project).unwrap();
     let scope = StoreScope::Project(project);
     let created = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap();
     let task_id = "3f2a1b7c-1111-4222-8333-444455556666";

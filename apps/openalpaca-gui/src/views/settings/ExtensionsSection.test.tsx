@@ -254,8 +254,75 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
       screen.getByText("Asks for: fs_write — starts on approval"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("You denied this plugin — stays off after approval"),
+      screen.getByText(
+        "You denied this plugin. Declares no capabilities — stays off after approval",
+      ),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * The consent row is an approval surface: the plugin's id and what it asks
+   * for are its author's strings, so each hidden character is drawn as a
+   * highlighted `<U+XXXX>` — never raw — with the count under them. Approve
+   * still answers for the plugin the daemon listed, id untouched.
+   */
+  it("shows a pending plugin's hidden characters, and approves the real id", async () => {
+    state.rows = [
+      extensionRow({
+        id: "no\u202Etes",
+        version: "1.0\u200B",
+        state: "unapproved",
+        reason: "never_seen",
+        declared: {
+          capabilities: ["fs\u200B_write"],
+          virtual_capabilities: [],
+          types: { tool: true },
+        },
+      }),
+    ];
+    const { container } = render(<ExtensionsSection />);
+
+    expect(container.textContent).not.toMatch(/[\u202E\u200B]/);
+    expect(
+      Array.from(
+        container.querySelectorAll("[data-hidden-char]"),
+        (node) => node.textContent,
+      ),
+    ).toEqual(["<U+202E>", "<U+200B>", "<U+200B>"]);
+    expect(container.textContent).toContain("no<U+202E>tes");
+    expect(container.textContent).toContain(
+      "Asks for: fs<U+200B>_write — starts on approval",
+    );
+    // The version beside Approve is the manifest's free text: escaped,
+    // counted, and wrapped within its own width rather than widening the
+    // row past Approve and Deny.
+    const version = screen.getByText("v1.0", { exact: false });
+    expect(version.textContent).toBe("v1.0<U+200B>");
+    expect(version.className).toContain("wrap-anywhere");
+    expect(version.className).toMatch(/max-w-/);
+    expect(
+      screen.getByText(
+        "Note: this request contains 3 hidden characters, shown as <U+…>.",
+      ),
+    ).toBeInTheDocument();
+    // The id wraps at the row's edge instead of being cut with an ellipsis,
+    // which could hide an escape the count says is there.
+    const name = container.querySelector("[data-hidden-char]")?.parentElement;
+    expect(name?.className).toContain("wrap-anywhere");
+    expect(name?.className).not.toContain("truncate");
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Approve" }));
+    expect(state.calls).toEqual([{ id: "no\u202Etes", verb: "approve" }]);
+  });
+
+  it("still cuts an ordinary row's name with an ellipsis", () => {
+    state.rows = [extensionRow({ kind: "mcp", id: "github", version: "1.2" })];
+    render(<ExtensionsSection />);
+    expect(screen.getByText("github").className).toContain("truncate");
+    // …and its version is drawn as it was, unbounded.
+    expect(screen.getByText("v1.2").className).not.toContain("wrap-anywhere");
   });
 
   it("removes an orphan, and offers Remove nowhere else", async () => {

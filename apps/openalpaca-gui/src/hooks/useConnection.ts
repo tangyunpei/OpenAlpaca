@@ -74,8 +74,8 @@ export function useHealth(): UseQueryResult<HealthResponse> {
 
 /**
  * `GET /v1/status` — the daemon's own numbers (uptime, schema version, log
- * path, store sizes) plus the canonical root it resolves this window's project
- * path to (R50).
+ * path, store sizes) plus the project root it resolves this window's project
+ * path to (R50) — canonical when recorded, as written once missing (ST-23).
  *
  * Asked even with no project. It used to be disabled there, because the only
  * field that moved was `project_root` and `null` is what "no project" already
@@ -147,10 +147,10 @@ export interface ConnectionStatus {
    * Why the last attempt to reach the daemon failed, verbatim, or `null`.
    *
    * For a daemon that would not start this is `ensure_daemon_running`'s
-   * rejection, which ends with the daemon's own log lines — a legacy-schema
-   * database, an older install's data, another daemon holding the lock. It
-   * used to reach nobody: the sidecar's output went to `/dev/null`. A later
-   * socket failure does not replace it (a daemon that died after writing
+   * rejection, which ends with the daemon's own log lines — a database this
+   * build does not know, another daemon holding the lock. It used to reach
+   * nobody: the sidecar's output went to `/dev/null`. A
+   * later socket failure does not replace it (a daemon that died after writing
    * discovery leaves a stale endpoint the ladder dials); only a socket that
    * opens clears it.
    */

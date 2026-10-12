@@ -1,0 +1,2 @@
+  PID ELAPSED COMMAND
+60493   17:48 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad

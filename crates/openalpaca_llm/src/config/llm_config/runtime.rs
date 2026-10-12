@@ -58,9 +58,6 @@ fn default_anthropic_usage_url() -> String {
 fn default_openai_usage_url() -> String {
     "https://api.openai.com/dashboard/billing/usage".to_string()
 }
-fn default_openai_embeddings_url() -> String {
-    "https://api.openai.com/v1/embeddings".to_string()
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointsConfig {
@@ -68,8 +65,6 @@ pub struct EndpointsConfig {
     pub anthropic_usage: String,
     #[serde(default = "default_openai_usage_url")]
     pub openai_usage: String,
-    #[serde(default = "default_openai_embeddings_url")]
-    pub openai_embeddings: String,
 }
 
 impl Default for EndpointsConfig {
@@ -77,7 +72,6 @@ impl Default for EndpointsConfig {
         Self {
             anthropic_usage: default_anthropic_usage_url(),
             openai_usage: default_openai_usage_url(),
-            openai_embeddings: default_openai_embeddings_url(),
         }
     }
 }

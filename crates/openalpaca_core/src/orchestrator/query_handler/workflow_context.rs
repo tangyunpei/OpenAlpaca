@@ -2,11 +2,12 @@
 //! workflows as a compact prompt block for the workflow-aware main loop.
 //!
 //! Injected PER-TURN into the composed message list, deliberately NOT through
-//! the compose engine's layers: Layer 3's fingerprint is keyed on query text
-//! (the `memory_retrieval_hash` is zeroed on this path), so a repeated query
-//! would serve a stale workflow status from the per-lane Tier-2 cache, and a
-//! Layer 2 raw-block would thrash the global Tier-1 LRU on every status
-//! change. See `handle_simple_query` for the injection point.
+//! the compose engine's layers: Layer 3's fingerprint is keyed on query text,
+//! so a repeated query would serve a stale workflow status from the per-lane
+//! Tier-2 cache, and a Layer 2 raw-block would thrash the global Tier-1 LRU
+//! on every status change. The memory delivery is kept out of that layer for
+//! the same reason (`compose::dynamic_context`). See `handle_simple_query`
+//! for the injection point.
 
 use crate::context::SharedContext;
 use openalpaca_storage::Database;

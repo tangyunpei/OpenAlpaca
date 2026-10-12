@@ -211,6 +211,7 @@ Collect the three required pieces of information:
      - Must match the pattern `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` (lowercase kebab-case). If invalid, say: "Skill ID must be lowercase kebab-case (e.g., 'my-skill'). Only lowercase letters, numbers, and hyphens."
      - Must be 64 characters or fewer.
      - Must NOT be a reserved name: `config`, `test`, `tests`, `example`, `examples`, `template`, `templates`, `assets`. If reserved, say: "'{id}' is a reserved directory name and cannot be used as a skill ID."
+     - Must NOT be `remember`, `forget` or `memories`: those are the chat memory commands, which the daemon answers itself, so a skill with that ID would never be reached by its slash command. If so, say: "'{id}' is reserved for a chat memory command and cannot be used as a skill ID."
    - Use `skill_script:check_exists` to verify the ID is not already taken.
 
 2. **Name** (human-readable)
@@ -228,6 +229,7 @@ Collect the three required pieces of information:
    - Ask: "What slash command should invoke this skill? (e.g., `/review`)"
    - Default: `/<skill-id>` derived from the directory name.
    - Validate: must start with `/`, and after the `/` must match `^[a-z][a-z0-9-]*$`.
+   - Must NOT be `/remember`, `/forget` or `/memories` (the chat memory commands, reserved: the daemon answers them before any skill). If so, say: "'{slash}' is reserved for a chat memory command; choose another slash command."
    - Use `skill_script:list_skills` to check for slash command conflicts.
 
 5. **Invoke mode** (`invoke.mode`)
@@ -331,6 +333,7 @@ If the user chose `mode: auto`, collect the following. If `mode: manual`, skip t
 - **Invalid permission level**: Show the three valid options and re-prompt.
 - **web_fetch + net conflict**: Auto-resolve by setting net=true and inform the user.
 - **Slash command conflict**: Use `skill_script:list_skills` output to detect. Warn the user.
+- **Reserved memory command**: `remember`, `forget` and `memories` (as an ID or as `/remember`, `/forget`, `/memories`) are refused; the scripts refuse them too.
 - **Script failure**: If any script tool returns an error, report it to the user with the error message.
 
 ## Style

@@ -12,7 +12,7 @@
 //! with no behaviour change. Read "conversation" as "session" throughout.
 
 use crate::Database;
-use crate::models::conversation::{Conversation, ConversationMessage};
+use crate::models::conversation::{Conversation, ConversationMessage, LearningRow};
 use crate::sql::escape_like;
 use anyhow::Result;
 use rusqlite::OptionalExtension;
@@ -20,8 +20,8 @@ use rusqlite::OptionalExtension;
 /// Every column [`ConversationRepository::row_to_session`] reads, in order.
 /// Written once so a column cannot reach one `SELECT` and miss another.
 const SESSION_COLUMNS: &str = "id, lane_key, source, title, message_count, last_message_at, \
-     created_at, updated_at, summary, summary_version, last_summarized_message_id, \
-     summary_updated_at, workspace_id, status, ended_at";
+     created_at, updated_at, working_state, working_state_version, working_state_through, \
+     working_state_updated_at, workspace_id, status, ended_at, episode_note_id, inherit";
 
 /// Every column [`ConversationRepository::row_to_message`] reads, in order.
 ///
@@ -30,7 +30,14 @@ const SESSION_COLUMNS: &str = "id, lane_key, source, title, message_count, last_
 /// `task_id` was exactly that bug), and the older-context window that motivated
 /// the narrow form discards everything but `(id, role, content)` anyway.
 const MESSAGE_COLUMNS: &str = "id, lane_key, role, content, source, model, tokens_in, \
-     tokens_out, duration_ms, created_at, content_json, display_text, task_id, session_id";
+     tokens_out, duration_ms, created_at, content_json, display_text, task_id, session_id, \
+     request_id, workspace_root";
+
+/// Every column [`ConversationRepository::row_to_learning_row`] reads, in
+/// order — and every column a learning window may read at all (design 09
+/// §1.2). Never `content_json` or `display_text`: on an attachment turn they
+/// carry the files' extracted text (U2).
+const LEARNING_COLUMNS: &str = "id, role, content, source, created_at, request_id, workspace_root";
 
 /// The page [`ConversationRepository::list_sessions`] serves when the caller
 /// asks for a non-positive one. `LIMIT -1` means *no limit* in SQLite, so an
@@ -107,8 +114,8 @@ impl<'a> ConversationRepository<'a> {
         self.db.with_connection(|conn| {
             let session_id = Self::resolve_session_id(conn, msg)?;
             conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, content_json, display_text, task_id, session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, content_json, display_text, task_id, session_id, request_id, workspace_root)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 (
                     &msg.lane_key,
                     &msg.role,
@@ -122,6 +129,8 @@ impl<'a> ConversationRepository<'a> {
                     display_text,
                     &msg.task_id,
                     &session_id,
+                    &msg.request_id,
+                    &msg.workspace_root,
                 ),
             )?;
             Ok(conn.last_insert_rowid())
@@ -291,6 +300,141 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// A session's learning window (design 09 §1.2): its rows with
+    /// `id > after_id`, in id order, at most `limit` of them — through
+    /// `idx_conv_msg_session`, and reading only [`LearningRow`]'s columns.
+    pub fn learning_window(
+        &self,
+        session_id: &str,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<LearningRow>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LEARNING_COLUMNS}
+                 FROM conversation_messages
+                 WHERE session_id = ?1 AND id > ?2
+                 ORDER BY id ASC
+                 LIMIT ?3",
+            ))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![session_id, after_id, limit],
+                    Self::row_to_learning_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// The newest `limit` rows of a session with `id <= at_or_before_id`, in
+    /// id order: where a window's `context` rows come from (design 09 §1.2).
+    /// The same columns as [`Self::learning_window`], and nothing else.
+    pub fn learning_rows_before(
+        &self,
+        session_id: &str,
+        at_or_before_id: i64,
+        limit: i64,
+    ) -> Result<Vec<LearningRow>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LEARNING_COLUMNS} FROM (
+                     SELECT {LEARNING_COLUMNS}
+                     FROM conversation_messages
+                     WHERE session_id = ?1 AND id <= ?2
+                     ORDER BY id DESC
+                     LIMIT ?3
+                 )
+                 ORDER BY id ASC",
+            ))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![session_id, at_or_before_id, limit],
+                    Self::row_to_learning_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// The rows with these ids that still exist, in id order, reading only
+    /// [`LearningRow`]'s columns — how a suggestion's cited `message` sources
+    /// are told apart into rows the user typed and everything else (design 09
+    /// §4.2 rule 5), through the primary key.
+    pub fn learning_rows_by_ids(&self, ids: &[i64]) -> Result<Vec<LearningRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db.with_connection(|conn| {
+            let marks = vec!["?"; ids.len()].join(", ");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {LEARNING_COLUMNS} FROM conversation_messages
+                 WHERE id IN ({marks})
+                 ORDER BY id ASC",
+            ))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(ids.iter()),
+                    Self::row_to_learning_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// The user row a turn wrote (`request_id`, migration 044), reading only
+    /// [`LearningRow`]'s columns; `None` when that turn wrote none. With the
+    /// turn's lane, the read walks that lane's rows newest first
+    /// (`idx_conv_msg_lane_id`), where a turn's own row is near the top. The
+    /// chat model's suggestion cites it (owner decision LQ11, design 09
+    /// §4.2 rule 5).
+    pub fn user_row_of_request(
+        &self,
+        lane_key: Option<&str>,
+        request_id: &str,
+    ) -> Result<Option<LearningRow>> {
+        self.db.with_connection(|conn| {
+            let row = match lane_key {
+                Some(lane) => conn
+                    .query_row(
+                        &format!(
+                            "SELECT {LEARNING_COLUMNS} FROM conversation_messages
+                             WHERE lane_key = ?1 AND request_id = ?2 AND role = 'user'
+                             ORDER BY id DESC LIMIT 1",
+                        ),
+                        rusqlite::params![lane, request_id],
+                        Self::row_to_learning_row,
+                    )
+                    .optional()?,
+                None => conn
+                    .query_row(
+                        &format!(
+                            "SELECT {LEARNING_COLUMNS} FROM conversation_messages
+                             WHERE request_id = ?1 AND role = 'user'
+                             ORDER BY id DESC LIMIT 1",
+                        ),
+                        rusqlite::params![request_id],
+                        Self::row_to_learning_row,
+                    )
+                    .optional()?,
+            };
+            Ok(row)
+        })
+    }
+
+    /// Every message id one session holds, in id order. Deleting or clearing
+    /// a conversation reads them first: its conversation summaries are the
+    /// notes whose sources all lie among them (design 09 §13.3).
+    pub fn message_ids(&self, session_id: &str) -> Result<Vec<i64>> {
+        self.db.with_connection(|conn| {
+            let ids = conn
+                .prepare("SELECT id FROM conversation_messages WHERE session_id = ?1 ORDER BY id")?
+                .query_map([session_id], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(ids)
+        })
+    }
+
     /// Delete all messages for a lane. Returns the number of deleted rows.
     pub fn delete_by_lane(&self, lane_key: &str) -> Result<u64> {
         self.db.with_connection(|conn| {
@@ -412,6 +556,20 @@ impl<'a> ConversationRepository<'a> {
         workspace_path: Option<&str>,
         title: Option<&str>,
     ) -> Result<Conversation> {
+        self.create_session_inheriting(lane_key, source, workspace_path, title, true)
+    }
+
+    /// [`Self::create_session`], saying whether the new conversation is given
+    /// the previous one's state (design 11 §4 (b), owner decision CQ-5):
+    /// `false` starts it fresh, for good.
+    pub fn create_session_inheriting(
+        &self,
+        lane_key: &str,
+        source: &str,
+        workspace_path: Option<&str>,
+        title: Option<&str>,
+        inherit: bool,
+    ) -> Result<Conversation> {
         let id = uuid::Uuid::new_v4().to_string();
         self.db.with_connection_mut(|conn| {
             let tx = conn.transaction()?;
@@ -421,9 +579,10 @@ impl<'a> ConversationRepository<'a> {
                 [lane_key],
             )?;
             tx.execute(
-                "INSERT INTO session (id, lane_key, source, title, workspace_id, status, message_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', 0)",
-                rusqlite::params![id, lane_key, source, title.unwrap_or(""), workspace_path],
+                "INSERT INTO session (id, lane_key, source, title, workspace_id, status, message_count,
+                                      inherit)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', 0, ?6)",
+                rusqlite::params![id, lane_key, source, title.unwrap_or(""), workspace_path, inherit],
             )?;
             tx.commit()?;
             Ok(())
@@ -518,6 +677,59 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// Name a session that has no title yet (G5, Round G) — `false` when it
+    /// has one, or is unknown.
+    ///
+    /// Guarded in the statement itself (`AND title = ''`), not by a read
+    /// before it: a rename that lands between a turn's read of the session and
+    /// this write is never overwritten, and of two turns racing to name the
+    /// same conversation exactly one writes.
+    pub fn set_title_if_empty(&self, session_id: &str, title: &str) -> Result<bool> {
+        self.db.with_connection(|conn| {
+            let changed = conn.execute(
+                "UPDATE session SET title = ?1, updated_at = datetime('now')
+                 WHERE id = ?2 AND title = ''",
+                rusqlite::params![title, session_id],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// What an untitled session is named from (G5, Round G): `title` of the
+    /// first of its user rows, oldest first, that `title` answers for.
+    ///
+    /// One `SELECT`, stepped only as far as that row. A conversation whose
+    /// first message was a slash command or a file alone is named by its
+    /// first sentence, and one an older build left untitled by its first
+    /// stored user row. Reads `content` — the text as typed — never
+    /// `display_text`, whose `[Attachments: …]` suffix nobody typed; and
+    /// skips a row of source `internal`, a follow-up the daemon re-entered
+    /// on the user's behalf (the assistant's own `queue_followup` text, as
+    /// learning reads it — `source <> 'internal'` in `learning_cursor.rs`).
+    /// A row with no source is an older build's and is read.
+    pub fn title_from_user_rows(
+        &self,
+        session_id: &str,
+        title: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<String>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT content FROM conversation_messages
+                 WHERE session_id = ?1 AND role = 'user'
+                   AND COALESCE(source, '') <> 'internal'
+                 ORDER BY id",
+            )?;
+            let mut rows = stmt.query([session_id])?;
+            while let Some(row) = rows.next()? {
+                let content: String = row.get(0)?;
+                if let Some(found) = title(&content) {
+                    return Ok(Some(found));
+                }
+            }
+            Ok(None)
+        })
+    }
+
     /// Delete a session, its messages, and the run links that pointed at it.
     ///
     /// One transaction, not three statements: a half-deleted session leaves
@@ -562,6 +774,9 @@ impl<'a> ConversationRepository<'a> {
                   WHERE session_id = ?1",
                 [id],
             )?;
+            // Learning v2 (design 09 §1.3): the session's learning cursor goes
+            // with it. Its unlearned turns went with the messages (LQ4).
+            tx.execute("DELETE FROM learning_cursor WHERE session_id = ?1", [id])?;
             tx.execute("DELETE FROM session WHERE id = ?1", [id])?;
             tx.commit()?;
             Ok(true)
@@ -609,6 +824,30 @@ impl<'a> ConversationRepository<'a> {
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<String>>>()?;
             Ok(ids)
+        })
+    }
+
+    /// The conversation a new one on `lane_key` continues from (design 11 §4
+    /// (b)): the lane's **newest** archived session — the last one closed —
+    /// bound to `workspace_id` (`IS`: no workspace matches no workspace). Only
+    /// that one: an older session is never read in its place, whatever it
+    /// holds.
+    pub fn previous_session(
+        &self,
+        lane_key: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<Option<Conversation>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM session
+                 WHERE lane_key = ?1 AND status = 'archived' AND workspace_id IS ?2
+                 ORDER BY ended_at DESC, rowid DESC LIMIT 1",
+            ))?;
+            let mut rows = stmt.query(rusqlite::params![lane_key, workspace_id])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(Self::row_to_session(row)?)),
+                None => Ok(None),
+            }
         })
     }
 
@@ -765,12 +1004,12 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Get summary data for the lane's active session.
-    /// Returns (summary, summary_version, last_summarized_message_id).
+    /// Get the working state of the lane's active session.
+    /// Returns (working_state, working_state_version, working_state_through).
     pub fn get_summary(&self, lane_key: &str) -> Result<(String, i64, i64)> {
         self.db.with_connection(|conn| {
             let result = conn.query_row(
-                "SELECT summary, summary_version, last_summarized_message_id FROM session WHERE lane_key = ?1 AND status = 'active'",
+                "SELECT working_state, working_state_version, working_state_through FROM session WHERE lane_key = ?1 AND status = 'active'",
                 [lane_key],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             ).optional()?;
@@ -778,33 +1017,54 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Update the active session's summary with optimistic locking.
-    /// Returns true if the update succeeded.
-    pub fn update_summary_optimistic(
+    /// Write one session's working state (design 11 §2) with optimistic
+    /// locking: only while the row still holds `expected_version`, which the
+    /// write bumps. Addressed by the session's id, never by its lane, so a
+    /// state computed for one conversation cannot land in the one the lane
+    /// switched to meanwhile — and an archived conversation can still be
+    /// written. Returns true if the update succeeded.
+    pub fn update_working_state(
         &self,
-        lane_key: &str,
+        session_id: &str,
         expected_version: i64,
-        summary: &str,
-        last_id: i64,
+        state: &str,
+        through: i64,
     ) -> Result<bool> {
         self.db.with_connection(|conn| {
             let rows = conn.execute(
-                "UPDATE session SET summary = ?1, summary_version = summary_version + 1,
-                 last_summarized_message_id = ?2, summary_updated_at = datetime('now'),
+                "UPDATE session SET working_state = ?1, working_state_version = working_state_version + 1,
+                 working_state_through = ?2, working_state_updated_at = datetime('now'),
                  updated_at = datetime('now')
-                 WHERE lane_key = ?3 AND status = 'active' AND summary_version = ?4",
-                rusqlite::params![summary, last_id, lane_key, expected_version],
+                 WHERE id = ?3 AND working_state_version = ?4",
+                rusqlite::params![state, through, session_id, expected_version],
             )?;
             Ok(rows > 0)
         })
     }
 
-    /// Clear the summary and reset counters for the lane's active session.
+    /// Records the conversation summary last written for one session (design
+    /// 11 §2, §3.4): the `episode` note's id, which a close writes after the
+    /// note lands. Addressed by the session's id, as
+    /// the state is; an archived conversation is written too.
+    pub fn set_episode_note_id(&self, session_id: &str, note_id: &str) -> Result<()> {
+        self.db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE session SET episode_note_id = ?1 WHERE id = ?2",
+                rusqlite::params![note_id, session_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Clear the working state and reset counters for the lane's active
+    /// session. The summary last written for it goes too: a history clear
+    /// forgets it (LQ4), so the session no longer names it.
     pub fn clear_summary(&self, lane_key: &str) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "UPDATE session SET summary = '', summary_version = 0,
-                 last_summarized_message_id = 0, summary_updated_at = datetime('now'),
+                "UPDATE session SET working_state = '', working_state_version = 0,
+                 working_state_through = 0, working_state_updated_at = datetime('now'),
+                 episode_note_id = NULL,
                  message_count = 0, last_message_at = NULL, updated_at = datetime('now')
                  WHERE lane_key = ?1 AND status = 'active'",
                 [lane_key],
@@ -813,12 +1073,14 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// Clear the summary and reset counters for one session by id.
+    /// Clear the working state and reset counters for one session by id, as
+    /// [`Self::clear_summary`] does.
     pub fn clear_summary_for_session(&self, session_id: &str) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "UPDATE session SET summary = '', summary_version = 0,
-                 last_summarized_message_id = 0, summary_updated_at = datetime('now'),
+                "UPDATE session SET working_state = '', working_state_version = 0,
+                 working_state_through = 0, working_state_updated_at = datetime('now'),
+                 episode_note_id = NULL,
                  message_count = 0, last_message_at = NULL, updated_at = datetime('now')
                  WHERE id = ?1",
                 [session_id],
@@ -953,13 +1215,15 @@ impl<'a> ConversationRepository<'a> {
             last_message_at: row.get(5)?,
             created_at: row.get(6)?,
             updated_at: row.get(7)?,
-            summary: row.get(8)?,
-            summary_version: row.get(9)?,
-            last_summarized_message_id: row.get(10)?,
-            summary_updated_at: row.get(11)?,
+            working_state: row.get(8)?,
+            working_state_version: row.get(9)?,
+            working_state_through: row.get(10)?,
+            working_state_updated_at: row.get(11)?,
             workspace_id: row.get(12)?,
             status: row.get(13)?,
             ended_at: row.get(14)?,
+            episode_note_id: row.get(15)?,
+            inherit: row.get(16)?,
         })
     }
 
@@ -979,6 +1243,20 @@ impl<'a> ConversationRepository<'a> {
             display_text: row.get(11)?,
             task_id: row.get(12)?,
             session_id: row.get(13)?,
+            request_id: row.get(14)?,
+            workspace_root: row.get(15)?,
+        })
+    }
+
+    fn row_to_learning_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningRow> {
+        Ok(LearningRow {
+            id: row.get(0)?,
+            role: row.get(1)?,
+            content: row.get(2)?,
+            source: row.get(3)?,
+            created_at: row.get(4)?,
+            request_id: row.get(5)?,
+            workspace_root: row.get(6)?,
         })
     }
 }

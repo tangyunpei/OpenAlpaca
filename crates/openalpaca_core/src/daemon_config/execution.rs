@@ -133,14 +133,16 @@ impl Default for ArtifactsConfig {
 
 /// Context budget and compaction configuration.
 ///
-/// Controls autocompact buffer sizing, compaction target, and extraction limits.
-/// Deserialized from `[execution.context]` in daemon.toml.
+/// Controls autocompact buffer sizing, the compaction target and the recent
+/// tail compaction keeps. Deserialized from `[execution.context]` in
+/// daemon.toml. Compaction's model is `[orchestrator.costs] summary_model`
+/// (design 11, CQ-3); a `compaction_model` left in a hand-edited file is
+/// ignored like any stale key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextBudgetConfig {
     pub autocompact_buffer_ratio: f64,
     pub compaction_target_ratio: f64,
-    pub compaction_model: Option<String>,
     pub min_recent_messages: usize,
 }
 
@@ -149,7 +151,6 @@ impl Default for ContextBudgetConfig {
         Self {
             autocompact_buffer_ratio: 0.165,
             compaction_target_ratio: 0.50,
-            compaction_model: None,
             min_recent_messages: 4,
         }
     }

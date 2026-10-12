@@ -1,0 +1,3093 @@
+//! A memory partition on disk: `<store>/memory/owners/<owner-key>/` with its
+//! `notes/`, `.history/` and `MEMORY.md`, bound to one control snapshot under
+//! `<home-store>/state/memory-control/<partition-key>.json` (design §2).
+//!
+//! **Opening never creates anything** (a read never creates the project
+//! store, design §3 rule 1); the first write lays the partition out lazily —
+//! private directories and an initial snapshot — in one place,
+//! [`Partition::ensure_laid_out`].
+//!
+//! **Every mutation touches at most one note file** (design §6): the steps of
+//! the mutation table are [`Partition::commit_write`] and [`Partition::forget`],
+//! the recovery column is [`Partition::recover`], run at every open of a
+//! partition whose snapshot is valid. In tests a [`CrashPoint`] stops a
+//! mutation after a named step with the disk exactly as it was.
+
+use super::authority::{Conflict, Derivation, DerivedNote, EffectiveStatus, NoteInput, derive};
+use super::cache::{FileEntry, NoteParseCache, ParsedNote, StatKey};
+use super::dirstat;
+use super::fsx::{
+    canonical_string_lenient, create_private_dir, create_private_dir_below, fsync_dir,
+    read_regular_nofollow, real_directory_state, remove_dir_all_if_exists, remove_file_if_exists,
+    write_atomic_private,
+};
+use super::note::{NewNote, Note, NoteId, NotePatch, NoteStatus, ReplacePolicy, to_second};
+use super::snapshot::{
+    ControlSnapshot, NoteRecord, Origin, Pending, SnapshotError, SnapshotScope, Tombstone,
+    save_generation,
+};
+use super::{
+    CONTROL_DIR, HISTORY_DIR, HISTORY_KEEP, MemoryFilesError, NAVIGATION_FILE, NOTES_DIR,
+    OWNERS_DIR, home_partition_key, is_owner_key, is_partition_key, is_revision, owner_key,
+    project_partition_key,
+};
+use crate::store::projects::{self, ProjectId};
+use crate::store::{ContentKind, StoreScope, home_root, state_dir};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::SystemTime;
+
+type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+
+thread_local! {
+    /// How many whole-partition parses this thread has made — the cost
+    /// design 09 §4.5 keeps off the reply path. Read by tests only.
+    static WHOLE_PARSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// How many `notes/` stat scans this thread has made (design 09 §6.3).
+    /// Read by tests only.
+    static SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// How many note files this thread has read from disk (design 09 §6.3).
+    /// Read by tests only.
+    static FILE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// How many whole copies of a control snapshot [`Partition::snapshot`]
+    /// has handed out on this thread. Read by tests only.
+    static SNAPSHOT_COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Tests: which snapshot save of this thread fails, counting the next
+    /// as 1; 0 fails none ([`fail_snapshot_save`]).
+    #[cfg(test)]
+    static FAILING_SAVE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Tests: whether the stat of the next note file this thread writes
+    /// fails ([`fail_written_stat`]).
+    #[cfg(test)]
+    static FAILING_STAT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests: the `n`th snapshot save this thread makes from now (1: the next)
+/// fails before anything is written, as a disk that refused the file would.
+#[cfg(test)]
+pub(super) fn fail_snapshot_save(n: u32) {
+    FAILING_SAVE.with(|c| c.set(n));
+}
+
+/// Tests: the stat of the next note file this thread writes fails once it
+/// is in place, as it would for a file removed or made unreadable a moment
+/// after its rename.
+#[cfg(test)]
+pub(super) fn fail_written_stat() {
+    FAILING_STAT.with(|f| f.set(true));
+}
+
+/// The whole-partition reads this thread has made so far — every note
+/// file listed and served, parsed now or taken from the parse cache (design
+/// 09 §6.3; [`note_file_reads_on_this_thread`] counts the files actually
+/// read). A test-only counter: a caller on the reply path proves it reads
+/// no partition by reading it before and after (design 09 §4.5,
+/// `pending_suggestions_parses_no_partition`). One thread-local increment
+/// per read, so a test is not disturbed by others running in parallel.
+#[doc(hidden)]
+pub fn whole_parses_on_this_thread() -> u64 {
+    WHOLE_PARSES.with(|n| n.get())
+}
+
+/// The `notes/` stat scans ([`Partition::scan`]) this thread has made so
+/// far — a test-only counter like [`whole_parses_on_this_thread`].
+#[doc(hidden)]
+pub fn scans_on_this_thread() -> u64 {
+    SCANS.with(|n| n.get())
+}
+
+/// The note files this thread has read from disk so far — a whole
+/// partition read counts every file the parse cache did not vouch for, and
+/// a mutation's re-read of the file it checks counts one (design 09 §6.3).
+/// A test-only counter like [`whole_parses_on_this_thread`].
+#[doc(hidden)]
+pub fn note_file_reads_on_this_thread() -> u64 {
+    FILE_READS.with(|n| n.get())
+}
+
+/// The whole control snapshots [`Partition::snapshot`] has copied on this
+/// thread so far — a test-only counter like [`whole_parses_on_this_thread`]:
+/// a per-hit check reads the snapshot by reference and copies none.
+#[doc(hidden)]
+pub fn snapshot_copies_on_this_thread() -> u64 {
+    SNAPSHOT_COPIES.with(|n| n.get())
+}
+
+/// Reads one note file, counted.
+fn read_note_file(path: &Path) -> Result<Vec<u8>> {
+    FILE_READS.with(|n| n.set(n.get() + 1));
+    read_regular_nofollow(path)
+}
+
+// ============================================================================
+// Who is writing
+// ============================================================================
+
+/// The surface a mutation comes from, mapped to the origin it records
+/// (design §4, §7a): a user-directed surface records `user`; a model tool
+/// call records `extracted_user`; the extractor records what it was told.
+/// One exception: an edit or archive of a conversation summary by anyone
+/// but the user keeps its `extracted_other` (design 09 §13.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Actor {
+    UserSurface,
+    ModelTool,
+    Extraction { origin: Origin },
+}
+
+impl Actor {
+    pub fn origin(self) -> Origin {
+        match self {
+            Actor::UserSurface => Origin::User,
+            Actor::ModelTool => Origin::ExtractedUser,
+            Actor::Extraction { origin } => origin,
+        }
+    }
+
+    /// Exactly the API, the CLI and the GUI (design §4).
+    pub fn is_user_directed(self) -> bool {
+        matches!(self, Actor::UserSurface)
+    }
+}
+
+// ============================================================================
+// Results
+// ============================================================================
+
+/// Whether a `create` wrote a file or answered with an exact duplicate
+/// (design §6 *Deduplication*, §7b P8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dedup {
+    Created,
+    Existing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Created {
+    pub id: NoteId,
+    pub revision: String,
+    pub origin: Origin,
+    pub dedup: Dedup,
+    /// The ids this note's frontmatter names (the `memory_store` result's
+    /// `superseded`).
+    pub superseded: Vec<NoteId>,
+    /// The note is a **suggestion** (design 09 §3.1): a candidate that names
+    /// a note in `supersedes` and retires nothing until the user confirms it
+    /// — what [`ReplacePolicy::SuggestUnlessLearned`] writes for a target the
+    /// user saved or edited (S2), and an inferred candidate with a target.
+    pub suggestion: bool,
+}
+
+/// `memory_update.action` (design §7a).
+#[derive(Debug, Clone)]
+pub enum UpdateAction {
+    Edit(NotePatch),
+    Archive,
+    /// `target_revision` binds the note a suggestion replaces (design 09
+    /// §3.2, S5): required when the candidate carries `supersedes`, and a
+    /// target that moved or went is `revision_conflict` or `not_found`, the
+    /// candidate left as it is. Ignored for a candidate that names nothing.
+    Confirm {
+        target_revision: Option<String>,
+    },
+}
+
+/// What a forget leaves behind (design 09 §3.3, ruling LR12). Both remove
+/// the one note and its `.history`, tombstone first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgetMode {
+    /// "Forget what I said" (design §6, *Forget contract*): the tombstone
+    /// keeps the note's `supersedes` — so a forgotten replacement keeps
+    /// retiring what it replaced — and suppresses every source it cited.
+    /// A candidate's tombstone carries no links (S3): it retired nothing
+    /// while it lived, and must not start now; and it suppresses none of
+    /// the sources the note it would replace also cites (the L8 close-out's
+    /// A2), which stays in force until the user confirms — nor those of any
+    /// note of saved origin in the partition (the close-out's repair rounds
+    /// 1 and 2: a sibling the user confirmed from the same turn or run).
+    Forget,
+    /// "Keep my note; take back what learning did": undo, a dismissed
+    /// suggestion. The tombstone carries **no links and no suppressed
+    /// source**, so what the note replaced comes back and every other note
+    /// the same message taught stays learned and recallable.
+    Withdraw,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Updated {
+    pub id: NoteId,
+    pub revision: String,
+    pub status: NoteStatus,
+    /// `false` when the patch changed nothing and no write happened.
+    pub written: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgetStatus {
+    Forgotten,
+    RevisionConflict { current_revision: String },
+    NotFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgetOutcome {
+    pub id: NoteId,
+    pub status: ForgetStatus,
+}
+
+/// One `notes/*.md` entry as the stat scan sees it (design §5 *Freshness*).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanEntry {
+    pub path: PathBuf,
+    pub file_name: String,
+    /// The id the file name starts with, when it has the canon's shape.
+    pub id: Option<NoteId>,
+    pub size: u64,
+    pub mtime: Option<SystemTime>,
+    /// `0` where the platform has none.
+    pub inode: u64,
+}
+
+/// A file under `notes/` that is not a note: kept on disk, excluded, never
+/// rewritten (design §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedFile {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+/// One note as read from disk, with everything the derivation says about it.
+#[derive(Debug, Clone)]
+pub struct NoteView {
+    pub note: Note,
+    /// The hash of the bytes actually read.
+    pub revision: String,
+    pub path: PathBuf,
+    pub file_name: String,
+    pub derived: DerivedNote,
+    /// `true` when the partition is quarantined (design §2): explicit reads
+    /// still work, but nothing here is verified against a snapshot.
+    pub unverified: bool,
+}
+
+/// A partition read whole: every note that could be served, and what could
+/// not.
+#[derive(Debug, Clone)]
+pub struct LoadedPartition {
+    pub health: PartitionHealth,
+    pub views: Vec<NoteView>,
+    pub malformed: Vec<MalformedFile>,
+    /// Ids that two or more files claim; none of those files is served.
+    pub duplicates: Vec<(NoteId, Vec<PathBuf>)>,
+    pub conflicts: Vec<Conflict>,
+    /// The stat scan this view was read from, sorted by file name — after a
+    /// write, with the written file's own stat — so a caller that indexes
+    /// the view needs no second scan (design 09 §6.3 quick win 3).
+    pub scan: Vec<ScanEntry>,
+}
+
+impl LoadedPartition {
+    pub fn get(&self, id: &NoteId) -> Option<&NoteView> {
+        self.views.iter().find(|v| v.note.id == *id)
+    }
+}
+
+/// What the snapshot says at open (design §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartitionHealth {
+    /// No directory and no snapshot: nothing to read, and the first write
+    /// creates it.
+    Absent,
+    Ready,
+    /// The snapshot is missing over existing notes, or invalid. Only
+    /// `doctor --repair` lifts it.
+    Quarantined(String),
+}
+
+/// A reconciliation scan's finding (design §5 *Freshness*, `memory_changed`
+/// with `change: external`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileChangeKind {
+    Added,
+    Modified,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileChange {
+    pub id: NoteId,
+    pub kind: ReconcileChangeKind,
+    /// The file's revision now (`None` when removed).
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairReport {
+    pub partition_key: String,
+    /// `false` when the partition was not quarantined: its preconditions
+    /// were checked and nothing was rebuilt.
+    pub rebuilt: bool,
+    pub notes_recorded: usize,
+    pub malformed: Vec<MalformedFile>,
+}
+
+/// Where a mutation is stopped in tests (design §6 table rows and fixture 15's
+/// `crash_at.after_step`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashPoint {
+    /// After step 1: `pending` set.
+    WriteAfter1,
+    /// Inside step 2: the `.history` copy written and fsynced, the note not
+    /// yet renamed into place.
+    WriteAfter2a,
+    /// After step 2: the note written, `.history` pruned.
+    WriteAfter2,
+    /// After step 3: `pending` cleared, the record written.
+    WriteAfter3,
+    /// After forget step 1: the tombstone appended.
+    ForgetAfter1,
+    /// After forget step 2: the files deleted.
+    ForgetAfter2,
+}
+
+// ============================================================================
+// The partition
+// ============================================================================
+
+/// A partition's files as one read found them: the stat scan, every note
+/// that parsed (with the revision of its bytes), the malformed files and
+/// the ids two files claim. A mutation patches it with what it changed on
+/// disk instead of reading the partition again (design 09 §6.3 quick wins 2
+/// and 3), so the view it returns is the one a fresh read would give.
+#[derive(Debug, Clone, Default)]
+struct Parsed {
+    scan: Vec<ScanEntry>,
+    notes: Vec<(ScanEntry, Arc<ParsedNote>)>,
+    malformed: Vec<MalformedFile>,
+    duplicates: Vec<(NoteId, Vec<PathBuf>)>,
+}
+
+impl Parsed {
+    /// Re-derives the duplicate ids from the parsed notes.
+    fn find_duplicates(&mut self) {
+        let mut by_id: BTreeMap<NoteId, Vec<PathBuf>> = BTreeMap::new();
+        for (entry, parsed) in &self.notes {
+            by_id
+                .entry(parsed.note.id)
+                .or_default()
+                .push(entry.path.clone());
+        }
+        self.duplicates = by_id
+            .into_iter()
+            .filter(|(_, paths)| paths.len() > 1)
+            .collect();
+    }
+
+    /// Forgets every file at one of `paths`: gone from the disk.
+    fn drop_paths(&mut self, paths: &HashSet<PathBuf>) {
+        self.scan.retain(|e| !paths.contains(&e.path));
+        self.notes.retain(|(e, _)| !paths.contains(&e.path));
+        self.malformed.retain(|m| !paths.contains(&m.path));
+        self.find_duplicates();
+    }
+
+    /// Records the file this process just wrote — `bytes` at `entry` —
+    /// replacing whatever was at `replaced` (the file written over, and
+    /// under a retitle the name it moved from). The bytes are classified
+    /// exactly as a read of the file would classify them; the note, when
+    /// they are one, is returned.
+    ///
+    /// Scale slice S4 (O8): the one or two replaced files are found by
+    /// binary search — `scan` and `notes` are sorted by file name,
+    /// `malformed` by path, every file under the one `notes/` — the written
+    /// file is inserted at its place, and only the ids the write touched
+    /// are counted again for duplicates. The result is the one the old
+    /// whole-list pass (three filters hashing every path, two sorts, the
+    /// duplicate map rebuilt) gave: `parsed_tests` pins the two against
+    /// each other.
+    fn put(
+        &mut self,
+        replaced: &HashSet<PathBuf>,
+        entry: ScanEntry,
+        bytes: &[u8],
+    ) -> Option<Arc<ParsedNote>> {
+        debug_assert!(self.scan.is_sorted_by(|a, b| a.file_name <= b.file_name));
+        debug_assert!(
+            self.notes
+                .is_sorted_by(|a, b| a.0.file_name <= b.0.file_name)
+        );
+        debug_assert!(self.malformed.is_sorted_by(|a, b| a.path <= b.path));
+        let mut touched: Vec<NoteId> = Vec::new();
+        for path in replaced {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Ok(i) = self
+                .scan
+                .binary_search_by(|e| e.file_name.as_str().cmp(&name))
+                && self.scan[i].path == *path
+            {
+                self.scan.remove(i);
+            }
+            if let Ok(i) = self
+                .notes
+                .binary_search_by(|(e, _)| e.file_name.as_str().cmp(&name))
+                && self.notes[i].0.path == *path
+            {
+                touched.push(self.notes.remove(i).1.note.id);
+            }
+            if let Ok(i) = self.malformed.binary_search_by(|m| m.path.cmp(path)) {
+                self.malformed.remove(i);
+            }
+        }
+        let written = match classify(&entry, Ok(bytes.to_vec())) {
+            Ok(parsed) => {
+                let at = self
+                    .notes
+                    .partition_point(|(e, _)| e.file_name <= entry.file_name);
+                self.notes.insert(at, (entry.clone(), Arc::clone(&parsed)));
+                touched.push(parsed.note.id);
+                Some(parsed)
+            }
+            Err(file) => {
+                let at = self.malformed.partition_point(|m| m.path <= file.path);
+                self.malformed.insert(at, file);
+                None
+            }
+        };
+        let at = self
+            .scan
+            .partition_point(|e| e.file_name <= entry.file_name);
+        self.scan.insert(at, entry);
+        touched.sort();
+        touched.dedup();
+        for id in touched {
+            self.recount_duplicate(id);
+        }
+        written
+    }
+
+    /// Re-derives whether `id` is claimed by two or more parsed files — the
+    /// one entry of `duplicates` [`Parsed::find_duplicates`] would give it,
+    /// in the same place.
+    fn recount_duplicate(&mut self, id: NoteId) {
+        self.duplicates.retain(|(d, _)| *d != id);
+        let paths: Vec<PathBuf> = self
+            .notes
+            .iter()
+            .filter(|(_, p)| p.note.id == id)
+            .map(|(e, _)| e.path.clone())
+            .collect();
+        if paths.len() > 1 {
+            let at = self.duplicates.partition_point(|(d, _)| *d < id);
+            self.duplicates.insert(at, (id, paths));
+        }
+    }
+}
+
+/// What one scanned file is: a note with the revision of its bytes, or a
+/// malformed file and why — unreadable, unparsable, or named for another
+/// id than its frontmatter carries.
+fn classify(
+    entry: &ScanEntry,
+    read: Result<Vec<u8>, String>,
+) -> Result<Arc<ParsedNote>, MalformedFile> {
+    let malformed = |reason: String| MalformedFile {
+        path: entry.path.clone(),
+        reason,
+    };
+    let bytes = read.map_err(malformed)?;
+    let note = Note::parse(&bytes).map_err(|e| malformed(e.reason))?;
+    if let Some(named) = entry.id
+        && named != note.id
+    {
+        return Err(malformed(format!(
+            "the file name says {named} but the frontmatter id is {}",
+            note.id
+        )));
+    }
+    let revision = super::sha256_hex(&bytes);
+    Ok(Arc::new(ParsedNote { note, revision }))
+}
+
+/// What a forget has done so far: each target's outcome, the files it
+/// deleted and the ids it forgot.
+#[derive(Default)]
+struct ForgetProgress {
+    outcomes: Vec<ForgetOutcome>,
+    removed: HashSet<PathBuf>,
+    forgotten: HashSet<NoteId>,
+    /// The save generation of the last snapshot save, for the cache.
+    saved: Option<u64>,
+}
+
+struct State {
+    /// `None` until the first write lays the partition out, or while
+    /// quarantined. Shared with the parse cache until a mutation changes it
+    /// (`Arc::make_mut`).
+    snapshot: Option<Arc<ControlSnapshot>>,
+    quarantine: Option<String>,
+}
+
+pub struct Partition {
+    scope: StoreScope,
+    scope_kind: SnapshotScope,
+    /// The project this partition belongs to (R18), read from the
+    /// `project.json` beside its `memory/` when it was opened; `None` for
+    /// the home partition.
+    project_id: Option<ProjectId>,
+    owner_id: String,
+    owner_key: String,
+    partition_key: String,
+    memory_dir: PathBuf,
+    root: PathBuf,
+    root_canonical: String,
+    notes_dir: PathBuf,
+    history_dir: PathBuf,
+    navigation_path: PathBuf,
+    snapshot_path: PathBuf,
+    state: Mutex<State>,
+    clock: Clock,
+    /// The service's parse cache (design 09 §6.3), when it opened this
+    /// partition; `None` reads every file every time.
+    cache: Option<Arc<NoteParseCache>>,
+    /// Opened for writing: a scan may delete a forgotten note's file it
+    /// meets (scale slice S3). A read-only open (`doctor`) leaves it out of
+    /// every listing and deletes nothing.
+    writable: bool,
+    #[cfg(test)]
+    crash: Mutex<Option<CrashPoint>>,
+}
+
+impl std::fmt::Debug for Partition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Partition")
+            .field("partition_key", &self.partition_key)
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
+/// The snapshot file of a partition key. A pure path query: it creates
+/// nothing, and a `partition_key` that is not one of the two shapes of design
+/// §2 (see [`is_partition_key`]) is `InvalidInput`, so the result is always a
+/// file directly under `state/memory-control/`.
+pub fn snapshot_path_for(partition_key: &str) -> Result<PathBuf, MemoryFilesError> {
+    if !is_partition_key(partition_key) {
+        return Err(MemoryFilesError::InvalidInput(format!(
+            "`{partition_key}` is not a partition key (home-<owner-key> or proj-<owner-key>-<project-key>)"
+        )));
+    }
+    Ok(home_root()?
+        .join("state")
+        .join(CONTROL_DIR)
+        .join(format!("{partition_key}.json")))
+}
+
+/// The store directory a partition of `scope` lives under, and the
+/// components above its `memory/` that [`Partition::open`] checks before any
+/// below (design §3 rule 1). The home root is the store's own and is not
+/// checked. A project is R12's question first: a root with no folder under
+/// `projects/` has no partition ([`MemoryFilesError::NotRegistered`]),
+/// decided before a path is joined, so nothing is created.
+fn scope_root(scope: &StoreScope) -> Result<(PathBuf, Vec<PathBuf>), MemoryFilesError> {
+    match scope {
+        StoreScope::Home => Ok((home_root()?, Vec::new())),
+        StoreScope::Project(root) => {
+            if !root.is_absolute() {
+                return Err(MemoryFilesError::Io(anyhow::anyhow!(
+                    "project store root must be an absolute path, got {}",
+                    root.display()
+                )));
+            }
+            let Some(project) = projects::lookup(root)? else {
+                return Err(MemoryFilesError::NotRegistered { root: root.clone() });
+            };
+            // The folder as the home store names it, not canonicalized:
+            // `Project::dir` is canonical, so a link at `projects/` (which
+            // `lookup` follows) would be resolved away before it could be
+            // checked. A link at the folder itself never gets here — `lookup`
+            // opens no linked folder (R11) — and the folder is checked anyway.
+            let parent = projects::projects_dir()?;
+            let store = parent.join(&project.name);
+            Ok((store.clone(), vec![parent, store]))
+        }
+    }
+}
+
+/// The project a scope's partition belongs to (storage design R18): `None`
+/// at home; for a project, the id in the `project.json` that records its
+/// root, or `NotRegistered` (R12) when no folder under `projects/` does. A
+/// relative root is refused by `lookup` (it has no existing ancestor).
+fn project_id_of(scope: &StoreScope) -> Result<Option<ProjectId>, MemoryFilesError> {
+    match scope {
+        StoreScope::Home => Ok(None),
+        StoreScope::Project(root) => match projects::lookup(root)? {
+            Some(project) => Ok(Some(project.id)),
+            None => Err(MemoryFilesError::NotRegistered { root: root.clone() }),
+        },
+    }
+}
+
+/// The partition key of `owner_key`'s partition in `scope` — what
+/// [`Partition::open`] derives — without opening or creating anything. For
+/// a log line that must name a partition it has not opened. A project
+/// partition's key is its project id's (R18): `NotRegistered` for a root no
+/// folder under `projects/` records.
+pub fn partition_key_for(scope: &StoreScope, owner_key: &str) -> Result<String, MemoryFilesError> {
+    Ok(match project_id_of(scope)? {
+        None => home_partition_key(owner_key),
+        Some(id) => project_partition_key(owner_key, &id),
+    })
+}
+
+fn now_seconds() -> DateTime<Utc> {
+    to_second(Utc::now())
+}
+
+/// Whether an open may write: an ordinary open runs recovery; a read-only
+/// one does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenMode {
+    ReadWrite,
+    ReadOnly,
+}
+
+impl Partition {
+    /// Opens the owner's partition in `scope` without creating anything.
+    ///
+    /// Design §3 rule 1: every component on the way — for a project, the home
+    /// store's `projects/` and the project's folder, then `memory`, `owners`,
+    /// `owners/<owner-key>`, `notes`, `.history` — is checked with
+    /// `symlink_metadata`; a link, a junction or a non-directory at any level
+    /// refuses the partition with [`MemoryFilesError::PathRefused`] naming it.
+    /// The home root itself is not checked (it is the store's, possibly a link
+    /// by design); the components below it are.
+    ///
+    /// A valid snapshot runs recovery (design §6).
+    pub fn open(scope: &StoreScope, owner_id: &str) -> Result<Self, MemoryFilesError> {
+        Self::open_inner(
+            scope,
+            owner_id,
+            owner_key(owner_id),
+            OpenMode::ReadWrite,
+            None,
+        )
+    }
+
+    /// [`Partition::open`] through the service's parse cache (design 09
+    /// §6.3): the snapshot and every unchanged note file are taken from
+    /// `cache` instead of being read and parsed again, and this partition's
+    /// own writes keep the cache current.
+    pub fn open_cached(
+        scope: &StoreScope,
+        owner_id: &str,
+        cache: &Arc<NoteParseCache>,
+    ) -> Result<Self, MemoryFilesError> {
+        Self::open_inner(
+            scope,
+            owner_id,
+            owner_key(owner_id),
+            OpenMode::ReadWrite,
+            Some(Arc::clone(cache)),
+        )
+    }
+
+    /// Opens a partition **by owner key**, for reading only: the path checks
+    /// of [`Partition::open`], the snapshot loaded and the quarantine
+    /// decided, but no recovery run — the one write an ordinary open makes.
+    /// What `doctor` (design §6, *Management operations*: "it changes
+    /// nothing") opens every partition with, another owner's included, whose
+    /// id it does not know. A key that is not 32 lowercase hex characters is
+    /// refused before it is joined to anything. Mutations through a partition
+    /// opened this way are refused by the ordinary quarantine check where they
+    /// would be anyway; nothing else distinguishes it, so a caller that opened
+    /// read-only must not write through it.
+    pub fn open_readonly(scope: &StoreScope, owner_key: &str) -> Result<Self, MemoryFilesError> {
+        if !is_owner_key(owner_key) {
+            return Err(MemoryFilesError::InvalidInput(format!(
+                "`{owner_key}` is not an owner key (32 lowercase hex characters)"
+            )));
+        }
+        Self::open_inner(scope, "", owner_key.to_string(), OpenMode::ReadOnly, None)
+    }
+
+    fn open_inner(
+        scope: &StoreScope,
+        owner_id: &str,
+        key: String,
+        mode: OpenMode,
+        cache: Option<Arc<NoteParseCache>>,
+    ) -> Result<Self, MemoryFilesError> {
+        let (store, above) = scope_root(scope)?;
+        let project_id = project_id_of(scope)?;
+        let memory_dir = store.join(ContentKind::Memory.dir_name());
+        let owners = memory_dir.join(OWNERS_DIR);
+        let root = owners.join(&key);
+        let notes_dir = root.join(NOTES_DIR);
+        let history_dir = root.join(HISTORY_DIR);
+
+        let mut components: Vec<&Path> = above.iter().map(PathBuf::as_path).collect();
+        components.extend([
+            memory_dir.as_path(),
+            owners.as_path(),
+            root.as_path(),
+            notes_dir.as_path(),
+            history_dir.as_path(),
+        ]);
+        for component in components {
+            if let Err((component, reason)) = real_directory_state(component) {
+                return Err(MemoryFilesError::PathRefused { component, reason });
+            }
+        }
+
+        let root_canonical = canonical_string_lenient(&root)?;
+        let (scope_kind, partition_key) = match &project_id {
+            None => (SnapshotScope::Home, home_partition_key(&key)),
+            Some(id) => (SnapshotScope::Project, project_partition_key(&key, id)),
+        };
+        let snapshot_path = snapshot_path_for(&partition_key)?;
+
+        let partition = Self {
+            scope: scope.clone(),
+            scope_kind,
+            project_id,
+            owner_id: owner_id.to_string(),
+            owner_key: key,
+            partition_key: partition_key.clone(),
+            memory_dir,
+            navigation_path: root.join(NAVIGATION_FILE),
+            root,
+            root_canonical,
+            notes_dir,
+            history_dir,
+            snapshot_path,
+            state: Mutex::new(State {
+                snapshot: None,
+                quarantine: None,
+            }),
+            clock: Arc::new(now_seconds),
+            cache,
+            writable: mode == OpenMode::ReadWrite,
+            #[cfg(test)]
+            crash: Mutex::new(None),
+        };
+
+        let loaded = match partition.load_snapshot() {
+            Ok(Some(snapshot)) => match snapshot.check_binding(
+                &partition_key,
+                &partition.owner_key,
+                &partition.root_canonical,
+                partition.project_id.as_ref(),
+            ) {
+                Ok(()) => Ok(Some(snapshot)),
+                Err(reason) => Err(format!("snapshot binding: {reason}")),
+            },
+            Ok(None) => {
+                if partition.has_note_files()? {
+                    Err(format!(
+                        "no control snapshot at {} for a partition that holds notes",
+                        partition.snapshot_path.display()
+                    ))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(SnapshotError::Invalid(reason)) => Err(reason),
+            Err(SnapshotError::Io(e)) => return Err(MemoryFilesError::Io(e)),
+        };
+        {
+            let mut state = partition.lock();
+            match loaded {
+                Ok(snapshot) => state.snapshot = snapshot,
+                Err(reason) => state.quarantine = Some(reason),
+            }
+        }
+        if mode == OpenMode::ReadWrite {
+            partition.recover()?;
+        }
+        Ok(partition)
+    }
+
+    /// Replaces the clock (tests).
+    pub fn with_clock(mut self, clock: impl Fn() -> DateTime<Utc> + Send + Sync + 'static) -> Self {
+        self.clock = Arc::new(clock);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_crash_point(&self, point: Option<CrashPoint>) {
+        *self.crash.lock().unwrap_or_else(|p| p.into_inner()) = point;
+    }
+
+    fn crash_check(&self, point: CrashPoint) -> Result<(), MemoryFilesError> {
+        #[cfg(test)]
+        {
+            let mut armed = self.crash.lock().unwrap_or_else(|p| p.into_inner());
+            if *armed == Some(point) {
+                *armed = None;
+                return Err(MemoryFilesError::Crashed(point));
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let _ = point;
+        }
+        Ok(())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        to_second((self.clock)())
+    }
+
+    // ------------------------------------------------------------------------
+    // The control snapshot, through the parse cache (design 09 §6.3)
+    // ------------------------------------------------------------------------
+
+    /// The snapshot file, parsed — or, through a cache, the parse this
+    /// process last read or saved, while the file's stat is unchanged and no
+    /// save came since. A file read from disk is cached once its stat has
+    /// settled (the racy window, as for notes).
+    fn load_snapshot(&self) -> Result<Option<Arc<ControlSnapshot>>, SnapshotError> {
+        let Some(cache) = &self.cache else {
+            return ControlSnapshot::load(&self.snapshot_path).map(|s| s.map(Arc::new));
+        };
+        let generation = save_generation();
+        let taken = SystemTime::now();
+        let stat = cache.key(&self.snapshot_path, StatKey::lstat(&self.snapshot_path));
+        if let Some(stat) = stat
+            && let Some(hit) = cache.snapshot(
+                &self.partition_key,
+                &self.notes_dir,
+                &self.snapshot_path,
+                stat,
+                generation,
+            )
+        {
+            return Ok(Some(hit));
+        }
+        let loaded = ControlSnapshot::load(&self.snapshot_path)?.map(Arc::new);
+        if let (Some(snapshot), Some(stat)) = (&loaded, stat)
+            && cache.settled(&stat, taken)
+        {
+            cache.put_snapshot(
+                &self.partition_key,
+                &self.notes_dir,
+                &self.snapshot_path,
+                stat,
+                generation,
+                Arc::clone(snapshot),
+            );
+        }
+        Ok(loaded)
+    }
+
+    /// The snapshot a mutation changes: unshared from the cache first.
+    fn snapshot_mut(state: &mut State) -> &mut ControlSnapshot {
+        Arc::make_mut(state.snapshot.as_mut().expect("a laid-out partition"))
+    }
+
+    /// Saves `snapshot` to the partition's file. Returns the save generation
+    /// it was written at when no other save of this process came in between
+    /// — the only one [`Partition::remember_snapshot`] may record it under.
+    fn save_snapshot(
+        &self,
+        snapshot: &mut Arc<ControlSnapshot>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<u64>, MemoryFilesError> {
+        #[cfg(test)]
+        if FAILING_SAVE.with(|c| c.replace(c.get().saturating_sub(1)) == 1) {
+            return Err(MemoryFilesError::Io(anyhow::anyhow!(
+                "injected snapshot save failure"
+            )));
+        }
+        let before = save_generation();
+        Arc::make_mut(snapshot).save(&self.snapshot_path, now)?;
+        Ok((save_generation() == before + 1).then_some(before + 1))
+    }
+
+    /// Records `state`'s snapshot in the cache as saved at `generation` —
+    /// once, after a mutation's last save, so a mutation's own saves do not
+    /// each unshare it again. Skipped when another save has come since.
+    fn remember_snapshot(&self, state: &State, generation: Option<u64>) {
+        let (Some(cache), Some(generation), Some(snapshot)) =
+            (&self.cache, generation, &state.snapshot)
+        else {
+            return;
+        };
+        let Some(stat) = cache.key(&self.snapshot_path, StatKey::lstat(&self.snapshot_path)) else {
+            return;
+        };
+        if save_generation() != generation {
+            return;
+        }
+        cache.put_snapshot(
+            &self.partition_key,
+            &self.notes_dir,
+            &self.snapshot_path,
+            stat,
+            generation,
+            Arc::clone(snapshot),
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Accessors
+    // ------------------------------------------------------------------------
+
+    pub fn scope(&self) -> &StoreScope {
+        &self.scope
+    }
+    /// The project this partition belongs to (R18); `None` at home.
+    pub fn project_id(&self) -> Option<&ProjectId> {
+        self.project_id.as_ref()
+    }
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+    pub fn owner_key(&self) -> &str {
+        &self.owner_key
+    }
+    pub fn partition_key(&self) -> &str {
+        &self.partition_key
+    }
+    /// `…/memory/owners/<owner-key>`.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    /// The canonical root string the snapshot binds to.
+    pub fn root_canonical(&self) -> &str {
+        &self.root_canonical
+    }
+    pub fn notes_dir(&self) -> &Path {
+        &self.notes_dir
+    }
+    pub fn history_dir(&self) -> &Path {
+        &self.history_dir
+    }
+    pub fn snapshot_path(&self) -> &Path {
+        &self.snapshot_path
+    }
+    /// `<store>/memory`.
+    pub fn memory_dir(&self) -> &Path {
+        &self.memory_dir
+    }
+
+    pub fn health(&self) -> PartitionHealth {
+        let state = self.lock();
+        if let Some(reason) = &state.quarantine {
+            PartitionHealth::Quarantined(reason.clone())
+        } else if state.snapshot.is_some() {
+            PartitionHealth::Ready
+        } else {
+            PartitionHealth::Absent
+        }
+    }
+
+    /// Reads the control snapshot in place, under the partition's lock —
+    /// what a per-note check needs, without the whole copy
+    /// [`Partition::snapshot`] makes (every note record and tombstone).
+    /// `f` must not call back into this partition.
+    pub fn with_snapshot<T>(&self, f: impl FnOnce(Option<&ControlSnapshot>) -> T) -> T {
+        f(self.lock().snapshot.as_deref())
+    }
+
+    /// Whether `id` was forgotten: the snapshot holds its tombstone.
+    pub fn is_tombstoned(&self, id: &NoteId) -> bool {
+        self.with_snapshot(|s| s.is_some_and(|s| s.tombstone(id).is_some()))
+    }
+
+    /// A copy of the control snapshot, when the partition has one.
+    pub fn snapshot(&self) -> Option<ControlSnapshot> {
+        SNAPSHOT_COPIES.with(|n| n.set(n.get() + 1));
+        self.lock().snapshot.as_deref().cloned()
+    }
+
+    // ------------------------------------------------------------------------
+    // Layout
+    // ------------------------------------------------------------------------
+
+    fn has_note_files(&self) -> Result<bool> {
+        Ok(!self.scan()?.is_empty())
+    }
+
+    /// An empty snapshot bound to this partition — for a project partition
+    /// stamped with its project id (R18). The first write and `repair`
+    /// save it; `derive_view` reads it in memory for a partition that has
+    /// none.
+    fn fresh_snapshot(&self, created_at: DateTime<Utc>) -> ControlSnapshot {
+        let fresh = ControlSnapshot::new(
+            &self.partition_key,
+            self.scope_kind,
+            &self.owner_key,
+            &self.owner_id,
+            &self.root_canonical,
+            created_at,
+        );
+        match self.project_id {
+            Some(id) => fresh.with_project_id(id),
+            None => fresh,
+        }
+    }
+
+    /// Lays the partition out on the first write: `memory/` and the owner
+    /// directories private (0700), and an initial empty snapshot — written
+    /// last, so an interrupted layout is an empty directory the next open
+    /// initializes again, never a snapshot over notes it did not record.
+    fn ensure_laid_out(&self, state: &mut State) -> Result<(), MemoryFilesError> {
+        if let Some(reason) = &state.quarantine {
+            return Err(MemoryFilesError::Quarantined {
+                partition_key: self.partition_key.clone(),
+                reason: reason.clone(),
+            });
+        }
+        if state.snapshot.is_some() {
+            return Ok(());
+        }
+        // Re-check the path right before creating anything on it — the
+        // project's folder and `projects/` above `memory/` too.
+        let (_, above) = scope_root(&self.scope)?;
+        let owners = self.memory_dir.join(OWNERS_DIR);
+        let below = [
+            self.memory_dir.as_path(),
+            owners.as_path(),
+            self.root.as_path(),
+            self.notes_dir.as_path(),
+            self.history_dir.as_path(),
+        ];
+        for component in above.iter().map(PathBuf::as_path).chain(below) {
+            if let Err((component, reason)) = real_directory_state(component) {
+                return Err(MemoryFilesError::PathRefused { component, reason });
+            }
+        }
+        self.create_private(&self.memory_dir)?;
+        self.create_private(&owners)?;
+        self.create_private(&self.root)?;
+        self.create_private(&self.notes_dir)?;
+        self.create_private(&self.history_dir)?;
+        let mut snapshot = Arc::new(self.fresh_snapshot(self.now()));
+        // `state/` itself is the store's and is created 0700 by the store,
+        // never by the snapshot's `create_dir_all` with the umask default.
+        state_dir()?;
+        let saved = self.save_snapshot(&mut snapshot, self.now())?;
+        state.snapshot = Some(snapshot);
+        self.remember_snapshot(state, saved);
+        self.write_navigation(&[]);
+        Ok(())
+    }
+
+    /// `dir` of this partition, 0700. A project's partition creates it below
+    /// the project's folder under `projects/` one level at a time and never
+    /// that folder itself: one the delete removed (or a re-point renamed)
+    /// since this partition was opened is `NotRegistered`, not a folder
+    /// re-created with no `project.json` (R-F3). The home partition makes its
+    /// parents as it always has.
+    fn create_private(&self, dir: &Path) -> Result<(), MemoryFilesError> {
+        let StoreScope::Project(root) = &self.scope else {
+            return Ok(create_private_dir(dir)?);
+        };
+        let base = self.memory_dir.parent().ok_or_else(|| {
+            MemoryFilesError::Io(anyhow::anyhow!(
+                "{} has no parent",
+                self.memory_dir.display()
+            ))
+        })?;
+        create_private_dir_below(base, dir).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                MemoryFilesError::NotRegistered { root: root.clone() }
+            } else {
+                MemoryFilesError::Io(
+                    anyhow::Error::new(e)
+                        .context(format!("Failed to create directory: {}", dir.display())),
+                )
+            }
+        })
+    }
+
+    /// Creates the partition now, with an empty snapshot (what a loader does;
+    /// a service never needs it — the first write does the same).
+    pub fn initialize(&self) -> Result<(), MemoryFilesError> {
+        let mut state = self.lock();
+        self.ensure_laid_out(&mut state)
+    }
+
+    // ------------------------------------------------------------------------
+    // Scanning and loading
+    // ------------------------------------------------------------------------
+
+    /// Lists `notes/*.md`: regular files only — no hidden or temp names, no
+    /// links, no directories — with the facts a stat scan compares. A file
+    /// named for a forgotten note is left out and, when the partition was
+    /// opened for writing, deleted (scale slice S3).
+    pub fn scan(&self) -> Result<Vec<ScanEntry>> {
+        let forgotten = self.forgotten_ids();
+        Ok(self
+            .scan_keyed(&forgotten)?
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect())
+    }
+
+    /// Every file of `notes/`, a forgotten note's included — what recovery
+    /// looks through.
+    fn scan_raw(&self) -> Result<Vec<ScanEntry>> {
+        Ok(self
+            .scan_keyed(&HashSet::new())?
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect())
+    }
+
+    /// The ids the snapshot holds tombstones for.
+    fn forgotten_ids(&self) -> HashSet<NoteId> {
+        Self::forgotten_in(&self.lock())
+    }
+
+    fn forgotten_in(state: &State) -> HashSet<NoteId> {
+        state
+            .snapshot
+            .as_ref()
+            .map(|s| s.tombstones.iter().map(|t| t.id).collect())
+            .unwrap_or_default()
+    }
+
+    /// Design §6's hard guarantee, checked wherever a scan runs (scale slice
+    /// S3): a file carrying a forgotten id — put back by a backup restore or
+    /// a sync client while the service runs — is never listed, read,
+    /// indexed or written into `MEMORY.md`. The caller leaves it out; this
+    /// deletes it and its `.history`, as recovery at open does, when the
+    /// partition was opened for writing. A deletion that fails leaves the
+    /// file out of every read and is logged with the note's id and the
+    /// operating system's error only — never the path, whose slug is the
+    /// forgotten title; every scan that meets the file tries again, and
+    /// logs again.
+    fn drop_forgotten(&self, path: &Path, id: NoteId) {
+        if !self.writable {
+            return;
+        }
+        let history = self.history_dir.join(id.to_string());
+        match remove_file_if_exists(path).and_then(|_| remove_dir_all_if_exists(&history)) {
+            Ok(_) => tracing::info!(
+                partition = %self.partition_key,
+                note = %id,
+                "memory: a forgotten note's file reappeared; deleted it"
+            ),
+            Err(e) => tracing::warn!(
+                partition = %self.partition_key,
+                note = %id,
+                error = %e.root_cause(),
+                "memory: a forgotten note's file reappeared and could not be deleted; \
+                 it stays out of every read"
+            ),
+        }
+    }
+
+    /// [`Partition::scan`], each entry with the stat identity the parse
+    /// cache compares — from the same stat call — leaving out (and deleting)
+    /// a file whose name carries one of `forgotten`.
+    ///
+    /// The listing is the platform's cheapest that answers the same facts
+    /// (owner decision LQ16, [`dirstat::list_notes`]): one
+    /// `getattrlistbulk` pass on macOS, `readdir` and `lstat` elsewhere.
+    fn scan_keyed(&self, forgotten: &HashSet<NoteId>) -> Result<Vec<(ScanEntry, StatKey)>> {
+        SCANS.with(|n| n.set(n.get() + 1));
+        let Some(listed) = dirstat::list_notes(&self.notes_dir)
+            .with_context(|| format!("Failed to list {}", self.notes_dir.display()))?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::with_capacity(listed.len());
+        for (entry, key) in listed {
+            if let Some(id) = entry.id
+                && forgotten.contains(&id)
+            {
+                self.drop_forgotten(&entry.path, id);
+                continue;
+            }
+            out.push((entry, key));
+        }
+        out.sort_by(|a, b| a.0.file_name.cmp(&b.0.file_name));
+        Ok(out)
+    }
+
+    /// The scan entry of one file this process just wrote, and its stat
+    /// identity.
+    fn scan_one(&self, path: &Path) -> Result<(ScanEntry, StatKey)> {
+        #[cfg(test)]
+        if FAILING_STAT.with(|f| f.replace(false)) {
+            anyhow::bail!("injected stat failure");
+        }
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("Failed to stat {}", path.display()))?;
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok((
+            dirstat::scan_entry(path.to_path_buf(), file_name, &meta),
+            StatKey::of(&meta),
+        ))
+    }
+
+    /// Scans and parses every file: the parsed notes (one per file), the
+    /// malformed files and the duplicate ids. Through the parse cache
+    /// (design 09 §6.3), a file whose stat identity is the cached one is not
+    /// read — or, while that stat is within the racy window, is read and
+    /// re-hashed but not parsed again — and what this read found replaces
+    /// the partition's entries when it differs from them.
+    ///
+    /// A file of one of `forgotten` — by its name or by the id its
+    /// frontmatter carries — is left out and deleted ([`Self::drop_forgotten`],
+    /// scale slice S3).
+    fn parse_all(&self, forgotten: &HashSet<NoteId>) -> Result<Parsed> {
+        WHOLE_PARSES.with(|n| n.set(n.get() + 1));
+        let taken = SystemTime::now();
+        let keyed = self.scan_keyed(forgotten)?;
+        let cache = self.cache.as_deref();
+        let cached = cache.and_then(|c| c.files(&self.partition_key, &self.notes_dir));
+        let mut scan = Vec::with_capacity(keyed.len());
+        let mut parsed = Vec::with_capacity(keyed.len());
+        let mut malformed = Vec::new();
+        // Beside each parsed note, the key and trust the cache would hold it
+        // under; `changed` and `kept` say whether that differs from `cached`.
+        let mut keys: Vec<Option<(StatKey, bool)>> = Vec::with_capacity(keyed.len());
+        let mut changed = false;
+        let mut kept = 0usize;
+        for (entry, scanned) in keyed {
+            let key = cache.and_then(|c| c.key(&entry.path, Some(scanned)));
+            let hit = match (&cached, key) {
+                (Some(files), Some(key)) => files.get(&entry.file_name).filter(|e| e.stat == key),
+                _ => None,
+            };
+            let (found, trusted) = match hit {
+                Some(hit) if hit.trusted => {
+                    kept += 1;
+                    (Ok(Arc::clone(&hit.parsed)), true)
+                }
+                _ => {
+                    let read = read_note_file(&entry.path);
+                    let settled = match (cache, key) {
+                        (Some(c), Some(key)) => c.settled(&key, taken),
+                        _ => false,
+                    };
+                    // A racy entry whose bytes still hash to it is reused,
+                    // not parsed again.
+                    let reuse = match (&read, hit) {
+                        (Ok(bytes), Some(hit))
+                            if super::sha256_hex(bytes) == hit.parsed.revision =>
+                        {
+                            Some(Arc::clone(&hit.parsed))
+                        }
+                        _ => None,
+                    };
+                    let unchanged = reuse.is_some() && !settled;
+                    let found = match reuse {
+                        Some(parsed) => Ok(parsed),
+                        None => classify(&entry, read.map_err(|e| format!("{e:#}"))),
+                    };
+                    if unchanged {
+                        kept += 1;
+                    } else if found.is_ok() {
+                        // New, promoted or replaced. (A file that is no note
+                        // is never cached; its old entry, if any, is counted
+                        // gone below.)
+                        changed = true;
+                    }
+                    (found, settled)
+                }
+            };
+            match found {
+                Ok(note) if forgotten.contains(&note.note.id) => {
+                    // A forgotten id under a name that does not carry it.
+                    self.drop_forgotten(&entry.path, note.note.id);
+                    changed = true;
+                    continue;
+                }
+                Ok(note) => {
+                    parsed.push((entry.clone(), note));
+                    keys.push(key.map(|key| (key, trusted)));
+                }
+                Err(file) => malformed.push(file),
+            }
+            scan.push(entry);
+        }
+        if let Some(cache) = cache {
+            let vanished = cached.as_ref().is_some_and(|files| files.len() != kept);
+            if changed || vanished || cached.is_none() {
+                self.store_parsed(cache, &parsed, &keys);
+            }
+        }
+        let mut out = Parsed {
+            scan,
+            notes: parsed,
+            malformed,
+            duplicates: Vec::new(),
+        };
+        out.find_duplicates();
+        Ok(out)
+    }
+
+    /// Replaces the partition's cache entries with what a read found — or
+    /// leaves the partition uncached when it would not fit under the cap,
+    /// which is decided before any entry is built.
+    fn store_parsed(
+        &self,
+        cache: &NoteParseCache,
+        parsed: &[(ScanEntry, Arc<ParsedNote>)],
+        keys: &[Option<(StatKey, bool)>],
+    ) {
+        let entries: Vec<(&str, FileEntry)> = parsed
+            .iter()
+            .zip(keys)
+            .filter_map(|((entry, note), key)| {
+                let (stat, trusted) = (*key)?;
+                Some((
+                    entry.file_name.as_str(),
+                    FileEntry::new(&entry.file_name, stat, Arc::clone(note), trusted),
+                ))
+            })
+            .collect();
+        let bytes: usize = entries.iter().map(|(_, e)| e.bytes).sum();
+        let files = (bytes <= cache.capacity()).then(|| {
+            entries
+                .into_iter()
+                .map(|(name, entry)| (name.to_string(), entry))
+                .collect()
+        });
+        cache.store_files(&self.partition_key, &self.notes_dir, files);
+    }
+
+    fn load_with(&self, state: &State) -> Result<LoadedPartition, MemoryFilesError> {
+        Ok(self.load_parsed(state)?.1)
+    }
+
+    /// Reads the partition once, keeping what was read so a mutation can
+    /// patch it with its own change.
+    fn load_parsed(&self, state: &State) -> Result<(Parsed, LoadedPartition), MemoryFilesError> {
+        let parsed = self.parse_all(&Self::forgotten_in(state))?;
+        let loaded = self.derive_view(&parsed, state);
+        Ok((parsed, loaded))
+    }
+
+    /// The invariant of the parse cache (design 09 §6.3): **a mutation
+    /// re-reads and re-hashes each file it checks a revision against,
+    /// before the check.** A view whose bytes are no longer the file's — a
+    /// cached parse a same-stat edit slipped past, or an edit that raced
+    /// this read — is dropped from the cache and the partition read again,
+    /// so the check compares against the bytes on disk and a write never
+    /// replaces an edit it did not see. A file that cannot be read any more
+    /// counts as changed.
+    fn recheck(
+        &self,
+        state: &State,
+        parsed: &mut Parsed,
+        loaded: &mut LoadedPartition,
+        ids: &[NoteId],
+    ) -> Result<(), MemoryFilesError> {
+        let mut stale: Vec<String> = Vec::new();
+        for id in ids {
+            let Some(view) = loaded.get(id) else {
+                continue;
+            };
+            let current = read_note_file(&view.path)
+                .ok()
+                .map(|bytes| super::sha256_hex(&bytes));
+            if current.as_deref() != Some(view.revision.as_str()) {
+                stale.push(view.file_name.clone());
+            }
+        }
+        if stale.is_empty() {
+            return Ok(());
+        }
+        if let Some(cache) = &self.cache {
+            cache.remove_files(&self.partition_key, &self.notes_dir, &stale);
+        }
+        (*parsed, *loaded) = self.load_parsed(state)?;
+        Ok(())
+    }
+
+    /// The derivation over what was read (design §6): every servable note
+    /// with its derived facts, under the snapshot as it stands in `state`.
+    fn derive_view(&self, parsed: &Parsed, state: &State) -> LoadedPartition {
+        let dup_ids: HashSet<NoteId> = parsed.duplicates.iter().map(|(id, _)| *id).collect();
+        let unique: Vec<&(ScanEntry, Arc<ParsedNote>)> = parsed
+            .notes
+            .iter()
+            .filter(|(_, p)| !dup_ids.contains(&p.note.id))
+            .collect();
+        let empty;
+        let (snapshot, unverified) = match (&state.snapshot, &state.quarantine) {
+            (Some(s), None) => (&**s, false),
+            _ => {
+                empty = self.fresh_snapshot(self.now());
+                (&empty, true)
+            }
+        };
+        let inputs: Vec<NoteInput<'_>> = unique
+            .iter()
+            .map(|(_, p)| NoteInput {
+                note: &p.note,
+                revision: &p.revision,
+            })
+            .collect();
+        let Derivation {
+            mut notes,
+            conflicts,
+        } = derive(&inputs, snapshot);
+        let views = unique
+            .into_iter()
+            .map(|(entry, p)| NoteView {
+                derived: notes.remove(&p.note.id).expect("derived for every input"),
+                note: p.note.clone(),
+                revision: p.revision.clone(),
+                path: entry.path.clone(),
+                file_name: entry.file_name.clone(),
+                unverified,
+            })
+            .collect();
+        let health = if let Some(reason) = &state.quarantine {
+            PartitionHealth::Quarantined(reason.clone())
+        } else if state.snapshot.is_some() {
+            PartitionHealth::Ready
+        } else {
+            PartitionHealth::Absent
+        };
+        LoadedPartition {
+            health,
+            views,
+            malformed: parsed.malformed.clone(),
+            duplicates: parsed.duplicates.clone(),
+            conflicts,
+            scan: parsed.scan.clone(),
+        }
+    }
+
+    /// Reads the whole partition: every servable note with its derived facts,
+    /// plus the malformed files and duplicate ids. Works while quarantined
+    /// (every view then reads `unverified`).
+    pub fn load(&self) -> Result<LoadedPartition, MemoryFilesError> {
+        let state = self.lock();
+        self.load_with(&state)
+    }
+
+    /// One note by id; a duplicate id is not served.
+    pub fn read(&self, id: &NoteId) -> Result<NoteView, MemoryFilesError> {
+        let loaded = self.load()?;
+        loaded
+            .get(id)
+            .cloned()
+            .ok_or(MemoryFilesError::NotFound(*id))
+    }
+
+    // ------------------------------------------------------------------------
+    // `.history`
+    // ------------------------------------------------------------------------
+
+    /// The service-written revisions kept for `id`, newest first.
+    pub fn history(&self, id: &NoteId) -> Result<Vec<(String, Option<SystemTime>)>> {
+        let dir = self.history_dir.join(id.to_string());
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(|| format!("Failed to list {}", dir.display())),
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(rev) = name.strip_suffix(".md") else {
+                continue;
+            };
+            if !is_revision(rev) {
+                continue;
+            }
+            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if !meta.file_type().is_file() {
+                continue;
+            }
+            out.push((rev.to_string(), meta.modified().ok()));
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+        Ok(out)
+    }
+
+    /// The bytes of one kept revision.
+    pub fn history_bytes(&self, id: &NoteId, revision: &str) -> Result<Option<Vec<u8>>> {
+        if !is_revision(revision) {
+            return Ok(None);
+        }
+        let path = self
+            .history_dir
+            .join(id.to_string())
+            .join(format!("{revision}.md"));
+        super::fsx::read_if_exists(&path)
+    }
+
+    fn history_file(&self, id: &NoteId, revision: &str) -> PathBuf {
+        self.history_dir
+            .join(id.to_string())
+            .join(format!("{revision}.md"))
+    }
+
+    /// Keeps the newest [`HISTORY_KEEP`] revisions of `id`; `keep` is never
+    /// pruned whatever its mtime says.
+    fn prune_history(&self, id: &NoteId, keep: &str) -> Result<()> {
+        let revisions = self.history(id)?;
+        let mut others = 0usize;
+        for (rev, _) in revisions {
+            if rev == keep {
+                continue;
+            }
+            if others < HISTORY_KEEP - 1 {
+                others += 1;
+                continue;
+            }
+            remove_file_if_exists(&self.history_file(id, &rev))?;
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // The mutation protocol (design §6, rows create / update / archive / confirm)
+    // ------------------------------------------------------------------------
+
+    /// The four steps of the table, each atomic. `from_rev` is `None` on
+    /// create; `current_path` is the file to write onto for an existing note
+    /// (a retitle renames it afterwards, so the recovery's hash test holds at
+    /// every point). `parsed` is what the mutation read before deciding; it
+    /// is patched with the file written, and the view derived from it — the
+    /// partition as a fresh read would now find it — is returned beside the
+    /// new revision and written to `MEMORY.md` (design 09 §6.3 quick win 3).
+    fn commit_write(
+        &self,
+        state: &mut State,
+        parsed: &mut Parsed,
+        from_rev: Option<String>,
+        note: &Note,
+        origin: Origin,
+        current_path: Option<&Path>,
+    ) -> Result<(String, LoadedPartition), MemoryFilesError> {
+        self.ensure_laid_out(state)?;
+        let bytes = note.serialize();
+        let to_rev = super::sha256_hex(bytes.as_bytes());
+
+        // Step 1: the single pending field.
+        Self::snapshot_mut(state).pending = Some(Pending {
+            id: note.id,
+            from_rev,
+            to_rev: to_rev.clone(),
+            origin,
+        });
+        self.save_snapshot(state.snapshot.as_mut().expect("laid out"), self.now())?;
+        self.crash_check(CrashPoint::WriteAfter1)?;
+
+        // Step 2a: the new bytes into `.history` before the note's rename.
+        self.create_private(&self.history_dir.join(note.id.to_string()))?;
+        write_atomic_private(&self.history_file(&note.id, &to_rev), bytes.as_bytes())?;
+        self.crash_check(CrashPoint::WriteAfter2a)?;
+
+        // Step 2: the note (temp, fsync, rename), then the slug, then prune.
+        let target = self.notes_dir.join(note.file_name());
+        let write_to = current_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| target.clone());
+        write_atomic_private(&write_to, bytes.as_bytes())?;
+        if write_to != target {
+            fs::rename(&write_to, &target).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    write_to.display(),
+                    target.display()
+                )
+            })?;
+            fsync_dir(&self.notes_dir)?;
+        }
+        self.prune_history(&note.id, &to_rev)?;
+        self.crash_check(CrashPoint::WriteAfter2)?;
+
+        // Step 3: record the revision and origin, clear pending.
+        let record = NoteRecord {
+            revision: to_rev.clone(),
+            origin,
+            written_at: self.now(),
+        };
+        let snapshot = Self::snapshot_mut(state);
+        snapshot.notes.insert(note.id, record);
+        snapshot.pending = None;
+        let saved = self.save_snapshot(state.snapshot.as_mut().expect("laid out"), self.now())?;
+        self.remember_snapshot(state, saved);
+        self.crash_check(CrashPoint::WriteAfter3)?;
+
+        // Step 4: navigation (the index and the event are the caller's),
+        // from what was read plus what was written — and the parse cache,
+        // which takes the written file untrusted: the next read re-hashes
+        // it (design 09 §6.3). The write has landed: a file that cannot be
+        // stat'ed now costs the patched view and the cache entry, not the
+        // write — the view is read again instead.
+        let (entry, stat) = match self.scan_one(&target) {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(
+                    "Could not stat the note just written in {} ({}); reading the partition again",
+                    self.partition_key,
+                    e.root_cause()
+                );
+                let view;
+                (*parsed, view) = self.load_parsed(state)?;
+                self.write_navigation(&view.views);
+                return Ok((to_rev, view));
+            }
+        };
+        let file_name = entry.file_name.clone();
+        let mut replaced_names = Vec::new();
+        if write_to != target
+            && let Some(name) = write_to.file_name()
+        {
+            replaced_names.push(name.to_string_lossy().into_owned());
+        }
+        let replaced: HashSet<PathBuf> = [write_to, target.clone()].into_iter().collect();
+        let written = parsed.put(&replaced, entry, bytes.as_bytes());
+        if let (Some(cache), Some(written)) = (&self.cache, written)
+            && let Some(stat) = cache.key(&target, Some(stat))
+        {
+            cache.put_file(
+                &self.partition_key,
+                &self.notes_dir,
+                &replaced_names,
+                &file_name,
+                FileEntry::new(&file_name, stat, written, false),
+            );
+        }
+        let view = self.derive_view(parsed, state);
+        self.write_navigation(&view.views);
+        Ok((to_rev, view))
+    }
+
+    /// `memory_store` (design §7a): validates, checks a `supersedes` target's
+    /// revision and authority, answers an exact duplicate with the existing
+    /// id, else creates the note with a fresh UUID.
+    pub fn create(&self, input: NewNote, actor: Actor) -> Result<Created, MemoryFilesError> {
+        self.create_viewed(input, actor).map(|(created, _)| created)
+    }
+
+    /// [`Partition::create`], and the partition as it stands afterwards —
+    /// what a fresh [`Partition::load`] would return, read once (design 09
+    /// §6.3 quick win 3).
+    pub fn create_viewed(
+        &self,
+        input: NewNote,
+        actor: Actor,
+    ) -> Result<(Created, LoadedPartition), MemoryFilesError> {
+        let mut state = self.lock();
+        self.refuse_if_quarantined(&state)?;
+        let Some(kind) = input.kind else {
+            return Err(MemoryFilesError::InvalidInput("kind is required".into()));
+        };
+        let mut status = match input.status.unwrap_or(NoteStatus::Active) {
+            NoteStatus::Archived => {
+                return Err(MemoryFilesError::InvalidInput(
+                    "a note is not created archived".into(),
+                ));
+            }
+            s => s,
+        };
+        let (mut parsed, mut loaded) = self.load_parsed(&state)?;
+        if let Some((target, _)) = &input.supersedes {
+            self.recheck(&state, &mut parsed, &mut loaded, &[*target])?;
+        }
+        // Design §7c Q8's exact duplicate: kind, title, body, key, aliases
+        // and tags.
+        let same_note = |v: &NoteView| {
+            v.note.kind == kind
+                && v.note.title == input.title
+                && v.note.body == input.body
+                && v.note.fact_key == input.fact_key
+                && v.note.aliases == input.aliases
+                && v.note.tags == input.tags
+        };
+        // A replacement is the same as a note only when it changes nothing a
+        // suggestion carries — its validity window included, which Q8 leaves
+        // out: a replacement that bounds a note in time changes it (the L8
+        // close-out's A1; before, a validity-only change of a saved note was
+        // answered with the note itself and written nowhere).
+        let same_replacement = |v: &NoteView| {
+            same_note(v)
+                && v.note.valid_from == input.valid_from
+                && v.note.valid_to == input.valid_to
+        };
+
+        let mut supersedes = Vec::new();
+        if let Some((target, expected)) = &input.supersedes {
+            let view = loaded
+                .get(target)
+                .ok_or(MemoryFilesError::NotFound(*target))?;
+            if view.revision != *expected {
+                return Err(MemoryFilesError::RevisionConflict {
+                    id: *target,
+                    current_revision: view.revision.clone(),
+                });
+            }
+            // S2 (design 09 §3.2, ruling LR9): learning — and, since owner
+            // decision LQ11, the chat model's tool call — replaces a learned
+            // note outright, and suggests replacing one the user saved,
+            // edited by hand or imported. Any other target (a conversation
+            // summary) is replaced as asked. The one load above decides.
+            if input.replace_policy == ReplacePolicy::SuggestUnlessLearned
+                && view.derived.origin.is_saved()
+            {
+                // A suggestion to replace a note in force with itself is that
+                // note — an exact duplicate, as with no `supersedes` below
+                // (repair round 1 of the L8 product slice), when its validity
+                // window is the note's too.
+                if view.derived.effective_status == EffectiveStatus::Active
+                    && same_replacement(view)
+                {
+                    let created = Created {
+                        id: view.note.id,
+                        revision: view.revision.clone(),
+                        origin: view.derived.origin,
+                        dedup: Dedup::Existing,
+                        superseded: Vec::new(),
+                        suggestion: false,
+                    };
+                    return Ok((created, loaded));
+                }
+                status = NoteStatus::Candidate;
+            }
+            // S1: a surface the user did not direct may not *replace* a note
+            // the user saved (G2) — but a candidate replaces nothing while it
+            // stays one (design §6), and only a user-directed confirm, bound
+            // to the target's revision (S5), makes it stop being one.
+            if view.derived.origin == Origin::User
+                && !actor.is_user_directed()
+                && status != NoteStatus::Candidate
+            {
+                return Err(authority_conflict(*target, "replace"));
+            }
+            // S4: a restated change does not mint a second, identical
+            // suggestion for the same target.
+            if status == NoteStatus::Candidate
+                && let Some(existing) = loaded.views.iter().find(|v| {
+                    v.derived.effective_status == EffectiveStatus::Candidate
+                        && v.note.supersedes == [*target]
+                        && same_replacement(v)
+                })
+            {
+                let created = Created {
+                    id: existing.note.id,
+                    revision: existing.revision.clone(),
+                    origin: existing.derived.origin,
+                    dedup: Dedup::Existing,
+                    superseded: existing.note.supersedes.clone(),
+                    suggestion: true,
+                };
+                return Ok((created, loaded));
+            }
+            supersedes.push(*target);
+        } else if let Some(existing) = loaded
+            .views
+            .iter()
+            .find(|v| v.derived.effective_status == EffectiveStatus::Active && same_note(v))
+        {
+            let created = Created {
+                id: existing.note.id,
+                revision: existing.revision.clone(),
+                origin: existing.derived.origin,
+                dedup: Dedup::Existing,
+                superseded: Vec::new(),
+                suggestion: false,
+            };
+            return Ok((created, loaded));
+        }
+
+        let now = self.now();
+        let note = Note {
+            id: NoteId::new(),
+            title: input.title,
+            kind,
+            status,
+            fact_key: input.fact_key,
+            aliases: input.aliases,
+            tags: input.tags,
+            created_at: now,
+            updated_at: now,
+            observed_at: input.observed_at,
+            valid_from: input.valid_from,
+            valid_to: input.valid_to,
+            review_after: None,
+            pinned: false,
+            sources: input.sources,
+            supersedes: supersedes.clone(),
+            unknown: Vec::new(),
+            body: input.body,
+        };
+        note.validate_for_write()
+            .map_err(MemoryFilesError::InvalidInput)?;
+        let origin = actor.origin();
+        let (revision, view) =
+            self.commit_write(&mut state, &mut parsed, None, &note, origin, None)?;
+        let created = Created {
+            id: note.id,
+            revision,
+            origin,
+            dedup: Dedup::Created,
+            suggestion: status == NoteStatus::Candidate && !supersedes.is_empty(),
+            superseded: supersedes,
+        };
+        Ok((created, view))
+    }
+
+    /// `memory_update` (design §7a): edit, archive or confirm, under the
+    /// revision check and the G2 rules — `confirm` only from a user-directed
+    /// surface; edit/archive of a `user` note only from one; and a fact key
+    /// set on a conversation summary only from one (owner decision LQ10).
+    pub fn update(
+        &self,
+        id: &NoteId,
+        expected_revision: &str,
+        action: UpdateAction,
+        actor: Actor,
+    ) -> Result<Updated, MemoryFilesError> {
+        self.update_viewed(id, expected_revision, action, actor)
+            .map(|(updated, _)| updated)
+    }
+
+    /// [`Partition::update`], and the partition as it stands afterwards —
+    /// what a fresh [`Partition::load`] would return, read once (design 09
+    /// §6.3 quick win 3).
+    pub fn update_viewed(
+        &self,
+        id: &NoteId,
+        expected_revision: &str,
+        action: UpdateAction,
+        actor: Actor,
+    ) -> Result<(Updated, LoadedPartition), MemoryFilesError> {
+        let mut state = self.lock();
+        self.refuse_if_quarantined(&state)?;
+        let (mut parsed, mut loaded) = self.load_parsed(&state)?;
+        self.recheck(&state, &mut parsed, &mut loaded, &[*id])?;
+        if matches!(action, UpdateAction::Confirm { .. }) {
+            // The note a confirmed suggestion retires is bound by revision
+            // too (S5): re-read it before that check as well.
+            let targets = loaded
+                .get(id)
+                .map(|v| v.note.supersedes.clone())
+                .unwrap_or_default();
+            self.recheck(&state, &mut parsed, &mut loaded, &targets)?;
+        }
+        let view = loaded.get(id).ok_or(MemoryFilesError::NotFound(*id))?;
+        if view.revision != expected_revision {
+            return Err(MemoryFilesError::RevisionConflict {
+                id: *id,
+                current_revision: view.revision.clone(),
+            });
+        }
+        let mut new = view.note.clone();
+        // A suggestion (design 09 §3.1): a candidate that names a note it
+        // would replace. It retires nothing while it stays a candidate, so
+        // every way it could stop being one other than a bound confirm is
+        // closed below (S9, S10).
+        let suggestion = new.status == NoteStatus::Candidate && !new.supersedes.is_empty();
+        // Design 09 §13.3: a conversation summary is the assistant's record
+        // of a conversation. An edit or archive by anyone but the user
+        // leaves it one — origin `extracted_other` — where a tool call's
+        // `extracted_user` would have it recalled on its own and read as
+        // learned from what the user said.
+        let written_origin = if !actor.is_user_directed()
+            && super::is_conversation_summary(view.note.kind, view.derived.origin, view.note.status)
+        {
+            Origin::ExtractedOther
+        } else {
+            actor.origin()
+        };
+        let origin = match &action {
+            UpdateAction::Confirm { target_revision } => {
+                if !actor.is_user_directed() {
+                    return Err(MemoryFilesError::ConfirmRefused {
+                        id: *id,
+                        message: format!(
+                            "Confirming a remembered candidate is done by you, not by me: open the Memory view in the app, or run `openalpaca memory confirm {id}`."
+                        ),
+                    });
+                }
+                if new.status != NoteStatus::Candidate {
+                    return Err(MemoryFilesError::InvalidInput(format!(
+                        "note {id} is {}, not a candidate",
+                        new.status
+                    )));
+                }
+                if suggestion {
+                    // S5: the confirm binds the note it retires, so a target
+                    // edited after the suggestion is never retired unseen.
+                    let [target] = new.supersedes.as_slice() else {
+                        return Err(MemoryFilesError::InvalidInput(format!(
+                            "note {id} names {} notes it would replace; a suggestion replaces one — edit its supersedes list before confirming it",
+                            new.supersedes.len()
+                        )));
+                    };
+                    let Some(target_revision) = target_revision else {
+                        return Err(MemoryFilesError::InvalidInput(format!(
+                            "note {id} would replace note {target}: confirming it needs target_revision, the revision of the note it replaces as you last saw it"
+                        )));
+                    };
+                    let current = loaded
+                        .get(target)
+                        .ok_or(MemoryFilesError::NotFound(*target))?;
+                    if current.revision != *target_revision {
+                        return Err(MemoryFilesError::RevisionConflict {
+                            id: *target,
+                            current_revision: current.revision.clone(),
+                        });
+                    }
+                    // A link retires its target without changing the
+                    // target's file, so a revision that still matches does
+                    // not mean the target is still the one in force.
+                    if current.derived.effective_status != EffectiveStatus::Active {
+                        return Err(MemoryFilesError::InvalidInput(format!(
+                            "note {target}, which note {id} would replace, is no longer active (it is {}): there is nothing left for this suggestion to replace — undo it to dismiss it (`openalpaca memory undo {id}`, or Keep mine in the Memory view)",
+                            current.derived.effective_status
+                        )));
+                    }
+                }
+                new.status = NoteStatus::Active;
+                Origin::User
+            }
+            UpdateAction::Archive => {
+                // S9: an archived former suggestion's link would count, and
+                // retire its target with the archiving actor's authority.
+                if suggestion {
+                    return Err(MemoryFilesError::InvalidInput(format!(
+                        "note {id} is a suggestion: a suggestion is replaced or kept, not archived — confirm it to replace the note it names, or undo it to keep yours"
+                    )));
+                }
+                if view.derived.origin == Origin::User && !actor.is_user_directed() {
+                    return Err(authority_conflict(*id, "archive"));
+                }
+                if new.status == NoteStatus::Archived {
+                    let updated = Updated {
+                        id: *id,
+                        revision: view.revision.clone(),
+                        status: new.status,
+                        written: false,
+                    };
+                    return Ok((updated, loaded));
+                }
+                new.status = NoteStatus::Archived;
+                written_origin
+            }
+            UpdateAction::Edit(patch) => {
+                if view.derived.origin == Origin::User && !actor.is_user_directed() {
+                    return Err(authority_conflict(*id, "edit"));
+                }
+                // S10: the text a confirmation shows is the extractor's, and
+                // an edit here would also re-record an inferred suggestion as
+                // the user's own words.
+                if suggestion && !actor.is_user_directed() {
+                    return Err(MemoryFilesError::AuthorityConflict {
+                        id: *id,
+                        message: format!(
+                            "Note {id} is a suggestion waiting for you, so a tool call may not edit it: open the Memory view in the app, or run `openalpaca memory confirm {id}` or `openalpaca memory undo {id}`."
+                        ),
+                    });
+                }
+                patch.apply(&mut new);
+                // Owner decision LQ10 (2026-09-28): a conversation summary
+                // takes no fact key from anyone but the user — learning
+                // ignores it, and the same-key grouping would set the
+                // assistant's record against the note that holds the key.
+                if !actor.is_user_directed()
+                    && new.fact_key.is_some()
+                    && new.fact_key != view.note.fact_key
+                    && super::is_conversation_summary(
+                        view.note.kind,
+                        view.derived.origin,
+                        view.note.status,
+                    )
+                {
+                    return Err(MemoryFilesError::AuthorityConflict {
+                        id: *id,
+                        message: format!(
+                            "Note {id} is a conversation summary, and a conversation summary takes no fact key from a model: store the fact as a note of its own, or set the key yourself in the Memory view in the app or with `openalpaca memory edit {id}`."
+                        ),
+                    });
+                }
+                if new.serialize() == view.note.serialize() {
+                    let updated = Updated {
+                        id: *id,
+                        revision: view.revision.clone(),
+                        status: new.status,
+                        written: false,
+                    };
+                    return Ok((updated, loaded));
+                }
+                written_origin
+            }
+        };
+        new.updated_at = self.now();
+        new.validate_for_write()
+            .map_err(MemoryFilesError::InvalidInput)?;
+        let path = view.path.clone();
+        let from_rev = view.revision.clone();
+        let status = new.status;
+        let (revision, view) = self.commit_write(
+            &mut state,
+            &mut parsed,
+            Some(from_rev),
+            &new,
+            origin,
+            Some(&path),
+        )?;
+        let updated = Updated {
+            id: *id,
+            revision,
+            status,
+            written: true,
+        };
+        Ok((updated, view))
+    }
+
+    // ------------------------------------------------------------------------
+    // Forget (design §6, tombstone first)
+    // ------------------------------------------------------------------------
+
+    /// `memory_forget` (design §7a): per target, a revision check, then the
+    /// tombstone (with the note's origin, `supersedes` and source ids), then
+    /// the file and its `.history`. Each target is its own single-note
+    /// mutation. A target with no file answers `not_found` whatever revision
+    /// was sent (§7b P12). [`ForgetMode::Forget`].
+    pub fn forget(
+        &self,
+        targets: &[(NoteId, String)],
+    ) -> Result<Vec<ForgetOutcome>, MemoryFilesError> {
+        self.forget_as(targets, ForgetMode::Forget)
+    }
+
+    /// A forget or a withdrawal (design 09 §3.3): the same single-note
+    /// mutations, tombstone first; `mode` decides what the tombstone keeps.
+    pub fn forget_as(
+        &self,
+        targets: &[(NoteId, String)],
+        mode: ForgetMode,
+    ) -> Result<Vec<ForgetOutcome>, MemoryFilesError> {
+        self.forget_viewed(targets, mode)
+            .map(|(outcomes, _)| outcomes)
+    }
+
+    /// [`Partition::forget_as`], and the partition as it stands afterwards.
+    /// The partition is read **once** for every target (design 09 §6.3 quick
+    /// win 2): forgetting one note changes no other note's revision, origin
+    /// or file, which is all a later target's checks read, and a target
+    /// already forgotten in this call answers `not_found`, as a re-read
+    /// would. `MEMORY.md` is rebuilt once, after the last target — and also
+    /// when a target fails, for the ones forgotten before it.
+    pub fn forget_viewed(
+        &self,
+        targets: &[(NoteId, String)],
+        mode: ForgetMode,
+    ) -> Result<(Vec<ForgetOutcome>, LoadedPartition), MemoryFilesError> {
+        let mut state = self.lock();
+        self.refuse_if_quarantined(&state)?;
+        let (mut parsed, mut loaded) = self.load_parsed(&state)?;
+        let ids: Vec<NoteId> = targets.iter().map(|(id, _)| *id).collect();
+        self.recheck(&state, &mut parsed, &mut loaded, &ids)?;
+        let mut done = ForgetProgress::default();
+        let result = self.forget_each(&mut state, &parsed, &loaded, targets, mode, &mut done);
+        if result.is_err()
+            && let Some(cache) = &self.cache
+        {
+            // A tombstone may be durable with its files still on disk: the
+            // next open sweeps again (scale slice S3).
+            cache.rearm_tombstone_sweep(&self.partition_key, &self.notes_dir);
+        }
+        self.remember_snapshot(&state, done.saved);
+        if let Some(cache) = &self.cache
+            && !done.removed.is_empty()
+        {
+            let names: Vec<String> = done
+                .removed
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .collect();
+            cache.remove_files(&self.partition_key, &self.notes_dir, &names);
+        }
+        if done.forgotten.is_empty() {
+            return result.map(|()| (done.outcomes, loaded));
+        }
+        parsed.drop_paths(&done.removed);
+        let view = self.derive_view(&parsed, &state);
+        self.write_navigation(&view.views);
+        result.map(|()| (done.outcomes, view))
+    }
+
+    /// The per-target steps of [`Partition::forget_viewed`] over one read of
+    /// the partition, recording in `done` what each did as it goes, so a
+    /// failure part-way leaves an account of the targets before it.
+    fn forget_each(
+        &self,
+        state: &mut State,
+        parsed: &Parsed,
+        loaded: &LoadedPartition,
+        targets: &[(NoteId, String)],
+        mode: ForgetMode,
+        done: &mut ForgetProgress,
+    ) -> Result<(), MemoryFilesError> {
+        let ForgetProgress {
+            outcomes,
+            removed,
+            forgotten,
+            saved,
+        } = done;
+        for (id, expected) in targets {
+            let view = if forgotten.contains(id) {
+                None
+            } else {
+                loaded.get(id)
+            };
+            let Some(view) = view else {
+                outcomes.push(ForgetOutcome {
+                    id: *id,
+                    status: ForgetStatus::NotFound,
+                });
+                continue;
+            };
+            if view.revision != *expected {
+                outcomes.push(ForgetOutcome {
+                    id: *id,
+                    status: ForgetStatus::RevisionConflict {
+                        current_revision: view.revision.clone(),
+                    },
+                });
+                continue;
+            }
+            let (supersedes, suppressed_sources) = match mode {
+                ForgetMode::Forget => {
+                    let pending = view.note.status == NoteStatus::Candidate;
+                    // A pending candidate — a suggestion or not — suppresses
+                    // none of the sources of the note it names, whatever that
+                    // note's origin, nor of any note the user saved. Not the
+                    // note it would replace (the L8 close-out's A2): that
+                    // note stays in force until the user confirms (design
+                    // §4), and the chat model's edit suggestion copies its
+                    // sources, so suppressing them would take it out of
+                    // recall through the suggestion. Nor a saved one (the
+                    // close-out's repair rounds 1 and 2): a candidate the
+                    // user confirmed from the same turn or run cites that
+                    // turn's or run's row too — every candidate of a run
+                    // cites the run — and rejecting its sibling would retire
+                    // it, unannounced. A note already gone — forgotten
+                    // earlier in this call too — shields nothing; its own
+                    // tombstone suppressed its rows.
+                    let shielded: HashSet<String> = if pending {
+                        loaded
+                            .views
+                            .iter()
+                            .filter(|v| v.note.id != *id && !forgotten.contains(&v.note.id))
+                            .filter(|v| {
+                                v.derived.origin.is_saved()
+                                    || view.note.supersedes.contains(&v.note.id)
+                            })
+                            .flat_map(|v| v.note.sources.iter().map(|s| s.suppression_key()))
+                            .collect()
+                    } else {
+                        HashSet::new()
+                    };
+                    (
+                        // S3: a candidate retired nothing while it lived.
+                        if pending {
+                            Vec::new()
+                        } else {
+                            view.note.supersedes.clone()
+                        },
+                        view.note
+                            .sources
+                            .iter()
+                            .map(|s| s.suppression_key())
+                            .filter(|key| !shielded.contains(key))
+                            .collect(),
+                    )
+                }
+                ForgetMode::Withdraw => (Vec::new(), Vec::new()),
+            };
+            let tombstone = Tombstone {
+                id: *id,
+                origin: view.derived.origin,
+                supersedes,
+                suppressed_sources,
+                forgotten_at: self.now(),
+            };
+            // Step 1: the tombstone, durable before anything is deleted.
+            let snapshot = Self::snapshot_mut(state);
+            snapshot.tombstones.push(tombstone);
+            snapshot.notes.remove(id);
+            // A save that fails leaves no earlier target's generation behind
+            // to cache this target's unsaved tombstone under.
+            *saved = None;
+            *saved = self.save_snapshot(
+                state.snapshot.as_mut().expect("not quarantined, has notes"),
+                self.now(),
+            )?;
+            self.crash_check(CrashPoint::ForgetAfter1)?;
+
+            // Step 2: the file (every file with that id) and its history.
+            let files: Vec<&PathBuf> = std::iter::once(&view.path)
+                .chain(
+                    parsed
+                        .scan
+                        .iter()
+                        .filter(|e| e.id == Some(*id))
+                        .map(|e| &e.path),
+                )
+                .collect();
+            for path in files {
+                remove_file_if_exists(path)?;
+                removed.insert(path.clone());
+            }
+            remove_dir_all_if_exists(&self.history_dir.join(id.to_string()))?;
+            self.crash_check(CrashPoint::ForgetAfter2)?;
+
+            // Step 3: navigation, once the caller is done (the index purge
+            // and the event are the caller's).
+            forgotten.insert(*id);
+            outcomes.push(ForgetOutcome {
+                id: *id,
+                status: ForgetStatus::Forgotten,
+            });
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // Recovery at open (design §6, the recovery column)
+    // ------------------------------------------------------------------------
+
+    /// Finishes or abandons an interrupted write from the single `pending`
+    /// field, then deletes any tombstoned file still on disk. Idempotent.
+    ///
+    /// **The forget row's sweep runs once per partition per process**
+    /// through a service's cache (scale slice S3), and again after a forget
+    /// that failed part-way; without a cache, at every open. That is as safe
+    /// as sweeping at every open because every other way to a note file
+    /// goes through a scan that leaves a forgotten id's file out and deletes
+    /// it with its `.history` ([`Self::drop_forgotten`]): the stat scan
+    /// before a read and at every reconciliation tick, and the whole read
+    /// behind every listing, write, index pass and `MEMORY.md`. The one
+    /// thing no scan meets is a `.history/<id>/` put back without its note;
+    /// nothing reads it (history is read only for a note that exists), and
+    /// the reconciliation tick deletes it
+    /// ([`Partition::sweep_forgotten_history`]). What stays at every open is
+    /// what reads no directory: the pending recovery, and dropping a
+    /// snapshot record a forgotten id should not have.
+    fn recover(&self) -> Result<(), MemoryFilesError> {
+        let mut state = self.lock();
+        let Some(current) = state.snapshot.as_ref() else {
+            return Ok(());
+        };
+        // Read the snapshot first and unshare it (`Arc::make_mut`) only when
+        // there is something to record: most opens have nothing to recover.
+        let pending = current.pending.clone();
+        let tombstoned: Vec<NoteId> = current.tombstones.iter().map(|t| t.id).collect();
+        let mut changed = false;
+        let mut records: Vec<(NoteId, NoteRecord)> = Vec::new();
+
+        if let Some(pending) = &pending {
+            changed = true;
+            let files: Vec<(PathBuf, String)> = self
+                .scan_raw()?
+                .into_iter()
+                .filter(|e| e.id == Some(pending.id))
+                .filter_map(|e| {
+                    read_regular_nofollow(&e.path)
+                        .ok()
+                        .map(|bytes| (e.path, super::sha256_hex(&bytes)))
+                })
+                .collect();
+            let at_to = files.iter().any(|(_, h)| *h == pending.to_rev);
+            let all_at_from = files
+                .iter()
+                .all(|(_, h)| Some(h) == pending.from_rev.as_ref());
+            if at_to {
+                // Finish step 3. A retitle interrupted between its content
+                // write and its rename may have left a `from_rev` twin.
+                for (path, hash) in &files {
+                    if *hash != pending.to_rev && Some(hash) == pending.from_rev.as_ref() {
+                        remove_file_if_exists(path)?;
+                    }
+                }
+                if let Some((path, _)) = files.iter().find(|(_, h)| *h == pending.to_rev)
+                    && let Ok(bytes) = read_regular_nofollow(path)
+                    && let Ok(note) = Note::parse(&bytes)
+                {
+                    let target = self.notes_dir.join(note.file_name());
+                    if *path != target && !target.exists() {
+                        let _ = fs::rename(path, &target);
+                    }
+                }
+                records.push((
+                    pending.id,
+                    NoteRecord {
+                        revision: pending.to_rev.clone(),
+                        origin: pending.origin,
+                        written_at: self.now(),
+                    },
+                ));
+            } else if files.is_empty() || all_at_from {
+                // Step 2 never landed: clear pending; the `.history` copy of
+                // `to_rev` is bounded and harmless.
+            } else if let [(_, hash)] = files.as_slice() {
+                // An external edit raced the write: the note is `external` at
+                // whatever the file holds; the service's own bytes are in
+                // `.history`.
+                records.push((
+                    pending.id,
+                    NoteRecord {
+                        revision: hash.clone(),
+                        origin: Origin::External,
+                        written_at: self.now(),
+                    },
+                ));
+            }
+        }
+
+        // Forget row: a tombstoned id whose file still exists is deleted.
+        // One listing of `notes/` serves every tombstone — once per process
+        // through a cache (see above).
+        let sweep = !tombstoned.is_empty() && !self.tombstones_swept();
+        if sweep {
+            let ids: HashSet<NoteId> = tombstoned.iter().copied().collect();
+            for entry in self.scan_raw()? {
+                if entry.id.is_some_and(|id| ids.contains(&id)) {
+                    remove_file_if_exists(&entry.path)?;
+                    changed = true;
+                }
+            }
+            for id in &tombstoned {
+                if remove_dir_all_if_exists(&self.history_dir.join(id.to_string()))? {
+                    changed = true;
+                }
+            }
+        }
+        let mut still_recorded = Vec::new();
+        for id in tombstoned {
+            let recorded = records.iter().any(|(r, _)| *r == id)
+                || state
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.notes.contains_key(&id));
+            if recorded {
+                still_recorded.push(id);
+                changed = true;
+            }
+        }
+
+        if changed {
+            let snapshot = Self::snapshot_mut(&mut state);
+            snapshot.pending = None;
+            for (id, record) in records {
+                snapshot.notes.insert(id, record);
+            }
+            for id in still_recorded {
+                snapshot.notes.remove(&id);
+            }
+            let saved =
+                self.save_snapshot(state.snapshot.as_mut().expect("checked above"), self.now())?;
+            self.remember_snapshot(&state, saved);
+            self.refresh_navigation(&state);
+        }
+        if sweep && let Some(cache) = &self.cache {
+            cache.mark_tombstones_swept(&self.partition_key, &self.notes_dir);
+        }
+        Ok(())
+    }
+
+    /// Whether this process has already swept the partition's forgotten
+    /// files: only through a cache — an uncached open always sweeps.
+    fn tombstones_swept(&self) -> bool {
+        self.cache
+            .as_ref()
+            .is_some_and(|c| c.tombstones_swept(&self.partition_key, &self.notes_dir))
+    }
+
+    /// Deletes the `.history/<id>/` of every forgotten id — one `lstat` per
+    /// tombstone, no directory listing — and answers how many it found.
+    /// What the reconciliation tick runs (scale slice S3): a `.history` put
+    /// back without its note is met by no scan, and the sweep at open runs
+    /// once per process. A partition opened read-only deletes nothing.
+    pub fn sweep_forgotten_history(&self) -> Result<usize, MemoryFilesError> {
+        if !self.writable {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for id in self.forgotten_ids() {
+            if remove_dir_all_if_exists(&self.history_dir.join(id.to_string()))? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    // ------------------------------------------------------------------------
+    // Reconciliation of external changes (design §5 *Freshness*)
+    // ------------------------------------------------------------------------
+
+    /// Re-hashes every note and brings the snapshot up to date with what
+    /// happened behind the service's back: a new file is recorded `external`,
+    /// an edited one re-recorded `external` at its current hash, a vanished
+    /// one dropped. Returns what changed, for the index and `memory_changed`.
+    /// A quarantined partition is refused; an absent one has nothing to do.
+    pub fn reconcile(&self) -> Result<Vec<ReconcileChange>, MemoryFilesError> {
+        self.reconcile_viewed().map(|(changes, _)| changes)
+    }
+
+    /// [`Partition::reconcile`], and the partition as it stands afterwards
+    /// (design 09 §6.3 quick win 3), read once.
+    pub fn reconcile_viewed(
+        &self,
+    ) -> Result<(Vec<ReconcileChange>, LoadedPartition), MemoryFilesError> {
+        let mut state = self.lock();
+        self.refuse_if_quarantined(&state)?;
+        if state.snapshot.is_none() {
+            let absent = LoadedPartition {
+                health: PartitionHealth::Absent,
+                views: Vec::new(),
+                malformed: Vec::new(),
+                duplicates: Vec::new(),
+                conflicts: Vec::new(),
+                scan: Vec::new(),
+            };
+            return Ok((Vec::new(), absent));
+        }
+        let (parsed, loaded) = self.load_parsed(&state)?;
+        // Quick win 1: "gone" is three set lookups per recorded note, not
+        // three list scans.
+        let served: HashSet<NoteId> = loaded.views.iter().map(|v| v.note.id).collect();
+        let present: HashSet<NoteId> = parsed.scan.iter().filter_map(|e| e.id).collect();
+        let duplicated: HashSet<NoteId> = parsed.duplicates.iter().map(|(id, _)| *id).collect();
+        let now = self.now();
+        let recorded = state.snapshot.as_ref().expect("checked");
+        let mut changes = Vec::new();
+        for view in &loaded.views {
+            let id = view.note.id;
+            let kind = match recorded.notes.get(&id) {
+                Some(record) if record.revision == view.revision => continue,
+                Some(_) => ReconcileChangeKind::Modified,
+                None => ReconcileChangeKind::Added,
+            };
+            changes.push(ReconcileChange {
+                id,
+                kind,
+                revision: Some(view.revision.clone()),
+            });
+        }
+        let gone: Vec<NoteId> = recorded
+            .notes
+            .keys()
+            .filter(|id| !served.contains(id) && !present.contains(id) && !duplicated.contains(id))
+            .copied()
+            .collect();
+        for id in gone {
+            changes.push(ReconcileChange {
+                id,
+                kind: ReconcileChangeKind::Removed,
+                revision: None,
+            });
+        }
+        if changes.is_empty() {
+            return Ok((changes, loaded));
+        }
+        // Only now is the snapshot unshared from the cache and changed.
+        let snapshot = Self::snapshot_mut(&mut state);
+        for change in &changes {
+            match &change.revision {
+                Some(revision) => {
+                    snapshot.notes.insert(
+                        change.id,
+                        NoteRecord {
+                            revision: revision.clone(),
+                            origin: Origin::External,
+                            written_at: now,
+                        },
+                    );
+                }
+                None => {
+                    snapshot.notes.remove(&change.id);
+                }
+            }
+        }
+        let saved = self.save_snapshot(state.snapshot.as_mut().expect("checked"), now)?;
+        self.remember_snapshot(&state, saved);
+        let view = self.derive_view(&parsed, &state);
+        self.write_navigation(&view.views);
+        Ok((changes, view))
+    }
+
+    // ------------------------------------------------------------------------
+    // Navigation
+    // ------------------------------------------------------------------------
+
+    fn refresh_navigation(&self, state: &State) {
+        match self.load_with(state) {
+            Ok(loaded) => self.write_navigation(&loaded.views),
+            Err(e) => tracing::warn!("Could not rebuild {}: {e}", self.navigation_path.display()),
+        }
+    }
+
+    /// `MEMORY.md`: ids, titles and relative links of the notes automatic
+    /// recall may deliver — navigation, not another copy of facts (design §2).
+    /// Best effort: a failure is logged, never an error.
+    fn write_navigation(&self, views: &[NoteView]) {
+        let mut listed: Vec<&NoteView> = views
+            .iter()
+            .filter(|v| v.derived.effective_status == EffectiveStatus::Active)
+            .collect();
+        listed.sort_by(|a, b| {
+            a.note
+                .title
+                .cmp(&b.note.title)
+                .then(a.note.id.cmp(&b.note.id))
+        });
+        let mut text = String::from(
+            "# Memory\n\nGenerated navigation; rebuilt by the service, never edited by hand.\n\n",
+        );
+        for v in listed {
+            text.push_str(&format!(
+                "- [{}]({}/{}) — `{}` · {}\n",
+                v.note.title.replace('[', "\\[").replace(']', "\\]"),
+                NOTES_DIR,
+                v.file_name,
+                v.note.id,
+                v.note.kind
+            ));
+        }
+        if let Err(e) = write_atomic_private(&self.navigation_path, text.as_bytes()) {
+            tracing::warn!("Could not write {}: {e:#}", self.navigation_path.display());
+        }
+    }
+
+    fn refuse_if_quarantined(&self, state: &State) -> Result<(), MemoryFilesError> {
+        if let Some(reason) = &state.quarantine {
+            return Err(MemoryFilesError::Quarantined {
+                partition_key: self.partition_key.clone(),
+                reason: reason.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // `doctor --repair` (design §6, *Management operations*)
+    // ------------------------------------------------------------------------
+
+    /// Rebuilds a missing or invalid snapshot from the directory and lifts the
+    /// quarantine. Preconditions: the directory's owner key is the current
+    /// owner's (else it is an orphan and `adopt` is the verb); no two parsed
+    /// notes share an id — a duplicate refuses the repair naming both files,
+    /// on a healthy partition too, because the service cannot choose.
+    /// Postconditions: the binding from the path, every parsed note recorded
+    /// at its current hash with origin `external`, no tombstones, no pending,
+    /// `repaired_at` stamped. Never touches a note file. A partition that is
+    /// not quarantined has its preconditions checked and nothing rebuilt.
+    pub fn repair(&self, current_owner_key: &str) -> Result<RepairReport, MemoryFilesError> {
+        let mut state = self.lock();
+        if self.owner_key != current_owner_key {
+            return Err(MemoryFilesError::InvalidInput(format!(
+                "partition {} belongs to owner key {}, not the current owner's {current_owner_key}; `openalpaca memory adopt {}` is the verb for that",
+                self.partition_key, self.owner_key, self.owner_key
+            )));
+        }
+        let Parsed {
+            notes: parsed,
+            malformed,
+            duplicates,
+            ..
+        } = self.parse_all(&Self::forgotten_in(&state))?;
+        if let Some((id, files)) = duplicates.into_iter().next() {
+            return Err(MemoryFilesError::DuplicateId { id, files });
+        }
+        if state.quarantine.is_none() {
+            return Ok(RepairReport {
+                partition_key: self.partition_key.clone(),
+                rebuilt: false,
+                notes_recorded: 0,
+                malformed,
+            });
+        }
+        let now = self.now();
+        let created_at = ControlSnapshot::load(&self.snapshot_path)
+            .ok()
+            .flatten()
+            .map(|s| s.created_at)
+            .unwrap_or(now);
+        let mut snapshot = self.fresh_snapshot(created_at);
+        snapshot.repaired_at = Some(now);
+        for (_, p) in &parsed {
+            snapshot.notes.insert(
+                p.note.id,
+                NoteRecord {
+                    revision: p.revision.clone(),
+                    origin: Origin::External,
+                    written_at: now,
+                },
+            );
+        }
+        self.create_private(&self.history_dir)?;
+        state_dir()?; // `state/` private before the snapshot's parent is made
+        let mut snapshot = Arc::new(snapshot);
+        let saved = self.save_snapshot(&mut snapshot, now)?;
+        state.snapshot = Some(snapshot);
+        state.quarantine = None;
+        self.remember_snapshot(&state, saved);
+        self.refresh_navigation(&state);
+        Ok(RepairReport {
+            partition_key: self.partition_key.clone(),
+            rebuilt: true,
+            notes_recorded: parsed.len(),
+            malformed,
+        })
+    }
+}
+
+fn authority_conflict(id: NoteId, verb: &str) -> MemoryFilesError {
+    MemoryFilesError::AuthorityConflict {
+        id,
+        message: format!(
+            "Note {id} was saved by you, so a tool call may not {verb} it: open the Memory view in the app, or run `openalpaca memory edit {id}` (or `openalpaca memory add --supersedes {id}`)."
+        ),
+    }
+}
+
+// ============================================================================
+// Home-store-wide operations (design §6, *Management operations*)
+// ============================================================================
+
+/// The owner keys that have a directory under `<store>/memory/owners/`.
+pub fn list_owner_keys(scope: &StoreScope) -> Result<Vec<String>> {
+    let (store, _) = scope_root(scope).map_err(anyhow::Error::new)?;
+    let owners = store.join(ContentKind::Memory.dir_name()).join(OWNERS_DIR);
+    let entries = match fs::read_dir(&owners) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("Failed to list {}", owners.display())),
+    };
+    let mut keys: Vec<String> = entries
+        .flatten()
+        .filter(|e| {
+            fs::symlink_metadata(e.path())
+                .map(|m| m.file_type().is_dir())
+                .unwrap_or(false)
+        })
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| is_owner_key(name))
+        .collect();
+    keys.sort();
+    Ok(keys)
+}
+
+/// Every snapshot file under `state/memory-control/`, parsed where it parses.
+pub fn list_snapshots() -> Result<Vec<(PathBuf, Result<ControlSnapshot, String>)>> {
+    let dir = home_root()?.join("state").join(CONTROL_DIR);
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("Failed to list {}", dir.display())),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || !name.ends_with(".json") {
+            continue;
+        }
+        let parsed = match ControlSnapshot::load(&path) {
+            Ok(Some(s)) => Ok(s),
+            Ok(None) => continue,
+            Err(e) => Err(e.to_string()),
+        };
+        out.push((path, parsed));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// `memory adopt <owner-key>` (design §6): re-binds every partition of an
+/// orphaned owner key — the home partition and every `proj-<old>-*`
+/// snapshot that carries a project id — to the current owner in one
+/// command. A project partition's folder is found by that id through
+/// `projects::by_id` (storage design R20), never by the directory its
+/// snapshot recorded: a re-point renames the folder and touches no
+/// snapshot. A snapshot with no id (an earlier build's, R22), or whose id
+/// no folder under `projects/` records, is left as it is. One collision
+/// refuses the whole command; nothing is partially adopted. Returns the
+/// new partition keys.
+///
+/// `old_owner_key` is a directory name, never a path: anything but 32
+/// lowercase hex characters is refused before it is joined to anything.
+pub fn adopt(
+    old_owner_key: &str,
+    current_owner_id: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<String>, MemoryFilesError> {
+    if !is_owner_key(old_owner_key) {
+        return Err(MemoryFilesError::InvalidInput(format!(
+            "`{old_owner_key}` is not an owner key (32 lowercase hex characters)"
+        )));
+    }
+    let new_key = owner_key(current_owner_id);
+    if old_owner_key == new_key {
+        return Err(MemoryFilesError::InvalidInput(
+            "that owner key is already the current owner's".into(),
+        ));
+    }
+    let home = home_root()?;
+    let control = home.join("state").join(CONTROL_DIR);
+
+    // Every partition to adopt: (owners dir, old snapshot path, old snapshot).
+    struct Candidate {
+        owners_dir: PathBuf,
+        old_snapshot: Option<(PathBuf, ControlSnapshot)>,
+        scope: SnapshotScope,
+        /// A project partition's id, from its snapshot (R18).
+        project_id: Option<ProjectId>,
+    }
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let home_owners = home.join(ContentKind::Memory.dir_name()).join(OWNERS_DIR);
+    let home_snapshot_path = control.join(format!("{}.json", home_partition_key(old_owner_key)));
+    let home_snapshot = match ControlSnapshot::load(&home_snapshot_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(MemoryFilesError::InvalidInput(format!(
+                "the home snapshot of {old_owner_key} is unreadable ({e}); repair it first"
+            )));
+        }
+    };
+    if home_owners.join(old_owner_key).is_dir() || home_snapshot.is_some() {
+        candidates.push(Candidate {
+            owners_dir: home_owners.clone(),
+            old_snapshot: home_snapshot.map(|s| (home_snapshot_path.clone(), s)),
+            scope: SnapshotScope::Home,
+            project_id: None,
+        });
+    }
+    for (path, parsed) in list_snapshots()? {
+        let prefix = format!("proj-{old_owner_key}-");
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let snapshot = parsed.map_err(|e| {
+            MemoryFilesError::InvalidInput(format!(
+                "{} is unreadable ({e}); repair it first",
+                path.display()
+            ))
+        })?;
+        // R22: an earlier build's project snapshot carries no project id; it
+        // has no key in this build and is never adopted. The doctor lists it.
+        let Some(project_id) = snapshot.project_id else {
+            tracing::info!(
+                path = %path.display(),
+                "memory adopt: left alone a project snapshot with no project id (an earlier build's)"
+            );
+            continue;
+        };
+        let Some(project) = projects::by_id(&project_id)? else {
+            tracing::warn!(
+                path = %path.display(),
+                project_id = %project_id,
+                "memory adopt: left alone a project snapshot whose project no folder under projects/ records"
+            );
+            continue;
+        };
+        candidates.push(Candidate {
+            owners_dir: project
+                .dir
+                .join(ContentKind::Memory.dir_name())
+                .join(OWNERS_DIR),
+            old_snapshot: Some((path, snapshot)),
+            scope: SnapshotScope::Project,
+            project_id: Some(project_id),
+        });
+    }
+    if candidates.is_empty() {
+        return Err(MemoryFilesError::InvalidInput(format!(
+            "no partition of owner key {old_owner_key} exists"
+        )));
+    }
+
+    // Collision check first, over everything, before anything moves.
+    for c in &candidates {
+        let target_dir = c.owners_dir.join(&new_key);
+        if target_dir.exists() {
+            return Err(MemoryFilesError::AdoptCollision(format!(
+                "{} already exists",
+                target_dir.display()
+            )));
+        }
+        let new_partition_key = match &c.project_id {
+            None => home_partition_key(&new_key),
+            Some(id) => project_partition_key(&new_key, id),
+        };
+        let new_snapshot_path = control.join(format!("{new_partition_key}.json"));
+        if new_snapshot_path.exists() {
+            return Err(MemoryFilesError::AdoptCollision(format!(
+                "{} already exists",
+                new_snapshot_path.display()
+            )));
+        }
+    }
+
+    state_dir()?; // `state/` private before the first snapshot is written
+    let mut adopted = Vec::new();
+    for c in candidates {
+        let old_dir = c.owners_dir.join(old_owner_key);
+        let new_dir = c.owners_dir.join(&new_key);
+        if old_dir.is_dir() {
+            fs::rename(&old_dir, &new_dir).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    old_dir.display(),
+                    new_dir.display()
+                )
+            })?;
+            fsync_dir(&c.owners_dir)?;
+        }
+        let root_canonical = canonical_string_lenient(&new_dir)?;
+        let new_partition_key = match &c.project_id {
+            None => home_partition_key(&new_key),
+            Some(id) => project_partition_key(&new_key, id),
+        };
+        let mut snapshot = match &c.old_snapshot {
+            Some((_, s)) => s.clone(),
+            None => ControlSnapshot::new(
+                &new_partition_key,
+                c.scope,
+                &new_key,
+                current_owner_id,
+                &root_canonical,
+                now,
+            ),
+        };
+        snapshot.partition_key = new_partition_key.clone();
+        snapshot.owner_key = new_key.clone();
+        snapshot.owner_id = current_owner_id.to_string();
+        snapshot.root = root_canonical;
+        snapshot.project_id = c.project_id;
+        snapshot.save(&control.join(format!("{new_partition_key}.json")), now)?;
+        if let Some((old_path, _)) = &c.old_snapshot {
+            remove_file_if_exists(old_path)?;
+        }
+        adopted.push(new_partition_key);
+    }
+    Ok(adopted)
+}
+
+#[cfg(test)]
+mod parsed_tests {
+    //! `Parsed::put` (scale slice S4, O8): what a write patches into the
+    //! view it read must be exactly what the whole-list version produced —
+    //! the same scan, notes, malformed files and duplicate ids, in the same
+    //! orders — over creates, rewrites, retitles, malformed bytes and files
+    //! that claim an id another file holds.
+
+    use super::*;
+
+    const TEMPLATE: &str = "---
+schema: 1
+id: 00000000-0000-4000-8000-000000000000
+title: T
+kind: fact
+status: active
+fact_key: null
+aliases: []
+tags: []
+created_at: 2026-09-23T10:00:00Z
+updated_at: 2026-09-23T10:00:00Z
+observed_at: null
+valid_from: null
+valid_to: null
+review_after: null
+pinned: false
+sources: []
+supersedes: []
+---
+# T
+
+body
+";
+
+    /// The whole-list `put` this slice replaced, kept as the reference.
+    fn put_reference(
+        p: &mut Parsed,
+        replaced: &HashSet<PathBuf>,
+        entry: ScanEntry,
+        bytes: &[u8],
+    ) -> Option<Arc<ParsedNote>> {
+        p.scan.retain(|e| !replaced.contains(&e.path));
+        p.notes.retain(|(e, _)| !replaced.contains(&e.path));
+        p.malformed.retain(|m| !replaced.contains(&m.path));
+        let written = match classify(&entry, Ok(bytes.to_vec())) {
+            Ok(parsed) => {
+                p.notes.push((entry.clone(), Arc::clone(&parsed)));
+                p.notes.sort_by(|a, b| a.0.file_name.cmp(&b.0.file_name));
+                Some(parsed)
+            }
+            Err(file) => {
+                p.malformed.push(file);
+                p.malformed.sort_by(|a, b| a.path.cmp(&b.path));
+                None
+            }
+        };
+        p.scan.push(entry);
+        p.scan.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+        p.find_duplicates();
+        written
+    }
+
+    fn id(n: u64) -> NoteId {
+        NoteId::parse(&format!("00000000-0000-4000-8000-{n:012x}")).unwrap()
+    }
+
+    fn bytes_for(id: NoteId, title: &str) -> Vec<u8> {
+        TEMPLATE
+            .replace("00000000-0000-4000-8000-000000000000", &id.to_string())
+            .replace("title: T", &format!("title: {title}"))
+            .into_bytes()
+    }
+
+    fn entry(dir: &Path, file_name: &str, size: u64) -> ScanEntry {
+        ScanEntry {
+            path: dir.join(file_name),
+            file_name: file_name.to_string(),
+            id: Note::id_from_file_name(file_name),
+            size,
+            mtime: None,
+            inode: size,
+        }
+    }
+
+    /// What two views must agree on, in order.
+    fn shape(p: &Parsed) -> impl PartialEq + std::fmt::Debug {
+        (
+            p.scan.clone(),
+            p.notes
+                .iter()
+                .map(|(e, n)| (e.path.clone(), n.note.id, n.revision.clone()))
+                .collect::<Vec<_>>(),
+            p.malformed.clone(),
+            p.duplicates.clone(),
+        )
+    }
+
+    #[test]
+    fn put_patches_the_view_exactly_as_the_whole_list_version() {
+        let dir = PathBuf::from("/nowhere/notes");
+        let mut seed: u64 = 0x00DD_BA11_5EED;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        // A starting view: sixty files, some malformed, two sharing an id
+        // under names that are not the canon's.
+        let mut fast = Parsed::default();
+        for i in 0..60u64 {
+            let (name, bytes) = match i % 10 {
+                3 => (format!("notes-{i:03}.md"), b"not a note".to_vec()),
+                7 => (
+                    format!("hand-{i:03}.md"),
+                    bytes_for(id(1_000 + i % 2), "hand"),
+                ),
+                _ => (
+                    Note::file_name_for(id(i), &format!("title {i}")),
+                    bytes_for(id(i), &format!("title {i}")),
+                ),
+            };
+            fast.put(&HashSet::new(), entry(&dir, &name, i), &bytes);
+        }
+        let mut reference = fast.clone();
+        assert_eq!(shape(&fast), shape(&reference));
+        assert!(!fast.duplicates.is_empty() && !fast.malformed.is_empty());
+
+        for step in 0..400u64 {
+            let existing: Vec<ScanEntry> = fast.scan.clone();
+            let pick = |k: u64| existing[(k as usize) % existing.len()].clone();
+            let (replaced, new_entry, bytes): (HashSet<PathBuf>, ScanEntry, Vec<u8>) =
+                match next(6) {
+                    // A new note.
+                    0 => {
+                        let n = 10_000 + step;
+                        let name = Note::file_name_for(id(n), "new");
+                        (HashSet::new(), entry(&dir, &name, step), bytes_for(id(n), "new"))
+                    }
+                    // A rewrite in place of any file, as a note.
+                    1 => {
+                        let old = pick(next(1_000));
+                        let n = old.id.unwrap_or_else(|| id(20_000 + step));
+                        let bytes = bytes_for(n, &format!("rewritten {step}"));
+                        (
+                            HashSet::from([old.path.clone()]),
+                            entry(&dir, &old.file_name, step),
+                            bytes,
+                        )
+                    }
+                    // A retitle: written onto the old name, renamed to a new one.
+                    2 => {
+                        let old = pick(next(1_000));
+                        let n = old.id.unwrap_or_else(|| id(30_000 + step));
+                        let name = Note::file_name_for(n, &format!("retitled {step}"));
+                        let target = dir.join(&name);
+                        (
+                            HashSet::from([old.path.clone(), target]),
+                            entry(&dir, &name, step),
+                            bytes_for(n, &format!("retitled {step}")),
+                        )
+                    }
+                    // Malformed bytes over a file.
+                    3 => {
+                        let old = pick(next(1_000));
+                        (
+                            HashSet::from([old.path.clone()]),
+                            entry(&dir, &old.file_name, step),
+                            b"---\nbroken".to_vec(),
+                        )
+                    }
+                    // A hand-named file claiming an id another file holds.
+                    4 => {
+                        let n = pick(next(1_000)).id.unwrap_or_else(|| id(7));
+                        let name = format!("hand-{step:04}.md");
+                        (HashSet::new(), entry(&dir, &name, step), bytes_for(n, "dup"))
+                    }
+                    // A file whose name says one id and whose frontmatter another.
+                    _ => {
+                        let name = Note::file_name_for(id(40_000 + step), "mismatch");
+                        (
+                            HashSet::new(),
+                            entry(&dir, &name, step),
+                            bytes_for(id(50_000 + step), "mismatch"),
+                        )
+                    }
+                };
+            let a = fast.put(&replaced, new_entry.clone(), &bytes);
+            let b = put_reference(&mut reference, &replaced, new_entry, &bytes);
+            assert_eq!(
+                a.map(|n| (n.note.id, n.revision.clone())),
+                b.map(|n| (n.note.id, n.revision.clone())),
+                "step {step}"
+            );
+            assert_eq!(shape(&fast), shape(&reference), "step {step}");
+        }
+    }
+}

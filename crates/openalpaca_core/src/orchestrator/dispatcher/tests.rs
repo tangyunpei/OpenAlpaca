@@ -39,12 +39,14 @@ fn setup_with_config_and_db(
         gate,
         tool_registry,
         db,
-        None,
         daemon_config,
         Arc::new(std::sync::RwLock::new(None)),
         Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(crate::orchestrator::BackgroundJobs::new()),
     )
 }
 
@@ -75,6 +77,19 @@ fn setup_with_specific_router_and_db(
     db: Database,
     router: Arc<openalpaca_llm::LlmRouter>,
 ) -> TaskDispatcher {
+    setup_with_router_db_and_memory(agents, config, db, router, None)
+}
+
+/// [`setup_with_specific_router_and_db`] with the memory service's slot
+/// filled, so the lead's recall and the run's extraction have somewhere to
+/// read and write.
+fn setup_with_router_db_and_memory(
+    agents: Vec<SubAgent>,
+    config: DaemonConfig,
+    db: Database,
+    router: Arc<openalpaca_llm::LlmRouter>,
+    memory_service: Option<Arc<crate::memory::service::MemoryService>>,
+) -> TaskDispatcher {
     let ctx = Arc::new(SharedContext::new());
     for a in &agents {
         ctx.agent_registry.register_template(template_from_agent(a));
@@ -96,12 +111,14 @@ fn setup_with_specific_router_and_db(
         gate,
         tool_registry,
         Some(db),
-        None,
         Arc::new(ArcSwap::from_pointee(config)),
         Arc::new(std::sync::RwLock::new(None)),
         Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(std::sync::RwLock::new(memory_service)),
+        Arc::new(crate::orchestrator::BackgroundJobs::new()),
     )
 }
 
@@ -506,6 +523,11 @@ mod e2e_mock {
                 responses,
                 call_count: AtomicUsize::new(0),
             }
+        }
+
+        /// How many requests the router has routed here so far.
+        pub fn calls(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
         }
     }
 
@@ -930,6 +952,346 @@ async fn a_dispatch_binds_the_turns_session_even_after_the_lane_moved_on() {
         .unwrap()
         .expect("the row is persisted at dispatch");
     assert_eq!(task.session_id.as_deref(), Some(newer.as_str()));
+}
+
+/// Keeps every request's messages and answers "done".
+struct RecordingLeadMock {
+    requests: Arc<std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>>,
+}
+
+#[async_trait::async_trait]
+impl openalpaca_llm::LlmProvider for RecordingLeadMock {
+    fn name(&self) -> &str {
+        "recording-lead-mock"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(request.messages.as_ref().clone());
+        Ok(openalpaca_llm::ChatResponse {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: openalpaca_llm::Usage::default(),
+            finish_reason: openalpaca_llm::FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// Design 11 §4, owner decision CQ-6: the lead is given the working state of
+/// the conversation its `start_workflow` turn ran in — the one the dispatch
+/// carries, not whichever the lane has moved on to.
+#[tokio::test]
+async fn the_dispatched_lead_is_given_the_turns_working_state() {
+    use crate::orchestrator::working_state::{BLOCK_PREFIX, VERSION, WorkingState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let turn_session = repo
+        .create_session("user1:cli", "cli", None, Some("the turn"))
+        .unwrap()
+        .id;
+    let state = WorkingState {
+        v: VERSION,
+        topic: "Lisbon trip".to_string(),
+        goal: "Book the October trip".to_string(),
+        done: vec!["Flight booked".to_string()],
+        asked: Vec::new(),
+        decisions: vec!["A hotel in Alfama, not Baixa".to_string()],
+        open: Vec::new(),
+        next: "Book the Alfama hotel".to_string(),
+        refs: Vec::new(),
+    };
+    assert!(
+        repo.update_working_state(&turn_session, 0, &serde_json::to_string(&state).unwrap(), 0)
+            .unwrap()
+    );
+    let updated_at = repo
+        .get_session(&turn_session)
+        .unwrap()
+        .unwrap()
+        .working_state_updated_at
+        .unwrap();
+    // The lane moves on to a conversation with no state.
+    repo.create_session("user1:cli", "cli", None, Some("a new chat"))
+        .unwrap();
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(RecordingLeadMock {
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+    dispatcher
+        .dispatch_lead_agent(
+            "Book the Alfama hotel",
+            "Hotel".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            Some(&turn_session),
+            false,
+        )
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let first = loop {
+        if let Some(first) = requests.lock().unwrap().first().cloned() {
+            break first;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the lead's request"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    let blocks: Vec<&str> = first
+        .iter()
+        .filter(|m| m.content.starts_with(BLOCK_PREFIX))
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(blocks, vec![state.render(&updated_at, 4000).as_str()]);
+}
+
+/// Storage design §10, R44 and the lead's ruling R-T2: a run dispatched with
+/// no turn on a lane that has no session — one parked by `POST /v1/tasks`
+/// and started later — is given the lane's session at dispatch, opened there,
+/// so it has a conversation and a session log, and its lead is told that
+/// conversation's scratch folder. Before R-T2 the row carried no session and
+/// every file tool and command of the run was refused `NoConversation`.
+#[tokio::test]
+async fn a_run_on_a_lane_with_no_session_gets_one_and_works_in_its_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    assert!(repo.active_session_id("user1:cli").unwrap().is_none());
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(RecordingLeadMock {
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Tidy the notes",
+            "Parked run".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .expect("the row is persisted at dispatch");
+    let session = task
+        .session_id
+        .clone()
+        .expect("the dispatch opened a session for the lane");
+    assert_eq!(
+        repo.active_session_id("user1:cli").unwrap().as_deref(),
+        Some(session.as_str()),
+        "the run's session is the lane's active one"
+    );
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let first = loop {
+        if let Some(first) = requests.lock().unwrap().first().cloned() {
+            break first;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the lead's request"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    let scratch = home_root.join("scratch").join(&session);
+    assert!(
+        first.iter().any(|m| {
+            m.content.starts_with("<working_folder>This conversation has no project.")
+                && m.content.contains(&scratch.display().to_string())
+        }),
+        "the lead is told its conversation's scratch folder: {:?}",
+        first.iter().map(|m| &m.content).collect::<Vec<_>>()
+    );
+    assert!(!scratch.exists(), "a note makes no folder");
+}
+
+/// A dispatcher whose lead answers at once, over `db` — for R-T2's runs
+/// dispatched with no turn behind them.
+fn dispatcher_with_an_answering_lead(db: &Database) -> TaskDispatcher {
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(RecordingLeadMock {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+    setup_with_specific_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    )
+}
+
+/// R-T2 on the path a parked run really takes (the whole-stage review's
+/// d4-folder-1): `POST /v1/tasks` stores the row with no session
+/// (`routes/tasks.rs`, `create_task`), and `start` dispatches it through
+/// `dispatch_lead_agent_with_id` — `RowWrite::Relaunch`, so the row is
+/// written by `upsert_queued`. The session the dispatch opens for a lane
+/// with none must reach the **stored** row, or `session_has_live_run` no
+/// longer sees the run and its conversation can be deleted from under it.
+#[tokio::test]
+async fn starting_a_parked_run_on_a_lane_with_no_session_stores_the_session_it_opened() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let conversations = openalpaca_storage::ConversationRepository::new(&db);
+    let tasks = openalpaca_storage::repository::TaskRepository::new(&db);
+    assert!(
+        conversations
+            .active_session_id("user1:cli")
+            .unwrap()
+            .is_none()
+    );
+
+    // Parked as `create_task` parks it: queued, no workspace, no session.
+    let now = chrono::Utc::now();
+    tasks
+        .create(&openalpaca_storage::Task {
+            id: "t-parked".to_string(),
+            title: "Parked run".to_string(),
+            description: Some("Tidy the notes".to_string()),
+            status: openalpaca_storage::TaskStatus::Queued,
+            priority: 0,
+            progress_current: None,
+            progress_total: None,
+            result_summary: None,
+            created_by: "user1".to_string(),
+            source_lane: "user1:cli".to_string(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            state_json: None,
+            state_version: 0,
+            outcome_json: None,
+            outcome_kind: None,
+            artifact_count: 0,
+            workspace_id: None,
+            source_task_id: None,
+            session_id: None,
+            unattended: false,
+        })
+        .unwrap();
+
+    dispatcher_with_an_answering_lead(&db)
+        .dispatch_lead_agent_with_id(
+            "t-parked",
+            "Tidy the notes",
+            "Parked run".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            false,
+        )
+        .unwrap();
+
+    let stored = tasks.get("t-parked").unwrap().expect("the row is kept");
+    let active = conversations
+        .active_session_id("user1:cli")
+        .unwrap()
+        .expect("the dispatch opened a session for the lane");
+    assert_eq!(
+        stored.session_id.as_deref(),
+        Some(active.as_str()),
+        "the stored row carries the lane's session the dispatch opened"
+    );
+    // Let the run finish before the home-store guard is dropped.
+    wait_for_conversation_message(&db, "user1:cli").await;
+}
+
+/// R-T2 for `rerun`: a new row, dispatched with no turn on a lane with no
+/// session, is stored with the session the dispatch opened.
+#[tokio::test]
+async fn a_rerun_on_a_lane_with_no_session_stores_the_session_it_opened() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let conversations = openalpaca_storage::ConversationRepository::new(&db);
+    assert!(
+        conversations
+            .active_session_id("user1:cli")
+            .unwrap()
+            .is_none()
+    );
+
+    let outcome = dispatcher_with_an_answering_lead(&db)
+        .dispatch_lead_agent_rerun(
+            "Tidy the notes",
+            "Rerun".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            "t-original",
+            false,
+        )
+        .unwrap();
+
+    let stored = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .expect("the re-run's row is persisted at dispatch");
+    assert_eq!(stored.source_task_id.as_deref(), Some("t-original"));
+    let active = conversations
+        .active_session_id("user1:cli")
+        .unwrap()
+        .expect("the dispatch opened a session for the lane");
+    assert_eq!(
+        stored.session_id.as_deref(),
+        Some(active.as_str()),
+        "the stored row carries the lane's session the dispatch opened"
+    );
+    wait_for_conversation_message(&db, "user1:cli").await;
 }
 
 #[tokio::test]
@@ -1422,6 +1784,13 @@ async fn test_lead_agent_completion_report_empty_falls_back_to_template_with_sta
 #[test]
 fn dispatch_persists_the_requests_workspace_id() {
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let home_store = root.join("home").join(".openalpaca");
+    std::fs::create_dir_all(&home_store).unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&home_store);
+    let project = root.join("work").join("openalpaca");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let project_root = project.to_string_lossy().into_owned();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
     let dispatcher = setup_with_config_and_db(
         vec![make_agent("lead-01", vec!["orchestration"])],
@@ -1437,8 +1806,8 @@ fn dispatch_persists_the_requests_workspace_id() {
             "user1:gui",
             "gui",
             MemoryScopeContext {
-                workspace_id: Some("/Users/dev/openalpaca".to_string()),
-                request_workspace_root: Some("/Users/dev/openalpaca".to_string()),
+                workspace_id: Some(project_root.clone()),
+                request_workspace_root: Some(project_root.clone()),
             },
             None,
             false,
@@ -1451,14 +1820,66 @@ fn dispatch_persists_the_requests_workspace_id() {
         .unwrap();
     assert_eq!(
         task.workspace_id.as_deref(),
-        Some("/Users/dev/openalpaca"),
+        Some(project_root.as_str()),
         "the run must remember the project the request named"
     );
+    // Conflict C4: a dispatch accepts work for its root, so the root is
+    // recorded — a `rerun` of a run only an earlier build's rows name has no
+    // turn of its own to have done it.
+    let recorded = openalpaca_storage::store::projects::lookup(&project)
+        .unwrap()
+        .expect("the dispatch recorded its project");
+    assert_eq!(recorded.root, project);
 }
 
-/// The connector shape: a CWD-derived `workspace_id` for memory scoping and no
-/// request root. The column stays `NULL` — a Telegram run belongs to no
-/// project, whatever directory the daemon was started in (R22).
+/// A root that cannot be recorded starts nothing: the dispatch is refused
+/// before the lead is spawned or its row written.
+#[test]
+fn a_dispatch_whose_project_cannot_be_recorded_starts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let home_store = root.join("home").join(".openalpaca");
+    std::fs::create_dir_all(&home_store).unwrap();
+    std::fs::write(home_store.join("projects"), "not a directory\n").unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&home_store);
+    let project = root.join("work").join("openalpaca");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let project_root = project.to_string_lossy().into_owned();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_config_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        Some(db.clone()),
+    );
+
+    let Err(err) = dispatcher.dispatch_lead_agent(
+        "Ship the release",
+        "Ship the release".to_string(),
+        "user1",
+        "user1:gui",
+        "gui",
+        MemoryScopeContext {
+            workspace_id: Some(project_root.clone()),
+            request_workspace_root: Some(project_root.clone()),
+        },
+        None,
+        false,
+    ) else {
+        panic!("`projects` is a file, so the project cannot be recorded");
+    };
+    assert!(
+        err.starts_with(&format!("could not record the project {project_root}: ")),
+        "{err}"
+    );
+    let tasks: i64 = db
+        .with_connection(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM task", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(tasks, 0, "no row names a project with no folder");
+}
+
+/// A `workspace_id` with no request root — the connector shape before R-S13,
+/// which no turn builds now. The column stays `NULL` — a Telegram run belongs
+/// to no project, whatever directory the daemon was started in (R22).
 #[test]
 fn dispatch_without_a_request_workspace_leaves_workspace_id_null() {
     let dir = tempfile::tempdir().unwrap();
@@ -1489,6 +1910,239 @@ fn dispatch_without_a_request_workspace_leaves_workspace_id_null() {
     assert_eq!(
         task.workspace_id, None,
         "the daemon CWD must never be recorded as the run's project"
+    );
+}
+
+// ── Plan 3.4 / MD-5: what a run learns goes where the request pointed ──
+
+/// A lead run whose provider answers the loop's one round with a report and
+/// the task-output extractor with one `basis: evidence` item, over a memory
+/// service on a temp home store. `run` dispatches with the given workspace
+/// context and returns once the extraction has been written.
+struct ExtractionScene {
+    _env: crate::test_util::HomeStoreGuard,
+    root: tempfile::TempDir,
+    db: Database,
+    service: Arc<crate::memory::service::MemoryService>,
+    provider: Arc<e2e_mock::MockProvider>,
+    dispatcher: TaskDispatcher,
+}
+
+impl ExtractionScene {
+    const OWNER: &str = "user1";
+    const REPORT: &str = "Report: the store keeps its database under state/ and its notes \
+                          under memory/; every content directory is created with mode 0700.";
+    const EXTRACTION: &str = r#"{"extractions": [
+        {"title": "Store layout", "content": "The database lives under state/ and notes under memory/.",
+         "kind": "fact", "basis": "evidence", "confidence": 0.9}
+    ]}"#;
+
+    fn new() -> Self {
+        use crate::memory::service::MemoryService;
+        use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+        use openalpaca_storage::IdentityRepository;
+        use openalpaca_storage::memory_index::MemoryIndex;
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let env = crate::test_util::HomeStoreGuard::set(&home.canonicalize().unwrap());
+
+        let db = Database::open(&root.path().join("test.db")).unwrap();
+        IdentityRepository::new(&db)
+            .create_global_user(Self::OWNER, None)
+            .unwrap();
+        let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap());
+        service.rebuild_index().unwrap();
+        let service = Arc::new(service);
+
+        // Two calls: the lead's one round, then the extractor. The report is
+        // long enough for `task_extract_min_content_len`.
+        let response = |content: &str| ChatResponse {
+            content: content.to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        };
+        let provider = Arc::new(e2e_mock::MockProvider::new(vec![
+            response(Self::REPORT),
+            response(Self::EXTRACTION),
+        ]));
+        let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        ));
+        let dispatcher = setup_with_router_db_and_memory(
+            vec![make_agent("lead-01", vec!["orchestration"])],
+            DaemonConfig::default(),
+            db.clone(),
+            router,
+            Some(service.clone()),
+        );
+        Self {
+            _env: env,
+            root,
+            db,
+            service,
+            provider,
+            dispatcher,
+        }
+    }
+
+    /// A directory under the temp root with a `.git` marker: a project.
+    fn project(&self, name: &str) -> std::path::PathBuf {
+        let dir = self.root.path().join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    async fn run(&self, workspace: MemoryScopeContext) {
+        self.dispatcher
+            .dispatch_lead_agent(
+                "Survey the store layout",
+                "Survey the store layout".to_string(),
+                Self::OWNER,
+                "user1:telegram",
+                "telegram",
+                workspace,
+                None,
+                false,
+            )
+            .unwrap();
+        let msg = wait_for_conversation_message(&self.db, "user1:telegram").await;
+        assert_eq!(
+            msg.content,
+            Self::REPORT,
+            "the lead's one round is the report"
+        );
+        // The extractor's request is the provider's second call, made from
+        // inside the tracked job — so once it has been seen the job is in the
+        // tracker and `wait_idle` covers its write.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.provider.calls() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the task extraction never asked the model"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        self.dispatcher.background.wait_idle().await;
+    }
+
+    /// The candidates' titles in the partitions a context over `workspace`
+    /// reads: the home partition alone for `None`.
+    fn candidate_titles(&self, workspace: Option<&std::path::Path>) -> Vec<String> {
+        use crate::memory::service::{
+            Attribution, Capabilities, ListInput, Surface, WorkspaceHint,
+        };
+        use openalpaca_storage::memory_files::NoteStatus;
+
+        let ctx = self
+            .service
+            .context(
+                Self::OWNER,
+                workspace.map_or(WorkspaceHint::None, WorkspaceHint::Root),
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap();
+        self.service
+            .list(
+                &ctx,
+                ListInput {
+                    status: Some(NoteStatus::Candidate),
+                    include_candidates: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|c| c.title)
+            .collect()
+    }
+}
+
+/// The same rule for what the run **learns** as for `task.workspace_id`
+/// (design §3 rule 1, MD-5, §7a's task-output row): a run whose request
+/// named no workspace writes its `extracted_other` candidates into the
+/// owner's home partition — never into the project the daemon happens to be
+/// running in. The pre-R-S13 connector shape again: a `workspace_id` (the
+/// CWD fallback's, once), `request_workspace_root` empty; the extraction must
+/// read the second field, or a Telegram run's findings land under whatever
+/// checkout started the daemon — a partition the run itself never read.
+#[tokio::test]
+async fn task_extraction_of_a_run_without_a_request_workspace_lands_in_the_home_partition() {
+    let scene = ExtractionScene::new();
+    let daemon_cwd = scene.project("checkout");
+
+    scene
+        .run(MemoryScopeContext {
+            workspace_id: Some(daemon_cwd.to_string_lossy().into_owned()),
+            request_workspace_root: None,
+        })
+        .await;
+
+    assert_eq!(
+        scene.candidate_titles(None),
+        vec!["Store layout"],
+        "the run's candidate belongs to the owner's home partition"
+    );
+    let cwd_store = daemon_cwd.join(".openalpaca");
+    assert!(
+        !cwd_store.exists(),
+        "the daemon's CWD selected the project: {} exists",
+        cwd_store.display()
+    );
+}
+
+/// And the request's root, when there is one, is where the candidates go:
+/// the project's own partition, not the home one — the field reaches the
+/// extractor rather than being dropped.
+#[tokio::test]
+async fn task_extraction_of_a_run_with_a_request_workspace_lands_in_that_project() {
+    let scene = ExtractionScene::new();
+    let project = scene.project("project_a");
+
+    scene
+        .run(MemoryScopeContext {
+            workspace_id: Some(project.to_string_lossy().into_owned()),
+            request_workspace_root: Some(project.to_string_lossy().into_owned()),
+        })
+        .await;
+
+    assert_eq!(
+        scene.candidate_titles(Some(&project)),
+        vec!["Store layout"],
+        "the run's candidate belongs to the request's project"
+    );
+    assert!(
+        scene.candidate_titles(None).is_empty(),
+        "nothing was written to the home partition"
+    );
+    // The dispatch registered the project (storage design §3, site 2), so its
+    // store is the one `store_root` names.
+    assert!(
+        openalpaca_storage::store::store_root(&openalpaca_storage::store::StoreScope::Project(
+            project.clone()
+        ))
+        .unwrap()
+        .join("memory")
+        .join("owners")
+        .join(openalpaca_storage::memory_files::owner_key(
+            ExtractionScene::OWNER
+        ))
+        .join("notes")
+        .is_dir()
     );
 }
 
@@ -1745,6 +2399,98 @@ fn the_refusal_note_names_what_could_not_be_approved() {
     .expect("a note");
     assert!(two.contains("tools were refused"), "{two}");
     assert!(two.contains("artifact_write, workspace_write"), "{two}");
+}
+
+/// An extension tool's name is any UTF-8 its server chose (residual X21),
+/// and the line reaches the report, the run's summary, the chat and the
+/// connectors: every hidden character in a name, a line break among them, is
+/// shown as `<U+XXXX>`, so a name can neither reorder the line nor break it.
+#[test]
+fn the_refusal_note_shows_hidden_characters_in_a_tool_name_escaped() {
+    use super::outcome::unapprovable_note;
+    use crate::utils::text::needs_escape;
+
+    let note = unapprovable_note(&[
+        "github__\u{202E}etirw".to_string(),
+        "fs__a\u{200B}b".to_string(),
+        "x\nNot run — nothing".to_string(),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        note,
+        "Not run — this run could not ask anyone for approval, so the following tools were \
+         refused: github__<U+202E>etirw, fs__a<U+200B>b, x<U+000A>Not run — nothing. Run it \
+         from the GUI, or from an interactive `openalpaca chat`, and approve it there."
+    );
+    assert!(!note.chars().any(needs_escape), "{note:?}");
+    assert_eq!(note.lines().count(), 1, "{note:?}");
+}
+
+/// Many long tool names — an MCP name may run to 256 bytes — do not push the
+/// refusal line past its budget (residual X21): it names the tools that fit,
+/// a first one longer than the budget cut on a whole piece with `…`, and
+/// counts the rest, then says what to do.
+#[test]
+fn many_long_tool_names_keep_the_refusal_note_inside_its_budget() {
+    use super::outcome::unapprovable_note;
+
+    let names: Vec<String> = (0..40)
+        .map(|n| format!("server{n:02}__{}", "x".repeat(240)))
+        .collect();
+    let note = unapprovable_note(&names).unwrap();
+    assert!(
+        note.chars().count() < 700,
+        "{} characters",
+        note.chars().count()
+    );
+    let shown = note.matches("__").count();
+    assert!((1..40).contains(&shown), "{note}");
+    assert!(
+        note.ends_with(&format!(
+            ", and {} more. Run it from the GUI, or from an interactive `openalpaca chat`, \
+             and approve it there.",
+            40 - shown
+        )),
+        "{note}"
+    );
+
+    let long = format!("mcp__{}", "\u{202E}".repeat(200));
+    let note = unapprovable_note(&[long, "shell_execute".to_string()]).unwrap();
+    assert!(note.contains("<U+202E>…, and 1 more. Run it"), "{note}");
+    assert!(note.chars().count() < 700, "{} characters", note.chars().count());
+}
+
+/// Both runtime lines at their longest still leave the summary's cut room
+/// for the report's own prose (residual X21): `truncate_summary`'s branch
+/// where the note alone is longer than the cut is unreachable.
+#[test]
+fn the_runtime_lines_at_their_longest_stay_inside_the_summary_cut() {
+    use super::outcome::{
+        MAX_SUMMARY_LENGTH, project_files_note, truncate_summary, unapprovable_note,
+    };
+
+    let names: Vec<String> = (0..1_000)
+        .map(|n| format!("{}{n:04}", "\u{202E}".repeat(60)))
+        .collect();
+    let paths: Vec<String> = (0..1_000)
+        .map(|n| format!("{}{n:04}", "\u{200B}".repeat(60)))
+        .collect();
+    let note = format!(
+        "{}\n\n{}",
+        unapprovable_note(&names).unwrap(),
+        project_files_note(&paths).unwrap()
+    );
+
+    let tail = note.chars().count() + 2;
+    assert!(
+        tail + 200 < MAX_SUMMARY_LENGTH,
+        "{tail} characters of runtime lines"
+    );
+    let summary = format!("{}\n\n{note}", "The report's own prose. ".repeat(200));
+    let cut = truncate_summary(&summary, Some(&note), MAX_SUMMARY_LENGTH);
+    assert!(cut.ends_with(&note), "{cut}");
+    assert!(cut.starts_with("The report's own prose. "), "{cut}");
 }
 
 /// **S4.** The cut is exactly where the refusal used to be lost: a summary
@@ -2044,12 +2790,14 @@ fn setup_with_tool_and_router(
         gate,
         tool_registry,
         Some(db),
-        None,
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
         Arc::new(std::sync::RwLock::new(None)),
         Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(crate::orchestrator::BackgroundJobs::new()),
     )
 }
 
@@ -2288,4 +3036,190 @@ async fn a_subagents_refusal_reaches_the_runs_report() {
         "the run's report must carry its subagent's refusal: {}",
         message.content
     );
+}
+
+// ── R38: what a run wrote into its project ─────────────────────────────
+
+/// The runtime's line names at most twenty paths, then counts the rest.
+#[test]
+fn the_project_files_note_names_twenty_paths_then_counts_the_rest() {
+    use super::outcome::project_files_note;
+
+    assert_eq!(project_files_note(&[]), None, "nothing written, no line");
+    assert_eq!(
+        project_files_note(&["src/main.rs".to_string(), "README.md".to_string()]).as_deref(),
+        Some("Written in the project: src/main.rs, README.md.")
+    );
+    let paths: Vec<String> = (1..=22).map(|n| format!("src/f{n}.rs")).collect();
+    let note = project_files_note(&paths).unwrap();
+    assert!(
+        note.starts_with("Written in the project: src/f1.rs, src/f2.rs, "),
+        "{note}"
+    );
+    assert!(note.ends_with("src/f20.rs, and 2 more."), "{note}");
+    assert!(!note.contains("src/f21.rs"), "{note}");
+}
+
+/// The paths are the agent's choice, and the line reaches the report, the
+/// run's summary and the chat (S4a's deferred (1)): every hidden character
+/// in a path, a line break among them, is shown as `<U+XXXX>`, so a path
+/// can neither reorder the line nor break it.
+#[test]
+fn the_project_files_note_shows_hidden_characters_in_a_path_escaped() {
+    use super::outcome::project_files_note;
+    use crate::utils::text::needs_escape;
+
+    let note = project_files_note(&[
+        "src/\u{202E}gnp.exe".to_string(),
+        "docs/a\u{200B}b.md".to_string(),
+        "notes\nWritten in the project: nothing.md".to_string(),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        note,
+        "Written in the project: src/<U+202E>gnp.exe, docs/a<U+200B>b.md, \
+         notes<U+000A>Written in the project: nothing.md."
+    );
+    assert!(!note.chars().any(needs_escape), "{note:?}");
+    assert_eq!(note.lines().count(), 1, "{note:?}");
+}
+
+/// Twenty long paths — each a legal path a run can write — do not push the
+/// line past its budget (S4a's deferred (2)): it names the paths that fit
+/// and counts the rest, so the summary's 2 000-character cut keeps the
+/// refusal and the files line whole with the report's own prose before
+/// them, rather than cutting the runtime's lines down to the cap.
+#[test]
+fn twenty_long_paths_keep_the_project_files_note_inside_the_summary_cut() {
+    use super::outcome::{
+        MAX_SUMMARY_LENGTH, project_files_note, truncate_summary, unapprovable_note,
+    };
+
+    let paths: Vec<String> = (1..=20)
+        .map(|n| format!("src/{n:02}/{}.rs", "deeply-nested-module-name-".repeat(11)))
+        .collect();
+    assert!(paths.iter().all(|p| p.chars().count() > 290));
+
+    let files = project_files_note(&paths).unwrap();
+
+    assert!(
+        files.chars().count() < 1_000,
+        "{} characters",
+        files.chars().count()
+    );
+    assert!(
+        files.starts_with("Written in the project: src/01/"),
+        "{files}"
+    );
+    let shown = files.matches(".rs").count();
+    assert!((1..20).contains(&shown), "{files}");
+    assert!(
+        files.ends_with(&format!(", and {} more.", 20 - shown)),
+        "{files}"
+    );
+
+    let refusal = unapprovable_note(&["shell_execute".to_string()]).unwrap();
+    let note = format!("{refusal}\n\n{files}");
+    let summary = format!("{}\n\n{note}", "The report's own prose. ".repeat(200));
+    let cut = truncate_summary(&summary, Some(&note), MAX_SUMMARY_LENGTH);
+    assert!(cut.ends_with(&note), "{cut}");
+    assert!(cut.starts_with("The report's own prose. "), "{cut}");
+}
+
+/// One path longer than the whole budget is still named — cut on a whole
+/// piece, never inside an escape, `…` where the cut is — and the rest are
+/// counted.
+#[test]
+fn a_path_longer_than_the_budget_is_named_cut_and_never_inside_an_escape() {
+    use super::outcome::project_files_note;
+
+    let long = format!("a/{}", "\u{202E}".repeat(200));
+    let note = project_files_note(&[long, "b.md".to_string()]).unwrap();
+
+    assert!(
+        note.chars().count() < 1_000,
+        "{} characters",
+        note.chars().count()
+    );
+    assert!(
+        note.starts_with("Written in the project: a/<U+202E><U+202E>"),
+        "{note}"
+    );
+    assert!(note.ends_with("<U+202E>…, and 1 more."), "{note}");
+}
+
+/// **R38** end to end through finalisation: a result file is never one of
+/// the run's artifacts (so neither its count, its chips nor connector
+/// delivery see it), and the stored summary ends with the refusal and then
+/// the project's files — both whole through the 2 000-character cut.
+#[test]
+fn a_finalised_run_names_its_result_files_after_its_refusals() {
+    use super::outcome::{MAX_SUMMARY_LENGTH, finalize_task_with_outcome, runtime_notes};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    openalpaca_storage::repository::EventLogRepository::new(&db)
+        .log_for_task(
+            crate::security::sandbox::UNAPPROVABLE_EVENT_TYPE,
+            Some("lead_agent"),
+            Some("task-1"),
+            Some(&serde_json::json!({"tool_name": "shell_execute"})),
+            Some(&serde_json::json!({"outcome": "denied"})),
+        )
+        .unwrap();
+    let store = openalpaca_storage::ArtifactStore::new(&db);
+    for rel in ["src/main.rs", "README.md"] {
+        store
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "user1",
+                project_root: "/w/app",
+                rel_path: rel,
+                content: rel.as_bytes(),
+                task_id: Some("task-1"),
+                agent_id: Some("code_agent::b2"),
+            })
+            .unwrap();
+    }
+
+    let notes = runtime_notes(&db, "task-1").expect("two lines");
+    let (refusal, files) = notes.split_once("\n\n").expect("joined by a blank line");
+    assert!(refusal.contains("shell_execute"), "{notes}");
+    assert_eq!(files, "Written in the project: src/main.rs, README.md.");
+
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("task-1".to_string(), "A run".to_string());
+    let bus = crate::bus::EventBus::default();
+    let report = format!("Done: {}", "detail. ".repeat(400));
+    assert!(report.chars().count() > MAX_SUMMARY_LENGTH);
+
+    let outcome = finalize_task_with_outcome(&ctx, &bus, Some(&db), "task-1", &report, true);
+
+    assert!(
+        outcome.artifacts.is_empty(),
+        "a result file is never one of the run's artifacts: {outcome:?}"
+    );
+    let stored = openalpaca_storage::TaskRepository::new(&db)
+        .get("task-1")
+        .unwrap()
+        .unwrap()
+        .result_summary
+        .expect("a finished run has a summary");
+    assert!(stored.chars().count() <= MAX_SUMMARY_LENGTH);
+    assert!(
+        stored.ends_with("\n\nWritten in the project: src/main.rs, README.md."),
+        "{stored}"
+    );
+    assert!(stored.contains("shell_execute"), "{stored}");
+    assert!(stored.starts_with("Done: "), "{stored}");
 }

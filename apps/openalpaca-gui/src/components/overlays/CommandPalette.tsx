@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Scrim } from "@/components/ui";
 import { useArtifacts } from "@/hooks/useArtifacts";
 import { cn } from "@/lib/cn";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { useUiStore } from "@/stores/ui";
 
 import { filterCommands, shortcutLabel, type Command } from "./commands";
@@ -76,11 +77,13 @@ function PaletteDialog({ pendingConfirmation }: CommandPaletteProps) {
       (artifact) => ({
         id: `find.${artifact.id}`,
         group: "Find",
-        label: artifact.name,
+        // An agent's file name: each hidden character as `<U+XXXX>`.
+        label: escapeHiddenLine(artifact.name).text,
         run: () => {
           setPaletteOpen(false);
-          // Sets the view, the selection and the Preview tab in one action.
-          openArtifact(artifact.id);
+          // Sets the view, the selection, the Preview tab and the Library's
+          // side — a project file's results, else by-products — in one action.
+          openArtifact(artifact.id, artifact.in_project);
         },
       }),
     );
@@ -235,7 +238,9 @@ function PaletteRow({ command, active, onHover, onRun }: PaletteRowProps) {
       <span className="w-[66px] shrink-0 font-mono text-2xs tracking-tag text-muted-fg uppercase">
         {command.group}
       </span>
-      <span className="flex-1 text-md text-ink">{command.label}</span>
+      <span className="min-w-0 flex-1 text-md wrap-anywhere text-ink">
+        {command.label}
+      </span>
       {shortcut !== null && (
         <span className="font-mono text-xs text-faint">{shortcut}</span>
       )}

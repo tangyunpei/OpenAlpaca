@@ -3,7 +3,8 @@
  *
  * Content is read through `api/artifacts` instead: `useArtifactText` for
  * characters and `artifactContentUrl` for the URL an `<img>` loads. `download`
- * here is still the one that hands the viewer a blob to save.
+ * here is still the one that hands the viewer a blob to save; `Open` and
+ * `Reveal in Finder` are `useArtifactFileActions`.
  */
 
 import {
@@ -18,7 +19,10 @@ import {
   openFileWithSystemDefault,
 } from "@/lib/api/files";
 import type { FileAsset, FileOpenResponse } from "@/lib/api/types";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { qk } from "@/lib/query-keys";
+import { revealInFolder } from "@/lib/reveal";
+import { useUiStore } from "@/stores/ui";
 
 export function useFileMetadata(id: string | null): UseQueryResult<FileAsset> {
   return useQuery({
@@ -32,7 +36,7 @@ export function useDownloadFile(): UseMutationResult<Blob, Error, string> {
   return useMutation({ mutationFn: (id: string) => downloadFile(id) });
 }
 
-/** Opens with the daemon host's default app — this is not "Reveal in Finder". */
+/** Opens with the daemon host's default app — `Open`, not `Reveal in Finder`. */
 export function useOpenFile(): UseMutationResult<
   FileOpenResponse,
   Error,
@@ -41,4 +45,43 @@ export function useOpenFile(): UseMutationResult<
   return useMutation({
     mutationFn: (id: string) => openFileWithSystemDefault(id),
   });
+}
+
+/**
+ * `Open` and `Reveal in Finder` for one artifact, each answered by a toast —
+ * the Library header, the `FILE WRITTEN` card and the file panel say the same
+ * words.
+ *
+ * `open` is the daemon's route, so the file opens in its default app on the
+ * daemon's host. `reveal` is the Tauri shell's `reveal_path` (`lib/reveal.ts`):
+ * Finder comes forward with the file selected, so success needs no toast, and
+ * a refusal is the shell's own sentence. Every toast quotes a path an agent
+ * may have chosen, so the name and each refusal are escaped — each hidden
+ * character as `<U+XXXX>` (d7-app-3).
+ */
+export function useArtifactFileActions(): {
+  open: (artifact: { id: string; name: string }) => void;
+  reveal: (path: string) => void;
+} {
+  const openFile = useOpenFile();
+  const showToast = useUiStore((s) => s.showToast);
+  return {
+    open: ({ id, name }) => {
+      openFile.mutate(id, {
+        onSuccess: () =>
+          showToast(`${escapeHiddenLine(name).text} opened in its default app`),
+        onError: (error) =>
+          showToast(`Could not open — ${escapeHiddenLine(error.message).text}`),
+      });
+    },
+    reveal: (path) => {
+      revealInFolder(path).catch((error: unknown) =>
+        showToast(
+          escapeHiddenLine(
+            error instanceof Error ? error.message : String(error),
+          ).text,
+        ),
+      );
+    },
+  };
 }

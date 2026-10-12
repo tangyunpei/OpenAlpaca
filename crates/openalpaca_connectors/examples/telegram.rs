@@ -27,8 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("TELOXIDE_TOKEN").expect("TELOXIDE_TOKEN environment variable not set");
 
     // 3. Connect to the real system database (shared with Daemon).
-    //    Through `open_home_database`: it checks for an older install's data
-    //    directory before opening, and makes `state/` at 0700 the way the
+    //    Through `open_home_database`: it makes `state/` at 0700 the way the
     //    daemon's own boot does.
     println!("Using Database: {}", store::database_path()?.display());
 

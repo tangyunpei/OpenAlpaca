@@ -48,6 +48,7 @@ use openalpaca_core::{
     orchestrator::Orchestrator,
     runner::LoopConfig,
 };
+use openalpaca_llm::keys::key_encryption::KeyEncryptor;
 use openalpaca_storage::{Database, discovery, store};
 use openalpaca_wake::manager::WakeManager;
 use std::path::PathBuf;
@@ -106,16 +107,11 @@ fn main() -> Result<()> {
 
     info!("OpenAlpaca Daemon starting...");
 
-    // D1: everything lives under ~/.openalpaca. Seed the home store, then say
-    // so loudly if an older install's data directory is still on this machine:
-    // this build does not move it (D-D), and coming up on a fresh, empty
-    // database while that data sits somewhere else is the one failure worth
-    // refusing to start over.
+    // D1: everything lives under ~/.openalpaca. Seed the home store.
     if let Err(e) = store::ensure_store(&store::StoreScope::Home) {
         error!("FATAL: cannot create the OpenAlpaca home store: {e:#}");
         std::process::exit(1);
     }
-    store::legacy_root::check_legacy_root();
 
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.
@@ -130,9 +126,10 @@ fn main() -> Result<()> {
         }
     };
 
-    // Resolve config dir and set master key BEFORE spawning any threads.
-    // std::env::set_var is unsafe in multi-threaded contexts (Rust 2024 edition),
-    // so we do it here in the single-threaded preamble.
+    // Resolve config dir and take the master key BEFORE spawning any threads.
+    // The key step removes OPENALPACA_MASTER_KEY from the environment (F3), and
+    // std::env::remove_var is unsafe in multi-threaded contexts (Rust 2024
+    // edition), so it happens here in the single-threaded preamble.
     let config_base_dir = bootstrap::resolve_config_base_dir();
     info!("Config base dir: {}", config_base_dir.display());
     bootstrap::seed_default_configs(&config_base_dir);
@@ -148,14 +145,24 @@ fn main() -> Result<()> {
     let master_key_dir = store::master_key_dir().context("Failed to resolve the state dir")?;
 
     // D6+D7: ensure_at is race-safe; on failure, fail fast.
-    match openalpaca_llm::keys::key_encryption::KeyEncryptor::ensure_at(&master_key_dir) {
+    // F3: the key stays in this process. It is installed as openalpaca_llm's
+    // process-local master key — what `KeyEncryptor::from_env` reads first —
+    // and `OPENALPACA_MASTER_KEY` is removed from the environment, inherited
+    // or not, so no child this daemon spawns (a shell command, a skill script,
+    // an MCP server, a plugin, a CLI model backend) receives it. The file wins
+    // over an inherited variable, as it always has: `ensure_at` never reads
+    // the environment.
+    match KeyEncryptor::ensure_at(&master_key_dir) {
         Ok(hex_key) => {
-            // SAFETY: No other threads exist yet — tokio runtime has not started.
-            unsafe {
-                std::env::set_var("OPENALPACA_MASTER_KEY", &hex_key);
+            // SAFETY: No other threads exist yet — the tokio runtime has not
+            // started and no signal handler is installed — so nothing else can
+            // be reading or writing the environment.
+            if let Err(e) = unsafe { KeyEncryptor::install_process_key_and_clear_env(&hex_key) } {
+                error!("FATAL: Cannot install the master key: {e}");
+                std::process::exit(1);
             }
             info!(
-                "Master key loaded from {}",
+                "Master key loaded from {} and kept in process memory (not exported)",
                 master_key_dir.join(".master_key").display()
             );
         }
@@ -175,7 +182,8 @@ fn main() -> Result<()> {
     let shutdown_flag = shutdown::install_signal_handlers();
     info!("Signal handlers installed (SIGINT + SIGTERM)");
 
-    // Start the tokio runtime AFTER env vars and signal handlers are set.
+    // Start the tokio runtime AFTER the master key is installed (and the
+    // environment cleaned of it) and the signal handlers are set.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -219,6 +227,10 @@ async fn async_main(
     let db_path = store::database_path()?;
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
+    // R24: a project re-point the previous process did not finish is
+    // finished here — after the database opens and before anything resolves
+    // a project (the routes and every ingress start later).
+    bootstrap::recover_repoints(&db);
     // §5.6b: recover the undelivered interjections of every run the previous
     // generation left in flight, then mark those runs `interrupted`. MUST stay
     // here — after the DB opens and before any ingress starts
@@ -276,6 +288,16 @@ async fn async_main(
 
     // Single EventBus for system-wide event distribution
     let bus = EventBus::new(daemon_config.load().server.event_bus_capacity);
+
+    // `USER.md`'s user-directed writer (`GET|PUT /v1/persona/user`, design
+    // §7a; MD-3): the same paths the `update_persona` tool writes, on the
+    // same bus. Built here, before `user_path` and `bus` move on.
+    let persona_user = Arc::new(openalpaca_core::tools::builtins::UserDocumentWriter {
+        user_path: user_path.clone(),
+        backup_dir: bootstrap::persona_backup_dir(&config_base_dir),
+        max_backups: Some(bootstrap::PERSONA_MAX_BACKUPS),
+        bus: bus.clone(),
+    });
 
     // Create ChatStreamManager early (zero deps — just DashMap::new()) so the
     // event bridge can forward ToolConfirmationRequested events to SSE streams.
@@ -435,6 +457,19 @@ async fn async_main(
     // register a provider a hand edit turned on.
     let llm_settings_for_reload = svcs.llm_settings_service.clone();
     let llm_router_for_shutdown = svcs.llm_router.clone();
+    // Learning v2 (design 09 §1.5): the queue every persisted turn is fed to,
+    // learning off the reply path. Without a router nothing could learn.
+    let learning_queue = svcs.llm_router.clone().map(|router| {
+        openalpaca_core::memory::learning::LearningQueue::new(
+            openalpaca_core::memory::learning::LearningDeps {
+                db: db.clone(),
+                router,
+                daemon_config: daemon_config.clone(),
+                memory_service: svcs.memory_service.clone(),
+            },
+            openalpaca_core::memory::learning::QueueMode::Automatic,
+        )
+    });
     // The session log's writers buffer: shutdown has to drain them (§5.5).
     let session_log_for_shutdown = svcs.shared_context.session_log().cloned();
     let web_search_config_for_reload = svcs.web_search_config.clone();
@@ -465,7 +500,6 @@ async fn async_main(
         svcs.security_gate,
         svcs.tool_registry,
         Some(db.clone()),
-        svcs.embedder.clone(),
         svcs.skill_catalog.clone(),
         svcs.skill_router.clone(),
         daemon_config.clone(),
@@ -473,6 +507,10 @@ async fn async_main(
 
     // Wire confirmation broker into orchestrator
     orchestrator.set_confirmation_broker(confirmation_broker.clone());
+    // The memory service: the main loop builds its memory writers from it
+    // (memory redesign, design §7a); the read surface is already in the
+    // registry.
+    orchestrator.set_memory_service(svcs.memory_service.clone());
 
     // Set initial documents
     orchestrator.update_user_document(initial_user_document);
@@ -502,13 +540,17 @@ async fn async_main(
     let handler = Arc::new(gateway_bridge::OrchestratorHandler::new(
         orchestrator.clone(),
     ));
-    let gateway = Arc::new(Gateway::new(
+    let gateway = Gateway::new(
         svcs.shared_context.clone(),
         lane_manager,
         handler,
         bus.clone(),
         Some(db.clone()),
-    ));
+    );
+    let gateway = Arc::new(match &learning_queue {
+        Some(queue) => gateway.with_learning(queue.clone()),
+        None => gateway,
+    });
 
     // Scheduled skills: register cron jobs for skills with invoke.cron
     // frontmatter (gated by orchestrator.routing.scheduled_skills_enabled).
@@ -674,15 +716,6 @@ async fn async_main(
     ));
 
     // Step 13: Spawn background tasks
-    if let Some(ref emb) = svcs.embedder {
-        background::spawn_embedding_indexer(
-            emb.clone(),
-            db.clone(),
-            daemon_config.clone(),
-            cancel_token.clone(),
-        );
-    }
-    background::spawn_memory_decay(db.clone(), daemon_config.clone(), cancel_token.clone());
     background::spawn_file_processing_worker(
         db.clone(),
         daemon_config.clone(),
@@ -690,6 +723,16 @@ async fn async_main(
     );
     background::spawn_asset_cleanup(db.clone(), daemon_config.clone(), cancel_token.clone());
     background::spawn_telemetry_cleanup(db.clone(), cancel_token.clone());
+    background::spawn_memory_index_rebuild(svcs.memory_service.clone());
+    background::spawn_memory_reconciliation(
+        svcs.memory_service.clone(),
+        local_user_id.clone(),
+        cancel_token.clone(),
+    );
+    if let Some(ref queue) = learning_queue {
+        background::spawn_learning_sweeper(queue.clone(), cancel_token.clone());
+        background::spawn_learning_catch_up(queue.clone(), cancel_token.clone());
+    }
 
     // Step 14: Build AppState and HTTP router
     let db_for_shutdown = db.clone();
@@ -711,7 +754,8 @@ async fn async_main(
         chat_service,
         token_manager: svcs.token_manager,
         provider_usage_tracker: svcs.provider_usage_tracker,
-        embedder: svcs.embedder,
+        memory_service: svcs.memory_service,
+        persona_user,
         local_user_id,
         default_lane_key,
         llm_config_path,
@@ -770,6 +814,46 @@ async fn async_main(
 
     if let Err(e) = server.await {
         error!("Server error: {e}");
+    }
+
+    // Learning v2's stop drain (design 09 §1.5, ruling LR6): the server has
+    // stopped, so every session with unlearned turns is flushed, one at a
+    // time, for at most 3 s — or what the force-exit window leaves after 5 s
+    // for the flushes below. What it does not finish, the boot catch-up
+    // learns: nothing is lost.
+    if let Some(ref queue) = learning_queue {
+        let left = force_exit_at
+            .get()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(FORCE_EXIT_GRACE);
+        let budget = openalpaca_core::memory::learning::SHUTDOWN_DRAIN
+            .min(left.saturating_sub(Duration::from_secs(5)));
+        if !queue.drain(budget).await {
+            info!("Learning drain stopped at its budget; the boot catch-up learns the rest");
+        }
+    }
+
+    // Stop the post-turn jobs — the conversation summary and a finished
+    // run's task extraction — and the learning queue's flushes together,
+    // before the cost tracker is flushed, so what they billed is in the flush
+    // and no note is written under a daemon that is going away (design §6: no
+    // fire-and-forget jobs). They stop on their tokens; the wait is for a
+    // write already in flight.
+    let learning_stopped = async {
+        match &learning_queue {
+            Some(queue) => queue.shutdown(Duration::from_secs(3)).await,
+            None => true,
+        }
+    };
+    let (post_turn_stopped, learning_stopped) = tokio::join!(
+        orchestrator.background().shutdown(Duration::from_secs(3)),
+        learning_stopped
+    );
+    if !post_turn_stopped {
+        warn!("Post-turn jobs did not stop within 3s; a summary or extraction may be lost");
+    }
+    if !learning_stopped {
+        warn!("Learning did not stop within 3s; the boot catch-up repeats its last chunk");
     }
 
     // Flush CostTracker to DB (defense-in-depth)

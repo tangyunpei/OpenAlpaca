@@ -32,6 +32,39 @@ pub struct ConversationMessage {
     /// writer does not name one. `None` only for rows written before a lane
     /// had any session at all.
     pub session_id: Option<String>,
+    /// The turn that wrote this row (migration 044, design 09 §1.3): the
+    /// gateway's request id, on both halves of a turn. `None` marks a row
+    /// that is not a turn — an extension notice, a `post_update`, a
+    /// completion report — which learning leaves out. Off the wire:
+    /// `GET /v1/chat/history` serializes this struct directly.
+    #[serde(skip)]
+    pub request_id: Option<String>,
+    /// The canonical project root the turn named (migration 044, design 09
+    /// §1.1, ruling LR1), on user rows only; `None` when the turn named no
+    /// project. Each row learns into its own turn's project, not the
+    /// session's binding. Off the wire, like `request_id`.
+    #[serde(skip)]
+    pub workspace_root: Option<String>,
+}
+
+/// One row of a learning window (design 09 §1.2): exactly the columns the
+/// extractor may read.
+///
+/// There is deliberately no `content_json` and no `display_text` here: on an
+/// attachment turn those carry the files' extracted text, and an uploaded
+/// document must never mint a note learned from the user's own words (U2).
+/// The type makes that structural rather than a convention of one query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearningRow {
+    pub id: i64,
+    pub role: String,
+    /// The message as typed (user rows) or as answered (assistant rows).
+    pub content: String,
+    pub source: Option<String>,
+    /// UTC, SQLite's `YYYY-MM-DD HH:MM:SS`.
+    pub created_at: String,
+    pub request_id: Option<String>,
+    pub workspace_root: Option<String>,
 }
 
 /// A session: one conversation transcript — an epoch of a lane, bound to at
@@ -50,10 +83,22 @@ pub struct Conversation {
     pub last_message_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    pub summary: String,
-    pub summary_version: i64,
-    pub last_summarized_message_id: i64,
-    pub summary_updated_at: Option<String>,
+    /// The conversation's working state as JSON, `''` until one is written
+    /// (design 11 §2; migration 2 put these five columns in place of the
+    /// session summary's four).
+    pub working_state: String,
+    /// Bumped by every write of the state: the optimistic lock.
+    pub working_state_version: i64,
+    /// The highest `conversation_messages.id` the state covers.
+    pub working_state_through: i64,
+    pub working_state_updated_at: Option<String>,
+    /// The conversation summary last projected from the state; `None` until
+    /// a close writes one, and again after a history clear forgets it.
+    pub episode_note_id: Option<String>,
+    /// `false` for a conversation started fresh (`inherit: false`): it is
+    /// never given the previous conversation's state (design 11 §4 (b),
+    /// owner decision CQ-5).
+    pub inherit: bool,
     /// Canonical project root this conversation is bound to; `None` = none.
     /// Set from the first `x-workspace-path` the session sees, `PATCH`-able.
     /// One workspace per session — changing project means a new session.

@@ -27,9 +27,14 @@ use crate::agent::subagent::SubAgent;
 use crate::agent::template::AgentTemplate;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
-use crate::daemon_config::DaemonConfig;
+use crate::daemon_config::{DaemonConfig, RecallMode};
 use crate::memory::scope_context::MemoryScopeContext;
+use crate::memory::service::{
+    Attribution, Capabilities, MemoryAccessContext, MemoryError, MemoryService, MemoryUsed,
+    RecallBudget, Surface, WorkspaceHint,
+};
 use crate::middleware::prompt::format_tool_guidance;
+use crate::middleware::user::UserDocument;
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
@@ -79,7 +84,13 @@ pub async fn run_lead_agent(
     shared_context: Arc<SharedContext>,
     bus: EventBus,
     db: Option<Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    // The memory service (design §7a, *Lead agent*): the opening prompt is
+    // primed through `recall`, read-only, for `created_by`'s own partitions;
+    // `None` where no store exists (tests), and nothing is primed.
+    memory_service: Option<Arc<MemoryService>>,
+    // The daemon's `USER.md`, for the one profile block the prompt carries
+    // (plan 3.3); `None` before onboarding wrote one.
+    user_document: Option<UserDocument>,
     task_id: &str,
     created_by: &str,
     lane_key: &str,
@@ -110,6 +121,10 @@ pub async fn run_lead_agent(
     // approved, instead of holding the run for the confirmation timeout with
     // no responder. Never an approval: fail-closed stays.
     unattended: bool,
+    // The conversation the run was started from (design 11 §4, owner
+    // decision CQ-6): its working state follows the objective. `None` for a
+    // run with no conversation.
+    session_id: Option<&str>,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -134,7 +149,7 @@ pub async fn run_lead_agent(
     // 2. Build spawn_subagent tool definition from templates
     let spawn_tool_def = spawn_subagent_tool_definition_from_templates(&worker_templates);
 
-    // 3. Build tools: spawn_subagent + check/wait + workspace + memory_search
+    // 3. Build tools: spawn_subagent + check/wait + workspace + memory reads
     let batch_spawn_enabled = daemon_config
         .load()
         .execution
@@ -154,15 +169,23 @@ pub async fn run_lead_agent(
         tools.push(queue_followup_tool_definition());
     }
     tools.extend(crate::tools::builtins::workspace_tool_definitions());
-    // Add memory_search so the lead agent can query user memories directly
-    if let Some(mem_tool) = tool_registry.get("memory_search") {
-        tools.push(mem_tool.definition.clone());
+    // The memory read tools, so the lead agent can query user memories
+    // directly. `memory_search` answers an index by default (design 09
+    // §13.1), so `memory_read` comes with it — the index is only half of a
+    // search without the read that follows — and `memory_timeline`, the
+    // third layer; all three are the `memory_read` capability's.
+    for name in ["memory_search", "memory_read", "memory_timeline"] {
+        if let Some(mem_tool) = tool_registry.get(name) {
+            tools.push(mem_tool.definition.clone());
+        }
     }
-    // artifact_write (plan §4.6) — the lead writes deliverables itself as well
-    // as delegating them. Offered only where the lead's own template declares
-    // the capability: the lead's surface is assembled here rather than resolved
-    // from the template, so this is the listing that keeps it a per-template
-    // grant instead of an ambient one.
+    // artifact_write (plan §4.6) — the lead saves by-products itself (a
+    // draft, notes, a hand-off a subagent picks up); a result file for the
+    // project is a subagent's to write, since the lead holds no tool that
+    // writes or edits one (R42, the lead's ruling R-T22). Offered only where
+    // the lead's own template declares the capability: the lead's surface is
+    // assembled here rather than resolved from the template, so this is the
+    // listing that keeps it a per-template grant instead of an ambient one.
     if lead_agent
         .capabilities
         .iter()
@@ -185,6 +208,28 @@ pub async fn run_lead_agent(
         && let Some(tool) = tool_registry.get("read_result")
     {
         tools.push(tool.definition.clone());
+    }
+    // R42 (storage design §14, §15): the lead reads the run's working folder
+    // and the run's by-products itself — `file_read` and `file_list` act in
+    // the project, or the conversation's scratch folder, and `artifact_read`
+    // reads back what a subagent saved — and holds no tool that writes or
+    // edits a file there or runs a command: it delegates result files. In
+    // code rather than by template, so a store seeded before Stage 2 gets
+    // them too; none of the three ever asks (ST-16). A tool whose name, or a
+    // capability it provides, the lead's template denies stays off: the
+    // sandbox denies by tool name, so `file_list` (which comes with
+    // `file_read`) would otherwise be admitted by `admit_tool_surface` below
+    // although `file_read` is denied — the same filter `resolve_capabilities`
+    // applies to a subagent's surface.
+    let denied = &lead_agent.constraints.denied_capabilities;
+    for name in ["file_read", "file_list", "artifact_read"] {
+        if let Some(tool) = tool_registry.get(name)
+            && !std::iter::once(&tool.definition.name)
+                .chain(tool.provides_capabilities.iter())
+                .any(|cap| denied.iter().any(|d| d.eq_ignore_ascii_case(cap)))
+        {
+            tools.push(tool.definition.clone());
+        }
     }
     // Extension tools (MCP-bridged `<server>__<tool>` + plugin-provided
     // `<plugin>::<tool>`) join the lead surface by default, less those whose
@@ -212,8 +257,16 @@ pub async fn run_lead_agent(
     ));
     tools.push(crate::tools::builtins::invoke_skill_tool_definition());
 
-    // 4. Build coordination tools with shared SubagentTracker
-    let tracker = Arc::new(SubagentTracker::new());
+    // 4. Build coordination tools with shared SubagentTracker, sized to the
+    //    inline bound the lead's own loop applies to every tool result, so a
+    //    batch of eight answers reaches the lead as one in-bound summary (F2).
+    let tracker = Arc::new(SubagentTracker::with_inline_bytes(
+        daemon_config
+            .load()
+            .orchestrator
+            .sessions
+            .tool_result_inline_bytes,
+    ));
 
     // Resolve parent context bundle once, shared across all subagent spawns.
     // TODO: In future, resolve via context_manager.resolve() with LeadAgent path
@@ -244,6 +297,8 @@ pub async fn run_lead_agent(
         compose_engine.clone(),
         // M6: every subagent of this run inherits the run's answer.
         unattended,
+        // R44: and the run's conversation.
+        session_id.map(str::to_string),
     ));
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
@@ -262,18 +317,16 @@ pub async fn run_lead_agent(
         owner_id: Some(created_by.to_string()),
         workspace_id: workspace.workspace_id.clone(),
         request_workspace_root: workspace.request_workspace_root.clone(),
-        skill_stack: vec![],
-        effective_constraints: None,
         lane_key: Some(lane_key.to_string()),
         source: Some(source.to_string()),
-        request_id: None,
-        principal: None,
-        scope: None,
-        workspace_path: None,
-        // Filled in by the sandbox at dispatch (T28), which owns the bus.
-        session_id: None,
-        session_log: None,
-        event_bus: None,
+        // R44 (storage design §10): the conversation the run was started
+        // from (resume's, the turn's, else the lane's active one, resolved
+        // at dispatch) — the scratch folder of a run with no project.
+        conversation_id: session_id.map(str::to_string),
+        // No request, principal, scope or workspace path is threaded to the
+        // lead, and the bus and session handles are the sandbox's to fill in
+        // at dispatch (T28).
+        ..Default::default()
     };
 
     // Build a per-request ToolRegistry containing the base tools plus
@@ -370,7 +423,7 @@ pub async fn run_lead_agent(
     sandbox_policy.unattended = unattended;
     // The lead's tool surface is assembled here, not in its template — so the
     // allowlist must admit the final defs (extension tools, invoke_skill,
-    // memory_search), mirroring how the main loop derives its policy from the
+    // the memory reads), mirroring how the main loop derives its policy from the
     // exposed definitions. Template denials still win: the sandbox checks the
     // deny list first. A subagent gets the same rule over its *own* surface —
     // the tools its template's capabilities resolve to, never the lead's — in
@@ -391,6 +444,14 @@ pub async fn run_lead_agent(
         &lead_agent.preset.persona,
         &worker_templates,
         prompt_window,
+        user_document.as_ref(),
+        Some(
+            daemon_config
+                .load()
+                .orchestrator
+                .prompt_budgets
+                .user_profile_budget,
+        ),
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {
@@ -411,84 +472,67 @@ pub async fn run_lead_agent(
     // 7. Build messages (with proactive memory injection)
     let mut messages = vec![ChatMessage::system(&full_system)];
 
-    // Inject retrieved memory context so lead agent has user preferences/facts
-    if let Some(ref db) = db {
-        let repo = openalpaca_storage::repository::MemoryRepository::new(db);
-        let query_embedding = if let Some(ref emb) = embedder {
-            emb.embed(&[task_description])
-                .await
-                .ok()
-                .and_then(|v| v.into_iter().next())
-        } else {
-            None
-        };
-        let scope_ctx = workspace.has_workspace().then(|| workspace.clone());
-        let memories = if let Some(ref ctx) = scope_ctx {
-            let cascade_scopes = ctx.cascade_scopes();
-            repo.search_hybrid_cascade(
-                created_by,
-                task_description,
-                query_embedding.as_deref(),
-                5,
-                None,
-                &cascade_scopes,
-            )
-            .unwrap_or_default()
-        } else {
-            repo.search_hybrid(
-                created_by,
-                task_description,
-                query_embedding.as_deref(),
-                5,
-                None,
-                None,
-                None,
-            )
-            .unwrap_or_default()
-        };
-        if !memories.is_empty() {
-            // Track access for importance decay + boost
-            let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-            let access_boost = daemon_config.load().orchestrator.memory.decay.access_boost;
-            if let Err(e) = repo.touch_accessed(&ids, access_boost) {
-                tracing::warn!("Failed to track memory access: {e}");
+    // The lead's opening memory (design §5: one recall path for every
+    // agent): `created_by`'s own partitions — global, plus the request
+    // workspace's project when there is one — matched against the task
+    // description, delivered as quoted data under the service's trust
+    // label, and recorded against this task once it is in the prompt.
+    if let Some(service) = memory_service.as_ref()
+        && let Some(ctx) =
+            lead_memory_context(service, created_by, &workspace, task_id, lane_key, source)
+    {
+        let recall_service = service.clone();
+        let recall_ctx = ctx.clone();
+        let description = task_description.to_string();
+        let mode = daemon_config.load().orchestrator.memory.recall_mode;
+        match tokio::task::spawn_blocking(move || {
+            lead_memory_delivery(&recall_service, &recall_ctx, &description, mode)
+        })
+        .await
+        {
+            Ok(Some((block, used))) => {
+                messages.push(ChatMessage::user(&block));
+                service.record_delivery(&ctx.attribution, &used);
             }
-
-            let mut block = String::from("### RETRIEVED MEMORY ###\n");
-            // Derive memory budget from the context window of the model that
-            // will actually answer (M5) so it scales with the available
-            // context (context_budget is not yet constructed). A registry
-            // that knows no window — and a window of 0, which must never
-            // divide anything — keeps this site's own default.
-            let model_window = crate::runner::routed_context_window(
-                router.as_ref(),
-                lead_agent.llm_config.model.as_deref(),
-            )
-            .unwrap_or(128_000);
-            let mut budget = (model_window / 20).clamp(500, 8000);
-            for m in &memories {
-                let entry = format!(
-                    "- [{}] {}\n",
-                    m.kind.as_str(),
-                    m.content.chars().take(300).collect::<String>()
-                );
-                if entry.len() > budget {
-                    break;
-                }
-                budget -= entry.len();
-                block.push_str(&entry);
-            }
-            messages.push(ChatMessage::user(
-                &crate::orchestrator::wrap_untrusted_context(
-                    &block,
-                    "retrieved_memory",
-                    "retrieved",
-                ),
-            ));
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                task_id,
+                error = %e,
+                "Lead memory recall did not complete; the run starts without it"
+            ),
         }
     }
 
     messages.push(ChatMessage::user(task_description));
+
+    // Design 11 §4, owner decision CQ-6: the working state of the
+    // conversation the run was started from — what the chat decided —
+    // right after the objective, as quoted data. Read once, no call; the
+    // loop's compaction folds the run's older messages into it.
+    let chat_state = session_id.zip(db.as_ref()).and_then(|(id, db)| {
+        let session = openalpaca_storage::ConversationRepository::new(db)
+            .get_session(id)
+            .ok()??;
+        let state = crate::orchestrator::working_state::stored(&session.working_state, id)?;
+        Some((state, session.working_state_updated_at.unwrap_or_default()))
+    });
+    if let Some((state, updated_at)) = &chat_state {
+        let max_chars = daemon_config.load().orchestrator.memory.summary_max_chars;
+        messages.push(ChatMessage::user(&state.render(updated_at, max_chars)));
+    }
+    // R28 (storage design §10): the lead is told the run's working folder —
+    // its project, or the conversation's scratch folder — after its objective
+    // and the chat's working state (CQ-6 keeps that block right after the
+    // objective). Read from the lead's own tool context, naming only the
+    // tools on its surface; on a project turn it is told that a file for the
+    // project is a subagent's to write (the lead's ruling R-T22).
+    if let Some(note) = crate::tools::working_folder::working_folder_note(
+        &tool_ctx,
+        tools.iter().map(|d| d.name.as_str()),
+        crate::tools::working_folder::NoteReader::Lead,
+    ) {
+        messages.push(ChatMessage::user(&note));
+    }
 
     // 7b. §5.6c — the replayed history.
     //
@@ -566,9 +610,11 @@ pub async fn run_lead_agent(
         lead_agent.llm_config.model.as_deref(),
     );
 
-    // Set compaction model from daemon config
-    loop_config.compaction_model = daemon_config.load()
-        .execution.context.compaction_model.clone();
+    // Design 11, CQ-3: compaction's working-state writer runs on
+    // `[orchestrator.costs] summary_model`, under its daily ceiling.
+    loop_config.writer =
+        crate::orchestrator::working_state::WriterConfig::new(&daemon_config.load(), db.clone());
+    loop_config.working_state = chat_state.map(|(state, _)| state);
     loop_config.event_bus = Some(bus.clone());
     loop_config.experimental_ephemeral_pressure =
         daemon_config.load().experimental.ephemeral_pressure_layer;
@@ -716,6 +762,78 @@ pub async fn run_lead_agent(
         final_content: result.final_content.clone(),
         loop_result: result,
         subagents_spawned,
+    }
+}
+
+/// The lead's memory context (design §7a, *Lead agent*): the run's
+/// `created_by` as owner — a `System` run (`/v1/command process`) and a
+/// `provider:id` owner have no partition, so the run is primed with nothing
+/// — and the request workspace root as the project, never the daemon's CWD
+/// (audit finding F1: a run with no workspace reads the global partition
+/// only, so no other project's notes reach it). `ModelTool`, read-only, and
+/// the delivery is attributed to the task, which is how a lead's recall
+/// shows in `GET /v1/memories/recently-used`. Extracted so the scope rule
+/// can be tested against a real store without running a lead.
+fn lead_memory_context(
+    service: &MemoryService,
+    created_by: &str,
+    workspace: &MemoryScopeContext,
+    task_id: &str,
+    lane_key: &str,
+    source: &str,
+) -> Option<MemoryAccessContext> {
+    let root = workspace
+        .request_workspace_root
+        .as_deref()
+        .map(std::path::Path::new);
+    let hint = match root {
+        Some(root) => WorkspaceHint::Root(root),
+        None => WorkspaceHint::None,
+    };
+    match service.context(
+        created_by,
+        hint,
+        Surface::ModelTool,
+        Capabilities::READ_ONLY,
+        Attribution {
+            lane_key: Some(lane_key.to_string()),
+            task_id: Some(task_id.to_string()),
+            request_id: None,
+            source: Some(source.to_string()),
+        },
+    ) {
+        Ok(ctx) => Some(ctx),
+        Err(MemoryError::NoOwner(_)) => None,
+        Err(e) => {
+            tracing::warn!(task_id, error = %e, "Lead memory context refused; the run starts without memory");
+            None
+        }
+    }
+}
+
+/// What the lead's opening prompt is primed with: the service's recall for
+/// the task description, delivered as `[orchestrator.memory] recall_mode`
+/// says (design 09 §13.2) and rendered as one quoted-data block, and the
+/// `memory_used` entries the caller records once the block is in the
+/// prompt. `None` when nothing was selected or the recall failed (one WARN;
+/// the run is unaffected).
+fn lead_memory_delivery(
+    service: &MemoryService,
+    ctx: &MemoryAccessContext,
+    task_description: &str,
+    mode: RecallMode,
+) -> Option<(String, Vec<MemoryUsed>)> {
+    match service.recall(ctx, task_description, RecallBudget::for_mode(mode)) {
+        Ok(result) if result.is_empty() => None,
+        Ok(result) => Some((result.render(), result.memory_used())),
+        Err(e) => {
+            tracing::warn!(
+                task_id = ctx.attribution.task_id.as_deref().unwrap_or(""),
+                error = %e,
+                "Lead memory recall failed; the run starts without memory"
+            );
+            None
+        }
     }
 }
 

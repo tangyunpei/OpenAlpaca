@@ -1,4 +1,4 @@
-use super::delivery::{TELEGRAM_MAX_LENGTH, chunk_message};
+use super::delivery::{TELEGRAM_MAX_LENGTH, approval_chunks, chunk_message};
 use crate::common::KeyedRateLimiter;
 use std::time::Duration;
 
@@ -13,6 +13,28 @@ fn chunk_message_uses_the_telegram_limit() {
         .map(String::len)
         .collect();
     assert_eq!(lens, [4096, 1]);
+}
+
+/// The lead's rulings R-T32 and Y.2 at Telegram's 4,096 bytes: an approval
+/// prompt sent in several messages keeps every preview line indented, and
+/// every message after the first begins with the prompt's own
+/// `(approval prompt, continued)` line, so even with each message's leading
+/// whitespace trimmed — as Telegram shows it — no message starts a line at
+/// the margin with the model's text: across them all one line starts
+/// `Arguments:` and one `Reply /yes`, the prompt's own. No message begins or
+/// ends with a blank line, and every one fits.
+#[test]
+fn a_chunked_approval_prompt_begins_every_later_message_with_its_own_line() {
+    let (args, preview) = crate::common::forging_edit_prompt(TELEGRAM_MAX_LENGTH);
+    let prompt = crate::common::format_confirmation_prompt("file_edit", &args, Some(&preview), 1);
+    let chunks = approval_chunks(&prompt);
+
+    crate::common::assert_approval_messages(&chunks);
+    assert!(
+        chunks
+            .iter()
+            .all(|c| !c.is_empty() && c.len() <= TELEGRAM_MAX_LENGTH)
+    );
 }
 
 /// Telegram keys the shared limiter by i64 chat id, negative for groups; the
@@ -50,6 +72,8 @@ fn queued_request(broker: &ConfirmationBroker, request_id: &str) -> ResponseRx {
         lane_key: Some("global1:telegram".to_string()),
         task_id: None,
         agent_instance_id: None,
+        preview: None,
+        per_call: false,
         timestamp: chrono::Utc::now(),
     })
 }
@@ -157,12 +181,41 @@ fn a_multibyte_argument_block_is_cut_without_panicking() {
         "byte 500 must land inside a character for this to be the old panic"
     );
 
-    let prompt = format_confirmation_prompt("shell_exec", &args, 1);
+    let prompt = format_confirmation_prompt("shell_exec", &args, None, 1);
 
     assert!(prompt.contains("Tool: shell_exec"), "{prompt}");
     assert!(prompt.contains("Reply /yes or /no to approve or deny."));
     assert!(prompt.ends_with("Reply /yes or /no to approve or deny."));
     // One prompt, so no queue hint.
-    assert!(!prompt.contains("pending)"), "{prompt}");
+    assert!(!prompt.contains("pending"), "{prompt}");
     assert!(prompt.contains("..."), "the arguments were truncated");
+}
+
+// ── The approval prompt carries no link preview ──────────────────────
+//
+// Telegram draws a card under the first URL in a message: the linked page's
+// own title, description and image. Under an approval prompt that card is
+// the site owner's text inside the message the person decides on.
+
+/// The request the prompt and its acknowledgement are sent with asks
+/// Telegram for no preview; the text is sent as given.
+#[test]
+fn an_approval_message_asks_telegram_for_no_link_preview() {
+    use super::delivery::approval_message;
+    use teloxide::prelude::*;
+    use teloxide::requests::HasPayload;
+
+    let bot = Bot::new("0:test");
+    let text = "Arguments:\n{\n  \"url\": \"https://e.x/a\"\n}";
+
+    let message = approval_message(&bot, ChatId(42), text);
+
+    let sent = serde_json::to_value(message.payload_ref()).unwrap();
+    assert_eq!(sent["text"], text);
+    assert_eq!(sent["chat_id"], 42);
+    assert_eq!(
+        sent["link_preview_options"],
+        serde_json::json!({"is_disabled": true}),
+        "{sent}"
+    );
 }

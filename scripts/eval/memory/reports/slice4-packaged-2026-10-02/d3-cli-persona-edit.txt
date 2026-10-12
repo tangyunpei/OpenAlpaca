@@ -1,0 +1,3 @@
+$ VISUAL=edit-persona-cli.sh openalpaca persona edit user
+✓ USER.md saved (revision e2b1a1a53f4b).
+exit=0

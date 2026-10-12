@@ -22,18 +22,24 @@ use crate::AppState;
 
 /// The store an upload's bytes belong to (D2).
 ///
-/// The request's project when the client named one — resolved through
-/// `MemoryScopeContext::for_request`, the same single resolver `/v1/chat` and
-/// `/v1/status` use, never a second reading of the header — and the home store
-/// otherwise. "Otherwise" covers every client that chose no project, a path
-/// under no project marker, and `$HOME` itself, which is not a project. It also
-/// covers every connector attachment, which reaches `UploadStore` without ever
-/// passing through here and always takes [`StoreScope::Home`].
-fn upload_scope(headers: &HeaderMap) -> StoreScope {
-    match super::request_project_root(super::workspace_header(headers).as_deref()) {
-        Some(root) => StoreScope::Project(PathBuf::from(root)),
-        None => StoreScope::Home,
-    }
+/// The request's project when the client named one, and the home store
+/// otherwise. An upload accepts work for that root, so the root is resolved
+/// and recorded under `projects/` (storage design §3) through
+/// `routes::register_request_project` — the single resolver `/v1/chat` and
+/// `/v1/status` use, never a second reading of the header. "Otherwise" covers
+/// every client that chose no project, a path under no project, and the home
+/// store with the folders around and inside it, which are no project (R13).
+/// It also covers every connector attachment, which reaches `UploadStore`
+/// without ever passing through here and always takes [`StoreScope::Home`].
+/// `Err` is the route's answer when the root cannot be recorded.
+#[allow(clippy::result_large_err)]
+fn upload_scope(headers: &HeaderMap) -> Result<StoreScope, axum::response::Response> {
+    Ok(
+        match super::register_request_project(super::workspace_header(headers).as_deref())? {
+            Some(root) => StoreScope::Project(PathBuf::from(root)),
+            None => StoreScope::Home,
+        },
+    )
 }
 
 /// POST /v1/files/upload — Multipart file upload
@@ -185,7 +191,10 @@ pub async fn upload_file_handler(
     // land at `<store>/uploads/<YYYY-MM-DD>/NN-<slug>.<ext>`.
     //
     // It writes files and talks to SQLite, so it runs on the blocking pool.
-    let scope = upload_scope(&headers);
+    let scope = match upload_scope(&headers) {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
     let writer_state = state.clone();
     let owner_id = state.local_user_id.clone();
     let write_name = filename.clone();
@@ -278,17 +287,10 @@ pub(crate) async fn file_content(
         return super::invalid_token();
     }
 
-    let repo = FileAssetRepository::new(db);
-    let asset = match repo.get_by_id(id) {
-        Ok(Some(a)) => {
-            if a.owner_id != owner_id {
-                tracing::debug!(file_id = %id, owner = %a.owner_id, "File owner mismatch — returning 404");
-                return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
-                    .into_response();
-            }
-            a
-        }
+    let record = match openalpaca_storage::ArtifactStore::new(db).get(id, owner_id) {
+        Ok(Some(record)) => record,
         Ok(None) => {
+            tracing::debug!(file_id = %id, "File not found for this owner — returning 404");
             return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
                 .into_response();
         }
@@ -302,12 +304,50 @@ pub(crate) async fn file_content(
         }
     };
 
-    super::content_response(
-        std::path::Path::new(&asset.storage_path),
-        &asset.mime_type,
-        &asset.filename,
-    )
-    .await
+    // R37: a result file's bytes are read through the resolver, under the
+    // project its row records — never from `storage_path` as written, which a
+    // link put there could lead out of the project.
+    let path = if record.in_project {
+        let owned_db = db.clone();
+        let owned_id = record.id.clone();
+        match tokio::task::spawn_blocking(move || {
+            openalpaca_storage::ArtifactStore::new(&owned_db).resolve_content(&owned_id, None)
+        })
+        .await
+        {
+            Ok(Ok(path)) => path,
+            Ok(Err(e)) => {
+                // A missing project's result file (R-T18) is `410` with the
+                // project's own code and sentence (R-T26), as an absent one
+                // is `410` `ARTIFACT_GONE`.
+                let (status, code) = match e.downcast_ref::<openalpaca_storage::ArtifactError>() {
+                    Some(
+                        gone @ (openalpaca_storage::ArtifactError::Gone { .. }
+                        | openalpaca_storage::ArtifactError::ProjectMissing { .. }),
+                    ) => (StatusCode::GONE, gone.code()),
+                    _ => (StatusCode::INTERNAL_SERVER_ERROR, "CONTENT_FAILED"),
+                };
+                return error_response(status, code, &format!("{e:#}")).into_response();
+            }
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "CONTENT_FAILED",
+                    &format!("the content task did not finish: {e}"),
+                )
+                .into_response();
+            }
+        }
+    } else {
+        PathBuf::from(&record.storage_path)
+    };
+    // A result file's name is its path in the project; the download is named
+    // for its last component.
+    let file_name = std::path::Path::new(&record.name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&record.name);
+    super::content_response(&path, &record.mime_type, file_name).await
 }
 
 pub async fn get_file_content_handler(
@@ -589,6 +629,10 @@ mod tests {
         let _guard =
             crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().expect("canonical"));
         let project = tempfile::tempdir().expect("project root");
+        openalpaca_storage::store::projects::register(
+            &project.path().canonicalize().expect("canonical"),
+        )
+        .expect("register");
         let (_dir, db) = test_db();
 
         let scope = StoreScope::Project(project.path().canonicalize().expect("canonical"));
@@ -673,11 +717,18 @@ mod tests {
         std::fs::create_dir_all(&nested).expect("create nested");
 
         // A path *inside* the project resolves up to the project root — the same
-        // marker walk a chat turn does, so an upload lands where that turn's
+        // resolution a chat turn's path gets, so an upload lands where that turn's
         // artifacts would.
-        assert_eq!(
-            upload_scope(&headers_with(nested.to_str())),
-            StoreScope::Project(project)
+        let Ok(scope) = upload_scope(&headers_with(nested.to_str())) else {
+            panic!("the project is recorded");
+        };
+        assert_eq!(scope, StoreScope::Project(project.clone()));
+        // An upload accepts work for that root, so the root is recorded under
+        // `projects/` (storage design §3).
+        assert!(
+            openalpaca_storage::store::projects::lookup(&project)
+                .expect("lookup")
+                .is_some()
         );
     }
 
@@ -689,7 +740,10 @@ mod tests {
 
         // No header at all — every client that chose no project, and the shape
         // every connector attachment reaches the writer with.
-        assert_eq!(upload_scope(&headers_with(None)), StoreScope::Home);
+        assert!(matches!(
+            upload_scope(&headers_with(None)),
+            Ok(StoreScope::Home)
+        ));
     }
 
     #[test]
@@ -700,13 +754,16 @@ mod tests {
 
         let loose = root.join("Downloads");
         std::fs::create_dir(&loose).expect("create dir");
-        assert_eq!(upload_scope(&headers_with(loose.to_str())), StoreScope::Home);
+        assert!(matches!(
+            upload_scope(&headers_with(loose.to_str())),
+            Ok(StoreScope::Home)
+        ));
     }
 
     /// `$HOME` is not a project: a header pointing anywhere under it with no
-    /// closer marker resolves to `$HOME`, whose "project store" *is* the home
-    /// store. It must fold to `Home`, or a stray header would claim the whole
-    /// home directory as a project.
+    /// closer project root reaches `$HOME`, which holds the home store, so the
+    /// resolver answers no project (R13). It must fold to `Home`, or a stray
+    /// header would claim the whole home directory as a project.
     #[test]
     fn upload_scope_for_a_path_resolving_to_the_home_store_is_the_home_store() {
         let tmp = tempfile::tempdir().expect("create tempdir");
@@ -717,10 +774,10 @@ mod tests {
 
         let documents = home.join("Documents");
         std::fs::create_dir(&documents).expect("create dir");
-        assert_eq!(
+        assert!(matches!(
             upload_scope(&headers_with(documents.to_str())),
-            StoreScope::Home
-        );
+            Ok(StoreScope::Home)
+        ));
     }
 
     #[test]
@@ -738,5 +795,380 @@ mod tests {
         let copied = std::fs::read(&target).expect("read copied");
         assert_eq!(copied, b"hello");
         let _ = std::fs::remove_file(&target);
+    }
+
+    // --- Stage 2: result files (ST-18, R37) ---
+
+    /// A result file of `user1`'s: real bytes in the guarded project, and the
+    /// pointer row R35's method writes.
+    fn result_file(
+        gp: &crate::test_util::GuardedProject,
+        db: &Database,
+        rel: &str,
+        body: &[u8],
+    ) -> openalpaca_storage::ArtifactRecord {
+        let path = gp.root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&path, body).expect("write the user's file");
+        let root = gp.root.to_string_lossy().into_owned();
+        openalpaca_storage::ArtifactStore::new(db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "user1",
+                project_root: &root,
+                rel_path: rel,
+                content: body,
+                task_id: None,
+                agent_id: None,
+            })
+            .expect("record the result file")
+            .0
+    }
+
+    /// Hands back, through the error, whether the route asked to stage and
+    /// which path it would open — so a test sees both without opening anything.
+    fn report_path(path: &str, _file_id: &str, _filename: &str, stage: bool) -> Result<(), String> {
+        Err(format!("{stage}:{path}"))
+    }
+
+    /// ST-18: a result file whose name no kind keeps — a script — is never
+    /// handed to the system's default app; the refusal names Reveal.
+    #[tokio::test]
+    async fn a_result_file_no_kind_keeps_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "scripts/build.sh", b"echo hi\n");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("Reveal only");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: "scripts/build.sh".to_string()
+            }
+        );
+
+        let response = open_file_error_response(err);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "OPEN_NOT_OFFERED");
+        assert_eq!(
+            body["error"]["message"],
+            "scripts/build.sh is not a kind of file OpenAlpaca opens in another app; show it in \
+             its folder instead (Reveal in Finder, or Show in folder)."
+        );
+    }
+
+    /// R37: a result file of a kept kind opens in place — unstaged, as every
+    /// produced row — at the path the resolver gives under its project.
+    #[tokio::test]
+    async fn a_result_file_opens_in_place_through_the_resolver() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("report_path reports");
+
+        let expected = gp.root.join("docs").join("plan.md");
+        assert_eq!(
+            err,
+            OpenFileApiError::OpenFailed(format!("false:{}", expected.display()))
+        );
+        assert!(
+            !expected.starts_with(gp.home_root()),
+            "the user's folder, not the store"
+        );
+    }
+
+    /// The lead's ruling R-T26: Open of a result file whose project is
+    /// missing — moved with a link left at its root (ST-23) — is `410`
+    /// `ARTIFACT_PROJECT_MISSING` with the sentence naming the root and the
+    /// re-point; the opener is never called, and nothing is opened through
+    /// the link (R-T18).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_of_a_missing_projects_result_file_is_a_410_naming_the_project() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let aside = tempfile::tempdir().expect("aside");
+        let moved = aside.path().join("moved");
+        std::fs::rename(&gp.root, &moved).expect("move the project");
+        std::os::unix::fs::symlink(&moved, &gp.root).expect("leave a link");
+        let sentence = format!(
+            "{}: this project's folder is gone or has moved; re-point the project to read its \
+             files.",
+            gp.root.display()
+        );
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("refused before the opener");
+        assert_eq!(err, OpenFileApiError::ProjectMissing(sentence.clone()));
+
+        let response = open_file_error_response(err);
+        assert_eq!(response.status(), StatusCode::GONE);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "ARTIFACT_PROJECT_MISSING");
+        assert_eq!(body["error"]["message"], sentence);
+    }
+
+    /// R37 with R31's rule: a result file replaced by a link out of the
+    /// project is not opened — the opener is never called.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_result_file_replaced_by_a_link_out_of_the_project_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, b"not the project's\n").expect("secret");
+        std::fs::remove_file(gp.root.join("docs").join("plan.md")).expect("remove");
+        std::os::unix::fs::symlink(&secret, gp.root.join("docs").join("plan.md")).expect("link");
+
+        match open_asset_for_user(&db, &row.id, "user1", report_path).await {
+            Err(OpenFileApiError::OpenFailed(message)) => {
+                assert!(message.contains("escapes"), "{message}");
+                assert!(
+                    !message.starts_with("false:"),
+                    "the opener was called: {message}"
+                );
+            }
+            other => panic!("expected OpenFailed, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&secret).unwrap(), b"not the project's\n");
+    }
+
+    /// The lead's ruling R-T25 (ST-18 on what is opened, not on the row's
+    /// name): a result file `docs/plan.md` replaced by a link to a script
+    /// inside the project is refused `NotOffered` naming the row — the link
+    /// stays in the project, so the resolver accepts it, and the opener is
+    /// never handed `run.command`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_result_file_replaced_by_a_link_to_a_script_in_the_project_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let script = gp.root.join("run.command");
+        std::fs::write(&script, b"#!/bin/sh\necho ran\n").expect("script");
+        let at = gp.root.join("docs").join("plan.md");
+        std::fs::remove_file(&at).expect("remove");
+        std::os::unix::fs::symlink(&script, &at).expect("link");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("Reveal only");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: "docs/plan.md".to_string()
+            },
+            "the opener was never called"
+        );
+    }
+
+    /// The lead's ruling R-T33: Open of a result file whose file is gone,
+    /// its project present, is `410 ARTIFACT_GONE` with the store's
+    /// sentence, as the content routes answer it — never a `500` — and the
+    /// opener is never called.
+    #[tokio::test]
+    async fn open_of_a_result_file_gone_from_its_present_project_is_a_410() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let at = gp.root.join("docs").join("plan.md");
+        std::fs::remove_file(&at).expect("the user deletes the file");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("refused before the opener");
+        let sentence = format!(
+            "artifact {} is gone: {} no longer exists",
+            row.id,
+            at.display()
+        );
+        assert_eq!(err, OpenFileApiError::Gone(sentence.clone()));
+
+        let response = open_file_error_response(err);
+        assert_eq!(response.status(), StatusCode::GONE);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "ARTIFACT_GONE");
+        assert_eq!(body["error"]["message"], sentence);
+    }
+
+    /// A by-product of `user1`'s in the home store's artifact store.
+    fn by_product(db: &Database, name: &str) -> openalpaca_storage::ArtifactRecord {
+        use openalpaca_storage::{ArtifactKind, ArtifactStore, NewArtifact};
+
+        ArtifactStore::new(db)
+            .put(NewArtifact::new(
+                "user1",
+                &StoreScope::Home,
+                ArtifactKind::Markdown,
+                name,
+                b"# Notes\n".as_slice(),
+            ))
+            .expect("put the by-product")
+            .0
+    }
+
+    /// A by-product opens in place, unstaged, at its file in the store — the
+    /// path its own folder there confines it to (R-T33).
+    #[tokio::test]
+    async fn a_by_product_opens_in_place_at_its_file_in_the_store() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("report_path reports");
+
+        assert_eq!(
+            err,
+            OpenFileApiError::OpenFailed(format!("false:{}", row.storage_path))
+        );
+    }
+
+    /// The lead's ruling R-T33 (R-T20 at Open): a by-product whose stored
+    /// file was replaced by a link out of its folder in the store — here to a
+    /// script in the project, the kind of link an approved command started in
+    /// a scratch folder could make — is refused, and the opener is never
+    /// handed the script.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_by_product_replaced_by_a_link_out_of_its_folder_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+        let script = gp.root.join("run.command");
+        std::fs::write(&script, b"#!/bin/sh\necho ran\n").expect("script");
+        std::fs::remove_file(&row.storage_path).expect("remove");
+        std::os::unix::fs::symlink(&script, &row.storage_path).expect("link");
+
+        match open_asset_for_user(&db, &row.id, "user1", report_path).await {
+            Err(OpenFileApiError::OpenFailed(message)) => {
+                let refusal = format!(
+                    "{}: its stored file is not inside its folder in OpenAlpaca's store, so it \
+                     is not opened",
+                    row.name
+                );
+                assert!(message.starts_with(&refusal), "{message}");
+            }
+            other => panic!("expected OpenFailed before the opener, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&script).unwrap(), b"#!/bin/sh\necho ran\n");
+    }
+
+    /// Second residual pass, Y.3 (R-T25 for a by-product): a by-product
+    /// `notes.md` whose stored file was replaced by a link to a script in the
+    /// same folder of the store — inside it, so the confinement accepts it —
+    /// is refused `NotOffered` naming the row: ST-18 is decided on the file
+    /// the link leads to, `run.command`, which no kind keeps. The opener is
+    /// never called, and the script is left as it was.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_by_product_replaced_by_a_link_to_a_script_in_its_folder_is_not_opened() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+        let stored = std::path::Path::new(&row.storage_path);
+        let script = stored.with_file_name("run.command");
+        std::fs::write(&script, b"#!/bin/sh\necho ran\n").expect("script");
+        std::fs::remove_file(stored).expect("remove");
+        std::os::unix::fs::symlink(&script, stored).expect("link");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("Reveal only");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: row.name.clone()
+            },
+            "the opener was never called"
+        );
+        assert_eq!(std::fs::read(&script).unwrap(), b"#!/bin/sh\necho ran\n");
+    }
+
+    /// R-T33: a by-product whose stored file was replaced by a folder is
+    /// refused `NotOffered` — a folder is not a file the default app opens.
+    #[tokio::test]
+    async fn a_by_product_replaced_by_a_folder_is_not_opened() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+        std::fs::remove_file(&row.storage_path).expect("remove");
+        std::fs::create_dir(&row.storage_path).expect("a folder in its place");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("not a file");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: row.name.clone()
+            },
+            "the opener was never called"
+        );
+    }
+
+    /// R-T33: a by-product whose file is gone from the store is `410
+    /// ARTIFACT_GONE` with the store's sentence, as the content routes
+    /// answer it, and the opener is never called.
+    #[tokio::test]
+    async fn open_of_a_by_product_gone_from_the_store_is_a_410() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+        std::fs::remove_file(&row.storage_path).expect("remove");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("refused before the opener");
+        assert_eq!(
+            err,
+            OpenFileApiError::Gone(format!(
+                "artifact {} is gone: {} no longer exists",
+                row.id, row.storage_path
+            ))
+        );
+    }
+
+    /// R-T25: a result file `docs/plan.md` replaced by a folder of that name
+    /// is refused `NotOffered` — the name's kind is kept, but a folder is not
+    /// a file the default app opens.
+    #[tokio::test]
+    async fn a_result_file_replaced_by_a_folder_is_not_opened() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let at = gp.root.join("docs").join("plan.md");
+        std::fs::remove_file(&at).expect("remove");
+        std::fs::create_dir(&at).expect("a folder in its place");
+
+        let err = open_asset_for_user(&db, &row.id, "user1", report_path)
+            .await
+            .expect_err("not a file");
+        assert_eq!(
+            err,
+            OpenFileApiError::NotOffered {
+                name: "docs/plan.md".to_string()
+            },
+            "the opener was never called"
+        );
     }
 }

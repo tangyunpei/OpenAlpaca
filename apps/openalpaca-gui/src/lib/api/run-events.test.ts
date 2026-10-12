@@ -121,6 +121,42 @@ describe("runEventsFromLog — sentences", () => {
     ).toBe("review·1 · done");
   });
 
+  it("says a file written into the project is there, with no version", () => {
+    expect(
+      one(
+        row(8, "artifact_written", {
+          name: "src/main.rs",
+          version: 1,
+          in_project: true,
+          openable: true,
+        }),
+      )?.text,
+    ).toBe("src/main.rs · in the project");
+  });
+
+  /**
+   * A file's name is the agent's — a project file's is the path it chose —
+   * so the row shows it as the Library does, a bidi override or a zero-width
+   * space as `<U+XXXX>` (plain text — the row is a string), on either side.
+   */
+  it("names a written file with its hidden characters as escapes", () => {
+    const name = "scripts/\u{202E}release\u{200B}.sh";
+    const shown = "scripts/<U+202E>release<U+200B>.sh";
+    expect(
+      one(
+        row(9, "artifact_written", {
+          name,
+          version: 1,
+          in_project: true,
+          openable: false,
+        }),
+      )?.text,
+    ).toBe(`${shown} · in the project`);
+    expect(one(row(10, "artifact_written", { name, version: 3 }))?.text).toBe(
+      `${shown} · v3`,
+    );
+  });
+
   it("marks a failed tool call and leaves a successful one bare", () => {
     expect(
       one(
@@ -189,6 +225,60 @@ describe("runEventsFromLog — sentences", () => {
         }),
       )?.text,
     ).toBe("web_search · circuit open after 3 failures");
+  });
+
+  /**
+   * A tool's name here is the one an approval card showed, and it is its
+   * third party's: the row shows it as the card does, a bidi override, a
+   * zero-width space or a line break in it as `<U+XXXX>` (plain text — the
+   * row is a string). The CLI's `tasks log` escapes the same rows, as JSON
+   * `\u` escapes in its detail.
+   */
+  it("names a tool as the approval card does, its hidden characters as escapes", () => {
+    const tool = "srv__rm\u{202E}fdp\u{200B}\n";
+    const shown = "srv__rm<U+202E>fdp<U+200B><U+000A>";
+    expect(
+      one(row(20, "tool_confirmation_requested", { tool_name: tool }))?.text,
+    ).toBe(`${shown} · awaiting approval`);
+    expect(
+      one(resolved(21, { tool_name: tool }, { outcome: "denied" }))?.text,
+    ).toBe(`${shown} · denied`);
+    expect(
+      one(row(22, "tool_executed", { tool_name: tool, success: false }))?.text,
+    ).toBe(`${shown} · failed`);
+    expect(one(row(23, "tool_auto_approved", { tool_name: tool }))?.text).toBe(
+      `${shown} · auto-approved`,
+    );
+    // The daemon's own reasons repeat the name, and one names the agent too
+    // (`security/capabilities/mod.rs`, `security/sandbox/mod.rs`): the row
+    // shows it escaped there as well, on one line (`tasks log` escapes it
+    // too, in its JSON detail).
+    expect(
+      one(
+        row(24, "security_violation", {
+          tool_name: tool,
+          reason: `Capability '${tool}' not in allow list for agent 'lead\u{202E}_agent'`,
+        }),
+      )?.text,
+    ).toBe(
+      `${shown} · Capability '${shown}' not in allow list for agent 'lead<U+202E>_agent'`,
+    );
+    expect(
+      one(
+        row(26, "security_violation", {
+          tool_name: tool,
+          reason: `Tool '${tool}' timed out after 30s`,
+        }),
+      )?.text,
+    ).toBe(`${shown} · Tool '${shown}' timed out after 30s`);
+    expect(
+      one(
+        row(25, "circuit_breaker_tripped", {
+          tool_name: tool,
+          consecutive_failures: 3,
+        }),
+      )?.text,
+    ).toBe(`${shown} · circuit open after 3 failures`);
   });
 
   /** Never a plausible-looking phrase built out of nothing. */

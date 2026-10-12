@@ -162,8 +162,163 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
     });
     expect(view.actions).toEqual(["approve"]);
     expect(view.description).toBe(
-      "You denied this plugin — starts on approval",
+      "You denied this plugin. Declares no capabilities — starts on approval",
     );
+  });
+
+  /**
+   * Approve on a denied row grants the capabilities the plugin's manifest
+   * declares now — a denied plugin stays denied whatever it declares, so an
+   * update after the denial is granted by this click — so the row says what
+   * they are, escaped and counted like a never-seen plugin's (A8: a row
+   * that shows part of what is approved still counts the whole).
+   */
+  it("unapproved/denied — what Approve grants is shown, escaped and counted", () => {
+    const view = extensionRowView(
+      extensionRow({
+        id: "notes",
+        version: "2.0",
+        state: "unapproved",
+        reason: "denied",
+        enabled: true,
+        declared: {
+          capabilities: ["notes_write", "shell\u202E_exec\u200B"],
+          virtual_capabilities: [],
+          types: { tool: true },
+        },
+      }),
+    );
+
+    expect(view.description).toBe(
+      "You denied this plugin. Asks for: notes_write, shell<U+202E>_exec<U+200B> — starts on approval",
+    );
+    expect(view.consent?.notice).toBe(
+      "Note: this request contains 2 hidden characters, shown as <U+…>.",
+    );
+    expect(view.actions).toEqual(["approve"]);
+  });
+
+  /**
+   * The consent row is an approval: what Approve grants is exactly the
+   * plugin's own strings — its directory name and the capabilities its
+   * manifest declares — so every hidden character in them is shown as
+   * `<U+XXXX>` (`lib/hidden-chars`, one-line fields) and the row counts them
+   * in the words every approval surface uses. Only what is shown changes.
+   */
+  it("unapproved/never_seen — the plugin's id and asks show hidden characters", () => {
+    const view = extensionRowView(
+      extensionRow({
+        id: "no\u202Etes\u200B",
+        version: "1.0\u200B",
+        state: "unapproved",
+        reason: "never_seen",
+        enabled: true,
+        declared: {
+          capabilities: ["fs_read\u202E", "net\u200Bconnect", "a\nb\u2800"],
+          virtual_capabilities: [],
+          types: { tool: true },
+        },
+      }),
+    );
+
+    expect(view.description).toBe(
+      "Asks for: fs_read<U+202E>, net<U+200B>connect, a<U+000A>b<U+2800> — starts on approval",
+    );
+    expect(view.consent?.name.text).toBe("no<U+202E>tes<U+200B>");
+    expect(
+      view.consent?.asks.pieces
+        .filter((piece) => piece.kind === "escape")
+        .map((piece) => piece.text),
+    ).toEqual(["<U+202E>", "<U+200B>", "<U+000A>", "<U+2800>"]);
+    // The version the row shows beside Approve is the manifest's free text
+    // too, escaped and counted as the CLI's manifest counts it.
+    expect(view.consent?.version?.text).toBe("1.0<U+200B>");
+    expect(view.consent?.notice).toBe(
+      "Note: this request contains 7 hidden characters, shown as <U+…>.",
+    );
+  });
+
+  it("unapproved/capabilities_grew — the added capabilities show hidden characters", () => {
+    const view = extensionRowView(
+      extensionRow({
+        state: "unapproved",
+        reason: "capabilities_grew",
+        added_capabilities: ["net\u200Bconnect\u{E0041}"],
+      }),
+    );
+
+    expect(view.description).toBe(
+      "Now also asks for: net<U+200B>connect<U+E0041> — starts on approval",
+    );
+    expect(view.consent?.notice).toBe(
+      "Note: this request contains 2 hidden characters, shown as <U+…>.",
+    );
+  });
+
+  it("unapproved/denied — the name Approve answers for is escaped and counted", () => {
+    const view = extensionRowView(
+      extensionRow({
+        id: "tri\u{FE0F}cky",
+        state: "unapproved",
+        reason: "denied",
+      }),
+    );
+
+    expect(view.consent?.name.text).toBe("tri<U+FE0F>cky");
+    expect(view.description).toBe(
+      "You denied this plugin. Declares no capabilities — starts on approval",
+    );
+    expect(view.consent?.notice).toBe(
+      "Note: this request contains 1 hidden character, shown as <U+…>.",
+    );
+  });
+
+  it("unapproved — a plain plugin asks with no notice", () => {
+    const view = extensionRowView(
+      extensionRow({
+        id: "notes",
+        version: "1.0",
+        state: "unapproved",
+        reason: "never_seen",
+        declared: {
+          capabilities: ["notes_write"],
+          virtual_capabilities: [],
+          types: { tool: true },
+        },
+      }),
+    );
+
+    expect(view.consent?.name.text).toBe("notes");
+    expect(view.consent?.version?.text).toBe("1.0");
+    expect(view.consent?.asks.text).toBe(view.description);
+    expect(view.consent?.notice).toBeNull();
+  });
+
+  /**
+   * Only the consent row: a failed row's detail — a child's stderr, an HTTP
+   * body — is quoted as it came, which is its own, display-only surface.
+   */
+  it("every row that asks for nothing carries no consent", () => {
+    for (const row of [
+      extensionRow({ state: "enabled" }),
+      extensionRow({ state: "disabled", enabled: false }),
+      extensionRow({
+        state: "failed",
+        reason: "crashed",
+        detail: "bro\u202Eken",
+      }),
+    ]) {
+      expect(extensionRowView(row).consent).toBeNull();
+    }
+    expect(
+      extensionRowView(
+        extensionRow({
+          state: "failed",
+          reason: "crashed",
+          detail: "b\u202Ec",
+        }),
+      ).description,
+    ).toMatch(/^"b\u202Ec" · since /);
   });
 
   it("failed/needs_authorization — asks, the hint, and the switch stays ON", () => {

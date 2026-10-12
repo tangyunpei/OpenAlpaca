@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use openalpaca_llm::{ChatRequest, ContentPart, ImageSource};
 use openalpaca_storage::{OutcomeKind, TaskStatus};
+use std::sync::Mutex;
 use uuid::Uuid;
 
 fn make_tool_registry() -> Arc<ToolRegistry> {
@@ -41,7 +42,6 @@ fn make_orchestrator_with_config(config: DaemonConfig) -> Orchestrator {
         LoopConfig::default(),
         gate,
         registry,
-        None,
         None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
@@ -175,6 +175,7 @@ async fn test_simple_query_echo() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_ok());
@@ -199,6 +200,7 @@ async fn test_task_query_empty() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_ok());
@@ -227,6 +229,7 @@ async fn test_task_control_cancel() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_ok());
@@ -253,6 +256,7 @@ async fn test_permission_denied_external() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_err());
@@ -314,7 +318,6 @@ async fn test_simple_query_with_mock_llm() {
         gate,
         registry,
         None,
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -333,6 +336,7 @@ async fn test_simple_query_with_mock_llm() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_ok());
@@ -357,6 +361,7 @@ async fn test_input_sanitization_blocks_null_bytes() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_err());
@@ -383,6 +388,7 @@ async fn test_security_gate_replaces_trust_gate() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
     assert!(result.is_err());
@@ -464,7 +470,6 @@ fn make_orchestrator_with_llm_and_agents(
         gate,
         registry,
         None,
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -512,6 +517,7 @@ async fn test_slash_commands_bypass_llm() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -583,7 +589,6 @@ fn make_orchestrator_with_tools_and_llm(
         gate,
         registry,
         None,
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -593,9 +598,9 @@ fn make_orchestrator_with_tools_and_llm(
 /// Ruling R22, through the real request path: `handle_message` →
 /// `MemoryScopeContext::for_request` → `simple_query_handler`'s `ToolContext`
 /// → the tool. A turn that carried no workspace — every connector lane, every
-/// scheduled skill — must reach tools with `request_workspace_root: None`,
-/// even though the CWD fallback still hands memory a `workspace_id` (this test
-/// process runs inside a `.git` checkout, so it does).
+/// scheduled skill — must reach tools with no project on either field, though
+/// this test process runs inside a `.git` checkout (the lead's R-S13: the
+/// daemon's current directory is never read).
 mod request_workspace_threading {
     use super::*;
     use crate::tools::registry::{BuiltInTool, ToolContext};
@@ -705,7 +710,6 @@ mod request_workspace_threading {
             gate,
             registry,
             None,
-            None,
             Arc::new(skill_catalog::SkillCatalog::new()),
             Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
             Arc::new(ArcSwap::from_pointee(config)),
@@ -723,6 +727,7 @@ mod request_workspace_threading {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .expect("turn should succeed");
@@ -734,19 +739,23 @@ mod request_workspace_threading {
 
     #[tokio::test]
     async fn a_turn_without_a_workspace_path_carries_no_request_root() {
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let ctx = tool_context_for_turn(None).await;
 
         assert_eq!(
             ctx.request_workspace_root, None,
             "the daemon CWD must never reach a tool as a request workspace root"
         );
-        assert_eq!(
-            ctx.workspace_id,
-            std::env::current_dir()
-                .ok()
-                .and_then(|d| crate::memory::workspace::resolve_workspace_id(&d)),
-            "memory scoping keeps its CWD fallback"
+        // Nor as a memory workspace (the lead's R-S13), though this test
+        // process runs inside a git checkout.
+        let cwd = std::env::current_dir().unwrap();
+        assert!(
+            cwd.ancestors().any(|dir| dir.join(".git").exists()),
+            "precondition: this test runs inside a git checkout ({})",
+            cwd.display()
         );
+        assert_eq!(ctx.workspace_id, None, "a turn with no path has no project");
     }
 
     #[tokio::test]
@@ -755,10 +764,157 @@ mod request_workspace_threading {
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let root = project.path().canonicalize().unwrap();
 
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let ctx = tool_context_for_turn(Some(project.path().to_string_lossy().to_string())).await;
 
         assert_eq!(ctx.request_workspace_root.as_deref(), root.to_str());
         assert_eq!(ctx.workspace_id.as_deref(), root.to_str());
+    }
+}
+
+/// Through the front door: the offers that depend on whether a turn is a
+/// project turn (the lead's ruling R-T14: one predicate, computed once).
+/// R48: a project turn whose words suggest `file_write` carries `file_edit`
+/// beside it on the main loop's request; a turn with no project carries
+/// `file_write` alone.
+mod project_turn_offers {
+    use super::*;
+    use openalpaca_llm::{ChatResponse, FinishReason, LlmError, LlmProvider, Usage};
+
+    /// Answers at once and keeps every request it was handed.
+    struct Capturing(Arc<Mutex<Vec<ChatRequest>>>);
+
+    #[async_trait]
+    impl LlmProvider for Capturing {
+        fn name(&self) -> &str {
+            "capturing"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            self.0
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(request);
+            Ok(ChatResponse {
+                content: "ok".to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    ..Default::default()
+                },
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// The tool names on the main loop's request for one turn whose words
+    /// are `content`, with `tools` registered by name.
+    async fn offered(workspace_path: Option<String>, content: &str, tools: &[&str]) -> Vec<String> {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let router = openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(Capturing(captured.clone())),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), tools);
+        orch.handle_message(HandleRequest {
+            request_id: Uuid::new_v4(),
+            source: "cli".to_string(),
+            content: content.to_string(),
+            principal: Principal::System,
+            scope: Scope::Global,
+            lane_key: "user1:cli".to_string(),
+            workspace_path,
+            stream_id: None,
+            model_override: None,
+            unattended: false,
+            turn_sink: None,
+            session_id: None,
+        })
+        .await
+        .expect("the turn answers");
+        let requests = captured.lock().unwrap_or_else(|p| p.into_inner());
+        requests
+            .last()
+            .expect("the main loop asked the model")
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect()
+    }
+
+    const EDIT_ASK: &str = "edit src/main.rs so the retry count is 5";
+
+    #[tokio::test]
+    async fn a_project_turn_asking_for_a_write_is_offered_file_edit_beside_file_write() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+
+        let names = offered(
+            Some(project.path().to_string_lossy().to_string()),
+            EDIT_ASK,
+            &["file_write", "file_edit"],
+        )
+        .await;
+
+        assert!(names.contains(&"file_write".to_string()), "{names:?}");
+        assert!(names.contains(&"file_edit".to_string()), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_no_project_is_offered_file_write_without_file_edit() {
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+
+        let names = offered(None, EDIT_ASK, &["file_write", "file_edit"]).await;
+
+        assert!(names.contains(&"file_write".to_string()), "{names:?}");
+        assert!(!names.contains(&"file_edit".to_string()), "{names:?}");
+    }
+
+    // ── R42 and the lead's rulings R-T6, R-T14: the file readers ──
+
+    const ASK_NO_KEYWORD: &str = "what does the retry loop do?";
+
+    #[tokio::test]
+    async fn a_project_turn_is_offered_the_file_readers_with_no_keyword() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+
+        let names = offered(
+            Some(project.path().to_string_lossy().to_string()),
+            ASK_NO_KEYWORD,
+            &["file_read", "file_list"],
+        )
+        .await;
+
+        assert!(names.contains(&"file_read".to_string()), "{names:?}");
+        assert!(names.contains(&"file_list".to_string()), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn with_no_project_file_list_comes_only_with_a_keyword_file_read() {
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+
+        let asked = offered(None, "read file notes.md", &["file_read", "file_list"]).await;
+        assert!(asked.contains(&"file_read".to_string()), "{asked:?}");
+        assert!(asked.contains(&"file_list".to_string()), "{asked:?}");
+
+        let not_asked = offered(None, ASK_NO_KEYWORD, &["file_read", "file_list"]).await;
+        assert!(!not_asked.contains(&"file_read".to_string()), "{not_asked:?}");
+        assert!(!not_asked.contains(&"file_list".to_string()), "{not_asked:?}");
     }
 }
 
@@ -846,6 +1002,7 @@ async fn test_tool_intent_detected_and_executes() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -932,6 +1089,7 @@ async fn test_tool_max_rounds_enforcement() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -964,6 +1122,7 @@ async fn test_tool_intent_but_not_in_registry() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -1005,6 +1164,7 @@ async fn test_attachment_text_does_not_change_intent_classification() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1040,6 +1200,7 @@ async fn test_empty_content_with_attachments_forces_simple_query() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1140,6 +1301,7 @@ fn attachment_request(request_id: Uuid, content: &str) -> HandleRequest {
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     }
 }
 
@@ -1396,7 +1558,6 @@ async fn an_over_long_document_is_cut_at_the_extraction_cap_and_says_so() {
         gate,
         make_tool_registry(),
         None,
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(config)),
@@ -1466,6 +1627,7 @@ async fn test_attachment_image_is_converted_to_base64_part() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1527,6 +1689,7 @@ async fn test_attachment_image_read_failure_inserts_placeholder_text() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1579,6 +1742,7 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -1676,6 +1840,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
                 model_override: None,
                 unattended: false,
                 turn_sink: None,
+                session_id: None,
             },
             attachments,
         )
@@ -2137,7 +2302,6 @@ fn make_orchestrator_with_llm_and_skills(
         gate,
         registry,
         None,
-        None,
         catalog,
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -2204,6 +2368,7 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -2252,7 +2417,6 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
         gate,
         registry,
         None,
-        None,
         catalog,
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -2272,6 +2436,7 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -2403,7 +2568,6 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
         gate,
         registry,
         None,
-        None,
         catalog,
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -2423,6 +2587,7 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -2488,6 +2653,7 @@ async fn send_steer(orch: &Orchestrator, content: &str) -> String {
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     })
     .await
     .unwrap()
@@ -2543,6 +2709,65 @@ async fn test_steer_prefix_single_workflow_pushes_and_confirms() {
         }
     );
     assert_eq!(orchestration_modes(&mut rx), vec!["steered".to_string()]);
+}
+
+/// F4 — the deterministic `/steer` carries the turn's resolved project root,
+/// the value `handlers.rs` resolves for the turn, not the path the client
+/// sent: a subdirectory is sent, the directory carrying `.git` is what the
+/// message holds. That root is what a message left undelivered at the
+/// workflow's exit is filed under (`dispatcher/lead_agent.rs:761-768`).
+/// The orchestrator here has no database and no session log, so the drained
+/// inbox is the whole observable.
+#[tokio::test]
+async fn a_steer_command_carries_the_turns_resolved_project_root() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+    let sent = project.path().join("src");
+    std::fs::create_dir(&sent).unwrap();
+    let root = project.path().canonicalize().unwrap();
+
+    let orch = make_steering_orchestrator();
+    orch.shared_context
+        .task_registry
+        .register("task-1".to_string(), "Build the report".to_string());
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::default());
+    orch.shared_context
+        .register_steering_inbox("task-1", inbox.clone());
+    orch.shared_context
+        .register_workflow_for_lane("user1:cli", "task-1");
+
+    let reply = orch
+        .handle_message(HandleRequest {
+            request_id: Uuid::new_v4(),
+            source: "cli".to_string(),
+            content: "/steer switch to staging".to_string(),
+            principal: Principal::User {
+                global_id: "user1".to_string(),
+            },
+            scope: Scope::Global,
+            lane_key: "user1:cli".to_string(),
+            workspace_path: Some(sent.to_string_lossy().to_string()),
+            stream_id: None,
+            model_override: None,
+            unattended: false,
+            turn_sink: None,
+            session_id: None,
+        })
+        .await
+        .unwrap();
+    assert!(reply.contains("task-1"), "unexpected reply: {reply}");
+
+    let queued = inbox.drain_all();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "switch to staging");
+    assert_eq!(
+        queued[0].workspace_path.as_deref(),
+        root.to_str(),
+        "the steering message must carry the resolved root, not the path as sent ({})",
+        sent.display()
+    );
 }
 
 #[tokio::test]
@@ -2669,7 +2894,6 @@ fn make_orchestrator_with_llm_agents_and_config(
         gate,
         registry,
         db,
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(config)),
@@ -2789,6 +3013,7 @@ async fn send_tool_mode(orch: &Orchestrator, request_id: Uuid, content: &str) ->
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     })
     .await
     .unwrap()
@@ -3369,7 +3594,6 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
         gate,
         registry.clone(),
         None,
-        None,
         catalog.clone(),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -3389,6 +3613,7 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await;
 
@@ -3643,7 +3868,6 @@ fn c5_orchestrator(
         gate,
         registry,
         None,
-        None,
         catalog,
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -3701,6 +3925,7 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .expect("the refusal is the reply, returned as Ok — never as Err");
@@ -3733,6 +3958,7 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .expect("the legacy branch refuses as Ok(reply) too");
@@ -3887,7 +4113,6 @@ Dump.
         gate,
         registry,
         None,
-        None,
         Arc::new(catalog),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(config)),
@@ -3901,6 +4126,7 @@ Dump.
         "Dumper",
         "dump it",
         "test:cli",
+        None,
         &ctx,
         None,
         &scope,
@@ -3954,6 +4180,7 @@ async fn the_top_level_invocation_site_refuses_on_the_same_predicate() {
                 skill,
                 "go",
                 "test:cli",
+                None,
                 &ctx,
                 None,
                 &scope,
@@ -4164,6 +4391,7 @@ async fn a_withdrawn_plugin_skill_is_attributed_to_its_plugin_on_slash() {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         })
         .await
         .expect("the tombstone answer is the reply");
@@ -4352,6 +4580,83 @@ fn a_delegating_row_replays_with_its_provenance_and_an_ordinary_one_does_not() {
     assert!(
         !stored.iter().any(|m| m.content.contains("start_workflow")),
         "no stored row may carry the provenance line"
+    );
+}
+
+/// G3b — a model that echoed the line into its own answer stored it, and the
+/// replay must not carry it twice: a row that already ends with its own
+/// provenance line (trailing whitespace aside) replays exactly as stored,
+/// and the stored row is never rewritten.
+#[test]
+fn a_delegating_row_that_already_ends_with_its_provenance_line_replays_as_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    repo.get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+
+    let task = "f89d487e-0000-4000-8000-000000000000";
+    let line = crate::orchestrator::context_builder::delegation_provenance_line(task);
+    let echoed = format!("Started. A background workflow is running.\n{line}\n  ");
+    // The same line for another run is not this row's line.
+    let other = format!(
+        "Started another one.\n{}",
+        crate::orchestrator::context_builder::delegation_provenance_line(
+            "9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b"
+        )
+    );
+    // Its own line with more text after it does not end with the line: the
+    // rule is "ends with", so the line is appended (the spec's letter).
+    let quoted = format!("{line}\nAnd then I kept going.");
+    for (content, task_id) in [(&echoed, task), (&other, task), (&quoted, task)] {
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:cli".to_string(),
+            role: "assistant".to_string(),
+            content: content.clone(),
+            task_id: Some(task_id.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let ctx = orch.build_context("user1:cli", "go");
+    assert_eq!(ctx.recent_messages.len(), 3);
+    assert_eq!(
+        ctx.recent_messages[0].content, echoed,
+        "a row that already ends with its line must replay as stored"
+    );
+    assert_eq!(ctx.recent_messages[0].content.matches(&line).count(), 1);
+    assert_eq!(
+        ctx.recent_messages[1].content,
+        format!("{other}\n{line}"),
+        "a row ending with another run's line still gets its own"
+    );
+    assert_eq!(
+        ctx.recent_messages[2].content,
+        format!("{quoted}\n{line}"),
+        "a row that holds its line but does not end with it still gets it"
+    );
+
+    let stored = repo.list_recent_by_lane("user1:cli", 10).unwrap();
+    assert_eq!(
+        stored[0].content, echoed,
+        "the stored row is never rewritten"
+    );
+    assert_eq!(
+        stored[1].content, other,
+        "the stored row is never rewritten"
+    );
+    assert_eq!(
+        stored[2].content, quoted,
+        "the stored row is never rewritten"
     );
 }
 
@@ -4838,7 +5143,6 @@ fn orchestrator_with_skill_and_config(
         LoopConfig::default(),
         gate,
         registry,
-        None,
         None,
         catalog,
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
@@ -5695,7 +5999,6 @@ async fn the_main_loop_is_budgeted_against_the_model_that_answers() {
         make_security_gate(&EventBus::default()),
         make_tool_registry(),
         Some(db.clone()),
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -5713,6 +6016,7 @@ async fn the_main_loop_is_budgeted_against_the_model_that_answers() {
         model_override: None,
         unattended: false,
         turn_sink: None,
+        session_id: None,
     })
     .await
     .expect("the turn is answered");
@@ -5727,6 +6031,274 @@ async fn the_main_loop_is_budgeted_against_the_model_that_answers() {
             "the budget must be the answering model's window, not the compiled 200 000"
         );
     }
+}
+
+/// R44 + R28 (storage design §10), the main loop: a turn with no project is
+/// told its conversation's scratch folder, right before the user's message.
+/// The line is read from the turn's own tool context, so naming the
+/// conversation the gateway resolved proves the context carries it — and
+/// nothing is made until a tool acts. It ends the relay rules' message
+/// rather than standing as a message of its own: one more per-turn message
+/// would take a slot in the compaction's four-message recent floor, so a
+/// first-round compaction would summarise one conversation row more — or,
+/// on a turn with recall and an active workflow, the turn's recall block
+/// (the S3 review's Important 1; the design-11 figures of
+/// `a_compacting_turn_writes_its_state_and_the_next_request_carries_it` pin
+/// the floor).
+#[tokio::test]
+async fn a_main_loop_turn_with_no_project_is_told_its_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    // The lane's session, as the gateway would have opened it for this turn.
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .get_or_create_active_session("test:cli", "cli", None)
+        .unwrap();
+    let provider = crate::test_util::RecordingProvider::new("Noted.");
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        EventBus::default(),
+        SystemPersona::default(),
+        Some(ollama_only_router(provider.clone())),
+        LoopConfig::default(),
+        make_security_gate(&EventBus::default()),
+        make_tool_registry(),
+        Some(db.clone()),
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+
+    orch.handle_message(HandleRequest {
+        request_id: Uuid::new_v4(),
+        source: "cli".to_string(),
+        content: "Where do my files go?".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        lane_key: "test:cli".to_string(),
+        workspace_path: None,
+        stream_id: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+        session_id: None,
+    })
+    .await
+    .expect("the turn is answered");
+
+    // R-T22: the line names only the tools the turn holds, and this turn —
+    // over an empty registry, with no project — holds no file tool and no
+    // shell, so it is told its folder and nothing more.
+    let folder = home_root.join("scratch").join(&session.id);
+    let note = format!(
+        "<working_folder>This conversation has no project. Your working folder is its scratch \
+         folder {}.</working_folder>",
+        folder.display()
+    );
+    let request = provider.first_request();
+    let contents: Vec<&str> = request
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    let carriers: Vec<usize> = contents
+        .iter()
+        .enumerate()
+        .filter(|(_, content)| content.contains("<working_folder>"))
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        carriers.len(),
+        1,
+        "one message carries the working-folder line: {contents:?}"
+    );
+    let at = carriers[0];
+    assert_eq!(
+        contents[at],
+        format!(
+            "{}\n{note}",
+            crate::tools::builtins::main_loop_relay_guidance()
+        ),
+        "the line ends the relay rules' message, not a message of its own"
+    );
+    assert_eq!(
+        at,
+        contents.len() - 2,
+        "the relay rules and the line sit right before the user's message"
+    );
+    assert!(!home_root.join("scratch").exists(), "a note makes no folder");
+}
+
+/// An orchestrator over `router` and `db` whose registry holds the
+/// builtins, so a scripted file tool really runs and a suggested one is
+/// really offered.
+fn orchestrator_with_builtins(
+    router: Arc<openalpaca_llm::LlmRouter>,
+    db: Option<openalpaca_storage::Database>,
+) -> Orchestrator {
+    let registry = Arc::new(ToolRegistry::default());
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let bus = EventBus::default();
+    Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus.clone(),
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        make_security_gate(&bus),
+        registry,
+        db,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    )
+}
+
+/// [`orchestrator_with_builtins`] answering from `steps`.
+fn scripted_turn_orchestrator_with_builtins(
+    steps: Vec<ScriptStep>,
+    db: openalpaca_storage::Database,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ScriptedTurnLlm::new(steps, requests.clone())),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    (
+        orchestrator_with_builtins(Arc::new(router), Some(db)),
+        requests,
+    )
+}
+
+/// R28 on the `ModelOnly` arms (the lead's ruling R-T22, the whole-stage
+/// review's d4-folder-4): a bootstrap turn — like an attachment-only one —
+/// is not the main loop, but it still runs the tools it was offered, here
+/// `file_write` by its verb and, on a project turn, `file_edit` and the
+/// readers with it. Its model is told the folder those tools act in, naming
+/// only those tools, as a message of its own right before the user's.
+#[tokio::test]
+async fn a_bootstrap_turn_that_runs_tools_is_told_its_working_folder() {
+    use crate::middleware::bootstrap::{BootstrapDocument, BootstrapFrontmatter};
+
+    let gp = crate::test_util::GuardedProject::new();
+    let provider = crate::test_util::RecordingProvider::new("Noted.");
+    let orch = orchestrator_with_builtins(ollama_only_router(provider.clone()), None);
+    orch.update_bootstrap_document(Some(BootstrapDocument {
+        frontmatter: BootstrapFrontmatter {
+            summary: "onboarding".to_string(),
+            read_when: vec![],
+        },
+        body: "Welcome! Let's get set up.".to_string(),
+    }));
+
+    orch.handle_message(HandleRequest {
+        workspace_path: Some(gp.root.display().to_string()),
+        ..HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "write notes.md with the plan",
+            Principal::User {
+                global_id: "user1".to_string(),
+            },
+            Scope::Global,
+            "user1:cli",
+        )
+    })
+    .await
+    .expect("the bootstrap turn is answered");
+
+    let request = provider.first_request();
+    let offered: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(offered.contains(&"file_write"), "{offered:?}");
+    let contents: Vec<&str> = request
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        contents[contents.len() - 2],
+        format!(
+            "<working_folder>Your working folder is the project folder {}. Paths in file_read, \
+             file_list, file_write and file_edit are relative to it.</working_folder>",
+            gp.root.display()
+        ),
+        "the line is a message of its own right before the user's: {contents:?}"
+    );
+    assert_eq!(contents[contents.len() - 1], "write notes.md with the plan");
+}
+
+/// The lead's ruling R-T27 (the whole-stage review's d4-folder-2): a turn's
+/// tools act for the conversation the gateway resolved the turn into —
+/// carried on `HandleRequest::session_id` — never for whichever session the
+/// lane points at by the time the handler reads it. Two windows on one lane
+/// race exactly so: the turn was persisted into S1, then another window's
+/// turn (or a New conversation click) opened S2 and made it the lane's
+/// active session. The turn's `file_list` acts in `scratch/<S1>/`, it is
+/// told that folder, and nothing of S2's is made.
+#[tokio::test]
+async fn a_turns_tools_act_in_the_conversation_its_request_carries_not_the_lanes_active_one() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let s1 = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let s2 = repo.create_session("user1:cli", "cli", None, None).unwrap();
+    assert_eq!(
+        repo.active_session_id("user1:cli").unwrap().as_deref(),
+        Some(s2.id.as_str()),
+        "the lane has moved on to S2"
+    );
+    let (orch, requests) = scripted_turn_orchestrator_with_builtins(
+        vec![
+            ScriptStep::Call("file_list", serde_json::json!({"path": "."})),
+            ScriptStep::Say("Listed."),
+        ],
+        db,
+    );
+
+    orch.handle_message(HandleRequest {
+        session_id: Some(s1.id.clone()),
+        ..HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "read file notes.md",
+            Principal::User {
+                global_id: "user1".to_string(),
+            },
+            Scope::Global,
+            "user1:cli",
+        )
+    })
+    .await
+    .expect("the turn is answered");
+
+    let scratch = home_root.join("scratch");
+    assert!(
+        scratch.join(&s1.id).is_dir(),
+        "file_list acted in the turn's own conversation's scratch folder"
+    );
+    assert!(
+        !scratch.join(&s2.id).exists(),
+        "nothing of the lane's active conversation was made"
+    );
+    let first = requests.lock().unwrap()[0].clone();
+    assert!(
+        first.messages.iter().any(|m| m
+            .content
+            .contains(&scratch.join(&s1.id).display().to_string())),
+        "the turn is told its own conversation's scratch folder"
+    );
 }
 
 /// **U1 on the skill tier.**
@@ -5775,7 +6347,6 @@ Look.
         gate,
         make_tool_registry(),
         None,
-        None,
         Arc::new(catalog),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -5784,7 +6355,6 @@ Look.
     // A history turn carrying an image and a document, as the transcript
     // replays them.
     let ctx = ConversationContext {
-        summary: None,
         recent_messages: vec![ChatMessage::user_with_parts(vec![
             ContentPart::Image {
                 source: ImageSource::Base64 {
@@ -5800,10 +6370,7 @@ Look.
                 extracted_text: Some("the codeword is WOMBAT".to_string()),
             },
         ])],
-        older_window: Vec::new(),
-        summary_version: 0,
-        last_summarized_id: 0,
-        old_summary_text: String::new(),
+        ..Default::default()
     };
     let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
 
@@ -5813,6 +6380,7 @@ Look.
         "Looker",
         "look at it",
         "test:cli",
+        None,
         &ctx,
         None,
         &scope,
@@ -5856,6 +6424,243 @@ Look.
     );
 }
 
+/// The tools each file-based skill's model is offered, in the order given:
+/// each `(name, tools)` is written as a skill with that `tools:` block,
+/// invoked once by name over the builtins, under a home-store guard.
+async fn tools_offered_to_skills(skills: &[(&str, &str)]) -> Vec<Vec<String>> {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let registry = ToolRegistry::default();
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let registry = Arc::new(registry);
+    let tmp = tempfile::tempdir().unwrap();
+    for (index, (name, tools)) in skills.iter().enumerate() {
+        let dir = tmp.path().join(format!("skill-{index}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: \"{name}\"\ndescription: \"Works with files\"\ninvoke:\n  slash: \
+                 \"/skill-{index}\"\n  mode: \"auto\"\ntools:\n{tools}---\n\n## Instructions\n\n\
+                 Work.\n"
+            ),
+        )
+        .unwrap();
+    }
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    catalog.set_availability_oracle(registry.clone());
+
+    let provider = crate::test_util::RecordingProvider::new("Done.");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let bus = EventBus::default();
+    let gate = make_security_gate_with_registry(&bus, registry.clone());
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
+
+    for (name, _) in skills {
+        orch.handle_skill_invocation(
+            Uuid::new_v4(),
+            "cli",
+            name,
+            "read src/main.rs",
+            "test:cli",
+            None,
+            &ConversationContext::default(),
+            None,
+            &scope,
+            None,
+            false,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("the skill runs");
+    }
+
+    provider
+        .requests()
+        .iter()
+        .map(|request| request.tools.iter().map(|t| t.name.clone()).collect())
+        .collect()
+}
+
+/// R42 / R-T6 on the skill tier (d6-surfaces-3): a file-based skill whose
+/// legacy `tools.allow` names `file_read` is handed `file_list` with it —
+/// the tool `file_read`'s not-found hint sends the model to — and one that
+/// also denies `file_read` is handed neither.
+#[tokio::test]
+async fn a_skill_allowed_file_read_by_name_is_handed_file_list_with_it() {
+    let offered = tools_offered_to_skills(&[
+        ("Reader", "  allow:\n    - file_read\n"),
+        (
+            "Denier",
+            "  allow:\n    - file_read\n  deny:\n    - file_read\n",
+        ),
+    ])
+    .await;
+
+    assert_eq!(offered.len(), 2, "{offered:?}");
+    assert_eq!(offered[0], vec!["file_read", "file_list"]);
+    assert!(offered[1].is_empty(), "{offered:?}");
+}
+
+/// Residual X5, the skill tier: the legacy `tools.allow` branch pairs every
+/// name its capability pairs (`constraints::PAIRED_TOOLS`) — `file_write`
+/// brings `file_edit` and `read_result` brings `artifact_read`, after the
+/// names the skill listed — and a skill whose `tools.deny` names either half
+/// of a pair is not handed the partner.
+#[tokio::test]
+async fn a_skill_allowed_file_write_or_read_result_by_name_is_handed_its_partner() {
+    let offered = tools_offered_to_skills(&[
+        (
+            "Writer",
+            "  allow:\n    - file_write\n    - read_result\n",
+        ),
+        (
+            "Careful",
+            "  allow:\n    - file_write\n    - read_result\n  deny:\n    - file_edit\n    - \
+             read_result\n",
+        ),
+    ])
+    .await;
+
+    assert_eq!(offered.len(), 2, "{offered:?}");
+    assert_eq!(
+        offered[0],
+        vec!["file_write", "read_result", "file_edit", "artifact_read"]
+    );
+    assert_eq!(offered[1], vec!["file_write"]);
+}
+
+/// R44 + R28 (storage design §10), the file-skill tier: a `/slash` skill's
+/// model is told the conversation's scratch folder — named from the turn's
+/// conversation, which its tool context now carries — right before the
+/// question, and nothing is made. R-T22: the line names only what the skill
+/// holds — `file_read`, by name, and `file_list` with it — so it carries no
+/// shell, `send` or `file_write` clause.
+#[tokio::test]
+async fn a_file_skill_with_no_project_is_told_its_scratch_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("looker");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: "Looker"
+description: "Looks at things"
+invoke:
+  slash: "/look"
+  mode: "auto"
+tools:
+  allow:
+    - file_read
+---
+
+## Instructions
+
+Look.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .get_or_create_active_session("test:cli", "cli", None)
+        .unwrap();
+
+    let provider = crate::test_util::RecordingProvider::new("Looked.");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let registry = Arc::new(ToolRegistry::default());
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        Some(db.clone()),
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
+
+    orch.handle_skill_invocation(
+        Uuid::new_v4(),
+        "cli",
+        "Looker",
+        "look at it",
+        "test:cli",
+        None,
+        &ConversationContext::default(),
+        None,
+        &scope,
+        None,
+        false,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .expect("the skill runs");
+
+    let folder = home_root.join("scratch").join(&session.id);
+    let request = provider.first_request();
+    let at = request
+        .messages
+        .iter()
+        .position(|m| m.content.starts_with("<working_folder>"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no working-folder note: {:?}",
+                request.messages.iter().map(|m| &m.content).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        request.messages[at].content,
+        format!(
+            "<working_folder>This conversation has no project. Your working folder is its \
+             scratch folder {}: paths in file_read and file_list are relative to \
+             it.</working_folder>",
+            folder.display()
+        )
+    );
+    assert_eq!(at, request.messages.len() - 2, "right before the question");
+    assert!(!home_root.join("scratch").exists(), "a note makes no folder");
+}
+
 // ── A1: the skill tier takes the turn's own attachments ─────────────────
 //
 // Round 8 adapted the tier's *history*. The turn's own files still stopped at
@@ -5886,7 +6691,6 @@ fn local_skill_orchestrator(
         LoopConfig::default(),
         gate,
         registry,
-        None,
         None,
         catalog,
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
@@ -6071,7 +6875,6 @@ async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
         gate,
         make_tool_registry(),
         None,
-        None,
         Arc::new(catalog),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -6200,7 +7003,6 @@ async fn a_direct_send_reports_the_turns_attachments_skipped() {
         gate,
         make_tool_registry(),
         Some(db),
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -6335,7 +7137,6 @@ async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
         gate,
         make_tool_registry(),
         Some(db),
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -6461,7 +7262,6 @@ async fn an_attachment_turn_is_not_replayed_as_its_own_history() {
         gate,
         make_tool_registry(),
         Some(db.clone()),
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -6484,6 +7284,7 @@ async fn an_attachment_turn_is_not_replayed_as_its_own_history() {
             "cli",
             None,
             std::slice::from_ref(&attachment),
+            None,
         )
         .expect("the gateway persists the user half first");
 
@@ -6978,4 +7779,2773 @@ async fn an_answer_that_states_no_id_is_never_reviewed_twice() {
         "A guanaco's fibre is finer than a llama's, at about 16 microns."
     );
     assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+// ── Memory recall through the service (plan 3.3) ──────────────────────
+
+/// Fixture 21's two notes in a temp home store, stored by the owner, plus
+/// the service the orchestrator answers with.
+struct RecallScene {
+    _env: crate::test_util::HomeStoreGuard,
+    _root: tempfile::TempDir,
+    service: Arc<crate::memory::service::MemoryService>,
+    vim: crate::memory::service::StoreOutput,
+    coffee: crate::memory::service::StoreOutput,
+}
+
+fn recall_scene(db: &openalpaca_storage::Database) -> RecallScene {
+    use crate::memory::service::{
+        Attribution, Capabilities, MemoryService, StoreInput, Surface, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let env = crate::test_util::HomeStoreGuard::set(&home.canonicalize().unwrap());
+    openalpaca_storage::IdentityRepository::new(db)
+        .create_global_user("user1", None)
+        .unwrap();
+    let service = MemoryService::new(
+        Some(db.clone()),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    );
+    service.rebuild_index().unwrap();
+    let owner = service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let vim = service
+        .store(
+            &owner,
+            StoreInput {
+                title: "Editor preference".into(),
+                body: "# Editor preference\n\nUser prefers vim for editing.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("editor.preference".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let coffee = service
+        .store(
+            &owner,
+            StoreInput {
+                title: "Coffee".into(),
+                body: "# Coffee\n\nUser drinks espresso after lunch.\n".into(),
+                kind: Some(NoteKind::Preference),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    RecallScene {
+        _env: env,
+        _root: root,
+        service: Arc::new(service),
+        vim,
+        coffee,
+    }
+}
+
+/// The user messages of a captured request that carry a memory delivery.
+fn memory_messages(request: &ChatRequest) -> Vec<String> {
+    request
+        .messages
+        .iter()
+        .filter(|m| {
+            matches!(m.role, openalpaca_llm::Role::User) && m.content.contains("<memory_context>")
+        })
+        .map(|m| m.content.clone())
+        .collect()
+}
+
+/// **Plan 3.3, fixture 21 step 2.** "what editor do I prefer?" recalls
+/// "User prefers vim for editing" into the main loop's own request — through
+/// the service's union-of-terms search (`prefer` reaches `prefers` as the
+/// word table's prefix query, design 09 §6.5.2), never the SQL repository —
+/// and says nothing about coffee. One block per turn, quoted as reference
+/// data.
+#[tokio::test]
+async fn the_main_loop_recalls_the_natural_question_fixture_through_the_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "vim, as you told me",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+
+    let reply = send_tool_mode(&orch, Uuid::new_v4(), "what editor do I prefer?").await;
+    assert_eq!(reply, "vim, as you told me");
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    let blocks = memory_messages(&reqs[0]);
+    assert_eq!(
+        blocks.len(),
+        1,
+        "one memory block per turn; messages: {:?}",
+        reqs[0]
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(blocks[0].contains("User prefers vim for editing"), "{}", blocks[0]);
+    assert!(blocks[0].contains(&scene.vim.id.to_string()), "{}", blocks[0]);
+    assert!(!blocks[0].contains("espresso"), "{}", blocks[0]);
+    assert!(!blocks[0].contains(&scene.coffee.id.to_string()));
+}
+
+/// Design 09 §13.1 (MD-14): the main loop's system prompt says the layered
+/// workflow once, in one line — search returns an index, pick ids, read only
+/// those, several at once — on a turn whose surface carries the memory read
+/// tools, and not on a turn without them. Owner decision LQ19 (F-C) adds one
+/// line: before saving a changed fact, search for the note it changes and
+/// name it. Design 11 §4 (CQ-5) adds another: a `previous_conversation`
+/// block names the note that records it, to read when the work goes on.
+#[tokio::test]
+async fn the_main_loop_prompt_says_search_pick_read_in_one_line() {
+    let guidance = crate::tools::builtins::main_loop_memory_guidance();
+    let lines: Vec<&str> = guidance.lines().collect();
+    assert_eq!(lines.len(), 5, "a tag, three lines, a tag: {guidance}");
+    for word in [
+        "memory_search",
+        "index",
+        "memory_read",
+        "several",
+        "memory_timeline",
+    ] {
+        assert!(lines[1].contains(word), "{word}: {}", lines[1]);
+    }
+    assert_eq!(
+        lines[2],
+        "Before saving a fact about the user that changes an earlier one, memory_search for the \
+         note it changes and pass its id in supersedes (or its fact_key)."
+    );
+    assert_eq!(
+        lines[3],
+        "A previous_conversation block names the memory note that records it; memory_read it \
+         when the user continues that work."
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "noted",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+    for tool in crate::tools::builtins::memory_read_tools(scene.service.clone()) {
+        orch.tool_registry.register(tool).unwrap();
+    }
+    send_tool_mode(&orch, Uuid::new_v4(), "what editor do I prefer?").await;
+    {
+        let reqs = requests.lock().unwrap();
+        let system = &reqs[0].messages[0];
+        assert!(matches!(system.role, openalpaca_llm::Role::System));
+        assert_eq!(
+            system.content.matches(guidance).count(),
+            1,
+            "{}",
+            system.content
+        );
+        let tools: Vec<&str> = reqs[0].tools.iter().map(|t| t.name.as_str()).collect();
+        for name in ["memory_search", "memory_read", "memory_timeline"] {
+            assert!(tools.contains(&name), "{name}: {tools:?}");
+        }
+    }
+
+    let (bare, requests) =
+        make_tool_mode_orchestrator(None, "noted", DaemonConfig::default(), vec![]);
+    send_tool_mode(&bare, Uuid::new_v4(), "what editor do I prefer?").await;
+    let reqs = requests.lock().unwrap();
+    assert!(
+        !reqs[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains("<memory_rules>")),
+        "no memory tools, no memory guidance"
+    );
+}
+
+/// **Plan 3.3, fixture 21 step 2 on the skill tier.** A `/slash` turn is a
+/// model-answering path like the main loop and takes the same per-turn
+/// delivery (`orchestrator/skill/invocation.rs`): `/file what editor do I
+/// prefer?` carries the vim note and not the coffee one, in one block right
+/// before the current user turn, and the turn's `memory_used` names that
+/// note with reason `recall`, taken once.
+#[tokio::test]
+async fn the_skill_tier_recalls_the_natural_question_fixture_through_the_service() {
+    use crate::memory::service::UsedReason;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests, _skills) = filer_skill_orchestrator(db, "vim, as you told me");
+    orch.set_memory_service(scene.service.clone());
+
+    let request_id = Uuid::new_v4();
+    let reply = send_filer(&orch, request_id, "/file what editor do I prefer?").await;
+    assert_eq!(reply, "vim, as you told me");
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    let messages = &reqs[0].messages;
+    let blocks = memory_messages(&reqs[0]);
+    assert_eq!(
+        blocks.len(),
+        1,
+        "one memory block per turn; messages: {:?}",
+        messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        blocks[0].contains("User prefers vim for editing"),
+        "{}",
+        blocks[0]
+    );
+    assert!(
+        blocks[0].contains(&scene.vim.id.to_string()),
+        "{}",
+        blocks[0]
+    );
+    assert!(!blocks[0].contains("espresso"), "{}", blocks[0]);
+    assert!(!blocks[0].contains(&scene.coffee.id.to_string()));
+    // Design §5 step 8: right before the user turn, after everything cached.
+    let last = messages.len() - 1;
+    assert!(
+        messages[last].content.contains("what editor do I prefer?"),
+        "{}",
+        messages[last].content
+    );
+    assert!(
+        messages[last - 1].content.contains("<memory_context>"),
+        "{}",
+        messages[last - 1].content
+    );
+    drop(reqs);
+
+    let used = orch.take_memory_used(request_id);
+    assert_eq!(used.len(), 1, "{used:?}");
+    assert_eq!(used[0].id, scene.vim.id);
+    assert_eq!(used[0].revision, scene.vim.revision);
+    assert_eq!(used[0].reason, UsedReason::Recall);
+    assert!(orch.take_memory_used(request_id).is_empty(), "taken once");
+}
+
+/// **Design 09 §4.5 (MD-12).** A suggestion learned from the user's words
+/// is waiting: an attended turn of the GUI's or the CLI's chat
+/// (`source == "gui"`) is offered `memory_confirm` and told about the
+/// suggestion in `<memory_suggestions>`, inside the memory message; a
+/// connector's turn and an unattended one get neither — the tool is not on
+/// their surface, so they are not told about something they cannot raise.
+#[tokio::test]
+async fn memory_suggestions_reach_only_an_attended_gui_turn() {
+    use crate::memory::service::{
+        Attribution, Capabilities, ExtractionProvenance, StoreInput, Surface, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::{NoteKind, NoteSource, ReplacePolicy, SourceType};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let row = db
+        .with_connection(|c| {
+            c.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, source, request_id, created_at)
+                 VALUES ('user1:gui', 'user', 'I switched to Helix.', 'gui', 'req-typed', '2026-09-20 09:00:00')",
+                [],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .unwrap();
+    let extractor = scene
+        .service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+            Attribution::default(),
+        )
+        .unwrap();
+    let suggestion = scene
+        .service
+        .store(
+            &extractor,
+            StoreInput {
+                title: "Editor preference".into(),
+                body: "# Editor preference\n\n## Knowledge\nThe user edits with Helix.\n".into(),
+                kind: Some(NoteKind::Preference),
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: row.to_string(),
+                    observed_at: None,
+                }],
+                // As learning stamps every note it writes (LQ14's datum).
+                observed_at: Some(chrono::Utc::now()),
+                supersedes: Some((scene.vim.id, scene.vim.revision.clone())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "noted",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+
+    let send = |source: &'static str, unattended: bool| {
+        let orch = &orch;
+        async move {
+            orch.handle_message(HandleRequest {
+                request_id: Uuid::new_v4(),
+                source: source.to_string(),
+                content: "what editor do I prefer?".to_string(),
+                principal: Principal::User {
+                    global_id: "user1".to_string(),
+                },
+                scope: Scope::Global,
+                lane_key: format!("user1:{source}"),
+                workspace_path: None,
+                stream_id: None,
+                model_override: None,
+                unattended,
+                turn_sink: None,
+                session_id: None,
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let told = |request: &ChatRequest| {
+        memory_messages(request)
+            .iter()
+            .any(|m| m.contains("<memory_suggestions>"))
+    };
+    let offered = |request: &ChatRequest| request.tools.iter().any(|t| t.name == "memory_confirm");
+
+    send("gui", false).await;
+    {
+        let reqs = requests.lock().unwrap();
+        let blocks = memory_messages(&reqs[0]);
+        assert_eq!(blocks.len(), 1, "one memory message per turn");
+        let block = &blocks[0];
+        assert!(block.contains("<memory_suggestions>"), "{block}");
+        assert!(
+            block.contains(&format!(
+                "[memory-suggestion id={} revision={} replaces={} replaces_revision={}]",
+                suggestion.id, suggestion.revision, scene.vim.id, scene.vim.revision
+            )),
+            "{block}"
+        );
+        assert!(
+            block.contains("(from what you said on 2026-09-20)"),
+            "{block}"
+        );
+        // The notes come first, the suggestions after them, one wrapper.
+        assert!(
+            block.find("User prefers vim").unwrap() < block.find("<memory_suggestions>").unwrap(),
+            "{block}"
+        );
+        assert!(offered(&reqs[0]));
+    }
+
+    send("telegram", false).await;
+    send("gui", true).await;
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 3);
+    for (name, request) in [("telegram", &reqs[1]), ("unattended gui", &reqs[2])] {
+        assert!(!told(request), "{name}: no <memory_suggestions>");
+        assert!(!offered(request), "{name}: no memory_confirm");
+        assert!(
+            memory_messages(request)
+                .iter()
+                .any(|m| m.contains("User prefers vim")),
+            "{name}: recall is unchanged"
+        );
+    }
+}
+
+/// **Design 09 §13.2 (MD-15), end to end on the main loop.** Under the
+/// shipped default, `recall_mode = "index"`, a question five notes match
+/// gets the top 2 as excerpts and the other 3 under the index block's
+/// header, one line each, in the turn's one memory message; the turn's
+/// `memory_used` names each listed note with reason `index`, and the
+/// recently-used ring records it that way — listed, not delivered. Under
+/// `recall_mode = "excerpts"` the same question gets today's delivery: five
+/// excerpts, no index block, no `index` reason.
+#[tokio::test]
+async fn an_index_turn_lists_notes_and_reports_them_with_reason_index() {
+    use crate::daemon_config::RecallMode;
+    use crate::memory::service::{Attribution, Capabilities, StoreInput, Surface, WorkspaceHint};
+    use openalpaca_storage::memory_files::NoteKind;
+    const HEADER: &str = "More notes that may be relevant (read with memory_read):\n";
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let owner = scene
+        .service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    for topic in ["theme", "font", "plugins", "keymap"] {
+        scene
+            .service
+            .store(
+                &owner,
+                StoreInput {
+                    title: format!("Editor {topic}"),
+                    body: format!(
+                        "# Editor {topic}\n\nThe editor {topic} is set up as the user likes it.\n"
+                    ),
+                    kind: Some(NoteKind::Preference),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "vim, as you told me",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what editor do I prefer?").await;
+    let block = {
+        let reqs = requests.lock().unwrap();
+        let blocks = memory_messages(&reqs[0]);
+        assert_eq!(blocks.len(), 1, "one memory message per turn");
+        blocks[0].clone()
+    };
+    assert_eq!(block.matches(HEADER).count(), 1, "{block}");
+    let (excerpts, index) = block.split_once(HEADER).unwrap();
+    assert_eq!(excerpts.matches("[memory id=").count(), 2, "{block}");
+    assert!(!index.contains("[memory id="), "{block}");
+    let lines: Vec<&str> = index
+        .strip_suffix("</memory_context>\n")
+        .expect("the index block is the last thing in the wrapper")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 3, "{block}");
+    assert!(!excerpts.contains("espresso") && !index.contains("Coffee"));
+
+    let used = orch.take_memory_used(request_id);
+    let reasons: Vec<&str> = used.iter().map(|u| u.reason.as_str()).collect();
+    assert_eq!(
+        reasons,
+        ["recall", "recall", "index", "index", "index"],
+        "{used:?}"
+    );
+    for (line, listed) in lines.iter().zip(&used[2..]) {
+        assert!(
+            line.starts_with(&format!("{} ", listed.id)),
+            "each line names its note first: {line}"
+        );
+    }
+    let ring = scene.service.recently_used(50);
+    for listed in &used[2..] {
+        assert!(
+            ring.iter().any(|r| r.id == listed.id
+                && r.reason.as_str() == "index"
+                && r.lane_key.as_deref() == Some("user1:cli")),
+            "{ring:?}"
+        );
+    }
+    assert!(
+        !ring
+            .iter()
+            .any(|r| r.reason.as_str() == "recall" && used[2..].iter().any(|u| u.id == r.id)),
+        "a listed note is not recorded as delivered: {ring:?}"
+    );
+
+    let mut excerpts_config = DaemonConfig::default();
+    excerpts_config.orchestrator.memory.recall_mode = RecallMode::Excerpts;
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "vim, as you told me",
+        excerpts_config,
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what editor do I prefer?").await;
+    let reqs = requests.lock().unwrap();
+    let blocks = memory_messages(&reqs[0]);
+    assert_eq!(blocks.len(), 1);
+    assert!(!blocks[0].contains(HEADER), "{}", blocks[0]);
+    assert_eq!(blocks[0].matches("[memory id=").count(), 5, "{}", blocks[0]);
+    let used = orch.take_memory_used(request_id);
+    assert_eq!(used.len(), 5, "{used:?}");
+    assert!(
+        used.iter().all(|u| u.reason.as_str() == "recall"),
+        "{used:?}"
+    );
+}
+/// **Plan 3.3.** The same question twice on the same lane, a note stored in
+/// between: the second turn's request carries both notes. Layer 3 is a
+/// per-lane cache keyed by query text, and the memory delivery is built
+/// outside it every turn; the turn's `memory_used` says what that turn
+/// delivered, and is taken once.
+#[tokio::test]
+async fn a_repeated_question_reads_this_turns_memory_not_the_cached_one() {
+    use crate::memory::service::{
+        Attribution, Capabilities, StoreInput, Surface, UsedReason, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "noted",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+
+    let first = Uuid::new_v4();
+    send_tool_mode(&orch, first, "what editor do I prefer?").await;
+    // What the bridge reads into `HandleResult.memory_used`.
+    let used = orch.take_memory_used(first);
+    assert_eq!(used.len(), 1, "{used:?}");
+    assert_eq!(used[0].id, scene.vim.id);
+    assert_eq!(used[0].revision, scene.vim.revision);
+    assert_eq!(used[0].reason, UsedReason::Recall);
+    assert!(orch.take_memory_used(first).is_empty(), "taken once");
+
+    let owner = scene
+        .service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let later = scene
+        .service
+        .store(
+            &owner,
+            StoreInput {
+                title: "Editor plugins".into(),
+                body: "# Editor plugins\n\nThe editor the user prefers runs the fzf plugin.\n"
+                    .into(),
+                kind: Some(NoteKind::Preference),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let second = Uuid::new_v4();
+    send_tool_mode(&orch, second, "what editor do I prefer?").await;
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    let blocks = memory_messages(&reqs[1]);
+    assert_eq!(blocks.len(), 1);
+    assert!(blocks[0].contains(&scene.vim.id.to_string()), "{}", blocks[0]);
+    assert!(blocks[0].contains(&later.id.to_string()), "{}", blocks[0]);
+    let used = orch.take_memory_used(second);
+    let ids: Vec<_> = used.iter().map(|u| u.id).collect();
+    assert!(ids.contains(&scene.vim.id) && ids.contains(&later.id), "{used:?}");
+}
+
+// ── One profile injection (plan 3.3, design §5) ──────────────────────
+
+use crate::test_util::PROFILE_DOC;
+
+/// How many times the rendered profile block appears in one request, over
+/// every message — the persona layer's system block and, before plan 3.3,
+/// the second copy the deleted `UserProfileSource` added as a system message
+/// of its own.
+fn profile_blocks(request: &ChatRequest) -> usize {
+    request
+        .messages
+        .iter()
+        .map(|m| m.content.matches("### USER PROFILE ###").count())
+        .sum()
+}
+
+/// **Plan 3.3.** The profile is injected once per turn: the persona layer's
+/// `user_document` block, cached with the rest of the static layer. On a
+/// daemon with a database the context manager used to add a second copy.
+#[tokio::test]
+async fn the_main_loop_prompt_carries_the_user_profile_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "noted",
+        DaemonConfig::default(),
+        vec![],
+        Some(db),
+    );
+    *orch.user_document.write().unwrap() =
+        Some(crate::middleware::user::parse_user_markdown(PROFILE_DOC).unwrap());
+
+    send_tool_mode(
+        &orch,
+        Uuid::new_v4(),
+        "Tell me about the Rust borrow checker in depth",
+    )
+    .await;
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        profile_blocks(&reqs[0]),
+        1,
+        "messages: {:?}",
+        reqs[0]
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        reqs[0].messages[0].content.contains("Name: Alex"),
+        "the persona layer's block is the one that survives"
+    );
+}
+
+/// A tool-mode orchestrator with a database and one file-based skill,
+/// `/file`, whose model answers `final_text` and records every request. The
+/// skill directory is returned because the catalog reads `SKILL.md` again
+/// at invocation (`load_full`), so it must outlive the call.
+fn filer_skill_orchestrator(
+    db: openalpaca_storage::Database,
+    final_text: &str,
+) -> (
+    Orchestrator,
+    Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    tempfile::TempDir,
+) {
+    let skills = tempfile::TempDir::new().unwrap();
+    let skill_dir = skills.path().join("filer");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: \"Filer\"\ndescription: \"Files issues\"\ninvoke:\n  slash: \"/file\"\n---\n\n## Instructions\n\nFile the issue.\n",
+    )
+    .unwrap();
+    let catalog = Arc::new(skill_catalog::SkillCatalog::new());
+    catalog.scan_directory(skills.path(), crate::middleware::skill::SkillScope::Project);
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ToolModeMockLlm {
+            tool_call: None,
+            final_text: final_text.to_string(),
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(Arc::new(router)),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db),
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    (orch, requests, skills)
+}
+
+/// One `/file …` turn from `user1` on its CLI lane.
+async fn send_filer(orch: &Orchestrator, request_id: Uuid, content: &str) -> String {
+    orch.handle_message(HandleRequest::new(
+        request_id,
+        "cli",
+        content,
+        Principal::User {
+            global_id: "user1".to_string(),
+        },
+        Scope::Global,
+        "user1:cli",
+    ))
+    .await
+    .unwrap()
+}
+
+/// The same rule on the skill tier, which composes with the same persona
+/// layer and the same context manager.
+#[tokio::test]
+async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests, _skills) = filer_skill_orchestrator(db, "filed");
+    *orch.user_document.write().unwrap() =
+        Some(crate::middleware::user::parse_user_markdown(PROFILE_DOC).unwrap());
+
+    let reply = send_filer(&orch, Uuid::new_v4(), "/file this bug").await;
+    assert_eq!(reply, "filed");
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        profile_blocks(&reqs[0]),
+        1,
+        "messages: {:?}",
+        reqs[0]
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ── Learning reads the message as typed (plan 3.4, MD-2; Learning v2) ────
+//
+// `handle_message` persists nothing and learns nothing: learning reads the
+// rows the gateway persisted, when the learning queue flushes the session
+// (design 09 §1.5). So these tests drive a `Gateway` over the orchestrator,
+// with persistence and a manual queue, and flush it by hand.
+
+/// The words that make [`MarkerExtractorLlm`] extract a preference.
+const VIM_MARKER: &str = "prefers vim for editing";
+
+/// A provider that answers every turn with "noted" and answers the memory
+/// extractor faithfully: a preference note, citing the transcript row that
+/// carries [`VIM_MARKER`], **only when the text it was handed carries it**.
+/// What reaches the extractor is therefore what decides whether a note
+/// exists.
+struct MarkerExtractorLlm {
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+impl MarkerExtractorLlm {
+    fn is_extractor_call(request: &ChatRequest) -> bool {
+        request.messages.iter().any(|m| {
+            matches!(m.role, openalpaca_llm::Role::System) && m.content.contains("memory extractor")
+        })
+    }
+
+    /// The `R<n>` of the transcript line carrying the marker.
+    fn marker_row(request: &ChatRequest) -> Option<u32> {
+        request
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, openalpaca_llm::Role::User))
+            .flat_map(|m| m.content.lines())
+            .filter(|line| line.contains(VIM_MARKER))
+            .find_map(|line| {
+                let rest = line.strip_prefix('R')?;
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse().ok()
+            })
+    }
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for MarkerExtractorLlm {
+    fn name(&self) -> &str {
+        "marker-extractor-mock"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, Usage};
+        self.requests.lock().unwrap().push(request.clone());
+        let content = if Self::is_extractor_call(&request) {
+            match Self::marker_row(&request) {
+                Some(row) => format!(
+                    r#"{{"items": [{{"title": "Editor preference",
+                        "content": "The user prefers vim for editing.",
+                        "kind": "preference", "stated_by": "user", "confidence": 0.95,
+                        "rows": [{row}]}}]}}"#
+                ),
+                None => r#"{"items": []}"#.to_string(),
+            }
+        } else {
+            "noted".to_string()
+        };
+        Ok(ChatResponse {
+            content,
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// An empty home partition for `user1`, plus the service over it.
+struct ExtractionScene {
+    _env: crate::test_util::HomeStoreGuard,
+    _root: tempfile::TempDir,
+    service: Arc<crate::memory::service::MemoryService>,
+}
+
+impl ExtractionScene {
+    fn new(db: &openalpaca_storage::Database) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let env = crate::test_util::HomeStoreGuard::set(&home.canonicalize().unwrap());
+        openalpaca_storage::IdentityRepository::new(db)
+            .create_global_user("user1", None)
+            .unwrap();
+        let service = crate::memory::service::MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        );
+        service.rebuild_index().unwrap();
+        Self {
+            _env: env,
+            _root: root,
+            service: Arc::new(service),
+        }
+    }
+
+    fn user_ctx(&self) -> crate::memory::service::MemoryAccessContext {
+        use crate::memory::service::{Attribution, Capabilities, Surface, WorkspaceHint};
+        self.service
+            .context(
+                "user1",
+                WorkspaceHint::None,
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap()
+    }
+
+    /// Every active note of `user1`'s global partition, by title.
+    fn active_titles(&self) -> Vec<String> {
+        self.service
+            .list(
+                &self.user_ctx(),
+                crate::memory::service::ListInput::default(),
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.title)
+            .collect()
+    }
+
+    /// Every candidate of `user1`'s global partition, by title.
+    fn candidate_titles(&self) -> Vec<String> {
+        self.service
+            .list(
+                &self.user_ctx(),
+                crate::memory::service::ListInput {
+                    status: Some(openalpaca_storage::memory_files::NoteStatus::Candidate),
+                    include_candidates: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.title)
+            .collect()
+    }
+}
+
+/// The daemon's `OrchestratorHandler`, in ten lines: the gateway hands each
+/// turn to the orchestrator.
+struct OrchestratorTurns(Arc<Orchestrator>);
+
+#[async_trait]
+impl crate::gateway::MessageHandler for OrchestratorTurns {
+    async fn handle(&self, request: HandleRequest) -> Result<crate::gateway::HandleResult, String> {
+        self.0
+            .handle_message(request)
+            .await
+            .map(crate::gateway::HandleResult::text)
+    }
+
+    async fn handle_with_attachments(
+        &self,
+        request: HandleRequest,
+        attachments: Vec<ResolvedAttachment>,
+    ) -> Result<crate::gateway::HandleResult, String> {
+        self.0
+            .handle_message_with_attachments(request, attachments)
+            .await
+            .map(crate::gateway::HandleResult::text)
+    }
+}
+
+/// An orchestrator over [`MarkerExtractorLlm`], a gateway that persists its
+/// turns and feeds them to a manual learning queue, and the request log.
+struct LearningStack {
+    gateway: crate::gateway::Gateway,
+    queue: Arc<crate::memory::learning::LearningQueue>,
+    db: openalpaca_storage::Database,
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+impl LearningStack {
+    fn new(db: openalpaca_storage::Database, scene: &ExtractionScene) -> Self {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(MarkerExtractorLlm {
+                requests: requests.clone(),
+            }),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        ));
+        let config = DaemonConfig::default();
+        let orch = make_orchestrator_with_llm_agents_and_config(
+            router.clone(),
+            vec![],
+            config.clone(),
+            Some(db.clone()),
+        );
+        orch.set_memory_service(scene.service.clone());
+        let queue = crate::memory::learning::LearningQueue::new(
+            crate::memory::learning::LearningDeps {
+                db: db.clone(),
+                router,
+                daemon_config: Arc::new(ArcSwap::from_pointee(config)),
+                memory_service: scene.service.clone(),
+            },
+            crate::memory::learning::QueueMode::Manual,
+        );
+        let gateway = crate::gateway::Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(OrchestratorTurns(Arc::new(orch))),
+            EventBus::default(),
+            Some(db.clone()),
+        )
+        .with_learning(queue.clone());
+        Self {
+            gateway,
+            queue,
+            db,
+            requests,
+        }
+    }
+
+    async fn say(&self, content: &str) -> crate::gateway::GatewayResponse {
+        self.gateway.handle_event(user1_turn(content)).await
+    }
+
+    fn session(&self) -> String {
+        openalpaca_storage::ConversationRepository::new(&self.db)
+            .active_session_id("user1:gui")
+            .unwrap()
+            .expect("a turn opened the session")
+    }
+
+    async fn flush(&self) -> crate::memory::learning::FlushReport {
+        self.queue.flush_session(&self.session()).await
+    }
+
+    fn extractor_calls(&self) -> Vec<ChatRequest> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| MarkerExtractorLlm::is_extractor_call(r))
+            .cloned()
+            .collect()
+    }
+}
+
+fn user1_turn(content: &str) -> crate::gateway::GatewayRequest {
+    crate::gateway::GatewayRequest {
+        source: openalpaca_api::events::EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: content.to_string(),
+        attachments: Vec::new(),
+        principal: Principal::User {
+            global_id: "user1".to_string(),
+        },
+        scope: Scope::Global,
+        workspace_path: None,
+        stream_id: None,
+        lane_override: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+    }
+}
+
+/// The control: the same preference typed by the user is learned at the
+/// session's next flush.
+#[tokio::test]
+async fn a_preference_the_user_typed_becomes_a_note_at_the_next_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let stack = LearningStack::new(db, &scene);
+
+    let reply = stack
+        .say("For the record: the user prefers vim for editing, every time.")
+        .await;
+    assert_eq!(reply.content, "noted");
+    assert!(
+        stack.extractor_calls().is_empty(),
+        "the reply path learns nothing"
+    );
+    stack.flush().await;
+
+    assert_eq!(scene.active_titles(), vec!["Editor preference".to_string()]);
+}
+
+/// **Plan 3.4, MD-2, U2.** A preference that appears only in an attachment's
+/// extracted text yields no note at all: the window reads the message as
+/// typed (`content`), never the attachment text the model input carried.
+/// The model that answered the turn *did* see the text — the same request
+/// log shows it — and the extractor did not.
+#[tokio::test]
+async fn a_preference_that_appears_only_in_an_attachments_text_yields_no_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let stack = LearningStack::new(db, &scene);
+
+    let typed = "Summarise the attached notes file for me, please.";
+    let turn = crate::gateway::GatewayRequest {
+        attachments: vec![ResolvedAttachment {
+            file_id: "notes-1".to_string(),
+            filename: "notes.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            size_bytes: 40,
+            extracted_text: Some("The user prefers vim for editing.".to_string()),
+            storage_path: "/dev/null".to_string(),
+        }],
+        ..user1_turn(typed)
+    };
+    let reply = stack.gateway.handle_event(turn).await;
+    assert_eq!(reply.content, "noted");
+    stack.flush().await;
+
+    assert!(
+        scene.active_titles().is_empty(),
+        "the attachment's text minted a note: {:?}",
+        scene.active_titles()
+    );
+    let extractor = stack.extractor_calls();
+    assert_eq!(extractor.len(), 1, "the extraction ran once");
+    assert!(
+        extractor[0]
+            .messages
+            .iter()
+            .all(|m| !m.content.contains(VIM_MARKER)),
+        "the extractor was handed the attachment's text"
+    );
+    assert!(
+        extractor[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains(typed)),
+        "the extractor was handed the message as typed"
+    );
+    let reqs = stack.requests.lock().unwrap();
+    // Native document part or labelled text block (U2), whichever the
+    // answering model takes: its request carries the text either way.
+    assert!(
+        reqs.iter()
+            .filter(|r| !MarkerExtractorLlm::is_extractor_call(r))
+            .any(|r| format!("{:?}", r.messages).contains(VIM_MARKER)),
+        "the answering model saw the attachment's text, as it should"
+    );
+}
+
+// ── Learning v2: the cadence, flipped (design 09 §8.12, L1 commit 5) ─────
+//
+// L1's third commit pinned the per-turn extractor's cadence at HEAD —
+// `default_cadence_extracts_one_turn_in_five`, `a_long_message_is_cut_to_800_chars`
+// and `a_followup_row_mints_an_extracted_user_note`. Each is flipped here.
+
+/// **D1, flipped.** Every persisted turn is learned at the next flush — not
+/// one in five, and not only the flushing turn — and the reply path makes no
+/// extraction call at all.
+#[tokio::test]
+async fn every_persisted_turn_is_learned_at_the_next_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let stack = LearningStack::new(db, &scene);
+
+    for i in 0..4 {
+        stack
+            .say(&format!("Turn {i}: here is something about my week."))
+            .await;
+    }
+    assert!(
+        stack.extractor_calls().is_empty(),
+        "no turn waited on learning"
+    );
+    let report = stack.flush().await;
+    assert_eq!(report.calls, 1, "{report:?}");
+    let calls = stack.extractor_calls();
+    let prompt: String = calls[0]
+        .messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+    for i in 0..4 {
+        assert!(
+            prompt.contains(&format!("Turn {i}:")),
+            "turn {i} missing: {prompt}"
+        );
+    }
+}
+
+/// **D2, flipped.** Messages are no longer cut to 800 characters: the tail
+/// of a 2,000-character message reaches the extractor.
+#[tokio::test]
+async fn a_long_message_reaches_the_extractor_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let stack = LearningStack::new(db, &scene);
+
+    let tail = "TAIL-SENTINEL-the-end-of-the-message";
+    let message = format!("{}{tail}", "a".repeat(2000 - tail.len()));
+    assert_eq!(message.chars().count(), 2000);
+    stack.say(&message).await;
+    stack.flush().await;
+
+    let calls = stack.extractor_calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].messages.iter().any(|m| m.content.contains(tail)),
+        "the message's tail did not reach the extractor"
+    );
+}
+
+/// **F7, flipped.** A follow-up replays the model's own `queue_followup`
+/// text as a `user` turn with source `internal`; learning labels it the
+/// assistant's, so the item it supports is a candidate — never an active
+/// note in the user's name.
+#[tokio::test]
+async fn a_followup_row_is_assistant_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let stack = LearningStack::new(db, &scene);
+
+    stack.say("Please set my editor up tomorrow.").await;
+    // What the follow-up runner hands the gateway: the assistant-written
+    // text, source `internal`, on the originating lane.
+    let followup = crate::gateway::GatewayRequest {
+        source: openalpaca_api::events::EventSource::Internal,
+        lane_override: Some("user1:gui".to_string()),
+        ..user1_turn("Next, remember the user prefers vim for editing and set it up.")
+    };
+    stack.gateway.handle_event(followup).await;
+    stack.flush().await;
+
+    assert!(
+        scene.active_titles().is_empty(),
+        "the assistant's own text became an active note in the user's name"
+    );
+    assert_eq!(
+        scene.candidate_titles(),
+        vec!["Editor preference".to_string()]
+    );
+}
+
+// ── Onboarding completes from the files, with no background writer (MD-3) ──
+
+const BOOTSTRAP_MD: &str = "---\nsummary: \"x\"\nread_when:\n  - y\n---\n\n# Hello\n";
+const IDENTITY_WITH_CONTENT: &str =
+    "---\nsummary: \"i\"\nread_when:\n  - y\n---\n\n- **Name:** Koda\n";
+const USER_WITH_CONTENT: &str = "---\ntitle: \"USER.md\"\nsummary: \"u\"\nread_when:\n  - y\n---\n\n\
+     ## Identity\n\n* Name: Junpei\n\n## Expertise & Background\n\nRust\n";
+const USER_SEEDED: &str = "---\ntitle: \"USER.md\"\nsummary: \"u\"\nread_when:\n  - y\n---\n\n\
+     ## Identity\n\n* Name:\n\n## Expertise & Background\n\n(Technical background)\n";
+
+/// What `update_persona` leaves behind during onboarding: the files. The
+/// in-memory documents are never loaded here — a daemon reloads them from an
+/// event that races the turn, and the extractor that used to fill the
+/// in-memory `USER.md` writes memory notes now — so completion must read
+/// the files themselves.
+#[tokio::test]
+async fn onboarding_completes_from_the_files_update_persona_wrote_with_no_background_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let bootstrap = dir.path().join("BOOTSTRAP.md");
+    let identity = dir.path().join("IDENTITY.md");
+    let user = dir.path().join("USER.md");
+    std::fs::write(&bootstrap, BOOTSTRAP_MD).unwrap();
+    std::fs::write(&identity, IDENTITY_WITH_CONTENT).unwrap();
+    std::fs::write(&user, USER_WITH_CONTENT).unwrap();
+
+    let orch = make_orchestrator();
+    orch.update_bootstrap_document(Some(
+        crate::middleware::bootstrap::parse_bootstrap_markdown(BOOTSTRAP_MD).unwrap(),
+    ));
+    orch.set_bootstrap_path(bootstrap.clone());
+    orch.set_identity_path(identity);
+    orch.set_user_path(user);
+    let mut events = orch.bus.subscribe();
+
+    orch.maybe_complete_bootstrap().await;
+
+    assert!(!bootstrap.exists(), "onboarding completed from the files");
+    assert!(!orch.is_bootstrapping());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(SystemEvent::BootstrapCompleted {
+            identity_populated: true,
+            user_populated: true,
+            ..
+        })
+    ));
+}
+
+/// The other half: a `USER.md` that is still the seeded template does not
+/// complete onboarding, file or no file.
+#[tokio::test]
+async fn onboarding_waits_while_the_user_file_is_still_the_seeded_template() {
+    let dir = tempfile::tempdir().unwrap();
+    let bootstrap = dir.path().join("BOOTSTRAP.md");
+    let identity = dir.path().join("IDENTITY.md");
+    let user = dir.path().join("USER.md");
+    std::fs::write(&bootstrap, BOOTSTRAP_MD).unwrap();
+    std::fs::write(&identity, IDENTITY_WITH_CONTENT).unwrap();
+    std::fs::write(&user, USER_SEEDED).unwrap();
+
+    let orch = make_orchestrator();
+    orch.update_bootstrap_document(Some(
+        crate::middleware::bootstrap::parse_bootstrap_markdown(BOOTSTRAP_MD).unwrap(),
+    ));
+    orch.set_bootstrap_path(bootstrap.clone());
+    orch.set_identity_path(identity);
+    orch.set_user_path(user);
+
+    orch.maybe_complete_bootstrap().await;
+
+    assert!(bootstrap.exists(), "nothing learned yet: onboarding goes on");
+    assert!(orch.is_bootstrapping());
+}
+
+// ── Design 11 §2, §4: the working state at turn end and in the window ─
+
+/// `u1`, `a2`, `u3`, … — the label of row `i` of [`session_with_rows`].
+fn row_label(i: usize) -> String {
+    format!("{}{i}", if i % 2 == 1 { "u" } else { "a" })
+}
+
+/// The lane `user1:cli`'s active session with `n` alternating user and
+/// assistant rows labelled by [`row_label`]; the session id and the row ids.
+fn session_with_rows(db: &openalpaca_storage::Database, n: usize) -> (String, Vec<i64>) {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let session = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let ids = (1..=n)
+        .map(|i| {
+            repo.insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:cli".to_string(),
+                role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                content: row_label(i),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    (session.id, ids)
+}
+
+fn window_of(ctx: &ConversationContext) -> Vec<String> {
+    ctx.recent_messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect()
+}
+
+fn labels(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
+    range.map(row_label).collect()
+}
+
+fn lisbon_state(next: &str) -> working_state::WorkingState {
+    working_state::WorkingState {
+        v: working_state::VERSION,
+        topic: "Lisbon trip".to_string(),
+        goal: "Book the October trip".to_string(),
+        done: vec!["Flight booked".to_string()],
+        asked: Vec::new(),
+        decisions: Vec::new(),
+        open: Vec::new(),
+        next: next.to_string(),
+        refs: Vec::new(),
+    }
+}
+
+/// The turn end of a turn whose loop compacted: `state`, covering the rows
+/// up to `through`, handed to `after_turn` as slice 3's main loop will.
+async fn a_compacting_turn_ends(
+    orch: &Orchestrator,
+    state: working_state::WorkingState,
+    through: i64,
+) {
+    let ctx = orch.build_context("user1:cli", "next");
+    working_state::after_turn(
+        orch.db.clone().unwrap(),
+        orch.llm_router.clone().unwrap(),
+        orch.daemon_config.clone(),
+        orch.compacted_states.clone(),
+        ctx,
+        Some((state, through)),
+        None,
+    )
+    .await;
+}
+
+/// CQ-4: after a compaction, the next turn's window starts after the rows
+/// the state covers — with `min_recent_messages` (4) rows kept verbatim when
+/// fewer lie after it — and the state rides ahead of the window.
+#[tokio::test]
+async fn after_a_compaction_the_window_starts_after_through_with_a_four_row_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let (_, ids) = session_with_rows(&db, 20);
+    assert_eq!(
+        window_of(&orch.build_context("user1:cli", "next")),
+        labels(1..=20)
+    );
+
+    a_compacting_turn_ends(&orch, lisbon_state("Compare the hotels"), ids[11]).await;
+    let ctx = orch.build_context("user1:cli", "next");
+    assert_eq!(
+        window_of(&ctx),
+        labels(13..=20),
+        "the window starts after `through`"
+    );
+    assert_eq!(
+        ctx.working_state.as_deref(),
+        Some(&lisbon_state("Compare the hotels"))
+    );
+    assert!(
+        ctx.older_window.is_empty(),
+        "no row lies between the state and the window"
+    );
+
+    a_compacting_turn_ends(&orch, lisbon_state("Book the hotel"), ids[17]).await;
+    let ctx = orch.build_context("user1:cli", "next");
+    assert_eq!(window_of(&ctx), labels(17..=20), "four rows stay verbatim");
+    assert_eq!(
+        ctx.working_state.as_deref(),
+        Some(&lisbon_state("Book the hotel"))
+    );
+}
+
+/// CQ-4 moves the window after a compaction **only**: a lag refresh and a
+/// close leave it as it is — the close even when it follows a compaction,
+/// whose moved window it puts back.
+#[tokio::test]
+async fn the_window_is_unchanged_after_a_lag_refresh_or_a_close() {
+    // A lag refresh: 20 rows and a 6-row window leave 14 rows behind it.
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.prompt_recent_messages = 6;
+    let answer = serde_json::to_string(&lisbon_state("Compare the hotels")).unwrap();
+    let (orch, _) =
+        make_tool_mode_orchestrator_with_db(None, &answer, config, Vec::new(), Some(db.clone()));
+    let (_, ids) = session_with_rows(&db, 20);
+    let before = orch.build_context("user1:cli", "next");
+    assert_eq!(window_of(&before), labels(15..=20));
+    working_state::after_turn(
+        db.clone(),
+        orch.llm_router.clone().unwrap(),
+        orch.daemon_config.clone(),
+        orch.compacted_states.clone(),
+        before,
+        None,
+        None,
+    )
+    .await;
+    let after = orch.build_context("user1:cli", "next");
+    assert_eq!(
+        after.working_state_through, ids[13],
+        "the lag refresh covered the 14 rows"
+    );
+    assert!(after.working_state.is_some());
+    assert_eq!(
+        window_of(&after),
+        labels(15..=20),
+        "and left the window as it was"
+    );
+
+    // A close after a compaction: the compaction moved the window …
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let (session, ids) = session_with_rows(&db, 20);
+    a_compacting_turn_ends(&orch, lisbon_state("Compare the hotels"), ids[11]).await;
+    let compacted = orch.build_context("user1:cli", "next");
+    assert_eq!(window_of(&compacted), labels(13..=20));
+
+    // … and the close — here the write its job makes (slice 4): the state
+    // through the session's newest row — puts the whole window back.
+    let closed = serde_json::to_string(&lisbon_state("Book the hotel")).unwrap();
+    assert!(
+        openalpaca_storage::ConversationRepository::new(&db)
+            .update_working_state(&session, compacted.working_state_version, &closed, ids[19])
+            .unwrap()
+    );
+    let ctx = orch.build_context("user1:cli", "next");
+    assert_eq!(
+        ctx.working_state.as_deref(),
+        Some(&lisbon_state("Book the hotel"))
+    );
+    assert_eq!(
+        window_of(&ctx),
+        labels(1..=20),
+        "a close does not move the window"
+    );
+}
+
+/// The main loop's request carries the session's working state as the
+/// history layer's first message: after the fixed zone, ahead of the rows.
+#[tokio::test]
+async fn a_main_loop_turn_carries_the_working_state_ahead_of_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let (session, ids) = session_with_rows(&db, 4);
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let state = lisbon_state("Compare the hotels");
+    assert!(
+        repo.update_working_state(&session, 0, &serde_json::to_string(&state).unwrap(), ids[1])
+            .unwrap()
+    );
+    let updated_at = repo
+        .get_session(&session)
+        .unwrap()
+        .unwrap()
+        .working_state_updated_at
+        .unwrap();
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+
+    let request = requests.lock().unwrap()[0].clone();
+    let blocks: Vec<usize> = request
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.starts_with(working_state::BLOCK_PREFIX))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(blocks.len(), 1, "one working-state block");
+    assert_eq!(
+        request.messages[blocks[0]].content,
+        state.render(
+            &updated_at,
+            DaemonConfig::default()
+                .orchestrator
+                .memory
+                .summary_max_chars
+        )
+    );
+    let first_row = request
+        .messages
+        .iter()
+        .position(|m| m.content == "u1")
+        .expect("the rows reach the model");
+    assert!(blocks[0] < first_row, "the state comes before the rows");
+}
+
+// ── Design 11 §10.2: the compaction invariant (slice 3) ─────────────
+
+/// The tool-mode orchestrator over `db`, every answer `reply`, its answering
+/// model's window 4 096 tokens and the compaction buffer forced high: a turn
+/// over ten 800-character rows compacts at `LlmSummary` without the assembly
+/// trimming a row, and a turn over four does not compact. The summariser's
+/// model is `claude-haiku-4-5-20251001`; the recent window holds `recent`
+/// rows.
+fn a_4k_orchestrator(
+    reply: &str,
+    db: &openalpaca_storage::Database,
+    recent: usize,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.prompt_recent_messages = recent;
+    config.execution.context.autocompact_buffer_ratio = 0.3;
+    config.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".to_string());
+    let (orch, requests) =
+        make_tool_mode_orchestrator_with_db(None, reply, config, Vec::new(), Some(db.clone()));
+    let registry = orch.llm_router.as_ref().unwrap().model_registry();
+    let mut info = registry
+        .get_model_info("claude-sonnet-4-5-20250929")
+        .expect("the tool-mode model is in the catalogue");
+    info.context_window = 4096;
+    registry.register("claude-sonnet-4-5-20250929".to_string(), info);
+    (orch, requests)
+}
+
+/// `user1:cli`'s active session with `n` 800-character rows (`r1 …` to
+/// `r<n> …`) and a working state at version 1 covering none of them.
+fn a_long_session(db: &openalpaca_storage::Database, n: usize) -> (String, Vec<i64>) {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let session = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let ids = (1..=n)
+        .map(|i| {
+            repo.insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:cli".to_string(),
+                role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                content: format!("r{i} {}", "x".repeat(800)),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    let state = serde_json::to_string(&lisbon_state("Pick the dates")).unwrap();
+    assert!(
+        repo.update_working_state(&session.id, 0, &state, 0)
+            .unwrap()
+    );
+    (session.id, ids)
+}
+
+/// Whether a request is the working-state writer's.
+fn is_writer_call(request: &ChatRequest) -> bool {
+    let (system, _) = working_state::render_prompt(None, "");
+    request
+        .messages
+        .first()
+        .is_some_and(|m| m.content == system)
+}
+
+/// **Design 11 §10.2, the compaction invariant.** On a 4K window, a turn that
+/// compacts makes **exactly one** summariser call, and its state reaches the
+/// session row at turn end with no other call — `through` the last row the
+/// writer read (§3.2: `messages[2..10]` are rows 1–8). The next turn's
+/// request carries that state's block ahead of the rows, the rows after
+/// `through` with the four-row floor, and nothing trimmed.
+#[tokio::test]
+async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let (session, ids) = a_long_session(&db, 10);
+
+    let compacting = Uuid::new_v4();
+    send_tool_mode(&orch, compacting, "what next?").await;
+    orch.background.wait_idle().await;
+    assert!(
+        orch.take_continuity(compacting).working_state_updated,
+        "its `done` says the working state changed (§5, CQ-7)"
+    );
+
+    let turn = requests.lock().unwrap().clone();
+    assert_eq!(
+        turn.iter().filter(|r| is_writer_call(r)).count(),
+        1,
+        "one summariser call for the compaction"
+    );
+    assert_eq!(turn.len(), 2, "and the answer: no other call at turn end");
+    assert_eq!(
+        turn.iter()
+            .find(|r| is_writer_call(r))
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("claude-haiku-4-5-20251001"),
+        "on `summary_model` (CQ-3)"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        written
+    );
+    assert_eq!(row.working_state_through, ids[7], "rows 1–8 were read");
+    assert_eq!(row.working_state_version, 2);
+    let usage = openalpaca_storage::repository::LlmUsageRepository::new(&db)
+        .get_agent_usage(working_state::USAGE_LABEL, 10)
+        .unwrap();
+    assert_eq!(
+        usage.iter().map(|c| c.status.as_str()).collect::<Vec<_>>(),
+        vec!["success"],
+        "the compaction's call has its usage row, under the summariser's label"
+    );
+    assert_eq!(usage[0].task_id, None);
+
+    let quiet = Uuid::new_v4();
+    send_tool_mode(&orch, quiet, "and then?").await;
+    assert!(!orch.take_continuity(quiet).working_state_updated);
+    let next = requests.lock().unwrap()[2].clone();
+    assert!(!is_writer_call(&next), "the next turn does not compact");
+    let blocks: Vec<usize> = next
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.starts_with(working_state::BLOCK_PREFIX))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(blocks.len(), 1, "one working-state block");
+    assert_eq!(
+        next.messages[blocks[0]].content,
+        written.render(
+            row.working_state_updated_at.as_deref().unwrap(),
+            DaemonConfig::default()
+                .orchestrator
+                .memory
+                .summary_max_chars
+        )
+    );
+    let rows: Vec<&str> = next
+        .messages
+        .iter()
+        .filter_map(|m| m.content.split_once(' ').map(|(label, _)| label))
+        .filter(|label| label.starts_with('r') && label[1..].parse::<u32>().is_ok())
+        .collect();
+    assert_eq!(
+        rows,
+        vec!["r7", "r8", "r9", "r10"],
+        "the rows after `through`, four kept verbatim, none trimmed"
+    );
+    let first_row = next
+        .messages
+        .iter()
+        .position(|m| m.content.starts_with("r7 "))
+        .unwrap();
+    assert!(blocks[0] < first_row, "the state comes before the rows");
+}
+
+/// Design 11 rev 1.8 (C1; 12 rev 2 §6.1): a turn given the previous
+/// conversation's block that compacts hands the writer only its own lines —
+/// nothing of the previous conversation, neither its block (which stands at
+/// `messages[1]`, kept and not read) nor its state — while the answer's
+/// request still carries the block.
+#[tokio::test]
+async fn a_compaction_given_the_previous_conversation_never_reads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let mut config = (**orch.daemon_config.load()).clone();
+    config.orchestrator.memory.carry_over_turns = 10;
+    orch.daemon_config.store(Arc::new(config));
+    let previous = working_state::WorkingState {
+        topic: "Tomas birthday plan".to_string(),
+        ..lisbon_state("Book the restaurant")
+    };
+    a_closed_conversation(&db, None, 2, Some((&previous, 2)), None);
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    for i in 1..=10 {
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:cli".to_string(),
+            role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+            content: format!("r{i} {}", "x".repeat(800)),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    assert!(
+        orch.build_context("user1:cli", "what next?")
+            .previous
+            .is_some(),
+        "the turn is given the previous conversation"
+    );
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    let writer = turn
+        .iter()
+        .find(|r| is_writer_call(r))
+        .expect("the turn compacts");
+    let user = &writer.messages[1].content;
+    assert!(user.contains("<new_lines>\n[user]: r"), "{user}");
+    for carried in [working_state::PREVIOUS_BLOCK_PREFIX, "Tomas", "carried"] {
+        assert!(!user.contains(carried), "{carried:?} in {user}");
+    }
+    assert!(
+        turn.iter().any(|r| !is_writer_call(r)
+            && r.messages
+                .iter()
+                .any(|m| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX))),
+        "the answer's request carries the previous conversation's block"
+    );
+}
+
+/// A note citing the message row `row`, stored and then forgotten — the
+/// user said "forget that" — so a tombstone suppresses `message:<row>`
+/// (design 03 §6).
+fn a_forgotten_note_citing(scene: &RecallScene, row: i64) {
+    use crate::memory::service::{
+        Attribution, Capabilities, ForgetInput, StoreInput, Surface, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::{NoteKind, NoteSource, SourceType};
+    let owner = scene
+        .service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let note = scene
+        .service
+        .store(
+            &owner,
+            StoreInput {
+                title: "A secret".into(),
+                body: "# A secret\n\nSomething the user asked to forget.\n".into(),
+                kind: Some(NoteKind::Fact),
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: row.to_string(),
+                    observed_at: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    scene
+        .service
+        .forget(
+            &owner,
+            ForgetInput {
+                targets: vec![(note.id, note.revision)],
+                reason: None,
+            },
+        )
+        .unwrap();
+}
+
+/// Design 11 rev 1.7 (F5; 03 §6): a turn's lag refresh never reads a row a
+/// forget took back — it reads the rows around it, and `through` still
+/// covers it.
+#[tokio::test]
+async fn the_lag_refresh_never_reads_a_row_a_forget_took_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let mut config = DaemonConfig::default();
+    config.orchestrator.memory.prompt_recent_messages = 6;
+    let answer = serde_json::to_string(&lisbon_state("Compare the hotels")).unwrap();
+    let (orch, requests) =
+        make_tool_mode_orchestrator_with_db(None, &answer, config, Vec::new(), Some(db.clone()));
+    let scene = recall_scene(&db);
+    orch.set_memory_service(scene.service.clone());
+    let (session, ids) = session_with_rows(&db, 20);
+    a_forgotten_note_citing(&scene, ids[2]);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "next").await;
+    orch.background.wait_idle().await;
+
+    let requests = requests.lock().unwrap().clone();
+    let writer = requests
+        .iter()
+        .find(|r| is_writer_call(r))
+        .expect("the turn end refreshed the state");
+    let prompt = &writer.messages[1].content;
+    assert!(!prompt.contains("[user]: u3\n"), "{prompt}");
+    for kept in ["[user]: u1\n", "[assistant]: a2\n", "[assistant]: a4\n"] {
+        assert!(prompt.contains(kept), "{kept} in {prompt}");
+    }
+    assert_eq!(
+        openalpaca_storage::ConversationRepository::new(&db)
+            .get_session(&session)
+            .unwrap()
+            .unwrap()
+            .working_state_through,
+        ids[13],
+        "the refresh covered the 14 rows behind the window"
+    );
+}
+
+/// Design 11 rev 1.7 (F5; 03 §6): a compaction never reads a row a forget
+/// took back either — the one call reads the older rows around it.
+#[tokio::test]
+async fn a_compaction_never_reads_a_row_a_forget_took_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let scene = recall_scene(&db);
+    orch.set_memory_service(scene.service.clone());
+    let (_, ids) = a_long_session(&db, 10);
+    a_forgotten_note_citing(&scene, ids[2]);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let requests = requests.lock().unwrap().clone();
+    let writers: Vec<&ChatRequest> = requests.iter().filter(|r| is_writer_call(r)).collect();
+    assert_eq!(writers.len(), 1, "one compaction call");
+    let prompt = &writers[0].messages[1].content;
+    assert!(!prompt.contains("[user]: r3 "), "{prompt}");
+    for kept in ["[assistant]: r2 ", "[assistant]: r4 ", "[user]: r5 "] {
+        assert!(prompt.contains(kept), "{kept} in {prompt}");
+    }
+}
+
+/// **Design 11 §10.2, its second half.** An answer that is not a state
+/// leaves the session row as it was, and the turn goes on over the heuristic
+/// summary (`compress_context`).
+#[tokio::test]
+async fn an_unusable_compaction_answer_leaves_the_row_and_the_loop_on_the_heuristic() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, requests) = a_4k_orchestrator("I would rather chat.", &db, 25);
+    let (session, _) = a_long_session(&db, 10);
+
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what next?").await;
+    orch.background.wait_idle().await;
+    assert!(
+        !orch.take_continuity(request_id).working_state_updated,
+        "no state goes to the row, and `done` says none changed"
+    );
+
+    let turn = requests.lock().unwrap().clone();
+    assert_eq!(turn.iter().filter(|r| is_writer_call(r)).count(), 1);
+    let answer = turn.iter().find(|r| !is_writer_call(r)).unwrap();
+    assert!(
+        answer
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with("[Context compressed:")),
+        "the heuristic summary stands in"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        lisbon_state("Pick the dates"),
+        "the row is untouched"
+    );
+    assert_eq!(
+        (row.working_state_version, row.working_state_through),
+        (1, 0)
+    );
+    let usage = openalpaca_storage::repository::LlmUsageRepository::new(&db)
+        .get_agent_usage(working_state::USAGE_LABEL, 10)
+        .unwrap();
+    assert_eq!(
+        usage
+            .iter()
+            .map(|c| (c.status.as_str(), c.error_message.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![("error", Some("the answer is not JSON"))],
+        "and its usage row says why"
+    );
+}
+
+/// §3.2 (panel defect U-2) through the main loop: fourteen rows are over the
+/// assembly's budget, so its trim drops the oldest before the loop ever runs
+/// — rows the compaction's writer never reads. The state it wrote reaches
+/// the row, and `through` stays where it was.
+#[tokio::test]
+async fn a_compaction_after_the_trim_dropped_rows_leaves_through_where_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 25);
+    let (session, _) = a_long_session(&db, 14);
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    let call = turn
+        .iter()
+        .find(|r| is_writer_call(r))
+        .expect("it compacted");
+    assert!(
+        !call.messages[1].content.contains("[user]: r1 "),
+        "the trim took the first row before the compaction"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        written
+    );
+    assert_eq!(
+        (row.working_state_version, row.working_state_through),
+        (2, 0),
+        "`through` does not pass the rows the trim dropped"
+    );
+}
+
+/// Design 11 rev 1.2 (the slice-3 review's F1): rows behind the recent
+/// window that the lag refresh has not covered yet — with a ten-row window
+/// over fourteen rows, rows 1–4, in no prompt and in no state — are read by
+/// the compaction's one writer call ahead of the window's, oldest first, so
+/// `through` passes them with the rows it read (`messages[2..10]` are rows
+/// 5–12). The next turn's window starts after it with the four-row floor,
+/// and no row lies between the state and the window: a conversation longer
+/// than the window stops re-sending and re-compacting it (CQ-4).
+#[tokio::test]
+async fn a_compaction_reads_the_rows_behind_the_window_and_moves_the_window_past_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let written = lisbon_state("Book the hotel");
+    let (orch, requests) = a_4k_orchestrator(&serde_json::to_string(&written).unwrap(), &db, 10);
+    let (session, ids) = a_long_session(&db, 14);
+    assert_eq!(
+        orch.build_context("user1:cli", "what next?")
+            .older_window
+            .len(),
+        4,
+        "rows 1–4 lie behind the window"
+    );
+
+    send_tool_mode(&orch, Uuid::new_v4(), "what next?").await;
+    orch.background.wait_idle().await;
+
+    let turn = requests.lock().unwrap().clone();
+    let calls: Vec<&ChatRequest> = turn.iter().filter(|r| is_writer_call(r)).collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "one summariser call, no second one at turn end"
+    );
+    let user = &calls[0].messages[1].content;
+    let at = |line: &str| {
+        user.find(line)
+            .unwrap_or_else(|| panic!("the writer read {line:?}"))
+    };
+    assert!(
+        at("[user]: r1 ") < at("[assistant]: r4 ") && at("[assistant]: r4 ") < at("[user]: r5 "),
+        "the rows behind the window first, then the window's"
+    );
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<working_state::WorkingState>(&row.working_state).unwrap(),
+        written
+    );
+    assert_eq!(
+        (row.working_state_version, row.working_state_through),
+        (2, ids[11]),
+        "`through` passes rows 1–4 and the window's rows 5–12"
+    );
+
+    let ctx = orch.build_context("user1:cli", "and then?");
+    assert!(
+        ctx.older_window.is_empty(),
+        "no row between the state and the window"
+    );
+    send_tool_mode(&orch, Uuid::new_v4(), "and then?").await;
+    let next = requests.lock().unwrap()[2].clone();
+    assert!(!is_writer_call(&next), "the next turn does not compact");
+    let rows: Vec<&str> = next
+        .messages
+        .iter()
+        .filter_map(|m| m.content.split_once(' ').map(|(label, _)| label))
+        .filter(|label| label.starts_with('r') && label[1..].parse::<u32>().is_ok())
+        .collect();
+    assert_eq!(
+        rows,
+        vec!["r11", "r12", "r13", "r14"],
+        "the window starts after `through`, four rows kept verbatim"
+    );
+}
+
+// ── Design 11 §4 (b), CQ-5: a new conversation carries the previous one ─
+
+/// A conversation on the lane `user1:cli` bound to `workspace`, with rows
+/// labelled `p1`, `p2`, … (odd ones the user's, each counted as the gateway
+/// counts it), and — when given — `state` covering the first `covered` of
+/// them; then closed by a new conversation on the same lane bound to
+/// `next_workspace`. The closed conversation's id and its row ids.
+fn a_closed_conversation(
+    db: &openalpaca_storage::Database,
+    workspace: Option<&str>,
+    rows: usize,
+    state: Option<(&working_state::WorkingState, usize)>,
+    next_workspace: Option<&str>,
+) -> (String, Vec<i64>) {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let closed = repo
+        .create_session("user1:cli", "cli", workspace, None)
+        .unwrap();
+    let ids: Vec<i64> = (1..=rows)
+        .map(|i| {
+            let id = repo
+                .insert(&openalpaca_storage::ConversationMessage {
+                    lane_key: "user1:cli".to_string(),
+                    role: if i % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                    content: format!("p{i}"),
+                    ..Default::default()
+                })
+                .unwrap();
+            repo.increment_message_count_for_session(&closed.id)
+                .unwrap();
+            id
+        })
+        .collect();
+    if let Some((state, covered)) = state {
+        let through = covered.checked_sub(1).map_or(0, |i| ids[i]);
+        assert!(
+            repo.update_working_state(
+                &closed.id,
+                0,
+                &serde_json::to_string(state).unwrap(),
+                through
+            )
+            .unwrap()
+        );
+    }
+    repo.create_session("user1:cli", "cli", next_workspace, None)
+        .unwrap();
+    (closed.id, ids)
+}
+
+/// A user turn of the lane's active conversation as the gateway runs it:
+/// the user row persisted first, the context built on the same text, then
+/// the answer row.
+fn a_turn(
+    orch: &Orchestrator,
+    db: &openalpaca_storage::Database,
+    text: &str,
+) -> ConversationContext {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    let row = |role: &str, content: &str| {
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:cli".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    row("user", text);
+    let ctx = orch.build_context("user1:cli", text);
+    row("assistant", &format!("answer to {text}"));
+    ctx
+}
+
+/// Owner decision CQ-5: a new conversation on the lane and project is given
+/// the previous one — its state, and its last exchange after what the state
+/// covers — for its first three user turns, and not the fourth; the heading
+/// names the timeline's date before the close projected a note — only as
+/// where a summary would be, since this conversation of two user turns gets
+/// none (rev 1.7, F6) — and the note, by id and title, after.
+#[test]
+fn a_new_conversation_is_given_the_previous_one_for_three_user_turns_and_not_the_fourth() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 4, Some((&state, 2)), None);
+    let row = openalpaca_storage::ConversationRepository::new(&db)
+        .get_session(&closed)
+        .unwrap()
+        .unwrap();
+    let ended_at = row.ended_at.clone().unwrap();
+    let date = &row.last_message_at.clone().unwrap()[..10];
+
+    let first = a_turn(&orch, &db, "go on");
+    let previous = first.previous.clone().expect("the first turn is given it");
+    assert_eq!(previous.state.as_deref(), Some(&state));
+    assert_eq!(
+        previous.exchange,
+        vec![
+            ("user".to_string(), "p3".to_string()),
+            ("assistant".to_string(), "p4".to_string())
+        ],
+        "the last exchange after what the state covers"
+    );
+    assert!(
+        first.previous_text(4000).unwrap().starts_with(&format!(
+            "The previous conversation on this project ended {ended_at}; if a summary of it \
+             was written, memory_timeline lists it under Conversation on {date}.\nTopic: \
+             Lisbon trip"
+        )),
+        "{:?}",
+        first.previous_text(4000)
+    );
+
+    let note = "55e811b6-3220-4758-a47b-034bd1023f38";
+    openalpaca_storage::ConversationRepository::new(&db)
+        .set_episode_note_id(&closed, note)
+        .unwrap();
+    let second = a_turn(&orch, &db, "and then?");
+    assert!(
+        second.previous_text(4000).unwrap().starts_with(&format!(
+            "The previous conversation on this project ended {ended_at}; its record is memory \
+             note {note} — memory_read it for the full record; memory_timeline shows what \
+             surrounds it.\nTopic: Lisbon trip"
+        )),
+        "{:?}",
+        second.previous_text(4000)
+    );
+    assert!(a_turn(&orch, &db, "the third").previous.is_some());
+    assert!(
+        a_turn(&orch, &db, "the fourth").previous.is_none(),
+        "not the fourth user turn"
+    );
+}
+
+/// Only while the new conversation has no state of its own: once one is
+/// written — by a compaction, a lag refresh or a close — it is given its own
+/// state and the previous one no longer.
+#[test]
+fn a_conversation_with_a_state_of_its_own_is_not_given_the_previous_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    a_closed_conversation(
+        &db,
+        None,
+        2,
+        Some((&lisbon_state("Compare the hotels"), 2)),
+        None,
+    );
+    let ctx = a_turn(&orch, &db, "go on");
+    assert!(ctx.previous.is_some());
+
+    let own = lisbon_state("Book the Alfama hotel");
+    assert!(
+        openalpaca_storage::ConversationRepository::new(&db)
+            .update_working_state(
+                ctx.session_id.as_deref().unwrap(),
+                0,
+                &serde_json::to_string(&own).unwrap(),
+                0
+            )
+            .unwrap()
+    );
+    let ctx = a_turn(&orch, &db, "and then?");
+    assert_eq!(ctx.working_state.as_deref(), Some(&own));
+    assert!(
+        ctx.previous.is_none(),
+        "its own state, not the previous one"
+    );
+}
+
+/// The previous conversation is the lane's newest closed one — or nothing:
+/// one with neither a state nor a row gives no block, and an older
+/// conversation's state is never given in its place; one with rows and no
+/// state gives its last exchange alone.
+#[test]
+fn the_previous_conversation_is_the_newest_one_or_nothing_never_an_older_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let state = lisbon_state("Compare the hotels");
+    a_closed_conversation(&db, None, 4, Some((&state, 4)), None);
+    a_closed_conversation(&db, None, 0, None, None);
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "the newest has no state and no rows: nothing, not the older one's state"
+    );
+
+    a_closed_conversation(&db, None, 2, None, None);
+    let previous = orch
+        .build_context("user1:cli", "go on")
+        .previous
+        .expect("rows and no state: the last exchange");
+    assert_eq!(previous.state, None, "not the older conversation's state");
+    assert_eq!(
+        previous.exchange,
+        vec![
+            ("user".to_string(), "p1".to_string()),
+            ("assistant".to_string(), "p2".to_string())
+        ]
+    );
+}
+
+/// The previous conversation is one on the same project — `NULL` matching
+/// `NULL` — never another project's, however recent.
+#[test]
+fn the_previous_conversation_is_never_another_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let state = lisbon_state("Compare the hotels");
+    a_closed_conversation(&db, Some("/p1"), 2, Some((&state, 2)), Some("/p2"));
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "/p1's conversation is not given to /p2's"
+    );
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    repo.create_session("user1:cli", "cli", None, None).unwrap();
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "nor to one with no project"
+    );
+    repo.create_session("user1:cli", "cli", Some("/p1"), None)
+        .unwrap();
+    let previous = orch
+        .build_context("user1:cli", "go on")
+        .previous
+        .expect("a new conversation on /p1 is given it");
+    assert_eq!(previous.state.as_deref(), Some(&state));
+    assert!(
+        previous.exchange.is_empty(),
+        "the state covers its last exchange: {:?}",
+        previous.exchange
+    );
+}
+
+/// A conversation started fresh (`inherit: false`) is never given the
+/// previous one; nor is any while `carry_over_turns` is 0.
+#[test]
+fn a_conversation_started_fresh_or_with_carry_over_off_is_given_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let closed = repo.create_session("user1:cli", "cli", None, None).unwrap();
+    let ids: Vec<i64> = ["p1", "p2"]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            repo.insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:cli".to_string(),
+                role: if i == 0 { "user" } else { "assistant" }.to_string(),
+                content: text.to_string(),
+                ..Default::default()
+            })
+            .unwrap()
+        })
+        .collect();
+    let state = lisbon_state("Compare the hotels");
+    assert!(
+        repo.update_working_state(
+            &closed.id,
+            0,
+            &serde_json::to_string(&state).unwrap(),
+            ids[1]
+        )
+        .unwrap()
+    );
+    let fresh = repo
+        .create_session_inheriting("user1:cli", "cli", None, None, false)
+        .unwrap();
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_none(),
+        "started fresh"
+    );
+    db.with_connection(|c| {
+        c.execute("UPDATE session SET inherit = 1 WHERE id = ?1", [&fresh.id])?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        orch.build_context("user1:cli", "go on").previous.is_some(),
+        "the same conversation, not started fresh, is given it"
+    );
+
+    let mut off = DaemonConfig::default();
+    off.orchestrator.memory.carry_over_turns = 0;
+    let (orch_off, _) =
+        make_tool_mode_orchestrator_with_db(None, "ok", off, Vec::new(), Some(db.clone()));
+    assert!(
+        orch_off
+            .build_context("user1:cli", "go on")
+            .previous
+            .is_none(),
+        "carry_over_turns = 0 is off"
+    );
+}
+
+/// The main loop's request carries the previous conversation as the history
+/// layer's first message, ahead of the memory delivery and the current turn;
+/// the turn's `memory_used` still names what recall delivered and nothing
+/// else — the block is not a note, and the note it names is not delivered.
+#[tokio::test]
+async fn a_main_loop_turn_carries_the_previous_conversation_and_memory_used_is_unchanged() {
+    use crate::memory::service::UsedReason;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "vim, as you told me",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 2, Some((&state, 2)), None);
+    openalpaca_storage::ConversationRepository::new(&db)
+        .set_episode_note_id(&closed, &scene.coffee.id.to_string())
+        .unwrap();
+    let expected = crate::orchestrator::wrap_untrusted_context(
+        &orch
+            .build_context("user1:cli", "what editor do I prefer?")
+            .previous_text(4000)
+            .unwrap(),
+        "previous_conversation",
+        "user_derived",
+    );
+    assert!(expected.contains(&scene.coffee.id.to_string()));
+
+    let request_id = Uuid::new_v4();
+    send_tool_mode(&orch, request_id, "what editor do I prefer?").await;
+
+    let request = requests.lock().unwrap()[0].clone();
+    let blocks: Vec<usize> = request
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(blocks.len(), 1, "one previous-conversation block");
+    assert_eq!(request.messages[blocks[0]].content, expected);
+    let memory = request
+        .messages
+        .iter()
+        .position(|m| m.content.contains("<memory_context>"))
+        .expect("recall delivered");
+    assert!(
+        blocks[0] < memory,
+        "the block comes before the memory delivery"
+    );
+
+    let used = orch.take_memory_used(request_id);
+    assert_eq!(used.len(), 1, "{used:?}");
+    assert_eq!(used[0].id, scene.vim.id);
+    assert_eq!(used[0].reason, UsedReason::Recall);
+}
+
+// ── Design 11 §5, CQ-7: the turn's continuity on the `done` frame ─────
+
+/// `continued_from` names what the request carries, not what the context
+/// held: the assembly trim may take the previous conversation's block (rev
+/// 1.4 item 7), and a turn that was not given it continues from nothing. A
+/// previous conversation with no state is named with an empty topic.
+#[test]
+fn continued_from_is_recorded_only_when_the_request_carries_the_block() {
+    let orch = make_orchestrator();
+    let mut ctx = ConversationContext {
+        previous: Some(working_state::PreviousConversation {
+            session_id: "s-prev".to_string(),
+            ended_at: "2026-09-28 11:00:00".to_string(),
+            date: "2026-09-28".to_string(),
+            episode_note_id: None,
+            state: Some(Arc::new(lisbon_state("Compare the hotels"))),
+            exchange: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let block = |ctx: &ConversationContext| {
+        wrap_untrusted_context(
+            &ctx.previous_text(4000).unwrap(),
+            working_state::PREVIOUS_BLOCK_TYPE,
+            "user_derived",
+        )
+    };
+
+    let trimmed = Uuid::new_v4();
+    orch.record_continued_from(trimmed, &ctx, &[ChatMessage::user("go on")]);
+    assert_eq!(
+        orch.take_continuity(trimmed),
+        crate::gateway::TurnContinuity::default(),
+        "the block is not in the request"
+    );
+
+    let given = Uuid::new_v4();
+    orch.record_continued_from(
+        given,
+        &ctx,
+        &[ChatMessage::user(&block(&ctx)), ChatMessage::user("go on")],
+    );
+    assert_eq!(
+        orch.take_continuity(given).continued_from,
+        Some(crate::gateway::ContinuedFrom {
+            session_id: "s-prev".to_string(),
+            topic: "Lisbon trip".to_string(),
+        })
+    );
+    assert_eq!(
+        orch.take_continuity(given),
+        crate::gateway::TurnContinuity::default(),
+        "taken once"
+    );
+
+    if let Some(previous) = ctx.previous.as_mut() {
+        previous.state = None;
+        previous.exchange = vec![("user".to_string(), "and the hotel?".to_string())];
+    }
+    let no_state = Uuid::new_v4();
+    orch.record_continued_from(no_state, &ctx, &[ChatMessage::user(&block(&ctx))]);
+    assert_eq!(
+        orch.take_continuity(no_state).continued_from,
+        Some(crate::gateway::ContinuedFrom {
+            session_id: "s-prev".to_string(),
+            topic: String::new(),
+        })
+    );
+}
+
+/// Through the main loop: a new conversation's turn given the previous one
+/// says so — its session and its state's topic — and a turn with no
+/// previous conversation says nothing; neither compacted.
+#[tokio::test]
+async fn a_main_loop_turn_says_what_it_continued_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+
+    let alone = Uuid::new_v4();
+    send_tool_mode(&orch, alone, "hello").await;
+    assert_eq!(
+        orch.take_continuity(alone),
+        crate::gateway::TurnContinuity::default()
+    );
+
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 2, Some((&state, 2)), None);
+    let continued = Uuid::new_v4();
+    send_tool_mode(&orch, continued, "where were we?").await;
+    assert_eq!(
+        orch.take_continuity(continued),
+        crate::gateway::TurnContinuity {
+            working_state_updated: false,
+            continued_from: Some(crate::gateway::ContinuedFrom {
+                session_id: closed,
+                topic: "Lisbon trip".to_string(),
+            }),
+        }
+    );
+}
+
+/// The skill tier builds the same history layer (rev 1.4 item 8), so a
+/// `/slash` turn given the previous conversation says so too.
+#[tokio::test]
+async fn a_skill_turn_says_what_it_continued_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ToolModeMockLlm {
+            tool_call: None,
+            final_text: "review done".to_string(),
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let (_tmp, catalog) = make_review_skill_catalog();
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(Arc::new(router)),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db.clone()),
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    let state = lisbon_state("Compare the hotels");
+    let (closed, _) = a_closed_conversation(&db, None, 2, Some((&state, 2)), None);
+
+    let request_id = Uuid::new_v4();
+    assert_eq!(
+        send_tool_mode(&orch, request_id, "/review some code").await,
+        "review done"
+    );
+    assert!(
+        requests.lock().unwrap()[0]
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with(working_state::PREVIOUS_BLOCK_PREFIX)),
+        "the skill's request carries the block"
+    );
+    assert_eq!(
+        orch.take_continuity(request_id).continued_from,
+        Some(crate::gateway::ContinuedFrom {
+            session_id: closed,
+            topic: "Lisbon trip".to_string(),
+        })
+    );
+}
+
+/// The final fix wave's R19 gate (the lead's ruling): a turn that has no
+/// project — a client path under `$HOME` with no repository (R13), or no path
+/// at all (R-S13) — files the model's unscoped `memory_store` in the home
+/// partition, as it always did. The refusal R19 adds for a project that went
+/// while the turn ran must never reach such a turn: its tools carry no
+/// project root, so nothing about a root can be stale.
+mod memory_store_on_a_turn_with_no_project {
+    use super::*;
+    use crate::memory::service::{
+        Attribution, Capabilities, ListInput, MemoryService, Surface, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::NoteScope;
+
+    struct Scene {
+        _env: crate::test_util::HomeStoreGuard,
+        _root: tempfile::TempDir,
+        home: std::path::PathBuf,
+        home_store: std::path::PathBuf,
+        service: Arc<MemoryService>,
+        orch: Orchestrator,
+        requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    }
+
+    /// A stand-in `$HOME` holding the home store, an owner, a memory
+    /// service and a main loop whose model calls `memory_store` once with no
+    /// `scope`.
+    fn scene() -> Scene {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap().join("home");
+        let home_store = home.join(".openalpaca");
+        std::fs::create_dir_all(&home_store).unwrap();
+        let env = crate::test_util::HomeStoreGuard::set(&home_store);
+        let db = openalpaca_storage::Database::open(&root.path().join("t.db")).unwrap();
+        openalpaca_storage::IdentityRepository::new(&db)
+            .create_global_user("user1", None)
+            .unwrap();
+        let service = Arc::new(MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        service.rebuild_index().unwrap();
+        let (orch, requests) = make_tool_mode_orchestrator_with_db(
+            Some((
+                "memory_store".to_string(),
+                serde_json::json!({
+                    "title": "Release day",
+                    "body": "# Release day\n\nWe ship on Fridays.\n",
+                    "kind": "decision",
+                }),
+            )),
+            "noted",
+            DaemonConfig::default(),
+            vec![],
+            Some(db),
+        );
+        orch.set_memory_service(service.clone());
+        Scene {
+            _env: env,
+            _root: root,
+            home,
+            home_store,
+            service,
+            orch,
+            requests,
+        }
+    }
+
+    async fn turn(scene: &Scene, workspace_path: Option<String>) {
+        let reply = scene
+            .orch
+            .handle_message(HandleRequest {
+                request_id: Uuid::new_v4(),
+                source: "cli".to_string(),
+                content: "remember that we ship on Fridays".to_string(),
+                principal: Principal::User {
+                    global_id: "user1".to_string(),
+                },
+                scope: Scope::Global,
+                lane_key: "user1:cli".to_string(),
+                workspace_path,
+                stream_id: None,
+                model_override: None,
+                unattended: false,
+                turn_sink: None,
+                session_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply, "noted");
+    }
+
+    /// The tool result the model read back, and the owner's notes as the
+    /// home partition lists them.
+    fn outcome(scene: &Scene) -> (String, Vec<(String, NoteScope)>) {
+        let result = scene
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r.messages.iter())
+            .find(|m| matches!(m.role, openalpaca_llm::Role::Tool))
+            .map(|m| m.content.clone())
+            .expect("the model read the tool's result back");
+        let home_only = scene
+            .service
+            .context(
+                "user1",
+                WorkspaceHint::None,
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap();
+        let notes = scene
+            .service
+            .list(&home_only, ListInput::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| (i.title, i.scope))
+            .collect();
+        (result, notes)
+    }
+
+    #[tokio::test]
+    async fn an_unscoped_memory_store_on_a_turn_under_home_with_no_repository_lands_at_home() {
+        let scene = scene();
+        let documents = scene.home.join("Documents");
+        std::fs::create_dir_all(&documents).unwrap();
+
+        turn(&scene, Some(documents.to_string_lossy().into_owned())).await;
+
+        let (result, notes) = outcome(&scene);
+        assert!(
+            result.contains(r#""scope":"global""#) && result.contains(r#""dedup":"created""#),
+            "the store succeeded, into global memory: {result}"
+        );
+        assert_eq!(
+            notes,
+            vec![("Release day".to_string(), NoteScope::Global)],
+            "the note is in the home partition: {result}"
+        );
+        assert!(
+            !scene.home_store.join("projects").exists(),
+            "no project was recorded for $HOME (R13)"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unscoped_memory_store_on_a_turn_that_sent_no_path_lands_at_home() {
+        let scene = scene();
+
+        turn(&scene, None).await;
+
+        let (result, notes) = outcome(&scene);
+        assert!(
+            result.contains(r#""scope":"global""#) && result.contains(r#""dedup":"created""#),
+            "the store succeeded, into global memory: {result}"
+        );
+        assert_eq!(
+            notes,
+            vec![("Release day".to_string(), NoteScope::Global)],
+            "the note is in the home partition: {result}"
+        );
+        assert!(!scene.home_store.join("projects").exists());
+    }
 }

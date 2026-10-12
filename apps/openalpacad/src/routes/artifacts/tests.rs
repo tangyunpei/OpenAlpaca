@@ -15,7 +15,7 @@ use axum::http::header::AUTHORIZATION;
 use chrono::Utc;
 use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::{
-    ArtifactRecord, ArtifactStore, Database, NewArtifact, NewUpload, UploadStore,
+    ArtifactRecord, ArtifactStore, Database, NewArtifact, NewProjectFile, NewUpload, UploadStore,
 };
 use tempfile::TempDir;
 
@@ -44,6 +44,12 @@ impl Fixture {
         let home = tempfile::tempdir().expect("home root");
         let env = HomeStoreGuard::set(&home.path().canonicalize().expect("canonicalize home"));
         let project = tempfile::tempdir().expect("project root");
+        // A project scope is a registered project's (design §3, R12) —
+        // registered under this fixture's home, never the developer's.
+        openalpaca_storage::store::projects::register(
+            &project.path().canonicalize().expect("canonicalize"),
+        )
+        .expect("register");
         let db_dir = tempfile::tempdir().expect("db dir");
         let db = Database::open(&db_dir.path().join("test.db")).expect("open db");
         Self {
@@ -141,6 +147,27 @@ impl Fixture {
             .get(id, owner)
             .expect("get")
             .expect("record present")
+    }
+
+    /// A result file in the fixture's project: real bytes, and the pointer
+    /// row R35's method writes.
+    fn result_file(&self, owner: &str, rel: &str, body: &str) -> ArtifactRecord {
+        let root = self.project.path().canonicalize().expect("canonicalize");
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&path, body).expect("write the user's file");
+        let root = root.to_string_lossy().into_owned();
+        ArtifactStore::new(&self.db)
+            .record_project_file(NewProjectFile {
+                owner_id: owner,
+                project_root: &root,
+                rel_path: rel,
+                content: body.as_bytes(),
+                task_id: None,
+                agent_id: None,
+            })
+            .expect("record the result file")
+            .0
     }
 }
 
@@ -1051,4 +1078,209 @@ async fn the_pin_round_trips() {
     };
     let (_, body) = split(list_artifacts(&f.db, OWNER, params)).await;
     assert_eq!(body["total"], 0);
+}
+
+// ============================================================================
+// Stage 2 — result files on the wire (ST-12, ST-18)
+// ============================================================================
+
+/// The ids `GET /v1/artifacts?in_project=` answers with, sorted.
+async fn listed_ids(f: &Fixture, in_project: Option<bool>) -> Vec<String> {
+    let params = ListArtifactsParams {
+        in_project,
+        ..Default::default()
+    };
+    let (status, body) = split(list_artifacts(&f.db, OWNER, params)).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut ids: Vec<String> = body["artifacts"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|a| a["id"].as_str().expect("an id").to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// A result file's row says it is in the project and whether Open is
+/// offered; a by-product is neither in the project nor refused Open.
+#[tokio::test]
+async fn a_result_file_row_says_it_is_in_the_project_and_whether_it_opens() {
+    let f = Fixture::new();
+    let by_product = f.put(OWNER, "Notes", "hello\n", None);
+    let code = f.result_file(OWNER, "src/main.rs", "fn main() {}\n");
+    let script = f.result_file(OWNER, "scripts/build.sh", "echo hi\n");
+
+    for (id, in_project, openable) in [
+        (&by_product.id, false, true),
+        (&code.id, true, true),
+        (&script.id, true, false),
+    ] {
+        let (status, body) = split(get_artifact(&f.db, OWNER, id)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["in_project"], in_project, "{body}");
+        assert_eq!(body["openable"], openable, "{body}");
+    }
+    let (_, body) = split(get_artifact(&f.db, OWNER, &code.id)).await;
+    assert_eq!(body["name"], "src/main.rs");
+    assert_eq!(body["rel_path"], "src/main.rs");
+    assert_eq!(body["version_count"], 0);
+}
+
+/// `?in_project=false` is the Library's default view (by-products),
+/// `?in_project=true` the results, absent both.
+#[tokio::test]
+async fn the_list_shows_by_products_or_result_files_on_request() {
+    let f = Fixture::new();
+    let by_product = f.put(OWNER, "Notes", "hello\n", None);
+    let result = f.result_file(OWNER, "docs/plan.md", "# Plan\n");
+
+    assert_eq!(listed_ids(&f, Some(false)).await, vec![by_product.id.clone()]);
+    assert_eq!(listed_ids(&f, Some(true)).await, vec![result.id.clone()]);
+    let mut both = vec![by_product.id.clone(), result.id.clone()];
+    both.sort();
+    assert_eq!(listed_ids(&f, None).await, both);
+}
+
+/// A result file's name is its path in the project; its download is named
+/// for the last component, so the header carries no `/`.
+#[tokio::test]
+async fn a_result_files_content_is_named_for_its_last_component() {
+    let f = Fixture::new();
+    let row = f.result_file(OWNER, "src/main.rs", "fn main() {}\n");
+
+    let response =
+        artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None, None).await;
+
+    assert_eq!(
+        header(&response, "content-disposition").as_deref(),
+        Some("inline; filename=\"main.rs\"")
+    );
+    let (status, _, bytes) = split_bytes(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"fn main() {}\n");
+}
+
+/// R37: the file route reads a result file through the resolver under its
+/// project, and names the download for its last component.
+#[tokio::test]
+async fn the_file_content_route_reads_a_result_file_through_the_resolver() {
+    let f = Fixture::new();
+    let row = f.result_file(OWNER, "src/main.rs", "fn main() {}\n");
+
+    let response =
+        crate::routes::files::file_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id)
+            .await;
+
+    assert_eq!(
+        header(&response, "content-disposition").as_deref(),
+        Some("inline; filename=\"main.rs\"")
+    );
+    let (status, _, bytes) = split_bytes(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"fn main() {}\n");
+}
+
+/// The fixture's project folder moved with a link left at its recorded root
+/// (ST-23): the project is missing, and its files are still there through
+/// the link. Returns the folder holding the moved project, so it lives as
+/// long as the test.
+#[cfg(unix)]
+fn move_the_project_behind_a_link(f: &Fixture) -> TempDir {
+    let root = f.project.path().canonicalize().expect("canonicalize");
+    let aside = tempfile::tempdir().expect("aside");
+    let moved = aside.path().join("moved");
+    std::fs::rename(&root, &moved).expect("move the project");
+    std::os::unix::fs::symlink(&moved, &root).expect("leave a link");
+    aside
+}
+
+/// R-T26's sentence, for the fixture's recorded root.
+fn project_missing_sentence(f: &Fixture) -> String {
+    format!(
+        "{}: this project's folder is gone or has moved; re-point the project to read its files.",
+        f.project
+            .path()
+            .canonicalize()
+            .expect("canonicalize")
+            .display()
+    )
+}
+
+/// The lead's ruling R-T26: a result file of a missing project is `410`
+/// `ARTIFACT_PROJECT_MISSING` on the artifact content route — what the
+/// preview and Export read — with the sentence naming the root and the
+/// re-point, never `ARTIFACT_GONE`'s "no longer exists": the file is there,
+/// through the link, and is not read through it (R-T18).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_result_file_of_a_missing_project_is_a_410_naming_the_project() {
+    let f = Fixture::new();
+    let row = f.result_file(OWNER, "docs/plan.md", "# Plan\n");
+    let sentence = project_missing_sentence(&f);
+    let _aside = move_the_project_behind_a_link(&f);
+
+    let (status, body) = split(
+        artifact_content(
+            &f.db,
+            OWNER,
+            TOKEN,
+            &bearer(TOKEN),
+            None,
+            &row.id,
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(error_code(&body), "ARTIFACT_PROJECT_MISSING");
+    assert_eq!(body["error"]["message"], sentence);
+    assert!(f.record(&row.id, OWNER).missing_since.is_some());
+}
+
+/// R-T26 on the file content route.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_file_content_route_answers_a_missing_projects_result_file_with_a_410() {
+    let f = Fixture::new();
+    let row = f.result_file(OWNER, "docs/plan.md", "# Plan\n");
+    let sentence = project_missing_sentence(&f);
+    let _aside = move_the_project_behind_a_link(&f);
+
+    let (status, body) = split(
+        crate::routes::files::file_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id)
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(error_code(&body), "ARTIFACT_PROJECT_MISSING");
+    assert_eq!(body["error"]["message"], sentence);
+}
+
+/// R37 with R31's rule: a result file replaced by a link out of the project
+/// is not served by the file route.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_result_file_replaced_by_a_link_out_of_the_project_is_not_served() {
+    let f = Fixture::new();
+    let row = f.result_file(OWNER, "docs/plan.md", "# Plan\n");
+    let outside = tempfile::tempdir().expect("outside");
+    let secret = outside.path().join("secret.md");
+    std::fs::write(&secret, "not the project's\n").expect("secret");
+    std::fs::remove_file(&row.storage_path).expect("remove");
+    std::os::unix::fs::symlink(&secret, &row.storage_path).expect("link");
+
+    let (status, body) = split(
+        crate::routes::files::file_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id)
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(error_code(&body), "CONTENT_FAILED");
+    assert!(!body.to_string().contains("not the project's"), "{body}");
 }

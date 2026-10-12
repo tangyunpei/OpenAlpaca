@@ -7,6 +7,7 @@ capabilities:
   - "file_write"
   - "artifact_write"
   - "shell_execute"
+  - "memory_read"
   - "workspace_read"
   - "workspace_write"
   - "read_result"
@@ -18,8 +19,6 @@ model: "claude-haiku-4-5-20251001"
 fallback_models: []
 max_tool_calls: 30
 timeout_seconds: 600
-require_confirmation_for:
-  - "file_delete"
 ---
 
 ## Persona

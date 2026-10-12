@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ResolutionRow,
+  pendingResolutionNote,
   resolutionNote,
   settlingRun,
   type ToolRun,
@@ -33,6 +34,39 @@ describe("ResolutionRow (§3.15)", () => {
     expect(screen.getByText("Approved")).toBeInTheDocument();
     expect(screen.getByText(/returned in 1\.4s/)).toBeInTheDocument();
     expect(screen.getByText("14:23")).toBeInTheDocument();
+  });
+
+  /**
+   * The echo of an answer names the tool as the card did, with no notice
+   * line of its own: the card already counted it (as the chat connectors'
+   * acknowledgement does).
+   */
+  it("shows a hidden character in the tool name it names as an escape", () => {
+    render(
+      <ResolutionRow
+        resolution="denied"
+        note={pendingResolutionNote("denied", "srv__rm\u{202E}fdp\u{200B}\t")}
+      />,
+    );
+    const note = screen.getByText(/denied · the agent was told to skip it\./);
+    expect(note.textContent).toBe(
+      "srv__rm<U+202E>fdp<U+200B><U+0009> denied · the agent was told to skip it.",
+    );
+    expect(note.querySelectorAll("[data-hidden-char]")).toHaveLength(3);
+    expect(screen.queryByText(/hidden character/)).toBeNull();
+  });
+
+  /** A name with no break opportunity wraps rather than run past the row. */
+  it("wraps a note too long for the row instead of running past it", () => {
+    render(
+      <ResolutionRow
+        resolution="denied"
+        note={pendingResolutionNote("denied", `srv__${"x".repeat(200)}`)}
+      />,
+    );
+    expect(
+      screen.getByText(/denied · the agent was told to skip it\./),
+    ).toHaveClass("min-w-0", "wrap-anywhere");
   });
 });
 

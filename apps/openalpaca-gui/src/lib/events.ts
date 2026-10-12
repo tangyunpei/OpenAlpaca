@@ -65,7 +65,10 @@ export type ServerEvent =
   | { type: "skill_invocation_started"; request_id: string; skill_id: string; query_preview: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_completed"; request_id: string; skill_id: string; duration_ms: number; output_preview: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_failed"; request_id: string; skill_id: string; error: string; ts: string; instance_id: string; _id: number }
-  | { type: "tool_confirmation_requested"; request_id: string; agent_id: string; tool_name: string; tool_arguments: unknown; stream_id: string | null; lane_key: string | null; task_id: string | null; ts: string; instance_id: string; _id: number }
+  // `preview` is the daemon-authored text of the card and `per_call` says the
+  // approval is good for this call only (design 09 §4.2, §4.4); both are
+  // absent from an older daemon.
+  | { type: "tool_confirmation_requested"; request_id: string; agent_id: string; tool_name: string; tool_arguments: unknown; stream_id: string | null; lane_key: string | null; task_id: string | null; preview?: string | null; per_call?: boolean; ts: string; instance_id: string; _id: number }
   // T1. The twin of the frame above, sent for every way a prompt stops being
   // pending — including the two nobody answered (`timed_out`, `cancelled`).
   // Before it existed a prompt that ran out its 300 s clock produced nothing
@@ -93,8 +96,11 @@ export type ServerEvent =
   | { type: "followup_cancelled"; lane_key: string; followup_id: number; ts: string; instance_id: string; _id: number }
   // A produced artifact (plan §4.9). `name` is the head file's own name and
   // `path` its absolute location; `task_id`/`agent_id` are null for a loose
-  // artifact — a chat turn that ran no workflow. Never fired for uploads.
-  | { type: "artifact_written"; artifact_id: string; task_id: string | null; agent_id: string | null; name: string; kind: string; version: number; path: string; ts: string; instance_id: string; _id: number }
+  // artifact — a chat turn that ran no workflow. Never fired for uploads. For
+  // a file an agent wrote into its project (`in_project`, storage design §13)
+  // `name` is its path in the project, `path` the real file and `version`
+  // always 1; `openable` says whether Open is offered (ST-18).
+  | { type: "artifact_written"; artifact_id: string; task_id: string | null; agent_id: string | null; name: string; kind: string; version: number; path: string; in_project: boolean; openable: boolean; ts: string; instance_id: string; _id: number }
   // One subagent lane of a run opening or closing (GAP-09). The payload is the
   // `subagent_span` row, so `started_at`/`ended_at` are the same strings
   // `GET /v1/tasks/{id}/timeline` serves. `state` is never `"blocked"` here —
@@ -106,7 +112,15 @@ export type ServerEvent =
   // (the former GAP-22), so extension rows in the event log are orderable.
   | { type: "extension_state_changed"; kind: string; id: string; state: string; generation: number; tools_changed: boolean; ts: string; instance_id: string; _id: number }
   | { type: "extension_capability_withheld"; kind: string; id: string; subject: string; moment: string; state: string; scope: string; stale: boolean; ts: string; instance_id: string; _id: number }
-  | { type: "extension_capability_withdrawn"; kind: string; id: string; state: string; cause: string; capabilities: string[]; tools: string[]; affected_templates: string[]; affected_skills: string[]; affected_cron_skills: string[]; notice_lane: string; ts: string; instance_id: string; _id: number };
+  | { type: "extension_capability_withdrawn"; kind: string; id: string; state: string; cause: string; capabilities: string[]; tools: string[]; affected_templates: string[]; affected_skills: string[]; affected_cron_skills: string[]; notice_lane: string; ts: string; instance_id: string; _id: number }
+  // A memory note changed (memory redesign G30): every service write — this
+  // window's, a model tool call's, the extractor's — and every change a
+  // reconciliation scan finds behind the service's back. `change` is
+  // `created | updated | archived | confirmed | forgotten | external`;
+  // `revision` is `null` for a forget; `surface` (`user | model_tool |
+  // extraction`) is absent for a scan's finding. Persisted nowhere, so it is
+  // an invalidation and never a row.
+  | { type: "memory_changed"; partition_key: string; note_id: string; change: string; revision: string | null; origin: string; surface?: string; ts: string; instance_id: string; _id: number };
 
 export type ServerEventType = ServerEvent["type"];
 

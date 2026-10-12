@@ -1,0 +1,1649 @@
+//! `/v1/memories*` — what the routes own (design §7a; plan 3.8): which
+//! refusal becomes which status and code, that the revision travels in
+//! `If-Match` and nowhere else, the cursor rule, recently-learned's edit
+//! rule, undo's origin rule, and that every write is one `memory_changed`.
+//! Driven over [`MemoryApi`] directly: an `AppState` is not constructible in
+//! a unit test, and each handler is one field read over these functions.
+
+use super::*;
+
+use axum::body::to_bytes;
+use openalpaca_core::bus::EventBus;
+use openalpaca_core::events::SystemEvent;
+use openalpaca_core::memory::service::ExtractionProvenance;
+use openalpaca_storage::IdentityRepository;
+use openalpaca_storage::memory_index::MemoryIndex;
+use openalpaca_storage::{Database, store};
+use tempfile::TempDir;
+
+use crate::test_util::HomeStoreGuard;
+
+const OWNER: &str = "owner-1";
+
+struct Fixture {
+    _home: TempDir,
+    _env: HomeStoreGuard,
+    _db_dir: TempDir,
+    home_store: std::path::PathBuf,
+    api: MemoryApi,
+    bus: EventBus,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let home_store = home
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(store::STORE_DIR_NAME);
+        std::fs::create_dir_all(&home_store).unwrap();
+        let env = HomeStoreGuard::set(&home_store);
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        IdentityRepository::new(&db)
+            .create_global_user(OWNER, None)
+            .unwrap();
+        let bus = EventBus::new(64);
+        let service = MemoryService::new(Some(db), MemoryIndex::open_in_memory().unwrap())
+            .with_bus(bus.clone());
+        service.rebuild_index().unwrap();
+        Self {
+            _home: home,
+            _env: env,
+            _db_dir: db_dir,
+            home_store,
+            api: MemoryApi {
+                service: Arc::new(service),
+                owner_id: OWNER.to_string(),
+            },
+            bus,
+        }
+    }
+
+    fn headers() -> HeaderMap {
+        HeaderMap::new()
+    }
+
+    fn with_if_match(revision: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_MATCH, format!("\"{revision}\"").parse().unwrap());
+        headers
+    }
+
+    async fn create(&self, title: &str, body: &str, kind: &str) -> (NoteId, String) {
+        let response = self
+            .api
+            .create(&Self::headers(), create_body(title, body, kind))
+            .await;
+        let (status, json) = split(response).await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        (
+            NoteId::parse(json["id"].as_str().unwrap()).unwrap(),
+            json["revision"].as_str().unwrap().to_string(),
+        )
+    }
+
+    /// What the background extractor writes for the user's own words: an
+    /// active `extracted_user` note — the recently-learned list's content.
+    fn extracted(&self, title: &str, body: &str) -> (NoteId, String) {
+        let ctx = self
+            .api
+            .service
+            .context(
+                OWNER,
+                WorkspaceHint::None,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                Attribution::default(),
+            )
+            .unwrap();
+        let out = self
+            .api
+            .service
+            .store(
+                &ctx,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Preference),
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (out.id, out.revision)
+    }
+
+    /// What the extractor writes for assistant or tool output: an
+    /// `extracted_other` candidate, outside recall until confirmed.
+    fn candidate(&self, title: &str, body: &str) -> (NoteId, String) {
+        let ctx = self
+            .api
+            .service
+            .context(
+                OWNER,
+                WorkspaceHint::None,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                Attribution::default(),
+            )
+            .unwrap();
+        let out = self
+            .api
+            .service
+            .store(
+                &ctx,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Fact),
+                    provenance: Some(ExtractionProvenance::OtherOutput),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (out.id, out.revision)
+    }
+
+    fn note_file(&self, id: NoteId) -> std::path::PathBuf {
+        let owner_key = openalpaca_storage::memory_files::owner_key(OWNER);
+        let notes = self
+            .home_store
+            .join("memory")
+            .join("owners")
+            .join(owner_key)
+            .join("notes");
+        std::fs::read_dir(notes)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(&id.to_string())
+            })
+            .expect("the note file exists")
+    }
+}
+
+fn create_body(title: &str, body: &str, kind: &str) -> CreateMemoryBody {
+    CreateMemoryBody {
+        title: title.to_string(),
+        body: body.to_string(),
+        kind: kind.to_string(),
+        scope: None,
+        aliases: Vec::new(),
+        tags: Vec::new(),
+        fact_key: None,
+        sources: Vec::new(),
+        valid_from: None,
+        valid_to: None,
+        supersedes: None,
+        expected_revision: None,
+    }
+}
+
+fn update_body(action: &str, body: Option<&str>) -> UpdateMemoryBody {
+    UpdateMemoryBody {
+        action: action.to_string(),
+        patch: body.map(|b| PatchBody {
+            body: Some(b.to_string()),
+            ..PatchBody::default()
+        }),
+        reason: None,
+        target_revision: None,
+        expected_revision: None,
+    }
+}
+
+async fn split(response: Response) -> (StatusCode, serde_json::Value) {
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, json)
+}
+
+fn etag_of(response: &Response) -> Option<String> {
+    response
+        .headers()
+        .get(header::ETAG)
+        .map(|v| v.to_str().unwrap().trim_matches('"').to_string())
+}
+
+fn code(json: &serde_json::Value) -> &str {
+    json["error"]["code"].as_str().unwrap_or("")
+}
+
+// ── If-Match: the one place a revision travels ─────────────────────────
+
+/// Every single-note mutation without `If-Match` is `428`, and nothing is
+/// written.
+#[tokio::test]
+async fn a_single_note_mutation_without_if_match_is_428() {
+    let f = Fixture::new();
+    let (id, revision) = f.create("Editor", "# Editor\n\nvim.\n", "preference").await;
+    let sid = id.to_string();
+
+    let (status, json) = split(
+        f.api
+            .update(&Fixture::headers(), &sid, update_body("archive", None))
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{json}");
+    assert_eq!(code(&json), "MEMORY_IF_MATCH_REQUIRED");
+    let (status, json) = split(f.api.undo(&Fixture::headers(), &sid).await).await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{json}");
+    assert_eq!(code(&json), "MEMORY_IF_MATCH_REQUIRED");
+    let (status, json) = split(f.api.delete(&Fixture::headers(), &sid).await).await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{json}");
+    assert_eq!(code(&json), "MEMORY_IF_MATCH_REQUIRED");
+
+    let (status, json) = split(
+        f.api
+            .read(&Fixture::headers(), &sid, ReadMemoryQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["revision"], revision, "nothing was written");
+    assert_eq!(json["status"], "active");
+}
+
+/// A stale `If-Match` is `409 MEMORY_REVISION_CONFLICT`: the message names
+/// the current revision, the response carries it as `ETag`, and the file is
+/// unchanged. `If-Match: *` names no revision and is refused.
+#[tokio::test]
+async fn a_stale_if_match_is_409_carrying_the_current_revision_as_etag() {
+    let f = Fixture::new();
+    let (id, revision) = f.create("Editor", "# Editor\n\nvim.\n", "preference").await;
+    let sid = id.to_string();
+    let stale = "0".repeat(64);
+
+    let response = f
+        .api
+        .update(
+            &Fixture::with_if_match(&stale),
+            &sid,
+            update_body("edit", Some("# Editor\n\nneovim.\n")),
+        )
+        .await;
+    assert_eq!(etag_of(&response).as_deref(), Some(revision.as_str()));
+    let (status, json) = split(response).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(code(&json), "MEMORY_REVISION_CONFLICT");
+    // The message is the service's own sentence, current revision included
+    // — the daemon cannot know what a client kept, so it says nothing
+    // about it; each client words its own conflict copy.
+    assert_eq!(
+        json["error"]["message"],
+        MemoryError::RevisionConflict {
+            id,
+            current_revision: revision.clone(),
+        }
+        .to_string(),
+        "{json}"
+    );
+
+    let response = f.api.delete(&Fixture::with_if_match(&stale), &sid).await;
+    assert_eq!(etag_of(&response).as_deref(), Some(revision.as_str()));
+    let (status, json) = split(response).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(code(&json), "MEMORY_REVISION_CONFLICT");
+
+    let (status, json) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match("*"),
+                &sid,
+                update_body("archive", None),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+
+    let (_, json) = split(
+        f.api
+            .read(&Fixture::headers(), &sid, ReadMemoryQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(json["body"], "# Editor\n\nvim.\n");
+    assert_eq!(json["status"], "active");
+}
+
+/// A body `expected_revision` is `400 MEMORY_INVALID_INPUT` on an update
+/// even beside a correct `If-Match`, and on a create — the header is the
+/// one place, so two revisions can never disagree silently.
+#[tokio::test]
+async fn a_body_expected_revision_is_400() {
+    let f = Fixture::new();
+    let (id, revision) = f.create("Editor", "# Editor\n\nvim.\n", "preference").await;
+    let sid = id.to_string();
+
+    let mut body = update_body("archive", None);
+    body.expected_revision = Some(serde_json::Value::String(revision.clone()));
+    let (status, json) = split(
+        f.api
+            .update(&Fixture::with_if_match(&revision), &sid, body)
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("If-Match"),
+        "{json}"
+    );
+
+    let mut body = create_body("Shell", "# Shell\n\nzsh.\n", "preference");
+    body.expected_revision = Some(serde_json::Value::String(revision.clone()));
+    let (status, json) = split(f.api.create(&Fixture::headers(), body).await).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+
+    // The archive with the header alone goes through, and the create too.
+    let (status, json) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&revision),
+                &sid,
+                update_body("archive", None),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["status"], "archived");
+    let (status, json) = split(
+        f.api
+            .list(
+                &Fixture::headers(),
+                ListMemoriesQuery {
+                    status: Some("archived".into()),
+                    ..Default::default()
+                },
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["items"].as_array().unwrap().len(), 1);
+}
+
+// ── Creating and reading ───────────────────────────────────────────────
+
+/// A create is `201` with the new revision as `ETag` and origin `user` —
+/// the API is a user-directed surface (design §4); an exact duplicate is
+/// `200` with the existing id and `dedup: existing`; a body `owner_id` is
+/// not a field this API has.
+#[tokio::test]
+async fn a_create_is_201_with_origin_user_and_an_etag() {
+    let f = Fixture::new();
+    let response = f
+        .api
+        .create(
+            &Fixture::headers(),
+            create_body("Editor", "# Editor\n\nvim.\n", "preference"),
+        )
+        .await;
+    let etag = etag_of(&response).expect("a create answers ETag");
+    let (status, json) = split(response).await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+    assert_eq!(json["revision"], etag);
+    assert_eq!(json["origin"], "user");
+    assert_eq!(json["scope"], "global");
+    assert_eq!(json["dedup"], "created");
+
+    let (status, again) = split(
+        f.api
+            .create(
+                &Fixture::headers(),
+                create_body("Editor", "# Editor\n\nvim.\n", "preference"),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["id"], json["id"]);
+    assert_eq!(again["dedup"], "existing");
+
+    let (status, json) = split(
+        f.api
+            .create(
+                &Fixture::headers(),
+                create_body("Bad", "# Bad\n", "opinion"),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+
+    // The closed body shape: a JSON `owner_id` never reaches the service.
+    let rejected = serde_json::from_str::<CreateMemoryBody>(
+        r#"{"title":"x","body":"y","kind":"fact","owner_id":"someone-else"}"#,
+    );
+    assert!(rejected.is_err(), "unknown fields are refused");
+}
+
+/// `GET /v1/memories/{id}` answers the note with `ETag`; an unknown id is
+/// `404 MEMORY_NOT_FOUND`; a value that is not a UUID is `400`.
+#[tokio::test]
+async fn a_read_carries_its_etag_and_an_unknown_id_is_404() {
+    let f = Fixture::new();
+    let (id, revision) = f.create("Editor", "# Editor\n\nvim.\n", "preference").await;
+    let response = f
+        .api
+        .read(
+            &Fixture::headers(),
+            &id.to_string(),
+            ReadMemoryQuery::default(),
+        )
+        .await;
+    assert_eq!(etag_of(&response).as_deref(), Some(revision.as_str()));
+    let (status, json) = split(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["title"], "Editor");
+    assert_eq!(json["frontmatter"]["kind"], "preference");
+    assert_eq!(json["sources_status"], "intact");
+
+    let (status, json) = split(
+        f.api
+            .read(
+                &Fixture::headers(),
+                &NoteId::new().to_string(),
+                ReadMemoryQuery::default(),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+
+    let (status, json) = split(
+        f.api
+            .read(
+                &Fixture::headers(),
+                "not-a-uuid",
+                ReadMemoryQuery::default(),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+}
+
+/// `/history` lists the kept revisions newest first, and `?revision=` reads
+/// one of them — the old body at the old revision, `ETag` to match.
+#[tokio::test]
+async fn history_lists_kept_revisions_and_one_reads_back() {
+    let f = Fixture::new();
+    let (id, first) = f.create("Editor", "# Editor\n\nvim.\n", "preference").await;
+    let sid = id.to_string();
+    let (status, edited) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&first),
+                &sid,
+                update_body("edit", Some("# Editor\n\nneovim.\n")),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let second = edited["revision"].as_str().unwrap().to_string();
+
+    let (status, json) = split(f.api.history(&Fixture::headers(), &sid).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let revisions: Vec<&str> = json["revisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["revision"].as_str().unwrap())
+        .collect();
+    assert_eq!(revisions, [second.as_str(), first.as_str()]);
+
+    let response = f
+        .api
+        .read(
+            &Fixture::headers(),
+            &sid,
+            ReadMemoryQuery {
+                revision: Some(first.clone()),
+                section: None,
+            },
+        )
+        .await;
+    assert_eq!(etag_of(&response).as_deref(), Some(first.as_str()));
+    let (status, json) = split(response).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["body"], "# Editor\n\nvim.\n");
+    assert_eq!(json["freshness"], "verified");
+
+    let (status, json) = split(
+        f.api
+            .read(
+                &Fixture::headers(),
+                &sid,
+                ReadMemoryQuery {
+                    revision: Some("1".repeat(64)),
+                    section: None,
+                },
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+}
+
+// ── The cursor rule ────────────────────────────────────────────────────
+
+/// A `next_cursor` is valid for the filter set that issued it: the next
+/// page continues where the first stopped, and the same cursor under
+/// another filter set is `400 MEMORY_INVALID_INPUT`.
+#[tokio::test]
+async fn a_cursor_from_another_filter_set_is_refused() {
+    let f = Fixture::new();
+    for i in 0..3 {
+        f.create(&format!("Note {i}"), &format!("# Note {i}\n"), "fact")
+            .await;
+    }
+    let (status, page) = split(
+        f.api
+            .list(
+                &Fixture::headers(),
+                ListMemoriesQuery {
+                    limit: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    let cursor = page["next_cursor"]
+        .as_str()
+        .expect("a third item remains")
+        .to_string();
+
+    let (status, next) = split(
+        f.api
+            .list(
+                &Fixture::headers(),
+                ListMemoriesQuery {
+                    limit: Some(2),
+                    cursor: Some(cursor.clone()),
+                    ..Default::default()
+                },
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{next}");
+    assert_eq!(next["items"].as_array().unwrap().len(), 1);
+    assert!(next["next_cursor"].is_null());
+
+    let (status, json) = split(
+        f.api
+            .list(
+                &Fixture::headers(),
+                ListMemoriesQuery {
+                    limit: Some(2),
+                    cursor: Some(cursor),
+                    kind: Some("fact".into()),
+                    ..Default::default()
+                },
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("different filters"),
+        "{json}"
+    );
+}
+
+// ── Recently learned and undo ──────────────────────────────────────────
+
+/// `recently-learned` lists the extractor's active `extracted_user` notes
+/// and drops one the moment the user makes it theirs — an `edit` through
+/// this surface re-records it as `user` (design §6; `confirm` is the same
+/// act for a candidate, which was never listed: a confirmed candidate is
+/// `user` too and stays out).
+#[tokio::test]
+async fn recently_learned_excludes_a_note_re_recorded_as_user() {
+    let f = Fixture::new();
+    let (learned, revision) = f.extracted("Learned", "# Learned\n\nFrom what you said.\n");
+    let (kept, _) = f.extracted("Kept", "# Kept\n\nStill learned.\n");
+    let (candidate, candidate_revision) =
+        f.candidate("Inferred", "# Inferred\n\nFrom the assistant.\n");
+    let (status, json) = split(
+        f.api
+            .recently_learned(&Fixture::headers(), RecentlyLearnedQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let ids = |json: &serde_json::Value| -> Vec<String> {
+        json["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let listed = ids(&json);
+    assert!(listed.contains(&learned.to_string()) && listed.contains(&kept.to_string()));
+    assert!(
+        !listed.contains(&candidate.to_string()),
+        "a candidate is not recently learned"
+    );
+    assert!(json["items"][0]["origin"] == "extracted_user");
+
+    let (status, json) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&revision),
+                &learned.to_string(),
+                update_body("edit", Some("# Learned\n\nNow in my words.\n")),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (status, json) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&candidate_revision),
+                &candidate.to_string(),
+                update_body("confirm", None),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["status"], "active");
+    let (_, confirmed) = split(
+        f.api
+            .read(
+                &Fixture::headers(),
+                &candidate.to_string(),
+                ReadMemoryQuery::default(),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(confirmed["origin"], "user");
+
+    let (_, json) = split(
+        f.api
+            .recently_learned(&Fixture::headers(), RecentlyLearnedQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(ids(&json), vec![kept.to_string()]);
+
+    // A window that excludes everything: nothing learned since one second
+    // into the future… expressed as an RFC 3339 instant.
+    let future = (Utc::now() + Duration::days(1)).to_rfc3339();
+    let (_, json) = split(
+        f.api
+            .recently_learned(
+                &Fixture::headers(),
+                RecentlyLearnedQuery {
+                    since: Some(future),
+                    limit: None,
+                },
+            )
+            .await,
+    )
+    .await;
+    assert!(ids(&json).is_empty());
+    let (status, json) = split(
+        f.api
+            .recently_learned(
+                &Fixture::headers(),
+                RecentlyLearnedQuery {
+                    since: Some("yesterday".into()),
+                    limit: None,
+                },
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+}
+
+/// `since` takes a window (`7d`, `24h`, `30m`) as well as an instant, and a
+/// window too large to subtract from now is `400 MEMORY_INVALID_INPUT` —
+/// a query string under the bearer token must never drop the connection.
+#[tokio::test]
+async fn a_since_window_is_honoured_and_an_oversized_one_is_400() {
+    let f = Fixture::new();
+    let (learned, _) = f.extracted("Learned", "# Learned\n\nThis week.\n");
+    for window in ["7d", "24h", "30m"] {
+        let (status, json) = split(
+            f.api
+                .recently_learned(
+                    &Fixture::headers(),
+                    RecentlyLearnedQuery {
+                        since: Some(window.into()),
+                        limit: None,
+                    },
+                )
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "since={window}: {json}");
+        assert_eq!(
+            json["items"][0]["id"],
+            learned.to_string(),
+            "since={window}"
+        );
+    }
+
+    let (status, json) = split(
+        f.api
+            .recently_learned(
+                &Fixture::headers(),
+                RecentlyLearnedQuery {
+                    since: Some("100000000d".into()),
+                    limit: None,
+                },
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("too large"),
+        "{json}"
+    );
+}
+
+/// `undo` forgets a recently learned note, and is `409 MEMORY_NOT_UNDOABLE`
+/// once its origin moved — the user has since made it theirs, and a plain
+/// forget is the verb for that.
+#[tokio::test]
+async fn undo_is_refused_once_the_origin_moved() {
+    let f = Fixture::new();
+    let (learned, revision) = f.extracted("Learned", "# Learned\n\nFrom what you said.\n");
+    let (mine, mine_revision) = f.create("Mine", "# Mine\n\nSaved by hand.\n", "fact").await;
+
+    let (status, json) = split(
+        f.api
+            .undo(&Fixture::with_if_match(&mine_revision), &mine.to_string())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_UNDOABLE");
+
+    let (status, edited) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&revision),
+                &learned.to_string(),
+                update_body("edit", Some("# Learned\n\nNow mine.\n")),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let (status, json) = split(
+        f.api
+            .undo(
+                &Fixture::with_if_match(edited["revision"].as_str().unwrap()),
+                &learned.to_string(),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_UNDOABLE");
+
+    let (fresh, fresh_revision) = f.extracted("Fresh", "# Fresh\n\nUndo me.\n");
+    let (status, json) = split(
+        f.api
+            .undo(&Fixture::with_if_match(&fresh_revision), &fresh.to_string())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    // Design 09 §3.3: undo withdraws — nothing it cited is suppressed.
+    assert_eq!(json["status"], "withdrawn");
+    assert_eq!(json["restored"], serde_json::json!([]));
+    assert!(json.get("retained").is_none(), "{json}");
+    let (status, _) = split(
+        f.api
+            .read(
+                &Fixture::headers(),
+                &fresh.to_string(),
+                ReadMemoryQuery::default(),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ── A note longer than a read serves ───────────────────────────────────
+
+/// Why an edit can never send back a body cut at 32 KiB. The note limit
+/// covers the whole file, frontmatter included (design §4), so a note that
+/// parses has a body under the 32 KiB a read serves: a read at the limit is
+/// whole and `truncated: false`. One byte over, the file does not parse — it
+/// is malformed, left on disk and excluded — so every route answers `404
+/// MEMORY_NOT_FOUND` for it, a body edit included, nothing is written, and
+/// `doctor` lists the file as `oversized`. The CLI's and the app's
+/// `truncated` refusals stand behind this; raising the parse limit above the
+/// read limit fails here.
+#[tokio::test]
+async fn a_note_file_over_32_kib_is_not_found_so_no_edit_can_cut_it() {
+    use openalpaca_storage::memory_files::MAX_NOTE_BYTES;
+    let f = Fixture::new();
+    let (id, created) = f
+        .create("Long log", "# Long log\n\nThe start.\n", "reference")
+        .await;
+    let sid = id.to_string();
+    let file = f.note_file(id);
+    let original = std::fs::read_to_string(&file).unwrap();
+    let tail = "The tail.\n";
+    let fill = |bytes: usize| {
+        format!(
+            "{original}{}{tail}",
+            "y".repeat(bytes - original.len() - tail.len())
+        )
+    };
+
+    // At the limit: the whole body is read, nothing is cut.
+    let at_limit = fill(MAX_NOTE_BYTES);
+    std::fs::write(&file, &at_limit).unwrap();
+    let (status, json) = split(f.api.sync(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (status, read) = split(
+        f.api
+            .read(&Fixture::headers(), &sid, ReadMemoryQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["truncated"], false);
+    let body = read["body"].as_str().unwrap();
+    assert!(
+        body.ends_with(tail) && at_limit.ends_with(body),
+        "the read holds the whole body"
+    );
+    let revision = read["revision"].as_str().unwrap().to_string();
+    assert_ne!(revision, created, "the hand edit was picked up");
+
+    // One byte over: malformed, so not found — to a read, an edit, a DELETE.
+    let over = fill(MAX_NOTE_BYTES + 1);
+    std::fs::write(&file, &over).unwrap();
+    let (status, json) = split(f.api.sync(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (status, json) = split(
+        f.api
+            .read(&Fixture::headers(), &sid, ReadMemoryQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+    let (status, json) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&revision),
+                &sid,
+                update_body("edit", Some("# Long log\n\nThe start.\n")),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+    let (status, json) = split(f.api.delete(&Fixture::with_if_match(&revision), &sid).await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        over,
+        "nothing was written"
+    );
+
+    let (status, report) = split(f.api.doctor(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let name = file.file_name().unwrap().to_string_lossy().into_owned();
+    let malformed: Vec<&serde_json::Value> = report["partitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["malformed"].as_array().unwrap())
+        .collect();
+    assert!(
+        malformed.iter().any(|m| {
+            m["path"].as_str().unwrap().ends_with(&name)
+                && m["reason"].as_str().unwrap().contains("oversized")
+        }),
+        "doctor names the file: {malformed:?}"
+    );
+
+    // Shortened by hand, it is a note again at the next scan.
+    std::fs::write(&file, &at_limit).unwrap();
+    let (status, json) = split(f.api.sync(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (status, read) = split(
+        f.api
+            .read(&Fixture::headers(), &sid, ReadMemoryQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["truncated"], false);
+}
+
+// ── memory_changed ─────────────────────────────────────────────────────
+
+/// Every write through the routes is one `memory_changed` on the bus with
+/// `surface: user`, a `sync` that finds a hand edit publishes one with no
+/// surface, and a read publishes nothing.
+#[tokio::test]
+async fn every_write_and_a_detected_external_edit_publish_one_memory_changed() {
+    let f = Fixture::new();
+    let mut rx = f.bus.subscribe();
+    let (id, revision) = f.create("Editor", "# Editor\n\nvim.\n", "preference").await;
+    let sid = id.to_string();
+    let (_, edited) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&revision),
+                &sid,
+                update_body("edit", Some("# Editor\n\nneovim.\n")),
+            )
+            .await,
+    )
+    .await;
+    let _ = split(
+        f.api
+            .read(&Fixture::headers(), &sid, ReadMemoryQuery::default())
+            .await,
+    )
+    .await;
+    let (other, _) = f.create("Shell", "# Shell\n\nzsh.\n", "preference").await;
+    let (status, _) = split(
+        f.api
+            .delete(
+                &Fixture::with_if_match(edited["revision"].as_str().unwrap()),
+                &sid,
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let file = f.note_file(other);
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\nHand-edited.\n");
+    std::fs::write(&file, text).unwrap();
+    let (status, json) = split(f.api.sync(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], 1);
+    assert_eq!(json["changes"][0]["note_id"], other.to_string());
+
+    let mut seen = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let SystemEvent::MemoryChanged {
+            change, surface, ..
+        } = event
+        {
+            seen.push((change, surface));
+        }
+    }
+    assert_eq!(
+        seen,
+        [
+            ("created".to_string(), Some("user".to_string())),
+            ("updated".to_string(), Some("user".to_string())),
+            ("created".to_string(), Some("user".to_string())),
+            ("forgotten".to_string(), Some("user".to_string())),
+            ("external".to_string(), None),
+        ]
+    );
+}
+
+// ── The management reads ───────────────────────────────────────────────
+
+/// `doctor` reports the owner's partitions and `recently-used` the ring:
+/// empty until a model is handed a note, then that delivery newest first,
+/// with the lane it was made on and `tool` for a note the model fetched
+/// itself.
+#[tokio::test]
+async fn the_doctor_and_recently_used_answer_their_shapes() {
+    let f = Fixture::new();
+    let (editor, editor_revision) = f.create("Editor", "# Editor\n\nvim.\n", "preference").await;
+    let (shell, _) = f.create("Shell", "# Shell\n\nzsh.\n", "preference").await;
+    let (status, json) = split(f.api.doctor(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let partitions = json["partitions"].as_array().unwrap();
+    assert_eq!(partitions.len(), 1);
+    assert_eq!(partitions[0]["scope"], "global");
+    assert_eq!(partitions[0]["health"], "ready");
+    assert_eq!(partitions[0]["notes"], 2);
+    assert_eq!(partitions[0]["orphan"], false);
+    assert_eq!(json["idless_project_snapshots"].as_array().unwrap().len(), 0);
+    assert!(json.get("move_snapshots").is_none(), "{json}");
+
+    let (status, json) = split(f.api.recently_used(RecentlyUsedQuery::default())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["items"].as_array().unwrap().len(),
+        0,
+        "nothing delivered to a model yet"
+    );
+
+    // A model on a lane fetches both notes through `memory_search`, the
+    // shell one first: the ring lists the deliveries newest first, and
+    // `limit` cuts it.
+    let model = f
+        .api
+        .service
+        .context(
+            OWNER,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution {
+                lane_key: Some(format!("{OWNER}:gui")),
+                request_id: Some(uuid::Uuid::new_v4()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for (query, expected) in [("zsh", shell), ("vim", editor)] {
+        let found = f
+            .api
+            .service
+            .search(
+                &model,
+                SearchInput {
+                    query: query.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(found.results.len(), 1, "{query}");
+        assert_eq!(found.results[0].id, expected, "{query}");
+    }
+    let (status, json) = split(f.api.recently_used(RecentlyUsedQuery::default())).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["id"], editor.to_string(), "newest first");
+    assert_eq!(items[0]["revision"], editor_revision);
+    assert_eq!(items[0]["reason"], "tool");
+    assert_eq!(items[0]["lane_key"], format!("{OWNER}:gui"));
+    assert!(items[0]["task_id"].is_null());
+    assert!(items[0]["delivered_at"].is_string());
+    assert_eq!(items[1]["id"], shell.to_string());
+    let (_, json) = split(f.api.recently_used(RecentlyUsedQuery { limit: Some(1) })).await;
+    assert_eq!(json["items"].as_array().unwrap().len(), 1);
+    assert_eq!(json["items"][0]["id"], editor.to_string());
+}
+
+// ── Suggestions (Learning v2, design 09 §3.5) ─────────────────────────
+
+impl Fixture {
+    /// What learning writes for a change in the user's words to a note the
+    /// user saved: a suggestion naming it (design 09 §2.5, S2).
+    fn suggestion(&self, target: NoteId, target_revision: &str, knowledge: &str) -> NoteId {
+        let ctx = self
+            .api
+            .service
+            .context(
+                OWNER,
+                WorkspaceHint::None,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                Attribution::default(),
+            )
+            .unwrap();
+        let out = self
+            .api
+            .service
+            .store(
+                &ctx,
+                StoreInput {
+                    title: "Commute".into(),
+                    body: format!(
+                        "# Commute\n\n## Knowledge\n{knowledge}\n\n## Evidence and limits\nFrom what you said on 2026-09-24. Replaces “Commute” (saved by you): The user said so.\n"
+                    ),
+                    kind: Some(NoteKind::Fact),
+                    // As learning stamps every note it writes (design 09
+                    // §2.5; LQ14's datum, which tells its suggestions from
+                    // the chat model's, whose reason is not read).
+                    observed_at: Some(chrono::Utc::now()),
+                    supersedes: Some((target, target_revision.to_string())),
+                    replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(out.suggestion);
+        out.id
+    }
+
+    async fn confirm(
+        &self,
+        id: NoteId,
+        revision: &str,
+        target_revision: Option<&str>,
+    ) -> (StatusCode, serde_json::Value, Option<String>) {
+        let mut body = update_body("confirm", None);
+        body.target_revision = target_revision.map(str::to_string);
+        let response = self
+            .api
+            .update(&Self::with_if_match(revision), &id.to_string(), body)
+            .await;
+        let etag = etag_of(&response);
+        let (status, json) = split(response).await;
+        (status, json, etag)
+    }
+
+    async fn revision_of(&self, id: NoteId) -> String {
+        let (status, json) = split(
+            self.api
+                .read(
+                    &Self::headers(),
+                    &id.to_string(),
+                    ReadMemoryQuery::default(),
+                )
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        json["revision"].as_str().unwrap().to_string()
+    }
+}
+
+/// `GET /v1/memories/suggestions` lists the pending suggestion with both
+/// texts and its target; `confirm` without `target_revision` is `400`, with
+/// a target that moved is `409` carrying the target's revision as `ETag`,
+/// with the current one `200` naming what it replaced and dismissed; and a
+/// `target_revision` on any other action is `400`.
+#[tokio::test]
+async fn suggestions_are_listed_and_a_confirm_binds_the_target_revision() {
+    let f = Fixture::new();
+    let (x, x_rev) = f
+        .create("Commute", "# Commute\n\n## Knowledge\nBus.\n", "fact")
+        .await;
+    let first = f.suggestion(x, &x_rev, "Bike.");
+    let second = f.suggestion(x, &x_rev, "A bicycle.");
+
+    let (status, json) = split(
+        f.api
+            .suggestions(&Fixture::headers(), SuggestionsQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "one per target: {json}");
+    assert_eq!(items[0]["older_count"], 1);
+    assert_eq!(items[0]["origin"], "extracted_user");
+    assert_eq!(items[0]["reason"], "The user said so.");
+    assert_eq!(items[0]["target"]["id"], x.to_string());
+    assert_eq!(items[0]["target"]["revision"], x_rev.as_str());
+    assert_eq!(items[0]["target"]["excerpt"], "Bus.");
+    assert_eq!(items[0]["target"]["origin"], "user");
+    let (status, json) = split(
+        f.api
+            .suggestions(&Fixture::headers(), SuggestionsQuery { limit: Some(101) })
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    let first_rev = f.revision_of(first).await;
+    let (status, json, _) = f.confirm(first, &first_rev, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("target_revision")
+    );
+
+    let mut archive = update_body("archive", None);
+    archive.target_revision = Some(x_rev.clone());
+    let (status, json) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&first_rev),
+                &first.to_string(),
+                archive,
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    // The target moves: its new revision comes back as `ETag`.
+    let (status, edited) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&x_rev),
+                &x.to_string(),
+                update_body("edit", Some("# Commute\n\n## Knowledge\nBus, line 42.\n")),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let moved = edited["revision"].as_str().unwrap().to_string();
+    let (status, json, etag) = f.confirm(first, &first_rev, Some(&x_rev)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(code(&json), "MEMORY_REVISION_CONFLICT");
+    assert_eq!(etag.as_deref(), Some(moved.as_str()));
+
+    let (status, json, _) = f.confirm(first, &first_rev, Some(&moved)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["status"], "active");
+    assert_eq!(json["superseded"], serde_json::json!([x.to_string()]));
+    assert_eq!(json["dismissed"], serde_json::json!([second.to_string()]));
+    let (_, json) = split(
+        f.api
+            .suggestions(&Fixture::headers(), SuggestionsQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(json["items"], serde_json::json!([]));
+}
+
+/// Design 09 §3.3: `undo` dismisses a candidate of any origin — *Keep
+/// mine* — as a withdrawal, and the note it named stays exactly as it was.
+#[tokio::test]
+async fn undo_dismisses_a_candidate() {
+    let f = Fixture::new();
+    let (x, x_rev) = f.create("Commute", "# Commute\n\nBus.\n", "fact").await;
+    let suggestion = f.suggestion(x, &x_rev, "Bike.");
+    let (inferred, inferred_rev) = f.candidate("Lunch", "# Lunch\n\nnoodles\n");
+    for (id, rev) in [
+        (suggestion, f.revision_of(suggestion).await),
+        (inferred, inferred_rev),
+    ] {
+        let (status, json) = split(
+            f.api
+                .undo(&Fixture::with_if_match(&rev), &id.to_string())
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["status"], "withdrawn");
+        assert_eq!(json["restored"], serde_json::json!([]));
+    }
+    assert_eq!(f.revision_of(x).await, x_rev);
+}
+
+// ── Layered retrieval (design 09 §13.1, slice L10a) ───────────────────
+
+impl Fixture {
+    /// A note learned from the user's words, dated by what it observed.
+    fn learned_on(&self, title: &str, body: &str, observed: &str) -> NoteId {
+        let ctx = self
+            .api
+            .service
+            .context(
+                OWNER,
+                WorkspaceHint::None,
+                Surface::Extraction,
+                Capabilities::EXTRACTION,
+                Attribution::default(),
+            )
+            .unwrap();
+        self.api
+            .service
+            .store(
+                &ctx,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Fact),
+                    observed_at: Some(
+                        DateTime::parse_from_rfc3339(observed)
+                            .unwrap()
+                            .with_timezone(&Utc),
+                    ),
+                    provenance: Some(ExtractionProvenance::UserWords),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+    }
+
+    async fn search(&self, q: SearchMemoriesQuery) -> (StatusCode, serde_json::Value) {
+        split(self.api.search(&Self::headers(), q).await).await
+    }
+
+    async fn timeline(&self, q: TimelineMemoriesQuery) -> (StatusCode, serde_json::Value) {
+        split(self.api.timeline(&Self::headers(), q).await).await
+    }
+}
+
+fn ids_of(json: &serde_json::Value) -> Vec<String> {
+    json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// **L10a evidence: the route mirrors the tool.** `GET /v1/memories/search`
+/// takes `detail`, `date_from`, `date_to` and `order_by` as `memory_search`
+/// does; with no `detail` it answers the snippets the Memory view reads, so
+/// the app's call is unchanged. A bad value is `400`.
+#[tokio::test]
+async fn search_takes_the_tools_detail_dates_and_order() {
+    let f = Fixture::new();
+    let jan = f.learned_on(
+        "Bike",
+        "# Bike\n\nThe user bought a bike.\n",
+        "2026-01-15T10:00:00Z",
+    );
+    let may = f.learned_on(
+        "Bike repair",
+        "# Bike repair\n\nThe shop fixed the brakes.\n",
+        "2026-05-02T10:00:00Z",
+    );
+    let q = |extra: &dyn Fn(&mut SearchMemoriesQuery)| {
+        let mut q = SearchMemoriesQuery {
+            q: "bike".into(),
+            ..Default::default()
+        };
+        extra(&mut q);
+        q
+    };
+
+    let (status, json) = f.search(q(&|_| {})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(
+        json["results"][0]["excerpt"].is_string(),
+        "the Memory view's call still answers snippets: {json}"
+    );
+
+    let (status, json) = f.search(q(&|q| q.detail = Some("index".into()))).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let row = json["results"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = row.keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "conflict", "date", "id", "kind", "reason", "scope", "size", "status", "title"
+        ]
+    );
+
+    let (_, json) = f.search(q(&|q| q.order_by = Some("newest".into()))).await;
+    assert_eq!(ids_of(&json), vec![may.to_string(), jan.to_string()]);
+    let (_, json) = f
+        .search(q(&|q| {
+            q.date_from = Some("2026-05-02".into());
+            q.date_to = Some("2026-05-02".into());
+        }))
+        .await;
+    assert_eq!(ids_of(&json), vec![may.to_string()]);
+    let (_, json) = f
+        .search(q(&|q| q.date_to = Some("2026-02-01T00:00:00Z".into())))
+        .await;
+    assert_eq!(ids_of(&json), vec![jan.to_string()]);
+    let (status, _) = f.search(q(&|q| q.limit = Some(50))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    for bad in [
+        q(&|q| q.detail = Some("full".into())),
+        q(&|q| q.order_by = Some("random".into())),
+        q(&|q| q.date_from = Some("spring".into())),
+        q(&|q| q.limit = Some(51)),
+        q(&|q| {
+            q.date_from = Some("2026-06-01".into());
+            q.date_to = Some("2026-05-01".into());
+        }),
+    ] {
+        let (status, json) = f.search(bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    }
+}
+
+/// **L10a evidence: the route mirrors the tool.** `GET /v1/memories/timeline`
+/// is `memory_timeline`: around an `anchor`, the first hit of `q`, or a
+/// `date`, in index rows in time order; not two anchors, not none, not more
+/// than 20 a side; an unknown note is `404`.
+#[tokio::test]
+async fn the_timeline_route_is_memory_timeline() {
+    let f = Fixture::new();
+    let berlin = f.learned_on(
+        "Office in Berlin",
+        "# Office in Berlin\n\nThe office was in Berlin.\n",
+        "2026-01-10T09:00:00Z",
+    );
+    let june = f.learned_on(
+        "Office move in June",
+        "# Office move in June\n\nThe office moves to Hamburg.\n",
+        "2026-06-10T09:00:00Z",
+    );
+    let july = f.learned_on(
+        "Office plants",
+        "# Office plants\n\nThe plants need water.\n",
+        "2026-07-10T09:00:00Z",
+    );
+    let rows = |json: &serde_json::Value| -> Vec<(String, String)> {
+        json["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_string(),
+                    r["reason"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let expected = vec![
+        (berlin.to_string(), "before".to_string()),
+        (june.to_string(), "anchor".to_string()),
+        (july.to_string(), "after".to_string()),
+    ];
+
+    let (status, json) = f
+        .timeline(TimelineMemoriesQuery {
+            anchor: Some(june.to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(rows(&json), expected);
+    assert_eq!(json["anchor"]["id"], june.to_string());
+    assert!(
+        json["results"][0]["excerpt"].is_null(),
+        "index rows: {json}"
+    );
+
+    let (_, json) = f
+        .timeline(TimelineMemoriesQuery {
+            q: Some("office move june".into()),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(rows(&json), expected);
+
+    let (_, json) = f
+        .timeline(TimelineMemoriesQuery {
+            date: Some("2026-06-10".into()),
+            before: Some(1),
+            after: Some(1),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(
+        rows(&json),
+        vec![
+            (berlin.to_string(), "before".to_string()),
+            (june.to_string(), "after".to_string()),
+        ]
+    );
+    assert_eq!(json["anchor"]["date"], "2026-06-10T00:00:00Z");
+
+    for bad in [
+        TimelineMemoriesQuery::default(),
+        TimelineMemoriesQuery {
+            anchor: Some(june.to_string()),
+            date: Some("2026-06-10".into()),
+            ..Default::default()
+        },
+        TimelineMemoriesQuery {
+            anchor: Some(june.to_string()),
+            after: Some(21),
+            ..Default::default()
+        },
+        TimelineMemoriesQuery {
+            date: Some("June".into()),
+            ..Default::default()
+        },
+    ] {
+        let (status, json) = f.timeline(bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(code(&json), "MEMORY_INVALID_INPUT");
+    }
+    let (status, json) = f
+        .timeline(TimelineMemoriesQuery {
+            anchor: Some("00000013-0000-4000-8000-00000000abcd".into()),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+}
+
+/// The timeline's rebuild refusal speaks to a person (repair round 1 of the
+/// L8 product slice): the service's own words name the model's tools, and
+/// the CLI prints the route's message as it is.
+#[tokio::test]
+async fn the_rebuild_refusal_names_no_model_tool() {
+    let (status, json) = split(refusal(MemoryError::IndexRebuilding)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(code(&json), "MEMORY_INDEX_REBUILDING");
+    let message = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("try again in a minute"), "{json}");
+    assert!(!message.contains("memory_"), "{json}");
+}
+
+fn headers_in(dir: &std::path::Path) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-workspace-path", dir.to_str().unwrap().parse().unwrap());
+    headers
+}
+
+/// Storage design §3: a memory write through a route accepts work for the
+/// header's root, so it records the root under `projects/` before the note
+/// is written; a read — the Memory view's list — records nothing.
+#[tokio::test]
+async fn a_write_records_the_headers_project_and_a_read_does_not() {
+    let f = Fixture::new();
+    let work = tempfile::tempdir().unwrap();
+    let repo = work.path().canonicalize().unwrap().join("app");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let headers = headers_in(&repo);
+
+    let (status, json) = split(f.api.list(&headers, ListMemoriesQuery::default()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        store::projects::lookup(&repo).unwrap(),
+        None,
+        "a read records nothing"
+    );
+
+    let (status, json) = split(
+        f.api
+            .create(
+                &headers,
+                create_body(
+                    "Release step",
+                    "# Release step\n\nTag, then run the release script.\n",
+                    "procedure",
+                ),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+    let recorded = store::projects::lookup(&repo)
+        .unwrap()
+        .expect("the write recorded its project");
+    assert_eq!(recorded.root, repo);
+}
+
+/// A write whose project cannot be recorded is refused the way an upload is
+/// (the lead's R-S7: one answer on every route that records a root), and
+/// nothing is written anywhere.
+#[tokio::test]
+async fn a_write_whose_project_cannot_be_recorded_is_refused_and_writes_nothing() {
+    let f = Fixture::new();
+    std::fs::write(f.home_store.join("projects"), "not a directory\n").unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let repo = work.path().canonicalize().unwrap().join("app");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+    let (status, json) = split(
+        f.api
+            .create(
+                &headers_in(&repo),
+                create_body(
+                    "Release step",
+                    "# Release step\n\nTag first.\n",
+                    "procedure",
+                ),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{json}");
+    assert_eq!(json["error"]["code"], "WORKSPACE_REGISTER_FAILED");
+    let message = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with(&format!(
+            "could not record the project for {}: ",
+            repo.display()
+        )),
+        "{message}"
+    );
+    assert!(!repo.join(".openalpaca").exists(), "nothing was written");
+}

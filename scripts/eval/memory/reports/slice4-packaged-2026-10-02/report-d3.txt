@@ -1,0 +1,93 @@
+# Track D: D3 report (the GUI round-trip on the isolated store)
+
+**Status: D3 is done. Every surface the task lists passed.**
+
+- The app was the bundled `openalpaca-gui.app` (`openalpaca_gui` sha256 `627108aa…2757`) from HEAD `8fde2925`.
+- It reused D2's daemon (pid 60493, port 51021, instance `950f…`) on the scratch root and never spawned one of its own.
+- It ran **unsandboxed**, because the loopback-profile attempt failed (see below). The daemon stayed under `no-network.sb` throughout.
+- At the end the GUI's `Stop daemon…` stopped the daemon cleanly. D3 then restarted it the way D2 did: the same binary, the same `no-network.sb`, the same store, CWD `live/`. The new daemon is **pid 70283, port 51667, instance `206fc373-7ca5-46a6-a446-0ecfba173267`**, and its token expires 2026-10-04T04:21:50Z (`evidence/d3-daemon.env`, `d3-restart-daemon.sh`).
+- The GUI was quit afterwards.
+- Nothing was committed, because the step names no commit. The git tree is unchanged: only `tasks/deps-upgrade/` is untracked.
+- **`track-d/SPEC.md` and `maps/slices34.md` still do not exist.** D3 was run from the task text alone.
+
+## The loopback-profile attempt
+
+1. **The profile.** I wrote `track-d/no-network-loopback.sb`: `(allow default)`, `(deny network-outbound)`, `(allow network-outbound (remote ip "localhost:*"))`.
+2. **The curl probe** (`evidence/d3-loopback-probe.txt`):
+   - Under the profile, curl to `127.0.0.1:51021/v1/status` returned **401**. Loopback was allowed.
+   - Curl to `192.0.2.1` (TEST-NET-1) failed with **exit 7 after 1 ms**. Everything else was refused.
+3. **The sandboxed launch.** I ran `Contents/MacOS/openalpaca_gui` under the profile, with the D2 environment exported and checked (`env.sh` guard) and CWD `live/`. It ran as pid 62649 (`evidence/d3-launch.txt`).
+   - The window came up.
+   - The Tauri process read discovery: the sidebar showed instance `950f`.
+   - The liveness probe reached the daemon, so **no second daemon was spawned and `daemon.log` was not rotated**. There was still exactly one `openalpacad`.
+4. **Why it was not kept.** Two independent reasons:
+   - **The webview could not reach the daemon.** The window showed "Could not load this lane: Load failed", "Could not check for pending approvals: Load failed", "Could not reach the daemon." and the status `disconnected` (`gui/00-sandboxed-launch-window.png`, captured with `screencapture -l <window id>`). The daemon logged no WebSocket connection. My guess is WebKit's out-of-process networking (`com.apple.WebKit.Networking`) under `sandbox-exec`, but I did not establish the cause. Settings → Connection could therefore never show `home_root`.
+   - **computer-use cannot address the process.** LaunchServices registered it with `bundleID=[ NULL ]` and a `sandboxed` flag (`lsappinfo`). computer-use answered "App not running: com.tangyunpei.openalpaca-gui", and `app_list_windows` returned `[]`.
+5. **Outcome.** pid 62649 was sent SIGTERM and exited; the daemon was unaffected. The app was relaunched **unsandboxed** in the same way (pid 63352), and LaunchServices then registered the bundle id normally.
+
+## How the app was driven (read this before trusting the clicks)
+
+- `request_access` for `com.tangyunpei.openalpaca-gui` was granted at tier full.
+- **Background `app_click` into the WKWebView had no effect while the window was not key.** Three attempts on `Settings` and `Memory` did nothing. One click worked, while the owner happened to have the window active.
+- `request_full_control` was approved. However, **every display-scope action was aborted with "user interrupt"** (twice), and later background clicks were refused with "the user is actively typing". The owner was using the machine, so I did not push full-screen control.
+- I therefore drove the window through **macOS Accessibility** from `osascript`, against the same granted app (`track-d/ax.js`, `track-d/ax-tf.js`):
+  - `AXPress` on the named buttons, checkboxes and radio buttons.
+  - `AXFocused` plus `AXValue` on the text fields.
+  - React received both: buttons enabled on input and handlers fired.
+
+  The clicks are therefore accessibility presses, not pointer events. Hover-only states and pointer hit-testing were not exercised.
+- Every step was preceded by an `app_screenshot`. Each lazy view was checked a second time after it loaded.
+- **The evidence PNGs are window-only captures** (`screencapture -l 10565`) in `evidence/gui/`.
+- Text typed into the app was only the step's own content:
+  - note titles and bodies;
+  - two searches (`grind`, `teapot`);
+  - the scratch project path;
+  - one `/remember` line;
+  - the `USER.md` field edits.
+
+## Surfaces
+
+| # | Surface | Result | Screenshot(s) |
+|---|---|---|---|
+| 1 | **Settings → Connection, `home_root` first** | **PASS**: daemon connected, instance `950f`, endpoint `127.0.0.1:51021`, schema `v2`. The Project card reads "No project: … files go to the home store (`<tmp>", which is the scratch root. | `02-settings-connection-home-root.png` |
+| 2 | Memory nav entry | **PASS**: it opens the Memory view with "0 notes" and the design's empty copy, "Nothing remembered yet. Ask Alpaca to remember something, or add a note." | `03-memory-nav-empty-global.png` |
+| 3a | Global / This project, with no project | **PASS**: `This project` is disabled and its tooltip names Settings → Connection. | `03-…` |
+| 3b | Global / This project, with a project | **PASS**. Steps: I set the project to `live/proj` (a scratch directory with a `.openalpaca` marker); `This project` shows "Nothing remembered for this project yet."; Add note saves "Saved to this project"; the file lands under `live/proj/.openalpaca/memory/owners/80a4…/notes/` (`evidence/d3-project-store-tree.txt`); `Global` does not list it. The project was then **Cleared** in Connection, so everything later is global. | `04-…`, `05-…`, `06-memory-global-excludes-project-note.png` |
+| 4 | Add note → list | **PASS**: the form says "Saved to Global, as something you said yourself". It saved "Espresso grinder setting" (fact), showed a toast, and the list and detail show it (`Saved by you`, `Global · notes/f085d45c…md`). | `07-…`, `08-…` |
+| 5 | Search | **PASS**: `grind` found 1 note by prefix ("1 found"). `teapot` showed "No note matches "teapot"." | `09-…`, `10-…` |
+| 6 | Note / Raw / Diff / History | **PASS**. With one version: Diff says "Only one version of this note is kept…" and History shows `bd541d4d current`. After the edits: Diff shows the CLI-vs-app hunk (+1 −1), History lists 3 versions (`69d5921b` current, `72732665`, `bd541d4d`), and `Compare bd541d4d` diffs the first version against the current one. | `11-…` to `14-…`, `19-…`, `20-…`, `21-…` |
+| 7 | **Edit with a CLI `memory edit` in between (the 409 copy)** | **PASS**. Steps: Raw → Edit and change the draft; run `openalpaca memory edit f085d45c --global` with `VISUAL=track-d/edit-cli.sh` (exit 0, revision `7273266538bd`, `evidence/d3-cli-edit.txt`); the window showed the design's copy verbatim, "This note changed since you opened it. Reload to see the current version — your text is kept.", with the draft kept and Save disabled; Reload showed "CURRENT VERSION" above the draft; Save then succeeded. **The copy came on the pre-save path:** the window saw `memory_changed` and noticed the revision move, so the GUI never sent the stale save. The daemon's own 409 was checked with curl: `POST /v1/memories/f085…` with the stale `If-Match` returned **409 `MEMORY_REVISION_CONFLICT`**, and the note was unchanged (`evidence/d3-stale-409.txt`). | `15-…` to `18-…` |
+| 8 | **Two-click Forget** | **PASS**. The first `Forget` turned into `Confirm forget`; the file was still on disk. The second click showed "Espresso grinder setting" is forgotten with the explanation, a toast, and the list back to empty. On disk, `notes/` and `.history/` are empty, and the control snapshot holds 2 tombstones (D2's and this note's) with `pending: null` (`evidence/d3-forget-disk.txt`). | `22-…`, `23-…` |
+| 9 | **Live refresh from a terminal `openalpaca memory add`** | **PASS**. With the Memory view open and untouched, `memory add --kind preference --title "Tea in the afternoon" --tag track-d …` (exit 0) made the note appear in the list without any interaction. | `24-memory-live-refresh-cli-add.png` |
+| 10a | **`/remember …` in GUI chat** | **PASS**. The answer, with no model, read "Saved as a note you wrote: "The bike is locked in the garage on weekdays" (71c9b3b1, global). It is used from your next message." Memory then lists it as `fact · Saved by you`. | `26-…`, `27-…` |
+| 10b | **Live refresh from a chat `/remember`** | **PASS**. With the GUI's Memory view open, `/remember The recycling goes out on Thursday evenings` was sent from an attended CLI chat (`script -q /dev/null openalpaca chat --message …`, a pty, exit 0, `evidence/d3-cli-chat-remember.txt`). The note appeared live. The GUI cannot show its own Memory view while sending from its own chat, so the GUI-chat case (10a) is only checked after a view switch. | `28-memory-live-refresh-chat-remember.png` |
+| 11 | **Settings → Persona save** | **PASS**. "Name: Track D tester" was saved with the toast "USER.md saved". The daemon logged `user_audit … actor=user` and hot-reloaded the profile. | `29-…`, `30-…` |
+| 12 | **Settings → Persona 409** | **PASS**: a real daemon 409 from the GUI. Steps: open a draft (Timezone); run `openalpaca persona edit user` with `VISUAL=track-d/edit-persona-cli.sh` (exit 0, revision `e2b1a1a53f4b`); click Save in the GUI. The copy read "USER.md changed since you opened it. Reload to see the current version — your text is kept.", with the draft kept and the file unchanged. Reload put "CURRENT VERSION" above the draft. A merged save kept both lines (`evidence/d3-USER.md.diff`). | `31-…` to `34-…` |
+| 13 | **First-run card in an empty transcript** | **PASS**. "No model is connected yet / configured: claude-haiku-4-5-20251001 — not available, and no model is. …" appears with `Open Models & keys`. It was seen at launch and again before the first turn. | `01-…`, `25-chat-first-run-card-empty-transcript.png` |
+| 14 | **Settings → Connection → Stop daemon… (last)** | **PASS**. The dialog title is "Stop the OpenAlpaca daemon?". It has the four paragraphs (cut off mid-step, comes back "interrupted", a streaming reply is lost, an approval is dropped, nothing is deleted) and "Right now: 1 window connected." (`evidence/d3-stop-dialog-text.txt`). `Stop daemon` behaved as follows: the daemon got `command=shutdown` and exited in about 1 s, with a **clean shutdown sequence**: cost flush (0 rows), session-log flush, extensions, connectors, wake, "Daemon stopped", 0 WARN and 0 ERROR (`evidence/d3-daemon-log-during-d3.txt`); `discovery.json` was removed; the GUI shows "Daemon stopped · stopped just now", `Start daemon`, the sidebar reads `stopped`, and a toast says "Daemon stopped.". After the external restart the GUI **stayed stopped**: it did not reconnect or respawn, and `busy.connected_clients` was 0. | `35-…`, `36-…`, `37-gui-stays-stopped-after-external-restart.png` |
+
+`Start daemon` in the GUI was **not** pressed, because it would have spawned an unsandboxed sidecar.
+
+## Defects and observations
+
+1. **Copy: "1 notes".** The Memory pane header pluralises unconditionally: `MemoryList.tsx:117` builds `` `${feed.items.length}${feed.hasMore ? "+" : ""} notes` ``. It was seen with one note (`08-…`). The search count ("1 found") is fine. Cosmetic.
+2. **Observation: the detail pane outlives a scope switch.** After switching from `This project` to `Global`, the detail still shows the project note while the Global list is empty (`06-…`). It is harmless and probably intentional, since the selection is kept, but a reader can take the note for a global one.
+3. **Observation: "Raw" is two different things.** The GUI's Raw tab shows the body only. That matches `docs/GUI_Manual.md` ("the body as written"), but `RawTab.tsx`'s header comment says "the note's Markdown as written", and `openalpaca memory show --raw` prints the whole file with its frontmatter. No GUI surface shows aliases, tags or the key of a note, and Add note has no alias field. That last point is design, not a bug.
+4. **Observation: the no-model memory command shows a model of `default`.** The GUI's answer meta reads `default · 0.0s · 0/0 tok`, and the CLI prints `[default | 0 in | 0 out | 44ms]`. No model answered.
+5. **Environment, not product: the sandboxed app cannot be used.** Under `sandbox-exec`, the GUI's webview could not reach a loopback daemon even though the profile allowed loopback, and LaunchServices gave the process no bundle id. The GUI half of "network-denied" is therefore **not demonstrated**. The daemon half is (D2, and again by the restart).
+6. **Not exercised:** the memory editor's *post-save* 409 branch (`refused: true`). The live `memory_changed` refresh always catches a CLI edit first. An on-disk external edit inside the 30 s reconciliation window would reach it. That branch's copy is the same constant, and Persona's post-save 409 was exercised for real.
+
+## Concerns
+
+1. The spec and the map are missing, as they were for D1/D2. Surfaces, names and order follow the task text.
+2. **The clicks are Accessibility presses, not pointer events.** Background pointer input does not reach the WKWebView unless its window is key. Full-screen control was interrupted by the owner's own use of the machine. A pointer-driven pass, with the owner away from the keyboard, would close that gap if the lead wants it.
+3. **WebKit's storage is shared with the owner's real app,** because the bundle id is the same (`com.tangyunpei.openalpaca-gui`). The only persisted key I set was `oa-project`, and it was **cleared** before the end. Sessions are not persisted. Pane widths and pins were not touched. No store outside `track-d/` was read or written.
+4. **Scratch artifacts left in place:**
+   - `track-d/live/proj/` with its `.openalpaca/` project store and one note.
+   - Global notes "Tea in the afternoon", "The bike is locked…" and "The recycling goes out…".
+   - `USER.md` with Name/Pronouns/Timezone filled. Its final newline was lost because my driver passed the text through `$(cat …)`; that is my artifact, not the product's.
+   - The CLI `/remember` transcript starts with `^D`, which is `script`'s EOF echo.
+5. **The daemon changed identity at the restart:** new pid, port and instance, with the same store and binary. Anything holding D2's values (51021, `950f…`) must read `evidence/d3-daemon.env`.
+   - The spec says D4 uses a different root. The spec is absent, so I left this store as it is, as instructed.
+   - D2's concern 3 still stands for D4: credential discovery and the Claude Code CLI backend fallback ran at both boots.
+6. The 409 surface for memory was shown on the window's own pre-save detection, plus a curl 409 on the daemon. It was not shown as the GUI receiving a 409 from the daemon (defect 6).

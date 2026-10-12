@@ -38,6 +38,14 @@ export interface ImagePreviewProps {
   height?: number | null;
   /** Muted line under the filename when the bytes are not loadable. */
   note?: string | null;
+  /**
+   * What to say when `src` fails to load, in place of the component's own
+   * sentence — for a caller that knows why a load may fail (a result file
+   * the daemon marked missing, whose Export and Open fail the same way). A
+   * change of it gives the same `src` a new attempt: the caller's reason
+   * for a failure is gone, so the failure may be too.
+   */
+  failedNote?: string | null;
   className?: string;
 }
 
@@ -48,14 +56,26 @@ export function ImagePreview({
   width,
   height,
   note,
+  failedNote,
   className,
 }: ImagePreviewProps) {
   const full = size === "full";
-  // Tracks the specific `src` that failed so a later, different `src` (a new
-  // artifact, or the same one after `missing` catches up and the caller
-  // passes a fresh URL) gets its own attempt rather than staying broken.
-  const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  const loadFailed = src !== null && src !== undefined && src === failedSrc;
+  // Tracks the specific `src` that failed, and what the caller said a failed
+  // load means then, so a later, different `src` (a new artifact, or the
+  // same one after `missing` catches up and the caller passes a fresh URL)
+  // gets its own attempt rather than staying broken — and so does the same
+  // `src` once that meaning changes: a row read again whose mark the daemon
+  // cleared (`failedNote` back to `null`) is a file that may load now (Y.4).
+  const [failed, setFailed] = useState<{
+    src: string;
+    failedNote: string | null;
+  } | null>(null);
+  const loadFailed =
+    src !== null &&
+    src !== undefined &&
+    failed !== null &&
+    src === failed.src &&
+    (failedNote ?? null) === failed.failedNote;
   const hasSrc = src !== null && src !== undefined && !loadFailed;
 
   const dimensions =
@@ -69,9 +89,11 @@ export function ImagePreview({
   // A load failure is the one thing this component learns for itself — the
   // browser rejected a URL the caller believed was good (gone, an expired
   // token, a CSP the webview doesn't admit) — so it overrides whatever note
-  // the caller passed for the "no src at all" case.
+  // the caller passed for the "no src at all" case. A caller that knows why
+  // a load may fail says so instead (`failedNote`).
   const placeholderNote = loadFailed
-    ? "The image could not be loaded — Export or Reveal opens it in its own app."
+    ? (failedNote ??
+      "The image could not be loaded — Export or Open opens it in its own app.")
     : note;
 
   return (
@@ -84,7 +106,7 @@ export function ImagePreview({
           src={src}
           alt={filename}
           className="block max-w-full rounded-md"
-          onError={() => setFailedSrc(src)}
+          onError={() => setFailed({ src, failedNote: failedNote ?? null })}
         />
       ) : (
         <div

@@ -4,7 +4,7 @@
  * These types were the *proposed* shapes in `unbacked.ts` until Phase 3 landed
  * the routes; they now describe what the daemon actually serves, with the
  * additive superset fields (`origin`, `pinned`, `missing`, `path`,
- * `project_root`, `rel_path`) the store writes.
+ * `project_root`, `rel_path`, `in_project`, `openable`) the store writes.
  *
  * Two URL builders sit beside the fetchers because the content routes are the
  * one part of the surface a *browser* loads rather than this client: they check
@@ -53,12 +53,38 @@ export interface Artifact {
   path: string;
   project_root: string | null;
   rel_path: string;
+  /**
+   * A result file in the project (ST-12): a pointer to the real file, with no
+   * versions. `name` and `rel_path` are then its path in the project and
+   * `path` the file itself.
+   */
+  in_project: boolean;
+  /** ST-18: Open is offered — every by-product; a result file only of a kind the store keeps. */
+  openable: boolean;
 }
 
 export interface ArtifactListPage {
   artifacts: Artifact[];
   /** The unpaged `COUNT(*)`, so a page can say what it is a page of. */
   total: number;
+}
+
+/** A row as the wire may carry it: a daemon older than result files (S4a) sends neither field. */
+type WireArtifact = Omit<Artifact, "in_project" | "openable"> &
+  Partial<Pick<Artifact, "in_project" | "openable">>;
+
+/**
+ * One reading of a row for every caller (d7-app-4): a row without
+ * `in_project` / `openable` is a by-product that opens — the reading the
+ * `artifact_written` frame already gets — rather than a row every caller
+ * reads as "not openable".
+ */
+function fromWire(row: WireArtifact): Artifact {
+  return {
+    ...row,
+    in_project: row.in_project ?? false,
+    openable: row.openable ?? true,
+  };
 }
 
 export interface ArtifactVersion {
@@ -96,6 +122,8 @@ export interface ListArtifactsQuery {
   q?: string;
   /** Rows whose bytes are gone are hidden unless this is set. */
   includeMissing?: boolean;
+  /** `in_project`: `false` by-products only (the Library's default), `true` results only; absent, both. */
+  inProject?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -105,20 +133,25 @@ export async function listArtifacts(
   query: ListArtifactsQuery = {},
   signal?: AbortSignal,
 ): Promise<ArtifactListPage> {
-  return await apiFetch<ArtifactListPage>("/v1/artifacts", {
-    signal,
-    query: {
-      task_id: query.taskId,
-      kind: query.kind,
-      origin: query.origin,
-      project_root: query.projectRoot,
-      pinned: query.pinned,
-      q: query.q,
-      include_missing: query.includeMissing,
-      limit: query.limit,
-      offset: query.offset,
+  const page = await apiFetch<{ artifacts: WireArtifact[]; total: number }>(
+    "/v1/artifacts",
+    {
+      signal,
+      query: {
+        task_id: query.taskId,
+        kind: query.kind,
+        origin: query.origin,
+        project_root: query.projectRoot,
+        pinned: query.pinned,
+        q: query.q,
+        include_missing: query.includeMissing,
+        in_project: query.inProject,
+        limit: query.limit,
+        offset: query.offset,
+      },
     },
-  });
+  );
+  return { ...page, artifacts: page.artifacts.map(fromWire) };
 }
 
 /** `GET /v1/artifacts/{id}` — 404 for an unknown row and for another owner's. */
@@ -126,9 +159,11 @@ export async function getArtifact(
   id: string,
   signal?: AbortSignal,
 ): Promise<Artifact> {
-  return await apiFetch<Artifact>(`/v1/artifacts/${encodeURIComponent(id)}`, {
-    signal,
-  });
+  return fromWire(
+    await apiFetch<WireArtifact>(`/v1/artifacts/${encodeURIComponent(id)}`, {
+      signal,
+    }),
+  );
 }
 
 /** `GET /v1/artifacts/{id}/versions` — newest first. */

@@ -128,26 +128,6 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
                 cx.path = None;
             }
         }
-        "ai.embeddings.enabled" => {
-            if let Some(ref mut emb) = config.embeddings {
-                emb.enabled = false;
-            }
-        }
-        "ai.embeddings.provider" => {
-            if let Some(ref mut emb) = config.embeddings {
-                emb.provider = String::new();
-            }
-        }
-        "ai.embeddings.model" => {
-            if let Some(ref mut emb) = config.embeddings {
-                emb.model = None;
-            }
-        }
-        "ai.embeddings.dimensions" => {
-            if let Some(ref mut emb) = config.embeddings {
-                emb.dimensions = None;
-            }
-        }
         "ai.web_search.api_key" => {
             if let Some(ref mut ws) = config.web_search {
                 ws.api_key = String::new();
@@ -235,10 +215,6 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
     let keys = [
         "ai.default_model",
         "ai.fallback_models",
-        "ai.embeddings.enabled",
-        "ai.embeddings.provider",
-        "ai.embeddings.model",
-        "ai.embeddings.dimensions",
         "ai.anthropic.enabled",
         "ai.anthropic.api_key",
         "ai.openai.enabled",
@@ -307,7 +283,6 @@ pub fn clear_ai_config_at(path: &std::path::Path) -> Result<()> {
     config.providers = None;
     config.credential_discovery = None;
     config.cli_backends = None;
-    config.embeddings = None;
     config.models = None;
     config.fallback_chains = None;
     config.security = None;

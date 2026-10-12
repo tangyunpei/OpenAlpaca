@@ -41,8 +41,8 @@ fn test_validate_clamps_out_of_range_values() {
     // Set some values out of range
     config.orchestrator.memory.prompt_recent_messages = 0; // min is 1
     config.orchestrator.memory.summary_max_chars = 999_999; // max is 32000
-    config.orchestrator.memory.fts_jaccard_threshold = 2.5; // max is 1.0
-    config.orchestrator.memory.decay.half_life_days = 0.0; // min is 1.0
+    config.orchestrator.memory.memory_confidence_threshold = 2.5; // max is 1.0
+    config.orchestrator.learning.turns_per_flush = 0; // min is 1
     config.security.max_input_length = 0; // min is 1024
     config.server.event_bus_capacity = 1; // min is 64
 
@@ -50,8 +50,8 @@ fn test_validate_clamps_out_of_range_values() {
 
     assert_eq!(config.orchestrator.memory.prompt_recent_messages, 1);
     assert_eq!(config.orchestrator.memory.summary_max_chars, 32000);
-    assert_eq!(config.orchestrator.memory.fts_jaccard_threshold, 1.0);
-    assert_eq!(config.orchestrator.memory.decay.half_life_days, 1.0);
+    assert_eq!(config.orchestrator.memory.memory_confidence_threshold, 1.0);
+    assert_eq!(config.orchestrator.learning.turns_per_flush, 1);
     assert_eq!(config.security.max_input_length, 1024);
     assert_eq!(config.server.event_bus_capacity, 64);
 }
@@ -574,4 +574,189 @@ fn test_artifacts_validate_clamps() {
     config.validate();
     assert_eq!(config.execution.artifacts.max_artifact_bytes, 100 * 1024 * 1024);
     assert_eq!(config.execution.artifacts.max_versions_per_artifact, 200);
+}
+
+// ── The two extraction count keys (memory redesign, plan 3.4; Learning v2) ──
+
+/// Design 09 §1.10: a learning call writes at most 12 notes, a task run 10,
+/// under `[orchestrator.costs]`.
+#[test]
+fn extraction_count_keys_default_to_twelve_per_call_and_ten_per_run() {
+    let config = DaemonConfig::default();
+    assert_eq!(config.orchestrator.costs.extract_max_items_per_call, 12);
+    assert_eq!(config.orchestrator.costs.task_extract_max_items_per_run, 10);
+
+    let parsed: DaemonConfig = toml::from_str("").unwrap();
+    assert_eq!(parsed.orchestrator.costs.extract_max_items_per_call, 12);
+    assert_eq!(parsed.orchestrator.costs.task_extract_max_items_per_run, 10);
+}
+
+/// A zero would switch extraction off by the back door and an absurd count
+/// would let one call flood a partition: both keys are clamped to 1..=50 and
+/// 1..=100, as the registry rows say.
+#[test]
+fn extraction_count_keys_are_clamped() {
+    let mut config: DaemonConfig = toml::from_str(
+        r#"
+[orchestrator.costs]
+extract_max_items_per_call = 0
+task_extract_max_items_per_run = 5000
+"#,
+    )
+    .unwrap();
+    config.validate();
+    assert_eq!(config.orchestrator.costs.extract_max_items_per_call, 1);
+    assert_eq!(
+        config.orchestrator.costs.task_extract_max_items_per_run,
+        100
+    );
+}
+
+// ── Learning v2's keys (design 09 §1.10) ─────────────────────────────
+
+/// MD-10's two numbers, the off switch and the daily call cap: 120 s of
+/// quiet, 10 new turns, learning on, and 200 extraction calls a UTC day —
+/// the same from the struct default and from an empty file.
+#[test]
+fn learning_keys_default_to_on_120s_10_turns_and_200_calls() {
+    for config in [DaemonConfig::default(), toml::from_str("").unwrap()] {
+        assert!(config.orchestrator.learning.enabled);
+        assert_eq!(config.orchestrator.learning.idle_secs, 120);
+        assert_eq!(config.orchestrator.learning.turns_per_flush, 10);
+        assert_eq!(config.orchestrator.costs.extract_max_calls_per_day, 200);
+    }
+}
+
+/// A partial `[orchestrator.learning]` table keeps the defaults of the keys
+/// it does not name (named serde defaults, never a bool's `false`).
+#[test]
+fn a_partial_learning_table_keeps_the_other_defaults() {
+    let config: DaemonConfig = toml::from_str(
+        r#"
+[orchestrator.learning]
+idle_secs = 0
+"#,
+    )
+    .unwrap();
+    assert!(config.orchestrator.learning.enabled);
+    assert_eq!(
+        config.orchestrator.learning.idle_secs, 0,
+        "0 switches the idle trigger off"
+    );
+    assert_eq!(config.orchestrator.learning.turns_per_flush, 10);
+}
+
+/// The registry's ranges: `idle_secs` 0..=3600, `turns_per_flush` 1..=100,
+/// `extract_max_calls_per_day` 0..=10000 (0 = no cap).
+#[test]
+fn learning_keys_are_clamped() {
+    let mut config: DaemonConfig = toml::from_str(
+        r#"
+[orchestrator.learning]
+idle_secs = 99999
+turns_per_flush = 0
+
+[orchestrator.costs]
+extract_max_calls_per_day = 20000
+"#,
+    )
+    .unwrap();
+    config.validate();
+    assert_eq!(config.orchestrator.learning.idle_secs, 3600);
+    assert_eq!(config.orchestrator.learning.turns_per_flush, 1);
+    assert_eq!(config.orchestrator.costs.extract_max_calls_per_day, 10000);
+
+    let mut high: DaemonConfig = toml::from_str(
+        r#"
+[orchestrator.learning]
+turns_per_flush = 1000
+"#,
+    )
+    .unwrap();
+    high.validate();
+    assert_eq!(high.orchestrator.learning.turns_per_flush, 100);
+}
+
+// ── Index-first recall (design 09 §13.2, MD-15) ──────────────────────
+
+/// `[orchestrator.memory] recall_mode` is `index` unless the file says
+/// otherwise — from the struct default, an empty file and a memory table
+/// that does not name it — and `excerpts` is the other value. Both survive a
+/// round trip; a value the key does not have fails the file like any other
+/// mistyped key.
+#[test]
+fn recall_mode_defaults_to_index_and_reads_excerpts() {
+    for config in [
+        DaemonConfig::default(),
+        toml::from_str("").unwrap(),
+        toml::from_str("[orchestrator.memory]\nprompt_recent_messages = 40\n").unwrap(),
+    ] {
+        assert_eq!(config.orchestrator.memory.recall_mode, RecallMode::Index);
+    }
+    let config: DaemonConfig =
+        toml::from_str("[orchestrator.memory]\nrecall_mode = \"excerpts\"\n").unwrap();
+    assert_eq!(config.orchestrator.memory.recall_mode, RecallMode::Excerpts);
+    let round: DaemonConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(round.orchestrator.memory.recall_mode, RecallMode::Excerpts);
+    assert!(
+        toml::to_string(&DaemonConfig::default())
+            .unwrap()
+            .contains("recall_mode = \"index\"")
+    );
+    assert!(
+        toml::from_str::<DaemonConfig>("[orchestrator.memory]\nrecall_mode = \"snippets\"\n")
+            .is_err()
+    );
+}
+
+/// Design 11 §8 (CQ-5): `[orchestrator.memory] carry_over_turns` is 3
+/// unless the file says otherwise, the shipped file names 3, `0` (off) is
+/// kept, and a value past the registry's 20 is clamped.
+#[test]
+fn carry_over_turns_defaults_to_three_and_zero_turns_it_off() {
+    for config in [
+        DaemonConfig::default(),
+        toml::from_str("").unwrap(),
+        toml::from_str(include_str!("../../../../config/daemon.toml")).unwrap(),
+    ] {
+        assert_eq!(config.orchestrator.memory.carry_over_turns, 3);
+    }
+    let mut off: DaemonConfig =
+        toml::from_str("[orchestrator.memory]\ncarry_over_turns = 0\n").unwrap();
+    off.validate();
+    assert_eq!(off.orchestrator.memory.carry_over_turns, 0);
+    let mut high: DaemonConfig =
+        toml::from_str("[orchestrator.memory]\ncarry_over_turns = 500\n").unwrap();
+    high.validate();
+    assert_eq!(high.orchestrator.memory.carry_over_turns, 20);
+}
+
+/// The shipped `config/daemon.toml` names the key with its default, and the
+/// whole file still parses.
+#[test]
+fn the_shipped_daemon_toml_names_recall_mode_index() {
+    let shipped = include_str!("../../../../config/daemon.toml");
+    assert!(shipped.contains("\nrecall_mode = \"index\"\n"), "{shipped}");
+    let config: DaemonConfig = toml::from_str(shipped).unwrap();
+    assert_eq!(config.orchestrator.memory.recall_mode, RecallMode::Index);
+}
+
+// ── Conversation summaries (design 09 §13.3, MD-16) ─────────────────────
+
+/// `[orchestrator.learning] episode_max_per_day` is gone (design 11 §8,
+/// owner decision CQ-2; kept gone by CQ-11): a summary's own call counts
+/// under the summariser's daily ceiling, and no daily count bounds it. A hand-edited file that still names
+/// it is read as every stale key is — ignored — and the shipped
+/// `config/daemon.toml` no longer names it.
+#[test]
+fn episode_max_per_day_is_gone_and_a_stale_key_is_ignored() {
+    let stale: DaemonConfig =
+        toml::from_str("[orchestrator.learning]\nidle_secs = 60\nepisode_max_per_day = 0\n")
+            .unwrap();
+    assert_eq!(stale.orchestrator.learning.idle_secs, 60);
+    let round = toml::to_string(&stale).unwrap();
+    assert!(!round.contains("episode_max_per_day"), "{round}");
+
+    let shipped = include_str!("../../../../config/daemon.toml");
+    assert!(!shipped.contains("episode_max_per_day"), "{shipped}");
 }

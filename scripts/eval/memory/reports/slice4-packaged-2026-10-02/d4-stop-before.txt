@@ -1,0 +1,3 @@
+  PID ELAPSED COMMAND
+72243   20:01 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad
+-rw-------@ 1 owner  wheel  432 Oct  2 21:27 <scratch>/program/track-d/store-model/state/discovery.json

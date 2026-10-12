@@ -13,6 +13,8 @@ pub mod daemon_config_cli;
 pub mod ext;
 pub mod gui;
 pub mod llm;
+pub mod memory;
+pub mod persona;
 pub mod plugin;
 pub mod sessions;
 mod llm_keys;

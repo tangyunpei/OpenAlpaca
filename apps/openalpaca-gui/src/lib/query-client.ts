@@ -174,6 +174,13 @@ export function invalidationKeysFor(
         qk.chat.all(),
       ];
 
+    // Memory redesign G30: the Memory view invalidates on this instead of
+    // polling, and `["memory"]` is the prefix of every key it mounts — list,
+    // search, recently learned, a note, its history. Not `chat`: nothing a
+    // transcript stores names a note (`done.memory_used` is live only).
+    case "memory_changed":
+      return [qk.memory.all()];
+
     case "connector_status":
       return [qk.connectors.all()];
 

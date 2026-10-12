@@ -1,0 +1,1177 @@
+//! The delete core against a scenario with a bystander on every leg: a second
+//! project, a home conversation, a surviving conversation that also holds a
+//! message naming the doomed project, and files linked from inside and from
+//! outside. The home store is a tempdir behind the crate's one guard; both
+//! projects are git repositories made for the test.
+
+use super::*;
+use crate::memory_files::{
+    ControlSnapshot, NOTES_DIR, OWNERS_DIR, SnapshotScope, home_partition_key, owner_key,
+    project_partition_key, snapshot_path_for,
+};
+use crate::repository::{ARTIFACT_ROLE, ATTACHMENT_ROLE};
+use crate::store::StoreScope;
+use crate::store::projects::{self, Project};
+use crate::store::tests::HomeStoreGuard;
+use crate::{
+    ArtifactKind, ArtifactStore, Database, FileAssetRepository, NewArtifact, NewProjectFile,
+    NewUpload, PurgeCounts, PurgeSession, UploadStore,
+};
+use chrono::{DateTime, TimeZone, Utc};
+use std::path::{Path, PathBuf};
+use tempfile::{TempDir, tempdir};
+
+const OWNER: &str = "owner-1";
+
+/// One date for every write, so a second put of a title is its next version.
+fn at() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 1, 9, 0, 0).unwrap()
+}
+
+pub(super) struct World {
+    tmp: TempDir,
+    _env: HomeStoreGuard,
+    pub(super) home: PathBuf,
+    pub(super) db: Database,
+}
+
+impl World {
+    pub(super) fn new() -> Self {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let env = HomeStoreGuard::set(&home);
+        let db = Database::open(&tmp.path().join("test.db")).unwrap();
+        Self {
+            tmp,
+            _env: env,
+            home,
+            db,
+        }
+    }
+
+    /// A git repository under the test's tempdir, registered as a project.
+    pub(super) fn project(&self, name: &str) -> Project {
+        let root = self
+            .tmp
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("repos")
+            .join(name);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        projects::register(&root).unwrap()
+    }
+
+    pub(super) fn exec(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(sql, params)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    pub(super) fn count(&self, sql: &str) -> i64 {
+        self.db
+            .with_connection(|conn| Ok(conn.query_row(sql, [], |row| row.get::<_, i64>(0))?))
+            .unwrap()
+    }
+
+    /// A user row in `session`, naming `root` in `workspace_root` (or none).
+    pub(super) fn message(&self, session: &str, root: Option<&str>) -> i64 {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO conversation_messages
+                         (lane_key, role, content, session_id, workspace_root)
+                     VALUES (?1, 'user', 'hi', ?1, ?2)",
+                    rusqlite::params![session, root],
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .unwrap()
+    }
+
+    /// An upload in `project`'s store whose bytes are its own name.
+    pub(super) fn upload(&self, project: &Project, name: &str) -> String {
+        let scope = StoreScope::Project(project.root.clone());
+        UploadStore::new(&self.db)
+            .put(NewUpload {
+                owner_id: OWNER,
+                filename: name,
+                mime_type: "text/plain",
+                data: name.as_bytes(),
+                scope: &scope,
+                created: at(),
+            })
+            .unwrap()
+            .asset
+            .id
+    }
+
+    /// A by-product in `project`'s store; the same title again is its next version.
+    pub(super) fn by_product(&self, project: &Project, title: &str, bytes: &[u8]) -> String {
+        let scope = StoreScope::Project(project.root.clone());
+        let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, title, bytes);
+        new.created = at();
+        ArtifactStore::new(&self.db).put(new).unwrap().0.id
+    }
+
+    pub(super) fn link(&self, message: i64, file: &str, role: &str) {
+        FileAssetRepository::new(&self.db)
+            .link_to_message_with_role(message, file, 0, None, role)
+            .unwrap();
+    }
+
+    /// A control snapshot written by hand: `project` names a project
+    /// partition stamped with its id, `None` the home partition.
+    pub(super) fn snapshot(&self, owner: &str, project: Option<&Project>) {
+        let okey = owner_key(owner);
+        let now = Utc::now();
+        let (key, scope, dir, id) = match project {
+            Some(p) => (
+                project_partition_key(&okey, &p.id),
+                SnapshotScope::Project,
+                p.dir.join("memory").join(OWNERS_DIR).join(&okey),
+                Some(p.id),
+            ),
+            None => (
+                home_partition_key(&okey),
+                SnapshotScope::Home,
+                self.home.join("memory").join(OWNERS_DIR).join(&okey),
+                None,
+            ),
+        };
+        let mut snapshot =
+            ControlSnapshot::new(&key, scope, &okey, owner, dir.to_string_lossy(), now);
+        if let Some(id) = id {
+            snapshot = snapshot.with_project_id(id);
+        }
+        snapshot
+            .save(&snapshot_path_for(&key).unwrap(), now)
+            .unwrap();
+    }
+
+    /// A file under a project partition's `notes/` — counted by name only.
+    pub(super) fn note_file(&self, project: &Project, owner: &str, name: &str) {
+        let dir = project
+            .dir
+            .join("memory")
+            .join(OWNERS_DIR)
+            .join(owner_key(owner))
+            .join(NOTES_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), b"---\nschema: 1\n---\n").unwrap();
+    }
+}
+
+/// What [`seed`] made, by name.
+pub(super) struct Seed {
+    pub(super) p: Project,
+    pub(super) q: Project,
+    pub(super) m_p: i64,
+    pub(super) m_q_leg: i64,
+    pub(super) m_q: i64,
+    pub(super) m_h: i64,
+    pub(super) u_alone: String,
+    pub(super) u_shared: String,
+    pub(super) u_leg: String,
+    pub(super) u_q: String,
+    pub(super) a_alone: String,
+    pub(super) a_shared: String,
+}
+
+/// `p` is deleted; `q` and the home scope are bystanders.
+///
+/// | Row | Names `p` by | Fate |
+/// |---|---|---|
+/// | session `s-p` | `workspace_id` | goes |
+/// | message `m_p` | its session | goes |
+/// | message `m_q_leg` (session `s-q`) | `workspace_root` | goes; `s-q` stays |
+/// | `t-p`, its span, event, decision, LLM call | `workspace_id` / the run | go |
+/// | follow-ups `f-sp` (session `s-p`), `f-path` (session `s-q`, `workspace_path = p`) | session / path | go |
+/// | `learning_cursor` of `s-p` | its session | goes |
+/// | `u_alone` (linked by `m_p`), `u_leg` (linked by `m_q_leg`), `a_alone` (unlinked) | `project_root` | go |
+/// | `u_shared` (linked by `m_p` and the home message `m_h`) | `project_root` | kept |
+/// | `a_shared`, two versions (linked as an artifact by `m_q`) | `project_root` | kept, newest version |
+pub(super) fn seed(w: &World) -> Seed {
+    let p = w.project("doomed");
+    let q = w.project("bystander");
+    let (pr, qr) = (p.root_string(), q.root_string());
+    w.exec(
+        "INSERT INTO session (id, lane_key, source, workspace_id) VALUES ('s-p', 's-p', 'gui', ?1)",
+        &[&pr],
+    );
+    w.exec(
+        "INSERT INTO session (id, lane_key, source, workspace_id, message_count)
+         VALUES ('s-q', 's-q', 'gui', ?1, 2)",
+        &[&qr],
+    );
+    w.exec(
+        "INSERT INTO session (id, lane_key, source) VALUES ('s-h', 's-h', 'gui')",
+        &[],
+    );
+    let m_p = w.message("s-p", Some(pr.as_str()));
+    let m_q_leg = w.message("s-q", Some(pr.as_str()));
+    let m_q = w.message("s-q", Some(qr.as_str()));
+    let m_h = w.message("s-h", None);
+    w.exec(
+        "INSERT INTO message_feedback (message_id, feedback) VALUES (?1, 'positive')",
+        &[&m_p],
+    );
+    w.exec(
+        "INSERT INTO task (id, title, created_by, source_lane, workspace_id, session_id, status)
+         VALUES ('t-p', 't', 'test', 'test', ?1, 's-p', 'completed')",
+        &[&pr],
+    );
+    w.exec(
+        "INSERT INTO task (id, title, created_by, source_lane, workspace_id, session_id, status)
+         VALUES ('t-q', 't', 'test', 'test', ?1, 's-q', 'completed')",
+        &[&qr],
+    );
+    // A home turn that started p's run: the run goes, the turn stays readable.
+    w.exec(
+        "UPDATE conversation_messages SET task_id = 't-p' WHERE id = ?1",
+        &[&m_h],
+    );
+    for (session, task) in [
+        (Some("s-p"), None),
+        (None, Some("t-p")),
+        (Some("s-q"), None),
+    ] {
+        w.exec(
+            "INSERT INTO tool_execution_log (agent_id, tool_name, success, duration_ms, session_id, task_id)
+             VALUES ('a', 'read', 1, 3, ?1, ?2)",
+            &[&session, &task],
+        );
+    }
+    w.exec(
+        "INSERT INTO lane_followups (lane_key, kind, content, principal_json, session_id)
+         VALUES ('s-p', 'followup', 'later', '{}', 's-p')",
+        &[],
+    );
+    w.exec(
+        "INSERT INTO lane_followups (lane_key, kind, content, principal_json, session_id, workspace_path)
+         VALUES ('s-q', 'followup', 'later', '{}', 's-q', ?1)",
+        &[&pr],
+    );
+    w.exec(
+        "INSERT INTO lane_followups (lane_key, kind, content, principal_json, session_id, workspace_path)
+         VALUES ('s-q', 'followup', 'later', '{}', 's-q', ?1)",
+        &[&qr],
+    );
+    w.exec(
+        "INSERT INTO learning_cursor (session_id) VALUES ('s-p'), ('s-q')",
+        &[],
+    );
+    w.exec(
+        "INSERT INTO subagent_span (id, task_id, template_id, agent_instance_id, label, started_at)
+         VALUES ('span-1', 't-p', 't', 'i', 'review', '2026-10-01T09:00:00Z')",
+        &[],
+    );
+    w.exec(
+        "INSERT INTO event_log (event_type, task_id) VALUES ('started', 't-p'), ('started', 't-q')",
+        &[],
+    );
+    w.exec(
+        "INSERT INTO dispatch_decisions (request_id, task_id, mode, reason)
+         VALUES ('r-1', 't-p', 'lead', 'because')",
+        &[],
+    );
+    w.exec(
+        "INSERT INTO llm_call_log (task_id, provider, model) VALUES ('t-p', 'anthropic', 'sonnet')",
+        &[],
+    );
+
+    let u_alone = w.upload(&p, "alone.txt");
+    let u_shared = w.upload(&p, "shared.txt");
+    let u_leg = w.upload(&p, "leg.txt");
+    let u_q = w.upload(&q, "theirs.txt");
+    let a_alone = w.by_product(&p, "Alone", b"alone\n");
+    let a_shared = w.by_product(&p, "Shared", b"v1\n");
+    assert_eq!(
+        w.by_product(&p, "Shared", b"v2\n"),
+        a_shared,
+        "the second put is version 2"
+    );
+    w.link(m_p, &u_alone, ATTACHMENT_ROLE);
+    w.link(m_p, &u_shared, ATTACHMENT_ROLE);
+    w.link(m_h, &u_shared, ATTACHMENT_ROLE);
+    w.link(m_q_leg, &u_leg, ATTACHMENT_ROLE);
+    w.link(m_q, &a_shared, ARTIFACT_ROLE);
+    w.link(m_q, &u_q, ATTACHMENT_ROLE);
+
+    Seed {
+        p,
+        q,
+        m_p,
+        m_q_leg,
+        m_q,
+        m_h,
+        u_alone,
+        u_shared,
+        u_leg,
+        u_q,
+        a_alone,
+        a_shared,
+    }
+}
+
+#[test]
+fn the_plan_counts_every_row_the_five_columns_name_and_the_files_a_surviving_message_links() {
+    let w = World::new();
+    let s = seed(&w);
+
+    let plan = delete_plan(&w.db, &s.p).unwrap();
+
+    assert_eq!(
+        plan.counts,
+        PurgeCounts {
+            sessions: 1,
+            messages: 2,
+            tool_calls: 2,
+            followups: 2,
+            tasks: 1,
+            spans: 1,
+            run_events: 1,
+            uploads: 2,
+            artifacts: 1,
+        }
+    );
+    assert_eq!(
+        plan.kept,
+        KeptFiles {
+            uploads: 1,
+            artifacts: 1
+        }
+    );
+    assert_eq!(
+        plan.sessions,
+        vec![PurgeSession {
+            id: "s-p".to_string(),
+            lane_key: "s-p".to_string()
+        }]
+    );
+    assert_eq!(plan.project, s.p);
+    assert_ne!(s.q.id, s.p.id);
+    // Every row the scenario named is still there to be accounted for.
+    for id in [
+        &s.u_alone,
+        &s.u_shared,
+        &s.u_leg,
+        &s.u_q,
+        &s.a_alone,
+        &s.a_shared,
+    ] {
+        assert_eq!(
+            w.count(&format!(
+                "SELECT COUNT(*) FROM file_assets WHERE id = '{id}'"
+            )),
+            1
+        );
+    }
+    for id in [s.m_p, s.m_q_leg, s.m_q, s.m_h] {
+        assert_eq!(
+            w.count(&format!(
+                "SELECT COUNT(*) FROM conversation_messages WHERE id = {id}"
+            )),
+            1
+        );
+    }
+    // A plan reads only.
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 3);
+    assert_eq!(w.count("SELECT COUNT(*) FROM conversation_messages"), 4);
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM file_assets"),
+        6,
+        "a second version is no second row"
+    );
+}
+
+/// The kept set reads the same predicate the delete does: a message dies on
+/// its session **or** on its own `workspace_root`, so a file only such a
+/// message links is not kept — until a message the delete leaves links it.
+#[test]
+fn a_file_linked_only_by_a_message_naming_the_project_is_not_kept() {
+    let w = World::new();
+    let s = seed(&w);
+    let before = delete_plan(&w.db, &s.p).unwrap();
+
+    w.link(s.m_h, &s.u_leg, ATTACHMENT_ROLE);
+    let after = delete_plan(&w.db, &s.p).unwrap();
+
+    assert_eq!(after.kept.uploads, before.kept.uploads + 1);
+    assert_eq!(after.counts.uploads, before.counts.uploads - 1);
+}
+
+#[test]
+fn the_plan_counts_every_owners_partition_and_note_files_of_this_project_only() {
+    let w = World::new();
+    let p = w.project("noted");
+    let q = w.project("other");
+    w.snapshot("alice", Some(&p));
+    w.snapshot("bob", Some(&p));
+    w.snapshot("alice", Some(&q));
+    w.snapshot("alice", None);
+    w.note_file(&p, "alice", "00000000-0000-4000-8000-000000000001--a.md");
+    w.note_file(&p, "alice", "00000000-0000-4000-8000-000000000002--b.md");
+    w.note_file(&p, "bob", "00000000-0000-4000-8000-000000000003--c.md");
+    w.note_file(&p, "bob", ".00000000-0000-4000-8000-000000000003--c.md.tmp");
+    w.note_file(&q, "alice", "00000000-0000-4000-8000-000000000004--d.md");
+
+    let plan = delete_plan(&w.db, &p).unwrap();
+
+    assert_eq!(plan.memory_partitions, 2);
+    assert_eq!(plan.memory_notes, 3);
+    assert!(plan.counts.is_empty());
+    assert_eq!(plan.kept, KeptFiles::default());
+}
+
+/// Every regular file under `dir`, recursively.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            out.extend(files_under(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[test]
+fn deleting_takes_every_row_the_plan_counted_and_nothing_else() {
+    let w = World::new();
+    let s = seed(&w);
+    let plan = delete_plan(&w.db, &s.p).unwrap();
+
+    let outcome = delete_project_data(&w.db, &s.p).unwrap();
+
+    assert_eq!(
+        outcome.counts, plan.counts,
+        "the dry run and the real call agree"
+    );
+    assert_eq!(outcome.kept, plan.kept);
+    assert_eq!(outcome.session_ids, vec!["s-p".to_string()]);
+    assert_eq!(outcome.message_ids, vec![s.m_p, s.m_q_leg]);
+
+    // The bystanders' rows, one by one.
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session WHERE id IN ('s-q', 's-h')"),
+        2
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 2);
+    let messages: Vec<i64> =
+        w.db.with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT id FROM conversation_messages ORDER BY id")?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    assert_eq!(messages, vec![s.m_q, s.m_h]);
+    assert_eq!(
+        w.count("SELECT message_count FROM session WHERE id = 's-q'"),
+        1,
+        "a surviving conversation that lost a message is recounted"
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM conversation_messages WHERE id = {} AND task_id = 't-p'",
+            s.m_h
+        )),
+        1,
+        "the home turn that started the deleted run stays readable, its task_id dangling"
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM message_feedback"), 0);
+    assert_eq!(w.count("SELECT COUNT(*) FROM tool_execution_log"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM lane_followups"), 1);
+    assert_eq!(
+        w.count(
+            "SELECT COUNT(*) FROM lane_followups
+              WHERE workspace_path = (SELECT workspace_id FROM session WHERE id = 's-q')"
+        ),
+        1
+    );
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM learning_cursor WHERE session_id = 's-q'"),
+        1
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM learning_cursor"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM task"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM task WHERE id = 't-q'"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM subagent_span"), 0);
+    assert_eq!(w.count("SELECT COUNT(*) FROM event_log"), 1);
+    assert_eq!(w.count("SELECT COUNT(*) FROM dispatch_decisions"), 0);
+    assert_eq!(w.count("SELECT COUNT(*) FROM llm_call_log"), 0);
+
+    // Files: three gone, q's untouched, two kept with no project.
+    let ids: Vec<String> =
+        w.db.with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT id FROM file_assets ORDER BY id")?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    let mut expected = vec![s.u_shared.clone(), s.u_q.clone(), s.a_shared.clone()];
+    expected.sort();
+    assert_eq!(ids, expected);
+    for gone in [&s.u_alone, &s.u_leg, &s.a_alone] {
+        assert!(!ids.contains(gone));
+    }
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM file_assets WHERE project_root IS NULL"),
+        2,
+        "both kept files are re-addressed with no project"
+    );
+    // The links a surviving message holds survive with their file.
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM conversation_message_attachments"),
+        3
+    );
+
+    // This call removes no file: the project's folder is step 3's.
+    assert!(s.p.dir.join("uploads").is_dir());
+    assert!(s.q.dir.is_dir());
+}
+
+#[test]
+fn a_linked_upload_and_a_linked_by_product_move_to_the_root_store_and_still_read() {
+    let w = World::new();
+    let s = seed(&w);
+
+    delete_project_data(&w.db, &s.p).unwrap();
+
+    let folder = format!("{}-{}", s.p.name, s.p.id);
+    let (storage_path, rel_path): (String, String) =
+        w.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT storage_path, rel_path FROM file_assets WHERE id = ?1",
+                [&s.u_shared],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert!(
+        rel_path.starts_with(&format!("{KEPT_DIR}/{folder}/")),
+        "{rel_path}"
+    );
+    assert_eq!(
+        PathBuf::from(&storage_path),
+        w.home.join("uploads").join(&rel_path),
+        "storage_path is the uploads root plus rel_path, byte for byte"
+    );
+    assert_eq!(std::fs::read(&storage_path).unwrap(), b"shared.txt");
+
+    let store = ArtifactStore::new(&w.db);
+    let head = store.resolve_content(&s.a_shared, None).unwrap();
+    assert!(
+        head.starts_with(w.home.join("artifacts").join(KEPT_DIR).join(&folder)),
+        "{}",
+        head.display()
+    );
+    assert_eq!(std::fs::read(&head).unwrap(), b"v2\n");
+}
+
+/// ST-19's consequence (§0.5): a kept by-product keeps its newest version
+/// only; the older ones go with the project.
+#[test]
+fn a_kept_by_product_keeps_its_newest_version_only() {
+    let w = World::new();
+    let s = seed(&w);
+
+    delete_project_data(&w.db, &s.p).unwrap();
+
+    let store = ArtifactStore::new(&w.db);
+    let versions = store.versions(&s.a_shared).unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].version, 2);
+    let rel: String =
+        w.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT rel_path FROM file_assets WHERE id = ?1",
+                [&s.a_shared],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        versions[0].rel_path, rel,
+        "the one version row points at the new head"
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT version_count FROM file_assets WHERE id = '{}'",
+            s.a_shared
+        )),
+        1
+    );
+    assert!(
+        store.resolve_content(&s.a_shared, Some(1)).is_err(),
+        "version 1 is gone"
+    );
+}
+
+#[test]
+fn a_failed_transaction_deletes_nothing_and_takes_its_copies_back() {
+    let w = World::new();
+    let s = seed(&w);
+    w.exec(
+        "CREATE TRIGGER refuse_task_delete BEFORE DELETE ON task
+         BEGIN SELECT RAISE(ABORT, 'refused by the test'); END",
+        &[],
+    );
+
+    let err = delete_project_data(&w.db, &s.p).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("refused by the test"),
+        "{err:#}"
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 3);
+    assert_eq!(w.count("SELECT COUNT(*) FROM conversation_messages"), 4);
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM file_assets WHERE project_root IS NULL"),
+        0
+    );
+    assert!(files_under(&w.home.join("uploads").join(KEPT_DIR)).is_empty());
+    assert!(files_under(&w.home.join("artifacts").join(KEPT_DIR)).is_empty());
+}
+
+/// A file linked from another conversation after the copies were made would
+/// lose its link with the project's rows; the transaction refuses instead.
+#[test]
+fn a_file_linked_after_the_copies_were_made_refuses_the_transaction() {
+    let w = World::new();
+    let s = seed(&w);
+    let root = s.p.root_string();
+
+    let err =
+        w.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            delete_within(&tx, &root, &[])
+        })
+        .unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("was attached to another conversation"),
+        "{err:#}"
+    );
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session"),
+        3,
+        "the dropped transaction rolled back"
+    );
+}
+
+/// The route checks for runs before it waits for the memory slot; a run that
+/// starts after those checks — under the root, or from one of the project's
+/// conversations with no workspace of its own — is refused by the
+/// transaction itself, before it deletes a row. A finished run is not.
+#[test]
+fn the_transaction_refuses_a_run_started_after_the_routes_checks() {
+    let w = World::new();
+    let s = seed(&w);
+    let root = s.p.root_string();
+    w.exec(
+        "INSERT INTO task (id, title, created_by, source_lane, workspace_id, status)
+         VALUES ('t-queued', 't', 'test', 'test', ?1, 'queued')",
+        &[&root],
+    );
+    w.exec(
+        "INSERT INTO task (id, title, created_by, source_lane, session_id, status)
+         VALUES ('t-from-chat', 't', 'test', 'test', 's-p', 'running')",
+        &[],
+    );
+
+    let err =
+        w.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            delete_within(&tx, &root, &[])
+        })
+        .unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<RunsInFlight>(),
+        Some(&RunsInFlight { root, runs: 2 }),
+        "{err:#}"
+    );
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 3);
+    assert_eq!(w.count("SELECT COUNT(*) FROM task"), 4);
+}
+
+/// A daemon that dies between step 1's copies and the commit leaves a copy
+/// at its kept address — whole or cut short — that no row names. The next
+/// delete of the project replaces it instead of failing on it for ever.
+#[test]
+fn a_copy_a_crashed_attempt_left_is_replaced_and_the_delete_goes_through() {
+    let w = World::new();
+    let s = seed(&w);
+    let folder = format!("{}-{}", s.p.name, s.p.id);
+    let column = |sql: &str, id: &str| -> String {
+        w.db.with_connection(|conn| Ok(conn.query_row(sql, [id], |row| row.get(0))?))
+            .unwrap()
+    };
+    let rel = |id: &str| column("SELECT rel_path FROM file_assets WHERE id = ?1", id);
+    let upload = w
+        .home
+        .join("uploads")
+        .join(KEPT_DIR)
+        .join(&folder)
+        .join(rel(&s.u_shared));
+    let by_product = w
+        .home
+        .join("artifacts")
+        .join(KEPT_DIR)
+        .join(&folder)
+        .join(rel(&s.a_shared));
+    for (stale, bytes) in [(&upload, b"shar".as_slice()), (&by_product, b"v1\n")] {
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(stale, bytes).unwrap();
+    }
+
+    let outcome = delete_project_data(&w.db, &s.p).unwrap();
+
+    assert_eq!(
+        outcome.kept,
+        KeptFiles {
+            uploads: 1,
+            artifacts: 1
+        }
+    );
+    assert_eq!(std::fs::read(&upload).unwrap(), b"shared.txt");
+    assert_eq!(std::fs::read(&by_product).unwrap(), b"v2\n");
+    let storage = |id: &str| column("SELECT storage_path FROM file_assets WHERE id = ?1", id);
+    assert_eq!(PathBuf::from(storage(&s.u_shared)), upload);
+    assert_eq!(PathBuf::from(storage(&s.a_shared)), by_product);
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session"),
+        2,
+        "the delete went through"
+    );
+}
+
+impl World {
+    fn tmp(&self) -> &Path {
+        self.tmp.path()
+    }
+}
+
+#[test]
+fn removing_the_folder_forgets_the_project_and_leaves_its_own_folder_and_the_others() {
+    let w = World::new();
+    let p = w.project("leaving");
+    let q = w.project("staying");
+    std::fs::create_dir_all(p.dir.join("artifacts").join("loose")).unwrap();
+    std::fs::write(p.dir.join("artifacts").join("loose").join("a.md"), b"a").unwrap();
+    std::fs::write(p.root.join("README.md"), b"the user's own file").unwrap();
+
+    assert!(remove_project_folder(&p).unwrap());
+
+    assert!(!p.dir.exists());
+    assert_eq!(projects::lookup(&p.root).unwrap(), None);
+    assert!(q.dir.join("project.json").is_file());
+    assert_eq!(
+        std::fs::read(p.root.join("README.md")).unwrap(),
+        b"the user's own file"
+    );
+    assert!(p.root.join(".git").is_dir());
+    assert!(
+        !remove_project_folder(&p).unwrap(),
+        "a second call finds nothing to do"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_where_the_folder_was_is_refused_and_its_target_kept() {
+    let w = World::new();
+    let p = w.project("linked");
+    let elsewhere = w.tmp().join("elsewhere");
+    std::fs::rename(&p.dir, &elsewhere).unwrap();
+    let link = projects::projects_dir().unwrap().join(&p.name);
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+
+    let err = remove_project_folder(&p).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("is not a real directory"),
+        "{err:#}"
+    );
+    assert!(elsewhere.join("project.json").is_file());
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn a_folder_that_now_records_another_project_is_left_in_place() {
+    let w = World::new();
+    let first = w.project("again");
+    std::fs::remove_dir_all(&first.dir).unwrap();
+    let second = projects::register(&first.root).unwrap();
+    assert_eq!(second.name, first.name);
+    assert_ne!(second.id, first.id);
+
+    let err = remove_project_folder(&first).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("no longer records project"),
+        "{err:#}"
+    );
+    assert!(second.dir.join("project.json").is_file());
+}
+
+/// R16 (R-F3): an upload or a by-product that resolved its project before
+/// the delete removed `projects/<name>/`, and reaches the disk only after,
+/// re-creates nothing. The put resolves its directories outside the
+/// database mutex and creates its leaf inside it; the test holds the mutex
+/// across the folder's removal, so the put meets the gone folder there.
+#[test]
+fn a_put_that_resolved_its_project_before_the_folder_went_re_creates_nothing() {
+    for upload in [true, false] {
+        let w = World::new();
+        let p = w.project("racing");
+        let db = w.db.clone();
+        let root = p.root.clone();
+        let kind = if upload { "uploads" } else { "artifacts" };
+        let (put, reached) =
+            w.db.with_connection(|_| {
+                let put = std::thread::spawn(move || {
+                    let scope = StoreScope::Project(root);
+                    let stored = if upload {
+                        UploadStore::new(&db)
+                            .put(NewUpload {
+                                owner_id: OWNER,
+                                filename: "late.txt",
+                                mime_type: "text/plain",
+                                data: b"late",
+                                scope: &scope,
+                                created: at(),
+                            })
+                            .map(|_| ())
+                    } else {
+                        let mut new = NewArtifact::new(
+                            OWNER,
+                            &scope,
+                            ArtifactKind::Markdown,
+                            "Late",
+                            b"late",
+                        );
+                        new.created = at();
+                        ArtifactStore::new(&db).put(new).map(|_| ())
+                    };
+                    stored.map_err(|e| format!("{e:#}"))
+                });
+                // Long enough for the put to resolve its project and wait
+                // here for the database.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                // `content_dir` made the kind's folder outside the mutex: the
+                // put met the gone folder at its leaf, not at its lookup
+                // (residual X4).
+                let reached = p.dir.join(kind).is_dir();
+                assert!(remove_project_folder(&p).unwrap());
+                Ok((put, reached))
+            })
+            .unwrap();
+        let stored = put.join().unwrap();
+
+        assert!(
+            reached,
+            "upload {upload}: the put had not made {kind}/ when the folder went"
+        );
+        assert!(stored.is_err(), "upload {upload}: the put went through");
+        assert!(
+            !p.dir.exists(),
+            "upload {upload}: {} was re-created with no project.json",
+            p.dir.display()
+        );
+        assert_eq!(w.count("SELECT COUNT(*) FROM file_assets"), 0);
+    }
+}
+
+/// A directory nobody may write until this drops — then `0700` again, so a
+/// failed assertion never leaves the test's tempdir unremovable.
+#[cfg(unix)]
+struct Locked(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Locked {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// R3: a removal that fails part-way — here a file under the folder that
+/// cannot be unlinked — leaves `project.json`, whatever order the directory
+/// lists its entries in: the project stays registered and listed, and
+/// deleting its data again finishes. `project.json` goes last.
+#[cfg(unix)]
+#[test]
+fn a_folder_removal_that_fails_part_way_keeps_project_json_and_a_second_one_finishes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for kind in ["uploads", "artifacts", "memory"] {
+        let w = World::new();
+        let p = w.project("stuck");
+        let locked = p.dir.join(kind).join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("held.txt"), b"held").unwrap();
+        let guard = Locked(locked.clone());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let err = remove_project_folder(&p).unwrap_err();
+
+        assert!(
+            p.dir.join(projects::PROJECT_FILE).is_file(),
+            "{kind}: project.json went before the removal failed ({err:#})"
+        );
+        assert_eq!(
+            projects::lookup(&p.root).unwrap().map(|found| found.id),
+            Some(p.id),
+            "{kind}: the project stays registered"
+        );
+        drop(guard);
+        assert!(remove_project_folder(&p).unwrap(), "{kind}");
+        assert!(!p.dir.exists(), "{kind}");
+        assert_eq!(projects::lookup(&p.root).unwrap(), None, "{kind}");
+    }
+}
+
+/// R18: a kept by-product is copied before the transaction. A chat turn
+/// that supersedes it between the copy and the transaction would leave the
+/// kept file holding the old version's bytes under the new version's row,
+/// which the next verify pass records as a user edit; the transaction
+/// refuses instead, as it refuses a file linked meanwhile.
+#[test]
+fn a_kept_by_product_superseded_after_its_copy_refuses_the_transaction() {
+    let w = World::new();
+    let s = seed(&w);
+    let root = s.p.root_string();
+    let placed: Vec<Placed> =
+        w.db.with_connection(|conn| kept_rows(conn, &root))
+            .unwrap()
+            .iter()
+            .map(|row| place_one(&s.p, row, kept_address(&s.p, row).unwrap(), false).unwrap())
+            .collect();
+    assert_eq!(
+        w.by_product(&s.p, "Shared", b"v3\n"),
+        s.a_shared,
+        "a turn writes the same title again"
+    );
+
+    let err =
+        w.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            delete_within(&tx, &root, &placed)
+        })
+        .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&format!("file {} of {root} changed", s.a_shared)),
+        "{message}"
+    );
+    assert!(message.contains("nothing was deleted"), "{message}");
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session"),
+        3,
+        "the dropped transaction rolled back"
+    );
+}
+
+/// S5a re-review: a retried delete never overwrites a kept file a committed
+/// row already names. After a partial failure kept the folder, an earlier
+/// kept upload's source was removed by hand and a new upload took its old
+/// name; the retry's kept address is then that committed file's. The copy
+/// is refused, nothing is deleted and the committed bytes stay.
+#[test]
+fn a_kept_address_a_committed_row_already_names_is_never_overwritten() {
+    let w = World::new();
+    let s = seed(&w);
+    let rel: String =
+        w.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT rel_path FROM file_assets WHERE id = ?1",
+                [&s.u_shared],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    let kept_rel = format!("{KEPT_DIR}/{}-{}/{rel}", s.p.name, s.p.id);
+    let committed = w.home.join("uploads").join(&kept_rel);
+    std::fs::create_dir_all(committed.parent().unwrap()).unwrap();
+    std::fs::write(&committed, b"committed").unwrap();
+    w.exec(
+        "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes,
+             storage_path, origin, project_root, rel_path)
+         VALUES ('k-earlier', ?1, 'sha', 'earlier.txt', 'text/plain', 9, ?2, 'upload', NULL, ?3)",
+        &[&OWNER, &committed.to_string_lossy().into_owned(), &kept_rel],
+    );
+
+    let err = delete_project_data(&w.db, &s.p).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert_eq!(
+        std::fs::read(&committed).map_err(|e| format!("{e} after: {message}")),
+        Ok(b"committed".to_vec()),
+        "the committed kept file was overwritten"
+    );
+    assert!(message.contains("already names"), "{message}");
+    assert!(message.contains("nothing was deleted"), "{message}");
+    assert_eq!(w.count("SELECT COUNT(*) FROM session"), 3);
+}
+
+/// S5a M3: a kept file whose bytes are gone from the project's folder (a
+/// hand edit of the store) is still re-addressed with no project, at its
+/// kept address, marked missing — no bytes are invented and the delete
+/// goes through.
+#[test]
+fn a_kept_file_whose_bytes_are_gone_is_re_addressed_and_marked_missing() {
+    let w = World::new();
+    let s = seed(&w);
+    let column = |sql: &str, id: &str| -> Option<String> {
+        w.db.with_connection(|conn| Ok(conn.query_row(sql, [id], |row| row.get(0))?))
+            .unwrap()
+    };
+    let source = column(
+        "SELECT storage_path FROM file_assets WHERE id = ?1",
+        &s.u_shared,
+    )
+    .expect("a storage path");
+    std::fs::remove_file(&source).unwrap();
+
+    let outcome = delete_project_data(&w.db, &s.p).unwrap();
+
+    assert_eq!(
+        outcome.kept,
+        KeptFiles {
+            uploads: 1,
+            artifacts: 1
+        }
+    );
+    let rel = column(
+        "SELECT rel_path FROM file_assets WHERE id = ?1",
+        &s.u_shared,
+    )
+    .expect("a rel_path");
+    assert!(
+        rel.starts_with(&format!("{KEPT_DIR}/{}-{}/", s.p.name, s.p.id)),
+        "{rel}"
+    );
+    let target = w.home.join("uploads").join(&rel);
+    assert_eq!(
+        column(
+            "SELECT storage_path FROM file_assets WHERE id = ?1",
+            &s.u_shared
+        ),
+        Some(target.to_string_lossy().into_owned())
+    );
+    assert!(!target.exists(), "no bytes were invented");
+    assert_eq!(
+        column(
+            "SELECT project_root FROM file_assets WHERE id = ?1",
+            &s.u_shared
+        ),
+        None
+    );
+    assert!(
+        column(
+            "SELECT missing_since FROM file_assets WHERE id = ?1",
+            &s.u_shared
+        )
+        .is_some(),
+        "the row says its bytes are gone"
+    );
+    assert!(
+        column(
+            "SELECT missing_since FROM file_assets WHERE id = ?1",
+            &s.a_shared
+        )
+        .is_none(),
+        "the kept by-product whose bytes were copied is not marked"
+    );
+    assert_eq!(
+        w.count("SELECT COUNT(*) FROM session"),
+        2,
+        "the delete went through"
+    );
+}
+
+/// R39: deleting a project's data takes its result files' rows and leaves
+/// their files — the user's bytes and modification time — where they are. A
+/// result file a surviving message links is never kept (copied into the root
+/// store), and its row is no by-product in the counts. (Fails when the delete
+/// iterates `storage_path`, or keeps a pointer row as a by-product.)
+#[test]
+fn deleting_a_projects_data_leaves_its_real_files() {
+    let w = World::new();
+    let s = seed(&w);
+    let file = s.p.root.join("src").join("lib.rs");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"pub fn answer() -> u32 { 42 }\n").unwrap();
+    let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let root = s.p.root_string();
+    let (row, _) = ArtifactStore::new(&w.db)
+        .record_project_file(NewProjectFile {
+            owner_id: OWNER,
+            project_root: &root,
+            rel_path: "src/lib.rs",
+            content: b"pub fn answer() -> u32 { 42 }\n",
+            task_id: Some("t-p"),
+            agent_id: Some("code_agent::a1"),
+        })
+        .unwrap();
+    // A home message the delete leaves links it, as it links a file to keep.
+    w.link(s.m_h, &row.id, ATTACHMENT_ROLE);
+
+    let plan = delete_plan(&w.db, &s.p).unwrap();
+    assert_eq!(
+        plan.kept,
+        KeptFiles {
+            uploads: 1,
+            artifacts: 1
+        },
+        "the seed's two kept files, and not the result file"
+    );
+    assert_eq!(plan.counts.artifacts, 1, "the seed's one by-product only");
+
+    let outcome = delete_project_data(&w.db, &s.p).unwrap();
+    assert_eq!(
+        outcome.counts, plan.counts,
+        "the dry run and the real call agree"
+    );
+    assert_eq!(outcome.kept, plan.kept);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT COUNT(*) FROM file_assets WHERE id = '{}'",
+            row.id
+        )),
+        0,
+        "its row went with the project's rows"
+    );
+    assert!(remove_project_folder(&s.p).unwrap());
+
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"pub fn answer() -> u32 { 42 }\n"
+    );
+    assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), mtime);
+    assert!(
+        s.p.root.join(".git").is_dir(),
+        "the project's own folder is untouched"
+    );
+}

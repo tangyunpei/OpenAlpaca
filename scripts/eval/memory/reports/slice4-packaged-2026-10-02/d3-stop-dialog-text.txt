@@ -1,0 +1,6 @@
+AXStaticText |  |  | Stop the OpenAlpaca daemon?
+AXStaticText |  |  | Everything OpenAlpaca is doing stops immediately. Nothing is finished first.
+AXStaticText |  |  | Any workflow that is running right now is cut off mid-step. When you start the daemon again it comes back marked “interr
+AXStaticText |  |  | A chat reply that is streaming right now is lost. A tool waiting for your approval is dropped without running.
+AXStaticText |  |  | Your conversations, artifacts, uploads and memories are untouched — this stops a program, it does not delete anything.
+AXStaticText |  |  | Right now: 1 window connected.

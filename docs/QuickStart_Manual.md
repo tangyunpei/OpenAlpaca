@@ -52,11 +52,10 @@ openalpaca daemon status
 
 Terminal only? Use `openalpaca daemon start --daemon-only`.
 
-The first start takes longer than later ones. It writes the default config,
-agent templates and skills into `~/.openalpaca/config`, and downloads the local
-embedding model (about 1 GB) into `~/.openalpaca/state/cache/fastembed`. The
-daemon answers no request until that download is done, so wait for
-`openalpaca daemon status` to report `Daemon is running` before step 4.
+The first start writes the default config, agent templates and skills into
+`~/.openalpaca/config`. It downloads nothing — memory is Markdown files plus a
+keyword index, with no model of its own — so `openalpaca daemon status` reports
+`Daemon is running` within seconds. Wait for that before step 4.
 
 ## 4. Connect a model
 
@@ -123,24 +122,26 @@ it back for as long as `USER.md` or `IDENTITY.md` beside it is still empty.
 ## Stop, upgrade, uninstall
 
 ```bash
-openalpaca daemon stop         # stops the daemon and the desktop app
+openalpaca daemon stop         # stops the daemon; an open app window stays open
+openalpaca gui stop            # quits the desktop app
 openalpaca daemon restart
 openalpaca daemon tail         # follow daemon events; -c N stops after N
 ```
 
 - **Upgrade:** build a newer package, run `install.sh` again with `--yes`, then
   `openalpaca daemon start`. The installer stops the running daemon; your data
-  and config are kept.
+  and config are kept. Coming from a build from before 2026-09-28, when the
+  schema was re-baselined at version 1? The new daemon refuses that database
+  (`Database … is at schema version <n>, which this build does not know`)
+  rather than convert it; read [Switching to the Markdown Memory
+  Build](Installation_Manual.md#switching-to-the-markdown-memory-build) before
+  you start it. Coming from an earlier build made since that date? It opens
+  your store as it is; read [Agents work in the
+  project](Installation_Manual.md#agents-work-in-the-project) first — an old
+  `system_agent.md` may keep two lines that would let that agent change your
+  project's files and run commands in it without asking.
 - **Uninstall:** `./scripts/release/uninstall.sh`. It leaves `~/.openalpaca`
   in place; delete that directory yourself for a complete cleanup.
-- **Have a development build's data** under
-  `~/Library/Application Support/OpenAlpaca`? Nothing is moved for you. If that
-  directory holds a database, a `.master_key` or a `config/` and `~/.openalpaca`
-  has no database yet, the daemon refuses to start rather than come up on an
-  empty database beside it; otherwise it starts, and warns once per boot while that
-  directory still holds a database, `.master_key`, `config/`, `plugins/` or `assets/`.
-  Read [If You Have Data From an Older
-  Build](Installation_Manual.md#if-you-have-data-from-an-older-build) first.
 
 ## Next
 

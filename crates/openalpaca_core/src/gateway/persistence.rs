@@ -4,6 +4,8 @@
 //! (GUI, Telegram, CLI, etc.) get automatic conversation persistence.
 
 use crate::gateway::router::ResolvedAttachment;
+use crate::memory::learning::is_slash_turn;
+use crate::utils::text::one_line;
 use anyhow::Result;
 use openalpaca_storage::{
     ConversationMessage, ConversationRepository, Database, FileAssetRepository,
@@ -38,6 +40,50 @@ pub struct PersistedUserMessage {
 struct TurnSession {
     id: String,
     project_switched: bool,
+    /// The row read said `title = ''` — the one case a turn names it (G5).
+    untitled: bool,
+}
+
+/// The most characters of a message a conversation's title keeps (G5).
+const TITLE_MAX_CHARS: usize = 60;
+
+/// A conversation's title from one of its user messages (G5, Round G): the
+/// first line with anything to read on it, as [`one_line`] leaves it (hidden
+/// and control characters dropped, whitespace collapsed), cut to at most
+/// [`TITLE_MAX_CHARS`] characters — at the last space that fits when the words
+/// before it keep at least half the limit, else at the limit itself (CJK text
+/// has no spaces, and a first word followed by a URL or a run of Chinese would
+/// otherwise leave the title one word long) — and followed by `…` when cut.
+/// Characters, never bytes: a cut cannot land inside one.
+///
+/// `None` for a message that starts with `/` — a slash command (`/remember …`,
+/// `/status`), by [`is_slash_turn`], the test learning leaves such a turn out
+/// by — and for a message with no text (a turn of attachments alone): neither
+/// says what the conversation is about, and the next user message is tried at
+/// its own turn.
+fn derive_title(message: &str) -> Option<String> {
+    if is_slash_turn(message) {
+        return None;
+    }
+    let line = message
+        .lines()
+        .map(one_line)
+        .find(|line| !line.is_empty())?;
+    if line.chars().count() <= TITLE_MAX_CHARS {
+        return Some(line);
+    }
+    let kept: String = line.chars().take(TITLE_MAX_CHARS).collect();
+    // `one_line` leaves single spaces only, so a space is the word boundary;
+    // the kept text already ends on one when the next character is a space.
+    let at_word_end = line.chars().nth(TITLE_MAX_CHARS) == Some(' ');
+    // The words before the last space that fits, kept only when they hold at
+    // least half the limit.
+    let words = kept.rfind(' ').map(|space| &kept[..space]);
+    let cut = match words {
+        Some(words) if !at_word_end && words.chars().count() >= TITLE_MAX_CHARS / 2 => words,
+        _ => kept.as_str(),
+    };
+    Some(format!("{cut}…"))
 }
 
 impl GatewayPersistence {
@@ -92,15 +138,43 @@ impl GatewayPersistence {
                 "project changed; opened a new session for the lane"
             );
             return Ok(TurnSession {
+                untitled: fresh.title.is_empty(),
                 id: fresh.id,
                 project_switched: true,
             });
         }
         let session = repo.get_or_create_active_session(lane_key, source, workspace_path)?;
         Ok(TurnSession {
+            untitled: session.title.is_empty(),
             id: session.id,
             project_switched: false,
         })
+    }
+
+    /// Name an untitled conversation after its user's words (G5, Round G):
+    /// [`derive_title`] of the first of its user rows that yields one — this
+    /// turn's own message for a new conversation, the first stored one for a
+    /// conversation an older build left untitled. Runs after the turn's row is
+    /// written, and only when the session's row said `title = ''`, so a named
+    /// conversation costs nothing; the write is guarded in its statement
+    /// ([`ConversationRepository::set_title_if_empty`]), so a rename is never
+    /// overwritten and two turns cannot both name it.
+    ///
+    /// A failure is logged, never returned: the user's message is already
+    /// stored, and a conversation without a name is not a failed turn.
+    fn title_if_untitled(&self, repo: &ConversationRepository<'_>, session: &TurnSession) {
+        if !session.untitled {
+            return;
+        }
+        let named = repo
+            .title_from_user_rows(&session.id, derive_title)
+            .and_then(|title| match title {
+                Some(title) => repo.set_title_if_empty(&session.id, &title),
+                None => Ok(false),
+            });
+        if let Err(e) = named {
+            tracing::warn!(session_id = %session.id, "could not name the conversation: {e}");
+        }
     }
 
     /// Persist a user message, ensuring the lane has an active session.
@@ -113,12 +187,21 @@ impl GatewayPersistence {
     ///
     /// The resolved id comes back to the caller so the assistant half of the
     /// same turn can be pinned to it — see [`PersistedUserMessage`].
+    ///
+    /// `request_id` is the turn's id and `workspace_path` its project's root —
+    /// canonical when it was recorded, as written once the project is missing
+    /// (ST-23);
+    /// both are written on the row (migration 044, design 09 §1.3) — the id
+    /// marks the row as a turn's, and the root is the project this row
+    /// learns into, whatever the session's binding says. `None` for a row no
+    /// turn wrote.
     pub fn persist_user_message(
         &self,
         lane_key: &str,
         content: &str,
         source: &str,
         workspace_path: Option<&str>,
+        request_id: Option<uuid::Uuid>,
     ) -> Result<PersistedUserMessage> {
         let repo = ConversationRepository::new(&self.db);
         let session = self.resolve_turn_session(&repo, lane_key, source, workspace_path)?;
@@ -128,9 +211,12 @@ impl GatewayPersistence {
             content: content.to_string(),
             source: Some(source.to_string()),
             session_id: Some(session.id.clone()),
+            request_id: request_id.map(|id| id.to_string()),
+            workspace_root: workspace_path.map(str::to_string),
             ..Default::default()
         })?;
         repo.increment_message_count_for_session(&session.id)?;
+        self.title_if_untitled(&repo, &session);
         Ok(PersistedUserMessage {
             message_id,
             session_id: session.id,
@@ -138,7 +224,8 @@ impl GatewayPersistence {
         })
     }
 
-    /// Persist a user message with file attachments.
+    /// Persist a user message with file attachments. `request_id` and
+    /// `workspace_path` as for [`Self::persist_user_message`].
     pub fn persist_user_message_with_attachments(
         &self,
         lane_key: &str,
@@ -146,6 +233,7 @@ impl GatewayPersistence {
         source: &str,
         workspace_path: Option<&str>,
         attachments: &[ResolvedAttachment],
+        request_id: Option<uuid::Uuid>,
     ) -> Result<PersistedUserMessage> {
         let repo = ConversationRepository::new(&self.db);
         let session = self.resolve_turn_session(&repo, lane_key, source, workspace_path)?;
@@ -204,6 +292,8 @@ impl GatewayPersistence {
             content: content.to_string(),
             source: Some(source.to_string()),
             session_id: Some(session.id.clone()),
+            request_id: request_id.map(|id| id.to_string()),
+            workspace_root: workspace_path.map(str::to_string),
             ..Default::default()
         };
 
@@ -222,6 +312,7 @@ impl GatewayPersistence {
         }
 
         repo.increment_message_count_for_session(&session.id)?;
+        self.title_if_untitled(&repo, &session);
         Ok(PersistedUserMessage {
             message_id: id,
             session_id: session.id,
@@ -262,6 +353,10 @@ impl GatewayPersistence {
     /// real numbers (G4). `None` on the non-LLM paths — a slash command spent
     /// no tokens, which is a different fact from "spent none that we counted",
     /// and the column stays NULL so a client can tell them apart.
+    ///
+    /// `request_id` is the turn's id (migration 044): the answer carries the
+    /// same id as its question, which is how learning pairs them. It never
+    /// carries a root — an answer learns under its question's.
     pub fn persist_assistant_message(
         &self,
         lane_key: &str,
@@ -269,6 +364,7 @@ impl GatewayPersistence {
         duration_ms: Option<i64>,
         source: &str,
         session_id: Option<&str>,
+        request_id: Option<uuid::Uuid>,
     ) -> Result<i64> {
         let content = result.content.as_str();
         if content.trim().is_empty() {
@@ -287,6 +383,7 @@ impl GatewayPersistence {
             duration_ms,
             task_id: result.delegation.as_ref().map(|d| d.task_id.clone()),
             session_id: session_id.map(str::to_string),
+            request_id: request_id.map(|id| id.to_string()),
             ..Default::default()
         })?;
         match session_id {
@@ -337,7 +434,14 @@ mod tests {
         let persistence = GatewayPersistence::new(db.clone());
 
         let id = persistence
-            .persist_user_message_with_attachments("user1:gui", "", "gui", None, &[sample_attachment()])
+            .persist_user_message_with_attachments(
+                "user1:gui",
+                "",
+                "gui",
+                None,
+                &[sample_attachment()],
+                None,
+            )
             .expect("persist message");
         assert!(id.message_id > 0);
 
@@ -376,6 +480,7 @@ mod tests {
                 "gui",
                 None,
                 &[sample_attachment()],
+                None,
             )
             .expect("persist message");
         assert!(id.message_id > 0);
@@ -415,6 +520,7 @@ mod tests {
                 &[sample_attachment_with_text(
                     "Candidate has 5 years experience",
                 )],
+                None,
             )
             .expect("persist message");
         assert!(id.message_id > 0);
@@ -462,10 +568,13 @@ mod tests {
                     tokens_out: Some(338),
                     attachments_used: Vec::new(),
                     attachments_skipped: Vec::new(),
+                    memory_used: Vec::new(),
                     delegation: None,
+                    continuity: Default::default(),
                 },
                 Some(1234),
                 "gui",
+                None,
                 None,
             )
             .expect("persist assistant message");
@@ -495,6 +604,7 @@ mod tests {
                 None,
                 "cli",
                 None,
+                None,
             )
             .expect("persist assistant message");
 
@@ -523,6 +633,7 @@ mod tests {
                 None,
                 "gui",
                 None,
+                None,
             )
             .expect("an empty answer is not an error");
         assert_eq!(empty, 0, "nothing was written");
@@ -535,6 +646,7 @@ mod tests {
                 None,
                 "gui",
                 None,
+                None,
             )
             .expect("persist assistant message");
         assert!(id > 0);
@@ -545,5 +657,262 @@ mod tests {
             .expect("load recent messages");
         let msg = msgs.iter().find(|m| m.role == "assistant").expect("row");
         assert_eq!(msg.content, line, "the transcript keeps what the user read");
+    }
+
+    // ── G5 (Round G): a conversation is named from the user's first message ──
+
+    fn title_of(db: &Database, session_id: &str) -> String {
+        ConversationRepository::new(db)
+            .get_session(session_id)
+            .expect("read the session")
+            .expect("the session exists")
+            .title
+    }
+
+    fn user_turn(persistence: &GatewayPersistence, lane: &str, content: &str) -> String {
+        persistence
+            .persist_user_message(lane, content, "gui", None, None)
+            .expect("persist the user message")
+            .session_id
+    }
+
+    #[test]
+    fn the_first_user_message_titles_the_session_and_the_second_does_not() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let session = user_turn(&persistence, "user7:gui", "Plan pasta night for six");
+        assert_eq!(title_of(&db, &session), "Plan pasta night for six");
+
+        let again = user_turn(&persistence, "user7:gui", "And a dessert, please");
+        assert_eq!(again, session, "the same conversation");
+        assert_eq!(title_of(&db, &session), "Plan pasta night for six");
+    }
+
+    #[test]
+    fn a_renamed_session_is_never_retitled() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        // A command names nothing, so the conversation is still untitled
+        // when the user renames it.
+        let session = user_turn(&persistence, "user8:gui", "/status");
+        assert_eq!(title_of(&db, &session), "");
+        assert!(
+            ConversationRepository::new(&db)
+                .update_session(&session, Some("My dinner plans"), None)
+                .expect("rename")
+        );
+
+        user_turn(&persistence, "user8:gui", "Plan pasta night for six");
+        assert_eq!(title_of(&db, &session), "My dinner plans");
+    }
+
+    #[test]
+    fn a_slash_command_and_an_attachment_only_turn_title_nothing_and_the_next_sentence_does() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let session = user_turn(&persistence, "user9:gui", "/remember I cook for six");
+        assert_eq!(title_of(&db, &session), "", "a command is not a title");
+
+        let files = persistence
+            .persist_user_message_with_attachments(
+                "user9:gui",
+                "",
+                "gui",
+                None,
+                &[sample_attachment()],
+                None,
+            )
+            .expect("persist an attachment-only turn");
+        assert_eq!(files.session_id, session);
+        assert_eq!(
+            title_of(&db, &session),
+            "",
+            "a file alone is not a title, nor is its `[Attachments: …]` text"
+        );
+
+        user_turn(&persistence, "user9:gui", "Plan pasta night for six");
+        assert_eq!(title_of(&db, &session), "Plan pasta night for six");
+    }
+
+    /// Characters, never bytes: a 200-character message with no space in it
+    /// is cut at its 60th character. The leading ASCII letter puts byte 60
+    /// inside a three-byte character, so a cut by bytes would panic there
+    /// (and one at a boundary would keep 20 characters, not 60).
+    #[test]
+    fn a_long_chinese_message_is_cut_at_60_characters() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+        let message: String = std::iter::once('A')
+            .chain("我想为六个人计划一个意大利面之夜".chars().cycle())
+            .take(200)
+            .collect();
+        assert!(!message.is_char_boundary(60), "byte 60 is mid-character");
+
+        let session = user_turn(&persistence, "user10:gui", &message);
+
+        let expected: String = message.chars().take(60).chain(['…']).collect();
+        assert_eq!(title_of(&db, &session), expected);
+    }
+
+    /// A turn of a file and a sentence is named by the sentence: the
+    /// attachment writer runs the same title step as the plain one.
+    #[test]
+    fn a_turn_with_a_file_and_a_sentence_is_named_by_the_sentence() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let turn = persistence
+            .persist_user_message_with_attachments(
+                "user12:gui",
+                "Summarize this resume for me",
+                "gui",
+                None,
+                &[sample_attachment_with_text("Jane Doe, engineer")],
+                None,
+            )
+            .expect("persist a turn with a file");
+
+        assert_eq!(
+            title_of(&db, &turn.session_id),
+            "Summarize this resume for me"
+        );
+    }
+
+    /// A follow-up the daemon re-enters on the user's behalf is stored as a
+    /// `user` row of source `internal` — the assistant's own words — and
+    /// names nothing; the user's next sentence does.
+    #[test]
+    fn a_follow_ups_re_entered_turn_names_nothing() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let session = user_turn(&persistence, "user13:gui", "/status");
+        let followup = persistence
+            .persist_user_message(
+                "user13:gui",
+                "Check the build again tomorrow and report back",
+                crate::memory::learning::INTERNAL_SOURCE,
+                None,
+                None,
+            )
+            .expect("persist the follow-up's turn");
+        assert_eq!(followup.session_id, session);
+        assert_eq!(title_of(&db, &session), "", "not the user's words");
+
+        user_turn(&persistence, "user13:gui", "Plan pasta night for six");
+        assert_eq!(title_of(&db, &session), "Plan pasta night for six");
+    }
+
+    /// A conversation an older build left untitled is named from its first
+    /// stored user row, not from the turn that happens to come next.
+    #[test]
+    fn an_older_untitled_session_takes_its_first_stored_user_row() {
+        let (_tmp, db) = make_db();
+        let repo = ConversationRepository::new(&db);
+        let session = repo
+            .get_or_create_active_session("user11:gui", "gui", None)
+            .expect("an untitled session");
+        for (role, content) in [
+            ("user", "Plan the Lisbon trip"),
+            ("assistant", "Happy to. When are you going?"),
+            ("user", "In October"),
+        ] {
+            repo.insert(&ConversationMessage {
+                lane_key: "user11:gui".to_string(),
+                role: role.to_string(),
+                content: content.to_string(),
+                session_id: Some(session.id.clone()),
+                ..Default::default()
+            })
+            .expect("an older row");
+        }
+        assert_eq!(title_of(&db, &session.id), "");
+
+        let persistence = GatewayPersistence::new(db.clone());
+        let turn = user_turn(&persistence, "user11:gui", "What about flights?");
+
+        assert_eq!(turn, session.id);
+        assert_eq!(title_of(&db, &session.id), "Plan the Lisbon trip");
+    }
+
+    #[test]
+    fn derive_title_reads_the_first_line_on_one_line_and_cuts_at_a_word() {
+        // The first line with anything on it, its hidden characters dropped
+        // and its whitespace collapsed.
+        assert_eq!(
+            derive_title("\n  \n Plan\u{202E} pasta\tnight \nfor six").as_deref(),
+            Some("Plan pasta night")
+        );
+        // Over the limit: cut at the last space that fits, then `…`.
+        let long = "Plan a pasta night for six people with a starter a main course \
+                    and a dessert";
+        let title = derive_title(long).expect("a title");
+        assert_eq!(
+            title,
+            "Plan a pasta night for six people with a starter a main…"
+        );
+        assert!(title.chars().count() <= 61);
+        // A cut that lands on a word's end keeps the whole word.
+        let exact = format!("{} tail", "a".repeat(60));
+        assert_eq!(derive_title(&exact), Some(format!("{}…", "a".repeat(60))));
+        // The last space is used only when the words before it keep at least
+        // half the limit (30 characters); otherwise the cut is at the limit.
+        let thirty = format!("{} {}", "a".repeat(30), "b".repeat(40));
+        assert_eq!(derive_title(&thirty), Some(format!("{}…", "a".repeat(30))));
+        let twenty_nine = format!("{} {}", "a".repeat(29), "b".repeat(41));
+        assert_eq!(
+            derive_title(&twenty_nine),
+            Some(format!("{} {}…", "a".repeat(29), "b".repeat(30)))
+        );
+        // So one space near the start leaves more than its first word: in
+        // Chinese around an English word, after a full-width space (U+3000,
+        // which `one_line` makes a space), and before a URL.
+        assert_eq!(
+            derive_title(
+                "帮我用 Rust写一个能够解析命令行参数的小工具，支持子命令、默认值、\
+                 环境变量覆盖和自动生成的帮助信息，并且附上完整的单元测试"
+            )
+            .as_deref(),
+            Some(
+                "帮我用 Rust写一个能够解析命令行参数的小工具，支持子命令、默认值、\
+                 环境变量覆盖和自动生成的帮助信息，并且附上完整的单…"
+            )
+        );
+        assert_eq!(
+            derive_title(
+                "你好\u{3000}我想为六个人计划一个意大利面之夜，需要一份购物清单、\
+                 每道菜的做法和时间安排，还要考虑一位素食者和一位对坚果过敏的朋友"
+            )
+            .as_deref(),
+            Some(
+                "你好 我想为六个人计划一个意大利面之夜，需要一份购物清单、\
+                 每道菜的做法和时间安排，还要考虑一位素食者和一位对坚果过敏的朋…"
+            )
+        );
+        assert_eq!(
+            derive_title(
+                "Summarize https://example.com/a/very/long/path/to/a/report/that/\
+                 keeps/going/and/going.html for me"
+            )
+            .as_deref(),
+            Some("Summarize https://example.com/a/very/long/path/to/a/report/t…")
+        );
+        // Characters, not bytes: 27 three-byte characters are 81 bytes, under
+        // the limit all the same, and are not cut.
+        let short_chinese = "我想为六个人计划一个意大利面之夜还要一份购物清单和做法";
+        assert_eq!(
+            (short_chinese.chars().count(), short_chinese.len()),
+            (27, 81)
+        );
+        assert_eq!(derive_title(short_chinese).as_deref(), Some(short_chinese));
+        // Nothing to read, or a message that starts with `/` (a command, or
+        // a path): no title.
+        assert_eq!(derive_title(""), None);
+        assert_eq!(derive_title(" \n\u{200B}\n "), None);
+        assert_eq!(derive_title("  /status"), None);
+        assert_eq!(derive_title("/usr/local/bin is not on my PATH"), None);
     }
 }

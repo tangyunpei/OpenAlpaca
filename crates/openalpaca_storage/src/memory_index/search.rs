@@ -1,0 +1,1199 @@
+//! Search: candidate generation from the three FTS tables (design 09 §6.5:
+//! the word table, the header trigram table, the unsegmented-body trigram
+//! table), the substring pass and the exact lookups; the filters, applied
+//! before the limit; ranking.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+use chrono::{DateTime, Utc};
+use rusqlite::types::Value;
+use rusqlite::{Connection, params_from_iter};
+
+use super::query::{self, ParsedQuery};
+use super::{
+    CANDIDATE_CAP, EffectiveStatus, IndexError, IndexState, MAX_LIMIT, MemoryIndex, Result,
+    SUBSTRING_SCAN_CAP, canon_timestamp, placeholders, read_state,
+};
+
+/// Why a hit matched (design §7a `MatchReason`). The substring pass for one-
+/// and two-character queries adds no reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MatchReason {
+    /// The whole normalized query equals the note's title.
+    Title,
+    /// The whole normalized query equals one of the note's aliases.
+    Alias,
+    /// The query equals the note's `fact_key`.
+    FactKey,
+    /// A term matched a whole token of the text split at script boundaries
+    /// (the `unicode61` table).
+    Term,
+    /// A term matched only as the beginning of such a token, and nowhere as
+    /// a whole one (the `unicode61` table's prefix query; design 09 §6.5.3,
+    /// LQ17).
+    Prefix,
+    /// A term matched only as a substring the trigram tables find: in a
+    /// title, an alias or a tag — or, for a term carrying an unsegmented
+    /// character, in unsegmented text.
+    Trigram,
+    /// An identifier or path literal matched as a phrase.
+    Phrase,
+}
+
+impl MatchReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Alias => "alias",
+            Self::FactKey => "fact_key",
+            Self::Term => "term",
+            Self::Prefix => "prefix",
+            Self::Trigram => "trigram",
+            Self::Phrase => "phrase",
+        }
+    }
+}
+
+/// Which filter set applies (design §5 step 5; fixture README, *Slice 2 has
+/// no service*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchMode {
+    /// `memory_search`: a same-`fact_key` loser and a `source_forgotten` note
+    /// are returned, flagged.
+    #[default]
+    Explicit,
+    /// The automatic per-turn recall: both are excluded, and so is a
+    /// conversation summary (design 09 §13.3,
+    /// [`crate::memory_files::is_conversation_summary`]).
+    Automatic,
+}
+
+/// How a search orders its hits (design 09 §13.1, `order_by`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchOrder {
+    /// The ranking of design §5 step 6.
+    #[default]
+    Relevance,
+    /// The newest `date` first — `observed_at`, else `created_at`.
+    Newest,
+    /// The oldest `date` first.
+    Oldest,
+}
+
+impl SearchOrder {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Relevance => "relevance",
+            Self::Newest => "newest",
+            Self::Oldest => "oldest",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "relevance" => Some(Self::Relevance),
+            "newest" => Some(Self::Newest),
+            "oldest" => Some(Self::Oldest),
+            _ => None,
+        }
+    }
+}
+
+/// One search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchQuery {
+    /// 1–512 characters.
+    pub query: String,
+    /// The partitions the caller resolved and authorized (design §5 step 1).
+    /// Empty means nothing is searched.
+    pub partition_keys: Vec<String>,
+    /// A `NoteKind` string.
+    pub kind: Option<String>,
+    /// 1–[`MAX_LIMIT`] (50).
+    pub limit: usize,
+    /// `true` includes superseded and archived notes and, with no `as_of`,
+    /// notes whose validity interval has ended. Candidates are never
+    /// returned.
+    pub historical: bool,
+    /// Evaluate the half-open validity interval at this instant. Absent: a
+    /// note whose interval ended by now is dropped and one that has not
+    /// begun is kept (design §4 *Times*), unless `historical`, which then
+    /// applies no validity filter.
+    pub as_of: Option<DateTime<Utc>>,
+    /// Only notes dated at or after this instant (design 09 §13.1: the date
+    /// is `observed_at`, else `created_at`), applied before the limit.
+    pub date_from: Option<DateTime<Utc>>,
+    /// Only notes dated at or before this instant.
+    pub date_to: Option<DateTime<Utc>>,
+    pub order: SearchOrder,
+    pub mode: SearchMode,
+}
+
+impl SearchQuery {
+    pub fn new(query: impl Into<String>, partition_keys: Vec<String>) -> Self {
+        Self {
+            query: query.into(),
+            partition_keys,
+            kind: None,
+            limit: super::DEFAULT_LIMIT,
+            historical: false,
+            as_of: None,
+            date_from: None,
+            date_to: None,
+            order: SearchOrder::Relevance,
+            mode: SearchMode::Explicit,
+        }
+    }
+}
+
+/// One result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub id: String,
+    pub revision: String,
+    pub partition_key: String,
+    pub scope: String,
+    pub relative_path: String,
+    pub title: String,
+    pub kind: String,
+    /// The stored `NoteStatus`.
+    pub status: String,
+    pub effective_status: EffectiveStatus,
+    pub origin: String,
+    pub fact_key: Option<String>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+    /// The note's window has not begun at the instant the validity filter
+    /// used — `as_of`, else the index clock's "now" — so the recall header
+    /// and the filter agree on one clock (design 09 §6.1).
+    pub upcoming: bool,
+    /// The note's window has ended at that same instant — only a
+    /// `historical` search without `as_of` returns such a note (design 09
+    /// §13.1: an index row marks it).
+    pub ended: bool,
+    /// `observed_at`, else `created_at`, in the canon (design 09 §13.1).
+    pub date: String,
+    pub updated_at: String,
+    pub pinned: bool,
+    pub conflict: bool,
+    pub same_key_loser: bool,
+    pub source_forgotten: bool,
+    pub superseded_by: Vec<String>,
+    /// The best chunk's heading. The index keeps no excerpt (design 09
+    /// §6.5.1: its one copy of the text is normalized, for ranking); the
+    /// caller reads the chunk at `chunk_ordinal` from the file it verifies.
+    pub heading: Option<String>,
+    /// 1-based file lines, inclusive.
+    pub line_range: (u32, u32),
+    pub chunk_ordinal: u32,
+    /// Sorted, deduplicated.
+    pub matches: Vec<MatchReason>,
+    pub score: f64,
+}
+
+/// A search's results.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    /// `hits.len()`.
+    pub count: usize,
+    /// A scan cap was hit: the substring pass or a candidate cap.
+    pub partial: bool,
+    pub index_state: IndexState,
+}
+
+// ============================================================================
+// Ranking weights (design §5 step 6: pinned and tested, not claimed optimal)
+// ============================================================================
+
+/// The whole normalized query equals the title.
+pub(crate) const W_EXACT_TITLE: f64 = 100.0;
+/// The whole normalized query equals an alias.
+pub(crate) const W_EXACT_ALIAS: f64 = 90.0;
+/// The query equals the `fact_key`.
+pub(crate) const W_EXACT_FACT_KEY: f64 = 90.0;
+/// Per identifier or path literal matched as a phrase.
+pub(crate) const W_PHRASE: f64 = 12.0;
+/// Per word matched as a whole token.
+pub(crate) const W_TERM: f64 = 10.0;
+/// Per word matched only as a substring — the trigram-only hit, below a
+/// whole-token hit (design §5 step 4).
+pub(crate) const W_TRIGRAM: f64 = 5.0;
+/// Per word matched only as the beginning of a token — a trigram-only hit's
+/// coverage, below a whole-token hit (design 09 §6.5.3). Its relevance is
+/// the word table's BM25, as a whole token's is.
+pub(crate) const W_PREFIX: f64 = 5.0;
+/// Per one- or two-character term found by the substring pass.
+pub(crate) const W_SHORT: f64 = 5.0;
+/// BM25 relevance from the `unicode61` table, normalized to 0..=1 over the
+/// candidates.
+pub(crate) const W_BM25_WORD: f64 = 2.0;
+/// BM25 relevance from the trigram tables — the larger of the header
+/// table's and the unsegmented-body table's, each normalized likewise.
+pub(crate) const W_BM25_TRIGRAM: f64 = 1.0;
+/// Per authority rank (design §4: `user` = 4 … `extracted_other` = 0).
+pub(crate) const W_AUTHORITY: f64 = 0.5;
+/// A note whose explicit `valid_from`/`valid_to` interval holds at the
+/// evaluation instant.
+pub(crate) const W_VALID_NOW: f64 = 1.0;
+
+// ============================================================================
+// Search
+// ============================================================================
+
+/// The filters of design §5 step 5 as one SQL fragment over the `note`
+/// alias `n`, applied inside every candidate query — so the caps count
+/// eligible rows and the limit is applied last.
+pub(super) struct Filter {
+    clause: String,
+    params: Vec<Value>,
+    /// The instant validity is evaluated at, for the ranking bonus.
+    pub(super) instant: String,
+}
+
+impl Filter {
+    pub(super) fn build(q: &SearchQuery, now: DateTime<Utc>) -> Self {
+        let mut clause = format!(
+            "n.partition_key IN ({})",
+            placeholders_unnumbered(q.partition_keys.len())
+        );
+        let mut params: Vec<Value> = q
+            .partition_keys
+            .iter()
+            .map(|k| Value::Text(k.clone()))
+            .collect();
+        if let Some(kind) = &q.kind {
+            clause.push_str(" AND n.kind = ?");
+            params.push(Value::Text(kind.clone()));
+        }
+        if q.historical {
+            clause.push_str(" AND n.effective_status IN ('active', 'superseded', 'archived')");
+        } else {
+            clause.push_str(" AND n.effective_status = 'active'");
+        }
+        let now = canon_timestamp(&now);
+        let instant = q.as_of.map(|t| canon_timestamp(&t)).unwrap_or(now);
+        // Design §4 *Times*: a historical query evaluates the requested
+        // instant — the whole half-open interval; current recall excludes a
+        // note whose interval has **ended**, and keeps one that has not begun
+        // (a trip planned for next month is current knowledge).
+        if q.as_of.is_some() {
+            clause.push_str(
+                " AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?)",
+            );
+            params.push(Value::Text(instant.clone()));
+            params.push(Value::Text(instant.clone()));
+        } else if !q.historical {
+            clause.push_str(" AND (n.valid_to IS NULL OR n.valid_to > ?)");
+            params.push(Value::Text(instant.clone()));
+        }
+        if q.mode == SearchMode::Automatic {
+            clause.push_str(" AND n.same_key_loser = 0 AND n.source_forgotten = 0");
+            // Design 09 §13.3 (MD-16): a conversation summary is found by an
+            // explicit search and never delivered on its own.
+            clause.push_str(" AND NOT (n.kind = 'episode' AND n.origin = 'extracted_other')");
+        }
+        // Design 09 §13.1: the date bounds are inclusive and, like every
+        // filter here, run before the limit.
+        if let Some(from) = q.date_from {
+            clause.push_str(" AND n.date >= ?");
+            params.push(Value::Text(canon_timestamp(&from)));
+        }
+        if let Some(to) = q.date_to {
+            clause.push_str(" AND n.date <= ?");
+            params.push(Value::Text(canon_timestamp(&to)));
+        }
+        Self {
+            clause,
+            params,
+            instant,
+        }
+    }
+}
+
+fn placeholders_unnumbered(n: usize) -> String {
+    vec!["?"; n].join(", ")
+}
+
+/// A candidate chunk with the evidence each generator produced. A chunk
+/// only the whole-word queries at the cap or the substring pass found
+/// carries no rank: its coverage decides (design 09 §6.5.3).
+#[derive(Default)]
+pub(super) struct ChunkEvidence {
+    pub(super) note_rowid: i64,
+    /// `fts_word`'s rank.
+    pub(super) word_rank: Option<f64>,
+    /// `fts_tri_head`'s rank.
+    pub(super) head_rank: Option<f64>,
+    /// `fts_tri`'s rank — only terms carrying an unsegmented character query
+    /// it.
+    pub(super) tri_rank: Option<f64>,
+}
+
+#[derive(Default)]
+pub(super) struct ExactEvidence {
+    pub(super) title: bool,
+    pub(super) alias: bool,
+    pub(super) fact_key: bool,
+}
+
+pub(super) struct NoteRow {
+    pub(super) rowid: i64,
+    pub(super) id: String,
+    pub(super) partition_key: String,
+    pub(super) scope: String,
+    pub(super) revision: String,
+    pub(super) relative_path: String,
+    pub(super) title: String,
+    pub(super) kind: String,
+    pub(super) status: String,
+    pub(super) effective_status: EffectiveStatus,
+    pub(super) origin: String,
+    pub(super) fact_key: Option<String>,
+    pub(super) valid_from: Option<String>,
+    pub(super) valid_to: Option<String>,
+    pub(super) updated_at: String,
+    pub(super) date: String,
+    pub(super) pinned: bool,
+    pub(super) conflict: bool,
+    pub(super) same_key_loser: bool,
+    pub(super) source_forgotten: bool,
+    pub(super) superseded_by: Vec<String>,
+    pub(super) authority: i64,
+}
+
+/// A candidate chunk with the text the ranker compares: its note's
+/// normalized header and its own normalized body.
+pub(super) struct ChunkRow {
+    pub(super) id: i64,
+    pub(super) note_rowid: i64,
+    pub(super) ordinal: u32,
+    pub(super) heading: Option<String>,
+    pub(super) line_from: u32,
+    pub(super) line_to: u32,
+    pub(super) title: String,
+    pub(super) aliases: String,
+    pub(super) tags: String,
+    pub(super) body: String,
+}
+
+impl MemoryIndex {
+    /// One search (design §5 steps 3–6). The filters — partition, kind,
+    /// status, derived supersession, validity, and on the automatic path the
+    /// same-`fact_key` loser and `source_forgotten` — run inside every
+    /// candidate query, before the limit. Verification of the selected files
+    /// (step 7) is the caller's: the hit carries the revision and path it
+    /// needs for that.
+    pub fn search(&self, q: &SearchQuery) -> Result<SearchResults> {
+        if q.limit == 0 || q.limit > MAX_LIMIT {
+            return Err(IndexError::InvalidInput(format!(
+                "limit must be 1–{MAX_LIMIT}, got {}",
+                q.limit
+            )));
+        }
+        let parsed = query::parse_query(&q.query)?;
+        let conn = self.lock();
+        let index_state = read_state(&conn)?;
+        if q.partition_keys.is_empty() {
+            return Ok(SearchResults {
+                hits: Vec::new(),
+                count: 0,
+                partial: false,
+                index_state,
+            });
+        }
+        let filter = Filter::build(q, self.now());
+        let mut partial = false;
+        let mut chunks: HashMap<i64, ChunkEvidence> = HashMap::new();
+        let mut exact: HashMap<i64, ExactEvidence> = HashMap::new();
+
+        // A literal's parts are routed only when the literal itself is found
+        // in no eligible note (`literal_has_hit`, design 09 §6.5.2): its
+        // prefix phrase can match a longer form and still leave it unfound.
+        let mut words: Vec<String> = parsed.words.clone();
+        for literal in &parsed.literals {
+            if !literal_has_hit(&conn, literal, &filter)? {
+                for part in &literal.parts {
+                    if !words.contains(part) {
+                        words.push(part.clone());
+                    }
+                }
+            }
+        }
+
+        if let Some(m) = parsed.word_match(&words) {
+            let rows = fts_candidates(&conn, "fts_word", &m, &filter)?;
+            let capped = rows.len() >= CANDIDATE_CAP;
+            partial |= capped;
+            for (chunk_id, note_rowid, rank) in rows {
+                let e = chunks.entry(chunk_id).or_default();
+                e.note_rowid = note_rowid;
+                e.word_rank = Some(rank);
+            }
+            // A word beginning shared by many longer words can fill the cap
+            // with them and crowd out a note whose one match is the whole
+            // word — the tag `work` among `worker` and `workspace`, or
+            // `rides to work` in a body (design 09 §6.5.2). So the terms
+            // sent as prefixes are searched again as whole words: in the
+            // header, ranked, with a cap of its own; and in the body, each
+            // term alone and unranked, its chunks added only when they fit
+            // within the cap — a word that common has no note a cap could
+            // single out, and ranking it would cost BM25 over every one.
+            // Below the cap the first query already holds every such chunk.
+            // The chunks these find carry no rank: their coverage decides.
+            if capped && let Some(at_cap) = parsed.word_match_exact_at_cap(&words) {
+                for (chunk_id, note_rowid, _) in
+                    fts_candidates(&conn, "fts_word", &at_cap.header, &filter)?
+                {
+                    chunks.entry(chunk_id).or_default().note_rowid = note_rowid;
+                }
+                for m in &at_cap.bodies {
+                    let rows = fts_rows_unranked(&conn, "fts_word", m, &filter, CANDIDATE_CAP + 1)?;
+                    if rows.len() <= CANDIDATE_CAP {
+                        for (chunk_id, note_rowid) in rows {
+                            chunks.entry(chunk_id).or_default().note_rowid = note_rowid;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(m) = parsed.head_trigram_match(&words) {
+            let rows = fts_candidates(&conn, "fts_tri_head", &m, &filter)?;
+            partial |= rows.len() >= CANDIDATE_CAP;
+            for (chunk_id, note_rowid, rank) in rows {
+                let e = chunks.entry(chunk_id).or_default();
+                e.note_rowid = note_rowid;
+                e.head_rank = Some(rank);
+            }
+        }
+        if let Some(m) = parsed.body_trigram_match(&words) {
+            let rows = fts_candidates(&conn, "fts_tri", &m, &filter)?;
+            partial |= rows.len() >= CANDIDATE_CAP;
+            for (chunk_id, note_rowid, rank) in rows {
+                let e = chunks.entry(chunk_id).or_default();
+                e.note_rowid = note_rowid;
+                e.tri_rank = Some(rank);
+            }
+        }
+        if !parsed.shorts.is_empty() {
+            let (rows, capped) = substring_candidates(&conn, &parsed.shorts, &filter)?;
+            partial |= capped;
+            for (chunk_id, note_rowid) in rows {
+                chunks.entry(chunk_id).or_default().note_rowid = note_rowid;
+            }
+        }
+        if !parsed.normalized.is_empty() {
+            for rowid in exact_rows(&conn, "n.norm_title = ?", &parsed.normalized, &filter)? {
+                exact.entry(rowid).or_default().title = true;
+            }
+            for rowid in alias_rows(&conn, &parsed.normalized, &filter)? {
+                exact.entry(rowid).or_default().alias = true;
+            }
+            for rowid in exact_rows(&conn, "n.fact_key = ?", &parsed.normalized, &filter)? {
+                exact.entry(rowid).or_default().fact_key = true;
+            }
+        }
+
+        // Load the rows behind the evidence.
+        let mut note_rowids: BTreeSet<i64> = chunks.values().map(|e| e.note_rowid).collect();
+        note_rowids.extend(exact.keys().copied());
+        if note_rowids.is_empty() {
+            return Ok(SearchResults {
+                hits: Vec::new(),
+                count: 0,
+                partial,
+                index_state,
+            });
+        }
+        let notes = load_notes(&conn, &note_rowids)?;
+        let mut chunk_rows = load_chunks(&conn, &chunks.keys().copied().collect::<Vec<_>>())?;
+        let exact_only: Vec<i64> = exact
+            .keys()
+            .copied()
+            .filter(|rowid| !chunks.values().any(|e| e.note_rowid == *rowid))
+            .collect();
+        chunk_rows.extend(load_first_chunks(&conn, &exact_only)?);
+        drop(conn);
+
+        Ok(rank(
+            q,
+            &parsed,
+            &words,
+            &filter,
+            notes,
+            chunk_rows,
+            &chunks,
+            &exact,
+            partial,
+            index_state,
+        ))
+    }
+}
+
+/// The best-ranked eligible chunks of one FTS table: `(chunk id, note
+/// rowid, rank)`, rank ascending (more negative is better).
+fn fts_candidates(
+    conn: &Connection,
+    table: &str,
+    match_expr: &str,
+    filter: &Filter,
+) -> Result<Vec<(i64, i64, f64)>> {
+    // CROSS JOIN pins the FTS scan as the outer loop.
+    let sql = format!(
+        "SELECT c.id, c.note_rowid, {table}.rank
+         FROM {table}
+         CROSS JOIN chunk c ON c.id = {table}.rowid
+         CROSS JOIN note n ON n.rowid = c.note_rowid
+         WHERE {table} MATCH ? AND {filter}
+         ORDER BY {table}.rank, c.id
+         LIMIT ?",
+        filter = filter.clause
+    );
+    let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 2);
+    params.push(Value::Text(match_expr.to_string()));
+    params.extend(filter.params.iter().cloned());
+    params.push(Value::Integer(CANDIDATE_CAP as i64));
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params_from_iter(params.iter()), |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, f64>(2)?,
+        ))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(IndexError::from)
+}
+
+/// Up to `limit` eligible chunks of one FTS table, in chunk id order and
+/// unranked: no BM25 is computed, so a term held by thousands of chunks
+/// costs no more than `limit` rows.
+fn fts_rows_unranked(
+    conn: &Connection,
+    table: &str,
+    match_expr: &str,
+    filter: &Filter,
+    limit: usize,
+) -> Result<Vec<(i64, i64)>> {
+    let sql = format!(
+        "SELECT c.id, c.note_rowid
+         FROM {table}
+         CROSS JOIN chunk c ON c.id = {table}.rowid
+         CROSS JOIN note n ON n.rowid = c.note_rowid
+         WHERE {table} MATCH ? AND {filter}
+         LIMIT ?",
+        filter = filter.clause
+    );
+    let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 2);
+    params.push(Value::Text(match_expr.to_string()));
+    params.extend(filter.params.iter().cloned());
+    params.push(Value::Integer(limit as i64));
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params_from_iter(params.iter()), |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(IndexError::from)
+}
+
+/// The bounded substring pass for one- and two-character terms: scans at
+/// most [`SUBSTRING_SCAN_CAP`] eligible chunks in index order and returns
+/// the chunks containing any of `shorts`, plus whether the cap was hit.
+fn substring_candidates(
+    conn: &Connection,
+    shorts: &[String],
+    filter: &Filter,
+) -> Result<(Vec<(i64, i64)>, bool)> {
+    let sql = format!(
+        "SELECT c.id, c.note_rowid, n.norm_title, n.norm_aliases, n.norm_tags, c.body
+         FROM chunk c
+         CROSS JOIN note n ON n.rowid = c.note_rowid
+         WHERE {filter}
+         ORDER BY c.id
+         LIMIT ?",
+        filter = filter.clause
+    );
+    let mut params: Vec<Value> = filter.params.clone();
+    params.push(Value::Integer(SUBSTRING_SCAN_CAP as i64 + 1));
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let mut rows = stmt.query(params_from_iter(params.iter()))?;
+    let mut hits = Vec::new();
+    let mut scanned = 0usize;
+    while let Some(row) = rows.next()? {
+        scanned += 1;
+        if scanned > SUBSTRING_SCAN_CAP {
+            return Ok((hits, true));
+        }
+        let id: i64 = row.get(0)?;
+        let note_rowid: i64 = row.get(1)?;
+        let fields: [String; 4] = [row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?];
+        if shorts
+            .iter()
+            .any(|s| fields.iter().any(|f| f.contains(s.as_str())))
+        {
+            hits.push((id, note_rowid));
+        }
+    }
+    Ok((hits, false))
+}
+
+/// Whether a literal is found in any eligible note — the probe that decides
+/// whether its parts are routed (design 09 §6.5.2). Found is what schema 3's
+/// probe meant: the literal's tokens in sequence (the exact phrase on the
+/// word table), or a substring a trigram table holds — and, since no trigram
+/// table holds a Latin body any more, a longer form the prefix phrase finds
+/// that holds the literal verbatim (`memory_file` in `memory_files`). A
+/// longer form alone is not the literal: `dark modes` does not hide the
+/// parts of `dark-mode`, so a note that says only `dark` is still found
+/// (repair round 2 of LQ17). A header needs no verbatim check: a literal has
+/// at least three characters, so the header trigram table finds it there.
+fn literal_has_hit(conn: &Connection, literal: &query::Literal, filter: &Filter) -> Result<bool> {
+    let only = ParsedQuery {
+        literals: vec![literal.clone()],
+        ..ParsedQuery::default()
+    };
+    let (exact, prefix) = literal.word_probes();
+    let probes = [
+        ("fts_word", Some(exact), None),
+        ("fts_tri_head", only.head_trigram_match(&[]), None),
+        ("fts_tri", only.body_trigram_match(&[]), None),
+        ("fts_word", prefix, Some(literal.text.as_str())),
+    ];
+    for (table, phrase, verbatim) in probes {
+        let Some(phrase) = phrase else {
+            continue;
+        };
+        let sql = format!(
+            "SELECT EXISTS(
+                SELECT 1 FROM {table}
+                CROSS JOIN chunk c ON c.id = {table}.rowid
+                CROSS JOIN note n ON n.rowid = c.note_rowid
+                WHERE {table} MATCH ? AND {filter}{verbatim})",
+            filter = filter.clause,
+            verbatim = if verbatim.is_some() {
+                " AND instr(c.body, ?) > 0"
+            } else {
+                ""
+            },
+        );
+        let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 2);
+        params.push(Value::Text(phrase));
+        params.extend(filter.params.iter().cloned());
+        if let Some(text) = verbatim {
+            params.push(Value::Text(text.to_string()));
+        }
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let hit: bool = stmt.query_row(params_from_iter(params.iter()), |r| r.get(0))?;
+        if hit {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn exact_rows(
+    conn: &Connection,
+    predicate: &str,
+    value: &str,
+    filter: &Filter,
+) -> Result<Vec<i64>> {
+    let sql = format!(
+        "SELECT n.rowid FROM note n WHERE {predicate} AND {filter}",
+        filter = filter.clause
+    );
+    let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 1);
+    params.push(Value::Text(value.to_string()));
+    params.extend(filter.params.iter().cloned());
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params_from_iter(params.iter()), |r| r.get::<_, i64>(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(IndexError::from)
+}
+
+fn alias_rows(conn: &Connection, value: &str, filter: &Filter) -> Result<Vec<i64>> {
+    let sql = format!(
+        "SELECT DISTINCT n.rowid FROM note_alias a
+         JOIN note n ON n.rowid = a.note_rowid
+         WHERE a.norm_alias = ? AND {filter}",
+        filter = filter.clause
+    );
+    let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 1);
+    params.push(Value::Text(value.to_string()));
+    params.extend(filter.params.iter().cloned());
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params_from_iter(params.iter()), |r| r.get::<_, i64>(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(IndexError::from)
+}
+
+/// `IN` lists are batched so a candidate set never exceeds SQLite's
+/// parameter limit.
+const IN_BATCH: usize = 200;
+
+fn load_notes(conn: &Connection, rowids: &BTreeSet<i64>) -> Result<HashMap<i64, NoteRow>> {
+    let mut out = HashMap::with_capacity(rowids.len());
+    let ids: Vec<i64> = rowids.iter().copied().collect();
+    for batch in ids.chunks(IN_BATCH) {
+        let sql = format!(
+            "SELECT rowid, id, partition_key, scope, revision, relative_path, title, kind,
+                    status, effective_status, origin, fact_key, valid_from, valid_to,
+                    updated_at, pinned, conflict, same_key_loser, source_forgotten,
+                    superseded_by, authority, date
+             FROM note WHERE rowid IN ({})",
+            placeholders(batch.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(batch.iter()), |r| {
+            let status: String = r.get(9)?;
+            let superseded: String = r.get(19)?;
+            Ok(NoteRow {
+                rowid: r.get(0)?,
+                id: r.get(1)?,
+                partition_key: r.get(2)?,
+                scope: r.get(3)?,
+                revision: r.get(4)?,
+                relative_path: r.get(5)?,
+                title: r.get(6)?,
+                kind: r.get(7)?,
+                status: r.get(8)?,
+                effective_status: EffectiveStatus::parse(&status)
+                    .unwrap_or(EffectiveStatus::Active),
+                origin: r.get(10)?,
+                fact_key: r.get(11)?,
+                valid_from: r.get(12)?,
+                valid_to: r.get(13)?,
+                updated_at: r.get(14)?,
+                pinned: r.get::<_, i64>(15)? != 0,
+                conflict: r.get::<_, i64>(16)? != 0,
+                same_key_loser: r.get::<_, i64>(17)? != 0,
+                source_forgotten: r.get::<_, i64>(18)? != 0,
+                superseded_by: serde_json::from_str(&superseded).unwrap_or_default(),
+                authority: r.get(20)?,
+                date: r.get(21)?,
+            })
+        })?;
+        for row in rows {
+            let row = row?;
+            out.insert(row.rowid, row);
+        }
+    }
+    Ok(out)
+}
+
+/// A chunk's columns with its note's normalized header — held once per
+/// note since index schema 4 (design 09 §6.5.1).
+const CHUNK_COLUMNS: &str = "c.id, c.note_rowid, c.ordinal, c.heading, c.line_from, c.line_to, \
+     n.norm_title, n.norm_aliases, n.norm_tags, c.body";
+
+fn chunk_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
+    Ok(ChunkRow {
+        id: r.get(0)?,
+        note_rowid: r.get(1)?,
+        ordinal: r.get::<_, i64>(2)? as u32,
+        heading: r.get(3)?,
+        line_from: r.get::<_, i64>(4)? as u32,
+        line_to: r.get::<_, i64>(5)? as u32,
+        title: r.get(6)?,
+        aliases: r.get(7)?,
+        tags: r.get(8)?,
+        body: r.get(9)?,
+    })
+}
+
+fn load_chunks(conn: &Connection, ids: &[i64]) -> Result<Vec<ChunkRow>> {
+    let mut out = Vec::with_capacity(ids.len());
+    for batch in ids.chunks(IN_BATCH) {
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunk c JOIN note n ON n.rowid = c.note_rowid
+             WHERE c.id IN ({})",
+            placeholders(batch.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(batch.iter()), chunk_from_row)?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    Ok(out)
+}
+
+/// The first chunk of each note, for a note found only by an exact lookup.
+fn load_first_chunks(conn: &Connection, note_rowids: &[i64]) -> Result<Vec<ChunkRow>> {
+    let mut out = Vec::with_capacity(note_rowids.len());
+    for batch in note_rowids.chunks(IN_BATCH) {
+        let sql = format!(
+            "SELECT {CHUNK_COLUMNS} FROM chunk c JOIN note n ON n.rowid = c.note_rowid
+             WHERE c.ordinal = 0 AND c.note_rowid IN ({})",
+            placeholders(batch.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(batch.iter()), chunk_from_row)?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    Ok(out)
+}
+
+// ============================================================================
+// Ranking
+// ============================================================================
+
+/// The normalized text fields of one chunk — title, aliases, tags, body —
+/// tokenized once, as the word table reads them: split at script boundaries
+/// (design 09 §6.5.1). The ranker and the file scan both read a chunk
+/// through this, with the index's evidence (§6.5.3).
+pub(super) struct ChunkText<'a> {
+    fields: [&'a str; 4],
+    tokens: [HashSet<&'a str>; 4],
+    token_lists: [Vec<&'a str>; 4],
+    /// The body carries an unsegmented character, so it is in `fts_tri`.
+    unsegmented: bool,
+}
+
+impl<'a> ChunkText<'a> {
+    pub(super) fn new(c: &'a ChunkRow) -> Self {
+        let fields = [
+            c.title.as_str(),
+            c.aliases.as_str(),
+            c.tags.as_str(),
+            c.body.as_str(),
+        ];
+        let token_lists = fields.map(|f| query::tokens_split(f).collect::<Vec<_>>());
+        let tokens = token_lists
+            .iter()
+            .map(|l| l.iter().copied().collect::<HashSet<_>>())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("four fields"));
+        Self {
+            fields,
+            tokens,
+            token_lists,
+            unsegmented: c.body.chars().any(query::is_unsegmented),
+        }
+    }
+
+    /// `term` is a whole token of some field — or, for a word glued across
+    /// scripts (`python版本`), its split tokens stand in sequence in some
+    /// field, which is how the word table matches it: as the phrase
+    /// `python 版本`, in spaced text as in glued (design 09 §6.5.3).
+    pub(super) fn has_token(&self, term: &str) -> bool {
+        if self.tokens.iter().any(|set| set.contains(term)) {
+            return true;
+        }
+        let split: Vec<&str> = query::tokens_split(term).collect();
+        split.len() > 1
+            && self
+                .token_lists
+                .iter()
+                .any(|list| list.windows(split.len()).any(|w| w == split.as_slice()))
+    }
+
+    /// A token of some field begins with `term`, which the word table
+    /// queries as a prefix ([`query::is_prefix_term`]).
+    pub(super) fn has_prefix(&self, term: &str) -> bool {
+        query::is_prefix_term(term)
+            && self
+                .token_lists
+                .iter()
+                .any(|list| list.iter().any(|t| t.starts_with(term)))
+    }
+
+    /// `text` is a substring where the trigram tables find one: in a title,
+    /// an alias or a tag; in the body only when both the text and the body
+    /// carry an unsegmented character.
+    pub(super) fn contains_indexed(&self, text: &str) -> bool {
+        text.chars().count() >= 3
+            && (self.fields[..3].iter().any(|f| f.contains(text))
+                || (self.unsegmented
+                    && text.chars().any(query::is_unsegmented)
+                    && self.fields[3].contains(text)))
+    }
+
+    /// `text` is a substring of any field — the one- and two-character
+    /// pass, which scans every field.
+    pub(super) fn contains(&self, text: &str) -> bool {
+        self.fields.iter().any(|f| f.contains(text))
+    }
+
+    /// A literal as a phrase, as the tables find it: a substring where the
+    /// trigram tables find one, or its tokens in sequence — the last one as
+    /// a prefix when the word table queries it as one. This is the `phrase`
+    /// evidence the ranker gives.
+    pub(super) fn has_phrase(&self, literal: &str) -> bool {
+        self.contains_indexed(literal) || self.has_sequence(literal, query::is_prefix_term(literal))
+    }
+
+    /// The literal itself is here, for the rule that routes its parts only
+    /// when it is found nowhere — `search`'s `literal_has_hit`, chunk by
+    /// chunk: a substring where the trigram tables find one, its tokens in
+    /// sequence, or a longer form its prefix phrase finds that holds it
+    /// verbatim in the body (`memory_file` in `memory_files`, not
+    /// `dark-mode` in `dark modes`).
+    pub(super) fn finds_literal(&self, literal: &str) -> bool {
+        self.contains_indexed(literal)
+            || self.has_sequence(literal, false)
+            || (query::is_prefix_term(literal)
+                && self.fields[3].contains(literal)
+                && self.has_sequence(literal, true))
+    }
+
+    /// The literal's tokens stand in sequence in some field — the last one
+    /// as a word's beginning when `prefix`.
+    fn has_sequence(&self, literal: &str, prefix: bool) -> bool {
+        let needle: Vec<&str> = query::tokens_split(literal).collect();
+        let Some((last, lead)) = needle.split_last() else {
+            return false;
+        };
+        self.token_lists.iter().any(|list| {
+            list.windows(needle.len()).any(|w| {
+                let (w_last, w_lead) = w.split_last().unwrap_or_else(|| unreachable!("non-empty"));
+                w_lead == lead && (w_last == last || (prefix && w_last.starts_with(last)))
+            })
+        })
+    }
+}
+
+/// Per-note accumulated evidence.
+struct NoteScore {
+    reasons: BTreeSet<MatchReason>,
+    terms: HashSet<String>,
+    /// Words matched as a beginning and nowhere as a whole token.
+    prefix_only: HashSet<String>,
+    /// Words matched as a substring and nowhere as a token or a beginning.
+    trigram_only: HashSet<String>,
+    phrases: HashSet<String>,
+    shorts: HashSet<String>,
+    word_rel: f64,
+    tri_rel: f64,
+    /// `(coverage score, -ordinal)` of the best chunk, and the chunk.
+    best: Option<(f64, i64, usize)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rank(
+    q: &SearchQuery,
+    parsed: &ParsedQuery,
+    words: &[String],
+    filter: &Filter,
+    notes: HashMap<i64, NoteRow>,
+    chunk_rows: Vec<ChunkRow>,
+    evidence: &HashMap<i64, ChunkEvidence>,
+    exact: &HashMap<i64, ExactEvidence>,
+    partial: bool,
+    index_state: IndexState,
+) -> SearchResults {
+    let max_word = evidence
+        .values()
+        .filter_map(|e| e.word_rank)
+        .map(|r| -r)
+        .fold(0.0_f64, f64::max);
+    let max_head = evidence
+        .values()
+        .filter_map(|e| e.head_rank)
+        .map(|r| -r)
+        .fold(0.0_f64, f64::max);
+    let max_tri = evidence
+        .values()
+        .filter_map(|e| e.tri_rank)
+        .map(|r| -r)
+        .fold(0.0_f64, f64::max);
+    let normalized = |rank: Option<f64>, max: f64| -> f64 {
+        rank.map(|r| -r / max.max(f64::MIN_POSITIVE)).unwrap_or(0.0)
+    };
+
+    let mut scores: HashMap<i64, NoteScore> = HashMap::new();
+    for (i, chunk) in chunk_rows.iter().enumerate() {
+        let Some(note) = notes.get(&chunk.note_rowid) else {
+            continue;
+        };
+        let text = ChunkText::new(chunk);
+        let entry = scores.entry(note.rowid).or_insert_with(|| NoteScore {
+            reasons: BTreeSet::new(),
+            terms: HashSet::new(),
+            prefix_only: HashSet::new(),
+            trigram_only: HashSet::new(),
+            phrases: HashSet::new(),
+            shorts: HashSet::new(),
+            word_rel: 0.0,
+            tri_rel: 0.0,
+            best: None,
+        });
+        // Per word, a note keeps its strongest evidence: a whole token,
+        // then a beginning, then a substring (design 09 §6.5.3).
+        let mut coverage = 0.0;
+        for word in words {
+            let word = word.as_str();
+            if text.has_token(word) {
+                entry.reasons.insert(MatchReason::Term);
+                entry.terms.insert(word.to_string());
+                entry.prefix_only.remove(word);
+                entry.trigram_only.remove(word);
+                coverage += W_TERM;
+            } else if text.has_prefix(word) {
+                entry.reasons.insert(MatchReason::Prefix);
+                if !entry.terms.contains(word) {
+                    entry.prefix_only.insert(word.to_string());
+                    entry.trigram_only.remove(word);
+                }
+                coverage += W_PREFIX;
+            } else if text.contains_indexed(word) {
+                entry.reasons.insert(MatchReason::Trigram);
+                if !entry.terms.contains(word) && !entry.prefix_only.contains(word) {
+                    entry.trigram_only.insert(word.to_string());
+                }
+                coverage += W_TRIGRAM;
+            }
+        }
+        for literal in parsed.literals.iter().map(|l| l.text.as_str()) {
+            if text.has_phrase(literal) {
+                entry.reasons.insert(MatchReason::Phrase);
+                entry.phrases.insert(literal.to_string());
+                coverage += W_PHRASE;
+            }
+        }
+        for short in &parsed.shorts {
+            if text.contains(short) {
+                entry.shorts.insert(short.to_string());
+                coverage += W_SHORT;
+            }
+        }
+        // Trigram relevance is the larger of the header table's and the
+        // unsegmented-body table's, so a Latin body word is not counted
+        // twice (design 09 §6.5.3).
+        let (wr, tr) = match evidence.get(&chunk.id) {
+            Some(e) => (
+                normalized(e.word_rank, max_word),
+                normalized(e.head_rank, max_head).max(normalized(e.tri_rank, max_tri)),
+            ),
+            None => (0.0, 0.0),
+        };
+        entry.word_rel = entry.word_rel.max(wr);
+        entry.tri_rel = entry.tri_rel.max(tr);
+        let chunk_score = coverage + W_BM25_WORD * wr + W_BM25_TRIGRAM * tr;
+        let key = (chunk_score, -(chunk.ordinal as i64));
+        let better = match entry.best {
+            None => true,
+            Some((s, o, _)) => key > (s, o),
+        };
+        if better {
+            entry.best = Some((chunk_score, -(chunk.ordinal as i64), i));
+        }
+    }
+
+    let mut hits: Vec<SearchHit> = Vec::with_capacity(scores.len());
+    for (rowid, s) in scores {
+        let note = &notes[&rowid];
+        let Some((_, _, chunk_index)) = s.best else {
+            continue;
+        };
+        let chunk = &chunk_rows[chunk_index];
+        let mut reasons = s.reasons;
+        let mut score = W_TERM * s.terms.len() as f64
+            + W_PREFIX * s.prefix_only.len() as f64
+            + W_TRIGRAM * s.trigram_only.len() as f64
+            + W_PHRASE * s.phrases.len() as f64
+            + W_SHORT * s.shorts.len() as f64
+            + W_BM25_WORD * s.word_rel
+            + W_BM25_TRIGRAM * s.tri_rel
+            + W_AUTHORITY * note.authority as f64;
+        if let Some(e) = exact.get(&rowid) {
+            if e.title {
+                reasons.insert(MatchReason::Title);
+                score += W_EXACT_TITLE;
+            }
+            if e.alias {
+                reasons.insert(MatchReason::Alias);
+                score += W_EXACT_ALIAS;
+            }
+            if e.fact_key {
+                reasons.insert(MatchReason::FactKey);
+                score += W_EXACT_FACT_KEY;
+            }
+        }
+        let explicit = note.valid_from.is_some() || note.valid_to.is_some();
+        let effective_now = note
+            .valid_from
+            .as_deref()
+            .is_none_or(|from| from <= filter.instant.as_str())
+            && note
+                .valid_to
+                .as_deref()
+                .is_none_or(|to| to > filter.instant.as_str());
+        if explicit && effective_now {
+            score += W_VALID_NOW;
+        }
+        // A reason stays only for a word the note has no stronger evidence
+        // for: a word matched whole somewhere in the note drops `prefix` and
+        // `trigram`, a beginning drops `trigram`.
+        if s.trigram_only.is_empty() {
+            reasons.remove(&MatchReason::Trigram);
+        }
+        if s.prefix_only.is_empty() {
+            reasons.remove(&MatchReason::Prefix);
+        }
+        hits.push(SearchHit {
+            id: note.id.clone(),
+            revision: note.revision.clone(),
+            partition_key: note.partition_key.clone(),
+            scope: note.scope.clone(),
+            relative_path: note.relative_path.clone(),
+            title: note.title.clone(),
+            kind: note.kind.clone(),
+            status: note.status.clone(),
+            effective_status: note.effective_status,
+            origin: note.origin.clone(),
+            fact_key: note.fact_key.clone(),
+            valid_from: note.valid_from.clone(),
+            valid_to: note.valid_to.clone(),
+            upcoming: note
+                .valid_from
+                .as_deref()
+                .is_some_and(|from| from > filter.instant.as_str()),
+            ended: note
+                .valid_to
+                .as_deref()
+                .is_some_and(|to| to <= filter.instant.as_str()),
+            date: note.date.clone(),
+            updated_at: note.updated_at.clone(),
+            pinned: note.pinned,
+            conflict: note.conflict,
+            same_key_loser: note.same_key_loser,
+            source_forgotten: note.source_forgotten,
+            superseded_by: note.superseded_by.clone(),
+            heading: chunk.heading.clone(),
+            line_range: (chunk.line_from, chunk.line_to),
+            chunk_ordinal: chunk.ordinal,
+            matches: reasons.into_iter().collect(),
+            score,
+        });
+    }
+    // Score, then newest `updated_at`, then id — deterministic to the end.
+    // A date order (design 09 §13.1) sorts every match by its date first and
+    // keeps that same order among notes of one date.
+    let by_score = |a: &SearchHit, b: &SearchHit| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+            .then_with(|| a.id.cmp(&b.id))
+    };
+    match q.order {
+        SearchOrder::Relevance => hits.sort_by(by_score),
+        SearchOrder::Newest => {
+            hits.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| by_score(a, b)))
+        }
+        SearchOrder::Oldest => {
+            hits.sort_by(|a, b| a.date.cmp(&b.date).then_with(|| by_score(a, b)))
+        }
+    }
+    hits.truncate(q.limit);
+    let count = hits.len();
+    SearchResults {
+        hits,
+        count,
+        partial,
+        index_state,
+    }
+}

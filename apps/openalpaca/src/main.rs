@@ -12,7 +12,7 @@
 //! - llm: Manage LLM settings, keys, and usage
 //! - chat: Chat with the Orchestrator
 //! - sessions: List the conversations a lane holds
-//! - store: Manage the content store (rebase a moved project, purge one you are done with)
+//! - store: Manage projects (list them, re-point a moved one, delete one's data)
 
 mod chat_stream;
 mod client;
@@ -70,8 +70,14 @@ enum Commands {
     /// Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove)
     Ext(commands::ext::ExtArgs),
 
-    /// Manage the content store (rebase a moved project, purge one you are done with)
+    /// Manage projects (list them, re-point a moved one, delete one's data)
     Store(commands::store::StoreArgs),
+
+    /// Show or edit the persona documents (USER.md) through the daemon
+    Persona(commands::persona::PersonaArgs),
+
+    /// Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt)
+    Memory(commands::memory::MemoryArgs),
 }
 
 #[tokio::main]
@@ -91,5 +97,7 @@ async fn main() -> Result<()> {
         Commands::Plugin(args) => commands::plugin::run(args).await,
         Commands::Ext(args) => commands::ext::run(args).await,
         Commands::Store(args) => commands::store::run(args).await,
+        Commands::Persona(args) => commands::persona::run(args).await,
+        Commands::Memory(args) => commands::memory::run(args).await,
     }
 }

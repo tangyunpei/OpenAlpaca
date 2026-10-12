@@ -2,7 +2,7 @@
 //!
 //! ```http
 //! GET    /v1/sessions?workspace_id=&source=&status=&q=&limit=&offset=
-//! POST   /v1/sessions {source?, workspace_path?, title?}
+//! POST   /v1/sessions {source?, workspace_path?, title?, inherit?}
 //! GET    /v1/sessions/{id}
 //! GET    /v1/sessions/{id}/messages?limit=&offset=&before_id=
 //! GET    /v1/sessions/{id}/events?after_seq=&types=&limit=&agent=&span_id=
@@ -37,6 +37,7 @@ use std::sync::Arc;
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::context::SharedContext;
 use openalpaca_core::events::SystemEvent;
+use openalpaca_core::orchestrator::working_state::WorkingState;
 use openalpaca_storage::{
     Conversation, ConversationRepository, Database, SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter,
 };
@@ -72,12 +73,12 @@ const MAX_EVENTS_BYTES: usize = 4 * 1024 * 1024;
 
 /// One session, as a client sees it (§5.7).
 ///
-/// The stored row minus the summary columns: `summary`, `summary_version` and
-/// friends are the context compactor's bookkeeping, not the conversation's
-/// description, and a sidebar that rendered them would be showing the model's
-/// notes to the user. `active_task_count` and `interrupted_task_count` are
-/// derived — the first from the live lane registry, the second from one
-/// grouped query over `task.session_id`.
+/// The stored row with its working state (design 11 §5, owner decision CQ-7:
+/// the state is for the user too — the chat aside's card draws it), minus the
+/// writer's bookkeeping (`working_state_version`, `working_state_through`),
+/// the projected note's id and the `inherit` flag. `active_task_count` and
+/// `interrupted_task_count` are derived — the first from the live lane
+/// registry, the second from one grouped query over `task.session_id`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionView {
     pub id: String,
@@ -92,6 +93,11 @@ pub struct SessionView {
     pub created_at: String,
     pub updated_at: String,
     pub ended_at: Option<String>,
+    /// The conversation's working state (design 11 §2), `null` while it has
+    /// none — or holds a text that is not one.
+    pub working_state: Option<WorkingState>,
+    /// When the state was last written; `null` while it has none.
+    pub working_state_updated_at: Option<String>,
     /// Runs this session's lane has in flight right now.
     pub active_task_count: i64,
     /// Runs started from this session that were left interrupted.
@@ -124,6 +130,11 @@ pub struct CreateSessionRequest {
     pub workspace_path: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// `false` starts the conversation fresh ("Start fresh"): it is never
+    /// given the previous conversation's state (design 11 §4 (b), owner
+    /// decision CQ-5). Absent is `true`.
+    #[serde(default)]
+    pub inherit: Option<bool>,
 }
 
 /// `?after_seq=&types=&limit=&agent=&span_id=` (§5.4/§5.7).
@@ -201,6 +212,14 @@ pub(super) struct Deps<'a> {
     /// `create_dir_all`). `None` when no session store resolved at boot, which
     /// is also when there is nothing on disk to remove.
     pub session_log: Option<Arc<openalpaca_core::session_log::SessionLogService>>,
+    /// The learning queue the gateway feeds, for `DELETE`: a deleted
+    /// conversation's turns not yet learned go with its messages (LQ4).
+    /// `None` when no router was configured at boot.
+    pub learning: Option<Arc<openalpaca_core::memory::learning::LearningQueue>>,
+    /// The memory service, for `DELETE`: a deleted conversation's summaries
+    /// are forgotten with it (design 09 §13.3). `None` in a test that has no
+    /// home store.
+    pub memory: Option<Arc<openalpaca_core::memory::service::MemoryService>>,
 }
 
 impl Deps<'_> {
@@ -223,20 +242,27 @@ impl Deps<'_> {
 
         sessions
             .into_iter()
-            .map(|s| SessionView {
-                active_task_count: self.ctx.workflows_for_lane(&s.lane_key).len() as i64,
-                interrupted_task_count: interrupted.get(&s.id).copied().unwrap_or(0),
-                id: s.id,
-                lane_key: s.lane_key,
-                source: s.source,
-                title: s.title,
-                workspace_id: s.workspace_id,
-                status: s.status,
-                message_count: s.message_count,
-                last_message_at: s.last_message_at,
-                created_at: s.created_at,
-                updated_at: s.updated_at,
-                ended_at: s.ended_at,
+            .map(|s| {
+                let working_state = serde_json::from_str::<WorkingState>(&s.working_state).ok();
+                SessionView {
+                    active_task_count: self.ctx.workflows_for_lane(&s.lane_key).len() as i64,
+                    interrupted_task_count: interrupted.get(&s.id).copied().unwrap_or(0),
+                    id: s.id,
+                    lane_key: s.lane_key,
+                    source: s.source,
+                    title: s.title,
+                    workspace_id: s.workspace_id,
+                    status: s.status,
+                    message_count: s.message_count,
+                    last_message_at: s.last_message_at,
+                    created_at: s.created_at,
+                    updated_at: s.updated_at,
+                    ended_at: s.ended_at,
+                    working_state_updated_at: s
+                        .working_state_updated_at
+                        .filter(|_| working_state.is_some()),
+                    working_state,
+                }
             })
             .collect()
     }
@@ -349,6 +375,8 @@ fn deps(state: &AppState) -> Deps<'_> {
             .as_ref()
             .map(|service| service.root().to_path_buf()),
         session_log,
+        learning: state.gateway.learning().cloned(),
+        memory: Some(state.memory_service.clone()),
     }
 }
 
@@ -426,11 +454,12 @@ pub(super) fn create_session(deps: &Deps<'_>, request: CreateSessionRequest) -> 
     let lane_key = format!("{}:{}", deps.owner, source);
     let workspace = request_project_root(request.workspace_path.as_deref());
 
-    match deps.repo().create_session(
+    match deps.repo().create_session_inheriting(
         &lane_key,
         source,
         workspace.as_deref(),
         request.title.as_deref(),
+        request.inherit.unwrap_or(true),
     ) {
         Ok(session) => {
             deps.announce(&session.id, &session.lane_key, SESSION_ACTIVE);
@@ -706,7 +735,7 @@ pub(super) fn patch_session(deps: &Deps<'_>, id: &str, request: PatchSessionRequ
 
     // Absent leaves the binding alone; an empty string unbinds; a path binds,
     // resolved to its project root the same way a chat turn's header is (R22).
-    // A path under no project marker resolves to `None` — which unbinds rather
+    // A path in no project resolves to `None` — which unbinds rather
     // than storing a root the daemon does not believe in. On an unbound
     // session both of those are the same no-op.
     let workspace = request.workspace_path.as_deref().map(|path| {
@@ -774,9 +803,27 @@ pub(super) async fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
         );
     }
 
+    // Read before the rows go: the conversation's summaries are forgotten by
+    // its message ids (design 09 §13.3). A read that fails forgets nothing.
+    let message_ids = deps.repo().message_ids(id).unwrap_or_default();
     match deps.repo().delete_session(id) {
         Ok(true) => {
             remove_session_log(deps, id).await;
+            // Storage design §10: and its scratch folder.
+            remove_scratch_folder(id);
+            // LQ4: the conversation's unlearned turns went with its
+            // messages; the learning queue forgets it too (a flush in flight
+            // writes nothing).
+            if let Some(queue) = deps.learning.as_deref() {
+                queue.forget_session(id);
+            }
+            forget_conversation_summaries(
+                deps.memory.clone(),
+                deps.owner,
+                session.workspace_id.as_deref(),
+                message_ids,
+            )
+            .await;
             deps.announce(&session.id, &session.lane_key, "deleted");
             StatusCode::NO_CONTENT.into_response()
         }
@@ -785,9 +832,48 @@ pub(super) async fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
     }
 }
 
+/// Deleting, clearing or purging a conversation forgets its summaries
+/// (design 09 §13.3, LQ4): the `episode` notes of origin `extracted_other`
+/// that are not candidates — one the extractor proposed is an ordinary
+/// candidate, not a summary — whose sources all lie among `message_ids`
+/// (the conversation's rows, read before they went), in the owner's home
+/// partition and `root`'s. Best effort: the rows are already gone and the
+/// caller's answer stands, so a failure is one WARN; an owner with no
+/// memory (not a `global_user` row) has nothing to forget.
+pub(crate) async fn forget_conversation_summaries(
+    memory: Option<Arc<openalpaca_core::memory::service::MemoryService>>,
+    owner: &str,
+    root: Option<&str>,
+    message_ids: Vec<i64>,
+) {
+    let Some(memory) = memory else {
+        return;
+    };
+    if message_ids.is_empty() {
+        return;
+    }
+    let owner = owner.to_string();
+    let root = root.map(std::path::PathBuf::from);
+    let forgotten = tokio::task::spawn_blocking(move || {
+        memory.forget_conversation_summaries(&owner, root.as_deref(), &message_ids)
+    })
+    .await;
+    match forgotten {
+        Ok(Ok(0)) | Ok(Err(openalpaca_core::memory::service::MemoryError::NoOwner(_))) => {}
+        Ok(Ok(n)) => tracing::info!(
+            forgotten = n,
+            "forgot the episode notes of a deleted conversation"
+        ),
+        Ok(Err(e)) => tracing::warn!(
+            "the conversation is gone, but its episode notes could not be forgotten: {e}"
+        ),
+        Err(e) => tracing::warn!("forgetting a deleted conversation's episode notes failed: {e}"),
+    }
+}
+
 /// Stand this session's writer down and remove its log directory.
 ///
-/// Shared shape with the purge's `remove_purged_bytes`: a missing directory is
+/// Shared shape with the delete's `remove_session_dirs`: a missing directory is
 /// nothing to do (a conversation that never narrated has none — P-22), and an
 /// I/O error is logged rather than raised, because the rows are already gone.
 pub(super) async fn remove_session_log(deps: &Deps<'_>, id: &str) {
@@ -806,6 +892,25 @@ pub(super) async fn remove_session_log(deps: &Deps<'_>, id: &str) {
             session_id = id,
             "Deleted the conversation but could not remove {}: {e}",
             dir.display()
+        );
+    }
+}
+
+/// Remove a deleted conversation's scratch folder — `~/.openalpaca/scratch/<id>/`,
+/// its working folder when it had no project (storage design §10) — so no
+/// later conversation can see its files. Shared with the project delete
+/// (`POST /v1/workspaces/purge`). Best effort, like the log: the rows are
+/// gone and the caller's answer stands, so a failure is one WARN naming the
+/// folder; a conversation that never ran a file tool or a command has none.
+/// Clearing a conversation (`routes/chat.rs`) and archiving one keep it.
+pub(crate) fn remove_scratch_folder(id: &str) {
+    use openalpaca_core::tools::working_folder::{remove_scratch, scratch_dir};
+    if let Err(e) = remove_scratch(id) {
+        let folder = scratch_dir(id)
+            .map_or_else(|_| format!("scratch/{id}"), |dir| dir.display().to_string());
+        tracing::warn!(
+            session_id = id,
+            "Deleted the conversation but could not remove {folder}: {e}"
         );
     }
 }

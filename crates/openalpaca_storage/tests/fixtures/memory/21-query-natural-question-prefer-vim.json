@@ -1,0 +1,92 @@
+{
+  "row": {
+    "id": "q1",
+    "scenario": "slice-2 query fixture: \"what editor do I prefer?\" recalls \"User prefers vim for editing\"",
+    "required_outcome": "The natural question finds the note by the words the question and the note share: `editor`, a whole token of the title, and `prefer` as the beginning of the title's `preference` and the body's `prefers` (the `unicode61` table's prefix query, 09 §6.5, LQ17). Step 1 carries `term` and `prefix`. Supports matrix rows 12 and 13 and plan 3.3's per-turn recall test; fixture 26 is the body-only variant."
+  },
+  "design": ["§5 step 3: union of terms, never the whole message ANDed", "§5 step 4 (03 rev 7.8, 09 §6.5.2): the `unicode61` table takes every term, as a prefix query when its last token has three or more characters; a word-beginning hit has a trigram-only hit's coverage weight, below a whole-token hit, and is reported as `prefix`; no stemmer", "§7a MatchReason: `prefix` (09 §6.5.3)"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "One note, one decoy. Before LQ17 this file said the note was found only through the trigram table and that plain `unicode61` returned nothing; that was the G23 reproduction under the whole-message AND the design removed. With the terms ORed, `editor` is a whole token of the title \"Editor preference\", so the word table alone finds the note, and `prefer*` finds the title's `preference` and the body's `prefers` as word beginnings: step 1 carries `term` and `prefix`. `what`/`do`/`i` are stop words and match nothing; `editor` does not match the body's `editing` (neither begins the other). `unicode61_only_would_return` records that the word table alone now returns the note; the loader does not run it. Step 3 is the same question with a stop-word-free phrasing (`preferred*` matches nothing; `editor` does); step 4 the whole-token form, which must carry `term`. Fixture 26 is the body-only test: there the title does not help.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000021-0000-4000-8000-000000000001",
+          "title": "Editor preference",
+          "kind": "preference",
+          "status": "active",
+          "fact_key": "editor.preference",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Editor preference\n\nUser prefers vim for editing.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000021-0000-4000-8000-000000000002",
+          "title": "Coffee",
+          "kind": "preference",
+          "status": "active",
+          "created_at": "2026-09-23T10:01:00Z",
+          "updated_at": "2026-09-23T10:01:00Z",
+          "body": "# Coffee\n\nUser drinks espresso after lunch.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_tool": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } }
+  },
+  "unicode61_only_would_return": { "what editor do I prefer?": ["00000021-0000-4000-8000-000000000001"] },
+  "operations": [
+    {
+      "step": 1,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "what editor do I prefer?" },
+      "expect": {
+        "ids": ["00000021-0000-4000-8000-000000000001"],
+        "ids_absent": ["00000021-0000-4000-8000-000000000002"],
+        "count": 1,
+        "results": { "00000021-0000-4000-8000-000000000001": { "match_includes": ["term", "prefix"], "excerpt_contains": "User prefers vim for editing", "freshness": "verified" } },
+        "partial": false
+      }
+    },
+    {
+      "step": 2,
+      "op": "recall",
+      "context": "alice_tool",
+      "input": { "message": "what editor do I prefer?" },
+      "expect": { "ids": ["00000021-0000-4000-8000-000000000001"], "memory_used": [{ "id": "00000021-0000-4000-8000-000000000001", "reason": "recall" }] }
+    },
+    {
+      "step": 3,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "preferred editor" },
+      "expect": { "ids": ["00000021-0000-4000-8000-000000000001"] }
+    },
+    {
+      "step": 4,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "prefers vim" },
+      "expect": { "ids": ["00000021-0000-4000-8000-000000000001"], "results": { "00000021-0000-4000-8000-000000000001": { "match_includes": ["term"] } } }
+    },
+    {
+      "step": 5,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "espresso" },
+      "expect": { "ids": ["00000021-0000-4000-8000-000000000002"], "ids_absent": ["00000021-0000-4000-8000-000000000001"] }
+    }
+  ]
+}

@@ -118,6 +118,10 @@ pub struct SpawnSubagentTool {
     /// by every subagent this lead spawns. A subagent's confirmation has
     /// exactly the same responder as the lead's: none.
     unattended: bool,
+    /// R44 (storage design §10): the run's conversation, handed to every
+    /// subagent's tool context — it names the scratch folder a run with no
+    /// project works in. `None` for a run with no conversation.
+    conversation_id: Option<String>,
 }
 
 impl SpawnSubagentTool {
@@ -152,6 +156,7 @@ impl SpawnSubagentTool {
         parent_bundle: Arc<ContextBundle>,
         compose_engine: Arc<crate::compose::ComposeEngine>,
         unattended: bool,
+        conversation_id: Option<String>,
     ) -> Self {
         Self {
             router,
@@ -175,6 +180,7 @@ impl SpawnSubagentTool {
             parent_bundle,
             compose_engine,
             unattended,
+            conversation_id,
         }
     }
 
@@ -343,19 +349,14 @@ impl BuiltInTool for SpawnSubagentTool {
             owner_id: Some(self.created_by.clone()),
             workspace_id: self.workspace.workspace_id.clone(),
             request_workspace_root: self.workspace.request_workspace_root.clone(),
-            skill_stack: vec![],
-            effective_constraints: None,
-            // Subagents are lane-detached: no lane/request threading here.
-            lane_key: None,
-            source: None,
-            request_id: None,
-            principal: None,
-            scope: None,
-            workspace_path: None,
-            // Filled in by the sandbox at dispatch (T28), which owns the bus.
-            session_id: None,
-            session_log: None,
-            event_bus: None,
+            // R44 (storage design §10): the run's conversation, for its
+            // scratch folder; a plugin agent's proxied calls carry it too.
+            conversation_id: self.conversation_id.clone(),
+            // Subagents are lane-detached: no lane, source, request,
+            // principal, scope or workspace path is threaded here, and the
+            // bus and session handles are the sandbox's to fill in at
+            // dispatch (T28).
+            ..Default::default()
         };
         let mut sandbox = SandboxManager::new(
             self.tool_registry.clone(),
@@ -383,6 +384,11 @@ impl BuiltInTool for SpawnSubagentTool {
                     agent.llm_config.model.as_deref(),
                 );
         loop_config.event_bus = Some(self.bus.clone());
+        // Design 11, CQ-3: compaction's writer runs on `summary_model`.
+        loop_config.writer = crate::orchestrator::working_state::WriterConfig::new(
+            &self.daemon_config.load(),
+            self.db.clone(),
+        );
         loop_config.experimental_ephemeral_pressure = self
             .daemon_config
             .load()
@@ -421,6 +427,14 @@ impl BuiltInTool for SpawnSubagentTool {
             None, // no predecessor handoff for lead agent spawns
         );
         let bundle = context_package.to_bundle();
+        // Design §5: a distilled memory section reaches a subagent the way
+        // it reaches every other loop — outside Layer 3, which leaves
+        // `ContextKind::Memory` out of its cached output — as one quoted-data
+        // message before the objective. The parent bundle is empty today
+        // (`run_lead_agent`, step 4), so this carries nothing until a lead
+        // distils real context; a package section carries no `memory_used`
+        // key, so nothing is recorded for a subagent.
+        let memory_turn = crate::prompt_ctx::sources::memory::memory_turn(&bundle);
 
         // ── Phase 6 Commit 3: route system-prompt + message-list assembly
         // through the layered compose engine. `PersonaMode::Skip` +
@@ -503,7 +517,6 @@ impl BuiltInTool for SpawnSubagentTool {
         let dynamic_context_input = DynamicContextInput {
             context_bundle: Arc::new(bundle),
             query: Arc::from(objective),
-            memory_retrieval_hash: [0u8; 32],
             path: ExecutionPath::LeadAgent,
             reserved_tokens: 0,
             mode: DynamicContextMode::Default,
@@ -512,7 +525,8 @@ impl BuiltInTool for SpawnSubagentTool {
         // objective → current_user_turn (no summary, no recent history).
         let history_input = HistoryInput {
             lane_tip_fingerprint: [0u8; 32],
-            summary: None,
+            working_state: None,
+            previous: None,
             summary_wrap_mode: SummaryWrapMode::Plain,
             recent_messages: Arc::new(Vec::new()),
             current_user_turn: Some(ChatMessage::user(objective)),
@@ -540,7 +554,22 @@ impl BuiltInTool for SpawnSubagentTool {
         );
 
         // Clone out of the Arc — run_agentic_loop_routed needs Vec<ChatMessage>.
-        let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+        let mut messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+        if let Some(memory) = &memory_turn {
+            let insert_at = messages.len().saturating_sub(1);
+            messages.insert(insert_at, ChatMessage::user(&memory.content));
+        }
+        // R28 (storage design §10): the subagent is told its working folder
+        // — the run's project, or its conversation's scratch folder — right
+        // before its objective. Read from the context its tools get.
+        if let Some(note) = crate::tools::working_folder::working_folder_note(
+            &subagent_tool_ctx,
+            tools.iter().map(|d| d.name.as_str()),
+            crate::tools::working_folder::NoteReader::Loop,
+        ) {
+            let insert_at = messages.len().saturating_sub(1);
+            messages.insert(insert_at, ChatMessage::user(&note));
+        }
 
         // **S3 — a subagent's rounds carry a budget too.** The lead's loop is
         // handed a `ContextBudgetManager` and the main loop's is; a subagent's
@@ -555,7 +584,8 @@ impl BuiltInTool for SpawnSubagentTool {
         let budget_config = self.daemon_config.load().execution.context.clone();
         let budget_system_prompt_tokens = (composed.token_budget.static_prompt_tokens
             + composed.token_budget.dynamic_context_tokens)
-            as usize;
+            as usize
+            + memory_turn.as_ref().map_or(0, |m| m.token_estimate());
         let budget_tools_tokens = crate::runner::estimate_tools_tokens(&tools);
 
         let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
@@ -671,8 +701,10 @@ impl BuiltInTool for SpawnSubagentTool {
             // instead of the LLM loop. Tool calls are proxied through the
             // same sandbox as internal subagents; depth/concurrency/
             // cancellation semantics are unchanged (the permit is held for
-            // the loop's lifetime and the child token is checked between
-            // steps).
+            // the loop's lifetime; the child token is checked between steps,
+            // and each proxied tool call and each poll's sleep is raced
+            // against it — a cancel drops the call, which kills a running
+            // command with its processes and withdraws a waiting card).
             if let Some((executor, objective_full, scope)) = plugin_execution {
                 tracing::info!(
                     agent_id = %agent_id_owned,
@@ -731,7 +763,8 @@ impl BuiltInTool for SpawnSubagentTool {
                 busy_guard.restore();
 
                 // Close the lane (GAP-09). A plugin loop has no
-                // `LoopFinishReason` of its own — a cancellation between steps
+                // `LoopFinishReason` of its own — a cancellation between
+                // steps, during a proxied tool call or during a poll's sleep
                 // comes back as `Failed { error: "Cancelled" }` — so the
                 // cancel token is what separates a cancelled lane from a
                 // failed one, keeping this path's vocabulary identical to the
@@ -913,14 +946,16 @@ impl BuiltInTool for SpawnSubagentTool {
                 };
                 tracker.complete(&run_id_clone, content, true);
             } else {
-                tracker.fail(
+                // F2: the error says why; the answer travels whole beside it,
+                // as a completed one does, so the lead can read it with
+                // `check_subagent_status` and the summary can show its tail.
+                tracker.fail_with_output(
                     &run_id_clone,
                     format!(
-                        "Agent '{}' failed: {:?}. Last output: {}",
-                        agent_id_owned,
-                        result.finish_reason,
-                        result.final_content.chars().take(500).collect::<String>()
+                        "Agent '{}' failed: {:?}.",
+                        agent_id_owned, result.finish_reason
                     ),
+                    result.final_content,
                 );
             }
         });
@@ -1103,8 +1138,18 @@ impl BuiltInTool for CheckSubagentStatusTool {
                 },
                 content,
             )),
-            Some(SubagentStatus::Failed { error }) => {
-                Err(format!("Subagent '{}' failed: {}", run_id, error))
+            Some(SubagentStatus::Failed { error, output }) => {
+                // F2: the kept answer, whole. An `Err` reaches the model as
+                // head and tail at the loop's inline bound; the tool itself
+                // cuts nothing.
+                if output.is_empty() {
+                    Err(format!("Subagent '{}' failed: {}", run_id, error))
+                } else {
+                    Err(format!(
+                        "Subagent '{}' failed: {}\nIts last output follows:\n{}",
+                        run_id, error, output
+                    ))
+                }
             }
             None => Err(format!(
                 "Unknown subagent_run_id: '{}'. Valid run IDs are shown when calling spawn_subagent.",
@@ -1118,9 +1163,13 @@ impl BuiltInTool for CheckSubagentStatusTool {
 pub fn check_subagent_status_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "check_subagent_status".to_string(),
-        description: "Check the status of a previously spawned subagent. Returns whether the \
-                       subagent is queued (waiting for an execution slot), running, completed, \
-                       or failed."
+        description: "Check one spawned subagent by its run_id. Queued or running: says so. \
+                      Completed: returns the subagent's whole answer — a long one arrives as a stub \
+                      naming a result_ref; page it with read_result. A run that keeps no conversation \
+                      log has no stub to give: there a long answer is cut after its first part, and \
+                      the cut says how much it shows. Failed: returns the error and the subagent's \
+                      whole last output, as its head and tail when long. wait_for_subagents shows only \
+                      the head and the tail of each answer; call this for the one you need in full."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -1177,6 +1226,13 @@ impl BuiltInTool for WaitForSubagentsTool {
                     self.tracker.summary()
                 ));
             }
+            // Listen for a status change BEFORE checking `all_done()`: the
+            // tracker wakes with `notify_waiters`, which keeps no permit, so
+            // a completion landing between the check and a later
+            // registration would be lost and the wait would run to the cap.
+            let subagent_change = self.tracker.notify.notified();
+            tokio::pin!(subagent_change);
+            subagent_change.as_mut().enable();
             if self.tracker.all_done() {
                 break;
             }
@@ -1204,7 +1260,7 @@ impl BuiltInTool for WaitForSubagentsTool {
                 }
             };
             tokio::select! {
-                _ = self.tracker.notify.notified() => { /* re-check all_done */ }
+                _ = &mut subagent_change => { /* re-check all_done */ }
                 _ = steering_wakeup => { /* re-check inbox */ }
                 _ = tokio::time::sleep(remaining) => { /* timeout */ }
             }
@@ -1232,9 +1288,12 @@ impl BuiltInTool for WaitForSubagentsTool {
 pub fn wait_for_subagents_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "wait_for_subagents".to_string(),
-        description: "Wait for ALL previously spawned subagents to complete, including any that \
-                       are queued for execution. Returns a summary of all results. Use this after \
-                       spawning all subagents to collect all outputs before synthesizing a response."
+        description: "Wait for ALL previously spawned subagents to complete, including any that are \
+                      queued for execution. Returns a summary of all results: each subagent's answer as \
+                      its head and its tail, with a notice naming the bytes between them, sized so that \
+                      a batch of eight fits one tool result. Read one answer in full with \
+                      check_subagent_status. Use this after spawning all subagents to collect all \
+                      outputs before synthesizing a response."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -1348,7 +1407,11 @@ pub fn post_update_tool_definition() -> ToolDefinition {
 /// - **Lead agent** (`new`): identity from the task's `created_by`, the
 ///   running task recorded as `source_task_id`.
 /// - **Main loop** (`for_main_loop`): per-request, no source task — identity
-///   and workspace path come from the invocation's `ToolContext`.
+///   comes from the invocation's `ToolContext`.
+///
+/// In both modes the row's `workspace_path` is the context's
+/// `request_workspace_root`, the turn's resolved project root (F4), so the
+/// turn the item later runs as re-enters in that project.
 pub struct QueueFollowupTool {
     db: Option<Database>,
     bus: EventBus,
@@ -1466,9 +1529,15 @@ impl BuiltInTool for QueueFollowupTool {
         self.queue(arguments, self.constructed_principal(), None)
     }
 
-    /// Context-aware variant: prefer the invocation's threaded identity and
-    /// workspace path (main-loop path) over the constructor fallback, so
-    /// re-entry scope survives (Routing V2 Phase-1 gap fix).
+    /// Context-aware variant — the one a sandboxed call reaches (the
+    /// builtin arm of `ToolRegistry::execute_with_context` hands every
+    /// builtin its context). The identity is the invocation's threaded
+    /// principal, else the constructor's `created_by` (the lead's context
+    /// threads none); the project is `request_workspace_root`, the turn's
+    /// resolved root — the run's project on the lead's context, the turn's
+    /// on the main loop's (F4). Never `workspace_path`: that was the path as
+    /// the client sent it, which the lead's context never carried, so a
+    /// follow-up a workflow promised re-entered with no project.
     async fn execute_with_context(
         &self,
         arguments: &serde_json::Value,
@@ -1478,7 +1547,7 @@ impl BuiltInTool for QueueFollowupTool {
             .principal
             .clone()
             .unwrap_or_else(|| self.constructed_principal());
-        self.queue(arguments, principal, ctx.workspace_path.as_deref())
+        self.queue(arguments, principal, ctx.request_workspace_root.as_deref())
     }
 }
 

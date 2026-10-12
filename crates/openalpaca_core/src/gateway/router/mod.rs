@@ -2,6 +2,8 @@ use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::gateway::persistence::GatewayPersistence;
 use crate::lane::{LaneKey, LaneManager};
+use crate::memory::learning::LearningQueue;
+use crate::memory::service::MemoryUsed;
 use crate::security::policy::{Principal, Scope};
 use async_trait::async_trait;
 use openalpaca_api::events::EventSource;
@@ -41,6 +43,28 @@ pub struct SkippedAttachment {
     pub reason: String,
 }
 
+/// Design 11 §5 (owner decision CQ-7): the previous conversation a turn was
+/// given (§4 (b)) — its session and its working state's topic, `""` when it
+/// carried no state, only its last exchange. The SSE `done` frame's
+/// `continued_from`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContinuedFrom {
+    pub session_id: String,
+    pub topic: String,
+}
+
+/// Design 11 §5 (CQ-7): what a turn says about its conversation's continuity.
+/// Travels `HandleResult` → `GatewayResponse` → the SSE `done` frame, like
+/// `memory_used`, and is persisted nowhere.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnContinuity {
+    /// The turn compacted, and its working state goes to the session row at
+    /// turn end (§3.3).
+    pub working_state_updated: bool,
+    /// The request carried the previous conversation's block (§4 (b)).
+    pub continued_from: Option<ContinuedFrom>,
+}
+
 /// Rich result from message handling, carrying optional LLM metadata.
 ///
 /// Non-LLM paths (task queries, commands, etc.) use `HandleResult::text()` which
@@ -57,8 +81,16 @@ pub struct HandleResult {
     pub attachments_used: Vec<String>,
     /// U3 — the turn's attachments that never reached the model, with a reason.
     pub attachments_skipped: Vec<SkippedAttachment>,
+    /// Plan 3.3 (design §7a) — the memory notes the turn delivered: the
+    /// automatic recall (`pinned`, `recall`) and what the model fetched
+    /// through `memory_search`/`memory_read` (`tool`). Live only, like
+    /// `attachments_skipped`: nothing persists it.
+    pub memory_used: Vec<MemoryUsed>,
     /// Set when handling delegated the message to a background task.
     pub delegation: Option<DelegationInfo>,
+    /// Design 11 §5 (CQ-7) — the working state written by the turn's
+    /// compaction and the previous conversation it was given. Live only.
+    pub continuity: TurnContinuity,
 }
 
 impl HandleResult {
@@ -71,7 +103,9 @@ impl HandleResult {
             tokens_out: None,
             attachments_used: Vec::new(),
             attachments_skipped: Vec::new(),
+            memory_used: Vec::new(),
             delegation: None,
+            continuity: TurnContinuity::default(),
         }
     }
 }
@@ -95,7 +129,11 @@ pub struct HandleRequest {
     pub scope: Scope,
     /// The lane this turn landed on, canonical `"{user_id}:{source}"`.
     pub lane_key: String,
-    /// Workspace path the client provided (GUI project dir, CLI cwd).
+    /// The turn's project root. From the gateway, the root it resolved and
+    /// recorded from the path the client sent (GUI project dir, CLI cwd) —
+    /// the root the conversation row is bound to — never the raw path, so
+    /// the handler cannot resolve it to another project (the final fix
+    /// wave's R7); `None` for a turn under no project.
     pub workspace_path: Option<String>,
     /// SSE stream ID for routing tool confirmation prompts to the chat stream.
     pub stream_id: Option<String>,
@@ -110,6 +148,15 @@ pub struct HandleRequest {
     /// S1 — see [`GatewayRequest::turn_sink`]. `None` for every caller that
     /// has nowhere to put a live delta.
     pub turn_sink: Option<crate::chat::TurnSinkHandle>,
+    /// The conversation this turn belongs to: the session the gateway
+    /// resolved (or opened) for it when it persisted the user's message, and
+    /// pinned the assistant's answer to (§5.1). The turn's tools act for it
+    /// — its scratch folder when the turn has no project, R44 — so a
+    /// conversation opened or activated on the same lane while the turn runs
+    /// never takes the turn's files (the lead's ruling R-T27). `None` for a
+    /// handler reached with no gateway, which falls back to the lane's active
+    /// session.
+    pub session_id: Option<String>,
 }
 
 impl HandleRequest {
@@ -136,6 +183,7 @@ impl HandleRequest {
             model_override: None,
             unattended: false,
             turn_sink: None,
+            session_id: None,
         }
     }
 }
@@ -166,7 +214,7 @@ pub struct GatewayRequest {
     pub principal: Principal,
     pub scope: Scope,
     /// Optional workspace path provided by the client (GUI project dir, CLI cwd).
-    /// Used for memory scoping instead of the daemon's CWD.
+    /// With none the turn has no project; the daemon's CWD is never read.
     pub workspace_path: Option<String>,
     /// SSE stream ID for routing tool confirmation prompts to the active chat stream.
     /// Set by `ChatService::send_message()`, `None` for connector/API requests.
@@ -223,8 +271,12 @@ pub struct GatewayResponse {
     pub attachments_used: Vec<String>,
     /// U3 — the turn's attachments that never reached the model, with a reason.
     pub attachments_skipped: Vec<SkippedAttachment>,
+    /// Plan 3.3 — the memory notes the turn delivered; empty when none.
+    pub memory_used: Vec<MemoryUsed>,
     /// Set when handling delegated the message to a background task.
     pub delegation: Option<DelegationInfo>,
+    /// Design 11 §5 (CQ-7) — see [`HandleResult::continuity`].
+    pub continuity: TurnContinuity,
 }
 
 /// The unified entry point for all inbound messages.
@@ -234,6 +286,9 @@ pub struct Gateway {
     pub handler: Arc<dyn MessageHandler>,
     pub bus: EventBus,
     persistence: Option<GatewayPersistence>,
+    /// Learning v2 (design 09 §1.5): the queue every persisted turn is fed
+    /// to. `None` learns nothing — every gateway but the daemon's own.
+    learning: Option<Arc<LearningQueue>>,
 }
 
 impl Gateway {
@@ -251,7 +306,20 @@ impl Gateway {
             handler,
             bus,
             persistence,
+            learning: None,
         }
+    }
+
+    /// Feeds every turn this gateway persists to `queue` (design 09 §1.5).
+    /// The daemon sets it on its one production gateway.
+    pub fn with_learning(mut self, queue: Arc<LearningQueue>) -> Self {
+        self.learning = Some(queue);
+        self
+    }
+
+    /// The learning queue this gateway feeds, if any.
+    pub fn learning(&self) -> Option<&Arc<LearningQueue>> {
+        self.learning.as_ref()
     }
 
     /// Handle an inbound event from any source.
@@ -278,10 +346,52 @@ impl Gateway {
                 LaneKey::new(&user_id, &source_name)
             }
         };
+        // Storage design §3: a chat turn accepts work for its root, so the
+        // root is resolved and recorded under `projects/` before anything of
+        // the turn exists — no in-flight learning entry, no row, no handler
+        // run. A root that cannot be recorded ends the turn here, so no row
+        // ever names a project with no folder. A gateway without a database
+        // records it too: its handler places content all the same.
+        let turn_scope = match crate::memory::scope_context::MemoryScopeContext::for_turn(
+            req.workspace_path.as_deref(),
+        ) {
+            Ok(scope) => scope,
+            Err(e) => {
+                let path = req.workspace_path.as_deref().unwrap_or_default();
+                tracing::warn!(path, "could not record the turn's project: {e:#}");
+                return GatewayResponse {
+                    lane_key: key,
+                    content: format!("Could not record the project for {path}: {e:#}"),
+                    is_error: true,
+                    model: None,
+                    tokens_in: None,
+                    tokens_out: None,
+                    attachments_used: Vec::new(),
+                    attachments_skipped: Vec::new(),
+                    memory_used: Vec::new(),
+                    delegation: None,
+                    continuity: TurnContinuity::default(),
+                };
+            }
+        };
         let lane_key_str = key.to_string();
         let lane = self.lane_manager.get_or_create_conversation(key.clone());
 
         let request_id = Uuid::new_v4();
+
+        // Learning v2 (design 09 §1.5): the turn is in flight from here, before
+        // its user row exists, so a flush reading the window meanwhile stops
+        // before the row rather than learning a turn whose answer has not
+        // landed. The guard's drop — after the assistant row is written, or on
+        // any earlier exit — ends it. Three in-memory updates in all: the
+        // reply path does no learning work.
+        let turn_guard = self.learning.as_ref().map(|queue| {
+            queue.turn_started(
+                request_id,
+                &lane_key_str,
+                crate::memory::learning::is_user_authored_turn(&source_name, &req.content),
+            )
+        });
 
         // Record message on the lane
         lane.record_message();
@@ -305,17 +415,19 @@ impl Gateway {
         if let Some(ref p) = self.persistence {
             // The canonical project root, not the raw header: a session's
             // `workspace_id` is the same key `task.workspace_id` and memory
-            // scoping use, and `MemoryScopeContext::for_request` is the one
-            // resolver (R22). `None` — no header, or a path under no marker —
-            // means no project, and the session stays unbound.
-            let workspace_root =
-                crate::memory::scope_context::MemoryScopeContext::for_request(
-                    req.workspace_path.as_deref(),
-                )
-                .request_workspace_root;
+            // scoping use, resolved once above (R22). `None` — no header, or a
+            // path under no project — means no project, and the session stays
+            // unbound.
+            let workspace_root = turn_scope.request_workspace_root.clone();
             let workspace_path = workspace_root.as_deref();
             let persisted = if req.attachments.is_empty() {
-                p.persist_user_message(&lane_key_str, &req.content, &source_name, workspace_path)
+                p.persist_user_message(
+                    &lane_key_str,
+                    &req.content,
+                    &source_name,
+                    workspace_path,
+                    Some(request_id),
+                )
             } else {
                 p.persist_user_message_with_attachments(
                     &lane_key_str,
@@ -323,10 +435,14 @@ impl Gateway {
                     &source_name,
                     workspace_path,
                     &req.attachments,
+                    Some(request_id),
                 )
             };
             match persisted {
                 Ok(turn) => {
+                    if let Some(guard) = &turn_guard {
+                        guard.attach_session(&turn.session_id);
+                    }
                     // §5.1: the turn's project was not this lane's session's
                     // project, so a new conversation was opened for it. Say so,
                     // the way `POST /v1/sessions` does — a second window's
@@ -383,11 +499,17 @@ impl Gateway {
             principal: req.principal,
             scope: req.scope,
             lane_key: lane_key_str.clone(),
-            workspace_path: req.workspace_path,
+            // R7: the root `for_turn` recorded and the user row is bound to,
+            // not the raw path, which the handler would resolve again.
+            workspace_path: turn_scope.request_workspace_root.clone(),
             stream_id: req.stream_id,
             model_override: req.model_override,
             unattended: req.unattended,
             turn_sink: req.turn_sink,
+            // R-T27: the session this turn resolved when it began, so its
+            // tools act for this conversation, not whichever the lane points
+            // at by the time they run.
+            session_id: turn_session.clone(),
         };
         let handler_result = if req.attachments.is_empty() {
             self.handler.handle(handle_request).await
@@ -413,6 +535,7 @@ impl Gateway {
                         &source_name,
                         // §5.1: the session this turn resolved when it began.
                         turn_session.as_deref(),
+                        Some(request_id),
                     ) {
                         Ok(message_id) if message_id > 0 => {
                             if let Err(e) = openalpaca_storage::SkillExecutionRepository::new(p.db())
@@ -467,7 +590,9 @@ impl Gateway {
                     tokens_out: result.tokens_out,
                     attachments_used: result.attachments_used,
                     attachments_skipped: result.attachments_skipped,
+                    memory_used: result.memory_used,
                     delegation: result.delegation,
+                    continuity: result.continuity,
                 }
             }
             Err(e) => GatewayResponse {
@@ -479,7 +604,9 @@ impl Gateway {
                 tokens_out: None,
                 attachments_used: Vec::new(),
                 attachments_skipped: Vec::new(),
+                memory_used: Vec::new(),
                 delegation: None,
+                continuity: TurnContinuity::default(),
             },
         }
     }

@@ -60,7 +60,9 @@ impl TaskDispatcher {
     /// has one (§5.5 item 5: the main loop's `start_workflow` knows it, because
     /// the gateway pinned it for this turn). It is used as given; `None` — a
     /// scheduled skill, a `start`/`rerun` from the route, any caller with no
-    /// turn — falls back to the lane's active session, resolved at dispatch.
+    /// turn — falls back to the lane's active session, resolved at dispatch
+    /// and opened there when the lane has none (storage design §10, ruling
+    /// R-T2: a run parked on a lane with no conversation gets one).
     /// Without the carry, a `create_session`/`activate_session` landing during
     /// the loop's LLM round re-homed the completion report, its artifact links
     /// and the run's JSONL into whichever conversation happened to be active by
@@ -229,6 +231,17 @@ impl TaskDispatcher {
         // today's behaviour.
         unattended: bool,
     ) -> Result<DispatchOutcome, String> {
+        // Storage design §3, conflict C4: a dispatch accepts work for its
+        // root, so the root is recorded under `projects/` before anything of
+        // the run exists — no spawned lead, no registry entry, no lane, no
+        // event, no row. A `rerun`, `start` or `resume` has no turn of its
+        // own to have done it. First of all, and so before every repository
+        // call: the projects lock is never taken inside a `with_connection`
+        // closure (lock order: that lock, then the database mutex).
+        if let Some(root) = workspace.request_workspace_root.as_deref() {
+            openalpaca_storage::store::projects::register(std::path::Path::new(root))
+                .map_err(|e| format!("could not record the project {root}: {e:#}"))?;
+        }
         let now = Utc::now();
         // Whether this dispatch is §5.6c's `resume`, asked before the seed is
         // moved into the spawn: the row write and the state init both differ.
@@ -321,15 +334,25 @@ impl TaskDispatcher {
             .map(|r| r.session_id.clone())
             .or_else(|| turn_session_id.map(str::to_string))
             .or_else(|| {
-            self.db.as_ref().and_then(|db| {
-                openalpaca_storage::ConversationRepository::new(db)
-                    .active_session_id(lane_key)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(%lane_key, "Failed to resolve the lane's active session: {e}");
-                        None
-                    })
-            })
-        });
+                // Storage design §10, ruling R-T2: a caller with no turn — a
+                // run parked by `POST /v1/tasks`, a scheduled skill, `start`,
+                // `rerun` — runs in the lane's active session, opened here
+                // when the lane has none, so the run has a conversation, a
+                // session log and a scratch folder. The same call the run's
+                // finalisation makes to post its report (`outcome.rs`), made
+                // earlier.
+                self.db.as_ref().and_then(|db| {
+                    match openalpaca_storage::ConversationRepository::new(db)
+                        .get_or_create_active_session(lane_key, source, None)
+                    {
+                        Ok(session) => Some(session.id),
+                        Err(e) => {
+                            tracing::warn!(%lane_key, "Failed to open the lane's session: {e}");
+                            None
+                        }
+                    }
+                })
+            });
 
         // Persist task to DB
         if let Some(ref db) = self.db {
@@ -355,9 +378,9 @@ impl TaskDispatcher {
                 artifact_count: 0,
                 // §4.7 item 3: the project this run belonged to. The request's
                 // workspace root and nothing else — `workspace_id` on the same
-                // context falls back to the daemon CWD for memory scoping, and
-                // recording *that* would claim a Telegram run belonged to
-                // whatever repository the daemon started in (R22).
+                // context is memory scoping's (it once fell back to the daemon
+                // CWD, R-S13), and recording that would claim a Telegram run
+                // belonged to whatever repository the daemon started in (R22).
                 workspace_id: workspace.request_workspace_root.clone(),
                 // Set only by `rerun`, which is the only dispatch that copies
                 // another run's goal onto a new id (GAP-06).
@@ -486,7 +509,7 @@ impl TaskDispatcher {
         let ctx = self.shared_context.clone();
         let lane_manager = self.lane_manager.clone();
         let db = self.db.clone();
-        let embedder = self.embedder.clone();
+        let background = self.background.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
         let connector_block = self.connector_guidance_block();
@@ -495,6 +518,12 @@ impl TaskDispatcher {
         let skill_catalog = self.skill_catalog.clone();
         let context_manager = self.context_manager.clone();
         let compose_engine = self.compose_engine.clone();
+        let memory_service = self.memory_service.read().ok().and_then(|g| g.clone());
+        let user_document = self
+            .user_document
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|p| p.into_inner().clone());
 
         // This run's cancellation token — the one a `start`/`resume` claim
         // already installed, if there was one, so a cancel issued in the window
@@ -658,7 +687,8 @@ impl TaskDispatcher {
                 ctx.clone(),
                 bus.clone(),
                 db.clone(),
-                embedder.clone(),
+                memory_service.clone(),
+                user_document,
                 &task_id,
                 &created_by,
                 &lane_key,
@@ -676,6 +706,7 @@ impl TaskDispatcher {
                 compose_engine,
                 resume,
                 unattended,
+                session_id.as_deref(),
             )
             .await;
 
@@ -933,9 +964,10 @@ impl TaskDispatcher {
                 // (that refusal is its tool result) but a model may bury it,
                 // paraphrase it away, or run out of room; the reader of the
                 // report is owed it verbatim, once, at the end.
-                let content = match super::outcome::unapprovable_note(
-                    &super::outcome::unapprovable_tools(db, &task_id),
-                ) {
+                // **R38** — then the files the run wrote into the project,
+                // listed by the runtime: never linked to the report as
+                // artifacts (interfaces §10 C10).
+                let content = match super::outcome::runtime_notes(db, &task_id) {
                     Some(note) => format!("{content}\n\n{note}"),
                     None => content,
                 };
@@ -1093,12 +1125,18 @@ impl TaskDispatcher {
                 }
             }
 
-            // Memory extraction from lead agent output (non-blocking)
+            // Memory extraction from the lead agent's output: a tracked job
+            // on the orchestrator's `BackgroundJobs`, candidates only (MD-2),
+            // nothing for a failed or cancelled run. Its project is the
+            // request's root — the same field `task.workspace_id` above
+            // records — never `workspace_id`, memory scoping's field, which the
+            // daemon CWD once filled (design §3 rule 1, MD-5; R-S13).
             if let Some(ref db) = db {
                 spawn_task_memory_extraction(
+                    &background,
+                    memory_service.clone(),
                     db,
                     &router,
-                    &embedder,
                     &daemon_config,
                     &created_by,
                     &task_id,
@@ -1106,7 +1144,7 @@ impl TaskDispatcher {
                     &final_content,
                     "lead_agent",
                     result.success,
-                    workspace.workspace_id,
+                    workspace.request_workspace_root,
                 );
             }
 

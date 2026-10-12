@@ -2,8 +2,9 @@
  * The composer's attachments (U5) — the moving half.
  *
  * Everything a chip goes through lives here: the cap, the upload, the daemon's
- * refusal, and the `file_id → filename` table the "not sent to the model" note
- * reads (U3). `Composer` renders what this holds and nothing else.
+ * refusal, the `file_id → filename` table the "not sent to the model" note
+ * reads (U3), and the `file_id → mime type` table the sent bubble's cards are
+ * badged from (G3a). `Composer` renders what this holds and nothing else.
  *
  * Two rules worth keeping:
  *   * **a file uploads the moment it is picked.** The alternative — uploading
@@ -53,6 +54,13 @@ export interface ComposerAttachments {
    * chips on purpose: the note is drawn after the chips are cleared.
    */
   names: Readonly<Record<string, string>>;
+  /**
+   * `file_id → mime_type` as the upload's answer stored it, for the same
+   * uploads. The bubble a send draws badges each file from it — the kind the
+   * daemon stores for that type, which is the Library's badge (G3a) — until
+   * history carries the stored row.
+   */
+  mimeTypes: Readonly<Record<string, string>>;
 }
 
 export function useComposerAttachments(
@@ -61,6 +69,7 @@ export function useComposerAttachments(
   const [items, setItems] = useState<DraftAttachment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [names, setNames] = useState<Record<string, string>>({});
+  const [mimeTypes, setMimeTypes] = useState<Record<string, string>>({});
 
   /** How many chips exist right now — updated synchronously by every mutator. */
   const count = useRef(0);
@@ -97,6 +106,10 @@ export function useComposerAttachments(
       void uploadFile(file, { workspacePath: workspace.current })
         .then((asset) => {
           setNames((current) => ({ ...current, [asset.id]: asset.filename }));
+          setMimeTypes((current) => ({
+            ...current,
+            [asset.id]: asset.mime_type,
+          }));
           setItems((current) =>
             current.map((entry) =>
               entry.key === draft.key
@@ -147,5 +160,6 @@ export function useComposerAttachments(
     uploading: items.some((entry) => entry.state === "uploading"),
     clear,
     names,
+    mimeTypes,
   };
 }

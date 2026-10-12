@@ -1,4 +1,5 @@
 use super::StreamCallback;
+use crate::orchestrator::working_state::{self, TranscriptLine, WorkingState, WriterConfig};
 use openalpaca_llm::{
     ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmRouter, LlmRouterError,
     RequestContext, RouterRequest, ThinkingConfig, ToolChoice, ToolDefinition,
@@ -16,8 +17,9 @@ pub(super) enum LlmBackend<'a> {
     Router {
         router: &'a LlmRouter,
         context: RequestContext,
-        /// Dedicated model for LLM-based context compaction (extraction + summarization).
-        compaction_model: Option<String>,
+        /// What compaction's working-state writer is called with (design 11
+        /// §3.1): `summary_model`, its daily ceiling, the line cut.
+        writer: WriterConfig,
         /// Per-agent fallback model chain (forwarded to `RouterRequest`).
         fallback_models: Vec<String>,
     },
@@ -205,211 +207,112 @@ fn estimate_cost(input_tokens: u32, output_tokens: u32, input_rate: f64, output_
         + (output_tokens as f64 * output_rate / 1_000_000.0)
 }
 
-// ── MemoryExtractor impl ─────────────────────────────────────────────
-
-#[async_trait::async_trait]
-impl<'a> crate::context_budget::compaction::MemoryExtractor for LlmBackend<'a> {
-    async fn extract(
-        &self,
-        messages: &[ChatMessage],
-    ) -> Result<Vec<crate::context_budget::compaction::ExtractedMemory>, String> {
-        let (router, compaction_model, req_context) = match self {
-            Self::Router {
-                router,
-                compaction_model,
-                context,
-                ..
-            } => (*router, compaction_model.clone(), context.clone()),
-            Self::Direct { .. } => {
-                return Err("No router available for LLM extraction".into());
-            }
-        };
-
-        let mut extract_messages = Vec::with_capacity(messages.len() + 1);
-        extract_messages.push(ChatMessage::system(
-            "You are a memory extraction assistant. Extract key facts, decisions, and important \
-             information from the following conversation messages. Return each memory as a line \
-             in the format:\n\
-             KIND: content\n\n\
-             Valid KINDs: fact, decision, preference, instruction, context\n\n\
-             Only extract genuinely important information. Be concise. Maximum 10 entries.",
-        ));
-        let combined: String = messages
-            .iter()
-            .map(|m| {
-                let role = match m.role {
-                    openalpaca_llm::Role::User => "User",
-                    openalpaca_llm::Role::Assistant => "Assistant",
-                    openalpaca_llm::Role::System => "System",
-                    openalpaca_llm::Role::Tool => "Tool",
-                };
-                format!("[{role}]: {}", m.content)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        extract_messages.push(ChatMessage::user(&combined));
-
-        let request = RouterRequest {
-            messages: Arc::new(extract_messages),
-            tools: Arc::new(vec![]),
-            model: compaction_model,
-            temperature: Some(0.0),
-            max_tokens: Some(1024),
-            context: req_context,
-            tool_choice: None,
-            tools_token_estimate: None,
-            enable_caching: false,
-            // M2: compaction's extraction is an internal utility call on a
-            // capped budget — reasoning would eat it before the memories are
-            // written. Ignored by a provider that has no such control.
-            thinking: Some(ThinkingConfig::Disabled),
-            context_management: None,
-            fallback_models: Vec::new(),
-            ephemeral_system_notice: None,
-        };
-
-        let response = router.complete(request).await.map_err(|e| e.to_string())?;
-
-        let memories = response
-            .content
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                if line.is_empty() {
-                    return None;
-                }
-                if let Some((kind, content)) = line.split_once(':') {
-                    let kind = kind.trim().to_lowercase();
-                    let content = content.trim().to_string();
-                    if !content.is_empty() {
-                        return Some(crate::context_budget::compaction::ExtractedMemory {
-                            kind,
-                            content,
-                        });
-                    }
-                }
-                None
-            })
-            .take(10)
-            .collect();
-
-        Ok(memories)
-    }
-}
-
 // ── Summarizer impl ──────────────────────────────────────────────────
 
+/// Compaction's one call (design 11 §3.3, CQ-1, CQ-3): the working-state
+/// writer over the older messages, on `summary_model`, under the summariser's
+/// label and its daily ceiling — read before the call, as at every site of
+/// the writer (§3.1) — and its usage row written under that label when the
+/// loop has a store (`WriterConfig::db`), as the turn end's is. A spent
+/// ceiling, a failed call and an answer that is not a state are all an
+/// `Err`: the pipeline falls back to its heuristic.
 #[async_trait::async_trait]
 impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
-    async fn summarize(&self, messages: &[ChatMessage]) -> Result<String, String> {
-        let (router, compaction_model, req_context) = match self {
-            Self::Router {
-                router,
-                compaction_model,
-                context,
-                ..
-            } => (*router, compaction_model.clone(), context.clone()),
+    async fn summarize(
+        &self,
+        previous: Option<&WorkingState>,
+        messages: &[ChatMessage],
+    ) -> Result<WorkingState, String> {
+        let (router, writer) = match self {
+            Self::Router { router, writer, .. } => (*router, writer),
             Self::Direct { .. } => {
                 return Err("No router available for LLM summarization".into());
             }
         };
 
-        let mut sum_messages = Vec::with_capacity(2);
-        sum_messages.push(ChatMessage::system(
-            "You are a conversation summarizer. Summarize the following conversation messages \
-             into a concise paragraph that captures the key points, decisions made, and important \
-             context. Focus on information that would be needed to continue the conversation. \
-             Be concise but complete.",
-        ));
-        let combined: String = messages
-            .iter()
-            .map(|m| {
-                let role = match m.role {
-                    openalpaca_llm::Role::User => "User",
-                    openalpaca_llm::Role::Assistant => "Assistant",
-                    openalpaca_llm::Role::System => "System",
-                    openalpaca_llm::Role::Tool => "Tool",
-                };
-                format!("[{role}]: {}", m.content)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        sum_messages.push(ChatMessage::user(&combined));
+        let spent = working_state::spent_today(router).await;
+        if spent > writer.max_daily_cost_usd {
+            return Err(format!(
+                "the summariser's daily ceiling is spent (${spent:.2})"
+            ));
+        }
 
-        let request = RouterRequest {
-            messages: Arc::new(sum_messages),
-            tools: Arc::new(vec![]),
-            model: compaction_model,
-            temperature: Some(0.0),
-            max_tokens: Some(2048),
-            context: req_context,
-            tool_choice: None,
-            tools_token_estimate: None,
-            enable_caching: false,
-            // M2: as above — the summary is a utility call, not a turn.
-            thinking: Some(ThinkingConfig::Disabled),
-            context_management: None,
-            fallback_models: Vec::new(),
-            ephemeral_system_notice: None,
+        // Rev 1.7 (F5; design 03 §6): a row a forget took back is not read.
+        // When that cannot be told, no call: the pipeline falls back.
+        let left_out = match &writer.rows {
+            Some(rows) => rows.left_out()?,
+            None => std::collections::HashSet::new(),
         };
-
-        let response = router.complete(request).await.map_err(|e| e.to_string())?;
-        Ok(response.content)
+        let lines: Vec<TranscriptLine<'_>> = messages
+            .iter()
+            .filter(|m| !left_out.contains(&m.content))
+            .map(|m| TranscriptLine {
+                role: match m.role {
+                    openalpaca_llm::Role::User => "user",
+                    openalpaca_llm::Role::Assistant => "assistant",
+                    openalpaca_llm::Role::System => "system",
+                    openalpaca_llm::Role::Tool => "tool",
+                },
+                text: &m.content,
+            })
+            .collect();
+        let request = working_state::update(
+            previous,
+            &lines,
+            writer.model.clone(),
+            writer.msg_trunc_chars,
+        );
+        working_state::call(writer.db.as_ref(), router, request).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context_budget::compaction::{MemoryExtractor, Summarizer};
+    use crate::context_budget::compaction::Summarizer;
     use crate::test_util::{RecordingProvider, router_recording};
 
-    /// **M2.** Compaction's memory extraction is an internal utility call on a
-    /// 1 024-token budget: it asks for no reasoning, so a local thinking model
-    /// spends the budget on the answer instead of on thoughts nobody reads.
-    #[tokio::test]
-    async fn compaction_extraction_asks_for_no_reasoning() {
-        let provider = RecordingProvider::new("fact: the store root is ~/.openalpaca");
-        let router = router_recording(provider.clone());
-        let backend = LlmBackend::Router {
-            router: &router,
-            context: RequestContext::default(),
-            compaction_model: None,
-            fallback_models: Vec::new(),
-        };
-
-        let memories = backend
-            .extract(&[ChatMessage::user("where do files go?")])
-            .await
-            .expect("extraction");
-        assert_eq!(memories.len(), 1, "the canned reply parsed");
-
-        let request = provider.first_request();
-        assert!(
-            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
-            "the utility call must ask for no reasoning, got {:?}",
-            request.thinking
-        );
-        assert_eq!(request.max_tokens, Some(1024), "the small budget is intact");
+    fn state() -> WorkingState {
+        WorkingState {
+            v: working_state::VERSION,
+            topic: "Store layout".into(),
+            goal: "Know where files go".into(),
+            done: Vec::new(),
+            asked: Vec::new(),
+            decisions: Vec::new(),
+            open: Vec::new(),
+            next: String::new(),
+            refs: Vec::new(),
+        }
     }
 
-    /// **M2.** The same for compaction's summarizer (2 048 tokens).
+    /// **M2**, CQ-3: compaction's one call is the working-state writer — no
+    /// reasoning, 1 536 output tokens, on `summary_model`, under the
+    /// summariser's label — and it reads the previous state and the older
+    /// messages as `[role]:` lines.
     #[tokio::test]
     async fn compaction_summary_asks_for_no_reasoning() {
-        let provider = RecordingProvider::new("They discussed the store layout.");
+        let provider = RecordingProvider::new(serde_json::to_string(&state()).unwrap());
         let router = router_recording(provider.clone());
         let backend = LlmBackend::Router {
             router: &router,
             context: RequestContext::default(),
-            compaction_model: None,
+            writer: WriterConfig {
+                model: Some("claude-haiku-4-5-20251001".into()),
+                ..WriterConfig::default()
+            },
             fallback_models: Vec::new(),
         };
+        let previous = WorkingState {
+            next: "Ask about uploads".into(),
+            ..state()
+        };
 
-        let summary = backend
-            .summarize(&[ChatMessage::user("where do files go?")])
+        let written = backend
+            .summarize(Some(&previous), &[ChatMessage::user("where do files go?")])
             .await
             .expect("summary");
-        assert!(!summary.is_empty());
+        assert_eq!(written, state());
 
         let request = provider.first_request();
         assert!(
@@ -417,6 +320,91 @@ mod tests {
             "the utility call must ask for no reasoning, got {:?}",
             request.thinking
         );
-        assert_eq!(request.max_tokens, Some(2048));
+        assert_eq!(request.max_tokens, Some(working_state::MAX_TOKENS));
+        assert_eq!(request.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        let user = &request.messages[1].content;
+        assert!(
+            user.contains(&serde_json::to_string(&previous).unwrap()),
+            "{user}"
+        );
+        assert!(user.contains("[user]: where do files go?"), "{user}");
+        assert!(
+            router
+                .cost_tracker
+                .get_agent_usage(working_state::USAGE_LABEL)
+                .await
+                .is_some(),
+            "the call is made and counted under the summariser's label"
+        );
+    }
+
+    /// The daily ceiling is read before the call: once the summariser has
+    /// spent it, compaction makes no call and the pipeline falls back.
+    #[tokio::test]
+    async fn compaction_makes_no_call_over_the_daily_ceiling() {
+        let provider = RecordingProvider::new(serde_json::to_string(&state()).unwrap());
+        let router = router_recording(provider.clone());
+        let backend = LlmBackend::Router {
+            router: &router,
+            context: RequestContext::default(),
+            writer: WriterConfig {
+                max_daily_cost_usd: 0.0,
+                ..WriterConfig::default()
+            },
+            fallback_models: Vec::new(),
+        };
+        let older = [ChatMessage::user("where do files go?")];
+        backend
+            .summarize(None, &older)
+            .await
+            .expect("nothing spent yet");
+        assert_eq!(provider.request_count(), 1);
+
+        let why = backend.summarize(None, &older).await.unwrap_err();
+        assert!(why.contains("daily ceiling"), "{why}");
+        assert_eq!(provider.request_count(), 1, "over the ceiling: no call");
+    }
+
+    /// Design 11 §3.1: compaction's call leaves its `llm_usage` row under the
+    /// summariser's label and no task — `success`, or `error` with why the
+    /// answer was unusable — as the turn end's does, so a restart rebuilds
+    /// the ceiling's spend from it and the usage listing shows the call.
+    #[tokio::test]
+    async fn compaction_records_its_usage_under_the_summary_label() {
+        use openalpaca_storage::repository::LlmUsageRepository;
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let older = [ChatMessage::user("where do files go?")];
+
+        for (reply, status, error) in [
+            (serde_json::to_string(&state()).unwrap(), "success", None),
+            (
+                "I would rather chat.".to_string(),
+                "error",
+                Some("the answer is not JSON"),
+            ),
+        ] {
+            let router = router_recording(RecordingProvider::new(reply));
+            let backend = LlmBackend::Router {
+                router: &router,
+                context: RequestContext::default(),
+                writer: WriterConfig {
+                    db: Some(db.clone()),
+                    ..WriterConfig::default()
+                },
+                fallback_models: Vec::new(),
+            };
+            let _ = backend.summarize(None, &older).await;
+
+            let calls = LlmUsageRepository::new(&db)
+                .get_agent_usage(working_state::USAGE_LABEL, 10)
+                .unwrap();
+            let call = calls
+                .iter()
+                .find(|c| c.status == status)
+                .unwrap_or_else(|| panic!("a {status} row: {calls:?}"));
+            assert_eq!(call.task_id, None, "no task: the summariser's spend");
+            assert_eq!(call.error_message.as_deref(), error);
+        }
     }
 }

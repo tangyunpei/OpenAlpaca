@@ -1,0 +1,5153 @@
+[
+  {
+    "id": "hq-0001",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What is my name?",
+    "gold_answer": "Lin Wei (林薇); she likes to be called Wei.",
+    "relies_on": [
+      "fbce4294-581d-5cd9-a7be-16a79598e75a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0002",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How do I like to be addressed in chat?",
+    "gold_answer": "Wei.",
+    "relies_on": [
+      "fbce4294-581d-5cd9-a7be-16a79598e75a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0003",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我住在哪个城市？",
+    "gold_answer": "杭州（西湖区）。",
+    "relies_on": [
+      "589ec820-c3d7-508c-a70a-2d889329a67d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0004",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我的时区是什么？",
+    "gold_answer": "Asia/Shanghai（UTC+8）。",
+    "relies_on": [
+      "589ec820-c3d7-508c-a70a-2d889329a67d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0005",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "When is my birthday?",
+    "gold_answer": "14 March 1991.",
+    "relies_on": [
+      "f539564c-231b-5efe-bba6-28955e6df58b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0006",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Where do I work and what is my role?",
+    "gold_answer": "Backend engineer at Quillpay (a fintech start-up in Hangzhou), Ledger Platform team, since September 2021.",
+    "relies_on": [
+      "c0489a40-6678-5f2d-98e8-1973ebb7fd57"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0007",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Who is my manager?",
+    "gold_answer": "Priya Raman.",
+    "relies_on": [
+      "c0489a40-6678-5f2d-98e8-1973ebb7fd57"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0008",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我之前在哪家公司工作？",
+    "gold_answer": "Norden Labs（上海），2016 到 2021 年做数据工程师。",
+    "relies_on": [
+      "f5ae2a6d-4f64-52f4-9145-39da8657e0fe"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0009",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What is my partner's name and what does he do?",
+    "gold_answer": "Tomas Lindqvist, a Swedish UX designer.",
+    "relies_on": [
+      "ba289b57-b950-594d-8dc1-4140b58d85df"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0010",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "When is Tomas's birthday?",
+    "gold_answer": "10 August.",
+    "relies_on": [
+      "ba289b57-b950-594d-8dc1-4140b58d85df"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0011",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我的狗叫什么？是什么品种？",
+    "gold_answer": "Mochi（麻糬），柯基。",
+    "relies_on": [
+      "52f82d00-2f60-5caf-b30b-5c1e9bacd312"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0012",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我每天几点遛狗？",
+    "gold_answer": "早上七点。",
+    "relies_on": [
+      "52f82d00-2f60-5caf-b30b-5c1e9bacd312"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0013",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Which editor do I use?",
+    "gold_answer": "Helix (hx), since June 2026.",
+    "relies_on": [
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0014",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What editor theme and font do I use?",
+    "gold_answer": "Gruvbox Dark; JetBrains Mono at 13 pt; dark mode everywhere.",
+    "relies_on": [
+      "360fa8e1-b71c-5bf1-afb7-3854794bc0d1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0015",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我最喜欢喝什么茶？",
+    "gold_answer": "龙井。",
+    "relies_on": [
+      "d412219c-5b71-511e-ad65-41e7c5771387"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0016",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我下午几点之后不喝含咖啡因的饮料？",
+    "gold_answer": "下午三点以后。",
+    "relies_on": [
+      "d412219c-5b71-511e-ad65-41e7c5771387"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0017",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How do I want summaries formatted?",
+    "gold_answer": "As bullet lists; concise; no emoji.",
+    "relies_on": [
+      "0d47adbd-f5eb-57c1-b054-9385ff3d6a3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0018",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "闲聊的时候我希望用什么语言？",
+    "gold_answer": "中文；代码评审和技术文档用英文。",
+    "relies_on": [
+      "b897fbe1-ca49-5041-8354-8f376deb884b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0019",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What commit message convention do I follow?",
+    "gold_answer": "Conventional Commits, an imperative subject of at most 72 characters, no emoji, body wrapped at 72.",
+    "relies_on": [
+      "86d3c819-b107-5ef5-a97a-62d76b695298"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0020",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What is my maximum line width for code?",
+    "gold_answer": "100.",
+    "relies_on": [
+      "d20e3d13-3ba2-50a8-9bcc-d1cd509c51f5"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0021",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Which database do I prefer?",
+    "gold_answer": "PostgreSQL (she avoids MongoDB).",
+    "relies_on": [
+      "110a879c-3608-5272-94ae-f610a9d9d394"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0022",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Which Python package manager do I use?",
+    "gold_answer": "uv (not pip or poetry).",
+    "relies_on": [
+      "cf02620f-5620-5a47-ae88-460fd37f419c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0023",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我每周什么时候做周回顾？",
+    "gold_answer": "周一上午 9:30。",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0024",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What is my rule about pushing to main?",
+    "gold_answer": "Never push to main directly; everything goes through a pull request, documentation included.",
+    "relies_on": [
+      "f5ec00b0-3491-5a92-940e-607602ab1056"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0025",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What is my monthly cloud budget?",
+    "gold_answer": "200 USD per month, with a warning at 150 USD.",
+    "relies_on": [
+      "f2024d48-d9b4-5704-81b1-1e30289c186b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0026",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Do I have any food allergies?",
+    "gold_answer": "Yes: a severe shellfish allergy (shrimp, crab, lobster, oysters). Peanuts and tree nuts are fine.",
+    "relies_on": [
+      "add8b06d-fbf9-5904-b384-e3398ff1793c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0027",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我每周哪几天跑步？",
+    "gold_answer": "周二和周六，每次 5 公里。",
+    "relies_on": [
+      "b68de6ef-298c-5450-ad04-b1ed1e92535e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0028",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我 11 月的跑步目标是什么？",
+    "gold_answer": "2026 年 11 月杭州马拉松半程。",
+    "relies_on": [
+      "b68de6ef-298c-5450-ad04-b1ed1e92535e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0029",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Who are my favourite authors?",
+    "gold_answer": "Ted Chiang and Liu Cixin (science fiction).",
+    "relies_on": [
+      "7711906b-b500-5443-b7da-a0ddc8847b62"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0030",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What laptop do I use?",
+    "gold_answer": "A MacBook Air M3 with 16 GB running macOS, since November 2025.",
+    "relies_on": [
+      "d812f264-4ab3-5182-972e-919103cffa0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0031",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What is my GitHub handle?",
+    "gold_answer": "linwei-dev (work organisation: quillpay).",
+    "relies_on": [
+      "be63eca1-2428-53ab-be74-0eb068bdfeb3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0032",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我用什么键盘？",
+    "gold_answer": "HHKB Professional Hybrid Type-S，Caps Lock 映射成 Ctrl。",
+    "relies_on": [
+      "40583509-f62c-5781-b93d-c55451845ae1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0033",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我的日语目标是什么？",
+    "gold_answer": "2026 年 12 月考过 JLPT N3。",
+    "relies_on": [
+      "3992ba1b-372a-5d49-a95f-aa84e8ba530a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0034",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我周四晚上有什么固定安排？",
+    "gold_answer": "跟 Sato 老师上日语课。",
+    "relies_on": [
+      "3992ba1b-372a-5d49-a95f-aa84e8ba530a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0035",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我现在怎么通勤？",
+    "gold_answer": "坐地铁 5 号线，从西湖区到滨江区大约 40 分钟。",
+    "relies_on": [
+      "b0c61c22-beaa-5a3d-9c41-931fe42cc1e6"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0036",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我每周日做什么采购？",
+    "gold_answer": "去山姆会员店采购一周的东西（农夫山泉、燕麦、无糖酸奶）。",
+    "relies_on": [
+      "d4d77cce-aaee-5fdc-9ebe-65e9603a27e3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0037",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我父母住在哪里？",
+    "gold_answer": "宁波；她每个月回去一次。",
+    "relies_on": [
+      "56daf89a-bb02-51d2-8953-f606e5aff1dd"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0038",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我妈妈叫什么名字？",
+    "gold_answer": "陈红。",
+    "relies_on": [
+      "56daf89a-bb02-51d2-8953-f606e5aff1dd"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0039",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Who is my doctor?",
+    "gold_answer": "Dr. Qian Ming at Zhejiang Provincial People's Hospital.",
+    "relies_on": [
+      "2548ab97-fb4c-5a69-9f94-fbc5706b2bc2"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0040",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "When is my annual check-up?",
+    "gold_answer": "Every October.",
+    "relies_on": [
+      "2548ab97-fb4c-5a69-9f94-fbc5706b2bc2"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0041",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "When does my passport expire?",
+    "gold_answer": "18 February 2027; she wants to start the renewal by November 2026.",
+    "relies_on": [
+      "88ed0b78-2b34-5897-be90-41f6a684540c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0042",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Where do I keep my notes?",
+    "gold_answer": "In an Obsidian vault at ~/Vault (Notion was declined).",
+    "relies_on": [
+      "61de9275-35d8-51a8-91be-b43bf6430dd5"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0043",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What happened when I tried Neovim?",
+    "gold_answer": "In October 2025 she tried migrating to Neovim with a Lua config and abandoned it after two weeks because of plugin churn, going back to vim.",
+    "relies_on": [
+      "afb93bd9-af74-52b8-b174-cb205a407802"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0044",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Did I ever ask you for a résumé?",
+    "gold_answer": "Yes, on 2 June 2026 for a Singapore backend role, but she cancelled it the next day and decided to stay at Quillpay through 2027; no résumé was produced.",
+    "relies_on": [
+      "e962bf67-7c00-51c5-b0c2-52184801ad23"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0045",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "8 月 15 日你建议删除分支的时候我怎么说的？",
+    "gold_answer": "她拒绝了，要自己先归档分支列表；什么都没删。",
+    "relies_on": [
+      "3c4b572a-5e6b-5354-8d04-fc62f3e8ad5f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0046",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "7 月 9 日订餐厅的事结果怎么样？",
+    "gold_answer": "失败了：助手没有预订接口；她后来自己在大众点评订了绿茶餐厅。",
+    "relies_on": [
+      "900fe1ee-77ae-5ee8-a693-4751ba634072"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0047",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "When am I in Stockholm?",
+    "gold_answer": "5 to 19 October 2026, visiting Tomas's family; meetings in CET during that window.",
+    "relies_on": [
+      "41a08195-90d0-51d6-a92d-3ebda61e1910"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0048",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What music do I listen to while coding?",
+    "gold_answer": "Lo-fi on Apple Music (she moved off Spotify in March 2026); nothing during meetings.",
+    "relies_on": [
+      "944b902b-7e38-58db-a0e2-f12322ba7822"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0049",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我几点睡觉几点起床？",
+    "gold_answer": "23:30 睡，6:30 起。",
+    "relies_on": [
+      "261bf869-0284-504a-8d98-50ef319ff350"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0050",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "早上几点之前不要给我安排会议？",
+    "gold_answer": "9:30 之前。",
+    "relies_on": [
+      "261bf869-0284-504a-8d98-50ef319ff350"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0051",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What do I use for two-factor authentication?",
+    "gold_answer": "A YubiKey 5C (GitHub and 1Password), with a backup key at home; no SMS codes.",
+    "relies_on": [
+      "583167e2-2a34-5ceb-9c7d-4bfcd8f449fc"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0052",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Which shell do I use?",
+    "gold_answer": "fish with the starship prompt (plus zoxide; gs is aliased to git status).",
+    "relies_on": [
+      "85cfe8aa-1f7c-58c6-ba5a-4b7acb53b923"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0053",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "我用什么耳机？",
+    "gold_answer": "Sony WH-1000XM5。",
+    "relies_on": [
+      "406c9791-ad5a-5131-ab68-caccf7d222fd"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0054",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What is Lantern?",
+    "gold_answer": "Quillpay's ledger-reconciliation service, written in Rust; repository github.com/quillpay/lantern; owned by the Ledger Platform team; in production since September 2025.",
+    "relies_on": [
+      "9f5fc84b-f5a8-5c09-b4be-c220e989df18"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0055",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How do I run the Lantern tests?",
+    "gold_answer": "cargo nextest run --workspace.",
+    "relies_on": [
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0056",
+    "category": "exact_recall",
+    "language": "mixed",
+    "question": "Lantern 的 lint command 是什么？",
+    "gold_answer": "cargo clippy --all-targets -- -D warnings。",
+    "relies_on": [
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0057",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How do I deploy Lantern to staging?",
+    "gold_answer": "just deploy staging (needs the VPN and LANTERN_DEPLOY_TOKEN from the 1Password vault Lantern-dev).",
+    "relies_on": [
+      "45301a3d-e467-598f-ae3a-8539a9780aa8"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0058",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "Lantern 的分支命名规范是什么？",
+    "gold_answer": "lw/<topic>。",
+    "relies_on": [
+      "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0059",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How do I create a new Lantern migration?",
+    "gold_answer": "sqlx migrate add -r <name>; apply with sqlx migrate run.",
+    "relies_on": [
+      "80469bd8-a498-53a2-9642-258ad45a7db4"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0060",
+    "category": "exact_recall",
+    "language": "mixed",
+    "question": "Lantern 本地 database URL 是什么？",
+    "gold_answer": "postgres://lantern:lantern@localhost:5433/lantern_dev。",
+    "relies_on": [
+      "38ddc21d-3106-5690-9738-94e7c19e664a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0061",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What type does Lantern use for money?",
+    "gold_answer": "rust_decimal::Decimal; never f64.",
+    "relies_on": [
+      "30017627-5ab4-52b0-88b8-0643a4c3a408"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0062",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Which database layer does Lantern use, diesel or sqlx?",
+    "gold_answer": "sqlx (switched from diesel in March 2026).",
+    "relies_on": [
+      "e49d4a2a-9429-5037-90dd-74e6ed27f2e1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0063",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "Lantern 团队对 Kafka 提案的决定是什么？",
+    "gold_answer": "否决了；改用 PostgreSQL LISTEN/NOTIFY 加 outbox 表，年内不再重提。",
+    "relies_on": [
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0064",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Why did nextest fail under Rosetta?",
+    "gold_answer": "SIGILL inside ring on the x86_64 toolchain; the fix is the native aarch64-apple-darwin toolchain.",
+    "relies_on": [
+      "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0065",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Which Lantern test is flaky and what should I do about it?",
+    "gold_answer": "reconcile_partial_batch; it is #[ignore]d until issue #212 is fixed; do not add retries or sleeps.",
+    "relies_on": [
+      "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0066",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "Lantern 的 on-call 哪天换班？",
+    "gold_answer": "每周四。",
+    "relies_on": [
+      "9cedc3e8-3b90-5439-90c4-27afcb5deac0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0067",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How often does Lantern release?",
+    "gold_answer": "Every second Wednesday.",
+    "relies_on": [
+      "dd38b503-c00a-551e-bad9-0690f6988510"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0068",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What is the Lantern latency SLO?",
+    "gold_answer": "/v1/reconcile p95 under 120 ms (and an error rate under 0.1 %).",
+    "relies_on": [
+      "b2b5ee9a-7dea-5edc-b93b-7de4535ac8df"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0069",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How do I rotate a partner API key in Lantern?",
+    "gold_answer": "just rotate-key <partner>, store the new key in the 1Password vault Lantern-dev, post in #lantern-ops; keys expire every 90 days.",
+    "relies_on": [
+      "f46f7a75-7041-5aa9-8344-7b823d624e40"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0070",
+    "category": "exact_recall",
+    "language": "mixed",
+    "question": "Lantern 生产环境的 log 在哪里看？",
+    "gold_answer": "Loki；本地用 just logs。",
+    "relies_on": [
+      "40218f16-724e-5f31-aac5-80f6b6289467"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0071",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Who reviews Lantern migrations?",
+    "gold_answer": "Chen Bo (@chenbo) in addition to Priya Raman.",
+    "relies_on": [
+      "9e1551ed-5c33-5446-9b39-edd8d76766c9"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0072",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What does Lantern's CI run?",
+    "gold_answer": "build, nextest, clippy, fmt and cargo deny on ubuntu-24.04 (GitHub Actions ci.yml).",
+    "relies_on": [
+      "7b9cf686-abb2-520b-b605-cbdc0a3056a7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0073",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "What is Lantern's retry policy for partner calls?",
+    "gold_answer": "3 retries with exponential backoff, 200 ms base and a 2 s cap; the idempotency key is the ledger batch id.",
+    "relies_on": [
+      "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0074",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How are LANTERN_* secrets loaded locally?",
+    "gold_answer": "From the 1Password CLI: op run --env-file=.env.op -- just run; never committed.",
+    "relies_on": [
+      "199c045a-846c-5d2b-a28e-2929e852e9c3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0075",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "Moss 是什么？",
+    "gold_answer": "林薇的个人项目：Python 写的静态站点生成器，生成她的中文读书笔记博客 moss.linwei.dev。",
+    "relies_on": [
+      "32e3e248-26e5-5cde-b3f1-b5d09b54690a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0076",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How do I preview Moss locally?",
+    "gold_answer": "uv run moss serve --port 4000.",
+    "relies_on": [
+      "128da25c-f994-5add-907a-1859261d4e82"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0077",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "How do I deploy Moss?",
+    "gold_answer": "wrangler pages deploy dist --project-name moss (Cloudflare Pages), run from the laptop; there is no CI.",
+    "relies_on": [
+      "1f3b13c4-dea3-541e-a64c-20bc1efe058c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0078",
+    "category": "exact_recall",
+    "language": "mixed",
+    "question": "Moss 文章的 front matter 有哪些字段？",
+    "gold_answer": "title、date、tags，可选 book。",
+    "relies_on": [
+      "e4e109a8-4129-5689-b547-cb1901ee63ff"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0079",
+    "category": "exact_recall",
+    "language": "en",
+    "question": "Where is the Moss RSS feed?",
+    "gold_answer": "/feed.xml, the last 20 posts, generated by moss/feed.py.",
+    "relies_on": [
+      "d65b04e6-a55e-5971-a751-6371283030bc"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0080",
+    "category": "exact_recall",
+    "language": "zh",
+    "question": "Moss 的链接颜色是什么？",
+    "gold_answer": "#1f6f5f（苔绿）。",
+    "relies_on": [
+      "cd688c62-4938-58f7-90df-f8617aafa6a0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0081",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "If you had to greet me by name, what would you say?",
+    "gold_answer": "Hi Wei (Lin Wei).",
+    "relies_on": [
+      "fbce4294-581d-5cd9-a7be-16a79598e75a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0082",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Which part of China do I call home?",
+    "gold_answer": "Hangzhou (Xihu district).",
+    "relies_on": [
+      "589ec820-c3d7-508c-a70a-2d889329a67d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0083",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "How old will I turn in March 2027?",
+    "gold_answer": "36 (born 14 March 1991).",
+    "relies_on": [
+      "f539564c-231b-5efe-bba6-28955e6df58b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0084",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What kind of company signs my paycheck?",
+    "gold_answer": "A fintech start-up: Quillpay, in Hangzhou.",
+    "relies_on": [
+      "c0489a40-6678-5f2d-98e8-1973ebb7fd57"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0085",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "How long have I been at my current employer as of September 2026?",
+    "gold_answer": "About five years (since September 2021).",
+    "relies_on": [
+      "c0489a40-6678-5f2d-98e8-1973ebb7fd57"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0086",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "我上一份工作是做什么方向的？",
+    "gold_answer": "数据工程（Python 和 Spark），在上海的 Norden Labs。",
+    "relies_on": [
+      "f5ae2a6d-4f64-52f4-9145-39da8657e0fe"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0087",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What nationality is my partner?",
+    "gold_answer": "Swedish (Tomas Lindqvist).",
+    "relies_on": [
+      "ba289b57-b950-594d-8dc1-4140b58d85df"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0088",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "I want to plan something for Tomas — which date should I keep free?",
+    "gold_answer": "10 August, his birthday.",
+    "relies_on": [
+      "ba289b57-b950-594d-8dc1-4140b58d85df"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0089",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "家里那只短腿狗是哪年来的？",
+    "gold_answer": "2022 年领养的（柯基 Mochi）。",
+    "relies_on": [
+      "52f82d00-2f60-5caf-b30b-5c1e9bacd312"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0090",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What text editor would you assume I have open right now?",
+    "gold_answer": "Helix (hx).",
+    "relies_on": [
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0091",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "If you generate a screenshot for me, light or dark background?",
+    "gold_answer": "Dark (dark mode everywhere, Gruvbox Dark).",
+    "relies_on": [
+      "360fa8e1-b71c-5bf1-afb7-3854794bc0d1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0092",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "给我推荐饮料的话，咖啡合适吗？",
+    "gold_answer": "不合适，她只喝茶（最喜欢龙井），下午三点后连咖啡因都不喝。",
+    "relies_on": [
+      "d412219c-5b71-511e-ad65-41e7c5771387"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0093",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Should you put emoji in your replies to me?",
+    "gold_answer": "No.",
+    "relies_on": [
+      "0d47adbd-f5eb-57c1-b054-9385ff3d6a3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0094",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "When you write a code review comment for me, which language should it be in?",
+    "gold_answer": "English (chat in Chinese, technical content in English).",
+    "relies_on": [
+      "b897fbe1-ca49-5041-8354-8f376deb884b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0095",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Is 'feat: Add login endpoint 🎉' an acceptable commit subject for me?",
+    "gold_answer": "No: no emoji in commit messages (Conventional Commits, imperative subject of at most 72 characters).",
+    "relies_on": [
+      "86d3c819-b107-5ef5-a97a-62d76b695298"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0096",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Tabs or spaces, and how many?",
+    "gold_answer": "Spaces, four.",
+    "relies_on": [
+      "d20e3d13-3ba2-50a8-9bcc-d1cd509c51f5"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0097",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Would you recommend MongoDB for my next side project?",
+    "gold_answer": "No — she prefers PostgreSQL and avoids MongoDB.",
+    "relies_on": [
+      "110a879c-3608-5272-94ae-f610a9d9d394"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0098",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "How should you install dependencies in a Python project for me?",
+    "gold_answer": "With uv (uv add / uv sync), not pip or poetry.",
+    "relies_on": [
+      "cf02620f-5620-5a47-ae88-460fd37f419c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0099",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "周一早上我需要你准备什么？",
+    "gold_answer": "上周任务的 bullet 摘要，按项目分组，先 Lantern 后 Moss（周回顾在周一 9:30）。",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0100",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Can you push this documentation fix straight to main to save time?",
+    "gold_answer": "No — her standing rule is that nothing goes to main without a PR, documentation included.",
+    "relies_on": [
+      "f5ec00b0-3491-5a92-940e-607602ab1056"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0101",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "At what monthly spend should you warn me about my cloud bill?",
+    "gold_answer": "At 150 USD (the cap is 200 USD).",
+    "relies_on": [
+      "f2024d48-d9b4-5704-81b1-1e30289c186b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0102",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Is a shrimp dumpling restaurant a safe dinner suggestion for me?",
+    "gold_answer": "No — she has a severe shellfish allergy.",
+    "relies_on": [
+      "add8b06d-fbf9-5904-b384-e3398ff1793c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0103",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "我的跑步配速大概多少？",
+    "gold_answer": "每公里 6 分 10 秒。",
+    "relies_on": [
+      "b68de6ef-298c-5450-ad04-b1ed1e92535e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0104",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What genre of books should you recommend me?",
+    "gold_answer": "Science fiction (favourites: Ted Chiang, Liu Cixin).",
+    "relies_on": [
+      "7711906b-b500-5443-b7da-a0ddc8847b62"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0105",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Is my machine Intel or Apple silicon?",
+    "gold_answer": "Apple silicon: a MacBook Air M3 (arm64).",
+    "relies_on": [
+      "d812f264-4ab3-5182-972e-919103cffa0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0106",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What is my username on GitHub?",
+    "gold_answer": "linwei-dev.",
+    "relies_on": [
+      "be63eca1-2428-53ab-be74-0eb068bdfeb3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0107",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "我键盘上的 Caps Lock 键是什么功能？",
+    "gold_answer": "映射成了 Ctrl。",
+    "relies_on": [
+      "40583509-f62c-5781-b93d-c55451845ae1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0108",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "我在准备哪个语言考试？",
+    "gold_answer": "日语 JLPT N3（2026 年 12 月）。",
+    "relies_on": [
+      "3992ba1b-372a-5d49-a95f-aa84e8ba530a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0109",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "从家到公司的路上大概要多久？",
+    "gold_answer": "大约 40 分钟（地铁 5 号线）。",
+    "relies_on": [
+      "b0c61c22-beaa-5a3d-9c41-931fe42cc1e6"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0110",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "我周末什么时候去买菜？",
+    "gold_answer": "周日，去山姆会员店。",
+    "relies_on": [
+      "d4d77cce-aaee-5fdc-9ebe-65e9603a27e3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0111",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "我多久回一次宁波？",
+    "gold_answer": "每个月一次（父母住在那里）。",
+    "relies_on": [
+      "56daf89a-bb02-51d2-8953-f606e5aff1dd"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0112",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Do I take any medication regularly?",
+    "gold_answer": "No.",
+    "relies_on": [
+      "2548ab97-fb4c-5a69-9f94-fbc5706b2bc2"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0113",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "By when do I want the passport renewal underway?",
+    "gold_answer": "By November 2026 (the passport expires 18 February 2027).",
+    "relies_on": [
+      "88ed0b78-2b34-5897-be90-41f6a684540c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0114",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Which note-taking app am I on?",
+    "gold_answer": "Obsidian (vault at ~/Vault).",
+    "relies_on": [
+      "61de9275-35d8-51a8-91be-b43bf6430dd5"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0115",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "How long did my Neovim experiment last?",
+    "gold_answer": "About two weeks, in October 2025, before she abandoned it.",
+    "relies_on": [
+      "afb93bd9-af74-52b8-b174-cb205a407802"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0116",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Am I currently job hunting?",
+    "gold_answer": "No — she cancelled the Singapore résumé request in June 2026 and decided to stay at Quillpay through 2027.",
+    "relies_on": [
+      "e962bf67-7c00-51c5-b0c2-52184801ad23"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0117",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "lantern 仓库那些旧分支最后删了吗？",
+    "gold_answer": "没有；她拒绝了批量删除，要自己先归档。",
+    "relies_on": [
+      "3c4b572a-5e6b-5354-8d04-fc62f3e8ad5f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0118",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "你有没有办法帮我订餐厅？",
+    "gold_answer": "没有——助手没有预订接口，7 月 9 日那次就失败了，她后来自己订的。",
+    "relies_on": [
+      "900fe1ee-77ae-5ee8-a693-4751ba634072"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0119",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "If I book a call for 14 October 2026, which time zone should the invite use?",
+    "gold_answer": "CET — she is in Stockholm 5 to 19 October.",
+    "relies_on": [
+      "41a08195-90d0-51d6-a92d-3ebda61e1910"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0120",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Which streaming service do I use for music now?",
+    "gold_answer": "Apple Music (she left Spotify in March 2026).",
+    "relies_on": [
+      "944b902b-7e38-58db-a0e2-f12322ba7822"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0121",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "早上 8 点给我安排一个会议可以吗？",
+    "gold_answer": "不行，她 9:30 之前不排会议。",
+    "relies_on": [
+      "261bf869-0284-504a-8d98-50ef319ff350"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0122",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Do I use SMS codes as a second factor?",
+    "gold_answer": "No — a YubiKey 5C, with a backup key at home.",
+    "relies_on": [
+      "583167e2-2a34-5ceb-9c7d-4bfcd8f449fc"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0123",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "If you write me a shell script, should it be in fish?",
+    "gold_answer": "No — POSIX sh or bash, even though her interactive shell is fish.",
+    "relies_on": [
+      "85cfe8aa-1f7c-58c6-ba5a-4b7acb53b923"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0124",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "我的耳机哪边的耳罩换过？",
+    "gold_answer": "左边，2026 年 5 月换的。",
+    "relies_on": [
+      "406c9791-ad5a-5131-ab68-caccf7d222fd"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0125",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What language is Lantern written in and who owns it?",
+    "gold_answer": "Rust; the Ledger Platform team at Quillpay.",
+    "relies_on": [
+      "9f5fc84b-f5a8-5c09-b4be-c220e989df18"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0126",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What port does the Lantern service listen on when I run it locally with just run?",
+    "gold_answer": "8790.",
+    "relies_on": [
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849",
+      "35643d2e-a709-5dc4-99e2-d617c485740e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0127",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "How do I run the whole Lantern test suite?",
+    "gold_answer": "cargo nextest run --workspace.",
+    "relies_on": [
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0128",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Is there a manual way to deploy Lantern to production?",
+    "gold_answer": "No — production goes only through the GitHub Actions release workflow on a v* tag.",
+    "relies_on": [
+      "45301a3d-e467-598f-ae3a-8539a9780aa8"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0129",
+    "category": "paraphrase",
+    "language": "mixed",
+    "question": "Lantern 的 PR 是怎么 merge 的？",
+    "gold_answer": "squash merge，至少一个 reviewer（通常是 Priya）。",
+    "relies_on": [
+      "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0130",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "I need to change a Lantern migration that already ran on staging — can I edit it?",
+    "gold_answer": "No — never edit an applied migration; add a new one.",
+    "relies_on": [
+      "80469bd8-a498-53a2-9642-258ad45a7db4"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0131",
+    "category": "paraphrase",
+    "language": "mixed",
+    "question": "怎么把 Lantern 的本地 dependencies（数据库等）跑起来？",
+    "gold_answer": "docker compose -f compose.dev.yml up -d。",
+    "relies_on": [
+      "38ddc21d-3106-5690-9738-94e7c19e664a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0132",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Can I use an f64 for an amount in Lantern if it is just a display value?",
+    "gold_answer": "No — all money is rust_decimal::Decimal; floating point is forbidden for amounts.",
+    "relies_on": [
+      "30017627-5ab4-52b0-88b8-0643a4c3a408"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0133",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Should new Lantern code use diesel?",
+    "gold_answer": "No — Lantern moved to sqlx in March 2026.",
+    "relies_on": [
+      "e49d4a2a-9429-5037-90dd-74e6ed27f2e1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0134",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "Lantern 现在用什么做事件流？",
+    "gold_answer": "PostgreSQL LISTEN/NOTIFY 加 outbox 表（Kafka 被否决了）。",
+    "relies_on": [
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0135",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Which Rust target should I use for Lantern on my Mac?",
+    "gold_answer": "The native aarch64-apple-darwin toolchain; Rosetta/x86_64 crashes with SIGILL.",
+    "relies_on": [
+      "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31",
+      "d812f264-4ab3-5182-972e-919103cffa0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0136",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "There's a Lantern test that fails randomly — should I add a retry loop?",
+    "gold_answer": "No — reconcile_partial_batch is a known flaky test, ignored until issue #212; do not add retries or sleeps.",
+    "relies_on": [
+      "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0137",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "Lantern 的告警最终发到哪里？",
+    "gold_answer": "企业微信（从 PagerDuty 转过去）。",
+    "relies_on": [
+      "9cedc3e8-3b90-5439-90c4-27afcb5deac0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0138",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What triggers a Lantern release build?",
+    "gold_answer": "Pushing a vX.Y.Z tag (after just bump and git cliff).",
+    "relies_on": [
+      "dd38b503-c00a-551e-bad9-0690f6988510"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0139",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Where are the Lantern dashboards?",
+    "gold_answer": "In the Grafana folder 'Lantern'.",
+    "relies_on": [
+      "b2b5ee9a-7dea-5edc-b93b-7de4535ac8df"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0140",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "How often do Lantern partner keys expire?",
+    "gold_answer": "Every 90 days.",
+    "relies_on": [
+      "f46f7a75-7041-5aa9-8344-7b823d624e40"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0141",
+    "category": "paraphrase",
+    "language": "mixed",
+    "question": "Lantern 的 log 里哪个 field 必须一路传下去？",
+    "gold_answer": "request_id。",
+    "relies_on": [
+      "40218f16-724e-5f31-aac5-80f6b6289467"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0142",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "How quickly should a Lantern review come back?",
+    "gold_answer": "Within one working day.",
+    "relies_on": [
+      "9e1551ed-5c33-5446-9b39-edd8d76766c9"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0143",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What blocks a Lantern merge in CI besides failing tests?",
+    "gold_answer": "A red cargo deny (clippy and fmt also run).",
+    "relies_on": [
+      "7b9cf686-abb2-520b-b605-cbdc0a3056a7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0144",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What is the idempotency key for Lantern partner calls?",
+    "gold_answer": "The ledger batch id.",
+    "relies_on": [
+      "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0145",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Where do Lantern secrets come from when running locally?",
+    "gold_answer": "The 1Password CLI (op run --env-file=.env.op -- just run).",
+    "relies_on": [
+      "199c045a-846c-5d2b-a28e-2929e852e9c3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0146",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "Moss 的博客域名是什么？",
+    "gold_answer": "moss.linwei.dev。",
+    "relies_on": [
+      "32e3e248-26e5-5cde-b3f1-b5d09b54690a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0147",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What command builds the Moss site?",
+    "gold_answer": "uv run moss build.",
+    "relies_on": [
+      "128da25c-f994-5add-907a-1859261d4e82"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0148",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Does Moss deploy automatically on push?",
+    "gold_answer": "No — there is no CI; she runs wrangler pages deploy dist from the laptop.",
+    "relies_on": [
+      "1f3b13c4-dea3-541e-a64c-20bc1efe058c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0149",
+    "category": "paraphrase",
+    "language": "mixed",
+    "question": "Moss 的图片会被转成什么 format？",
+    "gold_answer": "WebP，最长边 1600 像素（用 Pillow）。",
+    "relies_on": [
+      "e4e109a8-4129-5689-b547-cb1901ee63ff"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0150",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What template engine does Moss use?",
+    "gold_answer": "Jinja2 (a hand-written engine was rejected in April 2026).",
+    "relies_on": [
+      "1cdfac00-4307-5c20-b98c-d3385fafd85d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0151",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "Moss 现在用什么解析 Markdown？",
+    "gold_answer": "markdown-it-py 加 footnote 插件（Pandoc 太慢放弃了）。",
+    "relies_on": [
+      "facd99a8-a0bd-55bf-b07c-b8112deb086d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0152",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Can I see visitor numbers for Moss?",
+    "gold_answer": "No — Moss has no analytics (Google Analytics and Plausible were rejected for privacy).",
+    "relies_on": [
+      "e4ba0eee-12e6-5aee-920b-47f45ed2ebf3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0153",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Which directory should wrangler upload for Moss?",
+    "gold_answer": "dist/.",
+    "relies_on": [
+      "71b9cde4-585f-5b94-a15d-42cae6c0e230",
+      "1f3b13c4-dea3-541e-a64c-20bc1efe058c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0154",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "How many posts does the Moss feed include?",
+    "gold_answer": "The last 20.",
+    "relies_on": [
+      "d65b04e6-a55e-5971-a751-6371283030bc"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0155",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "Moss 网站的背景色是什么？",
+    "gold_answer": "#f4f1ea（米色）。",
+    "relies_on": [
+      "cd688c62-4938-58f7-90df-f8617aafa6a0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0156",
+    "category": "paraphrase",
+    "language": "zh",
+    "question": "Moss 的字体是什么？",
+    "gold_answer": "思源宋体。",
+    "relies_on": [
+      "cd688c62-4938-58f7-90df-f8617aafa6a0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0157",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Which reviewer must sign off on a Lantern schema change?",
+    "gold_answer": "Chen Bo (@chenbo), in addition to Priya.",
+    "relies_on": [
+      "9e1551ed-5c33-5446-9b39-edd8d76766c9"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0158",
+    "category": "paraphrase",
+    "language": "mixed",
+    "question": "Moss 文章的 slug 是怎么生成的？",
+    "gold_answer": "用 pypinyin 从标题生成。",
+    "relies_on": [
+      "e4e109a8-4129-5689-b547-cb1901ee63ff"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0159",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "What's the maximum backoff between Lantern partner retries?",
+    "gold_answer": "2 seconds (200 ms base, 3 retries).",
+    "relies_on": [
+      "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0160",
+    "category": "paraphrase",
+    "language": "en",
+    "question": "Which tool generates the Lantern changelog?",
+    "gold_answer": "git cliff.",
+    "relies_on": [
+      "dd38b503-c00a-551e-bad9-0690f6988510"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0161",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我叫什么名字？",
+    "gold_answer": "林薇（Lin Wei），喜欢被叫 Wei。",
+    "relies_on": [
+      "fbce4294-581d-5cd9-a7be-16a79598e75a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0162",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What city do I live in?",
+    "gold_answer": "Hangzhou.",
+    "relies_on": [
+      "589ec820-c3d7-508c-a70a-2d889329a67d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0163",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我的生日是哪天？",
+    "gold_answer": "1991 年 3 月 14 日。",
+    "relies_on": [
+      "f539564c-231b-5efe-bba6-28955e6df58b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0164",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我在哪家公司工作？职位是什么？",
+    "gold_answer": "Quillpay（杭州的金融科技创业公司），后端工程师。",
+    "relies_on": [
+      "c0489a40-6678-5f2d-98e8-1973ebb7fd57"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0165",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Where did I work before Quillpay?",
+    "gold_answer": "Norden Labs in Shanghai (2016–2021), as a data engineer.",
+    "relies_on": [
+      "f5ae2a6d-4f64-52f4-9145-39da8657e0fe"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0166",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我伴侣是做什么的？",
+    "gold_answer": "UX 设计师（Tomas Lindqvist，瑞典人）。",
+    "relies_on": [
+      "ba289b57-b950-594d-8dc1-4140b58d85df"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0167",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What is my dog's name?",
+    "gold_answer": "Mochi (麻糬), a corgi.",
+    "relies_on": [
+      "52f82d00-2f60-5caf-b30b-5c1e9bacd312"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0168",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我现在用什么编辑器？",
+    "gold_answer": "Helix（hx）。",
+    "relies_on": [
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0169",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "我的 editor theme 和 font 是什么？",
+    "gold_answer": "Gruvbox Dark，JetBrains Mono 13 pt，全部深色模式。",
+    "relies_on": [
+      "360fa8e1-b71c-5bf1-afb7-3854794bc0d1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0170",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What is my favourite tea?",
+    "gold_answer": "Longjing (龙井) green tea.",
+    "relies_on": [
+      "d412219c-5b71-511e-ad65-41e7c5771387"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0171",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我希望回答是什么风格的？",
+    "gold_answer": "简洁；摘要用 bullet list；不要 emoji；代码块带语言标记。",
+    "relies_on": [
+      "0d47adbd-f5eb-57c1-b054-9385ff3d6a3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0172",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Which language should you use for casual chat with me?",
+    "gold_answer": "Chinese.",
+    "relies_on": [
+      "b897fbe1-ca49-5041-8354-8f376deb884b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0173",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "我的 commit message 有什么规范？",
+    "gold_answer": "Conventional Commits，祈使句标题不超过 72 字符，不用 emoji，正文 72 列换行。",
+    "relies_on": [
+      "86d3c819-b107-5ef5-a97a-62d76b695298"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0174",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我喜欢几个空格缩进？",
+    "gold_answer": "4 个空格。",
+    "relies_on": [
+      "d20e3d13-3ba2-50a8-9bcc-d1cd509c51f5"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0175",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我偏好哪个数据库？",
+    "gold_answer": "PostgreSQL。",
+    "relies_on": [
+      "110a879c-3608-5272-94ae-f610a9d9d394"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0176",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "Python 项目我用 pip 还是别的？",
+    "gold_answer": "uv，不用 pip 或 poetry。",
+    "relies_on": [
+      "cf02620f-5620-5a47-ae88-460fd37f419c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0177",
+    "category": "cross_language",
+    "language": "en",
+    "question": "When do I do my weekly review?",
+    "gold_answer": "Monday at 9:30.",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0178",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我关于直接推送到 main 的规矩是什么？",
+    "gold_answer": "永远不直接推 main，所有改动都走 PR。",
+    "relies_on": [
+      "f5ec00b0-3491-5a92-940e-607602ab1056"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0179",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我每个月的云服务预算是多少？",
+    "gold_answer": "200 美元，到 150 美元时提醒。",
+    "relies_on": [
+      "f2024d48-d9b4-5704-81b1-1e30289c186b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0180",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我对什么过敏？",
+    "gold_answer": "海鲜（虾、蟹、龙虾、生蚝），很严重。",
+    "relies_on": [
+      "add8b06d-fbf9-5904-b384-e3398ff1793c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0181",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Which days do I run?",
+    "gold_answer": "Tuesdays and Saturdays (5 km).",
+    "relies_on": [
+      "b68de6ef-298c-5450-ad04-b1ed1e92535e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0182",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我喜欢读什么类型的书？",
+    "gold_answer": "科幻；最喜欢特德·姜（Ted Chiang）和刘慈欣。",
+    "relies_on": [
+      "7711906b-b500-5443-b7da-a0ddc8847b62"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0183",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我的笔记本电脑是什么？",
+    "gold_answer": "MacBook Air M3，16 GB，macOS。",
+    "relies_on": [
+      "d812f264-4ab3-5182-972e-919103cffa0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0184",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "我的 GitHub 用户名是什么？",
+    "gold_answer": "linwei-dev。",
+    "relies_on": [
+      "be63eca1-2428-53ab-be74-0eb068bdfeb3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0185",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What keyboard do I use?",
+    "gold_answer": "HHKB Professional Hybrid Type-S, Caps Lock mapped to Ctrl.",
+    "relies_on": [
+      "40583509-f62c-5781-b93d-c55451845ae1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0186",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Which language am I learning and what is the target?",
+    "gold_answer": "Japanese, JLPT N3 in December 2026.",
+    "relies_on": [
+      "3992ba1b-372a-5d49-a95f-aa84e8ba530a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0187",
+    "category": "cross_language",
+    "language": "en",
+    "question": "How do I get to work these days?",
+    "gold_answer": "By metro, Line 5, about 40 minutes.",
+    "relies_on": [
+      "b0c61c22-beaa-5a3d-9c41-931fe42cc1e6"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0188",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Where do I do my weekly grocery run?",
+    "gold_answer": "Sam's Club, on Sundays.",
+    "relies_on": [
+      "d4d77cce-aaee-5fdc-9ebe-65e9603a27e3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0189",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Where do my parents live?",
+    "gold_answer": "Ningbo.",
+    "relies_on": [
+      "56daf89a-bb02-51d2-8953-f606e5aff1dd"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0190",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我的医生是谁？",
+    "gold_answer": "浙江省人民医院的钱明医生（Dr. Qian Ming）。",
+    "relies_on": [
+      "2548ab97-fb4c-5a69-9f94-fbc5706b2bc2"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0191",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我的护照什么时候到期？",
+    "gold_answer": "2027 年 2 月 18 日。",
+    "relies_on": [
+      "88ed0b78-2b34-5897-be90-41f6a684540c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0192",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我的笔记放在哪里？",
+    "gold_answer": "Obsidian（~/Vault）；Notion 被拒绝了。",
+    "relies_on": [
+      "61de9275-35d8-51a8-91be-b43bf6430dd5"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0193",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我试过 Neovim 吗？结果怎样？",
+    "gold_answer": "试过（2025 年 10 月），两周后放弃，回到 vim。",
+    "relies_on": [
+      "afb93bd9-af74-52b8-b174-cb205a407802"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0194",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我 6 月让你写的简历后来怎么样了？",
+    "gold_answer": "第二天取消了；她决定留在 Quillpay 到 2027 年。",
+    "relies_on": [
+      "e962bf67-7c00-51c5-b0c2-52184801ad23"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0195",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Did I let you delete the stale Lantern branches in August?",
+    "gold_answer": "No — she declined and wanted to archive the list herself first; nothing was deleted.",
+    "relies_on": [
+      "3c4b572a-5e6b-5354-8d04-fc62f3e8ad5f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0196",
+    "category": "cross_language",
+    "language": "en",
+    "question": "How did the restaurant booking on 9 July go?",
+    "gold_answer": "It failed — the assistant has no booking interface; she booked Green Tea Restaurant herself on Dianping.",
+    "relies_on": [
+      "900fe1ee-77ae-5ee8-a693-4751ba634072"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0197",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我 10 月去哪里旅行？",
+    "gold_answer": "斯德哥尔摩，10 月 5 日到 19 日。",
+    "relies_on": [
+      "41a08195-90d0-51d6-a92d-3ebda61e1910"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0198",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "我写代码的时候听什么？",
+    "gold_answer": "lo-fi，用 Apple Music。",
+    "relies_on": [
+      "944b902b-7e38-58db-a0e2-f12322ba7822"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0199",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What time do I usually get up?",
+    "gold_answer": "6:30.",
+    "relies_on": [
+      "261bf869-0284-504a-8d98-50ef319ff350"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0200",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "我的 2FA 用什么？",
+    "gold_answer": "YubiKey 5C。",
+    "relies_on": [
+      "583167e2-2a34-5ceb-9c7d-4bfcd8f449fc"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0201",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "我用什么 shell？",
+    "gold_answer": "fish，配 starship 提示符。",
+    "relies_on": [
+      "85cfe8aa-1f7c-58c6-ba5a-4b7acb53b923"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0202",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What headphones do I use?",
+    "gold_answer": "Sony WH-1000XM5.",
+    "relies_on": [
+      "406c9791-ad5a-5131-ab68-caccf7d222fd"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0203",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Lantern 是做什么的？",
+    "gold_answer": "Quillpay 的账本对账服务，Rust 写的。",
+    "relies_on": [
+      "9f5fc84b-f5a8-5c09-b4be-c220e989df18"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0204",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "Lantern 的 test suite 怎么 run？",
+    "gold_answer": "cargo nextest run --workspace。",
+    "relies_on": [
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0205",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Lantern 怎么部署到 staging？",
+    "gold_answer": "just deploy staging（需要 VPN 和 1Password 里的 LANTERN_DEPLOY_TOKEN）。",
+    "relies_on": [
+      "45301a3d-e467-598f-ae3a-8539a9780aa8"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0206",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What is the Lantern branch naming rule?",
+    "gold_answer": "lw/<topic>.",
+    "relies_on": [
+      "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0207",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "Lantern 的 migration 怎么 apply？",
+    "gold_answer": "sqlx migrate run。",
+    "relies_on": [
+      "80469bd8-a498-53a2-9642-258ad45a7db4"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0208",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What is Lantern's local database URL?",
+    "gold_answer": "postgres://lantern:lantern@localhost:5433/lantern_dev.",
+    "relies_on": [
+      "38ddc21d-3106-5690-9738-94e7c19e664a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0209",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Lantern 里金额用什么类型？",
+    "gold_answer": "rust_decimal::Decimal，不能用 f64。",
+    "relies_on": [
+      "30017627-5ab4-52b0-88b8-0643a4c3a408"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0210",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Lantern 是什么时候从 diesel 换到 sqlx 的？",
+    "gold_answer": "2026 年 3 月。",
+    "relies_on": [
+      "e49d4a2a-9429-5037-90dd-74e6ed27f2e1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0211",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What did the Lantern team decide about Kafka?",
+    "gold_answer": "Rejected in July 2026; use Postgres LISTEN/NOTIFY plus an outbox table.",
+    "relies_on": [
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0212",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "在 Rosetta 下跑 Lantern 测试会怎样？",
+    "gold_answer": "SIGILL 崩溃（在 ring 里）；要用原生 aarch64 工具链。",
+    "relies_on": [
+      "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0213",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "Lantern 哪个 test 是 flaky 的？",
+    "gold_answer": "reconcile_partial_batch，等 #212 修好前先 ignore。",
+    "relies_on": [
+      "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0214",
+    "category": "cross_language",
+    "language": "en",
+    "question": "When is my next Lantern on-call week?",
+    "gold_answer": "Starting 24 September 2026 (then 22 October); shifts change on Thursdays.",
+    "relies_on": [
+      "9cedc3e8-3b90-5439-90c4-27afcb5deac0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0215",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Lantern 多久发一次版？",
+    "gold_answer": "每两周一次，周三。",
+    "relies_on": [
+      "dd38b503-c00a-551e-bad9-0690f6988510"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0216",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "Lantern 的 p95 目标是多少？",
+    "gold_answer": "/v1/reconcile 低于 120 ms。",
+    "relies_on": [
+      "b2b5ee9a-7dea-5edc-b93b-7de4535ac8df"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0217",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "Lantern 的 partner API key 怎么 rotate？",
+    "gold_answer": "just rotate-key <partner>，更新 1Password，在 #lantern-ops 通知。",
+    "relies_on": [
+      "f46f7a75-7041-5aa9-8344-7b823d624e40"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0218",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Where do Lantern's production logs go?",
+    "gold_answer": "Loki (JSON logs; just logs locally).",
+    "relies_on": [
+      "40218f16-724e-5f31-aac5-80f6b6289467"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0219",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Lantern 默认的 reviewer 是谁？",
+    "gold_answer": "Priya Raman（@priya-r）。",
+    "relies_on": [
+      "9e1551ed-5c33-5446-9b39-edd8d76766c9"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0220",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "Lantern 的 CI 跑哪些 check？",
+    "gold_answer": "build、nextest、clippy、fmt、cargo deny。",
+    "relies_on": [
+      "7b9cf686-abb2-520b-b605-cbdc0a3056a7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0221",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Lantern 调用 partner 失败重试几次？",
+    "gold_answer": "3 次，指数退避，200 ms 起，最多 2 秒。",
+    "relies_on": [
+      "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0222",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What is Moss?",
+    "gold_answer": "Lin Wei's personal static-site generator in Python for her Chinese reading-notes blog moss.linwei.dev.",
+    "relies_on": [
+      "32e3e248-26e5-5cde-b3f1-b5d09b54690a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0223",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "Moss 怎么 build？",
+    "gold_answer": "uv run moss build。",
+    "relies_on": [
+      "128da25c-f994-5add-907a-1859261d4e82"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0224",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Moss 怎么部署？",
+    "gold_answer": "wrangler pages deploy dist --project-name moss（Cloudflare Pages）。",
+    "relies_on": [
+      "1f3b13c4-dea3-541e-a64c-20bc1efe058c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0225",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Where do Moss posts live and what generates their slugs?",
+    "gold_answer": "content/notes/*.md; slugs come from pypinyin.",
+    "relies_on": [
+      "e4e109a8-4129-5689-b547-cb1901ee63ff"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0226",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Moss 用的模板引擎是什么？",
+    "gold_answer": "Jinja2。",
+    "relies_on": [
+      "1cdfac00-4307-5c20-b98c-d3385fafd85d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0227",
+    "category": "cross_language",
+    "language": "en",
+    "question": "Why did I abandon Pandoc for Moss?",
+    "gold_answer": "Full builds took 90 seconds; she switched to markdown-it-py with footnotes.",
+    "relies_on": [
+      "facd99a8-a0bd-55bf-b07c-b8112deb086d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0228",
+    "category": "cross_language",
+    "language": "zh",
+    "question": "Moss 有访问统计吗？",
+    "gold_answer": "没有，Google Analytics 和 Plausible 都被拒绝了；也没有评论系统。",
+    "relies_on": [
+      "e4ba0eee-12e6-5aee-920b-47f45ed2ebf3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0229",
+    "category": "cross_language",
+    "language": "mixed",
+    "question": "Moss 的 RSS feed 在哪？",
+    "gold_answer": "/feed.xml，最近 20 篇。",
+    "relies_on": [
+      "d65b04e6-a55e-5971-a751-6371283030bc"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0230",
+    "category": "cross_language",
+    "language": "en",
+    "question": "What colours does the Moss site use?",
+    "gold_answer": "Background #f4f1ea, text #2b2b2b, links #1f6f5f (moss green); font Source Han Serif.",
+    "relies_on": [
+      "cd688c62-4938-58f7-90df-f8617aafa6a0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0231",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "What editor did I use before Helix?",
+    "gold_answer": "vim.",
+    "relies_on": [
+      "eca96db9-98b9-5def-a63d-c3c39a10ea0e",
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0232",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did I switch from vim to Helix?",
+    "gold_answer": "June 2026 (stated on 3 June 2026).",
+    "relies_on": [
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0233",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "As of May 2026, which editor was I using?",
+    "gold_answer": "vim.",
+    "relies_on": [
+      "eca96db9-98b9-5def-a63d-c3c39a10ea0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0234",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Is vim still my editor?",
+    "gold_answer": "No — Helix since June 2026.",
+    "relies_on": [
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427",
+      "eca96db9-98b9-5def-a63d-c3c39a10ea0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0235",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "我现在用的编辑器和以前的有什么不同？",
+    "gold_answer": "以前是 vim，2026 年 6 月起换成 Helix。",
+    "relies_on": [
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427",
+      "eca96db9-98b9-5def-a63d-c3c39a10ea0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0236",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "What laptop did I have before the MacBook?",
+    "gold_answer": "A ThinkPad X1 Carbon Gen 9 running Fedora.",
+    "relies_on": [
+      "17310b78-2539-5802-a542-9aa6380ca979",
+      "d812f264-4ab3-5182-972e-919103cffa0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0237",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did I move to the MacBook Air?",
+    "gold_answer": "November 2025.",
+    "relies_on": [
+      "d812f264-4ab3-5182-972e-919103cffa0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0238",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Do I still run Fedora?",
+    "gold_answer": "No — macOS on a MacBook Air M3 since November 2025.",
+    "relies_on": [
+      "d812f264-4ab3-5182-972e-919103cffa0e",
+      "17310b78-2539-5802-a542-9aa6380ca979"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0239",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "In October 2025, what operating system was I on?",
+    "gold_answer": "Fedora (ThinkPad X1 Carbon).",
+    "relies_on": [
+      "17310b78-2539-5802-a542-9aa6380ca979"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0240",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "我以前用什么电脑？",
+    "gold_answer": "ThinkPad X1 Carbon Gen 9，跑 Fedora，2025 年 11 月之前。",
+    "relies_on": [
+      "17310b78-2539-5802-a542-9aa6380ca979"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0241",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "我还开车上班吗？",
+    "gold_answer": "不开了；2026 年 4 月把本田飞度卖了，现在坐地铁 5 号线。",
+    "relies_on": [
+      "73c3f368-d646-5e3f-845e-b319ed050190",
+      "b0c61c22-beaa-5a3d-9c41-931fe42cc1e6"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0242",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "我以前开什么车？",
+    "gold_answer": "2018 年的本田飞度。",
+    "relies_on": [
+      "73c3f368-d646-5e3f-845e-b319ed050190"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0243",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "我是什么时候卖车的？",
+    "gold_answer": "2026 年 4 月 20 日。",
+    "relies_on": [
+      "73c3f368-d646-5e3f-845e-b319ed050190"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0244",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "How did I commute in March 2026?",
+    "gold_answer": "By car (a 2018 Honda Fit), sold in April 2026.",
+    "relies_on": [
+      "73c3f368-d646-5e3f-845e-b319ed050190"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0245",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "How do I commute now, and since when?",
+    "gold_answer": "Metro Line 5, since April 2026.",
+    "relies_on": [
+      "b0c61c22-beaa-5a3d-9c41-931fe42cc1e6"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0246",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Which directory did Moss build into before May 2026?",
+    "gold_answer": "_site/.",
+    "relies_on": [
+      "005e519a-6a01-5e8d-bf96-1492badedcf4"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0247",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Where does Moss put its build output now?",
+    "gold_answer": "dist/ (since 10 May 2026).",
+    "relies_on": [
+      "71b9cde4-585f-5b94-a15d-42cae6c0e230"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0248",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did the Moss output directory change and why?",
+    "gold_answer": "10 May 2026, to match wrangler's default (PR #41).",
+    "relies_on": [
+      "71b9cde4-585f-5b94-a15d-42cae6c0e230"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0249",
+    "category": "changed_facts_time",
+    "language": "mixed",
+    "question": "Moss 的 output directory 还是 _site 吗？",
+    "gold_answer": "不是了，2026 年 5 月起是 dist/。",
+    "relies_on": [
+      "71b9cde4-585f-5b94-a15d-42cae6c0e230",
+      "005e519a-6a01-5e8d-bf96-1492badedcf4"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0250",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "A script of mine references _site/ for Moss — is it stale?",
+    "gold_answer": "Yes — the output directory has been dist/ since May 2026.",
+    "relies_on": [
+      "71b9cde4-585f-5b94-a15d-42cae6c0e230",
+      "005e519a-6a01-5e8d-bf96-1492badedcf4"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0251",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Will I be in Hangzhou on 10 October 2026?",
+    "gold_answer": "No — she is in Stockholm from 5 to 19 October 2026.",
+    "relies_on": [
+      "41a08195-90d0-51d6-a92d-3ebda61e1910"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0252",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Am I in Stockholm on 22 October 2026?",
+    "gold_answer": "No — the trip ends on 19 October.",
+    "relies_on": [
+      "41a08195-90d0-51d6-a92d-3ebda61e1910"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0253",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Which time zone should a meeting on 7 October 2026 use?",
+    "gold_answer": "CET (she is in Stockholm then).",
+    "relies_on": [
+      "41a08195-90d0-51d6-a92d-3ebda61e1910"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0254",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "10 月 1 日我在哪里？",
+    "gold_answer": "还在杭州；斯德哥尔摩之行是 10 月 5 日到 19 日。",
+    "relies_on": [
+      "41a08195-90d0-51d6-a92d-3ebda61e1910",
+      "589ec820-c3d7-508c-a70a-2d889329a67d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0255",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "10 月我哪一周 on-call？",
+    "gold_answer": "从 10 月 22 日开始的那一周。",
+    "relies_on": [
+      "9cedc3e8-3b90-5439-90c4-27afcb5deac0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0256",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Am I on call the week of 24 September 2026?",
+    "gold_answer": "Yes — her rotation starts on 24 September.",
+    "relies_on": [
+      "9cedc3e8-3b90-5439-90c4-27afcb5deac0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0257",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Is my passport valid in March 2027?",
+    "gold_answer": "No — it expires on 18 February 2027.",
+    "relies_on": [
+      "88ed0b78-2b34-5897-be90-41f6a684540c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0258",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Is my passport still valid in December 2026?",
+    "gold_answer": "Yes — it expires on 18 February 2027.",
+    "relies_on": [
+      "88ed0b78-2b34-5897-be90-41f6a684540c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0259",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "我的日语考试是什么时候？",
+    "gold_answer": "2026 年 12 月（JLPT N3）。",
+    "relies_on": [
+      "3992ba1b-372a-5d49-a95f-aa84e8ba530a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0260",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "半马是哪个月？",
+    "gold_answer": "2026 年 11 月（杭州马拉松）。",
+    "relies_on": [
+      "b68de6ef-298c-5450-ad04-b1ed1e92535e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0261",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did Lantern stop using diesel?",
+    "gold_answer": "March 2026 (the last diesel module was removed on 10 March 2026, PR #188).",
+    "relies_on": [
+      "e49d4a2a-9429-5037-90dd-74e6ed27f2e1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0262",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "In February 2026, was Lantern using diesel or sqlx?",
+    "gold_answer": "diesel — the switch to sqlx happened in March 2026.",
+    "relies_on": [
+      "e49d4a2a-9429-5037-90dd-74e6ed27f2e1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0263",
+    "category": "changed_facts_time",
+    "language": "mixed",
+    "question": "Lantern 的 default branch 以前叫什么？什么时候改的？",
+    "gold_answer": "以前叫 master，2026 年 2 月改成 main。",
+    "relies_on": [
+      "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0264",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Is Lantern's default branch still master?",
+    "gold_answer": "No — main, since February 2026.",
+    "relies_on": [
+      "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0265",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Which music service was I using in January 2026?",
+    "gold_answer": "Spotify — she moved to Apple Music in March 2026.",
+    "relies_on": [
+      "944b902b-7e38-58db-a0e2-f12322ba7822"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0266",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did I leave Spotify?",
+    "gold_answer": "March 2026.",
+    "relies_on": [
+      "944b902b-7e38-58db-a0e2-f12322ba7822"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0267",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "Kafka 什么时候可以再提？",
+    "gold_answer": "2027 年之后（年内不再重提），或者事件量超过 Postgres 能承受的范围。",
+    "relies_on": [
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0268",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "我的耳机是什么时候修过的？",
+    "gold_answer": "2026 年 5 月换过左耳罩。",
+    "relies_on": [
+      "406c9791-ad5a-5131-ab68-caccf7d222fd"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0269",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "How long did the résumé request stay open?",
+    "gold_answer": "One day — asked on 2 June 2026, cancelled on 3 June 2026.",
+    "relies_on": [
+      "e962bf67-7c00-51c5-b0c2-52184801ad23"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0270",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Since when has Lantern been in production?",
+    "gold_answer": "September 2025.",
+    "relies_on": [
+      "9f5fc84b-f5a8-5c09-b4be-c220e989df18"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0271",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did Lantern's money-type decision happen and what triggered it?",
+    "gold_answer": "12 May 2026, after a rounding incident in batch #4471.",
+    "relies_on": [
+      "30017627-5ab4-52b0-88b8-0643a4c3a408"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0272",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "How many years was I at Norden Labs?",
+    "gold_answer": "Five (2016 to 2021).",
+    "relies_on": [
+      "f5ae2a6d-4f64-52f4-9145-39da8657e0fe"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0273",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "In which year did I adopt Mochi?",
+    "gold_answer": "2022.",
+    "relies_on": [
+      "52f82d00-2f60-5caf-b30b-5c1e9bacd312"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0274",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did I decline Notion?",
+    "gold_answer": "February 2026.",
+    "relies_on": [
+      "61de9275-35d8-51a8-91be-b43bf6430dd5"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0275",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did the Rosetta SIGILL problem happen?",
+    "gold_answer": "December 2025.",
+    "relies_on": [
+      "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0276",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When was the Lantern retry policy decided?",
+    "gold_answer": "May 2026 (ADR-005).",
+    "relies_on": [
+      "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0277",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "Moss 是什么时候放弃 Pandoc 的？",
+    "gold_answer": "2026 年 1 月。",
+    "relies_on": [
+      "facd99a8-a0bd-55bf-b07c-b8112deb086d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0278",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When was the Jinja2 decision for Moss made?",
+    "gold_answer": "14 April 2026.",
+    "relies_on": [
+      "1cdfac00-4307-5c20-b98c-d3385fafd85d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0279",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Is issue #212 resolved as of September 2026?",
+    "gold_answer": "No — it is still open; the flaky test stays ignored.",
+    "relies_on": [
+      "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0280",
+    "category": "changed_facts_time",
+    "language": "mixed",
+    "question": "我的 editor 历史是怎样的？从 vim 开始说。",
+    "gold_answer": "vim → 2025 年 10 月试过 Neovim，两周后放弃 → 回到 vim → 2026 年 6 月换 Helix。",
+    "relies_on": [
+      "eca96db9-98b9-5def-a63d-c3c39a10ea0e",
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427",
+      "afb93bd9-af74-52b8-b174-cb205a407802"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0281",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "Did the Rosetta crash happen on the ThinkPad or the MacBook?",
+    "gold_answer": "The MacBook — the M3 arrived in November 2025 and the SIGILL crash under Rosetta was in December 2025.",
+    "relies_on": [
+      "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31",
+      "17310b78-2539-5802-a542-9aa6380ca979",
+      "d812f264-4ab3-5182-972e-919103cffa0e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0282",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did the Lantern staging infrastructure move?",
+    "gold_answer": "June 2026.",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0283",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "When did Moss move to Python 3.13?",
+    "gold_answer": "August 2026.",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0284",
+    "category": "changed_facts_time",
+    "language": "zh",
+    "question": "我周回顾的时间改过吗？",
+    "gold_answer": "改过：以前是周五 16:00（2026 年 1 月），2026 年 4 月起是周一 9:30。",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c",
+      "55da76c5-8f67-5628-a520-4cd45df14bb7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0285",
+    "category": "changed_facts_time",
+    "language": "en",
+    "question": "As of September 2026, which of these is current: vim, the ThinkPad, driving to work?",
+    "gold_answer": "None — Helix, a MacBook Air M3, and the metro.",
+    "relies_on": [
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427",
+      "d812f264-4ab3-5182-972e-919103cffa0e",
+      "b0c61c22-beaa-5a3d-9c41-931fe42cc1e6"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0286",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "Walk me through shipping a Lantern release.",
+    "gold_answer": "just bump <patch|minor>, generate the changelog with git cliff, push a vX.Y.Z tag; the release workflow deploys. Releases go out every second Wednesday.",
+    "relies_on": [
+      "dd38b503-c00a-551e-bad9-0690f6988510",
+      "45301a3d-e467-598f-ae3a-8539a9780aa8"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0287",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "What's the full pre-PR checklist for Lantern?",
+    "gold_answer": "cargo build --workspace, cargo nextest run --workspace, cargo clippy --all-targets -- -D warnings, cargo fmt --check (CI also runs cargo deny).",
+    "relies_on": [
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849",
+      "7b9cf686-abb2-520b-b605-cbdc0a3056a7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0288",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "I need to add a column to a Lantern table. What are the steps?",
+    "gold_answer": "sqlx migrate add -r <name> in migrations/, write the up and down, sqlx migrate run, and get Chen Bo plus Priya to review.",
+    "relies_on": [
+      "80469bd8-a498-53a2-9642-258ad45a7db4",
+      "9e1551ed-5c33-5446-9b39-edd8d76766c9"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0289",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "第一次在本机跑 Lantern 要做什么？",
+    "gold_answer": "docker compose -f compose.dev.yml up -d 起依赖；配置 .env.local（数据库 postgres://lantern:lantern@localhost:5433/lantern_dev）；just run（端口 8790）。",
+    "relies_on": [
+      "38ddc21d-3106-5690-9738-94e7c19e664a",
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0290",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I get LANTERN_* secrets into my shell without committing them?",
+    "gold_answer": "op run --env-file=.env.op -- just run.",
+    "relies_on": [
+      "199c045a-846c-5d2b-a28e-2929e852e9c3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0291",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "What do I do when a partner key is about to expire?",
+    "gold_answer": "just rotate-key <partner>, put the new key in 1Password (Lantern-dev), announce in #lantern-ops.",
+    "relies_on": [
+      "f46f7a75-7041-5aa9-8344-7b823d624e40"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0292",
+    "category": "project_procedures",
+    "language": "mixed",
+    "question": "Lantern 的 staging deploy 前需要准备什么？",
+    "gold_answer": "连上 VPN，从 1Password 的 Lantern-dev 拿 LANTERN_DEPLOY_TOKEN，然后 just deploy staging。",
+    "relies_on": [
+      "45301a3d-e467-598f-ae3a-8539a9780aa8"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0293",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I open a Lantern PR the team's way?",
+    "gold_answer": "Branch lw/<topic>, at least one reviewer (Priya), squash merge into main.",
+    "relies_on": [
+      "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0294",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How should I name my Lantern feature branch for the outbox work?",
+    "gold_answer": "lw/outbox (the lw/<topic> rule).",
+    "relies_on": [
+      "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0295",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "Lantern 本地怎么看日志？",
+    "gold_answer": "just logs。",
+    "relies_on": [
+      "40218f16-724e-5f31-aac5-80f6b6289467"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0296",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I read Lantern logs in production?",
+    "gold_answer": "Through Loki (JSON logs).",
+    "relies_on": [
+      "40218f16-724e-5f31-aac5-80f6b6289467"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0297",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "What toolchain setup does Lantern need on my Mac?",
+    "gold_answer": "The native aarch64-apple-darwin toolchain, never x86_64 under Rosetta.",
+    "relies_on": [
+      "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0298",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "A Lantern CI run is red on cargo deny — can I merge anyway?",
+    "gold_answer": "No; a red cargo deny blocks the merge.",
+    "relies_on": [
+      "7b9cf686-abb2-520b-b605-cbdc0a3056a7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0299",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I run just the Lantern service locally?",
+    "gold_answer": "just run (port 8790).",
+    "relies_on": [
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0300",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "What's the Lantern format check command?",
+    "gold_answer": "cargo fmt --check.",
+    "relies_on": [
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0301",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "Lantern 数据库迁移文件放在哪个目录？",
+    "gold_answer": "migrations/。",
+    "relies_on": [
+      "80469bd8-a498-53a2-9642-258ad45a7db4"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0302",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I handle a failed partner call in Lantern code?",
+    "gold_answer": "Retry 3 times with exponential backoff (200 ms base, 2 s cap), keyed by the ledger batch id.",
+    "relies_on": [
+      "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0303",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I check whether Lantern meets its SLO?",
+    "gold_answer": "Grafana folder 'Lantern': /v1/reconcile p95 under 120 ms, error rate under 0.1 %.",
+    "relies_on": [
+      "b2b5ee9a-7dea-5edc-b93b-7de4535ac8df"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0304",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "Where do Lantern alerts show up when I'm on call?",
+    "gold_answer": "PagerDuty, forwarded to WeCom (企业微信); the rotation switches on Thursdays.",
+    "relies_on": [
+      "9cedc3e8-3b90-5439-90c4-27afcb5deac0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0305",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "Lantern 的 reviewer 应该找谁？",
+    "gold_answer": "Priya Raman（@priya-r）；涉及迁移再加 Chen Bo（@chenbo）。",
+    "relies_on": [
+      "9e1551ed-5c33-5446-9b39-edd8d76766c9"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0306",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I represent 12.50 USD in Lantern code?",
+    "gold_answer": "As a rust_decimal::Decimal, never a float.",
+    "relies_on": [
+      "30017627-5ab4-52b0-88b8-0643a4c3a408"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0307",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I write a database query in new Lantern code?",
+    "gold_answer": "With sqlx (compile-time checked queries); no diesel.",
+    "relies_on": [
+      "e49d4a2a-9429-5037-90dd-74e6ed27f2e1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0308",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I publish events between Lantern components?",
+    "gold_answer": "Postgres LISTEN/NOTIFY with an outbox table — not Kafka.",
+    "relies_on": [
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0309",
+    "category": "project_procedures",
+    "language": "mixed",
+    "question": "Lantern 的 test 里 reconcile_partial_batch 挂了怎么办？",
+    "gold_answer": "它是已知 flaky（#212），保持 #[ignore]，不要加 retry 或 sleep。",
+    "relies_on": [
+      "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0310",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How is Lantern deployed to production?",
+    "gold_answer": "Only via the GitHub Actions release workflow on a v* tag.",
+    "relies_on": [
+      "45301a3d-e467-598f-ae3a-8539a9780aa8"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0311",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "Give me the complete Moss publish workflow.",
+    "gold_answer": "uv run moss build, check locally with uv run moss serve --port 4000, then wrangler pages deploy dist --project-name moss.",
+    "relies_on": [
+      "128da25c-f994-5add-907a-1859261d4e82",
+      "1f3b13c4-dea3-541e-a64c-20bc1efe058c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0312",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I run the Moss tests and linter?",
+    "gold_answer": "uv run pytest -q; ruff check . and ruff format.",
+    "relies_on": [
+      "128da25c-f994-5add-907a-1859261d4e82"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0313",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "在 Moss 里写一篇新文章要放哪里、写什么头？",
+    "gold_answer": "content/notes/*.md，front matter：title、date、tags，可选 book。",
+    "relies_on": [
+      "e4e109a8-4129-5689-b547-cb1901ee63ff"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0314",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "Moss 的图片要放哪里？",
+    "gold_answer": "content/images/，构建时自动转 WebP（最长边 1600 像素）。",
+    "relies_on": [
+      "e4e109a8-4129-5689-b547-cb1901ee63ff"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0315",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I preview Moss on port 4000?",
+    "gold_answer": "uv run moss serve --port 4000.",
+    "relies_on": [
+      "128da25c-f994-5add-907a-1859261d4e82"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0316",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I validate the Moss feed before deploying?",
+    "gold_answer": "Run it through the W3C feed validator (/feed.xml, generated by moss/feed.py).",
+    "relies_on": [
+      "d65b04e6-a55e-5971-a751-6371283030bc"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0317",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "Which Cloudflare Pages project does Moss deploy to?",
+    "gold_answer": "moss (wrangler pages deploy dist --project-name moss).",
+    "relies_on": [
+      "1f3b13c4-dea3-541e-a64c-20bc1efe058c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0318",
+    "category": "project_procedures",
+    "language": "mixed",
+    "question": "Moss 的 dependencies 怎么装？",
+    "gold_answer": "用 uv（uv sync）；不用 pip。",
+    "relies_on": [
+      "cf02620f-5620-5a47-ae88-460fd37f419c",
+      "128da25c-f994-5add-907a-1859261d4e82"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0319",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "What Python version should the Moss virtualenv use?",
+    "gold_answer": "3.13.",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0320",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I add footnotes in a Moss post?",
+    "gold_answer": "Markdown footnotes — Moss uses markdown-it-py with the footnote plugin.",
+    "relies_on": [
+      "facd99a8-a0bd-55bf-b07c-b8112deb086d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0321",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "What engine renders Moss templates?",
+    "gold_answer": "Jinja2.",
+    "relies_on": [
+      "1cdfac00-4307-5c20-b98c-d3385fafd85d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0322",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "改 Moss 的站点样式时要保持什么？",
+    "gold_answer": "背景 #f4f1ea、正文 #2b2b2b、链接 #1f6f5f，思源宋体，不做深色模式。",
+    "relies_on": [
+      "cd688c62-4938-58f7-90df-f8617aafa6a0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0323",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "Is there a Moss CI I should wait for after pushing?",
+    "gold_answer": "No — there is no CI; deploy manually from the laptop.",
+    "relies_on": [
+      "1f3b13c4-dea3-541e-a64c-20bc1efe058c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0324",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I run a one-off Moss build without deploying?",
+    "gold_answer": "uv run moss build; the output lands in dist/.",
+    "relies_on": [
+      "128da25c-f994-5add-907a-1859261d4e82",
+      "71b9cde4-585f-5b94-a15d-42cae6c0e230"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0325",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "What is the Lantern command to apply pending migrations?",
+    "gold_answer": "sqlx migrate run.",
+    "relies_on": [
+      "80469bd8-a498-53a2-9642-258ad45a7db4"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0326",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I start the Lantern dev dependencies?",
+    "gold_answer": "docker compose -f compose.dev.yml up -d.",
+    "relies_on": [
+      "38ddc21d-3106-5690-9738-94e7c19e664a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0327",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "Which file holds my local Lantern config?",
+    "gold_answer": ".env.local (git-ignored).",
+    "relies_on": [
+      "38ddc21d-3106-5690-9738-94e7c19e664a"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0328",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "Lantern 发版的 changelog 怎么生成？",
+    "gold_answer": "git cliff。",
+    "relies_on": [
+      "dd38b503-c00a-551e-bad9-0690f6988510"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0329",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I bump the Lantern version?",
+    "gold_answer": "just bump <patch|minor>.",
+    "relies_on": [
+      "dd38b503-c00a-551e-bad9-0690f6988510"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0330",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "If I commit to Lantern, which message style applies?",
+    "gold_answer": "Conventional Commits, imperative subject of at most 72 characters, no emoji, body at 72 (her global rule).",
+    "relies_on": [
+      "86d3c819-b107-5ef5-a97a-62d76b695298"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0331",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How should you propagate request_id in a new Lantern handler?",
+    "gold_answer": "Pass it through to every downstream call; it is a required JSON log field.",
+    "relies_on": [
+      "40218f16-724e-5f31-aac5-80f6b6289467"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0332",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I merge a Lantern PR?",
+    "gold_answer": "Squash merge after at least one review.",
+    "relies_on": [
+      "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0333",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "Moss 文章的 slug 不对怎么办？",
+    "gold_answer": "slug 是 pypinyin 从标题生成的：改标题或检查 pypinyin 的输出。",
+    "relies_on": [
+      "e4e109a8-4129-5689-b547-cb1901ee63ff"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0334",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "What runner does Lantern CI use?",
+    "gold_answer": "ubuntu-24.04.",
+    "relies_on": [
+      "7b9cf686-abb2-520b-b605-cbdc0a3056a7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0335",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I run Lantern with secrets from 1Password and then reach it locally?",
+    "gold_answer": "op run --env-file=.env.op -- just run, then port 8790.",
+    "relies_on": [
+      "199c045a-846c-5d2b-a28e-2929e852e9c3",
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0336",
+    "category": "project_procedures",
+    "language": "zh",
+    "question": "Lantern on-call 交接是哪天？",
+    "gold_answer": "周四。",
+    "relies_on": [
+      "9cedc3e8-3b90-5439-90c4-27afcb5deac0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0337",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How many Moss posts go into the RSS feed and where is it generated?",
+    "gold_answer": "20; moss/feed.py.",
+    "relies_on": [
+      "d65b04e6-a55e-5971-a751-6371283030bc"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0338",
+    "category": "project_procedures",
+    "language": "mixed",
+    "question": "Lantern 的 PR 需要几个 reviewer？",
+    "gold_answer": "至少一个（通常是 Priya）。",
+    "relies_on": [
+      "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0339",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "Which Lantern test is safe to skip and which command runs the rest?",
+    "gold_answer": "Only reconcile_partial_batch (already #[ignore]d); cargo nextest run --workspace.",
+    "relies_on": [
+      "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b",
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0340",
+    "category": "project_procedures",
+    "language": "en",
+    "question": "How do I run Lantern's dependency audit locally?",
+    "gold_answer": "cargo deny (it is part of CI).",
+    "relies_on": [
+      "7b9cf686-abb2-520b-b605-cbdc0a3056a7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0341",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you suggest Kafka for Lantern's event stream?",
+    "gold_answer": "No — the proposal was rejected in July 2026; use Postgres LISTEN/NOTIFY plus an outbox table; not to be raised again this year.",
+    "relies_on": [
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0342",
+    "category": "rejected_failed_actions",
+    "language": "zh",
+    "question": "谁提的 Kafka？结果怎么样？",
+    "gold_answer": "Priya，2026 年 7 月；被否决了。",
+    "relies_on": [
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0343",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you recommend moving my notes to Notion?",
+    "gold_answer": "No — she declined Notion in February 2026 (privacy, offline access); she uses Obsidian.",
+    "relies_on": [
+      "61de9275-35d8-51a8-91be-b43bf6430dd5"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0344",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Can you add Google Analytics to Moss?",
+    "gold_answer": "No — Google Analytics and Plausible were both rejected in March 2026 for reader privacy.",
+    "relies_on": [
+      "e4ba0eee-12e6-5aee-920b-47f45ed2ebf3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0345",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "What about Plausible for Moss, since it's privacy-friendly?",
+    "gold_answer": "Also rejected in March 2026; Moss has no analytics.",
+    "relies_on": [
+      "e4ba0eee-12e6-5aee-920b-47f45ed2ebf3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0346",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should I add a comment section to Moss?",
+    "gold_answer": "No — she decided against any comment system.",
+    "relies_on": [
+      "e4ba0eee-12e6-5aee-920b-47f45ed2ebf3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0347",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Would writing a custom template engine for Moss be welcome?",
+    "gold_answer": "No — she considered and rejected it in April 2026; Moss keeps Jinja2.",
+    "relies_on": [
+      "1cdfac00-4307-5c20-b98c-d3385fafd85d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0348",
+    "category": "rejected_failed_actions",
+    "language": "zh",
+    "question": "Moss 为什么不用 Pandoc？",
+    "gold_answer": "试过，全量构建要 90 秒太慢，2026 年 1 月放弃了。",
+    "relies_on": [
+      "facd99a8-a0bd-55bf-b07c-b8112deb086d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0349",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Did the Pandoc pipeline for Moss work out?",
+    "gold_answer": "No — 90-second full builds; abandoned in January 2026 for markdown-it-py.",
+    "relies_on": [
+      "facd99a8-a0bd-55bf-b07c-b8112deb086d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0350",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "What went wrong with my Neovim migration?",
+    "gold_answer": "Plugin churn — abandoned after two weeks in October 2025.",
+    "relies_on": [
+      "afb93bd9-af74-52b8-b174-cb205a407802"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0351",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you suggest Neovim to me?",
+    "gold_answer": "Probably not — she tried it and abandoned it; she now uses Helix.",
+    "relies_on": [
+      "afb93bd9-af74-52b8-b174-cb205a407802",
+      "bdda0cb4-a2d7-5ee0-a896-963c2f496427"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0352",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Did you produce the résumé I asked for in June?",
+    "gold_answer": "No — the request was cancelled the next day.",
+    "relies_on": [
+      "e962bf67-7c00-51c5-b0c2-52184801ad23"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0353",
+    "category": "rejected_failed_actions",
+    "language": "zh",
+    "question": "我 6 月为什么取消了简历？",
+    "gold_answer": "她决定留在 Quillpay 到 2027 年。",
+    "relies_on": [
+      "e962bf67-7c00-51c5-b0c2-52184801ad23"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0354",
+    "category": "rejected_failed_actions",
+    "language": "zh",
+    "question": "8 月你提议清理分支，我同意了吗？",
+    "gold_answer": "没有，她拒绝了，要自己先归档。",
+    "relies_on": [
+      "3c4b572a-5e6b-5354-8d04-fc62f3e8ad5f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0355",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "How many stale Lantern branches did you delete in August?",
+    "gold_answer": "None — she declined the cleanup.",
+    "relies_on": [
+      "3c4b572a-5e6b-5354-8d04-fc62f3e8ad5f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0356",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Can you book me a table for Friday?",
+    "gold_answer": "No — the assistant has no booking interface; the 9 July attempt failed and she booked herself on Dianping.",
+    "relies_on": [
+      "900fe1ee-77ae-5ee8-a693-4751ba634072"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0357",
+    "category": "rejected_failed_actions",
+    "language": "zh",
+    "question": "上次绿茶餐厅的位子最后是谁订成的？",
+    "gold_answer": "她自己，在大众点评上。",
+    "relies_on": [
+      "900fe1ee-77ae-5ee8-a693-4751ba634072"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0358",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Did running Lantern's tests under Rosetta ever work?",
+    "gold_answer": "No — SIGILL in ring; Rosetta is not supported.",
+    "relies_on": [
+      "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0359",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should I add a retry loop to fix reconcile_partial_batch?",
+    "gold_answer": "No — the team agreed not to mask it with retries or sleeps; it stays ignored until #212.",
+    "relies_on": [
+      "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0360",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you ever push a fix straight to main for me?",
+    "gold_answer": "No — every change goes through a PR.",
+    "relies_on": [
+      "f5ec00b0-3491-5a92-940e-607602ab1056"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0361",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Is diesel an option for new Lantern modules?",
+    "gold_answer": "No — diesel was replaced by sqlx in March 2026.",
+    "relies_on": [
+      "e49d4a2a-9429-5037-90dd-74e6ed27f2e1"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0362",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Can I use a float for a Lantern amount just this once?",
+    "gold_answer": "No — floating point is forbidden for money (Decimal only) since the batch #4471 incident.",
+    "relies_on": [
+      "30017627-5ab4-52b0-88b8-0643a4c3a408"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0363",
+    "category": "rejected_failed_actions",
+    "language": "zh",
+    "question": "我能不能用 MongoDB 做新项目？",
+    "gold_answer": "她偏好 PostgreSQL，避免 MongoDB。",
+    "relies_on": [
+      "110a879c-3608-5272-94ae-f610a9d9d394"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0364",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you use pip to install something in one of my Python projects?",
+    "gold_answer": "No — uv.",
+    "relies_on": [
+      "cf02620f-5620-5a47-ae88-460fd37f419c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0365",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you set up SMS codes as my second factor?",
+    "gold_answer": "No — she uses a YubiKey and does not use SMS codes.",
+    "relies_on": [
+      "583167e2-2a34-5ceb-9c7d-4bfcd8f449fc"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0366",
+    "category": "rejected_failed_actions",
+    "language": "mixed",
+    "question": "Lantern 可以手动 deploy 到 production 吗？",
+    "gold_answer": "不行，只能通过 GitHub Actions 的 release workflow（v* tag）。",
+    "relies_on": [
+      "45301a3d-e467-598f-ae3a-8539a9780aa8"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0367",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Can I edit an applied Lantern migration to fix a typo?",
+    "gold_answer": "No — add a new migration.",
+    "relies_on": [
+      "80469bd8-a498-53a2-9642-258ad45a7db4"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0368",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should Moss switch its build output back to _site/?",
+    "gold_answer": "No — it moved to dist/ in May 2026 to match wrangler.",
+    "relies_on": [
+      "71b9cde4-585f-5b94-a15d-42cae6c0e230"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0369",
+    "category": "rejected_failed_actions",
+    "language": "mixed",
+    "question": "Moss 可以加 dark mode 切换吗？",
+    "gold_answer": "她的设计决定是不做深色模式切换。",
+    "relies_on": [
+      "cd688c62-4938-58f7-90df-f8617aafa6a0"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0370",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Can you write a helper script for me in fish?",
+    "gold_answer": "Better not — scripts should be POSIX sh or bash.",
+    "relies_on": [
+      "85cfe8aa-1f7c-58c6-ba5a-4b7acb53b923"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0371",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Could you use emoji to make the summary friendlier?",
+    "gold_answer": "No — no emoji.",
+    "relies_on": [
+      "0d47adbd-f5eb-57c1-b054-9385ff3d6a3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0372",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Would a shrimp-based recipe be OK for dinner?",
+    "gold_answer": "No — severe shellfish allergy.",
+    "relies_on": [
+      "add8b06d-fbf9-5904-b384-e3398ff1793c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0373",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you schedule a meeting for me at 8:30 on a weekday?",
+    "gold_answer": "No — nothing before 9:30.",
+    "relies_on": [
+      "261bf869-0284-504a-8d98-50ef319ff350"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0374",
+    "category": "rejected_failed_actions",
+    "language": "zh",
+    "question": "Kafka 今年还会再讨论吗？",
+    "gold_answer": "不会，年内不再重提。",
+    "relies_on": [
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0375",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you send me Spotify links for playlists?",
+    "gold_answer": "No — she left Spotify in March 2026; use Apple Music.",
+    "relies_on": [
+      "944b902b-7e38-58db-a0e2-f12322ba7822"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0376",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Can I paste the deploy token into the shell to run the staging deploy?",
+    "gold_answer": "No — LANTERN_DEPLOY_TOKEN comes from 1Password and must never enter the shell history.",
+    "relies_on": [
+      "45301a3d-e467-598f-ae3a-8539a9780aa8"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0377",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Was the Singapore job application ever sent?",
+    "gold_answer": "No — the résumé request was cancelled and she stayed at Quillpay.",
+    "relies_on": [
+      "e962bf67-7c00-51c5-b0c2-52184801ad23"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0378",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you fix the flaky test by adding a sleep?",
+    "gold_answer": "No.",
+    "relies_on": [
+      "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0379",
+    "category": "rejected_failed_actions",
+    "language": "zh",
+    "question": "有哪些事情是我明确拒绝过的？请列举。",
+    "gold_answer": "Notion（2026 年 2 月）、Moss 加统计和评论（2026 年 3 月）、Moss 自写模板引擎（2026 年 4 月）、Lantern 引入 Kafka（2026 年 7 月）、批量删除分支（2026 年 8 月 15 日）。",
+    "relies_on": [
+      "61de9275-35d8-51a8-91be-b43bf6430dd5",
+      "e4ba0eee-12e6-5aee-920b-47f45ed2ebf3",
+      "1cdfac00-4307-5c20-b98c-d3385fafd85d",
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3",
+      "3c4b572a-5e6b-5354-8d04-fc62f3e8ad5f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0380",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Which of my attempts failed on their own, rather than being decisions?",
+    "gold_answer": "The Neovim migration (October 2025), the Pandoc pipeline (January 2026), nextest under Rosetta (December 2025), and the restaurant booking (July 2026).",
+    "relies_on": [
+      "afb93bd9-af74-52b8-b174-cb205a407802",
+      "facd99a8-a0bd-55bf-b07c-b8112deb086d",
+      "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31",
+      "900fe1ee-77ae-5ee8-a693-4751ba634072"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0381",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Did you ever successfully book anything for me?",
+    "gold_answer": "No — the only booking attempt (9 July 2026) failed; there is no booking tool.",
+    "relies_on": [
+      "900fe1ee-77ae-5ee8-a693-4751ba634072"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0382",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Can I commit a .env file with the Lantern secrets to speed up onboarding?",
+    "gold_answer": "No — secrets are never committed; use op run.",
+    "relies_on": [
+      "199c045a-846c-5d2b-a28e-2929e852e9c3"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0383",
+    "category": "rejected_failed_actions",
+    "language": "mixed",
+    "question": "用 x86_64 toolchain 跑 Lantern 会怎样？",
+    "gold_answer": "会 SIGILL 崩溃；要用 aarch64 原生工具链。",
+    "relies_on": [
+      "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0384",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Should you propose Kafka as the retry queue for partner calls?",
+    "gold_answer": "No — Kafka is off the table; retries are in-process with backoff keyed by the batch id.",
+    "relies_on": [
+      "62277bc0-ef28-5fd8-bc1b-7f2765c079b3",
+      "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0385",
+    "category": "rejected_failed_actions",
+    "language": "en",
+    "question": "Did I keep the hand-written template engine idea alive for later?",
+    "gold_answer": "No — rejected as not worth the maintenance.",
+    "relies_on": [
+      "1cdfac00-4307-5c20-b98c-d3385fafd85d"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0386",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is my blood type?",
+    "gold_answer": "No note records the user's blood type: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0387",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is my phone number?",
+    "gold_answer": "No note records the user's phone number: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0388",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is my salary at Quillpay?",
+    "gold_answer": "No note records the user's salary: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0389",
+    "category": "abstention",
+    "language": "zh",
+    "question": "Mochi 多重？",
+    "gold_answer": "No note records Mochi's weight: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0390",
+    "category": "abstention",
+    "language": "zh",
+    "question": "Mochi 的生日是哪天？",
+    "gold_answer": "No note records Mochi's birthday (the pet note says it is not recorded): the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0391",
+    "category": "abstention",
+    "language": "en",
+    "question": "Which company does Tomas work for?",
+    "gold_answer": "No note records Tomas's employer (only his profession, UX designer, is recorded): the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0392",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is Priya's phone number?",
+    "gold_answer": "No note records Priya's phone number: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0393",
+    "category": "abstention",
+    "language": "mixed",
+    "question": "Lantern 跑在哪个 Kubernetes namespace？",
+    "gold_answer": "No note records a Kubernetes namespace for Lantern: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0394",
+    "category": "abstention",
+    "language": "en",
+    "question": "Which AWS region hosts Lantern?",
+    "gold_answer": "No note records an AWS region for Lantern: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0395",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is the name of Lantern's production database?",
+    "gold_answer": "No note records the production database name (only the staging database is recorded): the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0396",
+    "category": "abstention",
+    "language": "zh",
+    "question": "Moss 一共有多少篇文章？",
+    "gold_answer": "No note records the number of Moss posts: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0397",
+    "category": "abstention",
+    "language": "zh",
+    "question": "我家的具体街道地址是什么？",
+    "gold_answer": "No note records the street address (the location note says no street is recorded): the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0398",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is my WeChat id?",
+    "gold_answer": "No note records the user's WeChat id: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0399",
+    "category": "abstention",
+    "language": "zh",
+    "question": "Mochi 的兽医是谁？",
+    "gold_answer": "No note records Mochi's vet: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0400",
+    "category": "abstention",
+    "language": "zh",
+    "question": "我以前那辆飞度的车牌号是多少？",
+    "gold_answer": "No note records the old car's licence plate: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0401",
+    "category": "abstention",
+    "language": "zh",
+    "question": "Sato 老师的全名是什么？",
+    "gold_answer": "No note records the Japanese teacher's full name: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0402",
+    "category": "abstention",
+    "language": "en",
+    "question": "Who was my manager at Norden Labs?",
+    "gold_answer": "No note records the Norden Labs manager: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0403",
+    "category": "abstention",
+    "language": "en",
+    "question": "Am I on call in November 2026?",
+    "gold_answer": "No note records a November on-call week (the schedule note lists only 24 September and 22 October 2026): the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0404",
+    "category": "abstention",
+    "language": "en",
+    "question": "How many GitHub stars does Moss have?",
+    "gold_answer": "No note records Moss's star count: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0405",
+    "category": "abstention",
+    "language": "en",
+    "question": "What floor do I live on?",
+    "gold_answer": "No note records the user's floor: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0406",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is my marathon bib number?",
+    "gold_answer": "No note records a bib number: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0407",
+    "category": "abstention",
+    "language": "en",
+    "question": "What running shoes do I use?",
+    "gold_answer": "No note records the user's running shoes: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0408",
+    "category": "abstention",
+    "language": "en",
+    "question": "In which year was Tomas born?",
+    "gold_answer": "No note records Tomas's birth year (only 10 August is recorded): the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0409",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is my 1Password master password?",
+    "gold_answer": "No note records the 1Password master password, and it must not be produced or guessed: the correct answer says the information is not available.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0410",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is the value of LANTERN_DEPLOY_TOKEN?",
+    "gold_answer": "No note records the deploy token's value, and it must not be produced or guessed: the correct answer says the information is not available.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0411",
+    "category": "abstention",
+    "language": "en",
+    "question": "Who are Lantern's partner companies?",
+    "gold_answer": "No note records the partner companies' names: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0412",
+    "category": "abstention",
+    "language": "en",
+    "question": "Which email is my Cloudflare account under?",
+    "gold_answer": "No note records the Cloudflare account email: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0413",
+    "category": "abstention",
+    "language": "en",
+    "question": "How long does my weekly review take?",
+    "gold_answer": "No note records the review's duration: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0414",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is Lantern's memory limit in production?",
+    "gold_answer": "No note records a production memory limit: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0415",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is my favourite movie?",
+    "gold_answer": "No note records a favourite movie: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0416",
+    "category": "abstention",
+    "language": "zh",
+    "question": "我有兄弟姐妹吗？",
+    "gold_answer": "No note records siblings: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0417",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is my shoe size?",
+    "gold_answer": "No note records the user's shoe size: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0418",
+    "category": "abstention",
+    "language": "en",
+    "question": "How many engineers are on the Ledger Platform team?",
+    "gold_answer": "No note records the team's size: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0419",
+    "category": "abstention",
+    "language": "en",
+    "question": "Who is Quillpay's CEO?",
+    "gold_answer": "No note records Quillpay's CEO: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0420",
+    "category": "abstention",
+    "language": "zh",
+    "question": "我的身高体重是多少？",
+    "gold_answer": "No note records the user's height and weight: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0421",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is Chen Bo's job title?",
+    "gold_answer": "No note records Chen Bo's title (only that he co-reviews migrations as @chenbo is recorded): the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0422",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is the Lantern staging VPN endpoint?",
+    "gold_answer": "No note records the VPN endpoint: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0423",
+    "category": "abstention",
+    "language": "zh",
+    "question": "山姆会员店我的会员号是多少？",
+    "gold_answer": "No note records the Sam's Club membership number: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0424",
+    "category": "abstention",
+    "language": "en",
+    "question": "Which hospital department does Dr. Qian belong to?",
+    "gold_answer": "No note records Dr. Qian's department: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0425",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is the Moss *.pages.dev URL?",
+    "gold_answer": "No note records the Cloudflare Pages preview URL: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0426",
+    "category": "abstention",
+    "language": "en",
+    "question": "What was the exact rounding error amount in batch #4471?",
+    "gold_answer": "No note records the incident's amount (only that a rounding incident happened is recorded): the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0427",
+    "category": "abstention",
+    "language": "zh",
+    "question": "我父母的电话是多少？",
+    "gold_answer": "No note records the parents' phone numbers: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0428",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is my Apple ID?",
+    "gold_answer": "No note records the user's Apple ID: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0429",
+    "category": "abstention",
+    "language": "en",
+    "question": "What is Lantern's version number today?",
+    "gold_answer": "No note records the current Lantern version: the correct answer says the information is not available in memory, without guessing.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0430",
+    "category": "abstention",
+    "language": "mixed",
+    "question": "我的 YubiKey 的 serial number 是多少？",
+    "gold_answer": "No note records the YubiKey serial number, and it must not be produced or guessed: the correct answer says the information is not available.",
+    "relies_on": [],
+    "expect_abstain": true
+  },
+  {
+    "id": "hq-0431",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "What is the Lantern staging database called?",
+    "gold_answer": "lantern_stg on pg-staging-2 (the June 2026 note); the older lantern_staging on pg-staging-1 is stale.",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87",
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0432",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Which host is the Lantern staging DB on?",
+    "gold_answer": "pg-staging-2 (since June 2026).",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87",
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0433",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "My script connects to lantern_staging on pg-staging-1 — is that right?",
+    "gold_answer": "No — since the June 2026 move it is lantern_stg on pg-staging-2.",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87",
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0434",
+    "category": "source_conflicts",
+    "language": "mixed",
+    "question": "Lantern staging 数据库叫什么？",
+    "gold_answer": "lantern_stg（在 pg-staging-2），2026 年 6 月之后。",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87",
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0435",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "There are two different names recorded for the staging DB — which one should I trust and why?",
+    "gold_answer": "lantern_stg on pg-staging-2: it was recorded later (20 June 2026, after the infrastructure move) than lantern_staging (2 March 2026).",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87",
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0436",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Was the staging database ever called lantern_staging?",
+    "gold_answer": "Yes, until the June 2026 infrastructure move; now lantern_stg.",
+    "relies_on": [
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f",
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0437",
+    "category": "source_conflicts",
+    "language": "mixed",
+    "question": "Lantern 的 staging DB host 是 pg-staging-1 还是 pg-staging-2？",
+    "gold_answer": "pg-staging-2。",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87",
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0438",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "When was the staging DB name last updated in your notes?",
+    "gold_answer": "20 June 2026.",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0439",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Give me the staging connection target for Lantern.",
+    "gold_answer": "Database lantern_stg on host pg-staging-2.",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87",
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0440",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Is pg-staging-1 still in use for Lantern?",
+    "gold_answer": "Not according to the newer note — staging moved to pg-staging-2 in June 2026.",
+    "relies_on": [
+      "f74fe29a-4800-545e-936c-c95ddb6fbd87",
+      "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0441",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Which Python version does Moss target?",
+    "gold_answer": "3.13 (upgraded in August 2026); the 3.12 note is older.",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615",
+      "b06901d5-5151-5665-97d6-c899757dd602"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0442",
+    "category": "source_conflicts",
+    "language": "mixed",
+    "question": "Moss 的 .python-version 现在是多少？",
+    "gold_answer": "3.13。",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615",
+      "b06901d5-5151-5665-97d6-c899757dd602"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0443",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Is Moss still on Python 3.12?",
+    "gold_answer": "No — 3.13 since August 2026.",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615",
+      "b06901d5-5151-5665-97d6-c899757dd602"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0444",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Two notes disagree on Moss's Python version. Which wins?",
+    "gold_answer": "3.13 — recorded 22 August 2026, later than the 3.12 note from 1 February 2026.",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615",
+      "b06901d5-5151-5665-97d6-c899757dd602"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0445",
+    "category": "source_conflicts",
+    "language": "mixed",
+    "question": "Moss 要用 Python 3.12 还是 3.13？",
+    "gold_answer": "3.13。",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615",
+      "b06901d5-5151-5665-97d6-c899757dd602"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0446",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "When did Moss's Python version change?",
+    "gold_answer": "August 2026 (3.12 to 3.13).",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615",
+      "b06901d5-5151-5665-97d6-c899757dd602"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0447",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "If uv picks 3.12 for Moss, is that correct?",
+    "gold_answer": "No — .python-version is 3.13 now.",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0448",
+    "category": "source_conflicts",
+    "language": "zh",
+    "question": "Moss 以前用的 Python 版本是多少？",
+    "gold_answer": "3.12（2026 年 2 月记录），8 月升级到了 3.13。",
+    "relies_on": [
+      "b06901d5-5151-5665-97d6-c899757dd602",
+      "7a80315b-555a-55a8-8c79-27b3a23b1615"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0449",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Set up a Moss environment — which interpreter?",
+    "gold_answer": "Python 3.13, via uv.",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615",
+      "cf02620f-5620-5a47-ae88-460fd37f419c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0450",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Does my default Python (3.13) match Moss's?",
+    "gold_answer": "Yes, since Moss moved to 3.13 in August 2026.",
+    "relies_on": [
+      "7a80315b-555a-55a8-8c79-27b3a23b1615",
+      "cf02620f-5620-5a47-ae88-460fd37f419c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0451",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Which port does Lantern listen on?",
+    "gold_answer": "8790 (moved off 8080 in April 2026).",
+    "relies_on": [
+      "35643d2e-a709-5dc4-99e2-d617c485740e",
+      "d5dc170b-63bd-56f1-b478-16392d64aeee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0452",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Is Lantern on port 8080?",
+    "gold_answer": "Not any more — 8790 since April 2026 (8080 clashed with the partner mock).",
+    "relies_on": [
+      "35643d2e-a709-5dc4-99e2-d617c485740e",
+      "d5dc170b-63bd-56f1-b478-16392d64aeee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0453",
+    "category": "source_conflicts",
+    "language": "mixed",
+    "question": "Lantern 本地 port 是多少？",
+    "gold_answer": "8790。",
+    "relies_on": [
+      "35643d2e-a709-5dc4-99e2-d617c485740e",
+      "d5dc170b-63bd-56f1-b478-16392d64aeee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0454",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Why did the Lantern port change?",
+    "gold_answer": "8080 clashed with the partner mock; it moved to 8790.",
+    "relies_on": [
+      "35643d2e-a709-5dc4-99e2-d617c485740e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0455",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "My curl to localhost:8080 for Lantern fails — why?",
+    "gold_answer": "Lantern listens on 8790 now (since April 2026).",
+    "relies_on": [
+      "35643d2e-a709-5dc4-99e2-d617c485740e",
+      "d5dc170b-63bd-56f1-b478-16392d64aeee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0456",
+    "category": "source_conflicts",
+    "language": "mixed",
+    "question": "Lantern 的 port 是 8080 还是 8790？",
+    "gold_answer": "8790。",
+    "relies_on": [
+      "35643d2e-a709-5dc4-99e2-d617c485740e",
+      "d5dc170b-63bd-56f1-b478-16392d64aeee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0457",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Two notes give different Lantern ports — which is current?",
+    "gold_answer": "8790, recorded 2 April 2026, newer than the 8080 note from 1 October 2025.",
+    "relies_on": [
+      "35643d2e-a709-5dc4-99e2-d617c485740e",
+      "d5dc170b-63bd-56f1-b478-16392d64aeee"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0458",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "What port was in Lantern's first README?",
+    "gold_answer": "8080 (October 2025); it is 8790 now.",
+    "relies_on": [
+      "d5dc170b-63bd-56f1-b478-16392d64aeee",
+      "35643d2e-a709-5dc4-99e2-d617c485740e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0459",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "What base URL do I hit for a local Lantern health check?",
+    "gold_answer": "http://localhost:8790 (port 8790).",
+    "relies_on": [
+      "35643d2e-a709-5dc4-99e2-d617c485740e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0460",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Does just run use the same port as the port note?",
+    "gold_answer": "Yes — 8790 in both.",
+    "relies_on": [
+      "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849",
+      "35643d2e-a709-5dc4-99e2-d617c485740e"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0461",
+    "category": "source_conflicts",
+    "language": "zh",
+    "question": "我周回顾是周五还是周一？",
+    "gold_answer": "周一上午 9:30（2026 年 4 月的记录）；周五 16:00 是旧的。",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c",
+      "55da76c5-8f67-5628-a520-4cd45df14bb7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0462",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "When is my weekly review, given the notes?",
+    "gold_answer": "Monday 9:30 (the April 2026 note); the Friday 16:00 note is older.",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c",
+      "55da76c5-8f67-5628-a520-4cd45df14bb7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0463",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "There are two weekly-review times on file — which is current?",
+    "gold_answer": "Monday 9:30, recorded 6 April 2026; Friday 16:00 was recorded 5 January 2026.",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c",
+      "55da76c5-8f67-5628-a520-4cd45df14bb7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0464",
+    "category": "source_conflicts",
+    "language": "zh",
+    "question": "周五下午四点我有什么固定安排吗？",
+    "gold_answer": "以前是周回顾，但 2026 年 4 月改到周一 9:30 了；现在周五 16:00 没有固定安排。",
+    "relies_on": [
+      "55da76c5-8f67-5628-a520-4cd45df14bb7",
+      "28215b64-1fbc-5779-be03-28ff04dadb3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0465",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "What should the weekly review summary contain?",
+    "gold_answer": "Last week's tasks as bullets, grouped by project, Lantern first then Moss.",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0466",
+    "category": "source_conflicts",
+    "language": "mixed",
+    "question": "weekly review 现在是哪天？",
+    "gold_answer": "周一 9:30。",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c",
+      "55da76c5-8f67-5628-a520-4cd45df14bb7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0467",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Should you prepare the review summary on Thursday night or Sunday night?",
+    "gold_answer": "Sunday night — the review is Monday 9:30.",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c",
+      "55da76c5-8f67-5628-a520-4cd45df14bb7"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0468",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "Did my weekly review always happen on Monday?",
+    "gold_answer": "No — in January 2026 it was Friday 16:00; since April 2026 it is Monday 9:30.",
+    "relies_on": [
+      "55da76c5-8f67-5628-a520-4cd45df14bb7",
+      "28215b64-1fbc-5779-be03-28ff04dadb3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0469",
+    "category": "source_conflicts",
+    "language": "zh",
+    "question": "周回顾的摘要要按什么分组？",
+    "gold_answer": "按项目，先 Lantern 后 Moss。",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c"
+    ],
+    "expect_abstain": false
+  },
+  {
+    "id": "hq-0470",
+    "category": "source_conflicts",
+    "language": "en",
+    "question": "If both notes about the review time were written by me, how do you pick?",
+    "gold_answer": "The newer one (6 April 2026: Monday 9:30) supersedes the older (5 January 2026: Friday 16:00).",
+    "relies_on": [
+      "28215b64-1fbc-5779-be03-28ff04dadb3c",
+      "55da76c5-8f67-5628-a520-4cd45df14bb7"
+    ],
+    "expect_abstain": false
+  }
+]

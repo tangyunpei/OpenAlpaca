@@ -1,0 +1,229 @@
+{
+  "row": {
+    "id": 16,
+    "scenario": "Forget, erase the cache, re-run source extraction; forget a replacement",
+    "required_outcome": "Suppressed and not revived; notes citing the forgotten one are derived `source_forgotten`; the transcript-retention boundary is stated"
+  },
+  "design": ["§6 Forget contract: ids plus expected revisions; tombstones; suppressed source ids; derived `source_forgotten`; the hard guarantee across index rebuild, restart and pending-write recovery; the retention boundary named in the result", "§6 Derived supersession: a tombstone keeps its `supersedes` list and origin, so forgetting a replacement does not revive its predecessor", "§7 Capabilities: memory_forget prompts on an attended turn and is refused unattended", "§7a memory_forget result, control snapshot tombstones"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "F (favourite colour) was extracted from message 4812; C (a birthday reminder) cites the same message; R (a replacement) supersedes O. Step 1 is the unattended refusal — nothing changes. Step 2 forgets F from an attended model-tool turn with the card approved: the file and its `.history` go, the tombstone carries `message:4812`, and the result names the transcript copy that remains. Steps 3–5: C is derived `source_forgotten` — out of automatic recall, still readable and searchable with that flag. Steps 6–8: erase the index and restart; nothing about F comes back. Step 9: re-running extraction over message 4812 writes nothing (suppressed source). Steps 10–13: forget R; O stays superseded because the tombstone's `supersedes` and origin still qualify. Step 14: editing C through a user surface lifts `source_forgotten`. Slice 2 runs everything but steps 1, 9 and 14 through the library; the `source_forgotten` flag has no §7a wire field, so the loader reads it from the search result's `sources_status` (a pinned name the report lists as a design gap).",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice", "messages": ["4812", "4813"] },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000016-0000-4000-8000-00000000000f",
+          "title": "Favourite colour",
+          "kind": "preference",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "sources": [{ "type": "message", "id": "4812", "observed_at": "2026-09-23T09:59:00Z" }],
+          "body": "# Favourite colour\n\nThe user's favourite colour is green.\n",
+          "origin": "extracted_user"
+        },
+        {
+          "id": "00000016-0000-4000-8000-00000000000c",
+          "title": "Birthday reminder",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:30Z",
+          "updated_at": "2026-09-23T10:00:30Z",
+          "sources": [{ "type": "message", "id": "4812", "observed_at": "2026-09-23T09:59:00Z" }],
+          "body": "# Birthday reminder\n\nThe user's sister has a birthday on 14 October.\n",
+          "origin": "extracted_user"
+        },
+        {
+          "id": "00000016-0000-4000-8000-000000000010",
+          "title": "Timezone",
+          "kind": "fact",
+          "status": "active",
+          "fact_key": "user.timezone",
+          "created_at": "2026-09-01T10:00:00Z",
+          "updated_at": "2026-09-01T10:00:00Z",
+          "body": "# Timezone\n\nThe user is in Europe/Berlin.\n",
+          "origin": "extracted_user"
+        },
+        {
+          "id": "00000016-0000-4000-8000-000000000011",
+          "title": "Timezone",
+          "kind": "fact",
+          "status": "active",
+          "fact_key": "user.timezone",
+          "created_at": "2026-09-20T10:00:00Z",
+          "updated_at": "2026-09-20T10:00:00Z",
+          "sources": [{ "type": "message", "id": "4813" }],
+          "supersedes": ["00000016-0000-4000-8000-000000000010"],
+          "body": "# Timezone\n\nThe user moved and is now in Asia/Tokyo.\n",
+          "origin": "extracted_user"
+        }
+      ],
+      "snapshot": {
+        "notes": {
+          "00000016-0000-4000-8000-00000000000f": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-09-23T10:00:00Z" },
+          "00000016-0000-4000-8000-00000000000c": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-09-23T10:00:30Z" },
+          "00000016-0000-4000-8000-000000000010": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-09-01T10:00:00Z" },
+          "00000016-0000-4000-8000-000000000011": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-09-20T10:00:00Z" }
+        },
+        "tombstones": [],
+        "pending": null
+      }
+    }
+  ],
+  "contexts": {
+    "alice_tool": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "scheduled_skill": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "unattended": true, "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": null, "task_id": null, "request_id": null, "source": "scheduled_skill" } },
+    "alice_extraction": { "owner_id": "u_example_alice", "workspace": null, "surface": "extraction", "capabilities": { "read": false, "write": true, "forget": false }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "extraction" } },
+    "alice_api": { "owner_id": "u_example_alice", "workspace": null, "surface": "user_surface", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": null, "task_id": null, "request_id": null, "source": "api" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "forget",
+      "context": "scheduled_skill",
+      "input": { "targets": [{ "id": "00000016-0000-4000-8000-00000000000f", "expected_revision": "@rev:00000016-0000-4000-8000-00000000000f" }] },
+      "expect": { "refused": "fixture:confirmation_unavailable", "notes_on_disk": [{ "partition": "alice_home", "id": "00000016-0000-4000-8000-00000000000f" }], "snapshot": { "alice_home": { "tombstones_count": 0 } } }
+    },
+    {
+      "step": 2,
+      "op": "forget",
+      "context": "alice_tool",
+      "input": { "targets": [{ "id": "00000016-0000-4000-8000-00000000000f", "expected_revision": "@rev:00000016-0000-4000-8000-00000000000f" }], "reason": "the user asked to forget their favourite colour", "confirmation": "approved" },
+      "expect": {
+        "status": { "00000016-0000-4000-8000-00000000000f": "forgotten" },
+        "retained": { "transcript": true, "note_contains": "transcript" },
+        "notes_not_on_disk": [{ "partition": "alice_home", "id": "00000016-0000-4000-8000-00000000000f" }],
+        "files_absent": ["part:alice_home/.history/00000016-0000-4000-8000-00000000000f"],
+        "snapshot": {
+          "alice_home": {
+            "notes": { "00000016-0000-4000-8000-00000000000f": null },
+            "tombstones": [{ "id": "00000016-0000-4000-8000-00000000000f", "origin": "extracted_user", "supersedes": [], "suppressed_sources": ["message:4812"] }]
+          }
+        },
+        "events": [{ "type": "memory_changed", "change": "forgotten", "note_id": "00000016-0000-4000-8000-00000000000f", "surface": "model_tool" }]
+      }
+    },
+    {
+      "step": 3,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "favourite colour", "historical": true },
+      "expect": { "ids_unordered": [], "ids_absent": ["00000016-0000-4000-8000-00000000000f"] }
+    },
+    {
+      "step": 4,
+      "op": "recall",
+      "context": "alice_tool",
+      "input": { "message": "when is my sister's birthday?" },
+      "expect": { "ids_unordered": [], "ids_absent": ["00000016-0000-4000-8000-00000000000c"] }
+    },
+    {
+      "step": 5,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "sister birthday" },
+      "expect": { "ids": ["00000016-0000-4000-8000-00000000000c"], "results": { "00000016-0000-4000-8000-00000000000c": { "sources_status": "source_forgotten", "status": "active" } } }
+    },
+    {
+      "step": 6,
+      "op": "erase_cache",
+      "input": {},
+      "expect": { "files_absent": ["home/state/cache/memory-index-v1.sqlite"] }
+    },
+    {
+      "step": 7,
+      "op": "restart",
+      "input": {},
+      "expect": { "files_exist": ["home/state/cache/memory-index-v1.sqlite"], "snapshot": { "alice_home": { "tombstones_count": 1 } } }
+    },
+    {
+      "step": 8,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "favourite colour green", "historical": true },
+      "expect": { "ids_unordered": [], "ids_absent": ["00000016-0000-4000-8000-00000000000f"] }
+    },
+    {
+      "step": 9,
+      "op": "extraction",
+      "context": "alice_extraction",
+      "input": { "typed": "By the way, my favourite colour is green.", "source": { "type": "message", "id": "4812" } },
+      "expect": { "extraction": { "count": 0 }, "snapshot": { "alice_home": { "tombstones_count": 1 } } }
+    },
+    {
+      "step": 10,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "timezone" },
+      "expect": { "ids": ["00000016-0000-4000-8000-000000000011"], "ids_absent": ["00000016-0000-4000-8000-000000000010"] }
+    },
+    {
+      "step": 11,
+      "op": "forget",
+      "context": "alice_tool",
+      "input": { "targets": [{ "id": "00000016-0000-4000-8000-000000000011", "expected_revision": "@rev:00000016-0000-4000-8000-000000000011" }], "confirmation": "approved" },
+      "expect": {
+        "status": { "00000016-0000-4000-8000-000000000011": "forgotten" },
+        "snapshot": {
+          "alice_home": {
+            "tombstones_count": 2,
+            "tombstones": [
+              { "id": "00000016-0000-4000-8000-00000000000f", "origin": "extracted_user", "supersedes": [], "suppressed_sources": ["message:4812"] },
+              { "id": "00000016-0000-4000-8000-000000000011", "origin": "extracted_user", "supersedes": ["00000016-0000-4000-8000-000000000010"], "suppressed_sources": ["message:4813"] }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "step": 12,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "timezone" },
+      "expect": { "ids_unordered": [], "ids_absent": ["00000016-0000-4000-8000-000000000010", "00000016-0000-4000-8000-000000000011"] }
+    },
+    {
+      "step": 13,
+      "op": "search",
+      "context": "alice_tool",
+      "input": { "query": "timezone", "historical": true },
+      "expect": { "ids": ["00000016-0000-4000-8000-000000000010"], "results": { "00000016-0000-4000-8000-000000000010": { "superseded_by": ["00000016-0000-4000-8000-000000000011"] } } }
+    },
+    {
+      "step": 14,
+      "op": "update",
+      "context": "alice_api",
+      "input": { "id": "00000016-0000-4000-8000-00000000000c", "expected_revision": "@rev:00000016-0000-4000-8000-00000000000c", "action": "edit", "patch": { "body": "# Birthday reminder\n\nThe user's sister has a birthday on 14 October (confirmed by the user).\n" } },
+      "expect": { "revision_changed": true, "snapshot": { "alice_home": { "notes": { "00000016-0000-4000-8000-00000000000c": { "revision": "@current", "origin": "user" } } } } }
+    },
+    {
+      "step": 15,
+      "op": "recall",
+      "context": "alice_tool",
+      "input": { "message": "when is my sister's birthday?" },
+      "expect": { "ids": ["00000016-0000-4000-8000-00000000000c"] }
+    },
+    {
+      "step": 16,
+      "op": "forget",
+      "context": "alice_tool",
+      "input": { "targets": [{ "id": "00000016-0000-4000-8000-00000000000f", "expected_revision": "@stale" }], "confirmation": "approved" },
+      "expect": { "status": { "00000016-0000-4000-8000-00000000000f": "not_found" } }
+    }
+  ],
+  "final_state": {
+    "snapshot": { "alice_home": { "tombstones_count": 2, "pending": null } },
+    "notes_not_on_disk": [
+      { "partition": "alice_home", "id": "00000016-0000-4000-8000-00000000000f" },
+      { "partition": "alice_home", "id": "00000016-0000-4000-8000-000000000011" }
+    ],
+    "notes_on_disk": [{ "partition": "alice_home", "id": "00000016-0000-4000-8000-000000000010" }]
+  }
+}

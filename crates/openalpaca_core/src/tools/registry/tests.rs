@@ -507,26 +507,24 @@ async fn test_command_unsubstituted_placeholder_detected() {
     );
 }
 
-#[tokio::test]
-async fn test_command_all_placeholders_substituted_runs() {
-    let registry = ToolRegistry::default();
-    registry.register(RegisteredTool {
+/// A command tool built for the tests below.
+fn command_tool(
+    name: &str,
+    command: &str,
+    args_template: Option<&str>,
+    params: serde_json::Value,
+) -> RegisteredTool {
+    RegisteredTool {
         definition: ToolDefinition {
-            name: "echo_tool".to_string(),
-            description: "Echo a message".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "msg": {"type": "string"}
-                },
-                "required": ["msg"]
-            }),
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            parameters: params,
             strict: None,
             input_examples: None,
         },
         backend: ToolBackend::Command {
-            command: "echo".to_string(),
-            args_template: Some("{msg}".to_string()),
+            command: command.to_string(),
+            args_template: args_template.map(str::to_string),
             timeout_secs: 5,
         },
         provides_capabilities: vec![],
@@ -535,14 +533,99 @@ async fn test_command_all_placeholders_substituted_runs() {
         version: "test-0.0.0".into(),
         author: "test".into(),
         created_at: chrono::Utc::now(),
-    }).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_command_all_placeholders_substituted_runs() {
+    // Stage 2 (R26): a command tool runs in the call's working folder, so
+    // the call carries one — a guarded project made for the test.
+    let gp = crate::test_util::GuardedProject::new();
+    let registry = ToolRegistry::default();
+    registry
+        .register(command_tool(
+            "echo_tool",
+            "echo",
+            Some("{msg}"),
+            serde_json::json!({
+                "type": "object",
+                "properties": {"msg": {"type": "string"}},
+                "required": ["msg"]
+            }),
+        ))
+        .unwrap();
 
     let result = registry
-        .execute("echo_tool", &serde_json::json!({"msg": "hello"}))
+        .execute_with_context("echo_tool", &serde_json::json!({"msg": "hello"}), &gp.ctx())
         .await;
     // Should succeed — no unsubstituted placeholders
     assert!(result.is_ok(), "Expected success, got: {:?}", result);
     assert!(result.unwrap().contains("hello"));
+}
+
+/// R26: a command tool's program starts in the project's folder, or in the
+/// conversation's scratch folder when there is no project.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_tool_runs_in_the_working_folder() {
+    let gp = crate::test_util::GuardedProject::new();
+    let registry = ToolRegistry::default();
+    registry
+        .register(command_tool(
+            "where_am_i",
+            "pwd",
+            Some("-P"),
+            serde_json::json!({"type": "object", "properties": {}}),
+        ))
+        .unwrap();
+
+    let out = registry
+        .execute_with_context("where_am_i", &serde_json::json!({}), &gp.ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.trim_end(), gp.root.display().to_string());
+
+    let out = registry
+        .execute_with_context("where_am_i", &serde_json::json!({}), &gp.scratch_ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        out.trim_end(),
+        gp.home_root()
+            .join("scratch")
+            .join("conv-test")
+            .display()
+            .to_string()
+    );
+}
+
+/// R26: reached with no context, a command tool runs nothing — and its
+/// placeholders are checked first, so a missing argument is still named as
+/// such (`test_command_unsubstituted_placeholder_detected` calls `execute`).
+#[tokio::test]
+async fn a_command_tool_with_no_context_is_refused_after_its_placeholders_are_checked() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(command_tool(
+            "echo_tool",
+            "echo",
+            Some("{msg}"),
+            serde_json::json!({
+                "type": "object",
+                "properties": {"msg": {"type": "string"}},
+                "required": ["msg"]
+            }),
+        ))
+        .unwrap();
+
+    let err = registry
+        .execute("echo_tool", &serde_json::json!({"msg": "hello"}))
+        .await
+        .expect_err("no context");
+    assert_eq!(
+        err,
+        crate::tools::working_folder::WorkingFolderRefusal::NoContext.to_string()
+    );
 }
 
 // --- registry::execute_with_context ---
@@ -705,7 +788,7 @@ async fn test_workspace_read_requires_task_id() {
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
 
     let registry = ToolRegistry::default();
-    for tool in builtin_tools(Some(db), None, None, None, None) {
+    for tool in builtin_tools(Some(db), None, None) {
         registry.register(tool).unwrap();
     }
 
@@ -2791,4 +2874,131 @@ fn created_by_resolves_the_principal_before_the_owner_id() {
     // No principal: the owner id, then the system.
     assert_eq!(with(None, Some("user1")), "user1");
     assert_eq!(with(None, None), "system");
+}
+
+// ── R29: traversal_rule (storage design §11) ────────────────────────────
+
+/// A builtin that says its arguments reach a program, as a skill script does.
+struct ProgramBuiltIn;
+
+#[async_trait]
+impl BuiltInTool for ProgramBuiltIn {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Ok("ran".to_string())
+    }
+
+    fn arguments_reach_a_program(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn only_a_first_party_builtin_is_spared_the_traversal_rule() {
+    let registry = ToolRegistry::default();
+    registry.register(make_tool("builtin_tool", "ok")).unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "script_like",
+            ToolBackend::BuiltIn(Arc::new(ProgramBuiltIn)),
+        ))
+        .unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "cmd_tool",
+            ToolBackend::Command {
+                command: "true".to_string(),
+                args_template: None,
+                timeout_secs: 5,
+            },
+        ))
+        .unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "http_tool",
+            ToolBackend::Http {
+                method: "GET".to_string(),
+                url: "https://example.com/{q}".to_string(),
+                headers: HashMap::new(),
+                timeout_secs: 5,
+            },
+        ))
+        .unwrap();
+    registry
+        .register(make_tool_with_backend("srv__echo", mcp_backend()))
+        .unwrap();
+    registry
+        .register(make_tool_with_backend(
+            "plug::do",
+            ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+        ))
+        .unwrap();
+
+    assert_eq!(registry.traversal_rule("builtin_tool"), TraversalRule::Allow);
+    for name in [
+        "script_like",
+        "cmd_tool",
+        "http_tool",
+        "srv__echo",
+        "plug::do",
+        "not_registered",
+    ] {
+        assert_eq!(registry.traversal_rule(name), TraversalRule::Refuse, "{name}");
+    }
+}
+
+#[test]
+fn a_builtin_says_its_arguments_reach_no_program_unless_it_says_otherwise() {
+    let plain = MockBuiltIn {
+        response: String::new(),
+    };
+    assert!(!plain.arguments_reach_a_program());
+    assert!(ProgramBuiltIn.arguments_reach_a_program());
+}
+
+// ── R45: a command tool is killed with what it started (storage design §11) ──
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_tool_that_times_out_takes_the_processes_it_started_with_it() {
+    use crate::test_util::{GONE_WITHIN, KillOnFail, pid_from_file, wait_until_gone};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    let registry = ToolRegistry::default();
+    registry
+        .register(make_tool_with_backend(
+            "hang_tool",
+            ToolBackend::Command {
+                command: "sh".to_string(),
+                args_template: Some("-c {script}".to_string()),
+                timeout_secs: 1,
+            },
+        ))
+        .unwrap();
+    let script = format!(
+        "cd '{}'; sleep 30 & echo $! > '{}'; wait",
+        dir.path().display(),
+        pidfile.display()
+    );
+
+    // Stage 2 (R26): a command tool runs in its call's working folder, so the
+    // call carries one — a guarded project made for the test. (The script
+    // `cd`s into its own tempdir, so where it starts does not matter.)
+    let gp = crate::test_util::GuardedProject::new();
+    let err = registry
+        .execute_with_context(
+            "hang_tool",
+            &serde_json::json!({"script": script}),
+            &gp.ctx(),
+        )
+        .await
+        .unwrap_err();
+    let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
+    let _kill = KillOnFail(pid);
+    assert_eq!(err, "Command timed out after 1s");
+    assert!(
+        wait_until_gone(pid, GONE_WITHIN).await,
+        "the command's background sleep {pid} outlived its timeout"
+    );
 }

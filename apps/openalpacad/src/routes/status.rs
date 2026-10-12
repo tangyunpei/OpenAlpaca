@@ -26,9 +26,11 @@
 //! holds no per-lane record of a workspace — the request root is threaded
 //! through a turn, never stored globally (ruling R22) — so the route answers
 //! the same way `/v1/chat` does: it reads `x-workspace-path` and reports what
-//! the marker walk makes of it. That is the useful answer, because the client
-//! sends a raw directory and the daemon decides which root owns it: the reply
-//! tells the GUI which project its next chat will write artifacts into. No
+//! the resolver makes of it — the nearest folder at or above it that is a
+//! registered project's root or holds `.git`; reading it records nothing.
+//! That is the useful answer, because the client sends a raw directory and
+//! the daemon decides which root owns it: the reply tells the GUI which
+//! project its next chat will write artifacts into. No
 //! header (every connector lane, any client that chose no project) → `null`,
 //! and so does a path that resolves to no project at all or to the home store,
 //! which is not a project (`MemoryScopeContext::for_request`).

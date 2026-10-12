@@ -156,6 +156,15 @@ impl openalpaca_api::plugin_traits::PluginSkillExecutor for StubPluginSkill {
 }
 
 fn orchestrator_for(registry: Arc<crate::tools::ToolRegistry>) -> Orchestrator {
+    orchestrator_with(registry, None)
+}
+
+/// [`orchestrator_for`], with a database — what reads the turn's
+/// conversation (storage design §10, R44).
+fn orchestrator_with(
+    registry: Arc<crate::tools::ToolRegistry>,
+    db: Option<openalpaca_storage::Database>,
+) -> Orchestrator {
     let bus = EventBus::default();
     let sandbox = Arc::new(SandboxManager::with_defaults(registry.clone(), bus.clone()));
     Orchestrator::new(
@@ -167,8 +176,7 @@ fn orchestrator_for(registry: Arc<crate::tools::ToolRegistry>) -> Orchestrator {
         LoopConfig::default(),
         Arc::new(SecurityGate::new(sandbox)),
         registry,
-        None,
-        None,
+        db,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
@@ -207,6 +215,7 @@ async fn run_plugin_skill_as(
         stub,
         "go",
         "test:cli",
+        None,
         None,
         &MemoryScopeContext::new(None),
         None,
@@ -456,4 +465,75 @@ async fn an_attended_skill_turn_keeps_the_fail_closed_refusal() {
         refusal.contains("no interactive"),
         "an attended turn with no broker keeps its own words: {refusal}"
     );
+}
+
+// ── R44 (storage design §10): the conversation reaches a plugin skill's tools ──
+
+/// Keeps the context the one call it served was handed.
+struct RecordsCtx(Arc<Mutex<Option<crate::tools::registry::ToolContext>>>);
+
+#[async_trait::async_trait]
+impl BuiltInTool for RecordsCtx {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("needs context".to_string())
+    }
+    async fn execute_with_context(
+        &self,
+        _arguments: &serde_json::Value,
+        ctx: &crate::tools::registry::ToolContext,
+    ) -> Result<String, String> {
+        *self.0.lock().unwrap() = Some(ctx.clone());
+        Ok("recorded".to_string())
+    }
+}
+
+#[tokio::test]
+async fn a_plugin_skills_tool_calls_carry_the_turns_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .get_or_create_active_session("test:cli", "cli", None)
+        .unwrap();
+    let seen = Arc::new(Mutex::new(None));
+    let registry = registry(true);
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "record_ctx".to_string(),
+                description: "record_ctx".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(RecordsCtx(seen.clone()))),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: Utc::now(),
+        })
+        .unwrap();
+    let orch = orchestrator_with(Arc::new(registry), Some(db));
+    let stub = Arc::new(StubPluginSkill {
+        tool: "record_ctx".to_string(),
+        invoked: Arc::new(AtomicBool::new(false)),
+        outcome: Arc::new(Mutex::new(None)),
+    });
+    let mut fm = SkillFrontmatter {
+        name: "acme-search".to_string(),
+        ..Default::default()
+    };
+    fm.tools.allow = vec!["record_ctx".to_string()];
+
+    run_plugin_skill(&orch, fm, stub.clone())
+        .await
+        .expect("the skill runs");
+
+    assert_eq!(
+        stub.outcome.lock().unwrap().clone(),
+        Some(Ok("recorded".to_string()))
+    );
+    let ctx = seen.lock().unwrap().clone().expect("the tool ran");
+    assert_eq!(ctx.conversation_id.as_deref(), Some(session.id.as_str()));
 }

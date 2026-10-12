@@ -2,9 +2,7 @@
 
 use anyhow::{Context, Result};
 use openalpaca_llm::cli_backend::{CliBackendConfig, CliBackendsConfig};
-use openalpaca_llm::config::{
-    EmbeddingsConfig, KeyConfig, LlmRouterConfig, OrchestratorLlmConfig, read_config,
-};
+use openalpaca_llm::config::{KeyConfig, LlmRouterConfig, OrchestratorLlmConfig, read_config};
 use openalpaca_llm::keys::credential_discovery::CredentialDiscoveryConfig;
 use openalpaca_llm::keys::key_encryption::KeyEncryptor;
 use openalpaca_llm::keys::secret_store::{KeyringSecretStore, MemorySecretStore, SecretStore};
@@ -192,54 +190,6 @@ pub(super) fn apply_to_config(
                 })
                 .path = Some(value.to_string());
         }
-        "ai.embeddings.enabled" => {
-            config
-                .embeddings
-                .get_or_insert_with(|| EmbeddingsConfig {
-                    enabled: false,
-                    provider: String::new(),
-                    model: None,
-                    dimensions: None,
-                })
-                .enabled = value == "true";
-        }
-        "ai.embeddings.provider" => {
-            config
-                .embeddings
-                .get_or_insert_with(|| EmbeddingsConfig {
-                    enabled: false,
-                    provider: String::new(),
-                    model: None,
-                    dimensions: None,
-                })
-                .provider = value.to_string();
-        }
-        "ai.embeddings.model" => {
-            config
-                .embeddings
-                .get_or_insert_with(|| EmbeddingsConfig {
-                    enabled: false,
-                    provider: String::new(),
-                    model: None,
-                    dimensions: None,
-                })
-                .model = Some(value.to_string());
-        }
-        "ai.embeddings.dimensions" => {
-            let dim: u32 = value
-                .trim()
-                .parse()
-                .map_err(|_| anyhow::anyhow!("Invalid dimensions value: {}", value))?;
-            config
-                .embeddings
-                .get_or_insert_with(|| EmbeddingsConfig {
-                    enabled: false,
-                    provider: String::new(),
-                    model: None,
-                    dimensions: None,
-                })
-                .dimensions = Some(dim);
-        }
         "ai.web_search.api_key" => {
             config
                 .web_search
@@ -382,18 +332,6 @@ pub(super) fn read_from_config(
             .as_ref()
             .and_then(|cb| cb.codex.as_ref())
             .and_then(|cx| cx.path.clone()),
-        "ai.embeddings.enabled" => config.embeddings.as_ref().map(|e| e.enabled.to_string()),
-        "ai.embeddings.provider" => config
-            .embeddings
-            .as_ref()
-            .filter(|e| !e.provider.is_empty())
-            .map(|e| e.provider.clone()),
-        "ai.embeddings.model" => config.embeddings.as_ref().and_then(|e| e.model.clone()),
-        "ai.embeddings.dimensions" => config
-            .embeddings
-            .as_ref()
-            .and_then(|e| e.dimensions)
-            .map(|d| d.to_string()),
         "ai.web_search.api_key" => config
             .web_search
             .as_ref()

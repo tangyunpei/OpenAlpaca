@@ -8,7 +8,7 @@
  *   `AppShell`       — the fluid frame (§2), `position:relative` so the
  *                      overlays can be absolute siblings of the panes.
  *   `NavRail`        — always mounted, never swapped (§2.1).
- *   one of four views— lazily loaded, keyed on the UI store's `view`.
+ *   one of five views— lazily loaded, keyed on the UI store's `view`.
  *   overlay slots    — the command palette (z-50) and the toast (z-60).
  *
  * This root owns **all** of the global keyboard surface (§4.5) and owns it
@@ -17,8 +17,12 @@
  *   `useGlobalKeys`      ⌘K and the ordered Escape ladder, with the ladder's
  *                        last rung (deny) and the Enter approval supplied by
  *                        the chat lane's published confirmation.
- *   `useCommandShortcuts` the palette's own shortcuts — ⌘N, ⌘⇧S, ⌘1–3, ⌘⇧D,
+ *   `useCommandShortcuts` the palette's own shortcuts — ⌘N, ⌘⇧S, ⌘1–4, ⌘⇧D,
  *                        ⌘, — bound off the same catalogue the palette draws.
+ *
+ * It also keeps the window on its project when that project is re-pointed
+ * from somewhere else (`useProjectFollow`, R22): every view's turns and reads
+ * send the window's root, so the follow cannot live in any one view.
  *
  * The confirmation itself lives in the chat session, behind a lazy boundary, so
  * it reaches the rail, the palette and the key ladder through the one-slot
@@ -39,6 +43,7 @@ import {
   useGlobalKeys,
   ViewBoundary,
 } from "@/components/shell";
+import { useProjectFollow } from "@/hooks/useProjectFollow";
 import { QueryProvider } from "@/lib/query-provider";
 import { useConfirmationStore } from "@/stores/confirmation";
 import { useUiStore, type View } from "@/stores/ui";
@@ -46,6 +51,7 @@ import { useUiStore, type View } from "@/stores/ui";
 const ChatView = lazy(() => import("@/views/ChatView"));
 const WorkView = lazy(() => import("@/views/WorkView"));
 const LibraryView = lazy(() => import("@/views/LibraryView"));
+const MemoryView = lazy(() => import("@/views/MemoryView"));
 const SettingsView = lazy(() => import("@/views/SettingsView"));
 
 function renderView(view: View, blockedRunId: string | null) {
@@ -56,6 +62,8 @@ function renderView(view: View, blockedRunId: string | null) {
       return <WorkView blockedRunId={blockedRunId} />;
     case "library":
       return <LibraryView />;
+    case "memory":
+      return <MemoryView />;
     case "settings":
       return <SettingsView />;
   }
@@ -72,6 +80,7 @@ export function AppFrame() {
     onDeny: pending?.deny,
   });
   useCommandShortcuts(useCommandCatalog());
+  useProjectFollow();
 
   return (
     <AppShell view={view}>

@@ -8,10 +8,13 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use colored::Colorize;
+use openalpaca_core::utils::text::escape_hidden_line;
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, print_list, status_color, truncate};
+use crate::output::{
+    OutputFormat, TableRow, json_with_hidden_escaped, print_list, status_color, truncate,
+};
 
 #[derive(Args)]
 pub struct TasksArgs {
@@ -429,15 +432,7 @@ async fn task_log(task_id: &str, limit: usize) -> Result<()> {
 
     // Newest first from the server; read the run forwards.
     for event in page.events.iter().rev() {
-        let ts = &event.timestamp[..19.min(event.timestamp.len())];
-        let agent = event.agent_id.as_deref().unwrap_or("-");
-        println!(
-            "{} {} [{}] {}",
-            ts.dimmed(),
-            status_color(&event.event_type),
-            agent,
-            format_event_payload(event.detail.as_ref().unwrap_or(&serde_json::Value::Null)),
-        );
+        println!("{}", log_line(event));
     }
 
     if page.next_before.is_some() {
@@ -450,6 +445,30 @@ async fn task_log(task_id: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
+/// One row of `tasks log`, painted: the time, the event, `[agent]` and the
+/// payload.
+///
+/// A prompt's audit rows (`tool_confirmation_requested` / `_resolved`) put a
+/// third party's tool name and the agent id beside the request id that
+/// `tasks confirmations approve` takes, so what they carry is shown, not
+/// printed: the agent on one line with every hidden character as
+/// `<U+XXXX>` (`escape_hidden_line`), and a payload printed as JSON with
+/// JSON's own escape for them ([`json_with_hidden_escaped`]).
+fn log_line(event: &EventLogEntry) -> String {
+    let ts = &event.timestamp[..19.min(event.timestamp.len())];
+    let agent = event
+        .agent_id
+        .as_deref()
+        .map_or_else(|| "-".to_string(), |id| escape_hidden_line(id).text);
+    format!(
+        "{} {} [{}] {}",
+        ts.dimmed(),
+        status_color(&event.event_type),
+        agent,
+        format_event_payload(event.detail.as_ref().unwrap_or(&serde_json::Value::Null)),
+    )
+}
+
 fn format_event_payload(payload: &serde_json::Value) -> String {
     if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
         return format!("status -> {}", status);
@@ -460,7 +479,7 @@ fn format_event_payload(payload: &serde_json::Value) -> String {
     if let Some(summary) = payload.get("result_summary").and_then(|v| v.as_str()) {
         return format!("result: {}", summary);
     }
-    payload.to_string()
+    json_with_hidden_escaped(&payload.to_string())
 }
 
 /// The owner half of a lane key — `{owner}:{source}` (`is_lane_owned_by`,
@@ -877,6 +896,48 @@ mod tests {
                 "resume --help must mention {word}: {about}"
             );
         }
+    }
+
+    /// A prompt's audit rows (`tool_confirmation_requested` / `_resolved`)
+    /// carry a third party's tool name and the agent id beside the request id
+    /// `tasks confirmations approve` takes, so the row shows their hidden
+    /// characters rather than printing them: the agent column as `<U+XXXX>`,
+    /// on one line, and the payload as JSON with JSON's own `\u` escapes,
+    /// which reads back as exactly the daemon's values.
+    #[test]
+    fn a_confirmation_row_in_the_log_shows_its_hidden_characters() {
+        plain();
+        let detail = serde_json::json!({
+            "request_id": "req-1",
+            "agent_id": "lead\u{202e}\n",
+            "tool_name": "srv__rm\u{202e}fdp\u{200b}\u{9b}",
+            "task_id": "task-1",
+        });
+        let event: EventLogEntry = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "timestamp": "2026-09-25T10:00:00.000Z",
+            "event_type": "tool_confirmation_requested",
+            "agent_id": "lead\u{202e}\n",
+            "task_id": "task-1",
+            "detail": detail,
+        }))
+        .expect("row");
+
+        let line = log_line(&event);
+        for c in ['\u{202e}', '\u{200b}', '\u{9b}', '\n'] {
+            assert!(!line.contains(c), "raw U+{:04X}: {line:?}", c as u32);
+        }
+        assert!(line.contains(" [lead<U+202E><U+000A>] "), "{line}");
+        assert!(
+            line.contains(r#""tool_name":"srv__rm\u202efdp\u200b\u009b""#),
+            "{line}"
+        );
+        let payload = line.split_once("] ").expect("the payload").1;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(payload).expect("valid JSON"),
+            detail,
+            "the daemon's own values"
+        );
     }
 }
 

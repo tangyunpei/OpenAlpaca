@@ -1247,3 +1247,624 @@ async fn a_denial_wins_over_an_admitted_surface() {
         .unwrap_err();
     assert!(err.contains("denied"), "{err}");
 }
+
+// ── Design 09 §4.2: the approval fact and per-call approvals (MD-12, G2) ──
+
+/// A stand-in for `memory_confirm`. The per-call rule is keyed on the tool's
+/// **name** (`approval_is_per_call`), so a recording double registered under
+/// that name drives every branch of the sandbox without a memory store; the
+/// real tool's own tests (`memory_tools/tests.rs`) run the same path end to
+/// end.
+#[derive(Default)]
+struct Recorder {
+    ran: std::sync::Mutex<Vec<ToolContext>>,
+    denied: std::sync::Mutex<Vec<ToolContext>>,
+    refuse_preview: Option<String>,
+}
+
+#[async_trait]
+impl BuiltInTool for Recorder {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("needs a context".to_string())
+    }
+
+    async fn execute_with_context(
+        &self,
+        _arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String> {
+        self.ran.lock().unwrap().push(ctx.clone());
+        Ok("ran".to_string())
+    }
+
+    async fn confirmation_preview(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<Option<String>, String> {
+        match &self.refuse_preview {
+            Some(reason) => Err(reason.clone()),
+            None => Ok(Some("Replace your saved note “A” with “B”?".to_string())),
+        }
+    }
+
+    async fn on_confirmation_denied(
+        &self,
+        _arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Option<String> {
+        self.denied.lock().unwrap().push(ctx.clone());
+        Some("The hook heard the No.".to_string())
+    }
+}
+
+/// A sandbox whose registry holds `memory_confirm` (per call) and `recorder`
+/// (an ordinary tool), both recording doubles, with a broker and a bus.
+fn per_call_sandbox(
+    confirm: Arc<Recorder>,
+    recorder: Arc<Recorder>,
+) -> (
+    SandboxManager,
+    Arc<ConfirmationBroker>,
+    tokio::sync::broadcast::Receiver<SystemEvent>,
+) {
+    let registry = ToolRegistry::default();
+    for (name, backend) in [("memory_confirm", confirm), ("recorder", recorder)] {
+        registry
+            .register(RegisteredTool {
+                definition: openalpaca_llm::ToolDefinition {
+                    name: name.to_string(),
+                    description: name.to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                    input_examples: None,
+                },
+                backend: ToolBackend::BuiltIn(backend),
+                provides_capabilities: vec![],
+                exempt_from_timeout: false,
+                annotations: None,
+                version: "test".into(),
+                author: "test".into(),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+    let bus = EventBus::default();
+    let rx = bus.subscribe();
+    let broker = Arc::new(ConfirmationBroker::new());
+    let mut sandbox =
+        SandboxManager::new(Arc::new(registry), bus, &CircuitBreakerConfig::default());
+    sandbox.set_confirmation_broker(broker.clone());
+    (sandbox, broker, rx)
+}
+
+fn confirm_call() -> ToolCall {
+    ToolCall {
+        id: "tc_confirm".to_string(),
+        name: "memory_confirm".to_string(),
+        arguments: serde_json::json!({"id": "s", "expected_revision": "r", "target_revision": "t"}),
+    }
+}
+
+/// Answers every card that appears, `approved` with `scope`, and returns the
+/// requests it answered once `wanted` of them have been.
+fn answer_cards(
+    broker: &Arc<ConfirmationBroker>,
+    approved: bool,
+    scope: Option<crate::security::confirmation::ApprovalScope>,
+    wanted: usize,
+) -> tokio::task::JoinHandle<Vec<crate::security::confirmation::ConfirmationRequest>> {
+    let broker = broker.clone();
+    tokio::spawn(async move {
+        let mut answered = Vec::new();
+        for _ in 0..300 {
+            for request in broker.pending_requests() {
+                if broker
+                    .respond(
+                        &request.request_id,
+                        ConfirmationResponse {
+                            approved,
+                            approval_scope: scope,
+                        },
+                    )
+                    .is_ok()
+                {
+                    answered.push(request);
+                }
+            }
+            if answered.len() >= wanted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        answered
+    })
+}
+
+/// A context that claims an approval and a denial it never got.
+fn forged_ctx() -> ToolContext {
+    ToolContext {
+        human_approval: Some(crate::tools::registry::HumanApproval::new("forged")),
+        human_denial: Some(crate::tools::registry::HumanDenial::new("forged")),
+        ..make_ctx("orchestrator")
+    }
+}
+
+/// Rule 1: the fact is made on the one branch where a person answered yes,
+/// and it names the card they answered.
+#[tokio::test]
+async fn an_approval_is_the_fact_of_the_answered_card() {
+    let confirm = Arc::new(Recorder::default());
+    let (sandbox, broker, _rx) = per_call_sandbox(confirm.clone(), Arc::default());
+    let cards = answer_cards(&broker, true, None, 1);
+    let out = sandbox
+        .execute_tool(&confirm_call(), &make_policy("orchestrator"), &forged_ctx())
+        .await
+        .unwrap();
+    assert_eq!(out, "ran");
+    let cards = cards.await.unwrap();
+    let ran = confirm.ran.lock().unwrap();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(
+        ran[0]
+            .human_approval
+            .as_ref()
+            .map(|a| a.request_id().to_string()),
+        Some(cards[0].request_id.clone()),
+        "the fact names the card the person answered, not the forged one"
+    );
+    assert_eq!(ran[0].human_denial, None);
+}
+
+/// Rule 2 (LR14): `auto_approve` never answers a per-call card — the owner
+/// who set `auto_approve_confirmations` still gets it, because approving
+/// everything blindly must not mint a `user` note.
+#[tokio::test]
+async fn auto_approve_still_prompts_a_per_call_tool() {
+    let confirm = Arc::new(Recorder::default());
+    let (sandbox, broker, _rx) = per_call_sandbox(confirm.clone(), Arc::default());
+    let mut policy = make_policy("orchestrator");
+    policy.auto_approve = true;
+    let cards = answer_cards(&broker, true, None, 1);
+    sandbox
+        .execute_tool(&confirm_call(), &policy, &make_ctx("orchestrator"))
+        .await
+        .unwrap();
+    assert_eq!(cards.await.unwrap().len(), 1, "the card was raised");
+    assert!(confirm.ran.lock().unwrap()[0].human_approval.is_some());
+
+    // …and with no broker to raise it on, auto_approve does not run it.
+    let quiet = Arc::new(Recorder::default());
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "memory_confirm".to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(quiet.clone()),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let no_broker = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let err = no_broker
+        .execute_tool(&confirm_call(), &policy, &make_ctx("orchestrator"))
+        .await
+        .unwrap_err();
+    assert!(err.contains("Fail-closed"), "{err}");
+    assert!(quiet.ran.lock().unwrap().is_empty());
+}
+
+/// Rule 2 (LR14): an *Always allow* answer is good for that call only — the
+/// cache records nothing, and the next call asks again.
+#[tokio::test]
+async fn an_entire_tool_approval_is_not_cached_for_memory_confirm() {
+    let confirm = Arc::new(Recorder::default());
+    let (sandbox, broker, _rx) = per_call_sandbox(confirm.clone(), Arc::default());
+    let cards = answer_cards(
+        &broker,
+        true,
+        Some(crate::security::confirmation::ApprovalScope::EntireTool),
+        2,
+    );
+    for _ in 0..2 {
+        sandbox
+            .execute_tool(
+                &confirm_call(),
+                &make_policy("orchestrator"),
+                &make_ctx("orchestrator"),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(cards.await.unwrap().len(), 2, "both calls asked");
+    let args_hash = crate::security::confirmation::hash_canonical_args(&confirm_call().arguments);
+    assert!(
+        !sandbox
+            .approval_cache()
+            .is_approved("memory_confirm", args_hash),
+        "nothing was recorded"
+    );
+}
+
+/// Rule 1: a cache hit is not a person's answer. An ordinary tool approved
+/// earlier runs without a card and **without** the fact; and a cache entry
+/// for `memory_confirm` itself is not consulted.
+#[tokio::test]
+async fn a_cache_hit_never_carries_an_approval() {
+    let confirm = Arc::new(Recorder::default());
+    let recorder = Arc::new(Recorder::default());
+    let (sandbox, broker, _rx) = per_call_sandbox(confirm.clone(), recorder.clone());
+    let mut policy = make_policy("orchestrator");
+    policy.require_confirmation_for = vec!["recorder".to_string(), "memory_confirm".to_string()];
+    let recorded = ToolCall {
+        id: "tc".into(),
+        name: "recorder".into(),
+        arguments: serde_json::json!({}),
+    };
+    sandbox.approval_cache().record(
+        "recorder",
+        0,
+        crate::security::confirmation::ApprovalScope::EntireTool,
+    );
+    sandbox.approval_cache().record(
+        "memory_confirm",
+        0,
+        crate::security::confirmation::ApprovalScope::EntireTool,
+    );
+    sandbox
+        .execute_tool(&recorded, &policy, &forged_ctx())
+        .await
+        .unwrap();
+    assert_eq!(broker.pending_count(), 0);
+    {
+        let ran = recorder.ran.lock().unwrap();
+        assert_eq!(
+            ran[0].human_approval, None,
+            "a cache hit carries no approval"
+        );
+        assert_eq!(ran[0].human_denial, None);
+    }
+
+    let cards = answer_cards(&broker, true, None, 1);
+    sandbox
+        .execute_tool(&confirm_call(), &policy, &make_ctx("orchestrator"))
+        .await
+        .unwrap();
+    assert_eq!(
+        cards.await.unwrap().len(),
+        1,
+        "the per-call tool asked despite its cache entry"
+    );
+}
+
+/// Rule 1: a caller cannot pass the fact through. A tool that needs no card
+/// runs with neither fact, whatever context it was handed.
+#[tokio::test]
+async fn a_caller_supplied_human_approval_is_discarded() {
+    let recorder = Arc::new(Recorder::default());
+    let (sandbox, broker, _rx) = per_call_sandbox(Arc::default(), recorder.clone());
+    let recorded = ToolCall {
+        id: "tc".into(),
+        name: "recorder".into(),
+        arguments: serde_json::json!({}),
+    };
+    sandbox
+        .execute_tool(&recorded, &make_policy("orchestrator"), &forged_ctx())
+        .await
+        .unwrap();
+    assert_eq!(broker.pending_count(), 0, "the recorder needs no card");
+    let ran = recorder.ran.lock().unwrap();
+    assert_eq!(ran[0].human_approval, None);
+    assert_eq!(ran[0].human_denial, None);
+}
+
+/// §4.3: an unattended turn has nobody to ask, so the per-call tool is
+/// refused at once — `auto_approve` or not — and never runs.
+#[tokio::test]
+async fn unattended_refuses_memory_confirm() {
+    let confirm = Arc::new(Recorder::default());
+    let (sandbox, broker, _rx) = per_call_sandbox(confirm.clone(), Arc::default());
+    for auto_approve in [false, true] {
+        let mut policy = make_policy("orchestrator");
+        policy.unattended = true;
+        policy.auto_approve = auto_approve;
+        let err = sandbox
+            .execute_tool(&confirm_call(), &policy, &forged_ctx())
+            .await
+            .unwrap_err();
+        assert!(err.contains("cannot ask for it"), "{err}");
+    }
+    assert_eq!(broker.pending_count(), 0);
+    assert!(confirm.ran.lock().unwrap().is_empty());
+}
+
+/// With no broker there is no card, so no approval — the per-call tool is
+/// refused fail-closed, even with a forged fact in its context.
+#[tokio::test]
+async fn no_broker_refuses_it() {
+    let confirm = Arc::new(Recorder::default());
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "memory_confirm".to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(confirm.clone()),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let err = sandbox
+        .execute_tool(&confirm_call(), &make_policy("orchestrator"), &forged_ctx())
+        .await
+        .unwrap_err();
+    assert!(err.contains("Fail-closed"), "{err}");
+    assert!(confirm.ran.lock().unwrap().is_empty());
+}
+
+/// §4.3: a Deny runs the tool's denial hook with the denial fact — named for
+/// the card the person answered — adds what the hook says to the refusal,
+/// and never runs the tool.
+#[tokio::test]
+async fn a_deny_runs_the_denial_hook_with_the_fact() {
+    let confirm = Arc::new(Recorder::default());
+    let (sandbox, broker, _rx) = per_call_sandbox(confirm.clone(), Arc::default());
+    let cards = answer_cards(&broker, false, None, 1);
+    let err = sandbox
+        .execute_tool(&confirm_call(), &make_policy("orchestrator"), &forged_ctx())
+        .await
+        .unwrap_err();
+    let cards = cards.await.unwrap();
+    assert!(err.contains("denied by user"), "{err}");
+    assert!(err.ends_with("The hook heard the No."), "{err}");
+    assert!(confirm.ran.lock().unwrap().is_empty());
+    let denied = confirm.denied.lock().unwrap();
+    assert_eq!(denied.len(), 1);
+    assert_eq!(
+        denied[0]
+            .human_denial
+            .as_ref()
+            .map(|d| d.request_id().to_string()),
+        Some(cards[0].request_id.clone())
+    );
+    assert_eq!(denied[0].human_approval, None);
+}
+
+/// §4.4: a preview that refuses raises no card — no pending request, no
+/// event — and the call fails with the preview's own reason.
+#[tokio::test]
+async fn a_preview_refusal_raises_no_card() {
+    let confirm = Arc::new(Recorder {
+        refuse_preview: Some("revision_conflict: the note moved".to_string()),
+        ..Default::default()
+    });
+    let (sandbox, broker, mut rx) = per_call_sandbox(confirm.clone(), Arc::default());
+    let err = sandbox
+        .execute_tool(
+            &confirm_call(),
+            &make_policy("orchestrator"),
+            &make_ctx("orchestrator"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, "revision_conflict: the note moved");
+    assert_eq!(broker.pending_count(), 0);
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|e| matches!(e, SystemEvent::ToolConfirmationRequested { .. })),
+        "no card went out"
+    );
+    assert!(confirm.ran.lock().unwrap().is_empty());
+}
+
+/// §4.4: the card carries the daemon's preview and says it is per call —
+/// on the broker's pending request (what `GET /v1/chat/confirmations`
+/// serves) and on the bus event every client hears.
+#[tokio::test]
+async fn the_card_carries_the_preview_and_per_call() {
+    let (sandbox, broker, mut rx) = per_call_sandbox(Arc::default(), Arc::default());
+    let cards = answer_cards(&broker, true, None, 1);
+    sandbox
+        .execute_tool(
+            &confirm_call(),
+            &make_policy("orchestrator"),
+            &make_ctx("orchestrator"),
+        )
+        .await
+        .unwrap();
+    let card = cards.await.unwrap().remove(0);
+    assert!(card.per_call);
+    assert_eq!(
+        card.preview.as_deref(),
+        Some("Replace your saved note “A” with “B”?")
+    );
+    match rx.try_recv().unwrap() {
+        SystemEvent::ToolConfirmationRequested {
+            preview, per_call, ..
+        } => {
+            assert!(per_call);
+            assert_eq!(preview, card.preview);
+        }
+        other => panic!("Expected ToolConfirmationRequested, got {other:?}"),
+    }
+}
+
+// ── R29: the `../` rule follows the backend (storage design §11) ────────
+
+/// A builtin, a command tool, an MCP tool and a skill script side by side.
+fn traversal_sandbox(skill_dir: &std::path::Path) -> SandboxManager {
+    let tool = |name: &str, backend: ToolBackend| RegisteredTool {
+        definition: openalpaca_llm::ToolDefinition {
+            name: name.to_string(),
+            description: name.to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        },
+        backend,
+        provides_capabilities: vec![],
+        exempt_from_timeout: false,
+        annotations: None,
+        version: "test-0.0.0".into(),
+        author: "test".into(),
+        created_at: chrono::Utc::now(),
+    };
+    let registry = ToolRegistry::default();
+    registry
+        .register(tool("note_tool", ToolBackend::BuiltIn(Arc::new(MockTool))))
+        .unwrap();
+    registry
+        .register(tool(
+            "cmd_tool",
+            ToolBackend::Command {
+                command: "true".to_string(),
+                args_template: Some("{path}".to_string()),
+                timeout_secs: 5,
+            },
+        ))
+        .unwrap();
+    registry
+        .register(tool(
+            "srv__echo",
+            ToolBackend::Mcp {
+                client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("srv")),
+                remote_name: "echo".to_string(),
+                server_name: "srv".to_string(),
+                generation: 0,
+            },
+        ))
+        .unwrap();
+    std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+    std::fs::write(skill_dir.join("scripts/noop.sh"), "exit 0\n").unwrap();
+    let script = crate::tools::builtins::ScriptToolBuiltIn::new(
+        skill_dir,
+        &crate::middleware::skill::ScriptConfig {
+            file: "noop.sh".to_string(),
+            name: "noop".to_string(),
+            description: "Does nothing".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            interpreter: Some("sh".to_string()),
+            timeout_secs: 5,
+        },
+    )
+    .unwrap();
+    registry
+        .register(tool("skill_script:noop", ToolBackend::BuiltIn(Arc::new(script))))
+        .unwrap();
+    SandboxManager::new(
+        Arc::new(registry),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    )
+}
+
+fn traversal_call(name: &str, arguments: serde_json::Value) -> ToolCall {
+    ToolCall {
+        id: "tc_r29".to_string(),
+        name: name.to_string(),
+        arguments,
+    }
+}
+
+#[tokio::test]
+async fn a_builtins_content_may_hold_a_relative_path() {
+    let skill = tempfile::tempdir().unwrap();
+    let sandbox = traversal_sandbox(skill.path());
+    let out = sandbox
+        .execute_tool(
+            &traversal_call(
+                "note_tool",
+                serde_json::json!({"content": "import { x } from '../lib/x';"}),
+            ),
+            &make_policy("agent1"),
+            &make_ctx("agent1"),
+        )
+        .await;
+    assert_eq!(out.as_deref(), Ok("search results"));
+}
+
+#[tokio::test]
+async fn a_command_tool_an_mcp_tool_and_a_skill_script_keep_the_traversal_rule() {
+    let skill = tempfile::tempdir().unwrap();
+    let sandbox = traversal_sandbox(skill.path());
+    for (name, arguments) in [
+        ("cmd_tool", serde_json::json!({"path": "../secret"})),
+        ("srv__echo", serde_json::json!({"text": "../secret"})),
+        ("skill_script:noop", serde_json::json!({"id": "../../escape"})),
+    ] {
+        let err = sandbox
+            .execute_tool(
+                &traversal_call(name, arguments),
+                &make_policy("agent1"),
+                &make_ctx("agent1"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Input blocked: Path traversal pattern detected", "{name}");
+    }
+}
+
+#[tokio::test]
+async fn a_builtins_null_byte_is_still_refused() {
+    let skill = tempfile::tempdir().unwrap();
+    let sandbox = traversal_sandbox(skill.path());
+    let err = sandbox
+        .execute_tool(
+            &traversal_call("note_tool", serde_json::json!({"content": "a\u{0}b"})),
+            &make_policy("agent1"),
+            &make_ctx("agent1"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Input blocked: Argument contains null bytes");
+}
+
+// ── R-T35: an explicit confirmation list naming `file_write` asks for `file_edit` ──
+
+/// The lead's ruling R-T35: `file_edit` provides `file_write`'s capability
+/// (R42), so whoever holds `file_write` holds `file_edit` beside it — a
+/// template granted the capability, a skill allowed `file_write` by name
+/// (`constraints::paired_tools`). An explicit list that names `file_write`
+/// asks for `file_edit` too, so a project file is never changed with no card
+/// where the author asked writes to prompt (T34's shape). Only that pair: a
+/// list naming a reader, or naming neither half, is returned as written, and
+/// one naming both is not doubled.
+#[test]
+fn an_explicit_confirmation_list_naming_file_write_also_asks_for_file_edit() {
+    let registry = make_registry();
+    let set = |list: &[&str]| {
+        let mut policy = make_policy("agent1");
+        policy.require_confirmation_for = list.iter().map(|name| name.to_string()).collect();
+        effective_confirmation_set(&policy, &registry)
+    };
+
+    assert_eq!(set(&["file_write"]), ["file_write", "file_edit"]);
+    assert_eq!(
+        set(&["shell_execute", "file_write"]),
+        ["shell_execute", "file_write", "file_edit"]
+    );
+    assert_eq!(
+        set(&["file_edit", "file_write"]),
+        ["file_edit", "file_write"]
+    );
+    assert_eq!(set(&["file_read"]), ["file_read"]);
+    assert_eq!(set(&["shell_execute"]), ["shell_execute"]);
+}

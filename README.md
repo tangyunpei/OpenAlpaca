@@ -12,8 +12,9 @@ It runs on a local Ollama model with no API key, or on Anthropic and OpenAI mode
 - **Use a local model.** A local Ollama needs no API key and costs nothing.
 - **Hand off bigger jobs.** Ask for a workflow: a lead agent runs it in the background with subagents, then reports back in the chat.
 - **Steer work in flight.** Check, pause, resume, cancel or redirect a running workflow from the same conversation.
-- **Attach files** to a message, and keep what agents write as versioned artifacts.
-- **Keep a memory.** What you ask it to remember is stored locally and searched by keyword and by meaning.
+- **Work in your project.** In a project an agent reads, lists, writes and edits its files and runs commands there. Each write and each command asks you first, and what it writes is a real file of the project. Drafts and hand-offs are kept as versioned artifacts.
+- **Attach files** to a message.
+- **Keep a memory.** What you ask it to remember, and what it learns from what you say, are Markdown notes on your own disk — searched by keyword, with no model or download, and readable, editable and forgettable in the app, the CLI or any text editor.
 - **Add tools** with skills (markdown files), MCP servers and plugins. Each extension has an on/off switch.
 - **Reach it from chat apps:** Telegram, Discord, and iMessage on macOS.
 
@@ -49,7 +50,7 @@ openalpaca daemon status
 
 `start` prints the path of the daemon log and returns at once. `status` prints `✓ Daemon is running` once the daemon answers. If it says the daemon is not running, run it again a second later.
 
-**The first start is slow.** The daemon downloads a local embedding model (about 1 GB) for memory search before it answers anything. Until then `status` may sit and wait. To watch the progress, open a second terminal and run `tail -f ~/.openalpaca/state/logs/daemon.log`. The line `Daemon ready` means it is up. Wait for it before step 4.
+The first start downloads nothing and takes a few seconds. To watch it, open a second terminal and run `tail -f ~/.openalpaca/state/logs/daemon.log`; the line `Daemon ready` means it is up. Wait for it before step 4.
 
 The first start also creates `~/.openalpaca/`. A daemon started this way reads its config from `~/.openalpaca/config/`, not from the repo's `config/`.
 
@@ -123,7 +124,7 @@ The path of one message:
 2. Everything else goes to the main loop. The model answers directly, or calls a tool: start a workflow, steer a running one, queue a follow-up, check a task, or store and search memory. A tool that needs confirmation pauses until you approve it.
 3. A workflow runs in the background. A lead agent spawns subagents (up to eight per batch), waits for them, and posts a completion report to the chat.
 4. The LLM router picks a provider and key for each call. If the requested model is not available, it falls back to one that is and says so.
-5. Replies stream to the client over SSE. Task, agent and tool events stream over WebSocket. Conversations, tasks and memory are stored in SQLite.
+5. Replies stream to the client over SSE. Task, agent and tool events stream over WebSocket. Conversations and tasks are stored in SQLite; memory is Markdown files, with a disposable SQLite keyword index beside them.
 
 More detail: [docs/agent-loop.md](docs/agent-loop.md) and [docs/Daemon_Manual.md](docs/Daemon_Manual.md).
 
@@ -137,8 +138,8 @@ A Rust workspace (edition 2024) with three apps and eight library crates.
 | `apps/openalpaca` | The CLI: daemon lifecycle, chat, tasks, models and keys, extensions, config |
 | `apps/openalpaca-gui` | The desktop app: Tauri v2 shell, React 19 + TypeScript + Tailwind v4 frontend |
 | `crates/openalpaca_core` | Orchestrator, message routing, agent loop, tools, skills, security gate, event bus |
-| `crates/openalpaca_llm` | LLM router, providers, key pools, rate limiting, cost tracking, embeddings |
-| `crates/openalpaca_storage` | SQLite, migrations, repositories, memory search, the `~/.openalpaca` store, artifacts, uploads |
+| `crates/openalpaca_llm` | LLM router, providers, key pools, rate limiting, cost tracking |
+| `crates/openalpaca_storage` | SQLite, migrations, repositories, the memory note files and their search index, the `~/.openalpaca` store, artifacts, uploads |
 | `crates/openalpaca_api` | Shared event types and plugin executor traits |
 | `crates/openalpaca_wake` | Cron scheduler and file watcher (scheduled skills, config hot reload) |
 | `crates/openalpaca_connectors` | Telegram, iMessage and Discord adapters |
@@ -151,12 +152,12 @@ Config is plain files. The daemon reloads most of them when they change. Edit th
 
 | File | Purpose |
 |---|---|
-| `llm.toml` | Providers, keys (encrypted), default model, fallback chains, embeddings. Created on first start; git-ignored in the repo. |
+| `llm.toml` | Providers, keys (encrypted), default model, fallback chains. Created on first start; git-ignored in the repo. |
 | `daemon.toml` | Execution limits, cost caps, routing, sessions, uploads, security, server settings. The repo's `config/daemon.toml` is the full reference; a fresh install gets a shorter file and built-in defaults. |
 | `mcp.toml` | MCP server declarations and each server's on/off switch. |
 | `agents/*.md` | Agent templates: YAML frontmatter (model, capabilities, limits) plus a persona. Nine ship. |
 | `skills/*/SKILL.md` | Skills. Four ship: `code-review`, `commit-message`, `create-skill`, `explain-code`. |
-| `orchestrator/*.md` | The assistant's persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`), created on first start. |
+| `orchestrator/*.md` | The assistant's persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`), created on first start. `USER.md` is yours to edit (`openalpaca persona edit user`, or Settings → Persona); nothing writes learned facts into it. |
 
 Which directory holds them:
 
@@ -167,11 +168,14 @@ Data always lives under `~/.openalpaca/`, on every platform:
 
 | Path | Holds |
 |---|---|
-| `state/` | The database, `discovery.json`, the lock, the master key, logs, backups, the embedding model cache |
+| `state/` | The database, `discovery.json`, the lock, the master key, logs, backups, the memory control snapshots and the memory search index |
 | `config/`, `plugins/` | Runtime config and installed plugins |
-| `artifacts/`, `uploads/`, `sessions/` | What agents wrote, what you attached, and conversation logs |
+| `artifacts/`, `uploads/`, `sessions/` | By-products agents saved with no project, what you attached, and conversation logs |
+| `scratch/` | One working folder per conversation with no project, removed with the conversation |
+| `memory/` | Memory notes, one Markdown file each, per owner |
+| `projects/` | One folder per project — a git repository you chat in, or a folder you chose — with its `project.json`, artifacts, uploads and memory notes |
 
-Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. A project can also hold its own `<project>/.openalpaca/` for artifacts and uploads.
+Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example to try things in a sandbox. A project's files and notes live in its folder under `projects/`, named after its path. Nothing OpenAlpaca stores is written inside the project's own folder: an agent writes there only with your approval, each write and each command asking first (Daemon Manual → *The Working Folder*).
 
 ## Documentation
 
@@ -208,12 +212,15 @@ bun run check && bun run test && bun run format:check && bun run build
 
 ## Status and limitations
 
-- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 42; existing version-42 databases remain usable, but earlier development schemas are no longer upgraded.
+- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 1, `002_working_state.sql` upgrades it to 2, `003_no_project_store_rows.sql` to 3 and `004_project_files.sql` to 4, so a fresh database opens at 4, and the next migration will be `005`. A database from before that re-baseline (2026-09-28) — 42, the last schema with memory inside the database, or 43 to 45 — is refused rather than upgraded; see [Switching to the Markdown Memory Build](docs/Installation_Manual.md#switching-to-the-markdown-memory-build).
+- **The shell is not confined to the project.** A command an agent runs starts in the project's folder, but an approved command runs as you and can reach any file you can. Every command asks first: read it before you approve it.
+- **Reading never asks.** In a project an agent can read any file there, `.env` included, and what it reads goes to the model that answers — a remote provider's when that model is not local.
 - **Platforms.** Developed on macOS. CI builds and tests on Linux. Windows has packaging scripts, but CI does not build the Rust workspace there.
 - **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
 - **MCP** is client-side and tools only. MCP resources and prompts are not implemented: the client has no resource or prompt methods. Serving MCP is not a goal.
+- **Memory search is by keyword.** There is no embedding model, so a question worded very differently from the note, or in another language, can miss it. Aliases on a note (for example a Chinese and an English name for the same thing) are the remedy.
 - **Desktop app.** Two controls are shown as unavailable because the daemon has no route for them: adding a connector, and the per-agent-template on/off switch.
 - **Resuming an interrupted run** by replay is experimental and off by default (`resume_enabled` in `daemon.toml`).
-- **Costs.** A chat turn is capped at $1. A workflow's lead agent is capped at $3 by its shipped template (`daemon.toml` defaults to $5 where a template sets nothing). There is no overall daily budget; only the small background jobs (profile extraction, summaries, task extraction) have daily ceilings.
+- **Costs.** A chat turn is capped at $1. A workflow's lead agent is capped at $3 by its shipped template (`daemon.toml` defaults to $5 where a template sets nothing). There is no overall daily budget; only the small background jobs (memory extraction, summaries, task-output extraction) have daily ceilings.
 - **Releases are unsigned.** The macOS package is not code-signed.
 - **License:** MIT, as declared in `Cargo.toml`.

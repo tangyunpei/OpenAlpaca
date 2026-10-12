@@ -22,9 +22,68 @@ describe("ImagePreview (§3.25f) — load failure", () => {
     expect(screen.getByText("shot.png")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "The image could not be loaded — Export or Reveal opens it in its own app.",
+        "The image could not be loaded — Export or Open opens it in its own app.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("says the caller's sentence instead of its own when the caller knows why a load may fail (X14)", () => {
+    const failedNote =
+      "This file could not be read the last time it was asked for.";
+    render(
+      <ImagePreview
+        filename="docs/diagram.png"
+        size="compact"
+        src={SRC}
+        failedNote={failedNote}
+      />,
+    );
+
+    fireEvent.error(screen.getByRole("img", { name: "docs/diagram.png" }));
+
+    expect(screen.getByText(failedNote)).toBeInTheDocument();
+    expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
+  });
+
+  it("tries the same src again when the caller's failedNote changes, so a row whose mark is cleared shows its image (Y.4)", () => {
+    const marked =
+      "This file could not be read the last time it was asked for.";
+    const { rerender } = render(
+      <ImagePreview
+        filename="docs/diagram.png"
+        size="compact"
+        src={SRC}
+        failedNote={marked}
+      />,
+    );
+    fireEvent.error(screen.getByRole("img", { name: "docs/diagram.png" }));
+    expect(screen.getByText(marked)).toBeInTheDocument();
+
+    // The same row read again, still marked: the failure stands.
+    rerender(
+      <ImagePreview
+        filename="docs/diagram.png"
+        size="compact"
+        src={SRC}
+        failedNote={marked}
+      />,
+    );
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+
+    // The row read again with its mark cleared: a new attempt, not the
+    // placeholder's own sentence.
+    rerender(
+      <ImagePreview
+        filename="docs/diagram.png"
+        size="compact"
+        src={SRC}
+        failedNote={null}
+      />,
+    );
+    expect(
+      screen.getByRole("img", { name: "docs/diagram.png" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
   });
 
   it("does not claim a load failure when there was never a src", () => {

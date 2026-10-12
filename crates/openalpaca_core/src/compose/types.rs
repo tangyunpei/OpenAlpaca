@@ -287,7 +287,8 @@ pub struct DynamicContextInput {
     pub query: Arc<str>,
     pub path: ExecutionPath,
     pub reserved_tokens: usize,
-    pub memory_retrieval_hash: [u8; 32],
+    /// The resolved bundle. Its `ContextKind::Memory` sections are not part
+    /// of this layer's output — see `compose::dynamic_context`.
     pub context_bundle: Arc<ContextBundle>,
     pub mode: DynamicContextMode,
 }
@@ -301,7 +302,13 @@ pub struct DynamicContextOutput {
 
 #[derive(Debug, Clone)]
 pub struct HistoryInput {
-    pub summary: Option<Arc<str>>,
+    /// The conversation's working state, as its text (design 11 §4): the
+    /// layer's first message, wrapped per `summary_wrap_mode`.
+    pub working_state: Option<Arc<str>>,
+    /// The previous conversation on the lane and project, as its text,
+    /// while this one is given it (design 11 §4 (b)): ahead of everything
+    /// else in the layer, wrapped per `summary_wrap_mode`.
+    pub previous: Option<Arc<str>>,
     pub summary_wrap_mode: SummaryWrapMode,
     pub recent_messages: Arc<Vec<ChatMessage>>,
     pub current_user_turn: Option<ChatMessage>,
@@ -325,6 +332,10 @@ pub struct ComposedRequest {
     pub token_budget: TokenBudget,
     pub section_registry: Vec<&'static str>,
     pub layer_trace: LayerTrace,
+    /// How many of the history layer's leading messages the budget trim
+    /// removed — rows the working state's writer never reads, so a
+    /// compaction's `through` may not pass them (design 11 §3.2).
+    pub history_head_dropped: usize,
 }
 
 #[derive(Debug, Clone, Copy)]

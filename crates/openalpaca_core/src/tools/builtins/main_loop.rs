@@ -1,9 +1,18 @@
 //! Main-loop tool registration policy (Routing V2, Phase 2).
 //!
 //! Builds the per-request tool set for the tool-mode main loop:
-//! - **Always-core**: `start_workflow`, `task_status`, `memory_store`,
-//!   `memory_forget`, plus the globally-registered `memory_search` (definition
-//!   only — its backend already lives in the shared registry).
+//! - **Always-core**: `start_workflow`, `task_status`, and — when the daemon
+//!   has a `MemoryService` — the three memory writers `memory_store`,
+//!   `memory_update`, `memory_forget` (design §7: only the main conversation
+//!   writes), plus the globally-registered read surface `memory_search`,
+//!   `memory_read`, `memory_list`, `memory_timeline` (definitions only —
+//!   their backends already live in the shared registry). On an attended turn of the GUI's or the
+//!   CLI's chat, `memory_confirm` too (design 09 §4.1): the assistant raises a
+//!   suggestion, and the person's card answers it.
+//! - **Readers** (R42): `artifact_read` on every turn with a database
+//!   (definition only); `file_read` and `file_list` are offered by the query
+//!   handler on a project turn, and `file_list` wherever `file_read` is
+//!   (R-T6, R-T14).
 //! - **Extension tools** (tool/skill wiring, Chunk 2): every MCP-bridged
 //!   (`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool in the
 //!   global registry whose extension is enabled (definitions only — backends
@@ -30,12 +39,15 @@ use openalpaca_llm::{LlmRouter, ToolDefinition};
 use std::sync::Arc;
 
 use super::invoke_skill::{InvokeSkillTool, invoke_skill_tool_definition};
-use super::memory_ops::{
-    MemoryForgetTool, MemoryStoreTool, memory_forget_tool_definition, memory_store_tool_definition,
+use super::memory_tools::{
+    IN_CHAT_SOURCE, MemoryConfirmTool, MemoryForgetTool, MemoryStoreTool, MemoryUpdateTool,
+    memory_confirm_tool_definition, memory_forget_tool_definition, memory_store_tool_definition,
+    memory_update_tool_definition,
 };
 use super::start_workflow::{StartWorkflowTool, start_workflow_tool_definition};
 use super::steer_workflow::{SteerWorkflowTool, steer_workflow_tool_definition};
 use super::task_status::{TaskStatusTool, task_status_tool_definition};
+use crate::memory::service::MemoryService;
 
 /// The per-request main-loop tool set produced by [`main_loop_tool_set`].
 pub struct MainLoopToolSet {
@@ -43,14 +55,17 @@ pub struct MainLoopToolSet {
     /// tools ∪ `invoke_skill`; the caller unions these with its base picks).
     pub definitions: Vec<ToolDefinition>,
     /// Per-request instances to inject into the per-request registry,
-    /// paired with their definitions. Excludes `memory_search`, whose
-    /// backend is already globally registered.
+    /// paired with their definitions. Excludes the memory read tools, whose
+    /// backends are already globally registered.
     pub instances: Vec<(ToolDefinition, Arc<dyn BuiltInTool>)>,
     /// Kept for result-cell readback after the loop (structured delegation).
     pub start_workflow: Arc<StartWorkflowTool>,
     /// Present only when the workflow-aware tools were included; kept for
     /// result-cell readback (the turn's `steered` flag).
     pub steer_workflow: Option<Arc<SteerWorkflowTool>>,
+    /// `memory_confirm` is on this turn's surface (design 09 §4.1), so the
+    /// turn may be told what is waiting in `<memory_suggestions>` (§4.5).
+    pub memory_confirm_offered: bool,
 }
 
 impl MainLoopToolSet {
@@ -62,12 +77,15 @@ impl MainLoopToolSet {
             // Known-good builtin definitions — a name collision with the
             // global registry would only shadow a stale entry, so log and
             // continue rather than fail the request.
+            // With the annotations the name carries: the sandbox derives the
+            // confirmation set from what is registered, so this is what makes
+            // `memory_forget` and `memory_update` prompt (design §7).
             if let Err(e) = registry.register(crate::tools::registry::RegisteredTool {
                 definition: definition.clone(),
                 backend: crate::tools::registry::ToolBackend::BuiltIn(backend.clone()),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
-                annotations: None,
+                annotations: super::annotations_for_builtin(&definition.name),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 author: "builtin".to_string(),
                 created_at: chrono::Utc::now(),
@@ -94,11 +112,32 @@ pub fn main_loop_relay_guidance() -> &'static str {
      - A workflow starts ONLY through a start_workflow call in THIS turn. Never say one was \
      started, and never state a task id, unless a start_workflow call in this turn returned \
      it — task ids in earlier messages belong to earlier runs.\n\
-     - You have no file- or artifact-writing tool of your own. When the user asks for a \
-     workflow or a background run, or asks you to write or save an artifact or a file, call \
-     start_workflow instead of answering inline or saying you cannot. Small questions are \
-     still answered directly.\n\
+     - Writing a file, editing one or running a command in the project you do yourself \
+     when those tools are on your surface; start_workflow is for a substantial multi-step \
+     task, an explicit request for a workflow or a background run. When no tool that \
+     writes a file is on your surface, a file the user asks for is `start_workflow`'s. \
+     Small questions are still answered directly.\n\
      </workflow_relay_rules>"
+}
+
+/// The main loop's memory guidance (design 09 §13.1, MD-14): the layered
+/// workflow its three read tools teach, said once in the system prompt — one
+/// line, given only to a turn whose surface carries `memory_search` — and,
+/// since owner decision LQ19 (F-C), one line on naming the note a new fact
+/// changes, without which a saved note gets no suggestion (the commute,
+/// report 10 §4.5) — and, since design 11 §4 (owner decision CQ-5), one line
+/// on the note a `previous_conversation` block names: the rule sits here, the
+/// block's content stays quoted data.
+pub fn main_loop_memory_guidance() -> &'static str {
+    "<memory_rules>\n\
+     Memory: memory_search returns an index, one line per note and no body — pick the ids that \
+     matter and read only those with memory_read, several in one call; memory_timeline shows \
+     what surrounds a note in time.\n\
+     Before saving a fact about the user that changes an earlier one, memory_search for the \
+     note it changes and pass its id in supersedes (or its fact_key).\n\
+     A previous_conversation block names the memory note that records it; memory_read it when \
+     the user continues that work.\n\
+     </memory_rules>"
 }
 
 /// Build the main-loop tool set for one request on `lane_key`.
@@ -118,7 +157,7 @@ pub fn main_loop_tool_set(
     bus: EventBus,
     routing: &RoutingConfig,
     db: Option<openalpaca_storage::Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    memory_service: Option<Arc<MemoryService>>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     skill_catalog: Arc<SkillCatalog>,
     llm_router: Option<Arc<LlmRouter>>,
@@ -133,6 +172,7 @@ pub fn main_loop_tool_set(
 ) -> MainLoopToolSet {
     let mut definitions: Vec<ToolDefinition> = Vec::new();
     let mut instances: Vec<(ToolDefinition, Arc<dyn BuiltInTool>)> = Vec::new();
+    let mut memory_confirm_offered = false;
 
     // ── Always-core set ─────────────────────────────────────────────────
     let start_workflow = Arc::new(StartWorkflowTool::new(
@@ -154,33 +194,60 @@ pub fn main_loop_tool_set(
             as Arc<dyn BuiltInTool>,
     ));
 
-    // Memory tools need a database; without one they'd only ever error
-    // ("Memory system is not available"), so keep them off the surface.
-    if db.is_some() {
+    // The memory writers need the service; without one (tests, a daemon
+    // with no store) they stay off the surface. `ModelTool` calls all
+    // (design §7a): a store records `extracted_user`.
+    if let Some(service) = memory_service {
         let store_def = memory_store_tool_definition();
         definitions.push(store_def.clone());
         instances.push((
             store_def,
-            Arc::new(MemoryStoreTool::new(
-                db.clone(),
-                embedder,
-                daemon_config.clone(),
-            )) as Arc<dyn BuiltInTool>,
+            Arc::new(MemoryStoreTool::new(service.clone())) as Arc<dyn BuiltInTool>,
+        ));
+
+        let update_def = memory_update_tool_definition();
+        definitions.push(update_def.clone());
+        instances.push((
+            update_def,
+            Arc::new(MemoryUpdateTool::new(service.clone())) as Arc<dyn BuiltInTool>,
         ));
 
         let forget_def = memory_forget_tool_definition();
         definitions.push(forget_def.clone());
         instances.push((
             forget_def,
-            Arc::new(MemoryForgetTool::new(db.clone())) as Arc<dyn BuiltInTool>,
+            Arc::new(MemoryForgetTool::new(service.clone())) as Arc<dyn BuiltInTool>,
         ));
+
+        // Design 09 §4.1 (ruling LR13): `memory_confirm` only where a person
+        // can answer its card on a user-directed channel — an attended turn
+        // of the GUI's or the CLI's chat. Never on a connector lane (its
+        // `/yes` is keyed by chat, not sender), an unattended turn, the
+        // skill tier, the lead or a subagent, none of which build this set.
+        if !unattended && ctx.source.as_deref() == Some(IN_CHAT_SOURCE) {
+            let confirm_def = memory_confirm_tool_definition();
+            definitions.push(confirm_def.clone());
+            instances.push((
+                confirm_def,
+                Arc::new(MemoryConfirmTool::new(service)) as Arc<dyn BuiltInTool>,
+            ));
+            memory_confirm_offered = true;
+        }
     }
 
-    // `memory_search` is globally registered (when a DB is configured) — the
-    // per-request registry clone already carries its backend; only the
-    // definition joins the core surface.
-    if let Some(search) = global_registry.get("memory_search") {
-        definitions.push(search.definition.clone());
+    // The memory read surface is globally registered (`memory_read_tools`,
+    // when the daemon has a service) — the per-request registry clone
+    // already carries the backends; only the definitions join the core
+    // surface.
+    for name in [
+        "memory_search",
+        "memory_read",
+        "memory_list",
+        "memory_timeline",
+    ] {
+        if let Some(tool) = global_registry.get(name) {
+            definitions.push(tool.definition.clone());
+        }
     }
 
     // ── read_result (only where a spill can happen) ─────────────────────
@@ -198,6 +265,19 @@ pub fn main_loop_tool_set(
         && let Some(read_result) = global_registry.get("read_result")
     {
         definitions.push(read_result.definition.clone());
+    }
+
+    // ── artifact_read (every turn with a database, R42) ─────────────────
+    // A by-product's id is named by artifact_write's result, by file_write's
+    // when there is no project, by a workspace entry and by task_status, so
+    // any turn may be handed one to read back. Definition only, like
+    // read_result's: the backend is globally registered, the per-request
+    // clone carries it, and this surface is the allowlist that admits it.
+    // The file readers are the query handler's offer (`offer_file_readers`).
+    if db.is_some()
+        && let Some(artifact_read) = global_registry.get("artifact_read")
+    {
+        definitions.push(artifact_read.definition.clone());
     }
 
     // ── Extension tools (MCP-bridged + plugin-provided) ─────────────────
@@ -239,9 +319,9 @@ pub fn main_loop_tool_set(
         definitions.push(steer_def.clone());
         instances.push((steer_def, steer.clone() as Arc<dyn BuiltInTool>));
 
-        // Main-loop queue_followup: identity + workspace path come from the
-        // invocation's ToolContext (Phase-1 gap fix); the constructor value
-        // is only the fallback.
+        // Main-loop queue_followup: identity and the turn's resolved project
+        // root (`request_workspace_root`, F4) come from the invocation's
+        // ToolContext; the constructor value is only the identity fallback.
         let created_by = ctx
             .owner_id
             .clone()
@@ -270,6 +350,7 @@ pub fn main_loop_tool_set(
         instances,
         start_workflow,
         steer_workflow,
+        memory_confirm_offered,
     }
 }
 
@@ -309,12 +390,14 @@ mod tests {
             gate,
             tool_registry.clone(),
             None,
-            None,
             daemon_config,
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(SkillCatalog::new()),
             Arc::new(crate::prompt_ctx::ContextManager::noop()),
             Arc::new(crate::compose::ComposeEngine::new(16)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(crate::orchestrator::BackgroundJobs::new()),
         ));
         (ctx, dispatcher, bus, tool_registry)
     }
@@ -342,6 +425,7 @@ mod tests {
             lane_key,
             Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             None,
+            None,
         )
     }
 
@@ -356,6 +440,7 @@ mod tests {
         lane_key: &str,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         llm_router: Option<Arc<LlmRouter>>,
+        memory_service: Option<Arc<crate::memory::service::MemoryService>>,
     ) -> MainLoopToolSet {
         main_loop_tool_set(
             dispatcher,
@@ -363,7 +448,7 @@ mod tests {
             bus,
             routing_cfg,
             db,
-            None,
+            memory_service,
             daemon_config,
             Arc::new(SkillCatalog::new()),
             llm_router,
@@ -379,9 +464,13 @@ mod tests {
         )
     }
 
-    /// H2 — the relay rules say what the model may claim and when to delegate.
-    /// Snapshot-style: the block is a contract with the model, so the clauses
-    /// are pinned rather than eyeballed.
+    /// H2, and §15: the relay rules say what the model may claim and when to
+    /// delegate — and no longer that only a workflow can write a file: on a
+    /// project turn the main chat writes, edits and runs commands itself when
+    /// those tools are on its surface, and a file asked for with no writing
+    /// tool on the surface is still start_workflow's (the lead's ruling
+    /// R-T7). Snapshot-style: the block is a contract with the model, so the
+    /// clauses are pinned.
     #[test]
     fn the_relay_rules_forbid_an_unearned_claim_and_name_the_delegate_cases() {
         let rules = main_loop_relay_guidance();
@@ -389,8 +478,14 @@ mod tests {
             "starts ONLY through a start_workflow call in THIS turn",
             "never state a task id",
             "task ids in earlier messages belong to earlier runs",
-            "no file- or artifact-writing tool of your own",
-            "write or save an artifact or a file, call start_workflow",
+            "Writing a file, editing one or running a command in the project you do yourself \
+             when those tools are on your surface",
+            "start_workflow is for a substantial multi-step task, an explicit request for a \
+             workflow or a background run",
+            // The lead's ruling R-T7: where chat cannot write, round 13's
+            // routing stays.
+            "When no tool that writes a file is on your surface, a file the user asks for is \
+             `start_workflow`'s.",
             "Small questions are still answered directly",
         ] {
             assert!(
@@ -398,26 +493,38 @@ mod tests {
                 "the relay rules must carry {clause:?}:\n{rules}"
             );
         }
+        for gone in [
+            "no file- or artifact-writing tool of your own",
+            "write or save an artifact or a file, call start_workflow",
+        ] {
+            assert!(!rules.contains(gone), "{gone:?} is no longer true:\n{rules}");
+        }
         // One block, still closed — the guidance is injected as a single
         // user message and a stray tag would reach the model as prose.
         assert!(rules.starts_with("<workflow_relay_rules>"));
         assert!(rules.ends_with("</workflow_relay_rules>"));
     }
 
-    /// H2's other half: `start_workflow`'s own description must agree with the
-    /// rules, or the model reads two different contracts in one prompt.
+    /// H2's other half: `start_workflow`'s own description agrees with the
+    /// rules — an explicit request and a substantial task, and no longer
+    /// "only a workflow can write a file" (§15).
     #[test]
-    fn start_workflow_describes_the_explicit_request_and_the_artifact_case() {
+    fn start_workflow_describes_the_explicit_request_and_claims_no_file_monopoly() {
         let description = start_workflow_tool_definition().description;
         for clause in [
             "substantial, multi-step task",
             "explicitly asks for a workflow or a background run",
-            "asks to write or save an artifact or a file",
             "ONLY way to start a run",
         ] {
             assert!(
                 description.contains(clause),
                 "start_workflow's description must carry {clause:?}:\n{description}"
+            );
+        }
+        for gone in ["which only a workflow can do", "write or save an artifact or a file"] {
+            assert!(
+                !description.contains(gone),
+                "{gone:?} is no longer true:\n{description}"
             );
         }
     }
@@ -428,7 +535,7 @@ mod tests {
         let set = build(
             shared, dispatcher, bus, &registry, &routing(true), None, "user1:cli",
         );
-        // No db → memory tools (and the global memory_search) absent.
+        // No service → the memory writers (and the global read tools) absent.
         assert_eq!(names(&set.definitions), vec!["start_workflow", "task_status"]);
         assert_eq!(set.instances.len(), 2);
         assert!(set.steer_workflow.is_none());
@@ -436,26 +543,30 @@ mod tests {
     }
 
     #[test]
-    fn test_core_set_with_db_includes_memory_tools_and_search_def() {
+    fn test_core_set_with_service_includes_memory_writers_and_read_defs() {
         let dir = tempfile::tempdir().unwrap();
         let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
-        let (shared, dispatcher, bus, registry) = setup();
-        // memory_search is globally registered in production; mirror that.
-        let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-        for tool in super::super::builtin_tools(
+        let service = Arc::new(crate::memory::service::MemoryService::new(
             Some(db.clone()),
-            None,
-            Some(daemon_config),
-            None,
-            None,
-        ) {
-            if tool.definition.name == "memory_search" {
-                registry.register(tool).unwrap();
-            }
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        let (shared, dispatcher, bus, registry) = setup();
+        // The read surface is globally registered in production; mirror that.
+        for tool in crate::tools::builtins::memory_read_tools(service.clone()) {
+            registry.register(tool).unwrap();
         }
 
-        let set = build(
-            shared, dispatcher, bus, &registry, &routing(false), Some(db), "user1:cli",
+        let set = build_with(
+            shared,
+            dispatcher,
+            bus,
+            &registry,
+            &routing(false),
+            Some(db),
+            "user1:cli",
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            None,
+            Some(service),
         );
         assert_eq!(
             names(&set.definitions),
@@ -463,12 +574,16 @@ mod tests {
                 "start_workflow",
                 "task_status",
                 "memory_store",
+                "memory_update",
                 "memory_forget",
                 "memory_search",
+                "memory_read",
+                "memory_list",
+                "memory_timeline",
             ]
         );
-        // memory_search has no per-request instance (global backend).
-        assert_eq!(set.instances.len(), 4);
+        // The read tools have no per-request instance (global backends).
+        assert_eq!(set.instances.len(), 5);
         assert!(set.steer_workflow.is_none());
     }
 
@@ -484,7 +599,7 @@ mod tests {
 
         // No session log service on the context yet.
         let (shared, dispatcher, bus, registry) = setup();
-        for tool in super::super::builtin_tools(Some(db.clone()), None, None, None, None) {
+        for tool in super::super::builtin_tools(Some(db.clone()), None, None) {
             if tool.definition.name == "read_result" {
                 registry.register(tool).unwrap();
             }
@@ -510,7 +625,7 @@ mod tests {
 
         // With one, as every daemon that resolved a store has.
         let (shared, dispatcher, bus, registry) = setup();
-        for tool in super::super::builtin_tools(Some(db.clone()), None, None, None, None) {
+        for tool in super::super::builtin_tools(Some(db.clone()), None, None) {
             if tool.definition.name == "read_result" {
                 registry.register(tool).unwrap();
             }
@@ -545,6 +660,64 @@ mod tests {
                 .any(|(def, _)| def.name == "read_result"),
             "no per-request instance is built for a globally registered backend"
         );
+    }
+
+    /// R42: `artifact_read` is on every main-loop turn with a database — any
+    /// turn may be handed a by-product's id. Definition only: the backend is
+    /// the global registry's, which the per-request clone carries. The file
+    /// readers are not this set's: the query handler offers them, from the
+    /// turn's one project-turn predicate (the lead's ruling R-T14).
+    #[test]
+    fn artifact_read_joins_every_turn_with_a_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let surface = |db: Option<openalpaca_storage::Database>, root: Option<&str>| {
+            let (shared, dispatcher, bus, registry) = setup();
+            for tool in super::super::builtin_tools(db.clone(), None, None) {
+                registry.register(tool).unwrap();
+            }
+            let set = main_loop_tool_set(
+                dispatcher,
+                shared,
+                bus,
+                &RoutingConfig::default(),
+                db,
+                None,
+                Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+                Arc::new(SkillCatalog::new()),
+                None,
+                1.0,
+                &registry,
+                "user1:gui",
+                &ToolContext {
+                    owner_id: Some("user1".to_string()),
+                    lane_key: Some("user1:gui".to_string()),
+                    request_workspace_root: root.map(str::to_string),
+                    ..Default::default()
+                },
+                false,
+            );
+            for (def, _) in &set.instances {
+                assert_ne!(def.name, "artifact_read", "artifact_read is offered by definition only");
+            }
+            names(&set.definitions)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let has = |names: &[String], name: &str| names.iter().any(|n| n == name);
+
+        let chat = surface(Some(db.clone()), None);
+        assert!(has(&chat, "artifact_read"), "{chat:?}");
+
+        let project = surface(Some(db.clone()), Some("/the/project"));
+        assert!(has(&project, "artifact_read"), "{project:?}");
+        for name in ["file_read", "file_list"] {
+            assert!(!has(&project, name), "{name} is the query handler's offer: {project:?}");
+        }
+
+        let no_db = surface(None, Some("/the/project"));
+        assert!(!has(&no_db, "artifact_read"), "{no_db:?}");
     }
 
     #[test]
@@ -693,6 +866,7 @@ mod tests {
             "user1:cli",
             Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             None,
+            None,
         );
         let names = names(&set.definitions);
         assert!(names.contains(&"srv__echo"), "MCP tool missing: {names:?}");
@@ -734,6 +908,90 @@ mod tests {
         assert!(per_request.get("srv__echo").is_some());
     }
 
+    /// R29's tripwire (storage design §11), the main loop's per-request half
+    /// (S1's M2): every handler the fullest main-loop surface injects per
+    /// request — the memory writers and `memory_confirm` (an attended GUI
+    /// turn), `invoke_skill` (a router), `steer_workflow` and
+    /// `queue_followup` (an active workflow, steering on) — and the memory
+    /// read tools the daemon registers globally beside the builtins say
+    /// their arguments reach no program, so the sanitizer's `../` rule stays
+    /// off them as it is off every first-party builtin. The name list says
+    /// what the walk saw: a new per-request tool lands in it.
+    #[test]
+    fn every_per_request_main_loop_tool_says_its_arguments_reach_no_program() {
+        use crate::tools::registry::ToolBackend;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let service = Arc::new(crate::memory::service::MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        let (shared, dispatcher, bus, registry) = setup();
+        let lane = format!("user1:{IN_CHAT_SOURCE}");
+        shared.register_workflow_for_lane(&lane, "task-1");
+
+        let set = main_loop_tool_set(
+            dispatcher,
+            shared,
+            bus,
+            &routing(true),
+            Some(db),
+            Some(service.clone()),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            Arc::new(SkillCatalog::new()),
+            Some(stub_router()),
+            1.0,
+            &registry,
+            &lane,
+            &ToolContext {
+                owner_id: Some("user1".to_string()),
+                lane_key: Some(lane.clone()),
+                source: Some(IN_CHAT_SOURCE.to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+
+        let mut seen: Vec<&str> = set
+            .instances
+            .iter()
+            .map(|(definition, _)| definition.name.as_str())
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![
+                "invoke_skill",
+                "memory_confirm",
+                "memory_forget",
+                "memory_store",
+                "memory_update",
+                "queue_followup",
+                "start_workflow",
+                "steer_workflow",
+                "task_status",
+            ]
+        );
+        for (definition, handler) in &set.instances {
+            assert!(
+                !handler.arguments_reach_a_program(),
+                "{} keeps the ../ rule",
+                definition.name
+            );
+        }
+        for tool in crate::tools::builtins::memory_read_tools(service) {
+            match &tool.backend {
+                ToolBackend::BuiltIn(handler) => assert!(
+                    !handler.arguments_reach_a_program(),
+                    "{} keeps the ../ rule",
+                    tool.definition.name
+                ),
+                _ => panic!("{} is not a builtin", tool.definition.name),
+            }
+        }
+    }
+
     #[test]
     fn test_invoke_skill_present_with_router() {
         let (shared, dispatcher, bus, registry) = setup();
@@ -747,6 +1005,7 @@ mod tests {
             "user1:cli",
             Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             Some(stub_router()),
+            None,
         );
         assert!(names(&set.definitions).contains(&"invoke_skill"));
         // invoke_skill is a per-request instance (start, status, invoke_skill).
@@ -755,5 +1014,176 @@ mod tests {
         let per_request = (*registry).clone();
         set.register_into(&per_request);
         assert!(per_request.get("invoke_skill").is_some());
+    }
+
+    /// Design 09 §4.1 (ruling LR13): `memory_confirm` is on the surface of an
+    /// attended turn of the GUI's or the CLI's chat (`source == "gui"`) and on
+    /// no other — not a connector lane, whose `/yes` is keyed by chat rather
+    /// than sender (G2), and not an unattended turn, where nobody can answer.
+    /// Where it is offered it prompts, like the other destructive writers.
+    #[test]
+    fn memory_confirm_is_absent_on_connector_and_unattended_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let service = Arc::new(crate::memory::service::MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        let surface = |source: &str, unattended: bool| {
+            let (shared, dispatcher, bus, registry) = setup();
+            let set = main_loop_tool_set(
+                dispatcher,
+                shared,
+                bus,
+                &RoutingConfig::default(),
+                Some(db.clone()),
+                Some(service.clone()),
+                Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+                Arc::new(SkillCatalog::new()),
+                None,
+                1.0,
+                &registry,
+                &format!("user1:{source}"),
+                &ToolContext {
+                    owner_id: Some("user1".to_string()),
+                    lane_key: Some(format!("user1:{source}")),
+                    source: Some(source.to_string()),
+                    ..Default::default()
+                },
+                unattended,
+            );
+            let offered = names(&set.definitions).contains(&"memory_confirm");
+            let instance = set
+                .instances
+                .iter()
+                .any(|(def, _)| def.name == "memory_confirm");
+            assert_eq!(offered, instance, "{source}/{unattended}");
+            assert_eq!(offered, set.memory_confirm_offered, "{source}/{unattended}");
+            (offered, set, registry)
+        };
+        let (offered, set, registry) = surface("gui", false);
+        assert!(offered, "an attended GUI/CLI chat turn offers it");
+        let per_request = (*registry).clone();
+        set.register_into(&per_request);
+        let policy = SandboxPolicy {
+            agent_id: crate::orchestrator::MAIN_LOOP_AGENT_ID.to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        assert!(
+            effective_confirmation_set(&policy, &per_request)
+                .contains(&"memory_confirm".to_string())
+        );
+        for (source, unattended) in [
+            ("gui", true),
+            ("telegram", false),
+            ("discord", false),
+            ("imessage", false),
+            ("internal", false),
+            ("cli", false),
+        ] {
+            assert!(
+                !surface(source, unattended).0,
+                "{source} (unattended: {unattended}) must not offer memory_confirm"
+            );
+        }
+        // Without a memory service, nothing memory is offered at all.
+        let (shared, dispatcher, bus, registry) = setup();
+        let set = build(
+            shared,
+            dispatcher,
+            bus,
+            &registry,
+            &routing(false),
+            None,
+            "user1:gui",
+        );
+        assert!(!set.memory_confirm_offered);
+    }
+
+    use crate::security::sandbox::effective_confirmation_set;
+    use crate::security::sandbox::SandboxPolicy;
+
+    /// Design §7, *Capabilities*: the sandbox derives the main loop's
+    /// confirmation set from the annotations of what is registered, so the
+    /// per-request instances must be registered with theirs — before this,
+    /// `register_into` registered every instance with `annotations: None` and
+    /// no memory tool could ever prompt.
+    #[test]
+    fn the_main_loop_confirmation_set_names_forget_and_update_and_not_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let service = Arc::new(crate::memory::service::MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        let (shared, dispatcher, bus, registry) = setup();
+        for tool in crate::tools::builtins::memory_read_tools(service.clone()) {
+            registry.register(tool).unwrap();
+        }
+        let set = main_loop_tool_set(
+            dispatcher,
+            shared,
+            bus,
+            &RoutingConfig::default(),
+            Some(db),
+            Some(service),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            Arc::new(SkillCatalog::new()),
+            None,
+            1.0,
+            &registry,
+            "user1:cli",
+            &ToolContext {
+                owner_id: Some("user1".to_string()),
+                lane_key: Some("user1:cli".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+        let per_request = (*registry).clone();
+        set.register_into(&per_request);
+        let policy = SandboxPolicy {
+            agent_id: crate::orchestrator::MAIN_LOOP_AGENT_ID.to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let confirmation_set = effective_confirmation_set(&policy, &per_request);
+        for name in ["memory_forget", "memory_update"] {
+            assert!(
+                confirmation_set.contains(&name.to_string()),
+                "{name} prompts: {confirmation_set:?}"
+            );
+        }
+        for name in [
+            "memory_store",
+            "memory_search",
+            "memory_read",
+            "memory_list",
+            "memory_timeline",
+            "start_workflow",
+            "task_status",
+        ] {
+            assert!(
+                !confirmation_set.contains(&name.to_string()),
+                "{name} never prompts: {confirmation_set:?}"
+            );
+        }
     }
 }

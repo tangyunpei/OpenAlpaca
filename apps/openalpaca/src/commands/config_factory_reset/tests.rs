@@ -229,22 +229,50 @@ fn the_reset_holds_the_daemon_lock_while_the_prompt_is_open() {
     );
 }
 
+/// Design §2: a factory reset does not touch memory. The notes, their control
+/// snapshots (the owner-id mapping and the tombstones `adopt` needs) and the
+/// search index survive byte for byte, beside the master key, the logs, the
+/// backups, the content directories and each project's folder under
+/// `projects/` (storage design §8).
 #[test]
-fn the_embedding_cache_and_the_master_key_survive_a_factory_reset() {
+fn the_memory_snapshots_the_index_and_the_master_key_survive_a_factory_reset() {
     let tmp = tempdir().unwrap();
     let _env = EnvSandbox::enter(tmp.path());
     assert_sandboxed(tmp.path());
     let root = home(tmp.path());
     seed_trio(&root);
     let survivors: BTreeMap<&str, &[u8]> = BTreeMap::from([
-        ("state/cache/fastembed/model.onnx", b"weights".as_slice()),
+        (
+            "state/memory-control/home-32acea7eb739b08afd959db91e46d450.json",
+            br#"{"schema":1,"partition_key":"home-32acea7eb739b08afd959db91e46d450"}"#.as_slice(),
+        ),
+        (
+            "state/cache/memory-index-v1.sqlite",
+            b"SQLite format 3\0not really".as_slice(),
+        ),
+        (
+            "memory/owners/32acea7eb739b08afd959db91e46d450/notes/00000000-0000-4000-8000-000000000001--a-note.md",
+            b"---\nschema: 1\n---\n# A note\n".as_slice(),
+        ),
         ("state/.master_key", b"key material".as_slice()),
         ("state/logs/daemon.log", b"a log line".as_slice()),
         ("state/backups/llm.toml.bak.1", b"[providers]".as_slice()),
         ("artifacts/report.md", b"# report".as_slice()),
         ("uploads/photo.png", b"\x89PNG".as_slice()),
         ("sessions/s1/log.jsonl", b"{}".as_slice()),
+        (
+            "scratch/0b6f1c2e-5a7d-4e2b-9c1a-3f4e5d6c7b8a/notes.txt",
+            b"a conversation's scratch work".as_slice(),
+        ),
         ("plugins/demo/plugin.toml", b"name = \"demo\"".as_slice()),
+        (
+            "projects/-tmp-app/project.json",
+            b"{\"version\":1}".as_slice(),
+        ),
+        (
+            "projects/-tmp-app/memory/owners/32acea7eb739b08afd959db91e46d450/notes/00000000-0000-4000-8000-000000000002--a-project-note.md",
+            b"---\nschema: 1\n---\n# A project note\n".as_slice(),
+        ),
     ]);
     for (rel, bytes) in &survivors {
         seed(&root, rel, bytes);
@@ -288,6 +316,13 @@ fn the_confirmation_names_the_root_and_what_survives() {
         "artifacts/",
         "uploads/",
         "sessions/",
+        "/tmp/oa-test-root/scratch/",
+        // Design §2: a factory reset does not touch memory, and the preview
+        // names the two `state/` entries it leaves and the notes it orphans.
+        "/tmp/oa-test-root/memory/",
+        "/tmp/oa-test-root/projects/",
+        "/tmp/oa-test-root/state/memory-control/",
+        "/tmp/oa-test-root/state/cache/memory-index-v1.sqlite",
         "state/cache/",
         ".master_key",
         "state/logs/",
@@ -298,7 +333,78 @@ fn the_confirmation_names_the_root_and_what_survives() {
             "the warning must mention {needle:?}:\n{warning}"
         );
     }
+    // Memory is files now, not rows: the database's loss is not memory's, and
+    // there is no embedding model in `state/cache/` any more.
+    for stale in ["every memory", "~1 GB", "embedding"] {
+        assert!(
+            !warning.contains(stale),
+            "the warning must not say {stale:?}:\n{warning}"
+        );
+    }
+    let untouched = warning
+        .split("Untouched:")
+        .nth(1)
+        .expect("an Untouched list");
+    for entry in [
+        "state/memory-control/",
+        "state/cache/memory-index-v1.sqlite",
+    ] {
+        assert!(
+            untouched.contains(entry),
+            "{entry} must be listed as untouched:\n{untouched}"
+        );
+    }
+    // Storage design §8: a factory reset leaves `projects/` — every project's
+    // `project.json`, and so its id, with it, which is what lets `openalpaca
+    // memory adopt` re-attach a project's notes — and the preview says so.
+    // Fixture 17's `factory_reset` step states the same in `preview_contains`.
+    let orphaned = warning
+        .split("Left on disk, and orphaned until adopted:")
+        .nth(1)
+        .and_then(|rest| rest.split("Untouched:").next())
+        .expect("an orphaned-until-adopted list");
+    assert!(
+        orphaned.contains("/tmp/oa-test-root/projects/") && orphaned.contains("project.json"),
+        "projects/ must be listed as left on disk with its project.json:\n{orphaned}"
+    );
     assert_eq!(CONFIRM_WORD, "factory-reset");
+}
+
+/// Final review R28: what the reset prints when it is done. A project's
+/// folder under `projects/` is not "unreferenced" — its `project.json` still
+/// registers the project, and its `memory/` holds the notes `openalpaca
+/// memory adopt` re-binds — so the line names each project's `artifacts/`
+/// and `uploads/` as the files nothing points at, never `projects/` itself,
+/// and says that deleting a project's folder drops its notes.
+#[test]
+fn the_closing_line_calls_a_projects_artifacts_and_uploads_unreferenced_never_its_folder() {
+    let done = reset_complete_message(Path::new("/tmp/oa-test-root/state/openalpaca.db"));
+    assert!(
+        done.starts_with(
+            "Factory reset complete. /tmp/oa-test-root/state/openalpaca.db is gone; the next \
+             daemon start builds an empty one.\n"
+        ),
+        "{done}"
+    );
+    assert!(
+        !done.contains("sessions/ and projects/"),
+        "projects/ must not be listed with the unreferenced files:\n{done}"
+    );
+    for needle in [
+        // d4-folder-5: the folders the preview lists as kept, scratch/ among
+        // them — the agents' scratch files stay, and nothing sweeps them.
+        "artifacts/, uploads/, sessions/ and scratch/",
+        "projects/<name>/artifacts/",
+        "projects/<name>/uploads/",
+        "project.json",
+        "openalpaca memory adopt",
+        "deleting a project's folder drops them",
+    ] {
+        assert!(
+            done.contains(needle),
+            "the closing line must say {needle:?}:\n{done}"
+        );
+    }
 }
 
 /// `llm.toml` and `daemon.toml` resolve through `OPENALPACA_CONFIG_DIR`, the

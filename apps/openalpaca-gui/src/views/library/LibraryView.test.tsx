@@ -8,14 +8,23 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Artifact } from "@/lib/api/artifacts";
 import { resetConnection } from "@/lib/connection";
+import { revealLabel } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
 
+import { RESULTS_EMPTY } from "./LibraryList";
 import LibraryView from "./LibraryView";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -48,6 +57,8 @@ const findings: Artifact = {
   path: "/home/.openalpaca/artifacts/2026-09-05-run/01-connector-audit-findings.md",
   project_root: null,
   rel_path: "2026-09-05-run/01-connector-audit-findings.md",
+  in_project: false,
+  openable: true,
 };
 
 const chart: Artifact = {
@@ -96,6 +107,7 @@ beforeEach(() => {
   resetConnection();
   useUiStore.setState({
     libraryKind: "All",
+    libraryResults: false,
     openArtifactId: null,
     libraryTab: "preview",
     pins: {},
@@ -204,6 +216,65 @@ describe("LibraryList — what the daemon serves", () => {
       expect(screen.getByText("spend.png")).toBeInTheDocument(),
     );
     expect(urlsFor("offset=1")).toHaveLength(1);
+  });
+});
+
+describe("LibraryList — by-products and results (storage design §13)", () => {
+  const written: Artifact = {
+    ...findings,
+    id: "art-9",
+    name: "src/main.rs",
+    kind: "code",
+    mime_type: "text/plain",
+    task_id: null,
+    task_title: null,
+    path: "/Users/dev/app/src/main.rs",
+    project_root: "/Users/dev/app",
+    rel_path: "src/main.rs",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: true,
+  };
+
+  it("lists by-products by default, asking the daemon for that side only", async () => {
+    listing([findings], 1);
+    renderView();
+
+    expect(
+      await screen.findByText("connector-audit-findings.md"),
+    ).toBeInTheDocument();
+    expect(urlsFor("in_project=false")).not.toHaveLength(0);
+    expect(urlsFor("in_project=true")).toHaveLength(0);
+  });
+
+  it("lists the files agents wrote into a project behind its chip", async () => {
+    listing([findings], 1);
+    route("in_project=true", () => json({ artifacts: [written], total: 1 }));
+    const user = userEvent.setup();
+    renderView();
+    await screen.findByText("connector-audit-findings.md");
+
+    await user.click(
+      screen.getByRole("button", { name: "Results in the project" }),
+    );
+
+    expect(await screen.findByText("src/main.rs")).toBeInTheDocument();
+    expect(
+      screen.queryByText("connector-audit-findings.md"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Results in the project" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(useUiStore.getState().libraryResults).toBe(true);
+  });
+
+  it("says no file was written into a project yet when that side is empty", async () => {
+    route("in_project=true", () => json({ artifacts: [], total: 0 }));
+    useUiStore.setState({ libraryResults: true });
+    renderView();
+
+    expect(await screen.findByText(RESULTS_EMPTY)).toBeInTheDocument();
   });
 });
 
@@ -410,5 +481,514 @@ describe("LibraryDetail", () => {
       name: /connector-audit-findings\.md/,
     });
     expect(within(row).getByLabelText("Pinned")).toBeInTheDocument();
+  });
+});
+
+describe("LibraryDetail — a file written into a project", () => {
+  const notes: Artifact = {
+    ...findings,
+    id: "art-9",
+    name: "docs/notes.md",
+    task_id: null,
+    task_title: null,
+    path: "/Users/dev/app/docs/notes.md",
+    project_root: "/Users/dev/app",
+    rel_path: "docs/notes.md",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: true,
+  };
+
+  beforeEach(() => {
+    route("in_project=true", () => json({ artifacts: [notes], total: 1 }));
+    route("/v1/artifacts/art-9/versions", () => json({ versions: [] }));
+    route("/v1/artifacts/art-9/content", () =>
+      text("# Notes\n\nKept in the project.\n"),
+    );
+    route("/v1/artifacts/art-9", () => json(notes));
+    useUiStore.setState({ openArtifactId: "art-9", libraryResults: true });
+  });
+
+  it("shows its Preview even when History was the last tab, and offers no other", async () => {
+    useUiStore.setState({ libraryTab: "history" });
+    renderView();
+
+    expect(await screen.findByText("Kept in the project.")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Preview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByRole("tab", { name: "History" })).toBeNull();
+    expect(screen.queryByText("No version history for this file.")).toBeNull();
+  });
+});
+
+describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
+  const connection = {
+    baseUrl: "http://127.0.0.1:9999",
+    token: "test-token",
+    instanceId: "7f3a1122",
+  };
+  const sentence =
+    "/Users/dev/app: this project's folder is gone or has moved; re-point the project to read its files.";
+  const marked: Artifact = {
+    ...findings,
+    id: "art-9",
+    name: "docs/notes.md",
+    task_id: null,
+    task_title: null,
+    path: "/Users/dev/app/docs/notes.md",
+    project_root: "/Users/dev/app",
+    rel_path: "docs/notes.md",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: true,
+    missing: true,
+  };
+
+  /** Whether the content route has found the file again (R37 clears the mark). */
+  let back = false;
+
+  beforeEach(() => {
+    back = false;
+    const row = () => ({ ...marked, missing: !back });
+    route("in_project=true", () => json({ artifacts: [row()], total: 1 }));
+    route("/v1/artifacts/art-9/versions", () => json({ versions: [] }));
+    route("/v1/artifacts/art-9", () => json(row()));
+    useUiStore.setState({ openArtifactId: "art-9", libraryResults: true });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.mocked(invoke).mockImplementation(async () => connection);
+  });
+
+  it("lists a marked result file with a missing tag, reads it again and drops the tag once it is back", async () => {
+    route("/v1/artifacts/art-9/content", () => {
+      back = true;
+      return text("# Notes\n\nIt is back.\n");
+    });
+    renderView();
+
+    expect(await screen.findByText("It is back.")).toBeInTheDocument();
+    expect(urlsFor("include_missing=true")).not.toHaveLength(0);
+    expect(urlsFor("/v1/artifacts/art-9/content")).toHaveLength(1);
+    // The read cleared the mark on the daemon; the rows are read again and
+    // the tag goes.
+    await waitFor(() =>
+      expect(screen.queryByText("missing")).not.toBeInTheDocument(),
+    );
+    expect(
+      requests.filter((r) => r.url.endsWith("/v1/artifacts/art-9")).length,
+    ).toBeGreaterThan(1);
+  });
+
+  it("draws the missing tag on a marked row", async () => {
+    route("/v1/artifacts/art-9/content", () =>
+      json(
+        {
+          error: {
+            code: "ARTIFACT_GONE",
+            message:
+              "artifact art-9 is gone: /Users/dev/app/docs/notes.md no longer exists",
+          },
+        },
+        410,
+      ),
+    );
+    renderView();
+
+    expect(await screen.findByText("missing")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "This file is no longer at docs/notes.md in the project. Its row is kept, and the file is shown again once it is back.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says a marked image could not be read when it does not load, never that Export or Open opens it (X14)", async () => {
+    const diagram: Artifact = {
+      ...marked,
+      name: "docs/diagram.png",
+      kind: "image",
+      mime_type: "image/png",
+      path: "/Users/dev/app/docs/diagram.png",
+      rel_path: "docs/diagram.png",
+    };
+    route("in_project=true", () => json({ artifacts: [diagram], total: 1 }));
+    route("/v1/artifacts/art-9", () => json(diagram));
+    route("/v1/artifacts/art-9/content", () =>
+      json(
+        { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
+        410,
+      ),
+    );
+    renderView();
+
+    // The browser's load is the read; jsdom loads nothing, so it is failed
+    // here as a 410 fails it.
+    fireEvent.error(await screen.findByAltText("docs/diagram.png"));
+
+    expect(
+      await screen.findByText(
+        "This file could not be read the last time it was asked for: it was not at its path in the project, or the project's folder is gone or has moved. Its row is kept, and the image is loaded again the next time this preview is opened.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Export or Open/)).not.toBeInTheDocument();
+    expect(screen.getByText("missing")).toBeInTheDocument();
+  });
+
+  it("shows the daemon's sentence when the project's folder is gone or has moved", async () => {
+    route("/v1/artifacts/art-9/content", () =>
+      json(
+        { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
+        410,
+      ),
+    );
+    renderView();
+
+    expect(await screen.findByText(sentence)).toBeInTheDocument();
+    expect(screen.queryByText(/no longer at/)).not.toBeInTheDocument();
+  });
+
+  it("toasts Reveal's refusal for a missing project's file as the shell words it", async () => {
+    vi.stubGlobal("isTauri", true);
+    route("/v1/artifacts/art-9/content", () =>
+      json(
+        { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
+        410,
+      ),
+    );
+    vi.mocked(invoke).mockImplementation(async (command: string) =>
+      command === "reveal_path" ? Promise.reject(sentence) : connection,
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(
+      await screen.findByRole("button", { name: revealLabel() }),
+    );
+
+    await waitFor(() => expect(useUiStore.getState().toast).toBe(sentence));
+  });
+});
+
+describe("LibraryDetail — Open and Reveal", () => {
+  /** What the mocked discovery command answers, as the factory above does. */
+  const connection = {
+    baseUrl: "http://127.0.0.1:9999",
+    token: "test-token",
+    instanceId: "7f3a1122",
+  };
+
+  beforeEach(() => {
+    listing([findings], 1);
+    route("/v1/artifacts/art-1/content", () => text("# Findings\n"));
+    route("/v1/artifacts/art-1", () => json(findings));
+    useUiStore.setState({ openArtifactId: "art-1" });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.mocked(invoke).mockImplementation(async () => connection);
+  });
+
+  it("opens the file through the daemon's open route, as `Reveal` used to", async () => {
+    route("/v1/files/art-1/open", () =>
+      json({ id: "art-1", status: "opened" }),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "connector-audit-findings.md opened in its default app",
+      ),
+    );
+    const open = requests.find((r) => r.url.includes("/v1/files/art-1/open"));
+    expect(open?.method).toBe("POST");
+  });
+
+  it("toasts the daemon's reason when the open route fails", async () => {
+    route("/v1/files/art-1/open", () =>
+      json(
+        {
+          error: {
+            code: "OPEN_FAILED",
+            message: "No application knows how to open this file",
+          },
+        },
+        500,
+      ),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "Could not open — No application knows how to open this file",
+      ),
+    );
+  });
+
+  it("draws no Reveal in the Vite preview, where there is no shell", async () => {
+    renderView();
+
+    expect(
+      await screen.findByRole("button", { name: "Open" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: revealLabel() }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("asks the shell to reveal the artifact's path, and toasts its refusal", async () => {
+    vi.stubGlobal("isTauri", true);
+    const refusal = `${findings.path} is not there any more, so it cannot be shown in its folder.`;
+    vi.mocked(invoke).mockImplementation(async (command: string) =>
+      command === "reveal_path" ? Promise.reject(refusal) : connection,
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(
+      await screen.findByRole("button", { name: revealLabel() }),
+    );
+
+    expect(invoke).toHaveBeenCalledWith("reveal_path", {
+      path: findings.path,
+    });
+    await waitFor(() => expect(useUiStore.getState().toast).toBe(refusal));
+    // Revealing is the shell's; nothing went to the daemon's open route.
+    expect(requests.some((r) => r.url.includes("/open"))).toBe(false);
+  });
+});
+
+describe("LibraryDetail — toasts name an agent's file escaped (d7-app-3, S6a M2)", () => {
+  const connection = {
+    baseUrl: "http://127.0.0.1:9999",
+    token: "test-token",
+    instanceId: "7f3a1122",
+  };
+  const hidden: Artifact = {
+    ...findings,
+    id: "art-h",
+    name: "\u{202E}notes\u{200B}.md",
+  };
+  const shown = "<U+202E>notes<U+200B>.md";
+
+  beforeEach(() => {
+    listing([hidden], 1);
+    route("/v1/artifacts/art-h/versions", () => json({ versions: [] }));
+    route("/v1/artifacts/art-h/content", () => text("# Notes\n"));
+    route("/v1/artifacts/art-h", () => json(hidden));
+    useUiStore.setState({ openArtifactId: "art-h" });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.mocked(invoke).mockImplementation(async () => connection);
+  });
+
+  it("says the file opened", async () => {
+    route("/v1/files/art-h/open", () =>
+      json({ id: "art-h", status: "opened" }),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        `${shown} opened in its default app`,
+      ),
+    );
+  });
+
+  it("quotes the open route's refusal", async () => {
+    route("/v1/files/art-h/open", () =>
+      json(
+        {
+          error: {
+            code: "OPEN_NOT_OFFERED",
+            message:
+              "docs/\u{202E}run\u{200B}.sh is not a kind of file OpenAlpaca opens in another app",
+          },
+        },
+        409,
+      ),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "Could not open — docs/<U+202E>run<U+200B>.sh is not a kind of file OpenAlpaca opens in another app",
+      ),
+    );
+  });
+
+  it("quotes the shell's Reveal refusal", async () => {
+    vi.stubGlobal("isTauri", true);
+    vi.mocked(invoke).mockImplementation(async (command: string) =>
+      command === "reveal_path"
+        ? Promise.reject(
+            "/w/docs/\u{202E}notes\u{200B}.md is not there any more, so it cannot be shown in its folder.",
+          )
+        : connection,
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(
+      await screen.findByRole("button", { name: revealLabel() }),
+    );
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "/w/docs/<U+202E>notes<U+200B>.md is not there any more, so it cannot be shown in its folder.",
+      ),
+    );
+  });
+
+  it("says the file was pinned", async () => {
+    route("/v1/artifacts/art-h/pin", () => json({ id: "art-h", pinned: true }));
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "☆ Pin" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(`${shown} pinned`),
+    );
+  });
+
+  it("quotes Export's failure", async () => {
+    route("/v1/files/art-h/content", () =>
+      json(
+        {
+          error: {
+            code: "ARTIFACT_GONE",
+            message:
+              "artifact art-h is gone: /w/\u{202E}notes\u{200B}.md no longer exists",
+          },
+        },
+        410,
+      ),
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Export" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "Export failed — artifact art-h is gone: /w/<U+202E>notes<U+200B>.md no longer exists",
+      ),
+    );
+  });
+});
+
+describe("LibraryDetail — Export", () => {
+  const projectFile: Artifact = {
+    ...findings,
+    id: "art-9",
+    name: "docs/notes.md",
+    task_id: null,
+    task_title: null,
+    path: "/Users/dev/app/docs/notes.md",
+    project_root: "/Users/dev/app",
+    rel_path: "docs/notes.md",
+    version: 1,
+    version_count: 0,
+    in_project: true,
+    openable: true,
+  };
+  /** The `download` name of every anchor the view clicked. */
+  let saved: string[] = [];
+  let click: { mockRestore: () => void } | null = null;
+  /** What the environment had before the test defined the two statics. */
+  let createDescriptor: PropertyDescriptor | undefined;
+  let revokeDescriptor: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    saved = [];
+    route("in_project=true", () =>
+      json({ artifacts: [projectFile], total: 1 }),
+    );
+    route("/v1/artifacts/art-9/versions", () => json({ versions: [] }));
+    route("/v1/artifacts/art-9/content", () => text("# Notes\n"));
+    route("/v1/artifacts/art-9", () => json(projectFile));
+    // Export's bytes: the files route, which S4a.15 reads through the resolver.
+    route("/v1/files/art-9/content", () => text("# Notes\n"));
+    useUiStore.setState({ openArtifactId: "art-9", libraryResults: true });
+    createDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    revokeDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    // jsdom has no object URLs; the two statics are defined for the test only.
+    Object.defineProperty(URL, "createObjectURL", {
+      value: vi.fn(() => "blob:notes"),
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      value: vi.fn(),
+      configurable: true,
+      writable: true,
+    });
+    click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        saved.push(this.download);
+      });
+  });
+
+  afterEach(() => {
+    // Only this block's spy: the module's `invoke` double keeps its answer.
+    click?.mockRestore();
+    // Put back what was there, or nothing when nothing was.
+    if (createDescriptor === undefined)
+      Reflect.deleteProperty(URL, "createObjectURL");
+    else Object.defineProperty(URL, "createObjectURL", createDescriptor);
+    if (revokeDescriptor === undefined)
+      Reflect.deleteProperty(URL, "revokeObjectURL");
+    else Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+  });
+
+  it("says an agent's file was exported with its name escaped (S6a M2)", async () => {
+    const hidden = { ...projectFile, name: "docs/\u{202E}notes\u{200B}.md" };
+    route("in_project=true", () => json({ artifacts: [hidden], total: 1 }));
+    route("/v1/artifacts/art-9", () => json(hidden));
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Export" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(
+        "docs/<U+202E>notes<U+200B>.md exported",
+      ),
+    );
+  });
+
+  it("saves a file written into the project under its own name, with no folder", async () => {
+    const user = userEvent.setup();
+    renderView();
+
+    await user.click(await screen.findByRole("button", { name: "Export" }));
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe("docs/notes.md exported"),
+    );
+    expect(saved).toEqual(["notes.md"]);
+    expect(urlsFor("/v1/files/art-9/content")).toHaveLength(1);
   });
 });

@@ -234,6 +234,12 @@ export function ListCard({
 
 export interface ListRowProps {
   name: React.ReactNode;
+  /**
+   * Wrap the name at the row's edge instead of cutting it with an ellipsis —
+   * for a name a person approves, whose cut tail could hide an escape
+   * (`lib/hidden-chars`) the row's count says is there.
+   */
+  wrapName?: boolean;
   /** Tags sit beside the name. */
   tags?: React.ReactNode;
   description?: React.ReactNode;
@@ -241,23 +247,38 @@ export interface ListRowProps {
   chips?: React.ReactNode;
   /** Mono meta pinned right of the description column. */
   meta?: React.ReactNode;
+  /**
+   * Wrap the meta within a bounded width instead of letting it widen the row
+   * — for a meta a person approves (a plugin's version on its consent row),
+   * whose long unbroken run could push the controls past the row's edge.
+   */
+  wrapMeta?: boolean;
   /** The trailing control — a `Toggle`, buttons, or nothing. */
   control?: React.ReactNode;
 }
 
 export function ListRow({
   name,
+  wrapName = false,
   tags,
   description,
   chips,
   meta,
+  wrapMeta = false,
   control,
 }: ListRowProps) {
   return (
     <div className="flex items-center gap-[12px] border-b border-line-hair-2 px-[16px] py-[13px]">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-[8px]">
-          <span className="truncate text-md font-medium text-ink">{name}</span>
+          <span
+            className={cn(
+              wrapName ? "min-w-0 wrap-anywhere" : "truncate",
+              "text-md font-medium text-ink",
+            )}
+          >
+            {name}
+          </span>
           {tags}
         </div>
         {description !== undefined && (
@@ -270,7 +291,14 @@ export function ListRow({
         )}
       </div>
       {meta !== undefined && (
-        <span className="shrink-0 font-mono text-xs text-faint">{meta}</span>
+        <span
+          className={cn(
+            "shrink-0 font-mono text-xs text-faint",
+            wrapMeta && "max-w-[12rem] wrap-anywhere",
+          )}
+        >
+          {meta}
+        </span>
       )}
       {control}
     </div>

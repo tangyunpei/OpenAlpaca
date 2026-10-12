@@ -5,11 +5,18 @@
  * a plain `DaemonStatus | undefined` prop, so no daemon-connection or
  * usage/tasks hooks need mocking to exercise its rendering.
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DaemonStatus, SessionSweep } from "@/lib/api/types";
+import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import {
@@ -17,6 +24,7 @@ import {
   DAEMON_LOG_LINES,
   StorageCard,
   homeStoreLabel,
+  projectCardRoot,
 } from "./ConnectionSection";
 
 /**
@@ -44,13 +52,73 @@ vi.mock("@/hooks/useUsage", async (importOriginal) => ({
   }),
 }));
 
-// The moved-project offer (§4.8, P-12) reads two queries of its own; this card
-// is not what those tests are about, so it is mocked to "nothing has moved".
+/**
+ * `Use` (storage design §9) asks `POST /v1/workspaces`. `choose.answer` is
+ * what the daemon answers and `choose.refusal` what it refuses with; the
+ * mutation is a spy, so a test sees what was sent.
+ */
+const choose = vi.hoisted(() => {
+  const state = {
+    answer: null as {
+      id: string;
+      root: string;
+      name: string;
+      missing: boolean;
+    } | null,
+    refusal: null as Error | null,
+  };
+  const mutate = vi.fn(
+    (
+      _path: string,
+      options?: {
+        onSuccess?: (project: NonNullable<typeof state.answer>) => void;
+        onError?: (error: Error) => void;
+      },
+    ) => {
+      if (state.refusal !== null) options?.onError?.(state.refusal);
+      else if (state.answer !== null) options?.onSuccess?.(state.answer);
+    },
+  );
+  return Object.assign(state, { mutate });
+});
+
+/**
+ * The Projects list under the card has its own tests (ProjectsCard.test.tsx).
+ * Here `projects.list` is empty unless a test fills it, so the flows behind
+ * its buttons mount only where a test opens one: `repoint` and `remove` are
+ * the writes' answers (`mutateAsync`), and `plan` is the delete's dry run.
+ */
+const projects = vi.hoisted(() => ({
+  list: [] as Array<{
+    id: string;
+    root: string;
+    name: string;
+    missing: boolean;
+  }>,
+  plan: undefined as unknown,
+  repoint: vi.fn(),
+  remove: vi.fn(),
+}));
+
 vi.mock("@/hooks/useWorkspaces", () => ({
-  useMovedProject: () => ({ moved: null, pending: false, error: null }),
-  useRebaseWorkspace: () => ({
+  useChooseProject: () => ({ mutate: choose.mutate, isPending: false }),
+  useProjects: () => ({ data: projects.list, isPending: false, error: null }),
+  useWorkspace: () => ({
+    data: undefined,
+    isPending: true,
+    error: null,
+    refetch: vi.fn(),
+  }),
+  useRepointProject: () => ({
     mutate: vi.fn(),
+    mutateAsync: projects.repoint,
     isPending: false,
+  }),
+  useDeleteProjectData: () => ({
+    mutate: vi.fn(),
+    mutateAsync: projects.remove,
+    isPending: false,
+    data: projects.plan,
     error: null,
   }),
 }));
@@ -136,6 +204,14 @@ afterEach(() => {
   connectorRows.data = [];
   shellLog.read.mockReset();
   daemon.data = undefined;
+  choose.answer = null;
+  choose.refusal = null;
+  choose.mutate.mockClear();
+  projects.list = [];
+  projects.plan = undefined;
+  projects.repoint.mockReset();
+  projects.remove.mockReset();
+  useProjectStore.setState({ path: null, id: null });
 });
 
 vi.mock("@/hooks/useTasks", () => ({
@@ -591,5 +667,244 @@ describe("while the daemon is stopped", () => {
     expect(
       screen.getByRole("button", { name: "Start daemon" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("Use (storage design §9)", () => {
+  beforeEach(() => {
+    useProjectStore.setState({ path: null, id: null });
+    useUiStore.setState({ toast: null });
+  });
+
+  it("keeps the root the daemon answered, not the text that was typed", async () => {
+    const user = userEvent.setup();
+    choose.answer = {
+      id: "0b5c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d",
+      root: "/Users/dev/repo",
+      name: "-Users-dev-repo",
+      missing: false,
+    };
+    render(<ConnectionSection />);
+
+    await user.type(
+      screen.getByLabelText("Project path"),
+      "/Users/dev/repo/src",
+    );
+    await user.click(screen.getByRole("button", { name: "Use" }));
+
+    expect(choose.mutate).toHaveBeenCalledTimes(1);
+    expect(choose.mutate.mock.calls[0]?.[0]).toBe("/Users/dev/repo/src");
+    expect(useProjectStore.getState().path).toBe("/Users/dev/repo");
+    // R22: and the project's id, which is what survives a re-point made from
+    // anywhere else.
+    expect(useProjectStore.getState().id).toBe(
+      "0b5c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d",
+    );
+    expect(screen.getByLabelText("Project path")).toHaveValue(
+      "/Users/dev/repo",
+    );
+    expect(useUiStore.getState().toast).toBe(
+      "Project set to /Users/dev/repo — new runs will use it",
+    );
+  });
+
+  it("shows the daemon's refusal as written and keeps the project the window had", async () => {
+    const user = userEvent.setup();
+    useProjectStore.setState({ path: "/Users/dev/repo" });
+    choose.refusal = new Error(
+      "/Users/dev is, contains or lies inside the OpenAlpaca home store, so it cannot be a project. Name the project directory itself",
+    );
+    render(<ConnectionSection />);
+
+    const field = screen.getByLabelText("Project path");
+    await user.clear(field);
+    await user.type(field, "/Users/dev");
+    await user.click(screen.getByRole("button", { name: "Use" }));
+
+    expect(
+      screen.getByText(
+        /so it cannot be a project\. Name the project directory itself$/,
+      ),
+    ).toBeInTheDocument();
+    expect(useProjectStore.getState().path).toBe("/Users/dev/repo");
+  });
+
+  it("names the root the daemon resolved the window's path to", () => {
+    useProjectStore.setState({ path: "/Users/dev/repo/src" });
+    daemon.data = status({ project_root: "/Users/dev/repo" });
+    render(<ConnectionSection />);
+
+    expect(screen.getByText("/Users/dev/repo")).toBeInTheDocument();
+    expect(screen.queryByText("/Users/dev/repo/src")).toBeNull();
+  });
+
+  it("says so when the window's path is in no project", () => {
+    useProjectStore.setState({ path: "/Users/dev/notes" });
+    daemon.data = status({ project_root: null });
+    render(<ConnectionSection />);
+
+    // R22: the folder may have moved (a re-point from the CLI, or by hand),
+    // where `Use` on the old path would only be refused.
+    expect(
+      screen.getByText(
+        "/Users/dev/notes is in no project: no git repository holds it and it was not chosen with Use. Its folder may have moved: Use its new folder, or Re-point… its project in the list below. If the folder is still there, press Use to make it one.",
+      ),
+    ).toBeInTheDocument();
+    // Its turns are filed with no project, so the card promises no folder
+    // under projects/.
+    expect(
+      screen.getByText(/^No project: runs are recorded without one/),
+    ).toBeInTheDocument();
+  });
+
+  it("says a run's files are kept under projects/ at home, never in the project folder", () => {
+    useProjectStore.setState({ path: "/Users/dev/repo" });
+    daemon.data = status({ project_root: "/Users/dev/repo" });
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        /kept under projects\/ in the home store \(\/home\/\.openalpaca\); nothing is written into the project folder/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/<project>\/\.openalpaca/)).toBeNull();
+  });
+});
+
+describe("projectCardRoot", () => {
+  it("names the resolved root, the stored path until the daemon answers, and flags one in no project", () => {
+    expect(projectCardRoot(null, "/r")).toEqual({
+      text: "none",
+      unresolved: false,
+    });
+    expect(projectCardRoot("/r/src", "/r")).toEqual({
+      text: "/r",
+      unresolved: false,
+    });
+    expect(projectCardRoot("/r/src", undefined)).toEqual({
+      text: "/r/src",
+      unresolved: false,
+    });
+    expect(projectCardRoot("/notes", null)).toEqual({
+      text: "/notes",
+      unresolved: true,
+    });
+  });
+});
+
+/**
+ * The Project card and the Projects list sit side by side, and a re-point or
+ * a delete from the list moves the window's project. The card's field must
+ * follow: left on the old root, `Use` would post it again — after a delete,
+ * the project's own folder is still there, so that press would register the
+ * deleted project again, empty.
+ */
+describe("the Project card follows a re-point or a delete from the list (storage design §6)", () => {
+  const REPO = {
+    id: "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b",
+    root: "/Users/dev/repo",
+    name: "-Users-dev-repo",
+    missing: false,
+  };
+  const MOVED = {
+    ...REPO,
+    root: "/Users/dev/work/repo",
+    name: "-Users-dev-work-repo",
+  };
+
+  function deletion(dryRun: boolean) {
+    return {
+      dry_run: dryRun,
+      applied: !dryRun,
+      project: REPO,
+      entries: [],
+      counts: {
+        sessions: 1,
+        messages: 2,
+        tool_calls: 0,
+        followups: 0,
+        tasks: 0,
+        spans: 0,
+        run_events: 0,
+        uploads: 0,
+        artifacts: 0,
+        memory_notes: 0,
+      },
+      kept: { uploads: 0, artifacts: 0 },
+      removed: dryRun
+        ? null
+        : { session_dirs: 1, memory_partitions: 1, project_folder: true },
+    };
+  }
+
+  beforeEach(() => {
+    useProjectStore.setState({ path: REPO.root });
+    useUiStore.setState({ toast: null });
+    daemon.data = status({ project_root: REPO.root });
+    projects.list = [REPO];
+  });
+
+  it("empties the field, drops the refusal and turns Use off once the window's project's data is deleted", async () => {
+    const user = userEvent.setup();
+    choose.refusal = new Error("no such directory: /Users/dev/rep");
+    projects.plan = deletion(true);
+    projects.remove.mockResolvedValue(deletion(false));
+    render(<ConnectionSection />);
+
+    const field = screen.getByLabelText("Project path");
+    expect(field).toHaveValue(REPO.root);
+    await user.clear(field);
+    await user.type(field, "/Users/dev/rep");
+    await user.click(screen.getByRole("button", { name: "Use" }));
+    expect(
+      screen.getByText("no such directory: /Users/dev/rep"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Delete data…" }));
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Delete data",
+      }),
+    );
+
+    await waitFor(() => expect(useProjectStore.getState().path).toBeNull());
+    expect(projects.remove).toHaveBeenCalledWith({
+      path: REPO.root,
+      dryRun: false,
+    });
+    expect(screen.getByLabelText("Project path")).toHaveValue("");
+    expect(screen.queryByText("no such directory: /Users/dev/rep")).toBeNull();
+    expect(screen.getByRole("button", { name: "Use" })).toBeDisabled();
+  });
+
+  it("puts the new root in the field once the window's project is re-pointed", async () => {
+    const user = userEvent.setup();
+    projects.repoint.mockResolvedValue({
+      old_path: REPO.root,
+      new_path: MOVED.root,
+      moved: { artifacts: 0, sessions: 1, tasks: 0, messages: 2, followups: 0 },
+      project: MOVED,
+    });
+    render(<ConnectionSection />);
+    expect(screen.getByLabelText("Project path")).toHaveValue(REPO.root);
+
+    await user.click(screen.getByRole("button", { name: "Re-point…" }));
+    const dialog = screen.getByRole("dialog");
+    await user.type(
+      within(dialog).getByLabelText("New project folder"),
+      MOVED.root,
+    );
+    const press = within(dialog).getByRole("button", { name: "Re-point" });
+    await waitFor(() => expect(press).toBeEnabled());
+    await user.click(press);
+
+    await waitFor(() =>
+      expect(useProjectStore.getState().path).toBe(MOVED.root),
+    );
+    expect(projects.repoint).toHaveBeenCalledWith({
+      from: REPO.root,
+      to: MOVED.root,
+    });
+    expect(screen.getByLabelText("Project path")).toHaveValue(MOVED.root);
   });
 });

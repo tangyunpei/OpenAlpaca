@@ -1525,6 +1525,8 @@ mod tests {
                 lane_key: None,
                 task_id: Some("task-1".to_string()),
                 agent_instance_id: Some("review_agent::b".to_string()),
+                preview: None,
+                per_call: false,
                 timestamp: Utc::now(),
             },
         );
@@ -1539,6 +1541,8 @@ mod tests {
                 lane_key: None,
                 task_id: Some("other-task".to_string()),
                 agent_instance_id: Some("review_agent::a".to_string()),
+                preview: None,
+                per_call: false,
                 timestamp: Utc::now(),
             },
         );
@@ -1601,6 +1605,8 @@ mod tests {
                 lane_key: None,
                 task_id: Some("task-1".to_string()),
                 agent_instance_id: Some("review_agent::a".to_string()),
+                preview: None,
+                per_call: false,
                 timestamp: Utc::now(),
             },
         );
@@ -2325,7 +2331,6 @@ mod tests {
             gate,
             registry,
             Some(db.clone()),
-            None,
             Arc::new(skill_catalog::SkillCatalog::new()),
             Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
             Arc::new(arc_swap::ArcSwap::from_pointee(

@@ -1,0 +1,337 @@
+{
+  "row": {
+    "id": 15,
+    "scenario": "A crash at each step of design §6's recovery table",
+    "required_outcome": "One consistent state, no duplicate"
+  },
+  "design": ["§6 Write protocol, the mutation table: create / update / archive / confirm (steps 1–4), forget (steps 1–3), and the recovery at service start for each; the workspace-move row is exercised by fixture 17", "§7a control snapshot `pending`"],
+  "loads_in": ["slice-2"],
+  "notes_for_implementer": "Every `crash_at` runs the mutation up to and including the named step and then drops the service without step 3/4 (the harness injects the stop); `restart` is the recovery at service start. Steps of the create/update row: 1 = `pending` set; 2a = the `.history/<id>/<to_rev>.md` copy written and fsynced, the note not yet renamed into place; 2 = the note written (temp, fsync, rename) and `.history` pruned; 3 = the snapshot records `to_rev` and origin and clears `pending`. Forget: 1 = tombstone appended; 2 = files deleted; 3 = index purged. Each case ends in the state the table's recovery column names; `no duplicate` means the note is listed once (never one entry per revision) and the index agrees with the file. `@from_rev` and `@to_rev` are the interrupted mutation's, which the harness knows because it planned the write. The `pending` object is checked in the §7a shape between crash and restart so the recovery reads exactly what the table says it reads.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000015-0000-4000-8000-000000000001",
+          "title": "Update target",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Update target\n\nVersion one of the body.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000015-0000-4000-8000-000000000002",
+          "title": "Archive target",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Archive target\n\nTo be archived.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000015-0000-4000-8000-000000000003",
+          "title": "Confirm target",
+          "kind": "fact",
+          "status": "candidate",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Confirm target\n\nA candidate awaiting confirmation.\n",
+          "origin": "extracted_other"
+        },
+        {
+          "id": "00000015-0000-4000-8000-000000000004",
+          "title": "Forget target",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "sources": [{ "type": "message", "id": "6001" }],
+          "body": "# Forget target\n\nTo be forgotten.\n",
+          "origin": "extracted_user"
+        },
+        {
+          "id": "00000015-0000-4000-8000-000000000005",
+          "title": "Raced target",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Raced target\n\nBefore the race.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_api": { "owner_id": "u_example_alice", "workspace": null, "surface": "user_surface", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": null, "task_id": null, "request_id": null, "source": "api" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "create_after_1",
+      "input": { "mutation": "create", "after_step": 1, "input": { "title": "Created then crashed", "body": "# Created then crashed\n\nBody.\n", "kind": "fact" } },
+      "expect": { "snapshot": { "alice_home": { "pending": { "id": "@id:create_after_1", "from_rev": null, "to_rev": "@to_rev" } } }, "notes_not_on_disk": [{ "partition": "alice_home", "id": "@id:create_after_1" }] }
+    },
+    {
+      "step": 2,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "@id:create_after_1": null } } }, "notes_not_on_disk": [{ "partition": "alice_home", "id": "@id:create_after_1" }] }
+    },
+    {
+      "step": 3,
+      "op": "list",
+      "context": "alice_api",
+      "input": {},
+      "expect": { "ids_absent": ["@id:create_after_1"] }
+    },
+    {
+      "step": 4,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "create_after_2a",
+      "input": { "mutation": "create", "after_step": "2a", "input": { "title": "Created history only", "body": "# Created history only\n\nBody.\n", "kind": "fact" } },
+      "expect": { "history_has": [{ "partition": "alice_home", "id": "@id:create_after_2a", "revision": "@to_rev" }], "notes_not_on_disk": [{ "partition": "alice_home", "id": "@id:create_after_2a" }] }
+    },
+    {
+      "step": 5,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "@id:create_after_2a": null } } }, "notes_not_on_disk": [{ "partition": "alice_home", "id": "@id:create_after_2a" }], "history_has": [{ "partition": "alice_home", "id": "@id:create_after_2a", "revision": "@to_rev" }] }
+    },
+    {
+      "step": 6,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "create_after_2",
+      "input": { "mutation": "create", "after_step": 2, "input": { "title": "Created and written", "body": "# Created and written\n\nBody.\n", "kind": "fact" } },
+      "expect": { "notes_on_disk": [{ "partition": "alice_home", "id": "@id:create_after_2" }], "snapshot": { "alice_home": { "pending": { "id": "@id:create_after_2", "from_rev": null, "to_rev": "@to_rev" }, "notes": { "@id:create_after_2": null } } } }
+    },
+    {
+      "step": 7,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "@id:create_after_2": { "revision": "@to_rev", "origin": "user" } } } } }
+    },
+    {
+      "step": 8,
+      "op": "search",
+      "context": "alice_api",
+      "input": { "query": "created and written" },
+      "expect": { "ids": ["@id:create_after_2"], "count": 1 }
+    },
+    {
+      "step": 9,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "update_after_1",
+      "input": { "mutation": "update", "after_step": 1, "input": { "id": "00000015-0000-4000-8000-000000000001", "expected_revision": "@rev:00000015-0000-4000-8000-000000000001", "action": "edit", "patch": { "body": "# Update target\n\nVersion two of the body.\n" } } },
+      "expect": { "snapshot": { "alice_home": { "pending": { "id": "00000015-0000-4000-8000-000000000001", "from_rev": "@from_rev", "to_rev": "@to_rev" } } } }
+    },
+    {
+      "step": 10,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "00000015-0000-4000-8000-000000000001": { "revision": "@from_rev", "origin": "user" } } } }, "history_absent": [{ "partition": "alice_home", "id": "00000015-0000-4000-8000-000000000001", "revision": "@to_rev" }] }
+    },
+    {
+      "step": 11,
+      "op": "read",
+      "context": "alice_api",
+      "input": { "id": "00000015-0000-4000-8000-000000000001" },
+      "expect": { "results": { "00000015-0000-4000-8000-000000000001": { "excerpt_contains": "Version one" } } }
+    },
+    {
+      "step": 12,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "update_after_2a",
+      "input": { "mutation": "update", "after_step": "2a", "input": { "id": "00000015-0000-4000-8000-000000000001", "expected_revision": "@rev:00000015-0000-4000-8000-000000000001", "action": "edit", "patch": { "body": "# Update target\n\nVersion two of the body.\n" } } },
+      "expect": { "history_has": [{ "partition": "alice_home", "id": "00000015-0000-4000-8000-000000000001", "revision": "@to_rev" }], "snapshot": { "alice_home": { "pending": { "id": "00000015-0000-4000-8000-000000000001", "from_rev": "@from_rev", "to_rev": "@to_rev" } } } }
+    },
+    {
+      "step": 13,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "00000015-0000-4000-8000-000000000001": { "revision": "@from_rev", "origin": "user" } } } }, "history_has": [{ "partition": "alice_home", "id": "00000015-0000-4000-8000-000000000001", "revision": "@to_rev" }] }
+    },
+    {
+      "step": 14,
+      "op": "search",
+      "context": "alice_api",
+      "input": { "query": "version of the body" },
+      "expect": { "ids": ["00000015-0000-4000-8000-000000000001"], "count": 1, "results": { "00000015-0000-4000-8000-000000000001": { "excerpt_contains": "Version one" } } }
+    },
+    {
+      "step": 15,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "update_after_2",
+      "input": { "mutation": "update", "after_step": 2, "input": { "id": "00000015-0000-4000-8000-000000000001", "expected_revision": "@rev:00000015-0000-4000-8000-000000000001", "action": "edit", "patch": { "body": "# Update target\n\nVersion two of the body.\n" } } },
+      "expect": { "snapshot": { "alice_home": { "pending": { "id": "00000015-0000-4000-8000-000000000001", "from_rev": "@from_rev", "to_rev": "@to_rev" }, "notes": { "00000015-0000-4000-8000-000000000001": { "revision": "@from_rev" } } } } }
+    },
+    {
+      "step": 16,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "00000015-0000-4000-8000-000000000001": { "revision": "@to_rev", "origin": "user" } } } } }
+    },
+    {
+      "step": 17,
+      "op": "search",
+      "context": "alice_api",
+      "input": { "query": "version of the body" },
+      "expect": { "ids": ["00000015-0000-4000-8000-000000000001"], "count": 1, "results": { "00000015-0000-4000-8000-000000000001": { "excerpt_contains": "Version two", "freshness": "verified" } } }
+    },
+    {
+      "step": 18,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "update_after_3",
+      "input": { "mutation": "update", "after_step": 3, "input": { "id": "00000015-0000-4000-8000-000000000001", "expected_revision": "@rev:00000015-0000-4000-8000-000000000001", "action": "edit", "patch": { "body": "# Update target\n\nVersion three of the body.\n" } } },
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "00000015-0000-4000-8000-000000000001": { "revision": "@to_rev" } } } } }
+    },
+    {
+      "step": 19,
+      "op": "restart",
+      "input": {},
+      "expect": { "index_state": "ready" }
+    },
+    {
+      "step": 20,
+      "op": "search",
+      "context": "alice_api",
+      "input": { "query": "version of the body" },
+      "expect": { "ids": ["00000015-0000-4000-8000-000000000001"], "count": 1, "results": { "00000015-0000-4000-8000-000000000001": { "excerpt_contains": "Version three" } } }
+    },
+    {
+      "step": 21,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "raced",
+      "input": { "mutation": "update", "after_step": 2, "then_external_edit": "\nAn editor wrote this after the crash.\n", "input": { "id": "00000015-0000-4000-8000-000000000005", "expected_revision": "@rev:00000015-0000-4000-8000-000000000005", "action": "edit", "patch": { "body": "# Raced target\n\nThe service's new body.\n" } } },
+      "expect": { "history_has": [{ "partition": "alice_home", "id": "00000015-0000-4000-8000-000000000005", "revision": "@to_rev" }] }
+    },
+    {
+      "step": 22,
+      "op": "restart",
+      "input": {},
+      "expect": {
+        "snapshot": { "alice_home": { "pending": null, "notes": { "00000015-0000-4000-8000-000000000005": { "origin": "external" } } } },
+        "history_has": [{ "partition": "alice_home", "id": "00000015-0000-4000-8000-000000000005", "revision": "@to_rev" }]
+      }
+    },
+    {
+      "step": 23,
+      "op": "read",
+      "context": "alice_api",
+      "input": { "id": "00000015-0000-4000-8000-000000000005" },
+      "expect": { "results": { "00000015-0000-4000-8000-000000000005": { "origin": "external", "excerpt_contains": "An editor wrote this after the crash" } } }
+    },
+    {
+      "step": 24,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "archive_after_2",
+      "input": { "mutation": "archive", "after_step": 2, "input": { "id": "00000015-0000-4000-8000-000000000002", "expected_revision": "@rev:00000015-0000-4000-8000-000000000002", "action": "archive" } },
+      "expect": { "snapshot": { "alice_home": { "pending": { "id": "00000015-0000-4000-8000-000000000002", "from_rev": "@from_rev", "to_rev": "@to_rev" } } } }
+    },
+    {
+      "step": 25,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "00000015-0000-4000-8000-000000000002": { "revision": "@to_rev", "origin": "user" } } } } }
+    },
+    {
+      "step": 26,
+      "op": "list",
+      "context": "alice_api",
+      "input": { "status": "archived" },
+      "expect": { "ids": ["00000015-0000-4000-8000-000000000002"], "count": 1 }
+    },
+    {
+      "step": 27,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "confirm_after_1",
+      "input": { "mutation": "confirm", "after_step": 1, "input": { "id": "00000015-0000-4000-8000-000000000003", "expected_revision": "@rev:00000015-0000-4000-8000-000000000003", "action": "confirm" } },
+      "expect": { "snapshot": { "alice_home": { "pending": { "id": "00000015-0000-4000-8000-000000000003", "from_rev": "@from_rev", "to_rev": "@to_rev" } } } }
+    },
+    {
+      "step": 28,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "00000015-0000-4000-8000-000000000003": { "revision": "@from_rev", "origin": "extracted_other" } } } }, "note_status": { "00000015-0000-4000-8000-000000000003": "candidate" } }
+    },
+    {
+      "step": 29,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "confirm_after_2",
+      "input": { "mutation": "confirm", "after_step": 2, "input": { "id": "00000015-0000-4000-8000-000000000003", "expected_revision": "@rev:00000015-0000-4000-8000-000000000003", "action": "confirm" } },
+      "expect": { "snapshot": { "alice_home": { "pending": { "id": "00000015-0000-4000-8000-000000000003", "from_rev": "@from_rev", "to_rev": "@to_rev" } } } }
+    },
+    {
+      "step": 30,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "pending": null, "notes": { "00000015-0000-4000-8000-000000000003": { "revision": "@to_rev", "origin": "user" } } } } }
+    },
+    {
+      "step": 31,
+      "op": "list",
+      "context": "alice_api",
+      "input": {},
+      "expect": { "ids_unordered": ["00000015-0000-4000-8000-000000000001", "00000015-0000-4000-8000-000000000003", "00000015-0000-4000-8000-000000000004", "00000015-0000-4000-8000-000000000005", "@id:create_after_2"] }
+    },
+    {
+      "step": 32,
+      "op": "crash_at",
+      "context": "alice_api",
+      "as": "forget_after_1",
+      "input": { "mutation": "forget", "after_step": 1, "input": { "targets": [{ "id": "00000015-0000-4000-8000-000000000004", "expected_revision": "@rev:00000015-0000-4000-8000-000000000004" }] } },
+      "expect": {
+        "snapshot": { "alice_home": { "tombstones": [{ "id": "00000015-0000-4000-8000-000000000004", "origin": "extracted_user", "supersedes": [], "suppressed_sources": ["message:6001"] }] } },
+        "notes_on_disk": [{ "partition": "alice_home", "id": "00000015-0000-4000-8000-000000000004" }]
+      }
+    },
+    {
+      "step": 33,
+      "op": "restart",
+      "input": {},
+      "expect": {
+        "notes_not_on_disk": [{ "partition": "alice_home", "id": "00000015-0000-4000-8000-000000000004" }],
+        "files_absent": ["part:alice_home/.history/00000015-0000-4000-8000-000000000004"],
+        "snapshot": { "alice_home": { "tombstones_count": 1, "notes": { "00000015-0000-4000-8000-000000000004": null } } }
+      }
+    },
+    {
+      "step": 34,
+      "op": "search",
+      "context": "alice_api",
+      "input": { "query": "to be forgotten", "historical": true },
+      "expect": { "ids_unordered": [], "ids_absent": ["00000015-0000-4000-8000-000000000004"] }
+    },
+    {
+      "step": 35,
+      "op": "restart",
+      "input": {},
+      "expect": { "snapshot": { "alice_home": { "tombstones_count": 1 } } }
+    }
+  ],
+  "final_state": {
+    "snapshot": { "alice_home": { "pending": null, "tombstones_count": 1 } }
+  }
+}

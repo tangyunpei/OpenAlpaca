@@ -1,0 +1,15 @@
+14c14
+< * Name:
+---
+> * Name: Track D tester
+16,17c16,17
+< * Pronouns:
+< * Timezone:
+---
+> * Pronouns: they/them (set from the CLI)
+> * Timezone: America/Los_Angeles
+37c37
+< (Anything else. Build this over time. The more you know, the better you can help -- but remember, you're learning about a person, not building a dossier. Respect the difference.)
+---
+> (Anything else. Build this over time. The more you know, the better you can help -- but remember, you're learning about a person, not building a dossier. Respect the difference.)
+\ No newline at end of file

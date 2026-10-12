@@ -1,0 +1,23 @@
+$ python3 scripts/eval/memory/compare.py  scripts/eval/memory/reports/l8-final/D-index.json scripts/eval/memory/reports/l8-final/D-excerpts.json
+candidate judge: qwen3.8:27b-mlx  judge_is_reader=true  judge_same_family=true  recall_mode=index
+baseline judge:  qwen3.8:27b-mlx  judge_is_reader=true  judge_same_family=true  recall_mode=excerpts
+candidate: scripts/eval/memory/reports/l8-final/D-index.json (system D)
+baseline:  scripts/eval/memory/reports/l8-final/D-excerpts.json (system D)
+paired questions: 469  (candidate judged 469, baseline judged 470)
+accuracy: candidate 96.6%  baseline 95.7%
+paired difference: +0.9 pp  95% CI [-0.7, +2.4]  SE 0.80 pp
+discordant pairs: 14 (3.0%): candidate-only 9, baseline-only 5, both 444
+
+per category (candidate vs baseline, point difference):
+  abstention               n=45    95.6% vs  93.3%  +2.2 pp
+  changed_facts_time       n=55    96.4% vs  92.7%  +3.6 pp
+  cross_language           n=70    95.7% vs  97.1%  -1.4 pp
+  exact_recall             n=80    98.8% vs  97.5%  +1.2 pp
+  paraphrase               n=79    94.9% vs  96.2%  -1.3 pp
+  project_procedures       n=55    96.4% vs  96.4%  +0.0 pp
+  rejected_failed_actions  n=45    97.8% vs  95.6%  +2.2 pp
+  source_conflicts         n=40    97.5% vs  95.0%  +2.5 pp
+
+gate: CI lower bound -0.7 pp > margin -5.0 pp -> PASS
+claim allowed: 'comparable measured quality' (non-inferior at the margin)
+exit 0

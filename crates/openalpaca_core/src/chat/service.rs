@@ -18,7 +18,7 @@ use arc_swap::ArcSwap;
 use chrono::Utc;
 use openalpaca_api::events::EventSource;
 use openalpaca_storage::{
-    AttachmentRef, ConversationMessage, ConversationRepository, Database, FileAsset,
+    ArtifactStore, AttachmentRef, ConversationMessage, ConversationRepository, Database, FileAsset,
     FileAssetRepository, FileAssetStatus,
 };
 use serde::{Deserialize, Serialize};
@@ -48,8 +48,9 @@ pub struct ChatService {
 /// before anything activates a session (D16), and
 /// [`ChatService::send_message`] runs it for the callers that do not come
 /// through the route. The message wording is part of the contract — the route
-/// maps `Attachment not found` to `404 ATTACHMENT_NOT_FOUND` and `Access denied
-/// to attachment` to `403 ATTACHMENT_ACCESS_DENIED`.
+/// maps `Attachment not found` to `404 ATTACHMENT_NOT_FOUND`, `Access denied
+/// to attachment` to `403 ATTACHMENT_ACCESS_DENIED` and `Not an attachment`
+/// (a result file in the project, ruling R-T8) to `422 ATTACHMENT_IN_PROJECT`.
 pub fn preflight_attachments(
     db: &Database,
     attachment_refs: &[AttachmentRef],
@@ -62,6 +63,7 @@ pub fn preflight_attachments(
                 if asset.owner_id != principal {
                     anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
                 }
+                refuse_a_project_file(db, &att_ref.file_id, principal)?;
             }
             Ok(None) => {
                 anyhow::bail!("Attachment not found: {}", att_ref.file_id);
@@ -70,6 +72,24 @@ pub fn preflight_attachments(
                 anyhow::bail!("Failed to resolve attachment {}: {}", att_ref.file_id, e);
             }
         }
+    }
+    Ok(())
+}
+
+/// The lead's ruling R-T8 (storage design §13, R37): a result file in the
+/// project — a pointer row, ST-12 — is the user's file where it stands, read
+/// with `file_read`, not an attachment. A turn that names one is refused with
+/// `artifact_read`'s sentence before its `storage_path` is read as written.
+/// `Ok` for every other row, and for an id that is not `principal`'s (the
+/// caller's own check answers that one first).
+fn refuse_a_project_file(db: &Database, file_id: &str, principal: &str) -> Result<()> {
+    if let Some(record) = ArtifactStore::new(db).get(file_id, principal)?
+        && record.in_project
+    {
+        let rel = record.rel_path.as_deref().unwrap_or(&record.name);
+        anyhow::bail!(
+            "Not an attachment: '{file_id}' is a file in the project ({rel}); read it with file_read."
+        );
     }
     Ok(())
 }
@@ -233,7 +253,9 @@ impl ChatService {
                 let delegation = response.delegation.clone();
                 // U3: one call — an all-withheld turn has an empty
                 // `attachments_used` and a non-empty `attachments_skipped`,
-                // and both are omitted from the frame when empty.
+                // and both are omitted from the frame when empty; so is
+                // `memory_used` (plan 3.3), the notes this turn delivered.
+                // The turn's continuity (design 11 §5) is always sent.
                 sink.send_done_with_attachments(
                     &response.content,
                     model,
@@ -242,7 +264,9 @@ impl ChatService {
                     duration_ms,
                     response.attachments_used,
                     response.attachments_skipped,
+                    response.memory_used,
                     delegation,
+                    response.continuity,
                 );
             }
 
@@ -405,6 +429,7 @@ impl ChatService {
                 if asset.owner_id != principal {
                     anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
                 }
+                refuse_a_project_file(&db, &att_ref.file_id, &principal)?;
                 out.push(asset);
             }
             Ok(out)
@@ -526,6 +551,65 @@ mod tests {
         assert!(resolved[0].extracted_text.is_none());
     }
 
+    /// The lead's ruling R-T8 (storage design §13, R37): a result file in
+    /// the project — a pointer row, written by R35's method — is not an
+    /// attachment. The preflight and the loader refuse it with
+    /// `artifact_read`'s sentence, before its `storage_path` is read as
+    /// written; an upload beside it still loads.
+    #[tokio::test]
+    async fn a_result_file_in_the_project_is_refused_as_an_attachment() {
+        let db = setup_db();
+        FileAssetRepository::new(&db)
+            .insert(&build_asset(
+                "a-ready",
+                FileAssetStatus::Ready,
+                Some("hello"),
+            ))
+            .unwrap();
+        let (row, _) = openalpaca_storage::ArtifactStore::new(&db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "u1",
+                project_root: "/w/app",
+                rel_path: "src/lib.rs",
+                content: b"pub fn a() {}\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .unwrap();
+        let refused = format!(
+            "Not an attachment: '{}' is a file in the project (src/lib.rs); read it with file_read.",
+            row.id
+        );
+        let refs = vec![AttachmentRef {
+            file_id: row.id.clone(),
+            caption: None,
+        }];
+
+        assert_eq!(
+            preflight_attachments(&db, &refs, "u1")
+                .unwrap_err()
+                .to_string(),
+            refused
+        );
+        assert_eq!(
+            ChatService::resolve_attachments_with_wait(db.clone(), &refs, "u1", 0, 20)
+                .await
+                .unwrap_err()
+                .to_string(),
+            refused
+        );
+
+        let upload = vec![AttachmentRef {
+            file_id: "a-ready".to_string(),
+            caption: None,
+        }];
+        assert!(preflight_attachments(&db, &upload, "u1").is_ok());
+        let resolved = ChatService::resolve_attachments_with_wait(db, &upload, "u1", 0, 20)
+            .await
+            .unwrap();
+        assert_eq!(resolved[0].file_id, "a-ready");
+    }
+
     // ── S1: real streaming ────────────────────────────────────────────
 
     use crate::chat::ChatStreamEvent;
@@ -571,6 +655,26 @@ mod tests {
     impl MessageHandler for SilentHandler {
         async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
             Ok(HandleResult::text("the whole answer".to_string()))
+        }
+    }
+
+    /// A handler whose turn compacted and was given the previous
+    /// conversation (design 11 §5).
+    struct ContinuingHandler;
+
+    #[async_trait::async_trait]
+    impl MessageHandler for ContinuingHandler {
+        async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
+            Ok(HandleResult {
+                continuity: crate::gateway::TurnContinuity {
+                    working_state_updated: true,
+                    continued_from: Some(crate::gateway::ContinuedFrom {
+                        session_id: "s-prev".to_string(),
+                        topic: "Lisbon trip".to_string(),
+                    }),
+                },
+                ..HandleResult::text("we were comparing hotels".to_string())
+            })
         }
     }
 
@@ -698,6 +802,44 @@ mod tests {
         );
         match done {
             ChatStreamEvent::Done { content, .. } => assert_eq!(content, "the whole answer"),
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// **Design 11 §5 (CQ-7).** The handler's continuity reaches the turn's
+    /// `done` through the gateway: the working state changed, and the
+    /// previous conversation it was given.
+    #[tokio::test]
+    async fn done_carries_the_handlers_continuity() {
+        let (service, streams) = service_with(Arc::new(ContinuingHandler));
+
+        let sent = service
+            .send_message(
+                "where were we?".to_string(),
+                vec![],
+                "u1",
+                None,
+                None,
+                false,
+            )
+            .expect("send");
+        let mut rx = streams.get_receiver(&sent.stream_id).expect("stream");
+
+        match drain_until_done(&mut rx, |_| {}).await {
+            ChatStreamEvent::Done {
+                working_state_updated,
+                continued_from,
+                ..
+            } => {
+                assert!(working_state_updated);
+                assert_eq!(
+                    continued_from,
+                    Some(crate::gateway::ContinuedFrom {
+                        session_id: "s-prev".to_string(),
+                        topic: "Lisbon trip".to_string(),
+                    })
+                );
+            }
             other => panic!("expected Done, got {other:?}"),
         }
     }

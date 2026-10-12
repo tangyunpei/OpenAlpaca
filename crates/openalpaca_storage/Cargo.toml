@@ -16,7 +16,6 @@ file-lock.workspace = true
 base64.workspace = true
 rand.workspace = true
 rusqlite.workspace = true
-sqlite-vec.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 sha2.workspace = true
@@ -30,3 +29,9 @@ libc.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tracing-test.workspace = true
+
+[features]
+# Test builds of the crates that depend on this one turn it on through their
+# [dev-dependencies], so `store::projects::register` refuses an unguarded home
+# store in every test binary and in no release or `cargo run` build.
+test-home-guard = []

@@ -28,10 +28,12 @@
 
 import { useLayoutEffect, useRef } from "react";
 
-import { Button } from "@/components/ui";
+import { Button, EscapedText } from "@/components/ui";
 import { useStopIntent } from "@/hooks/useConnection";
 import { cn } from "@/lib/cn";
 import { dragCarriesFiles } from "@/lib/drag";
+import { oldestOfPending } from "@/lib/confirmation-queue";
+import { escapeHiddenLine, hiddenOnCard } from "@/lib/hidden-chars";
 import { formatFileSize, type ModelEntry } from "@/lib/api/types";
 import type { ComposerMode } from "@/stores/ui";
 
@@ -85,10 +87,25 @@ export interface ComposerProps {
   // ── blocked state ─────────────────────────────────────────────────────────
   /** The tool the daemon is waiting on. */
   pendingToolName?: string;
+  /**
+   * The hidden characters the whole request holds — its card's count — which
+   * the bar says beside the name it shows (`hiddenOnCard`).
+   */
+  pendingHidden?: number;
+  /**
+   * How many prompts are pending. Approve and Deny answer the oldest; with
+   * more than one, the bar says so and which card that is.
+   */
+  pendingCount?: number;
   onApprove?: () => void;
   onDeny?: () => void;
   onAlwaysAllow?: () => void;
-  /** Disables the three answers while the POST is in flight. */
+  /**
+   * The pending approval is good for this one call only (design 09 §4.2 —
+   * `memory_confirm`'s card): *Always allow* is not offered.
+   */
+  perCall?: boolean;
+  /** Disables the answers while the POST is in flight. */
   answering?: boolean;
 
   // ── normal state ──────────────────────────────────────────────────────────
@@ -198,9 +215,12 @@ export function Composer(props: ComposerProps) {
   const {
     blocked,
     pendingToolName = "This tool",
+    pendingHidden = 0,
+    pendingCount = 1,
     onApprove,
     onDeny,
     onAlwaysAllow,
+    perCall = false,
     answering = false,
     value,
     onChange,
@@ -245,6 +265,8 @@ export function Composer(props: ComposerProps) {
   }, [value, blocked]);
 
   if (blocked) {
+    const hiddenPointer = hiddenOnCard(pendingHidden);
+    const oldest = oldestOfPending(pendingCount);
     return (
       <div className="shrink-0 border-t border-line-subtle bg-main px-[26px] pt-[14px] pb-[20px]">
         <div className="mx-auto max-w-transcript">
@@ -253,13 +275,30 @@ export function Composer(props: ComposerProps) {
               aria-hidden
               className="animate-pulse-oa-fast block h-[6px] w-[6px] shrink-0 rounded-full bg-red"
             />
-            <span className="font-mono text-xs-plus tracking-label text-amber-ink">
-              {pendingToolName} is waiting on you
+            <span className="min-w-0 font-mono text-xs-plus tracking-label wrap-anywhere text-amber-ink">
+              {/* Right above Approve: the name as the card shows it, which
+                  of several prompts Approve answers, and the whole request's
+                  count, which the card draws. */}
+              <EscapedText escaped={escapeHiddenLine(pendingToolName)} /> is
+              waiting on you
+              {oldest !== null && (
+                <>
+                  {" · "}
+                  {oldest} — its card is outlined in red
+                </>
+              )}
+              {hiddenPointer !== null && (
+                <>
+                  {" · "}
+                  <span className="text-red-ink">{hiddenPointer}</span>
+                </>
+              )}
             </span>
           </div>
 
           {/* Wraps for the same reason the composer's own row does (T2): three
-              answers side by side do not fit a half-screen window. */}
+              answers side by side do not fit a half-screen window. A per-call
+              card has two. */}
           <div className="flex flex-wrap items-center gap-[8px] rounded-3xl border border-red bg-raised p-[8px] shadow-alert">
             <Button
               variant="primaryBlock"
@@ -288,19 +327,21 @@ export function Composer(props: ComposerProps) {
                 esc
               </span>
             </button>
-            <button
-              type="button"
-              disabled={answering}
-              onClick={onAlwaysAllow}
-              className={cn(
-                "cursor-pointer rounded-lg border-none bg-transparent px-[13px] py-[11px] text-base leading-[normal] text-tertiary",
-                "transition-colors duration-[120ms] hover:text-ink",
-                "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
-                "disabled:pointer-events-none disabled:opacity-55",
-              )}
-            >
-              Always allow
-            </button>
+            {!perCall && (
+              <button
+                type="button"
+                disabled={answering}
+                onClick={onAlwaysAllow}
+                className={cn(
+                  "cursor-pointer rounded-lg border-none bg-transparent px-[13px] py-[11px] text-base leading-[normal] text-tertiary",
+                  "transition-colors duration-[120ms] hover:text-ink",
+                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue",
+                  "disabled:pointer-events-none disabled:opacity-55",
+                )}
+              >
+                Always allow
+              </button>
+            )}
           </div>
 
           <HintRow left="composer paused until answered" spend={spend} />
@@ -380,7 +421,12 @@ export function Composer(props: ComposerProps) {
             T2's composer rule: while the row can hold the textarea's floor and
             the cluster it looks exactly as the design draws it, and when it
             cannot the cluster takes a line of its own rather than squeezing
-            the message box to nothing. */}
+            the message box to nothing. On that line the cluster may shrink
+            (`min-w-0`, not `shrink-0`): a column re-opened by hand can leave
+            the line narrower than Attach, the model label and Send, and then
+            the label elides further instead of Send being drawn outside the
+            card (Track D, D4). Line breaking reads the cluster's full width,
+            so it still wraps exactly where it did. */}
         <div className="relative flex flex-wrap items-end gap-[9px] rounded-3xl border border-line bg-raised py-[7px] pr-[7px] pl-[11px] focus-within:border-line-hover">
           <textarea
             ref={textarea}
@@ -406,7 +452,7 @@ export function Composer(props: ComposerProps) {
             className="min-h-[24px] flex-1 resize-none border-none bg-transparent py-[8px] font-sans text-lg leading-[1.5] text-ink outline-none placeholder:text-faint"
           />
 
-          <div className="ml-auto flex shrink-0 items-end gap-[9px]">
+          <div className="ml-auto flex min-w-0 items-end gap-[9px]">
             {onAttachFiles !== undefined && (
               <>
                 {/* Hidden, not absent: the button is the control, and this is

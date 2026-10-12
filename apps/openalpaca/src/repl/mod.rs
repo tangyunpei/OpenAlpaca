@@ -7,7 +7,7 @@ use crate::chat_stream::{self, ChatTarget, StreamOptions, StreamResult, UsageInf
 use crate::client::DaemonClient;
 use colored::Colorize;
 use completer::ReplHelper;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 const MAX_HISTORY_ENTRIES: usize = 1000;
 
@@ -217,7 +217,10 @@ impl ReplSession {
                 // the REPL's half of L12, where the one-shot paths exit
                 // non-zero instead. On stderr, like every other error here.
                 if let Some(message) = result.failure() {
-                    eprintln!("\n{} {}", "Error:".red(), message);
+                    eprintln!(
+                        "\n{}",
+                        chat_stream::failure_line(message, std::io::stderr().is_terminal())
+                    );
                 }
                 // If delegation, poll for task completion
                 if let StreamResult::Delegation { delegation, .. } = &result

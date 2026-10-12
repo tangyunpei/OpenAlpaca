@@ -15,6 +15,17 @@
  * The type scale is the transcript's own — 15px body, headings stepped above
  * it from the existing tokens — because a chat row is not a document and a
  * model's `#` is a section marker, not a title page.
+ *
+ * **`wrapAnywhere`** is for a text someone decides on — a candidate note the
+ * owner confirms, whose escapes (`lib/hidden-chars`) are counted under it —
+ * where nothing may sit out of sight: every block wraps a run with no break
+ * opportunity anywhere, a code block wraps its lines instead of scrolling
+ * sideways behind a scrollbar macOS does not draw, and a table is drawn as
+ * its rows, one wrapping line each, its cells joined by ` · ` — a `<table>`
+ * never shrinks a column below its cells' padding, so past about 26 columns
+ * it is wider than the Note tab and its far cells scroll out of sight. Each
+ * row keeps its cells past the header's width, where a transcript's table
+ * drops them. A transcript keeps its own layout.
  */
 
 import { cn } from "@/lib/cn";
@@ -28,6 +39,11 @@ export interface MessageBodyProps {
   /** Rendered at the end of the last block — the streaming caret. */
   trailing?: React.ReactNode;
   className?: string;
+  /**
+   * Wrap every block, code included, and draw a table as its rows, one
+   * wrapping line each, every cell kept (see above).
+   */
+  wrapAnywhere?: boolean;
 }
 
 /**
@@ -49,6 +65,31 @@ function Segment({ segment }: { segment: ProseSegment }) {
   }
   if (segment.em === true) return <em>{body}</em>;
   return segment.code ? body : <span>{segment.text}</span>;
+}
+
+/** A table cell that holds no text: what `keepEveryCell` pads a row with. */
+function isEmptyCell(cell: ProseSegment[]): boolean {
+  return cell.every((segment) => segment.text === "");
+}
+
+/**
+ * One row of a table someone decides on, as a line: its cells joined by
+ * ` · `, its trailing empty cells (the header's padding among them) left
+ * off, since they hold nothing to show.
+ */
+function TableRowLine({ row }: { row: ProseSegment[][] }) {
+  let end = row.length;
+  while (end > 0 && isEmptyCell(row[end - 1] ?? [])) end -= 1;
+  return (
+    <>
+      {row.slice(0, end).map((cell, column) => (
+        <span key={column}>
+          {column > 0 && <span className="text-faint"> · </span>}
+          <Segments segments={cell} />
+        </span>
+      ))}
+    </>
+  );
 }
 
 function Segments({ segments }: { segments: ProseSegment[] }) {
@@ -77,10 +118,12 @@ export function MessageBody({
   text,
   spacing = "assistant",
   trailing,
-  className,
+  className: extra,
+  wrapAnywhere = false,
 }: MessageBodyProps) {
-  const blocks = parseProse(text);
+  const blocks = parseProse(text, { keepEveryCell: wrapAnywhere });
   const last = blocks.length - 1;
+  const className = cn(wrapAnywhere && "wrap-anywhere", extra);
 
   if (blocks.length === 0) {
     return trailing === undefined ? null : (
@@ -158,8 +201,14 @@ export function MessageBody({
                 </span>
               )}
               {/* Its own horizontal scroll: a long line is the block's
-                  problem, never the transcript's. */}
-              <pre className="m-0 overflow-x-auto rounded-md border border-line-subtle bg-code-chip px-[11px] py-[9px] font-mono text-md leading-[1.5] text-ink">
+                  problem, never the transcript's. With `wrapAnywhere` the
+                  lines wrap instead, so nothing scrolls out of sight. */}
+              <pre
+                className={cn(
+                  "m-0 overflow-x-auto rounded-md border border-line-subtle bg-code-chip px-[11px] py-[9px] font-mono text-md leading-[1.5] text-ink",
+                  wrapAnywhere && "wrap-anywhere whitespace-pre-wrap",
+                )}
+              >
                 {block.text}
                 {isLast && trailing}
               </pre>
@@ -192,6 +241,34 @@ export function MessageBody({
                 className,
               )}
             />
+          );
+        }
+
+        if (block.kind === "table" && wrapAnywhere) {
+          return (
+            <div
+              key={block.key}
+              className={cn(
+                "mb-[14px] text-base-plus leading-[1.5] text-ink",
+                className,
+              )}
+            >
+              {[block.header, ...block.rows].map((row, rowIndex) => (
+                <p
+                  key={rowIndex}
+                  data-table-row=""
+                  className={cn(
+                    "m-0 py-[4px]",
+                    rowIndex === 0
+                      ? "border-b border-line font-semibold"
+                      : "border-b border-line-subtle",
+                  )}
+                >
+                  <TableRowLine row={row} />
+                </p>
+              ))}
+              {isLast && trailing}
+            </div>
           );
         }
 

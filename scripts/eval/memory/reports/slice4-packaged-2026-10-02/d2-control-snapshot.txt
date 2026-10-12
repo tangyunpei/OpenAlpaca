@@ -1,0 +1,30 @@
+$ ls -la state/memory-control/
+total 8
+drwx------@  3 owner  wheel   96 Oct  2 21:03 .
+drwx------@ 11 owner  wheel  352 Oct  2 21:03 ..
+-rw-------@  1 owner  wheel  760 Oct  2 21:03 home-80a4c0bb8402f4b0597eae9792caa358.json
+
+### <scratch>/program/track-d/store/state/memory-control/home-80a4c0bb8402f4b0597eae9792caa358.json
+{
+    "schema": 1,
+    "partition_key": "home-80a4c0bb8402f4b0597eae9792caa358",
+    "scope": "home",
+    "owner_key": "80a4c0bb8402f4b0597eae9792caa358",
+    "owner_id": "b63cfca8-7add-4831-85d5-af990b09f4ed",
+    "root": "<scratch>/program/track-d/store/memory/owners/80a4c0bb8402f4b0597eae9792caa358",
+    "created_at": "2026-10-03T04:03:50Z",
+    "updated_at": "2026-10-03T04:03:50Z",
+    "moved_from": null,
+    "repaired_at": null,
+    "pending": null,
+    "notes": {},
+    "tombstones": [
+        {
+            "id": "8bce7aec-7229-4a50-8772-1420173d4328",
+            "origin": "user",
+            "supersedes": [],
+            "suppressed_sources": [],
+            "forgotten_at": "2026-10-03T04:03:50Z"
+        }
+    ]
+}

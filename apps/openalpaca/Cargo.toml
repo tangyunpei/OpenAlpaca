@@ -33,6 +33,11 @@ openalpaca_llm = { workspace = true }
 openalpaca_core = { workspace = true }
 toml.workspace = true
 uuid.workspace = true
+# `openalpaca persona edit`'s editor round trip: the edited text lives in a
+# named temp file that is kept on a 409 (memory redesign, plan 3.4).
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+# test-home-guard: store::projects::register refuses an unguarded home store in
+# this crate's test builds (storage design, Stage 1).
+openalpaca_storage = { workspace = true, features = ["test-home-guard"] }

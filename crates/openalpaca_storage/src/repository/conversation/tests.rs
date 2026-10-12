@@ -199,11 +199,13 @@ fn test_update_summary_optimistic_success() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);
 
-    repo.get_or_create_active_session("user1:gui", "gui", None).unwrap();
+    let session = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
 
     // Update with correct version (0)
     let ok = repo
-        .update_summary_optimistic("user1:gui", 0, "Test summary", 42)
+        .update_working_state(&session.id, 0, "Test summary", 42)
         .unwrap();
     assert!(ok);
 
@@ -218,17 +220,19 @@ fn test_update_summary_optimistic_conflict() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);
 
-    repo.get_or_create_active_session("user1:gui", "gui", None).unwrap();
+    let session = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
 
     // First update succeeds
     assert!(
-        repo.update_summary_optimistic("user1:gui", 0, "Summary v1", 10)
+        repo.update_working_state(&session.id, 0, "Summary v1", 10)
             .unwrap()
     );
 
     // Second update with stale version (0) fails
     let ok = repo
-        .update_summary_optimistic("user1:gui", 0, "Summary v2", 20)
+        .update_working_state(&session.id, 0, "Summary v2", 20)
         .unwrap();
     assert!(!ok);
 
@@ -239,13 +243,193 @@ fn test_update_summary_optimistic_conflict() {
     assert_eq!(last_id, 10);
 }
 
+/// A working state is written to the session it was computed for (design 11
+/// §2): after "new chat" the write still lands on the archived conversation,
+/// and the lane's new session — at the same version 0 — is left empty.
+#[test]
+fn the_working_state_write_addresses_its_session_not_the_lane() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let first = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    let second = repo.create_session("user1:gui", "gui", None, None).unwrap();
+
+    assert!(
+        repo.update_working_state(&first.id, 0, "{\"v\":1}", 7)
+            .unwrap()
+    );
+
+    let first = repo.get_session(&first.id).unwrap().unwrap();
+    assert_eq!(first.status, "archived");
+    assert_eq!(first.working_state, "{\"v\":1}");
+    assert_eq!(first.working_state_version, 1);
+    assert_eq!(first.working_state_through, 7);
+    assert!(first.working_state_updated_at.is_some());
+
+    let second = repo.get_session(&second.id).unwrap().unwrap();
+    assert_eq!(second.status, "active");
+    assert_eq!(second.working_state, "");
+    assert_eq!(second.working_state_version, 0);
+    assert_eq!(second.working_state_through, 0);
+}
+
+/// The close records the episode note it projected (design 11 §2) on the
+/// session it closed — archived or not — and nowhere else.
+#[test]
+fn the_episode_note_id_is_written_to_its_session() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let first = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    assert_eq!(first.episode_note_id, None);
+    let second = repo.create_session("user1:gui", "gui", None, None).unwrap();
+
+    repo.set_episode_note_id(&first.id, "55e811b6-3220-4758-a47b-034bd1023f38")
+        .unwrap();
+
+    let first = repo.get_session(&first.id).unwrap().unwrap();
+    assert_eq!(first.status, "archived");
+    assert_eq!(
+        first.episode_note_id.as_deref(),
+        Some("55e811b6-3220-4758-a47b-034bd1023f38")
+    );
+    let second = repo.get_session(&second.id).unwrap().unwrap();
+    assert_eq!(second.episode_note_id, None);
+}
+
+/// A history clear forgets the session's conversation summaries (LQ4), so
+/// the session stops naming the one last projected — by either clear.
+#[test]
+fn a_history_clear_forgets_the_episode_note_id() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let note = "55e811b6-3220-4758-a47b-034bd1023f38";
+
+    let first = repo.create_session("user1:gui", "gui", None, None).unwrap();
+    repo.set_episode_note_id(&first.id, note).unwrap();
+    repo.clear_summary_for_session(&first.id).unwrap();
+    assert_eq!(
+        repo.get_session(&first.id)
+            .unwrap()
+            .unwrap()
+            .episode_note_id,
+        None
+    );
+
+    repo.set_episode_note_id(&first.id, note).unwrap();
+    repo.clear_summary("user1:gui").unwrap();
+    assert_eq!(
+        repo.get_session(&first.id)
+            .unwrap()
+            .unwrap()
+            .episode_note_id,
+        None
+    );
+}
+
+/// Design 11 §4 (b), owner decision CQ-5: a conversation carries the
+/// previous one's state unless it was started fresh, and a fresh start is
+/// stored with the row.
+#[test]
+fn a_session_started_fresh_is_stored_as_not_inheriting() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let implicit = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    assert!(implicit.inherit);
+    let new_chat = repo.create_session("user1:gui", "gui", None, None).unwrap();
+    assert!(new_chat.inherit);
+    let fresh = repo
+        .create_session_inheriting("user1:gui", "gui", None, None, false)
+        .unwrap();
+    assert!(!fresh.inherit);
+    assert!(!repo.get_session(&fresh.id).unwrap().unwrap().inherit);
+    assert_eq!(
+        repo.get_active_session_for_lane("user1:gui")
+            .unwrap()
+            .unwrap()
+            .id,
+        fresh.id
+    );
+}
+
+/// Design 11 §4 (b): the conversation a new one continues from is the
+/// lane's newest archived session — the last one closed, not the last one
+/// created — bound to the same workspace, `NULL` matching `NULL`; never an
+/// older one, never another lane's, never the active one.
+#[test]
+fn the_previous_session_is_the_lanes_last_closed_one_in_the_same_workspace() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let lane = "user1:gui";
+
+    let a = repo.create_session(lane, "gui", None, Some("a")).unwrap();
+    let p = repo
+        .create_session(lane, "gui", Some("/p"), Some("p"))
+        .unwrap();
+    let b = repo.create_session(lane, "gui", None, Some("b")).unwrap();
+    let now = repo.create_session(lane, "gui", None, Some("now")).unwrap();
+    let elsewhere = repo
+        .create_session("user1:cli", "cli", None, Some("other lane"))
+        .unwrap();
+    repo.create_session("user1:cli", "cli", None, None).unwrap();
+    // `a` was closed last, although it was created first.
+    let ended_at = |id: &str, at: &str| {
+        db.with_connection(|c| {
+            c.execute(
+                "UPDATE session SET ended_at = ?1 WHERE id = ?2",
+                rusqlite::params![at, id],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+    };
+    ended_at(&b.id, "2026-09-28 10:00:00");
+    ended_at(&a.id, "2026-09-28 11:00:00");
+    ended_at(&p.id, "2026-09-28 09:00:00");
+    ended_at(&elsewhere.id, "2026-09-28 13:00:00");
+
+    let previous = |workspace: Option<&str>| {
+        repo.previous_session(lane, workspace)
+            .unwrap()
+            .map(|s| s.title)
+    };
+    assert_eq!(previous(None).as_deref(), Some("a"), "the last one closed");
+    assert_eq!(previous(Some("/p")).as_deref(), Some("p"));
+    assert_eq!(
+        previous(Some("/q")),
+        None,
+        "no conversation on that project"
+    );
+    ended_at(&b.id, "2026-09-28 12:00:00");
+    assert_eq!(
+        previous(None).as_deref(),
+        Some("b"),
+        "only the newest: `a` is not read in its place"
+    );
+    assert_ne!(previous(None).as_deref(), Some(now.title.as_str()));
+    assert_ne!(
+        previous(None).as_deref(),
+        Some("other lane"),
+        "another lane's is never read"
+    );
+}
+
 #[test]
 fn test_clear_summary() {
     let db = test_db();
     let repo = ConversationRepository::new(&db);
 
-    repo.get_or_create_active_session("user1:gui", "gui", None).unwrap();
-    repo.update_summary_optimistic("user1:gui", 0, "Some summary", 50)
+    let session = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    repo.update_working_state(&session.id, 0, "Some summary", 50)
         .unwrap();
     repo.increment_message_count("user1:gui").unwrap();
 
@@ -1191,4 +1375,265 @@ fn message_counts_by_source_ignores_unattributed_rows() {
         .message_counts_by_source_since("2000-01-01 00:00:00")
         .unwrap();
     assert!(counts.is_empty(), "an unattributed row counts for nobody");
+}
+
+// ── Learning v2 (design 09 §1.2, §1.3) ──────────────────────────────────
+
+fn learning_row(
+    repo: &ConversationRepository<'_>,
+    session: &str,
+    role: &str,
+    content: &str,
+    request_id: Option<&str>,
+    workspace_root: Option<&str>,
+) -> i64 {
+    repo.insert_with_structured(
+        &ConversationMessage {
+            lane_key: "user:gui".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            source: Some("gui".to_string()),
+            session_id: Some(session.to_string()),
+            request_id: request_id.map(str::to_string),
+            workspace_root: workspace_root.map(str::to_string),
+            ..Default::default()
+        },
+        r#"{"v":1,"parts":[{"type":"document","extracted_text":"THE ATTACHMENT"}]}"#,
+        "[Attachments: notes.txt]",
+    )
+    .unwrap()
+}
+
+/// The window is the session's rows past the cursor, in id order, and it
+/// carries the turn's id and project root — and nothing that holds an
+/// attachment's text (U2).
+#[test]
+fn the_learning_window_reads_rows_after_the_cursor_in_id_order() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let other = repo.create_session("user:cli", "cli", None, None).unwrap();
+    let first = learning_row(&repo, &session.id, "user", "first", Some("r1"), Some("/p"));
+    let second = learning_row(&repo, &session.id, "assistant", "second", Some("r1"), None);
+    learning_row(&repo, &other.id, "user", "elsewhere", Some("r9"), None);
+    let third = learning_row(&repo, &session.id, "user", "third", None, None);
+
+    let window = repo.learning_window(&session.id, first, 10).unwrap();
+    assert_eq!(
+        window.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![second, third]
+    );
+    assert_eq!(window[0].role, "assistant");
+    assert_eq!(window[0].content, "second");
+    assert_eq!(window[0].request_id.as_deref(), Some("r1"));
+    assert_eq!(window[1].request_id, None);
+    assert!(
+        window.iter().all(|r| !r.content.contains("THE ATTACHMENT")),
+        "the window reads content, never content_json"
+    );
+
+    let all = repo.learning_window(&session.id, 0, 10).unwrap();
+    assert_eq!(all[0].workspace_root.as_deref(), Some("/p"));
+    assert_eq!(
+        repo.learning_window(&session.id, 0, 1).unwrap().len(),
+        1,
+        "limit binds"
+    );
+}
+
+/// Context rows come from before the cursor: the newest ones, in id order.
+#[test]
+fn learning_rows_before_reads_the_newest_rows_at_or_before_an_id() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let ids: Vec<i64> = (0..5)
+        .map(|i| {
+            learning_row(
+                &repo,
+                &session.id,
+                "user",
+                &format!("m{i}"),
+                Some("r"),
+                None,
+            )
+        })
+        .collect();
+    let rows = repo.learning_rows_before(&session.id, ids[3], 2).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![ids[2], ids[3]]
+    );
+}
+
+/// A suggestion's cited `message` sources, read by id (design 09 §4.2 rule
+/// 5): the rows that still exist, in id order, with the learning columns and
+/// never an attachment's text; an empty list reads nothing.
+#[test]
+fn learning_rows_by_ids_reads_the_cited_rows_that_exist() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let a = learning_row(&repo, &session.id, "user", "typed", Some("r1"), None);
+    let b = learning_row(&repo, &session.id, "assistant", "answer", Some("r1"), None);
+    let rows = repo.learning_rows_by_ids(&[b, 999_999, a]).unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a, b]);
+    assert_eq!(rows[0].role, "user");
+    assert_eq!(rows[0].request_id.as_deref(), Some("r1"));
+    assert!(rows.iter().all(|r| !r.content.contains("THE ATTACHMENT")));
+    assert!(repo.learning_rows_by_ids(&[]).unwrap().is_empty());
+}
+
+/// The two new columns round-trip through every message read, and stay off
+/// the wire: `GET /v1/chat/history` serializes this struct directly.
+#[test]
+fn request_id_and_workspace_root_round_trip_and_stay_off_the_wire() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    learning_row(
+        &repo,
+        &session.id,
+        "user",
+        "hello",
+        Some("req-1"),
+        Some("/repo"),
+    );
+    let messages = repo.list_by_session(&session.id, 10, 0).unwrap();
+    assert_eq!(messages[0].request_id.as_deref(), Some("req-1"));
+    assert_eq!(messages[0].workspace_root.as_deref(), Some("/repo"));
+
+    let wire = serde_json::to_value(&messages[0]).unwrap();
+    assert!(wire.get("request_id").is_none(), "{wire}");
+    assert!(wire.get("workspace_root").is_none(), "{wire}");
+}
+
+/// Design §1.3 *Lifecycle*: `delete_session` deletes the cursor row in its
+/// existing transaction.
+#[test]
+fn deleting_a_session_deletes_its_cursor() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let keep = repo.create_session("user:cli", "cli", None, None).unwrap();
+    let cursors = crate::repository::LearningCursorRepository::new(&db);
+    assert!(cursors.advance_cas(&session.id, 7, 0).unwrap());
+    assert!(cursors.advance_cas(&keep.id, 3, 0).unwrap());
+
+    assert!(repo.delete_session(&session.id).unwrap());
+    let rows: Vec<String> = db
+        .with_connection(|c| {
+            Ok(c.prepare("SELECT session_id FROM learning_cursor")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .unwrap();
+    assert_eq!(rows, vec![keep.id]);
+}
+
+/// Deleting or clearing a conversation forgets its summaries (design 09
+/// §13.3): what the route reads first is every message id the session
+/// holds, in id order — and no other session's.
+#[test]
+fn message_ids_lists_every_row_of_one_session() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let other = repo.create_session("user:cli", "cli", None, None).unwrap();
+    let a = learning_row(&repo, &session.id, "user", "typed", Some("r1"), None);
+    learning_row(&repo, &other.id, "user", "elsewhere", Some("r2"), None);
+    let b = learning_row(&repo, &session.id, "assistant", "answer", Some("r1"), None);
+    let c = learning_row(&repo, &session.id, "assistant", "a notice", None, None);
+    assert_eq!(repo.message_ids(&session.id).unwrap(), vec![a, b, c]);
+    assert!(repo.message_ids("no-such-session").unwrap().is_empty());
+}
+
+fn session_title(repo: &ConversationRepository<'_>, id: &str) -> String {
+    repo.get_session(id).unwrap().unwrap().title
+}
+
+/// G5 (Round G): a turn names only an untitled conversation. The guard is
+/// the statement's own, so a rename that lands between a turn's read of the
+/// session and its write survives, and a second title never replaces the
+/// first.
+#[test]
+fn set_title_if_empty_names_only_an_untitled_session() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let untitled = repo.create_session("user:gui", "gui", None, None).unwrap();
+    assert!(
+        repo.set_title_if_empty(&untitled.id, "Plan pasta night")
+            .unwrap()
+    );
+    assert_eq!(session_title(&repo, &untitled.id), "Plan pasta night");
+    assert!(
+        !repo
+            .set_title_if_empty(&untitled.id, "Something else")
+            .unwrap()
+    );
+    assert_eq!(session_title(&repo, &untitled.id), "Plan pasta night");
+
+    let renamed = repo.create_session("user:cli", "cli", None, None).unwrap();
+    assert!(
+        repo.update_session(&renamed.id, Some("My own name"), None)
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .set_title_if_empty(&renamed.id, "Plan pasta night")
+            .unwrap()
+    );
+    assert_eq!(session_title(&repo, &renamed.id), "My own name");
+
+    assert!(!repo.set_title_if_empty("no-such-session", "x").unwrap());
+}
+
+/// G5: the title is read from the first of the session's own user rows that
+/// names one — never an assistant row, never another session's, never a
+/// follow-up the daemon re-entered (source `internal`), and never the
+/// `display_text` an attachment turn carries.
+#[test]
+fn title_from_user_rows_reads_the_first_user_row_that_names_one() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.create_session("user:gui", "gui", None, None).unwrap();
+    let other = repo.create_session("user:cli", "cli", None, None).unwrap();
+    learning_row(&repo, &other.id, "user", "Elsewhere entirely", None, None);
+    learning_row(
+        &repo,
+        &session.id,
+        "assistant",
+        "Hello, how can I help?",
+        None,
+        None,
+    );
+    learning_row(&repo, &session.id, "user", "/status", None, None);
+    learning_row(&repo, &session.id, "user", "", None, None);
+    repo.insert(&ConversationMessage {
+        lane_key: "user:gui".to_string(),
+        role: "user".to_string(),
+        content: "Check the build again tomorrow and report back".to_string(),
+        source: Some("internal".to_string()),
+        session_id: Some(session.id.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    learning_row(&repo, &session.id, "user", "Plan pasta night", None, None);
+    learning_row(&repo, &session.id, "user", "And dessert?", None, None);
+
+    let sentence = |content: &str| {
+        (!content.is_empty() && !content.starts_with('/')).then(|| content.to_string())
+    };
+    assert_eq!(
+        repo.title_from_user_rows(&session.id, sentence)
+            .unwrap()
+            .as_deref(),
+        Some("Plan pasta night")
+    );
+    assert_eq!(
+        repo.title_from_user_rows("no-such-session", sentence)
+            .unwrap(),
+        None
+    );
 }

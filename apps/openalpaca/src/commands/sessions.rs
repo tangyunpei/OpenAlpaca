@@ -10,10 +10,11 @@
 //!
 //! Two flags, and they pull in opposite directions on purpose:
 //!   * `--workspace <path>` **narrows** to one project. The path is resolved
-//!     the same way the daemon resolves a turn's `x-workspace-path` — up to the
-//!     nearest `.openalpaca`/`.git` — so `--workspace .` works from anywhere
-//!     inside a repository, and a path under no project marker is an error
-//!     rather than a filter that silently matches nothing.
+//!     the same way the daemon resolves a turn's `x-workspace-path` — to the
+//!     nearest folder at or above it that is a registered project's root or
+//!     holds `.git` — so `--workspace .` works from anywhere inside a
+//!     repository, and a path in no project is an error rather than a filter
+//!     that silently matches nothing.
 //!   * `--all` **widens** past the lane the CLI and the GUI share (both talk on
 //!     `{local_user}:gui`) to every lane the daemon holds, connectors included.
 //!
@@ -95,7 +96,9 @@ struct MeResponse {
     default_lane_key: String,
 }
 
-/// `""` is what an unrenamed conversation carries; never print a blank cell.
+/// `""` is what a conversation nothing has named yet carries — the daemon
+/// names one from its first sentence (G5), or a rename does; never print a
+/// blank cell.
 fn display_title(title: &str) -> &str {
     if title.trim().is_empty() {
         "(untitled)"
@@ -184,19 +187,31 @@ pub(crate) fn lane_source(lane_key: &str) -> Option<&str> {
 ///
 /// The same resolver a turn's `x-workspace-path` goes through (R22), so the
 /// value compared here is the one `session.workspace_id` holds. A path under
-/// no project marker — or one that resolves to the home store — has no project
+/// no project — no git repository, no chosen folder, or the home store — has no project
 /// root, and saying so beats filtering on a path nothing can match.
+///
+/// A root a project records is handed to the resolver as written
+/// (`memory::named_directory`, ST-23): a project whose folder is gone,
+/// renamed by case only or moved with a link left at its old path still
+/// resolves to that project, never to what the root now reaches. Any other
+/// path is canonicalized first; an absolute one that is not there any more
+/// is handed over as written (R23) — a path inside a missing project's root
+/// still resolves to that project (ST-7). A relative one that is not there
+/// names nothing.
 pub(crate) fn resolve_workspace_filter(path: &str) -> Result<String> {
-    let absolute = std::path::Path::new(path)
-        .canonicalize()
-        .with_context(|| format!("No such directory: {path}"))?;
+    let written = std::path::Path::new(path);
+    let absolute = match super::memory::named_directory(written) {
+        Ok(named) => named,
+        Err(_) if written.is_absolute() => written.to_path_buf(),
+        Err(e) => return Err(e).with_context(|| format!("No such directory: {path}")),
+    };
     openalpaca_core::memory::scope_context::MemoryScopeContext::for_request(Some(
         &absolute.to_string_lossy(),
     ))
     .request_workspace_root
     .ok_or_else(|| {
         anyhow::anyhow!(
-            "{} is not inside a project — conversations are bound to a root marked by .openalpaca or .git",
+            "{} is not inside a project — conversations are bound to a git repository or a folder chosen as a project",
             absolute.display()
         )
     })

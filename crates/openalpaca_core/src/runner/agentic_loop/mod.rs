@@ -14,11 +14,11 @@ pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
 // Internal re-exports so the core loop and tests can access submodule items
 use backend::LlmBackend;
 pub(crate) use context::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
-use tool_helpers::{
-    format_tool_error, format_tool_error_with_hint, head_tail_tool_result, truncate_tool_result_to,
-};
+pub(crate) use tool_helpers::MAX_TOOL_RESULT_SIZE;
+use crate::utils::text::head_tail;
+use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result_to};
 #[cfg(test)]
-use tool_helpers::{MAX_TOOL_RESULT_SIZE, truncate_tool_result};
+use tool_helpers::truncate_tool_result;
 
 use chrono::Utc;
 use crate::runner::steering::SteeringMsg;
@@ -66,6 +66,9 @@ struct LoopState {
     /// V3: the last tool result that was an error, so a turn that ends with
     /// nothing can say what it last tripped over.
     last_tool_error: Option<String>,
+    /// Design 11 §3.3: the last working state a compaction wrote, and its
+    /// boundary in the list the loop was handed.
+    working_state: Option<(crate::orchestrator::working_state::WorkingState, usize)>,
 }
 
 impl LoopState {
@@ -81,6 +84,7 @@ impl LoopState {
             max_tokens_retries: 0,
             last_cost: 0.0,
             last_tool_error: None,
+            working_state: None,
         }
     }
 
@@ -97,6 +101,7 @@ impl LoopState {
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
             last_tool_error: self.last_tool_error.clone(),
+            working_state: self.working_state.clone(),
         }
     }
 
@@ -117,6 +122,7 @@ impl LoopState {
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
             last_tool_error: self.last_tool_error.clone(),
+            working_state: self.working_state.clone(),
         }
     }
 }
@@ -177,7 +183,12 @@ pub async fn run_agentic_loop_routed(
         task_id: task_id.map(|s| s.to_string()),
     };
     run_agentic_loop_inner(
-        LlmBackend::Router { router, context, compaction_model: config.compaction_model.clone(), fallback_models: config.fallback_models.clone() },
+        LlmBackend::Router {
+            router,
+            context,
+            writer: config.writer.clone(),
+            fallback_models: config.fallback_models.clone(),
+        },
         initial_messages,
         tools,
         config,
@@ -273,7 +284,7 @@ fn model_visible_result(
     // is a rule about the *model's* copy, and it holds whether or not the log
     // spilled the full bytes behind it.
     if !ok {
-        return head_tail_tool_result(result_text.to_string(), config.tool_result_inline_bytes);
+        return head_tail(result_text, config.tool_result_inline_bytes);
     }
     match spill_ref {
         Some(rel) => spill_stub(result_text.len(), &spill_preview(result_text), rel),
@@ -635,16 +646,44 @@ async fn run_agentic_loop_core(
                 });
 
                 let compactor = crate::prompt_ctx::compaction::GraduatedCompactor::new(
-                    budget, &backend, &backend,
+                    budget,
+                    &backend,
+                    config.writer.max_chars,
                 );
+                // Design 11 §3.3: the state the older messages are folded
+                // into — this loop's last one, else the one it was handed
+                // with the rows behind the list that it does not cover
+                // (§3.2's cursor, rev 1.2), read first. This loop's own state
+                // already covers them.
+                let (previous, behind) = match &state.working_state {
+                    Some((written, _)) => (Some(written), &[][..]),
+                    None => (
+                        config.working_state.as_deref(),
+                        config
+                            .working_state_cursor
+                            .as_ref()
+                            .map_or(&[][..], |cursor| cursor.behind.as_slice()),
+                    ),
+                };
                 let report = compactor
                     .compact(
                         Arc::make_mut(&mut messages),
                         config.context_tail_keep,
                         cancel_token.clone(),
+                        previous,
+                        behind,
                     )
                     .instrument(compaction_span.clone())
                     .await;
+                // Its boundary never goes back: a later compaction's is
+                // counted in a list the earlier ones already shortened.
+                if let Some((written, boundary)) = report.working_state.clone() {
+                    let boundary = match &state.working_state {
+                        Some((_, earlier)) => boundary.max(*earlier),
+                        None => boundary,
+                    };
+                    state.working_state = Some((written, boundary));
+                }
 
                 compaction_span.in_scope(|| {
                     tracing::info!(
@@ -683,8 +722,20 @@ async fn run_agentic_loop_core(
                         "messages_before": report.messages_before,
                         "messages_after": report.messages_after,
                         "messages_discarded": report.messages_discarded,
-                        "memories_extracted": report.memories_extracted,
                         "tiers_applied": format!("{:?}", report.tiers_applied),
+                        // Design 11 §6, CQ-8: the state this compaction wrote
+                        // (null when it wrote none) and the message row it
+                        // covers through (null outside the main loop), so a
+                        // replay splices the state instead of a bare note.
+                        "working_state": report
+                            .working_state
+                            .as_ref()
+                            .map(|(written, _)| json!(written))
+                            .unwrap_or(Value::Null),
+                        "state_through": match (&report.working_state, &state.working_state, &config.working_state_cursor) {
+                            (Some(_), Some((_, boundary)), Some(cursor)) => json!(cursor.after(*boundary)),
+                            _ => Value::Null,
+                        },
                         "cumulative_dropped_tokens": cumulative_dropped_tokens,
                         "dropped_from_seq": Value::Null,
                         "summary_msg_id": Value::Null,
@@ -700,7 +751,6 @@ async fn run_agentic_loop_core(
                             * 100.0,
                         messages_before: report.messages_before,
                         messages_after: report.messages_after,
-                        memories_extracted: report.memories_extracted,
                         messages_discarded: report.messages_discarded,
                         summary_tokens: report.initial_tokens
                             .saturating_sub(report.final_tokens),
@@ -1046,10 +1096,12 @@ async fn run_agentic_loop_core(
                         .session_log
                         .as_ref()
                         .map(|log| log.session_id().to_string());
-                    // The same handle, for the one tool that writes into the
-                    // log before it acts: `file_write`'s pre-edit image
-                    // (§5.7). Set from `config` so the id and the handle can
-                    // never name two different sessions.
+                    // The same handle, for the tools that write into the log
+                    // before they act: `file_write` and `file_edit` copy a
+                    // project file they replace or edit into
+                    // `sessions/<id>/snapshots/` first (`pre_edit.rs`, R46).
+                    // Set from `config` so the id and the handle can never
+                    // name two different sessions.
                     effective_ctx.session_log = config.session_log.clone();
 
                     // §5.5: the call is announced before dispatch, so a

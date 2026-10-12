@@ -10,8 +10,8 @@ pub mod feedback;
 pub mod file_asset;
 pub mod followup;
 pub mod identity;
+pub mod learning_cursor;
 pub mod llm_usage;
-pub mod memory;
 pub mod orchestrator_latency;
 pub mod preference;
 pub mod skill_execution;
@@ -34,8 +34,8 @@ pub use followup::{
     RecoveredSteering,
 };
 pub use identity::IdentityRepository;
+pub use learning_cursor::{LearningCursor, LearningCursorRepository};
 pub use llm_usage::LlmUsageRepository;
-pub use memory::MemoryRepository;
 pub use orchestrator_latency::OrchestratorLatencyRepository;
 pub use preference::PreferenceRepository;
 pub use skill_execution::{SkillExecutionRepository, resolve_skill_key};

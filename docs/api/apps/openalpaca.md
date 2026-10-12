@@ -28,7 +28,9 @@
 | `openalpaca sessions` | List the conversations a lane holds (plan §5.7) | `apps/openalpaca/src/commands/sessions.rs` |
 | `openalpaca plugin` | Manage plugins (list, approve, deny, enable, disable, config) | `apps/openalpaca/src/commands/plugin.rs` |
 | `openalpaca ext` | Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove) | `apps/openalpaca/src/commands/ext.rs` |
-| `openalpaca store` | Manage the content store (rebase a moved project, purge one you are done with) | `apps/openalpaca/src/commands/store.rs` |
+| `openalpaca store` | Manage projects (list them, re-point a moved one, delete one's data) | `apps/openalpaca/src/commands/store.rs` |
+| `openalpaca persona` | Show or edit the persona documents (USER.md) through the daemon | `apps/openalpaca/src/commands/persona.rs` |
+| `openalpaca memory` | Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt) | `apps/openalpaca/src/commands/memory.rs` |
 
 ## Request/Query Types
 
@@ -203,6 +205,20 @@
 - No `Subcommand` enum found in module.
 - Parsed flags: none
 
+### `memory`
+
+- Source: `apps/openalpaca/src/commands/memory.rs`
+- No `Subcommand` enum found in module.
+- Parsed flags: `--after`, `--alias`, `--as-of`, `--before`, `--candidates`, `--date`, `--fact-key`, `--format`, `--historical`, `--history`, `--kind`, `--limit`, `--order`, `--query`, `--raw`, `--repair`, `--revision`, `--scope`, `--since`, `--status`, `--supersedes`, `--tag`, `--title`, `--until`, `--yes`, `-y`
+
+### `persona`
+
+- Source: `apps/openalpaca/src/commands/persona.rs`
+- Enum `PersonaCommands` variants:
+  - `show` (fields: `target`)
+  - `edit` (fields: `target`)
+- Parsed flags: none
+
 ### `plugin`
 
 - Source: `apps/openalpaca/src/commands/plugin.rs`
@@ -236,9 +252,10 @@
 
 - Source: `apps/openalpaca/src/commands/store.rs`
 - Enum `StoreCommands` variants:
+  - `list`
   - `rebase` (fields: `old`, `new`, `dry_run`)
-  - `purge` (fields: `project`, `all`, `dry_run`, `yes`)
-- Parsed flags: `--all`, `--dry-run`, `--yes`, `-y`
+  - `purge` (fields: `project`, `dry_run`, `yes`)
+- Parsed flags: `--dry-run`, `--yes`, `-y`
 
 ### `tail`
 

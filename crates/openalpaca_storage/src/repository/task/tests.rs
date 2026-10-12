@@ -585,6 +585,37 @@ fn upsert_queued_relaunches_an_existing_row_in_place() {
     assert_eq!(repo.list_recent(10).unwrap().len(), 1);
 }
 
+/// Storage design §10, the lead's ruling R-T2: a run parked by
+/// `POST /v1/tasks` is stored with no session (`create_task` writes
+/// `session_id: NULL`), and `start` re-launches that row through
+/// `upsert_queued` with the session the dispatcher opened for it. That
+/// session reaches the stored row only through `RELAUNCH_ON_CONFLICT`'s
+/// `session_id = excluded.session_id`; without it the row keeps NULL, and
+/// `session_has_live_run` no longer sees the run in its conversation.
+#[test]
+fn upsert_queued_writes_the_session_onto_a_parked_row_that_had_none() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let parked = make_task("t1", "Tidy the notes");
+    assert!(
+        parked.session_id.is_none(),
+        "parked as create_task parks it"
+    );
+    repo.create(&parked).unwrap();
+    assert!(repo.get("t1").unwrap().unwrap().session_id.is_none());
+
+    let mut started = make_task("t1", "Tidy the notes");
+    started.session_id = Some("session-opened-at-dispatch".to_string());
+    repo.upsert_queued(&started).unwrap();
+
+    assert_eq!(
+        repo.get("t1").unwrap().unwrap().session_id.as_deref(),
+        Some("session-opened-at-dispatch"),
+        "the relaunch writes the run's session onto the row"
+    );
+}
+
 /// §5.6c's `resume` is the first verb to re-launch a row that **did** run.
 /// The final outcome's artifact list is built from `state_json`
 /// (`TaskState::collect_artifacts` walks the steps' pointers), not from a

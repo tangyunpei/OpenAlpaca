@@ -5,28 +5,9 @@
 use crate::migrations::{self, Migration};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use sqlite_vec::sqlite3_vec_init;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info};
-
-static VEC_INIT: Once = Once::new();
-
-/// Register sqlite-vec extension globally (process-wide, idempotent).
-///
-/// Uses `sqlite3_auto_extension` so every `Connection::open()` gets vec functions.
-/// The `transmute` converts `sqlite3_vec_init` (which has the sqlite3 extension
-/// entry point signature) into the `Option<unsafe extern "C" fn()>` that
-/// `sqlite3_auto_extension` expects. This is the documented pattern from
-/// the sqlite-vec crate.
-fn ensure_vec_extension() {
-    VEC_INIT.call_once(|| unsafe {
-        #[allow(clippy::missing_transmute_annotations)]
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite3_vec_init as *const (),
-        )));
-    });
-}
 
 /// Database manager wrapping a SQLite connection
 #[derive(Clone)]
@@ -36,9 +17,12 @@ pub struct Database {
 
 impl Database {
     /// Open or create a database at the given path, running any pending migrations.
+    ///
+    /// No SQLite extension is registered on the way: the baseline declares no
+    /// virtual table beyond SQLite itself, and the refusal of a database this
+    /// build does not know reads only `schema_version`, which needs no module
+    /// either.
     pub fn open(path: &Path) -> Result<Self> {
-        ensure_vec_extension();
-
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
@@ -105,35 +89,61 @@ impl Database {
 
     /// Run all pending migrations
     ///
+    /// Four cases, decided by the stored `schema_version` before any SQL runs:
+    /// a fresh database (version 0: no table, or no row) runs every registered
+    /// migration in one transaction and opens at the newest; one below the
+    /// newest runs the migrations it is missing; one at the newest returns;
+    /// and one **above the newest registered migration** is refused with
+    /// nothing changed. That last case is also what a database from before the
+    /// schema was re-baselined at version 1 reads as (the old line had reached
+    /// 42 before the memory redesign and 45 after it), so the refusal names
+    /// both possibilities: a newer build wrote it, or a pre-squash build did
+    /// and the factory reset is the way through.
+    ///
     /// `path` is the database file this connection was opened from; it is used
-    /// only to name the file in the legacy-refusal message, which is otherwise
-    /// unactionable — the store root is overridable with `OPENALPACA_HOME_STORE`,
-    /// so "this database" identifies nothing.
+    /// only to name the file in the refusal, which is otherwise unactionable —
+    /// the store root is overridable with `OPENALPACA_HOME_STORE`, so "this
+    /// database" identifies nothing.
     fn run_migrations(&self, path: &Path) -> Result<()> {
         let current_version = self.schema_version()?;
         debug!("Current schema version: {}", current_version);
+        let named_file = || std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
 
-        // The baseline creates the final schema directly; it cannot upgrade a
-        // partially migrated development database. Refuse before executing SQL
-        // so its existing schema and rows remain available to an older build.
+        // A version past the newest registered migration is one this build
+        // does not know. Nothing is pending, so without this check the open
+        // would succeed and fail later on a table this build has never heard
+        // of — or worse, write rows the other schema does not expect. Refuse
+        // before executing SQL, so the file's schema and rows stay exactly as
+        // they are.
         //
-        // The message names both the verb and the file. `openalpaca config
-        // reset --factory` is reachable from here because it opens no database
-        // at all — it deletes exactly the three files `delete_database_files`
-        // below names, and the next open sees version 0 and gets the baseline.
-        // The path is still spelled out because the store root is overridable
-        // with `OPENALPACA_HOME_STORE`, so "your database" identifies nothing.
-        if current_version > 0 && current_version < migrations::BASELINE_VERSION {
-            let file = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        // Two builds can have written such a file, and the message cannot tell
+        // them apart, so it states both: a newer build (use it), or a build from
+        // before the schema was re-baselined at version 1 — such a database
+        // (42 before the memory redesign, 43 to 45 after it) reads as a version
+        // above this build's and can be neither read nor upgraded here. For
+        // that one it names `openalpaca config reset --factory`, which is
+        // reachable from here because it opens no database at all: it deletes
+        // exactly the three files `delete_database_files` below names, and the
+        // next open sees version 0 and gets the baseline. The file is spelled
+        // out because the store root is overridable with
+        // `OPENALPACA_HOME_STORE`, so "your database" identifies nothing.
+        // Start-up refusals never name each other's remedies; this one names
+        // its own.
+        let newest = migrations::MIGRATIONS
+            .last()
+            .map(|m| m.version)
+            .unwrap_or(migrations::BASELINE_VERSION);
+        if current_version > newest {
+            let file = named_file();
             anyhow::bail!(
-                "Unsupported legacy schema version {current_version}: this build starts at schema \
-                 version {baseline} and cannot upgrade a database created by an older one. \
-                 Run `openalpaca config reset --factory` to delete {file} (with its -wal and \
-                 -shm files) and start again at schema version {baseline}; that discards every \
-                 task, message and memory it holds, and leaves your artifact and upload files on \
-                 disk with nothing pointing at them. To keep any of it, open {file} with a build \
-                 from before the migrations were squashed into the baseline and export it first.",
-                baseline = migrations::BASELINE_VERSION,
+                "Database `{file}` is at schema version {current_version}, which this build does \
+                 not know (it creates schema version 1 and knows versions up to {newest}). \
+                 Nothing was changed. If a newer OpenAlpaca build created this database, use \
+                 that build. If it was created by a build from before the schema was \
+                 re-baselined at version 1, it cannot be read or upgraded: run \
+                 `openalpaca config reset --factory` to start again (it deletes the database \
+                 and `llm.toml`'s keys; see the Installation Manual, \"Switching to the \
+                 Markdown Memory Build\").",
                 file = file.display(),
             );
         }

@@ -10,6 +10,7 @@
 import { useMemo } from "react";
 
 import { cn } from "@/lib/cn";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 
 import { parseUnifiedDiff, sourceAsDiffLines, type DiffLine } from "../diff";
 
@@ -79,6 +80,11 @@ export interface ArtifactPreviewProps {
   src?: string | null;
   /** Shown under the empty sentence when `content` is `null`. */
   note?: string | null;
+  /**
+   * An image's sentence when `src` fails to load, in place of the
+   * placeholder's own (`previewPlan`'s `failedNote`).
+   */
+  failedNote?: string | null;
   className?: string;
 }
 
@@ -88,6 +94,7 @@ export function ArtifactPreview({
   size,
   src,
   note,
+  failedNote,
   className,
 }: ArtifactPreviewProps) {
   const parsed = useMemo(() => {
@@ -106,17 +113,23 @@ export function ArtifactPreview({
     }
   }, [content, meta.kind]);
 
+  // The name is an agent's (a result file's path in the project): it is
+  // escaped here, once, for every renderer that draws it — each hidden
+  // character as `<U+XXXX>`. The count line is the header's beside it.
+  const name = escapeHiddenLine(meta.name).text;
+
   // The image kind is the one renderer that draws without bytes: its dashed
   // placeholder *is* the missing state (§3.25f).
   if (meta.kind === "image") {
     return (
       <ImagePreview
-        filename={meta.name}
+        filename={name}
         size={size}
         src={src ?? null}
         width={meta.width ?? null}
         height={meta.height ?? null}
         note={note ?? null}
+        failedNote={failedNote ?? null}
         className={className}
       />
     );
@@ -134,7 +147,7 @@ export function ArtifactPreview({
     case "code":
       return (
         <CodePreview
-          path={meta.name}
+          path={name}
           lines={parsed.lines}
           size={size}
           addedLines={meta.addedLines ?? null}
@@ -149,7 +162,7 @@ export function ArtifactPreview({
           size={size}
           exitCode={meta.exitCode ?? null}
           duration={meta.duration ?? null}
-          label={meta.name}
+          label={name}
           className={className}
         />
       );
@@ -164,7 +177,7 @@ export function ArtifactPreview({
     case "raw":
       return meta.kind === "html" ? (
         <HtmlPreview
-          filename={meta.name}
+          filename={name}
           html={content}
           size={size}
           className={className}

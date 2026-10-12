@@ -13,14 +13,7 @@ use std::sync::{Mutex, MutexGuard};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-const SANDBOXED: [&str; 5] = [
-    // `directories`' data dir — and therefore the pre-D1 app dir that
-    // `legacy_app_dir()` resolves — comes from HOME, and on Linux from
-    // XDG_DATA_HOME first when that is absolute. Overriding HOME and clearing
-    // XDG_DATA_HOME confines it, and any stray legacy-root write, to the temp
-    // dir instead of the developer's real one.
-    "HOME",
-    "XDG_DATA_HOME",
+const SANDBOXED: [&str; 3] = [
     "OPENALPACA_HOME_STORE",
     "OPENALPACA_CONFIG_DIR",
     // The CLI never sets this; an inherited value would mask the bug under test.
@@ -37,47 +30,27 @@ pub(crate) struct EnvSandbox {
 }
 
 impl EnvSandbox {
-    /// Points every sandboxed variable into `root`: `HOME` is `root` itself,
-    /// `XDG_DATA_HOME` is unset, the home store is `root/home` and the config
-    /// directory is `root/config` (created here). Held until the guard is
-    /// dropped, which restores every variable as it was.
+    /// Points every sandboxed variable into `root`: the home store is
+    /// `root/home` and the config directory is `root/config` (created here).
+    /// Held until the guard is dropped, which restores every variable as it
+    /// was.
     pub(crate) fn enter(root: &Path) -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let saved = SANDBOXED
             .iter()
             .map(|var| (*var, std::env::var_os(var)))
             .collect();
-        let sandbox = Self { _lock: lock, saved };
-        sandbox.apply(root);
-        sandbox
-    }
-
-    /// Sets the sandboxed variables, then refuses to go on unless the legacy
-    /// root resolves inside `root`. Called with `ENV_LOCK` held (it is a
-    /// method on the guard).
-    fn apply(&self, root: &Path) {
         let config = root.join("config");
         std::fs::create_dir_all(&config).unwrap();
-        // SAFETY: serialized by ENV_LOCK; every test in this binary that
-        // touches these variables holds it through this sandbox.
+        // SAFETY: serialized by ENV_LOCK, held from here until the guard is
+        // dropped; every test in this binary that touches these variables
+        // holds it through this sandbox.
         unsafe {
-            std::env::set_var("HOME", root);
-            std::env::remove_var("XDG_DATA_HOME");
             std::env::set_var("OPENALPACA_HOME_STORE", root.join("home"));
             std::env::set_var("OPENALPACA_CONFIG_DIR", &config);
             std::env::remove_var("OPENALPACA_MASTER_KEY");
         }
-
-        // Fail before writing anything if the sandbox is not airtight: a test
-        // must never be able to reach the real legacy application data dir.
-        let legacy = openalpaca_storage::store::legacy_root::legacy_app_dir()
-            .expect("the legacy app dir must resolve");
-        assert!(
-            legacy.starts_with(root),
-            "the HOME/XDG_DATA_HOME override did not sandbox the legacy root ({}); \
-             refusing to run",
-            legacy.display()
-        );
+        Self { _lock: lock, saved }
     }
 }
 
@@ -91,6 +64,78 @@ impl Drop for EnvSandbox {
             }
         }
     }
+}
+
+/// One canned HTTP answer per connection, served in order on a loopback
+/// port with `Connection: close`, so a `DaemonClient` opens a fresh
+/// connection for each request. Returns the address and, on join, the raw
+/// requests it received — what `persona edit` and `memory edit` are checked
+/// against.
+pub(crate) fn serve(
+    answers: Vec<String>,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let addr = listener.local_addr().expect("the bound address");
+    let server = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for answer in answers {
+            let (mut socket, _) = listener.accept().expect("a request arrives");
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            // Headers first, then as many body bytes as Content-Length says.
+            loop {
+                let n = socket.read(&mut buf).expect("the request is readable");
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).to_string();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let head = &text[..end];
+                    let length: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if raw.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            seen.push(String::from_utf8_lossy(&raw).to_string());
+            socket
+                .write_all(answer.as_bytes())
+                .expect("the answer is written");
+            socket.flush().ok();
+        }
+        seen
+    });
+    (addr, server)
+}
+
+/// Whether the volume `dir` is on ignores letter case — what a test of a
+/// folder renamed by case only (ST-23) needs before it can rename one. Probes
+/// with a file and a stat of its other-case name, and removes the probe. A
+/// copy of storage's own probe (`store::tests::volume_ignores_case`), which is
+/// test-only there and not exported across crates. Unix only, as its caller.
+#[cfg(unix)]
+pub(crate) fn volume_ignores_case(dir: &Path) -> bool {
+    let made = dir.join("case-probe-Ab");
+    std::fs::write(&made, b"").unwrap();
+    let ignores = std::fs::symlink_metadata(dir.join("CASE-PROBE-AB")).is_ok();
+    std::fs::remove_file(&made).unwrap();
+    ignores
+}
+
+/// A JSON answer for [`serve`], with an `ETag` header.
+pub(crate) fn json_answer(status: &str, etag: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nETag: \"{etag}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 /// Names the store root a [`LockHolder`] child is spawned for. The child
@@ -195,34 +240,10 @@ fn singleton_lock_holder_process() {
     let _ = std::io::stdin().read_to_end(&mut until_closed);
 }
 
-/// A Linux box (or runner) that exports an absolute `XDG_DATA_HOME` puts the
-/// legacy root there, outside the sandbox, whatever `HOME` says. Entering the
-/// sandbox must clear it — and leaving must put it back.
+/// Storage's `store::projects::register` refuses an unguarded home store only
+/// in a build that carries its `test-home-guard` feature, which this crate
+/// turns on through `[dev-dependencies]` (storage design, Stage 1, S1.9).
 #[test]
-fn the_sandbox_clears_xdg_data_home_and_restores_it() {
-    let tmp = tempfile::tempdir().unwrap();
-    let before = {
-        let sandbox = EnvSandbox::enter(tmp.path());
-        let before = sandbox
-            .saved
-            .iter()
-            .find(|(var, _)| *var == "XDG_DATA_HOME")
-            .map(|(_, value)| value.clone())
-            .expect("XDG_DATA_HOME is one of the sandboxed variables");
-        // SAFETY: under ENV_LOCK, held by `sandbox`.
-        unsafe { std::env::set_var("XDG_DATA_HOME", "/an/exported/xdg/data/home") };
-        sandbox.apply(tmp.path());
-        assert_eq!(
-            std::env::var_os("XDG_DATA_HOME"),
-            None,
-            "the sandbox must clear XDG_DATA_HOME"
-        );
-        before
-    };
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    assert_eq!(
-        std::env::var_os("XDG_DATA_HOME"),
-        before,
-        "leaving the sandbox must restore XDG_DATA_HOME as it was"
-    );
+fn the_storage_test_home_guard_is_armed_in_this_test_build() {
+    assert!(openalpaca_storage::store::projects::test_home_guard_armed());
 }

@@ -6,6 +6,7 @@
  */
 
 import type { ChatHistoryQuery } from "./api/chat";
+import type { NoteScope, NoteStatus } from "./api/memories";
 import type { ListSessionsQuery } from "./api/sessions";
 import type { EventHistoryQuery } from "./api/telemetry";
 import type { ListTasksQuery } from "./api/tasks";
@@ -68,6 +69,8 @@ export const qk = {
 
   artifacts: {
     all: () => ["artifacts"] as const,
+    /** Every list and feed, whatever its query — the prefix of `list`. */
+    lists: () => ["artifacts", "list"] as const,
     list: (query: Record<string, unknown>) =>
       ["artifacts", "list", query] as const,
     detail: (id: string) => ["artifacts", "detail", id] as const,
@@ -160,11 +163,54 @@ export const qk = {
   },
 
   /**
-   * `GET /v1/workspaces?path=`. The path is the key: the route answers about
-   * one root, and another root is a different answer, not a stale one.
+   * `/v1/memories*` (memory redesign, design §7a). The window's project is part
+   * of every key, for the reason `status` carries it: `x-workspace-path` picks
+   * the partitions a request can see, so another project is another answer.
+   * `["memory"]` is the prefix `memory_changed` invalidates (G30) — the view
+   * never polls.
+   */
+  memory: {
+    all: () => ["memory"] as const,
+    list: (
+      query: { scope: NoteScope; status: NoteStatus },
+      workspacePath: string | null,
+    ) => ["memory", "list", query, workspacePath] as const,
+    search: (
+      query: { q: string; scope: NoteScope },
+      workspacePath: string | null,
+    ) => ["memory", "search", query, workspacePath] as const,
+    recentlyLearned: (workspacePath: string | null) =>
+      ["memory", "recently-learned", workspacePath] as const,
+    suggestions: (workspacePath: string | null) =>
+      ["memory", "suggestions", workspacePath] as const,
+    detail: (id: string, workspacePath: string | null) =>
+      ["memory", "detail", id, workspacePath] as const,
+    /** One kept `.history` copy — immutable, so it is never stale. */
+    revision: (id: string, revision: string, workspacePath: string | null) =>
+      ["memory", "revision", id, revision, workspacePath] as const,
+    history: (id: string, workspacePath: string | null) =>
+      ["memory", "history", id, workspacePath] as const,
+  },
+
+  /**
+   * `GET /v1/persona/user`. No event names a `USER.md` write, so nothing but
+   * this window's own save invalidates it; a write from elsewhere reaches the
+   * editor as a `409` on save, which is the design's answer (§6).
+   */
+  persona: {
+    all: () => ["persona"] as const,
+    user: () => ["persona", "user"] as const,
+  },
+
+  /**
+   * `/v1/workspaces`. `list` is every project the home store records;
+   * `detail` is one path's resolution, keyed by the path because another
+   * path is a different answer, not a stale one. `["workspaces"]` is the
+   * prefix a life-cycle write invalidates.
    */
   workspaces: {
     all: () => ["workspaces"] as const,
+    list: () => ["workspaces", "list"] as const,
     detail: (path: string) => ["workspaces", "detail", path] as const,
   },
 } as const;

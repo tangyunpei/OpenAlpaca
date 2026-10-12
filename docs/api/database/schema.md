@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 1
+- Registered migrations: 4
 
 ## Tables
 
@@ -126,6 +126,8 @@ content_json TEXT
 display_text TEXT
 task_id TEXT
 session_id TEXT
+request_id TEXT
+workspace_root TEXT
 ```
 
 ### `discovered_models` (table)
@@ -192,7 +194,7 @@ UNIQUE(provider, provider_user_id)
 
 ### `file_assets` (table)
 
-Source migration: `001_baseline.sql`
+Source migration: `004_project_files.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -220,6 +222,7 @@ version_count INTEGER NOT NULL DEFAULT 1
 pinned INTEGER NOT NULL DEFAULT 0
 summary TEXT
 missing_since TEXT
+in_project INTEGER NOT NULL DEFAULT 0
 ```
 
 ### `global_user` (table)
@@ -250,6 +253,19 @@ created_at TEXT NOT NULL DEFAULT (datetime('now'))
 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 session_id TEXT
 unattended INTEGER NOT NULL DEFAULT 0
+```
+
+### `learning_cursor` (table)
+
+Source migration: `001_baseline.sql`
+
+```sql
+session_id TEXT PRIMARY KEY
+extracted_through INTEGER NOT NULL DEFAULT 0
+attempts INTEGER NOT NULL DEFAULT 0
+last_error TEXT
+updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+episode_through INTEGER NOT NULL DEFAULT 0
 ```
 
 ### `link_token` (table)
@@ -299,28 +315,6 @@ total_input_tokens INTEGER DEFAULT 0
 total_output_tokens INTEGER DEFAULT 0
 total_cost_usd REAL DEFAULT 0
 PRIMARY KEY (date, agent_id, model)
-```
-
-### `memory` (table)
-
-Source migration: `001_baseline.sql`
-
-```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT
-owner_id TEXT NOT NULL
-kind TEXT NOT NULL
-scope TEXT NOT NULL
-scope_id TEXT NOT NULL DEFAULT ''
-source TEXT NOT NULL
-content TEXT NOT NULL
-content_hash TEXT NOT NULL
-importance REAL NOT NULL DEFAULT 0.5
-confidence REAL NOT NULL DEFAULT 0.7
-created_at TEXT NOT NULL DEFAULT (datetime('now'))
-metadata TEXT
-updated_at TEXT
-supersedes_id INTEGER REFERENCES memory(id) ON DELETE SET NULL
-last_accessed_at TEXT
 ```
 
 ### `message_feedback` (table)
@@ -376,7 +370,7 @@ version INTEGER PRIMARY KEY
 
 ### `session` (table)
 
-Source migration: `001_baseline.sql`
+Source migration: `002_working_state.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -387,10 +381,12 @@ workspace_id TEXT
 status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived'))
 message_count INTEGER DEFAULT 0
 last_message_at TEXT
-summary TEXT NOT NULL DEFAULT ''
-summary_version INTEGER NOT NULL DEFAULT 0
-last_summarized_message_id INTEGER NOT NULL DEFAULT 0
-summary_updated_at TEXT
+working_state TEXT NOT NULL DEFAULT ''
+working_state_version INTEGER NOT NULL DEFAULT 0
+working_state_through INTEGER NOT NULL DEFAULT 0
+working_state_updated_at TEXT
+episode_note_id TEXT
+inherit INTEGER NOT NULL DEFAULT 1
 ended_at TEXT
 created_at TEXT NOT NULL DEFAULT (datetime('now'))
 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -554,21 +550,13 @@ result_ref TEXT
 | `idx_llm_call_log_agent` | `llm_call_log` | `INDEX` | `agent_id, timestamp DESC` | `001_baseline.sql` |
 | `idx_llm_call_log_task` | `llm_call_log` | `INDEX` | `task_id, timestamp DESC` | `001_baseline.sql` |
 | `idx_llm_call_log_timestamp` | `llm_call_log` | `INDEX` | `timestamp` | `001_baseline.sql` |
-| `idx_memory_content_hash` | `memory` | `UNIQUE` | `owner_id, scope, scope_id, content_hash` | `001_baseline.sql` |
-| `idx_memory_decay` | `memory` | `INDEX` | `owner_id, kind, last_accessed_at` | `001_baseline.sql` |
-| `idx_memory_importance` | `memory` | `INDEX` | `owner_id, importance` | `001_baseline.sql` |
-| `idx_memory_owner` | `memory` | `INDEX` | `owner_id` | `001_baseline.sql` |
-| `idx_memory_owner_created` | `memory` | `INDEX` | `owner_id, created_at DESC` | `001_baseline.sql` |
-| `idx_memory_owner_kind` | `memory` | `INDEX` | `owner_id, kind` | `001_baseline.sql` |
-| `idx_memory_owner_scope` | `memory` | `INDEX` | `owner_id, scope, scope_id` | `001_baseline.sql` |
-| `idx_memory_supersedes` | `memory` | `INDEX` | `supersedes_id` | `001_baseline.sql` |
 | `idx_mf_feedback` | `message_feedback` | `INDEX` | `feedback` | `001_baseline.sql` |
 | `idx_orch_latency_mode` | `orchestrator_latency` | `INDEX` | `mode, timestamp DESC` | `001_baseline.sql` |
 | `idx_orch_latency_ts` | `orchestrator_latency` | `INDEX` | `timestamp DESC` | `001_baseline.sql` |
 | `idx_preference_user` | `preference` | `INDEX` | `user_id` | `001_baseline.sql` |
-| `idx_session_source` | `session` | `INDEX` | `source` | `001_baseline.sql` |
-| `idx_session_updated` | `session` | `INDEX` | `updated_at DESC` | `001_baseline.sql` |
-| `idx_session_workspace` | `session` | `INDEX` | `workspace_id, updated_at DESC` | `001_baseline.sql` |
+| `idx_session_source` | `session` | `INDEX` | `source` | `002_working_state.sql` |
+| `idx_session_updated` | `session` | `INDEX` | `updated_at DESC` | `002_working_state.sql` |
+| `idx_session_workspace` | `session` | `INDEX` | `workspace_id, updated_at DESC` | `002_working_state.sql` |
 | `idx_sel_agent` | `skill_execution_log` | `INDEX` | `agent_id, skill_id` | `001_baseline.sql` |
 | `idx_sel_request_id` | `skill_execution_log` | `UNIQUE` | `request_id` | `001_baseline.sql` |
 | `idx_sel_response_msg` | `skill_execution_log` | `INDEX` | `response_message_id` | `001_baseline.sql` |
@@ -592,8 +580,4 @@ result_ref TEXT
 
 ## Triggers
 
-| Name | Source |
-|---|---|
-| `memory_ad` | `001_baseline.sql` |
-| `memory_ai` | `001_baseline.sql` |
-| `memory_au` | `001_baseline.sql` |
+No active triggers parsed.

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { SETTINGS_SECTIONS, sectionMeta, toSectionId } from "./sections";
 
 describe("Settings sections (§5.4)", () => {
-  it("ships the design's eight sections in order", () => {
+  it("ships the design's eight sections in order, and Persona as the ninth", () => {
     expect(SETTINGS_SECTIONS.map((section) => section.label)).toEqual([
       "Connection",
       "Models & keys",
@@ -13,7 +13,20 @@ describe("Settings sections (§5.4)", () => {
       "Agents",
       "Conversations",
       "Event log",
+      "Persona",
     ]);
+  });
+
+  /**
+   * Memory redesign MD-3: the learner stopped writing into `USER.md`, so the
+   * section that edits it must not promise that it learns — and must say
+   * where learned things went instead.
+   */
+  it("says Persona is the owner's own words, and that learning lives in Memory", () => {
+    const blurb = sectionMeta("persona").blurb;
+    expect(blurb).toMatch(/USER\.md/);
+    expect(blurb).toMatch(/Memory/);
+    expect(toSectionId("persona")).toBe("persona");
   });
 
   it("keeps the design's copy verbatim", () => {

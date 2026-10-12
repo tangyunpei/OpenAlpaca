@@ -1,0 +1,35 @@
+# daemon.log greps — 2026-10-03T04:04:05Z, log lines: 72
+# level counts
+ERROR 0
+WARN 0
+INFO 72
+DEBUG 0
+TRACE 0
+
+### grep -n -i -E 'download'  (count 0)
+
+### grep -n -i -E 'fastembed'  (count 0)
+
+### grep -n -i -E 'onnx'  (count 0)
+
+### grep -n -i -E 'ort[^a-z]'  (count 0)
+
+### grep -n -i -E 'hf-hub|hf_hub|huggingface'  (count 0)
+
+### grep -n -i -E 'tokenizer'  (count 0)
+
+### grep -n -i -E 'embed'  (count 0)
+
+### grep -n -i -E 'sqlite-vec|vec0'  (count 0)
+
+### grep -n -i -E 'connection|connect error|refused|timed out|timeout'  (count 0)
+
+### grep -n -i -E 'network|dns|resolve'  (count 0)
+
+### grep -n -i -E 'panic'  (count 0)
+
+### grep -n -i -E 'error'  (count 0)
+
+### grep -n -i -E 'warn'  (count 0)
+
+### grep -n -i -E 'fail'  (count 0)

@@ -18,11 +18,13 @@
  *
  * Three states, and the middle one is the whole point: a daemon that has not
  * answered yet is *unknown*, and unknown renders nothing. `GET /v1/status` has
- * no `initialData` and a first boot answers slowly (the embedding model is
- * downloaded before anything else), so reading `undefined` as "no model" would
- * put "you have no model" on screen at every cold start of a perfectly
- * configured install. Hence `=== undefined` and `=== null` below, and never a
- * falsy test.
+ * no `initialData`, so the value is `undefined` until the daemon's first answer
+ * arrives — at every cold start, and for as long as a booting daemon takes.
+ * (A first boot no longer waits on an embedding-model download — the memory
+ * redesign removed it — but the window is still there.) Reading `undefined`
+ * as "no model" would put "you have no model" on screen at every cold start
+ * of a perfectly configured install. Hence `=== undefined` and `=== null`
+ * below, and never a falsy test.
  */
 
 import type { DaemonLlmStatus } from "@/lib/api/types";

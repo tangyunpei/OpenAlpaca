@@ -347,6 +347,13 @@ pub enum SystemEvent {
         /// The run that is waiting on this prompt (GAP-10), or `None` outside
         /// one — the same attribution §4.4's derived `blocked` lane uses.
         task_id: Option<String>,
+        /// The daemon-authored text the card shows above the arguments
+        /// (design 09 §4.4), or `None` for the ordinary card. Never persisted:
+        /// the `event_log` row keeps ids only.
+        preview: Option<String>,
+        /// The approval is good for this call only (design 09 §4.2 rule 2):
+        /// no client offers *Always allow* for it.
+        per_call: bool,
         timestamp: DateTime<Utc>,
     },
     /// A pending tool confirmation stopped being pending (T1).
@@ -385,7 +392,6 @@ pub enum SystemEvent {
         utilization_pct: f64,
         messages_before: usize,
         messages_after: usize,
-        memories_extracted: usize,
         messages_discarded: usize,
         summary_tokens: usize,
         timestamp: DateTime<Utc>,
@@ -470,8 +476,10 @@ pub enum SystemEvent {
         followup_id: i64,
         timestamp: DateTime<Utc>,
     },
-    /// An agent wrote a **produced** artifact — `artifact_write`, or the
-    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
+    /// An agent wrote a **produced** artifact — `artifact_write`, a
+    /// `file_write` saved as a by-product (no project), the
+    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9) — or a
+    /// result file `file_write` wrote into the project (`in_project`, R35).
     ///
     /// Published by the builtin itself, after a successful
     /// `ArtifactStore::put`, from the [`EventBus`](crate::bus::EventBus) the
@@ -491,6 +499,14 @@ pub enum SystemEvent {
         version: u32,
         /// The head file's absolute path (`ArtifactRecord::storage_path`).
         path: String,
+        /// A result file in the project — a pointer row (ST-12) — rather than
+        /// a by-product. A payload from before Stage 2 carries neither this
+        /// field nor the next, and is a by-product.
+        #[serde(default)]
+        in_project: bool,
+        /// ST-18: whether Open is offered for it (`ArtifactRecord::openable`).
+        #[serde(default = "openable_by_default")]
+        openable: bool,
         timestamp: DateTime<Utc>,
     },
     /// One subagent lane of a run opened or closed (plan Phase 4, GAP-09).
@@ -594,4 +610,65 @@ pub enum SystemEvent {
         notice_lane: String,
         timestamp: DateTime<Utc>,
     },
+    /// A memory note changed (memory redesign, design §7a `memory_changed`;
+    /// plan 3.8). Published by the memory service on **every** write it
+    /// makes — through a user-directed surface, a model tool call or the
+    /// extractor — and by a reconciliation scan that found a file changed
+    /// behind its back (`change: external`, no `surface`; §7b P13). Bridged
+    /// to `ServerEvent::MemoryChanged`; persisted nowhere.
+    MemoryChanged {
+        /// `home-<owner-key>` or `proj-<owner-key>-<project-key>` (design §2).
+        partition_key: String,
+        note_id: String,
+        /// `created | updated | archived | confirmed | forgotten | external`.
+        change: String,
+        /// The revision written; `None` for a forget.
+        revision: Option<String>,
+        /// `user | extracted_user | extracted_other | imported | external`.
+        origin: String,
+        /// `user | model_tool | extraction`; `None` for a scan's finding.
+        surface: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+}
+
+/// `ArtifactWritten::openable` in a payload that predates it: every artifact
+/// announced before Stage 2 was a by-product, and every by-product opens.
+fn openable_by_default() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A payload from before Stage 2 has neither field and reads as an
+    /// openable by-product (interfaces §5.4).
+    #[test]
+    fn an_artifact_written_payload_without_the_stage_2_fields_is_an_openable_by_product() {
+        let older = serde_json::json!({
+            "type": "artifact_written",
+            "payload": {
+                "artifact_id": "a-1",
+                "task_id": null,
+                "agent_id": null,
+                "name": "01-notes.md",
+                "kind": "markdown",
+                "version": 1,
+                "path": "/h/.openalpaca/artifacts/loose/01-notes.md",
+                "timestamp": "2026-10-08T10:00:00Z"
+            }
+        });
+        match serde_json::from_value::<SystemEvent>(older).unwrap() {
+            SystemEvent::ArtifactWritten {
+                in_project,
+                openable,
+                ..
+            } => {
+                assert!(!in_project);
+                assert!(openable);
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+    }
 }

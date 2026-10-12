@@ -100,15 +100,26 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     ai_config::clear_ai_config_at(&targets.llm_config)?;
     daemon_config_cli::clear_daemon_config_at(&targets.daemon_config)?;
 
-    println!(
-        "Factory reset complete. {} is gone; the next daemon start builds an empty one.",
-        db_path.display()
-    );
-    println!(
-        "Your files under artifacts/, uploads/ and sessions/ are still on disk, \
-         with nothing pointing at them."
-    );
+    println!("{}", reset_complete_message(&db_path));
     Ok(())
+}
+
+/// What the reset prints once the files are gone. A project's folder under
+/// `projects/` is not among the unreferenced files: its `project.json` still
+/// registers the project, and its `memory/` holds notes `openalpaca memory
+/// adopt` can re-bind (storage design §8) — only its `artifacts/` and
+/// `uploads/` lose the rows that pointed at them.
+pub(super) fn reset_complete_message(db_path: &Path) -> String {
+    format!(
+        "Factory reset complete. {} is gone; the next daemon start builds an empty one.\n\
+         Your files under artifacts/, uploads/, sessions/ and scratch/, and each project's \
+         projects/<name>/artifacts/ and projects/<name>/uploads/, are still on disk, \
+         with nothing pointing at them. Each project's folder stays registered by its \
+         project.json and holds that project's memory notes: like yours under memory/, \
+         they keep their control snapshots and can be adopted by the new owner \
+         (openalpaca memory adopt), so deleting a project's folder drops them.",
+        db_path.display()
+    )
 }
 
 /// Takes the daemon's singleton lock for the length of the reset — the same
@@ -187,7 +198,6 @@ empty database at the current schema version.
 Gone for good:
   - every conversation, message and session row
   - every task, every run and its history
-  - every memory
   - the rows that index your artifacts and uploads
   - {llm}
   - {daemon}
@@ -196,11 +206,27 @@ Left on disk, and from now on unreferenced:
   - {root}/artifacts/
   - {root}/uploads/
   - {root}/sessions/
+  - {root}/scratch/
 The files stay exactly where they are; nothing in the new database points at
 them any more. Delete them yourself if you want the space back.
 
+Left on disk, and orphaned until adopted:
+  - {root}/memory/ — your memory notes, per owner. The next start mints a new
+    owner id, so `openalpaca memory doctor` lists them as orphaned; nothing is
+    reassigned for you — `openalpaca memory adopt <owner-key>` re-binds them.
+  - {root}/projects/ — one folder per project. Each keeps its project.json
+    (the project's id and the path it was made for), so the next turn in that
+    project finds the same folder; its artifacts/ and uploads/ are unreferenced
+    like the ones above, and its memory/ notes are orphaned like yours — the
+    same `openalpaca memory adopt` re-binds them, finding each project by that
+    id.
+
 Untouched:
-  - {root}/state/cache/ — the local embedding model (~1 GB)
+  - {root}/state/memory-control/ — the memory partitions' control snapshots
+    (revisions, origins, tombstones), kept so the notes can be adopted
+  - {root}/state/cache/memory-index-v1.sqlite — the memory search index,
+    checked and rebuilt on the next start
+  - the rest of {root}/state/cache/
   - {root}/state/.master_key
   - {root}/state/logs/
   - {root}/state/backups/

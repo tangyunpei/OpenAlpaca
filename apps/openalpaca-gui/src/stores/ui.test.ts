@@ -18,6 +18,7 @@ const initial: Partial<UiState> = {
   paletteOpen: false,
   toast: null,
   dense: false,
+  libraryResults: false,
 };
 
 beforeEach(() => {
@@ -51,6 +52,24 @@ describe("pane widths", () => {
       PANE_DEFAULTS.libListW,
     );
     expect(localStorage.getItem("oa-pane-widths")).toContain('"libListW":326');
+  });
+});
+
+describe("the Memory view", () => {
+  it("opens a note from anywhere on its Note tab", () => {
+    useUiStore.setState({ memoryTab: "history" });
+    useUiStore.getState().openMemory("55e811b6-3220-4758-a47b-034bd1023f38");
+    const state = useUiStore.getState();
+    expect(state.view).toBe("memory");
+    expect(state.openMemoryId).toBe("55e811b6-3220-4758-a47b-034bd1023f38");
+    expect(state.memoryTab).toBe("note");
+  });
+
+  it("drops the selection when a note goes away", () => {
+    useUiStore.getState().openMemory("n-1");
+    useUiStore.getState().clearMemory();
+    expect(useUiStore.getState().openMemoryId).toBeNull();
+    expect(useUiStore.getState().view).toBe("memory");
   });
 });
 
@@ -190,5 +209,50 @@ describe("pins", () => {
 
     // Identity matters: a new object every fetch would re-render every row.
     expect(useUiStore.getState().pins).toBe(before);
+  });
+});
+
+describe("the Library's two sides (storage design §13)", () => {
+  it("switches between by-products and results and keeps the selection", () => {
+    useUiStore.setState({ openArtifactId: "findings" });
+
+    useUiStore.getState().setLibraryResults(true);
+    expect(useUiStore.getState().libraryResults).toBe(true);
+    expect(useUiStore.getState().openArtifactId).toBe("findings");
+
+    useUiStore.getState().setLibraryResults(false);
+    expect(useUiStore.getState().libraryResults).toBe(false);
+  });
+
+  it("opens a project file on the results side and a by-product on the other", () => {
+    useUiStore.getState().openArtifact("written", true);
+    expect(useUiStore.getState()).toMatchObject({
+      view: "library",
+      openArtifactId: "written",
+      libraryResults: true,
+    });
+
+    useUiStore.getState().openArtifact("findings", false);
+    expect(useUiStore.getState().libraryResults).toBe(false);
+  });
+
+  it("leaves the side as it was when the caller does not know the row's", () => {
+    useUiStore.getState().setLibraryResults(true);
+    useUiStore.getState().openArtifact("written");
+    expect(useUiStore.getState().libraryResults).toBe(true);
+  });
+
+  it("carries a project file from the side panel onto the results side, on Preview", () => {
+    useUiStore.getState().openSidePanel("written");
+    useUiStore.getState().setPanelTab("history");
+    useUiStore.getState().openInLibrary(true);
+
+    expect(useUiStore.getState()).toMatchObject({
+      view: "library",
+      openArtifactId: "written",
+      libraryResults: true,
+      libraryTab: "preview",
+      panelArtifactId: null,
+    });
   });
 });

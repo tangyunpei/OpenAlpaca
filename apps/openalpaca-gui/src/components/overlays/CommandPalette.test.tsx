@@ -1,9 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render as renderRaw, screen, waitFor } from "@testing-library/react";
+import {
+  render as renderRaw,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetConnection } from "@/lib/connection";
+import { useConfirmationStore } from "@/stores/confirmation";
 import { useUiStore } from "@/stores/ui";
 
 import { CommandPalette } from "./CommandPalette";
@@ -25,7 +31,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 /** The rows `GET /v1/artifacts?q=` answers with; empty unless a test sets it. */
-let hits: { id: string; name: string }[] = [];
+let hits: { id: string; name: string; in_project?: boolean }[] = [];
 let searches: string[] = [];
 
 function render(ui: React.ReactElement) {
@@ -45,6 +51,7 @@ function render(ui: React.ReactElement) {
 beforeEach(() => {
   hits = [];
   searches = [];
+  useConfirmationStore.setState({ pending: null });
   resetConnection();
   vi.stubGlobal(
     "fetch",
@@ -74,6 +81,8 @@ beforeEach(() => {
             path: `/tmp/${hit.name}`,
             project_root: null,
             rel_path: hit.name,
+            in_project: hit.in_project ?? false,
+            openable: true,
           })),
           total: hits.length,
         }),
@@ -177,7 +186,12 @@ describe("CommandPalette (§3.33)", () => {
 
     rerender(
       <CommandPalette
-        pendingConfirmation={{ toolName: "shell_execute", onApprove }}
+        pendingConfirmation={{
+          toolName: "shell_execute",
+          hidden: 0,
+          count: 1,
+          onApprove,
+        }}
       />,
     );
     await userEvent
@@ -186,6 +200,52 @@ describe("CommandPalette (§3.33)", () => {
         screen.getByRole("option", { name: /Approve pending shell_execute/ }),
       );
     expect(onApprove).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * The row approves with the name alone on it, and answers the oldest of the
+   * prompts pending: what the chat lane publishes with the confirmation — how
+   * many are pending, and the card's hidden-character count — goes beside it.
+   */
+  it("says the published queue and hidden-character count on its Approve row", () => {
+    useConfirmationStore.setState({
+      pending: {
+        toolName: "shell_execute",
+        hidden: 2,
+        count: 2,
+        runId: null,
+        approve: vi.fn(),
+        deny: vi.fn(),
+      },
+    });
+    render(<CommandPalette />);
+    expect(
+      screen.getByRole("option", {
+        name: /Approve pending shell_execute · oldest of 2 pending · its card shows 2 hidden characters/,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * The dialog clips what overflows it, and `Approve pending <name>` approves:
+   * a name with no break opportunity wraps inside the row instead.
+   */
+  it("wraps a row's label too long for the dialog instead of clipping it", () => {
+    render(
+      <CommandPalette
+        pendingConfirmation={{
+          toolName: `srv__${"x".repeat(200)}`,
+          hidden: 0,
+          count: 1,
+          onApprove: vi.fn(),
+        }}
+      />,
+    );
+    const option = screen.getByRole("option", { name: /Approve pending/ });
+    expect(within(option).getByText(/Approve pending/)).toHaveClass(
+      "min-w-0",
+      "wrap-anywhere",
+    );
   });
 
   it("offers no Find row, and asks for nothing, until something is typed", () => {
@@ -212,5 +272,39 @@ describe("CommandPalette (§3.33)", () => {
     expect(state.view).toBe("library");
     expect(state.openArtifactId).toBe("art-1");
     expect(state.libraryTab).toBe("preview");
+  });
+
+  it("names a found file escaped, never raw (S6a M2)", async () => {
+    hits = [{ id: "art-7", name: "docs/\u{202E}notes\u{200B}.md" }];
+    const user = userEvent.setup();
+    render(<CommandPalette />);
+
+    await user.type(screen.getByRole("combobox"), "notes");
+
+    expect(
+      await screen.findByRole("option", {
+        name: /docs\/<U\+202E>notes<U\+200B>\.md/,
+      }),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("\u{202E}");
+    expect(document.body.textContent).not.toContain("\u{200B}");
+  });
+
+  it("opens a found project file on the Library's results side", async () => {
+    hits = [{ id: "art-9", name: "src/main.rs", in_project: true }];
+    useUiStore.setState({ libraryResults: false });
+    const user = userEvent.setup();
+    render(<CommandPalette />);
+
+    await user.type(screen.getByRole("combobox"), "main");
+    await user.click(
+      await screen.findByRole("option", { name: /src\/main\.rs/ }),
+    );
+
+    expect(useUiStore.getState()).toMatchObject({
+      view: "library",
+      openArtifactId: "art-9",
+      libraryResults: true,
+    });
   });
 });

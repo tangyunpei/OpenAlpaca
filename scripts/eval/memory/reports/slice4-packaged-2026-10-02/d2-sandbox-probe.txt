@@ -1,0 +1,11 @@
+# the profile denies outbound connects, loopback included (a probe, not the daemon)
+$ sandbox-exec -f scripts/eval/memory/no-network.sb /usr/bin/curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:51021/v1/status
+curl: (7) Failed to connect to 127.0.0.1 port 51021 after 0 ms: Couldn't connect to server
+000
+exit=7
+$ (control, unsandboxed) /usr/bin/curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:51021/v1/status  (no token: 401 expected)
+401
+exit=0
+$ ps -o pid,ppid,pgid,etime,command -p <daemon pid>
+  PID  PPID  PGID ELAPSED COMMAND
+60493     1 60493   00:56 <repo>/target/release/bundle/macos/openalpaca-gui.app/Contents/MacOS/openalpacad

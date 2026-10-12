@@ -1,0 +1,136 @@
+{
+  "row": {
+    "id": 20,
+    "scenario": "Compaction, lead/worker handoff, a cancelled task",
+    "required_outcome": "Provenance, trust labels and budgets preserved; failed output never promoted"
+  },
+  "design": ["§4 Initial limits: 8 KiB combined automatic context, 2 KiB pinned sub-budget, at most 8 retrieved chunks", "§5 steps 2, 7, 8: pinned notes within a sub-budget; every delivery carries id, path, heading, line range, revision, sources, match reason and freshness; delivered as quoted data; `memory_used` reported; the lead's and subagents' deliveries appear in the recently-used ring with their task_id", "§5: the memory section leaves the cached dynamic-context layer (a repeated identical query does not reuse a stale section)", "§6 Promotion and correction: failed or cancelled tasks and assistant-only completion claims never become facts", "§7a per-surface table: lead and subagents read only; task-output extraction yields `extracted_other` candidates only"],
+  "loads_in": ["slice-3"],
+  "notes_for_implementer": "Twelve notes of about 1.5 KiB on one topic, three of them pinned at about 1 KiB each. Step 1: a recall on that topic returns at most 8 chunks and at most 8192 bytes including the pinned notes and wrappers, with at most 2048 bytes of pinned notes (so two of the three), and reports truncation. Step 2: the lead's delivery carries the full provenance per item and is not a system instruction; step 3 the subagent's narrowed context gets the same items with the same provenance, read-only. Step 4: a service write between two identical recalls is visible in the second (nothing is cached by query text). Steps 5–7: task-output extraction from a cancelled task, a failed task and an assistant-only completion claim never produces an active note — the first two produce nothing, the third at most an `extracted_other` candidate. Step 8: the recently-used ring lists the lead's delivery with its task_id. The 1.5 KiB bodies use the generator so the byte budget is real.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice", "messages": ["9001"], "tasks": ["00000020-0000-4000-8000-0000000000aa", "00000020-0000-4000-8000-0000000000ab", "00000020-0000-4000-8000-0000000000ac"] },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        { "id": "00000020-0000-4000-8000-000000000001", "title": "Release checklist part 1", "kind": "procedure", "status": "active", "pinned": true, "tags": ["release"], "created_at": "2026-09-23T10:00:00Z", "updated_at": "2026-09-23T10:00:00Z", "body": { "@repeat": { "text": "# Release checklist part 1\n\nRelease step: verify the changelog and the release tag before publishing. ", "bytes": 1024 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000002", "title": "Release checklist part 2", "kind": "procedure", "status": "active", "pinned": true, "tags": ["release"], "created_at": "2026-09-23T10:00:01Z", "updated_at": "2026-09-23T10:00:01Z", "body": { "@repeat": { "text": "# Release checklist part 2\n\nRelease step: run the packaged smoke test on an empty store before publishing. ", "bytes": 1024 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000003", "title": "Release checklist part 3", "kind": "procedure", "status": "active", "pinned": true, "tags": ["release"], "created_at": "2026-09-23T10:00:02Z", "updated_at": "2026-09-23T10:00:02Z", "body": { "@repeat": { "text": "# Release checklist part 3\n\nRelease step: announce the release in the channel after publishing. ", "bytes": 1024 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000004", "title": "Release note 4", "kind": "reference", "status": "active", "tags": ["release"], "created_at": "2026-09-23T10:00:03Z", "updated_at": "2026-09-23T10:00:03Z", "body": { "@repeat": { "text": "# Release note 4\n\nRelease detail four about publishing the release tag. ", "bytes": 1536 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000005", "title": "Release note 5", "kind": "reference", "status": "active", "tags": ["release"], "created_at": "2026-09-23T10:00:04Z", "updated_at": "2026-09-23T10:00:04Z", "body": { "@repeat": { "text": "# Release note 5\n\nRelease detail five about publishing the release tag. ", "bytes": 1536 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000006", "title": "Release note 6", "kind": "reference", "status": "active", "tags": ["release"], "created_at": "2026-09-23T10:00:05Z", "updated_at": "2026-09-23T10:00:05Z", "body": { "@repeat": { "text": "# Release note 6\n\nRelease detail six about publishing the release tag. ", "bytes": 1536 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000007", "title": "Release note 7", "kind": "reference", "status": "active", "tags": ["release"], "created_at": "2026-09-23T10:00:06Z", "updated_at": "2026-09-23T10:00:06Z", "body": { "@repeat": { "text": "# Release note 7\n\nRelease detail seven about publishing the release tag. ", "bytes": 1536 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000008", "title": "Release note 8", "kind": "reference", "status": "active", "tags": ["release"], "created_at": "2026-09-23T10:00:07Z", "updated_at": "2026-09-23T10:00:07Z", "body": { "@repeat": { "text": "# Release note 8\n\nRelease detail eight about publishing the release tag. ", "bytes": 1536 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000009", "title": "Release note 9", "kind": "reference", "status": "active", "tags": ["release"], "created_at": "2026-09-23T10:00:08Z", "updated_at": "2026-09-23T10:00:08Z", "body": { "@repeat": { "text": "# Release note 9\n\nRelease detail nine about publishing the release tag. ", "bytes": 1536 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000010", "title": "Release note 10", "kind": "reference", "status": "active", "tags": ["release"], "created_at": "2026-09-23T10:00:09Z", "updated_at": "2026-09-23T10:00:09Z", "body": { "@repeat": { "text": "# Release note 10\n\nRelease detail ten about publishing the release tag. ", "bytes": 1536 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000011", "title": "Release note 11", "kind": "reference", "status": "active", "tags": ["release"], "created_at": "2026-09-23T10:00:10Z", "updated_at": "2026-09-23T10:00:10Z", "body": { "@repeat": { "text": "# Release note 11\n\nRelease detail eleven about publishing the release tag. ", "bytes": 1536 } }, "origin": "user" },
+        { "id": "00000020-0000-4000-8000-000000000012", "title": "Release note 12", "kind": "reference", "status": "active", "tags": ["release"], "created_at": "2026-09-23T10:00:11Z", "updated_at": "2026-09-23T10:00:11Z", "body": { "@repeat": { "text": "# Release note 12\n\nRelease detail twelve about publishing the release tag. ", "bytes": 1536 } }, "origin": "user" }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_tool": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "alice_lead": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": false, "forget": false }, "attribution": { "lane_key": null, "task_id": "00000020-0000-4000-8000-0000000000aa", "request_id": null, "source": "lead_agent" } },
+    "alice_subagent": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": false, "forget": false }, "attribution": { "lane_key": null, "task_id": "00000020-0000-4000-8000-0000000000aa", "request_id": null, "source": "subagent" } },
+    "task_extraction_cancelled": { "owner_id": "u_example_alice", "workspace": null, "surface": "extraction", "capabilities": { "read": false, "write": true, "forget": false }, "attribution": { "lane_key": null, "task_id": "00000020-0000-4000-8000-0000000000ab", "request_id": null, "source": "task_extraction" } },
+    "task_extraction_failed": { "owner_id": "u_example_alice", "workspace": null, "surface": "extraction", "capabilities": { "read": false, "write": true, "forget": false }, "attribution": { "lane_key": null, "task_id": "00000020-0000-4000-8000-0000000000ac", "request_id": null, "source": "task_extraction" } },
+    "task_extraction_completed": { "owner_id": "u_example_alice", "workspace": null, "surface": "extraction", "capabilities": { "read": false, "write": true, "forget": false }, "attribution": { "lane_key": null, "task_id": "00000020-0000-4000-8000-0000000000aa", "request_id": null, "source": "task_extraction" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "recall",
+      "context": "alice_tool",
+      "input": { "message": "walk me through publishing the release tag" },
+      "expect": {
+        "chunks_lte": 8,
+        "total_bytes_lte": 8192,
+        "pinned_bytes_lte": 2048,
+        "truncated": true,
+        "memory_used_includes": [{ "id": "00000020-0000-4000-8000-000000000001", "reason": "pinned" }, { "id": "00000020-0000-4000-8000-000000000002", "reason": "pinned" }],
+        "ids_absent": ["00000020-0000-4000-8000-000000000003"],
+        "delivered_as": "quoted_data",
+        "provenance_fields": ["id", "path", "heading", "line_range", "revision", "sources", "match", "freshness"]
+      }
+    },
+    {
+      "step": 2,
+      "op": "recall",
+      "context": "alice_lead",
+      "input": { "message": "walk me through publishing the release tag" },
+      "expect": { "chunks_lte": 8, "total_bytes_lte": 8192, "delivered_as": "quoted_data", "provenance_fields": ["id", "path", "heading", "line_range", "revision", "sources", "match", "freshness"], "trust_label_present": true }
+    },
+    {
+      "step": 3,
+      "op": "recall",
+      "context": "alice_subagent",
+      "input": { "message": "walk me through publishing the release tag" },
+      "expect": { "chunks_lte": 8, "total_bytes_lte": 8192, "delivered_as": "quoted_data", "trust_label_present": true }
+    },
+    {
+      "step": 4,
+      "op": "store",
+      "context": "alice_subagent",
+      "input": { "title": "Worker write", "body": "# Worker write\n\nA worker may not write.\n", "kind": "fact" },
+      "expect": { "refused": "fixture:capability_denied", "message_contains": ["memory_write"] }
+    },
+    {
+      "step": 5,
+      "op": "store",
+      "context": "alice_tool",
+      "as": "between",
+      "input": { "title": "Release tag format", "body": "# Release tag format\n\nRelease tags are `v<major>.<minor>.<patch>` — publishing the release tag uses this exact format.\n", "kind": "fact", "fact_key": "release.tag_format" },
+      "expect": { "created": true }
+    },
+    {
+      "step": 6,
+      "op": "recall",
+      "context": "alice_tool",
+      "input": { "message": "walk me through publishing the release tag" },
+      "expect": { "ids_include": ["@id:between"], "total_bytes_lte": 8192, "chunks_lte": 8 }
+    },
+    {
+      "step": 7,
+      "op": "extraction",
+      "context": "task_extraction_cancelled",
+      "input": { "typed": "", "tool_output": "Release published to the registry at 10:42; the tag format is now vX.Y.", "source": { "type": "task", "id": "00000020-0000-4000-8000-0000000000ab" }, "task_outcome": "cancelled" },
+      "expect": { "extraction": { "count": 0 } }
+    },
+    {
+      "step": 8,
+      "op": "extraction",
+      "context": "task_extraction_failed",
+      "input": { "typed": "", "tool_output": "error: release failed; the tag format is now vX.Y.", "source": { "type": "task", "id": "00000020-0000-4000-8000-0000000000ac" }, "task_outcome": "failed" },
+      "expect": { "extraction": { "count": 0 } }
+    },
+    {
+      "step": 9,
+      "op": "extraction",
+      "context": "task_extraction_completed",
+      "input": { "typed": "", "assistant_text": "I have published the release and the registry now lists it.", "source": { "type": "task", "id": "00000020-0000-4000-8000-0000000000aa" }, "task_outcome": "completed" },
+      "expect": { "extraction": { "count_lte": 1, "notes": [{ "origin": "extracted_other", "status": "candidate" }] } }
+    },
+    {
+      "step": 10,
+      "op": "recall",
+      "context": "alice_tool",
+      "input": { "message": "was the release published?" },
+      "expect": { "ids_absent_by_status": ["candidate"] }
+    },
+    {
+      "step": 11,
+      "op": "recently_used",
+      "context": "alice_tool",
+      "input": { "limit": 50 },
+      "expect": { "items_include": [{ "id": "00000020-0000-4000-8000-000000000001", "reason": "pinned", "task_id": "00000020-0000-4000-8000-0000000000aa" }] }
+    }
+  ],
+  "final_state": {
+    "snapshot": { "alice_home": { "pending": null } }
+  }
+}

@@ -15,6 +15,7 @@ use crate::events::SystemEvent;
 use crate::middleware::skill::{
     SkillDocument, SkillFrontmatter, SkillScope, parse_skill_frontmatter, parse_skill_markdown,
 };
+use crate::orchestrator::intent::is_reserved_slash_name;
 use chrono::Utc;
 use openalpaca_storage::resolve_skill_key;
 use std::collections::HashMap;
@@ -381,6 +382,7 @@ impl SkillCatalog {
 
         let key = dir_name.to_lowercase();
         let skill_name_for_event = frontmatter.name.clone();
+        warn_reserved_slash_claims(&key, &frontmatter);
 
         let entry = SkillEntry {
             frontmatter,
@@ -724,6 +726,7 @@ impl SkillCatalog {
         plugin_id: String,
     ) {
         let skill_id = skill_id.to_lowercase();
+        warn_reserved_slash_claims(&skill_id, &frontmatter);
         let slash_cmd = frontmatter.invoke.slash.clone();
         let aliases = frontmatter.invoke.aliases.clone();
         let entry = SkillEntry {
@@ -990,3 +993,37 @@ impl SkillCatalog {
 
 #[cfg(test)]
 mod tests;
+
+/// Design 09 §12.3: the slash names a skill claims — its slash command, its
+/// aliases and its id (the `/{skill_id}` fallback of
+/// [`SkillCatalog::get_by_command`]) — that a chat memory command reserves,
+/// each once, with its slash.
+fn reserved_slash_claims(id: &str, frontmatter: &SkillFrontmatter) -> Vec<String> {
+    let names = frontmatter
+        .effective_slash_command()
+        .into_iter()
+        .chain(frontmatter.invoke.aliases.iter().cloned())
+        .chain(std::iter::once(id.to_string()));
+    let mut claimed: Vec<String> = Vec::new();
+    for name in names {
+        let bare = name.strip_prefix('/').unwrap_or(&name).to_lowercase();
+        let slash = format!("/{bare}");
+        if is_reserved_slash_name(&bare) && !claimed.contains(&slash) {
+            claimed.push(slash);
+        }
+    }
+    claimed
+}
+
+/// One WARN at load for a skill that claims a reserved slash name. The skill
+/// still loads — its other names and the router still reach it — but that
+/// slash runs the memory command, which is parsed before any skill.
+fn warn_reserved_slash_claims(id: &str, frontmatter: &SkillFrontmatter) {
+    let claimed = reserved_slash_claims(id, frontmatter);
+    if !claimed.is_empty() {
+        tracing::warn!(
+            "SkillCatalog: skill '{id}' claims {}, reserved for the chat memory commands: that slash runs the memory command and never reaches this skill",
+            claimed.join(", ")
+        );
+    }
+}

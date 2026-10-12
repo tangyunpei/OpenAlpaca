@@ -245,6 +245,19 @@ pub enum ServerEvent {
         lane_key: Option<String>,
         /// The run waiting on this prompt (GAP-10), or `null` outside one.
         task_id: Option<String>,
+        /// What the card says about the call, written by the daemon (design
+        /// 09 §4.4; storage design R34, R49) and shown above the literal
+        /// arguments: `memory_confirm`'s from the notes it names, the file
+        /// tools' and the shell's from the working folder and the call's path
+        /// or strings, every third-party character escaped. `null` for the
+        /// ordinary card.
+        /// Live only: the `event_log` row keeps ids only.
+        #[serde(default)]
+        preview: Option<String>,
+        /// The approval is good for this one call only (design 09 §4.2 rule
+        /// 2): offer no *Always allow* — the daemon ignores the scope anyway.
+        #[serde(default)]
+        per_call: bool,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -346,8 +359,10 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
-    /// An agent wrote a **produced** artifact — `artifact_write`, or the
-    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
+    /// An agent wrote a **produced** artifact — `artifact_write`, a
+    /// `file_write` saved as a by-product (no project), the
+    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9) — or a
+    /// result file `file_write` wrote into the project (`in_project`, R35).
     ///
     /// Never fired for uploads: an upload has no agent and no version to
     /// announce. A supersede is a write, so a second `put` of the same name
@@ -366,6 +381,14 @@ pub enum ServerEvent {
         version: u32,
         /// The head file's absolute path (`file_assets.storage_path`).
         path: String,
+        /// A result file in the project — a pointer row (ST-12) — rather than
+        /// a by-product. A frame from an older daemon carries neither this
+        /// field nor the next, and is a by-product.
+        #[serde(default)]
+        in_project: bool,
+        /// ST-18: whether Open is offered for it (`ArtifactRecord::openable`).
+        #[serde(default = "openable_by_default")]
+        openable: bool,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -465,6 +488,37 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// A memory note changed (memory redesign, design §7a; owner decision
+    /// G30). Broadcast for every write the memory service makes — through
+    /// `/v1/memories*`, a model tool call or the extractor — and for every
+    /// change a reconciliation scan finds behind the service's back
+    /// (`change: external`, with no `surface`; §7b P13). The GUI's Memory
+    /// view invalidates its queries on it instead of polling. Persisted
+    /// nowhere (`events/persistence.rs` answers `Ok(0)`), like
+    /// `daemon_shutting_down`.
+    MemoryChanged {
+        /// `home-<owner-key>` or `proj-<owner-key>-<project-key>` (design §2).
+        partition_key: String,
+        note_id: String,
+        /// `created | updated | archived | confirmed | forgotten | external`.
+        change: String,
+        /// The revision written; `null` for a forget.
+        revision: Option<String>,
+        /// `user | extracted_user | extracted_other | imported | external`.
+        origin: String,
+        /// `user | model_tool | extraction`; absent for a scan's finding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+}
+
+/// `ArtifactWritten::openable` in a frame that predates it: every artifact
+/// announced before Stage 2 was a by-product, and an older daemon offered
+/// Open for every one.
+fn openable_by_default() -> bool {
+    true
 }
 
 /// The source of an event, identifying which connector or interface originated it.

@@ -190,6 +190,30 @@ describe("invalidationKeysFor", () => {
     ).toEqual([qk.artifacts.all()]);
   });
 
+  // Memory redesign G30: the Memory view never polls, so this frame is the
+  // only thing that tells it a note changed — through the API, a model tool
+  // call, the extractor, or an editor behind the service's back (`external`,
+  // which carries no `surface`).
+  it("refreshes every memory key from one memory_changed frame", () => {
+    for (const frame of [
+      { change: "created", surface: "model_tool" },
+      { change: "forgotten", revision: null, surface: "user" },
+      { change: "external" },
+    ]) {
+      expect(
+        invalidationKeysFor(
+          event("memory_changed", {
+            partition_key: "home-32acea7eb739b08afd959db91e46d450",
+            note_id: "55e811b6-3220-4758-a47b-034bd1023f38",
+            revision: "9f".repeat(32),
+            origin: "user",
+            ...frame,
+          }),
+        ),
+      ).toEqual([qk.memory.all()]);
+    }
+  });
+
   // Phase 4: a lane transition changes this run's timeline, not the run
   // list — a run with eight subagents fires sixteen of these over its life,
   // so invalidating `tasks.all()` here would re-list every run sixteen
@@ -363,6 +387,28 @@ describe("invalidateForEvent", () => {
     expect(invalidated(client, qk.extensions.list())).toBe(true);
     expect(invalidated(client, qk.tools.list())).toBe(true);
     expect(invalidated(client, qk.connectors.list())).toBe(true);
+    expect(invalidated(client, qk.tasks.list({ status: "active" }))).toBe(
+      false,
+    );
+  });
+
+  it("reaches every mounted memory query from one memory_changed frame", () => {
+    const client = seeded();
+    const list = qk.memory.list({ scope: "global", status: "active" }, null);
+    const detail = qk.memory.detail("n-1", "/Users/me/repo");
+    const learned = qk.memory.recentlyLearned(null);
+    client.setQueryData(list, { pages: [], pageParams: [] });
+    client.setQueryData(detail, null);
+    client.setQueryData(learned, []);
+
+    invalidateForEvent(
+      client,
+      event("memory_changed", { note_id: "n-1", change: "updated" }),
+    );
+
+    expect(invalidated(client, list)).toBe(true);
+    expect(invalidated(client, detail)).toBe(true);
+    expect(invalidated(client, learned)).toBe(true);
     expect(invalidated(client, qk.tasks.list({ status: "active" }))).toBe(
       false,
     );

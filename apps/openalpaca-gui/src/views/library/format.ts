@@ -27,3 +27,25 @@ export function relativeTime(iso: string, now: Date = new Date()): string {
   if (delta < DAY) return `${Math.floor(delta / HOUR)}h ago`;
   return `${Math.floor(delta / DAY)}d ago`;
 }
+
+/**
+ * A project's folder name — the last component of its root, either separator
+ * (`/Users/dev/app` → `app`, `C:\dev\app` → `app`) — for a result row's
+ * subtitle and the detail's meta row (storage design §13). `null` for no root.
+ */
+export function projectName(root: string | null): string | null {
+  if (root === null) return null;
+  const parts = root.split(/[\\/]/).filter((part) => part !== "");
+  return parts.at(-1) ?? null;
+}
+
+/**
+ * The name `Export` saves under: the last component of a row's name, either
+ * separator — a file written into the project, `src/main.rs`, saves as
+ * `main.rs`, since a saved file's name holds no folder; any other row's name
+ * is already one component and is kept as it is.
+ */
+export function baseName(name: string): string {
+  const parts = name.split(/[\\/]/).filter((part) => part !== "");
+  return parts.at(-1) ?? name;
+}

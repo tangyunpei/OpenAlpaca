@@ -1,10 +1,12 @@
+mod approval_preview;
+mod artifact_read;
 mod artifact_write;
 mod file_ops;
 mod helpers;
 mod invoke_skill;
 mod main_loop;
-mod memory_ops;
-mod memory_search;
+mod memory_tools;
+mod pre_edit;
 mod read_result;
 mod send;
 mod shell_execute;
@@ -17,12 +19,19 @@ mod web_search;
 
 // Routing V2: these tools are constructed per-request by the tool-mode
 // main loop (via `main_loop_tool_set`) and injected into its per-request
-// registry — never registered globally via `builtin_tools()`.
+// registry — never registered globally via `builtin_tools()`. The memory
+// read surface (`memory_read_tools`: search, read, list, timeline) is the exception
+// the daemon registers globally, so every agent granted `memory_read` has
+// it; the three memory writers stay per-request on the main loop.
 pub use invoke_skill::{invoke_skill_tool_definition, InvokeSkillTool};
-pub use main_loop::{main_loop_relay_guidance, main_loop_tool_set, MainLoopToolSet};
-pub use memory_ops::{
-    memory_forget_tool_definition, memory_store_tool_definition, MemoryForgetTool,
-    MemoryStoreTool,
+pub use main_loop::{
+    MainLoopToolSet, main_loop_memory_guidance, main_loop_relay_guidance, main_loop_tool_set,
+};
+pub use memory_tools::{
+    MemoryConfirmTool, MemoryForgetTool, MemoryStoreTool, MemoryUpdateTool,
+    memory_confirm_tool_definition, memory_forget_tool_definition, memory_list_tool_definition,
+    memory_read_tool_definition, memory_read_tools, memory_search_tool_definition,
+    memory_store_tool_definition, memory_timeline_tool_definition, memory_update_tool_definition,
 };
 pub use start_workflow::{start_workflow_tool_definition, StartWorkflowTool};
 pub use steer_workflow::{steer_workflow_tool_definition, SteerWorkflowTool};
@@ -43,8 +52,8 @@ use tokio::process::Command;
 pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>;
 
 use self::artifact_write::artifact_write_tool;
-use self::file_ops::{file_read_tool, file_write_tool};
-use self::memory_search::memory_search_tool;
+use self::artifact_read::artifact_read_tool;
+use self::file_ops::{file_edit_tool, file_list_tool, file_read_tool, file_write_tool};
 use self::read_result::read_result_tool;
 use self::shell_execute::shell_execute_tool;
 use self::update_persona::update_persona_tool;
@@ -53,9 +62,24 @@ use self::web_search::web_search_tool;
 
 use super::registry::{RegisteredTool, ToolBackend};
 
+/// The lead's ruling R-T14: the one "project turn" predicate — the turn's
+/// request carries a root the store paths read as a project
+/// (`scope_from_context`'s project arm: non-blank and absolute). The main
+/// loop computes it once per turn and hands it to every offer that depends
+/// on it (`file_edit` beside `file_write`, S4b; the file readers, S5).
+pub(crate) fn is_project_turn(ctx: &ToolContext) -> bool {
+    matches!(
+        artifact_write::scope_from_context(ctx),
+        openalpaca_storage::store::StoreScope::Project(_)
+    )
+}
+
 /// Context required by the `update_persona` tool at runtime.
 /// Re-export from the update_persona module.
 pub use update_persona::PersonaToolContext;
+/// The `USER.md` replace path a user-directed surface writes through
+/// (`PUT /v1/persona/user`): the tool's own backup-and-atomic-write path.
+pub use update_persona::{UserDocumentRead, UserDocumentWriter, UserDocumentWritten};
 
 // ---------------------------------------------------------------------------
 // WorkspaceReadTool
@@ -168,6 +192,16 @@ impl BuiltInTool for WorkspaceWriteTool {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: content".to_string())?;
+
+        // The key names the entry (and, spilled, the artifact's path): the
+        // store's own entries are refused before anything is looked up
+        // (design §2, plan 3.2).
+        if let Some(what) = helpers::is_store_owned_path(key, helpers::StoreAccess::Write) {
+            return Err(format!(
+                "Workspace key '{key}' is refused: it names {what}, which the daemon owns. \
+                 Memory notes are written with memory_store and memory_update."
+            ));
+        }
 
         // Enforce the documented 32KB content size limit
         const MAX_WORKSPACE_CONTENT_SIZE: usize = 32768;
@@ -302,38 +336,41 @@ impl BuiltInTool for WorkspaceWriteTool {
 }
 
 /// Return all built-in tool definitions and implementations.
-/// When `db` is provided, memory-backed tools (memory_search) are included.
-/// When `embedder` is provided, memory_search uses hybrid (FTS + vector) search.
 ///
-/// `workspace_root` is the explicit workspace directory for file tools.
-/// If `None`, falls back to `std::env::current_dir()` (for backward
-/// compatibility in tests and CLI).
+/// The memory tools are not among them: the read surface is
+/// [`memory_read_tools`] over the daemon's `MemoryService`, and the writers
+/// are per-request (`main_loop_tool_set`).
+///
+/// No startup folder is captured: the file tools and the shell act in each
+/// call's working folder (design §10, `tools::working_folder`).
 pub fn builtin_tools(
     db: Option<openalpaca_storage::Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
-    workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool> {
     let ws_cfg = web_search_config
         .unwrap_or_else(|| Arc::new(ArcSwap::from_pointee(WebSearchConfig::default())));
 
-    let ws_root = workspace_root
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    // Clone db before memory_search consumes it — the workspace and artifact
-    // tools need it too.
-    let ws_db = db.clone();
+    let ws_db = db;
     // The daemon config the file, artifact and workspace tools share.
-    let tool_cfg = daemon_config.clone();
+    let tool_cfg = daemon_config;
 
     let mut tools = vec![
         web_search_tool(ws_cfg),
         web_fetch_tool(),
-        file_read_tool(ws_root.clone()),
-        // The config carries §5.7's `snapshot_max_bytes` — the bound on the
-        // pre-edit image `file_write` takes before it overwrites a file.
-        file_write_tool(ws_root, tool_cfg.clone()),
+        file_read_tool(),
+        // R40: one folder of the working folder, read-only. It comes with the
+        // `file_read` capability (R42), so every template that reads files
+        // lists them with no template edit.
+        file_list_tool(),
+        // The config carries ST-17's `snapshot_max_bytes` — the cap on the
+        // pre-edit copy `file_write` keeps before it replaces a project file
+        // — and the artifact caps; the database records a result file's
+        // pointer row (R35) and holds a by-product (no project).
+        file_write_tool(ws_db.clone(), tool_cfg.clone()),
+        // ST-22: a change inside a project file — the same folder, card,
+        // pre-edit copy and pointer row as file_write's real write.
+        file_edit_tool(ws_db.clone(), tool_cfg.clone()),
         shell_execute_tool(),
         // §5.4's counterpart to the `results/` spill. Registered on every
         // surface because the stub the loop emits names it on every surface —
@@ -345,11 +382,12 @@ pub fn builtin_tools(
         // has to exist for capability resolution even where no database was
         // wired (tests, the CLI), and the tool refuses at call time instead.
         artifact_write_tool(ws_db.clone(), tool_cfg.clone()),
+        // R41: read a by-product back by the id artifact_write, file_write's
+        // by-product result, a workspace entry and task_status name. Comes
+        // with the `read_result` capability (R42); registered with or without
+        // a database, like artifact_write, and refuses at call time without.
+        artifact_read_tool(ws_db.clone()),
     ];
-    if let (Some(db), Some(dc)) = (db, daemon_config) {
-        tools.push(memory_search_tool(db, embedder, dc));
-    }
-
     // Always register workspace tools — definitions needed for capability resolution.
     for def in workspace_tool_definitions() {
         let cap = if def.name == "workspace_read" {
@@ -384,17 +422,17 @@ pub fn builtin_tools(
 /// and optionally `send`.
 pub fn builtin_tools_with_persona_context(
     db: Option<openalpaca_storage::Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     persona_ctx: PersonaToolContext,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
-    workspace_root: Option<PathBuf>,
     connector_send_provider: Option<ConnectorSendLock>,
 ) -> Vec<RegisteredTool> {
-    let mut tools = builtin_tools(db, embedder, daemon_config, web_search_config, workspace_root);
+    // `send` resolves a file in the call's working folder (R26) and looks an
+    // artifact id up in the store (R23): it takes the database, not a root.
+    let mut tools = builtin_tools(db.clone(), daemon_config, web_search_config);
     tools.push(update_persona_tool(persona_ctx));
     if let Some(provider) = connector_send_provider {
-        tools.push(send::send_tool(provider));
+        tools.push(send::send_tool(provider, db));
     }
     tools
 }
@@ -544,26 +582,30 @@ impl BuiltInTool for ScriptToolBuiltIn {
         cmd.args(&args);
         cmd.current_dir(&self.skill_dir);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(self.timeout_secs),
-            cmd.output(),
-        )
-        .await
-        .map_err(|_| format!("Script timed out after {}s", self.timeout_secs))?
-        .map_err(|e| format!("Failed to execute script: {}", e))?;
+        // R45 (storage design §11): killed with the processes it started
+        // when its time runs out or its call is dropped.
+        let timeout = std::time::Duration::from_secs(self.timeout_secs);
+        let output = match crate::tools::platform::run_bounded(cmd, timeout).await {
+            Ok(output) => output,
+            Err(crate::tools::platform::RunFailure::TimedOut) => {
+                return Err(format!("Script timed out after {}s", self.timeout_secs));
+            }
+            Err(
+                crate::tools::platform::RunFailure::Spawn(e)
+                | crate::tools::platform::RunFailure::Io(e),
+            ) => {
+                return Err(format!("Failed to execute script: {}", e));
+            }
+        };
 
-        // Cap output size to prevent memory pressure from scripts producing
-        // unbounded stdout/stderr, matching the command backend limit.
-        const MAX_SCRIPT_OUTPUT_BYTES: usize = 512 * 1024; // 512 KB
+        // Each stream at most 512 KB, the command backend's limit:
+        // `run_bounded` kept no more than that and one byte while the script
+        // ran (R-T28), and the cut to the cap, with its line (residual X7),
+        // is here. A failure shows only the first 500 characters of stderr.
         if output.status.success() {
-            let stdout = String::from_utf8_lossy(
-                &output.stdout[..output.stdout.len().min(MAX_SCRIPT_OUTPUT_BYTES)],
-            );
-            Ok(stdout.to_string())
+            Ok(crate::tools::platform::shown_output(&output.stdout, "stdout"))
         } else {
-            let stderr = String::from_utf8_lossy(
-                &output.stderr[..output.stderr.len().min(MAX_SCRIPT_OUTPUT_BYTES)],
-            );
+            let stderr = crate::tools::platform::shown_output(&output.stderr, "stderr");
             Err(format!(
                 "Script failed (exit {}): {}",
                 output.status.code().unwrap_or(-1),
@@ -571,22 +613,50 @@ impl BuiltInTool for ScriptToolBuiltIn {
             ))
         }
     }
+
+    /// R29: a script's arguments become its command line (`--key=value`),
+    /// and `config/skills/create-skill/scripts/write_skill_md.sh` builds a
+    /// path from `--id` with no check of its own, so the `../` rule stays.
+    fn arguments_reach_a_program(&self) -> bool {
+        true
+    }
 }
 
 /// Return MCP-style annotations for a known built-in tool name.
 /// Returns `None` for unknown names; callers default to `None` (no special treatment).
 pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::ToolAnnotations> {
     match name {
-        "file_read" | "workspace_read" | "memory_search" | "read_result" => {
+        "file_read" | "file_list" | "artifact_read" | "workspace_read" | "read_result"
+        | "memory_search" | "memory_read" | "memory_list" | "memory_timeline" => {
             Some(read_only_annotations())
         }
         "web_fetch" | "web_search" => Some(read_only_open_world_annotations()),
-        "file_write" | "workspace_write" | "artifact_write" | "update_persona" => {
-            Some(destructive_local_annotations())
-        }
+        // Design §7, *Capabilities*: the two memory tools that prompt;
+        // `memory_store` deliberately carries none — a plain save never
+        // prompts, and a tool-issued supersede is bounded by authority.
+        // Design 09 §4.1: `memory_confirm` prompts on an attended turn and is
+        // refused on an unattended one, like the other two.
+        "file_edit" | "file_write" | "update_persona" | "memory_forget" | "memory_update"
+        | "memory_confirm" => Some(destructive_local_annotations()),
+        // ST-15 (storage design §12): the by-product writers write only under
+        // ~/.openalpaca and never ask. By name, before the tool runs — so
+        // `file_write` saving a by-product with no project still asks.
+        "artifact_write" | "workspace_write" => Some(local_write_annotations()),
         "shell_execute" | "send" => Some(destructive_open_world_annotations()),
         _ => None,
     }
+}
+
+/// Whether a person's approval of this tool is good for **one call only**
+/// (design 09 §4.2 rule 2, ruling LR14): true only for `memory_confirm`,
+/// whose Approve is what mints a `user` note (G2).
+///
+/// For such a tool the sandbox always raises the card — it skips the
+/// approval cache and `auto_approve`, and never records an approval — and
+/// the card says so (`per_call`), so no client offers *Always allow*.
+/// Static per tool name, like every annotation (design 03 §7).
+pub fn approval_is_per_call(name: &str) -> bool {
+    name == "memory_confirm"
 }
 
 fn read_only_annotations() -> openalpaca_mcp::ToolAnnotations {
@@ -605,6 +675,17 @@ fn read_only_open_world_annotations() -> openalpaca_mcp::ToolAnnotations {
         read_only_hint: Some(true),
         idempotent_hint: Some(true),
         open_world_hint: Some(true),
+        ..Default::default()
+    }
+}
+
+/// A by-product writer (ST-15): writes only under ~/.openalpaca, never asks.
+fn local_write_annotations() -> openalpaca_mcp::ToolAnnotations {
+    openalpaca_mcp::ToolAnnotations {
+        destructive_hint: Some(false),
+        read_only_hint: Some(false),
+        idempotent_hint: Some(false),
+        open_world_hint: Some(false),
         ..Default::default()
     }
 }

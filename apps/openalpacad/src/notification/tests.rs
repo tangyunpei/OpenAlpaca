@@ -277,26 +277,9 @@ async fn test_deliver_artifacts_skips_non_file_capable_channel() {
     // No assertion needed — just verifying no panic
 }
 
-#[tokio::test]
-async fn test_deliver_artifacts_skips_oversized_files() {
-    let db = test_db();
-    let repo = FileAssetRepository::new(&db);
-    // Create a real (small) temp file so the existence check passes,
-    // but set size_bytes > 50MB in the DB record so the size check fires.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), b"dummy").unwrap();
-    let path_str = tmp.path().to_str().unwrap();
-    let oversized = make_file_asset("big_file", path_str, 60 * 1024 * 1024);
-    repo.insert(&oversized).unwrap();
-
-    let send = MockSendProvider {
-        file_capable: vec!["telegram".to_string()],
-    };
-    // outcome_json referencing the oversized file via file_asset_id
-    let outcome_json = r#"{"summary":"done","outcome_kind":"artifact_only","artifacts":[{"key":"k","label":"Big file","agent_id":"a","step_order":0,"file_asset_id":"big_file"}]}"#;
-    // File exists on disk → existence check passes → size check fires → skip logged.
-    deliver_artifacts(&db, &send, "task_1", "telegram", "12345", Some(outcome_json), "user1").await;
-}
+// The size limit's test is `an_artifact_over_the_size_limit_is_never_delivered`
+// in `artifacts.rs`: delivery now resolves a file's folder in the store, so
+// it runs under a guarded home store (d3-approvals-2).
 
 // ── Phase 12-B: Edge-case notification tests ──────────────────────
 

@@ -54,7 +54,8 @@ pub struct FileAssetRepository<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducedArtifact {
     pub id: String,
-    /// `file_assets.filename` — the head file's own name (`01-notes.md`).
+    /// `file_assets.filename` — the head file's own name (`01-notes.md`); for
+    /// a result file in the project, its project-relative path (`src/a.rs`).
     pub filename: String,
     /// The runtime instance that wrote it ("writing_agent::a1b2c3d4").
     pub agent_id: Option<String>,
@@ -157,10 +158,15 @@ impl<'a> FileAssetRepository<'a> {
     /// grows: the split is `= 'upload'` vs. the rest, so a new origin lands on
     /// the informational side rather than silently against the upload cap.
     /// Read by `GET /v1/status`.
+    ///
+    /// A result file's pointer row (`in_project = 1`) is counted in neither
+    /// number: its bytes are in the user's project folder, not the store
+    /// (R38, the lead's ruling R-T9).
     pub fn storage_bytes_by_origin(&self) -> Result<StorageBytes> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT origin, COALESCE(SUM(size_bytes), 0) FROM file_assets GROUP BY origin",
+                "SELECT origin, COALESCE(SUM(size_bytes), 0) FROM file_assets
+                 WHERE in_project = 0 GROUP BY origin",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -298,12 +304,16 @@ impl<'a> FileAssetRepository<'a> {
     /// The ids of the artifacts a run *produced*, oldest first.
     ///
     /// `origin != 'upload'` on purpose: a file the user attached during the run
-    /// also carries its `task_id`, and it is not the run's output.
+    /// also carries its `task_id`, and it is not the run's output. And
+    /// `in_project = 0`: a file the run wrote into its project is the user's
+    /// file, never one of the run's artifacts (R38) — a completion report is
+    /// never linked to one, which would make the project delete keep a copy of
+    /// it (interfaces §10 C10).
     pub fn produced_ids_for_task(&self, task_id: &str) -> Result<Vec<String>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id FROM file_assets
-                 WHERE task_id = ?1 AND origin != 'upload'
+                 WHERE task_id = ?1 AND origin != 'upload' AND in_project = 0
                  ORDER BY created_at ASC, rowid ASC",
             )?;
             let mut ids = Vec::new();
@@ -322,11 +332,15 @@ impl<'a> FileAssetRepository<'a> {
     /// "what did this run make": `file_assets.task_id` is written by the one
     /// artifact writer, for the lead and for every subagent of the run alike,
     /// so it does not matter which lane produced the file.
+    ///
+    /// Result files in the project are not among them (R38): the count, the
+    /// chips and connector delivery read this, and a connector is never sent a
+    /// project's files automatically.
     pub fn produced_for_task(&self, task_id: &str) -> Result<Vec<ProducedArtifact>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, filename, agent_id FROM file_assets
-                 WHERE task_id = ?1 AND origin != 'upload'
+                 WHERE task_id = ?1 AND origin != 'upload' AND in_project = 0
                  ORDER BY created_at ASC, rowid ASC",
             )?;
             let mut produced = Vec::new();
@@ -360,7 +374,7 @@ impl<'a> FileAssetRepository<'a> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT task_id, COUNT(*) FROM file_assets
-                 WHERE origin != 'upload' AND task_id IN ({placeholders})
+                 WHERE origin != 'upload' AND in_project = 0 AND task_id IN ({placeholders})
                  GROUP BY task_id"
             ))?;
             let mut rows = stmt.query(rusqlite::params_from_iter(task_ids.iter()))?;
@@ -370,6 +384,30 @@ impl<'a> FileAssetRepository<'a> {
             Ok(())
         })?;
         Ok(counts)
+    }
+
+    /// **R38.** The files a run wrote into its project — pointer rows
+    /// (`in_project = 1`), oldest first, `filename` their project-relative
+    /// path. Never the run's artifacts (see [`Self::produced_for_task`]); the
+    /// completion report names them in a line of its own.
+    pub fn project_files_for_task(&self, task_id: &str) -> Result<Vec<ProducedArtifact>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, filename, agent_id FROM file_assets
+                 WHERE task_id = ?1 AND in_project = 1
+                 ORDER BY created_at ASC, rowid ASC",
+            )?;
+            let mut files = Vec::new();
+            let mut rows = stmt.query(rusqlite::params![task_id])?;
+            while let Some(row) = rows.next()? {
+                files.push(ProducedArtifact {
+                    id: row.get(0)?,
+                    filename: row.get(1)?,
+                    agent_id: row.get(2)?,
+                });
+            }
+            Ok(files)
+        })
     }
 
     /// List file assets by status, ordered by creation date (oldest first).

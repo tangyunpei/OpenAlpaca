@@ -1,0 +1,20 @@
+live/proj
+live/proj/.openalpaca
+live/proj/.openalpaca/memory
+live/proj/.openalpaca/.layout
+live/proj/.openalpaca/README.md
+live/proj/.openalpaca/.gitignore
+live/proj/.openalpaca/memory/.gitignore
+live/proj/.openalpaca/memory/owners
+live/proj/.openalpaca/memory/owners/80a4c0bb8402f4b0597eae9792caa358
+live/proj/.openalpaca/memory/owners/80a4c0bb8402f4b0597eae9792caa358/.history
+live/proj/.openalpaca/memory/owners/80a4c0bb8402f4b0597eae9792caa358/MEMORY.md
+live/proj/.openalpaca/memory/owners/80a4c0bb8402f4b0597eae9792caa358/notes
+live/proj/.openalpaca/memory/owners/80a4c0bb8402f4b0597eae9792caa358/.history/c1ada80a-2ad4-44bd-a979-20eaa9d77003
+live/proj/.openalpaca/memory/owners/80a4c0bb8402f4b0597eae9792caa358/notes/c1ada80a-2ad4-44bd-a979-20eaa9d77003--track-d-project-note.md
+live/proj/.openalpaca/memory/owners/80a4c0bb8402f4b0597eae9792caa358/.history/c1ada80a-2ad4-44bd-a979-20eaa9d77003/033965ba2cdb2d829fa06ca60a95daec69c9b54fe68f15a583c23683f7dcfd0f.md
+total 8
+drwx------@ 4 owner  wheel  128 Oct  2 21:14 .
+drwxr-xr-x@ 6 owner  wheel  192 Oct  2 21:14 ..
+-rw-------@ 1 owner  wheel    2 Oct  2 21:14 .gitignore
+drwx------@ 3 owner  wheel   96 Oct  2 21:14 owners

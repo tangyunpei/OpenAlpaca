@@ -80,7 +80,8 @@ impl std::error::Error for SecurityViolation {}
 ///
 /// Ambient capabilities are granted constructor-side, not here:
 /// `AgentTemplate::to_subagent` appends `workspace_read`/`workspace_write` to
-/// the template's list, so they arrive as ordinary members of `Only(..)`.
+/// the template's list, and `memory_read` to an internal template's unless it
+/// denies it (design 09 §5), so they arrive as ordinary members of `Only(..)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Allowlist {
     /// No allow-list restriction — only the deny list applies.

@@ -11,6 +11,7 @@ import type { ChatMessage } from "@/lib/api/types";
 import {
   buildTranscript,
   parseUserContent,
+  persistedLiveTurn,
   showsLiveTurn,
   showsPendingTurn,
   streamPhaseLabel,
@@ -181,6 +182,135 @@ describe("the live turn's reasoning (S2)", () => {
   });
 });
 
+/**
+ * Memory redesign 3.3/3.9: `done.memory_used` names the notes a turn
+ * delivered. Live only, like `attachments_skipped` — nothing persists it — so
+ * the live row carries it, and a stored row only when this view watched its
+ * turn finish (Track D, D4 defect 1).
+ */
+describe("the notes a turn used (memory_used)", () => {
+  const used = [
+    {
+      id: "55e811b6-3220-4758-a47b-034bd1023f38",
+      revision: "a".repeat(64),
+      reason: "recall",
+    },
+  ];
+
+  it("rides on the live row once `done` lands, and on no stored one", () => {
+    const stream = drive(OPEN, {
+      type: "done",
+      data: {
+        content: "Tabs, width 4.",
+        model: "m",
+        tokens_in: 1,
+        tokens_out: 1,
+        duration_ms: 1,
+        memory_used: used,
+      },
+    });
+    const rows = buildTranscript(
+      input({
+        history: [
+          message({ id: 1, role: "assistant", content: "An older answer." }),
+        ],
+        stream,
+      }),
+    ).filter((item) => item.kind === "assistant");
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ memoryUsed: [] });
+    expect(rows[1]).toMatchObject({ memoryUsed: used });
+  });
+
+  it("is empty while the turn streams and when `done` names none", () => {
+    const streaming = drive(OPEN, { type: "delta", content: "Tabs" });
+    expect(buildTranscript(input({ stream: streaming })).at(-1)).toMatchObject({
+      kind: "assistant",
+      memoryUsed: [],
+    });
+  });
+
+  /**
+   * D4 defect 1: `done` invalidates the history, the stored copy arrives, the
+   * live row gives way to it — and the note went with the live row, one
+   * round trip after it was drawn. The stored row that replaced it keeps it.
+   */
+  it("stays on the stored row that replaced the live one when history catches up", () => {
+    const stream = drive(OPEN, {
+      type: "done",
+      data: {
+        content: "Tabs, width 4.",
+        model: "m",
+        tokens_in: 1,
+        tokens_out: 1,
+        duration_ms: 1,
+        memory_used: used,
+        attachments_skipped: [{ id: "file-1", reason: "no vision" }],
+      },
+    });
+    const history = [
+      // An older answer with the same words is not this turn's.
+      message({ id: 1, role: "assistant", content: "Tabs, width 4." }),
+      message({ id: 2, role: "user", content: "tabs or spaces?" }),
+      message({ id: 3, role: "assistant", content: "Tabs, width 4." }),
+    ];
+
+    expect(persistedLiveTurn(stream, history)?.id).toBe(3);
+    const rows = buildTranscript(
+      input({ history, stream, attachmentNames: { "file-1": "photo.png" } }),
+    ).filter((item) => item.kind === "assistant");
+
+    expect(rows.map((row) => row.key)).toEqual(["m1", "m3"]);
+    expect(rows[0]).toMatchObject({ memoryUsed: [], skipped: [] });
+    expect(rows[1]).toMatchObject({
+      memoryUsed: used,
+      skipped: [
+        { fileId: "file-1", filename: "photo.png", reason: "no vision" },
+      ],
+    });
+  });
+
+  it("stays on an earlier turn's stored row after the next turn starts", () => {
+    const done = {
+      content: "Tabs, width 4.",
+      model: "m",
+      tokens_in: 1,
+      tokens_out: 1,
+      duration_ms: 1,
+      memory_used: used,
+    };
+    const rows = buildTranscript(
+      input({
+        history: [
+          message({ id: 2, role: "user", content: "tabs or spaces?" }),
+          message({ id: 3, role: "assistant", content: "Tabs, width 4." }),
+          message({ id: 4, role: "assistant", content: "Another answer." }),
+        ],
+        stream: drive(OPEN, { type: "thinking" }),
+        answered: [{ messageId: 3, done }],
+      }),
+    ).filter((item) => item.kind === "assistant");
+
+    expect(rows.map((row) => [row.key, row.memoryUsed])).toEqual([
+      ["m3", used],
+      ["m4", []],
+      ["live-s1", []],
+    ]);
+  });
+
+  it("names no stored row while the turn runs or after it failed", () => {
+    const history = [message({ id: 3, role: "assistant", content: "" })];
+    expect(persistedLiveTurn(drive(OPEN), history)).toBeNull();
+    expect(
+      persistedLiveTurn(
+        drive(OPEN, { type: "server_error", message: "boom" }),
+        history,
+      ),
+    ).toBeNull();
+  });
+});
+
 describe("parseUserContent — the chat prefix in stored history", () => {
   it("recognises the `/steer ` prefix and strips it for display", () => {
     expect(parseUserContent("/steer keep going")).toEqual({
@@ -257,8 +387,11 @@ describe("buildTranscript — written artifacts", () => {
     name: "findings.md",
     kind: "markdown",
     version: 2,
+    path: "/home/.openalpaca/artifacts/2026-08-31-run/01-findings.md",
     taskId: "task-1",
     at: "2026-08-31T14:22:30Z",
+    inProject: false,
+    openable: true,
   };
 
   it("places the card at the moment the file was written", () => {
@@ -427,6 +560,8 @@ describe("buildTranscript", () => {
             requestId: "req-1",
             toolName: "shell_execute",
             toolArguments: { command: "cargo tree" },
+            preview: null,
+            perCall: false,
             agentName: "review_agent",
             at: "2026-08-31T14:27:00Z",
           },
@@ -447,6 +582,44 @@ describe("buildTranscript", () => {
       "report",
       "confirmation",
       "resolution",
+    ]);
+  });
+});
+
+/**
+ * The composer's Approve and Deny answer the oldest pending prompt, while the
+ * transcript orders cards by clock: each card carries its place in the answer
+ * order, so the one the composer answers can say so.
+ */
+describe("a confirmation's place in the answer order", () => {
+  const entry = (requestId: string, at: string) => ({
+    requestId,
+    toolName: "shell_execute",
+    toolArguments: { command: requestId },
+    preview: null,
+    perCall: false,
+    agentName: null,
+    at,
+  });
+
+  it("numbers the cards in the order the composer answers them", () => {
+    const items = buildTranscript(
+      input({
+        confirmations: [
+          entry("req-old", "2026-08-31T14:27:00Z"),
+          entry("req-new", "2026-08-31T14:26:00Z"),
+        ],
+      }),
+    );
+    const places = items.flatMap((item) =>
+      item.kind === "confirmation"
+        ? [[item.entry.requestId, item.position, item.total]]
+        : [],
+    );
+    // Drawn by clock, numbered by the answer order.
+    expect(places).toEqual([
+      ["req-new", 2, 2],
+      ["req-old", 1, 2],
     ]);
   });
 });

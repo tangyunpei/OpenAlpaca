@@ -52,6 +52,8 @@ impl Harness {
             owner: OWNER,
             sessions_root: Some(self.sessions_root.clone()),
             session_log: Some(self.log.clone()),
+            learning: None,
+            memory: None,
         }
     }
 
@@ -270,7 +272,111 @@ async fn creating_lands_on_the_callers_own_lane_whatever_the_source() {
     assert_eq!(body["source"], "cli");
 }
 
+/// Design 11 §5 (owner decisions CQ-5, CQ-7): "Start fresh" is `inherit:
+/// false`, stored on the row; a request that says nothing inherits.
+#[tokio::test]
+async fn creating_with_inherit_false_starts_the_conversation_fresh() {
+    let h = Harness::new();
+    let (status, fresh) = split(create_session(
+        &h.deps(),
+        CreateSessionRequest {
+            inherit: Some(false),
+            ..Default::default()
+        },
+    ))
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let fresh = h
+        .repo()
+        .get_session(fresh["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(!fresh.inherit, "started fresh");
+
+    let (_, inheriting) = split(create_session(&h.deps(), CreateSessionRequest::default())).await;
+    let inheriting = h
+        .repo()
+        .get_session(inheriting["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(inheriting.inherit, "absent is `true`");
+}
+
 // ── GET /v1/sessions/{id} and /messages ──────────────────────────────
+
+/// Design 11 §5 (owner decision CQ-7): a session is served with its working
+/// state — the JSON the row holds, and when it was written — and with
+/// `null` for both while it has none; the writer's bookkeeping stays off the
+/// wire. The list serves the same view.
+#[tokio::test]
+async fn a_session_is_served_with_its_working_state_or_null() {
+    let h = Harness::new();
+    let with_state = h
+        .repo()
+        .create_session(LANE, "gui", None, Some("Lisbon"))
+        .expect("session");
+    let state = serde_json::json!({
+        "v": 1, "topic": "Lisbon trip", "goal": "Book the October trip",
+        "done": ["Flight booked (task 1a2b3c4d)"],
+        "asked": ["Whether Lisbon needs a visa: not for an EU citizen"],
+        "decisions": [], "open": [],
+        "next": "Compare the hotels", "refs": ["task 1a2b3c4d"],
+    });
+    assert!(
+        h.repo()
+            .update_working_state(&with_state.id, 0, &state.to_string(), 7)
+            .unwrap()
+    );
+    let without = h
+        .repo()
+        .create_session(LANE, "gui", None, Some("Empty"))
+        .expect("session");
+
+    let (status, body) = split(h.deps().reread(&with_state.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["working_state"], state);
+    assert!(body["working_state_updated_at"].is_string());
+    for hidden in [
+        "working_state_version",
+        "working_state_through",
+        "episode_note_id",
+        "inherit",
+    ] {
+        assert!(body.get(hidden).is_none(), "{hidden} is not served");
+    }
+
+    let (_, body) = split(h.deps().reread(&without.id)).await;
+    assert!(body["working_state"].is_null());
+    assert!(body["working_state_updated_at"].is_null());
+    assert!(body.as_object().unwrap().contains_key("working_state"));
+
+    // A text that is not a state reads as none, its stamp with it.
+    let unreadable = h
+        .repo()
+        .create_session(LANE, "gui", None, Some("Unreadable"))
+        .expect("session");
+    assert!(
+        h.repo()
+            .update_working_state(&unreadable.id, 0, "the old prose summary", 3)
+            .unwrap()
+    );
+    let (_, body) = split(h.deps().reread(&unreadable.id)).await;
+    assert!(body["working_state"].is_null());
+    assert!(body["working_state_updated_at"].is_null());
+
+    let (_, list) = split(list_sessions(&h.deps(), ListSessionsQuery::default())).await;
+    let served = |id: &str| {
+        list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(served(&with_state.id)["working_state"], state);
+    assert!(served(&without.id)["working_state"].is_null());
+}
 
 #[tokio::test]
 async fn an_unknown_session_is_404_everywhere() {
@@ -469,6 +575,8 @@ async fn archiving_leaves_the_lane_with_no_active_session() {
 
 #[tokio::test]
 async fn patching_renames_and_binds_a_workspace_the_session_does_not_have() {
+    let home = tempfile::tempdir().expect("home store");
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
     let h = Harness::new();
     let session = h
         .repo()
@@ -943,6 +1051,10 @@ async fn the_event_log_clamps_its_page_size() {
 #[tokio::test]
 async fn deleting_answers_204_and_takes_the_transcript_with_it() {
     use openalpaca_core::session_log::{Record, RecordType};
+    // The delete removes the conversation's scratch folder under the home
+    // store (storage design §10): a guarded temp store, never the real one.
+    let home = tempfile::tempdir().expect("home store");
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
 
     let h = Harness::new();
     let session = h
@@ -999,6 +1111,110 @@ async fn deleting_answers_204_and_takes_the_transcript_with_it() {
     ));
 }
 
+/// Storage design §10: a conversation's scratch folder — its working folder
+/// when it has no project — goes with it, and no other conversation's.
+#[tokio::test]
+async fn deleting_a_conversation_removes_its_scratch_folder_and_no_other() {
+    let home = tempfile::tempdir().expect("home store");
+    let store = home.path().join(".openalpaca");
+    let _env = crate::test_util::HomeStoreGuard::set(&store);
+    let h = Harness::new();
+    let doomed = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let scratch = store.join("scratch");
+    for id in [doomed.id.as_str(), "another-conversation"] {
+        std::fs::create_dir_all(scratch.join(id)).expect("scratch folder");
+        std::fs::write(scratch.join(id).join("notes.txt"), id).expect("a file");
+    }
+
+    let response = delete_session(&h.deps(), &doomed.id).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        !scratch.join(&doomed.id).exists(),
+        "the scratch folder went with the conversation"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("another-conversation/notes.txt")).expect("kept"),
+        "another-conversation"
+    );
+}
+
+/// LQ4: a deleted conversation's turns not yet learned go with its messages —
+/// the learning queue forgets the session, so nothing is flushed for it.
+#[tokio::test]
+async fn deleting_drops_the_conversations_unlearned_turns() {
+    // The delete removes the conversation's scratch folder under the home
+    // store (storage design §10): a guarded temp store, never the real one.
+    let home = tempfile::tempdir().expect("home store");
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let queue = crate::test_util::learning_queue(&h.db);
+    crate::test_util::finish_turn(&queue, LANE, &session.id);
+    assert_eq!(queue.pending_turns(&session.id), 1);
+
+    let deps = Deps {
+        learning: Some(queue.clone()),
+        ..h.deps()
+    };
+    let response = delete_session(&deps, &session.id).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(queue.pending_turns(&session.id), 0, "turns dropped");
+    assert!(!queue.is_due(&session.id));
+}
+
+/// Design 09 §13.3 (LQ4): deleting a conversation also forgets the
+/// summaries whose sources all lie in it — and nothing it taught.
+#[tokio::test]
+async fn deleting_a_conversation_forgets_its_summaries() {
+    let h = Harness::new();
+    let (_home, _guard, memory) = crate::test_util::memory_service(&h.db, OWNER);
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let mut rows = Vec::new();
+    for (role, text) in [("user", "Plan the Lisbon trip."), ("assistant", "Sure.")] {
+        rows.push(
+            h.repo()
+                .insert(&ConversationMessage {
+                    lane_key: LANE.to_string(),
+                    role: role.to_string(),
+                    content: text.to_string(),
+                    session_id: Some(session.id.clone()),
+                    ..Default::default()
+                })
+                .expect("message"),
+        );
+    }
+    crate::test_util::extracted_note(
+        &memory,
+        OWNER,
+        None,
+        "Conversation on 2026-09-20: Lisbon",
+        &rows,
+        true,
+    );
+    crate::test_util::extracted_note(&memory, OWNER, None, "Lisbon trip", &rows[..1], false);
+
+    let deps = Deps {
+        memory: Some(memory.clone()),
+        ..h.deps()
+    };
+    let response = delete_session(&deps, &session.id).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        crate::test_util::note_titles(&memory, OWNER, None),
+        vec!["Lisbon trip".to_string()],
+        "the summary went with its conversation; the learned note stayed"
+    );
+}
+
 #[tokio::test]
 async fn deleting_a_session_with_a_run_in_flight_is_409() {
     let h = Harness::new();
@@ -1028,6 +1244,10 @@ async fn deleting_a_session_with_a_run_in_flight_is_409() {
 /// block this one: sessions are the unit, lanes are not.
 #[tokio::test]
 async fn a_run_in_another_conversation_on_the_lane_does_not_block_the_delete() {
+    // The delete removes the conversation's scratch folder under the home
+    // store (storage design §10): a guarded temp store, never the real one.
+    let home = tempfile::tempdir().expect("home store");
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
     let h = Harness::new();
     let busy = h
         .repo()

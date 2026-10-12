@@ -56,13 +56,13 @@ fn empty_compose_inputs() -> (
         query: Arc::<str>::from("hi"),
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 0,
-        memory_retrieval_hash: [0u8; 32],
         context_bundle: Arc::new(ContextBundle::empty()),
         mode: DynamicContextMode::Default,
     };
 
     let history_input = HistoryInput {
-        summary: None,
+        working_state: None,
+        previous: None,
         summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
         recent_messages: Arc::new(Vec::new()),
         current_user_turn: None,
@@ -788,12 +788,20 @@ use crate::prompt_ctx::{
 };
 use openalpaca_llm::{ChatMessage, Role};
 
+fn test_memory_used() -> crate::memory::service::MemoryUsed {
+    crate::memory::service::MemoryUsed {
+        id: openalpaca_storage::memory_files::NoteId::parse("00000021-0000-4000-8000-000000000001")
+            .unwrap(),
+        revision: "f".repeat(64),
+        reason: crate::memory::service::UsedReason::Recall,
+    }
+}
+
 fn make_dyn_ctx_input(mode: DynamicContextMode) -> DynamicContextInput {
     DynamicContextInput {
         query: Arc::from("test query"),
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 1000,
-        memory_retrieval_hash: [0u8; 32],
         context_bundle: Arc::new(ContextBundle::empty()),
         mode,
     }
@@ -801,7 +809,8 @@ fn make_dyn_ctx_input(mode: DynamicContextMode) -> DynamicContextInput {
 
 fn make_history_input(mode: HistoryMode) -> HistoryInput {
     HistoryInput {
-        summary: None,
+        working_state: None,
+        previous: None,
         summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
         recent_messages: Arc::new(vec![]),
         current_user_turn: None,
@@ -810,9 +819,11 @@ fn make_history_input(mode: HistoryMode) -> HistoryInput {
     }
 }
 
-/// Construct a minimal `ContextBundle` with one UserMessage-mode section
-/// (memory) and one SystemMessage-mode section (user profile). Exercises
-/// both Layer 3 output paths (context_messages + additional_system_blocks).
+/// Construct a minimal `ContextBundle` with two UserMessage-mode sections
+/// (a memory note, which Layer 3 leaves out — plan 3.3 — and a workspace
+/// artifact, which it emits) and one SystemMessage-mode section (a
+/// conversation summary). Exercises both Layer 3 output paths
+/// (context_messages + additional_system_blocks).
 fn make_test_bundle_with_memory_section() -> ContextBundle {
     ContextBundle {
         sections: vec![
@@ -823,20 +834,33 @@ fn make_test_bundle_with_memory_section() -> ContextBundle {
                 token_estimate: 10,
                 priority: SectionPriority::Normal,
                 relevance: 0.8,
-                key: ContextKey::Memory(42),
+                key: ContextKey::Memory(test_memory_used()),
                 injection: InjectionMode::UserMessage {
                     tag: "memory".to_string(),
                     trust: TrustLevel::Untrusted,
                 },
             },
             ContextSection {
-                source: "user_profile",
-                kind: ContextKind::UserProfile,
+                source: "workspace",
+                kind: ContextKind::WorkspaceArtifact,
+                content: "workspace artifact snippet".to_string(),
+                token_estimate: 10,
+                priority: SectionPriority::Normal,
+                relevance: 0.7,
+                key: ContextKey::WorkspaceArtifact("notes.md".to_string()),
+                injection: InjectionMode::UserMessage {
+                    tag: "workspace_artifact".to_string(),
+                    trust: TrustLevel::Untrusted,
+                },
+            },
+            ContextSection {
+                source: "conversation",
+                kind: ContextKind::ConversationSummary,
                 content: "user likes rust".to_string(),
                 token_estimate: 5,
                 priority: SectionPriority::High,
                 relevance: 1.0,
-                key: ContextKey::UserProfile,
+                key: ContextKey::ConversationSummary,
                 injection: InjectionMode::SystemMessage,
             },
         ],
@@ -872,15 +896,29 @@ fn test_dynamic_context_layer_fingerprint_busts_on_query_change() {
     );
 }
 
+/// Plan 3.3: the memory sections are not in Layer 3's output — the caller
+/// appends them per turn, outside the cache (`sources::memory::memory_turn`).
 #[test]
-fn test_dynamic_context_layer_fingerprint_busts_on_memory_change() {
-    let mut a = make_dyn_ctx_input(DynamicContextMode::Default);
-    a.memory_retrieval_hash = [1u8; 32];
-    let mut b = make_dyn_ctx_input(DynamicContextMode::Default);
-    b.memory_retrieval_hash = [2u8; 32];
-    assert_ne!(
-        super::dynamic_context::compute(&a).fingerprint,
-        super::dynamic_context::compute(&b).fingerprint,
+fn test_dynamic_context_layer_leaves_memory_sections_out() {
+    let mut input = make_dyn_ctx_input(DynamicContextMode::Default);
+    input.context_bundle = Arc::new(make_test_bundle_with_memory_section());
+    let output = super::dynamic_context::compute(&input);
+    assert_eq!(output.context_messages.len(), 1, "{:?}", output.context_messages);
+    assert!(output.context_messages[0].content.contains("workspace artifact snippet"));
+    let all: String = output
+        .context_messages
+        .iter()
+        .map(|m| m.content.clone())
+        .chain(
+            output
+                .additional_system_blocks
+                .iter()
+                .map(|b| b.content.to_string()),
+        )
+        .collect();
+    assert!(
+        !all.contains("retrieved memory snippet"),
+        "memory reached the cached layer: {all}"
     );
 }
 
@@ -918,13 +956,13 @@ fn test_dynamic_context_layer_default_untrusted_wraps_content() {
     let mut input = make_dyn_ctx_input(DynamicContextMode::Default);
     input.context_bundle = Arc::new(make_test_bundle_with_memory_section());
     let out = super::dynamic_context::compute(&input);
-    let memory_msg = out
+    let artifact_msg = out
         .context_messages
         .iter()
-        .find(|m| m.content.contains("retrieved memory snippet"))
-        .expect("should have a message mentioning the memory content");
+        .find(|m| m.content.contains("workspace artifact snippet"))
+        .expect("should have a message mentioning the artifact content");
     assert!(
-        memory_msg.content.contains("<context_data"),
+        artifact_msg.content.contains("<context_data"),
         "untrusted content should be wrapped in <context_data> envelope"
     );
 }
@@ -939,7 +977,7 @@ fn test_history_layer_skip_mode_empty() {
 #[test]
 fn test_history_layer_default_mode_assembles_summary_then_recent_then_current() {
     let mut input = make_history_input(HistoryMode::Default);
-    input.summary = Some(Arc::from("prior summary"));
+    input.working_state = Some(Arc::from("prior summary"));
     input.recent_messages = Arc::new(vec![
         ChatMessage::user("old user msg"),
         ChatMessage::assistant("old assistant reply"),
@@ -962,7 +1000,7 @@ fn test_history_layer_default_mode_assembles_summary_then_recent_then_current() 
 #[test]
 fn test_history_layer_default_mode_untrusted_summary_is_wrapped() {
     let mut input = make_history_input(HistoryMode::Default);
-    input.summary = Some(Arc::from("prior summary"));
+    input.working_state = Some(Arc::from("prior summary"));
     input.summary_wrap_mode = SummaryWrapMode::UntrustedWrap;
     let out = super::history::compute(&input);
     assert_eq!(out.messages.len(), 1);
@@ -975,7 +1013,7 @@ fn test_history_layer_default_mode_untrusted_summary_is_wrapped() {
 #[test]
 fn test_history_layer_default_mode_plain_summary_is_not_wrapped() {
     let mut input = make_history_input(HistoryMode::Default);
-    input.summary = Some(Arc::from("prior summary"));
+    input.working_state = Some(Arc::from("prior summary"));
     input.summary_wrap_mode = SummaryWrapMode::Plain;
     let out = super::history::compute(&input);
     assert_eq!(out.messages.len(), 1);
@@ -1009,9 +1047,9 @@ fn test_history_layer_fingerprint_busts_on_current_turn_change() {
 #[test]
 fn test_history_layer_fingerprint_busts_on_summary_change() {
     let mut a = make_history_input(HistoryMode::Default);
-    a.summary = Some(Arc::from("summary A"));
+    a.working_state = Some(Arc::from("summary A"));
     let mut b = make_history_input(HistoryMode::Default);
-    b.summary = Some(Arc::from("summary B"));
+    b.working_state = Some(Arc::from("summary B"));
     assert_ne!(
         super::history::compute(&a).fingerprint,
         super::history::compute(&b).fingerprint
@@ -1569,7 +1607,6 @@ fn test_golden_social_fast_path_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(query),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 0,
         mode: DynamicContextMode::Skip,
@@ -1577,7 +1614,8 @@ fn test_golden_social_fast_path_byte_identical() {
 
     let history_input = HistoryInput {
         lane_tip_fingerprint: [0u8; 32],
-        summary: None,
+        working_state: None,
+        previous: None,
         summary_wrap_mode: SummaryWrapMode::Plain,
         recent_messages: Arc::new(recent.clone()),
         current_user_turn: Some(ChatMessage::user(query)),
@@ -1778,7 +1816,6 @@ fn test_golden_skill_invocation_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(query),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::SkillInvocation {
             skill_id: "test_skill".to_string(),
         },
@@ -1788,7 +1825,8 @@ fn test_golden_skill_invocation_byte_identical() {
 
     let history_input = HistoryInput {
         lane_tip_fingerprint: [0u8; 32],
-        summary: None,
+        working_state: None,
+        previous: None,
         summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
         recent_messages: Arc::new(recent.clone()),
         current_user_turn: Some(ChatMessage::user(query)),
@@ -2006,7 +2044,6 @@ fn test_golden_simple_query_text_only_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(query),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
@@ -2014,7 +2051,8 @@ fn test_golden_simple_query_text_only_byte_identical() {
 
     let history_input = HistoryInput {
         lane_tip_fingerprint: [0u8; 32],
-        summary: None,
+        working_state: None,
+        previous: None,
         summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
         recent_messages: Arc::new(recent.clone()),
         current_user_turn: Some(ChatMessage::user(query)),
@@ -2219,7 +2257,6 @@ fn test_golden_simple_query_multimodal_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(query),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
@@ -2230,7 +2267,8 @@ fn test_golden_simple_query_multimodal_byte_identical() {
     // message.
     let history_input = HistoryInput {
         lane_tip_fingerprint: [0u8; 32],
-        summary: None,
+        working_state: None,
+        previous: None,
         summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
         recent_messages: Arc::new(recent.clone()),
         current_user_turn: Some(ChatMessage::user_with_parts(adapted_parts.clone())),
@@ -2538,7 +2576,6 @@ fn test_golden_dag_node_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(task_description),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::LeadAgent,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
@@ -2547,7 +2584,8 @@ fn test_golden_dag_node_byte_identical() {
     // task_description → recent_messages[0]; workspace_wrapped → current_user_turn.
     let history_input = HistoryInput {
         lane_tip_fingerprint: [0u8; 32],
-        summary: None,
+        working_state: None,
+        previous: None,
         summary_wrap_mode: SummaryWrapMode::Plain,
         recent_messages: Arc::new(vec![ChatMessage::user(task_description)]),
         current_user_turn: Some(ChatMessage::user(&workspace_wrapped)),
@@ -2627,28 +2665,34 @@ fn test_golden_dag_node_byte_identical() {
 /// Phase 6 Commit 3 — Lead Agent (build_lead_agent_prompt_from_templates) golden fixture.
 ///
 /// Asserts byte-identical system message content between:
-///   (a) pre-migration `PromptBuilder` chain at
-///       `runner/lead_agent/prompt.rs:12-138` and
-///   (b) migrated `ComposeEngine::compose(ComposeRequest::LeadAgent{...})` with
-///       `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
+///   (a) the pre-migration `PromptBuilder` chain, its eight raw blocks spelled
+///       out here, and
+///   (b) the **real** `build_lead_agent_prompt_from_templates`, which carries
+///       the same blocks through `ComposeEngine::compose(ComposeRequest::LeadAgent{...})`
+///       with `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
 ///       `DynamicContextMode::Skip` + `HistoryMode::Skip`.
 ///
+/// Until the S6text review's M4 the second half re-built those blocks here
+/// and composed them itself, so the test compared two copies it owned and
+/// never called the builder: a change to the lead's prompt passed it. It now
+/// calls the builder, so any change to the lead's system prompt fails here
+/// until the reference below is changed with it.
+///
 /// `build_lead_agent_prompt_from_templates` returns ONLY the system prompt
-/// string; the caller at `runner/lead_agent/mod.rs:217` then concatenates
-/// `format_tool_guidance` + `connector_suffix` inline before building the
-/// message vec. The migration therefore only needs to preserve the system
-/// message content emitted by the 8 raw_blocks — no tools, no connector
-/// guidance, no context bundle, no history flow through this call site.
+/// string; `run_lead_agent` then concatenates `format_tool_guidance` + the
+/// connector, extension and workflow-contract suffixes inline before building
+/// the message vec — none of them is part of this fixture. No user document
+/// is passed, so no profile block is carried.
 #[test]
 fn test_golden_lead_agent_byte_identical() {
     use crate::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
     use crate::prompt::PromptBuilder;
-    use openalpaca_llm::Role;
-    use std::collections::HashMap;
     use crate::prompt_ctx::SectionPriority;
+    use crate::runner::lead_agent::build_lead_agent_prompt_from_templates;
+    use std::collections::HashMap;
 
-    // ── Canned Lead Agent scene. Mirrors the pre-migration arguments at
-    //    runner/lead_agent/prompt.rs:12-138 + runner/lead_agent/mod.rs:217. ──
+    // ── Canned Lead Agent scene: the builder's arguments, as `run_lead_agent`
+    //    passes them with no user document. ──
     let base_persona = "I am a Lead Agent persona for the golden test.";
     let model_window: usize = 200_000;
 
@@ -2720,8 +2764,8 @@ fn test_golden_lead_agent_byte_identical() {
     }
     agents_block.push_str("</agents>");
 
-    // Copy the 5 other raw_block string constants VERBATIM from
-    // runner/lead_agent/prompt.rs:46-134.
+    // The other raw blocks, as the builder in runner/lead_agent/prompt.rs
+    // writes them — the reference the real builder is held to below.
     let role_text = "<role>\n\
          You are a Lead Agent orchestrating a complex task. You are responsible for analyzing \
          the user's request, decomposing it into sub-objectives, delegating work to specialized \
@@ -2761,10 +2805,14 @@ fn test_golden_lead_agent_byte_identical() {
          for parallel spawning instead of individual spawn_subagent calls. This is more efficient \
          and reduces round-trips.\n\
          check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
-         queued, running, completed, or failed.\n\
+         queued, running, completed, or failed. Completed: returns the whole answer — a long one \
+         arrives as a stub to page with read_result, or, in a run that keeps no conversation log, \
+         cut after its first part with a note of how much it shows. Failed: returns the error and \
+         the last output, as head and tail when long.\n\
          wait_for_subagents: Block until ALL spawned subagents finish, including any that are \
-         queued for execution. Returns a summary of all results. Call this after spawning all \
-         subagents.\n\
+         queued for execution. Returns a summary of all results: each answer's head and tail, \
+         with a notice of what lies between — read one in full with check_subagent_status. \
+         Call this after spawning all subagents.\n\
          workspace_read / workspace_write: Share context between subagents. Write setup data before spawning; \
          read results after completion.\n\
          </tools>";
@@ -2798,135 +2846,22 @@ fn test_golden_lead_agent_byte_identical() {
         .build();
     let expected_system = built.system_message.clone();
 
-    // ── Via the engine: PersonaMode::Skip + StaticPromptMode::SubagentMinimal. ──
-    //
-    // The 8 raw_blocks go through StaticPromptInput.raw_blocks in canonical
-    // registration order. No tools, no connector_guidance, no context_bundle,
-    // no history are threaded through — build_lead_agent_prompt_from_templates
-    // returns only the system prompt string.
+    // ── The real builder, composing the same blocks through the engine. ──
     let engine = ComposeEngine::new(16);
-
-    let raw_blocks_for_engine: Vec<SystemBlock> = vec![
-        SystemBlock {
-            name: "lead_persona",
-            content: Arc::<str>::from(base_persona.to_string()),
-            priority: SectionPriority::Critical,
-        },
-        SystemBlock {
-            name: "lead_role",
-            content: Arc::<str>::from(role_text.to_string()),
-            priority: SectionPriority::Critical,
-        },
-        SystemBlock {
-            name: "agents_catalog",
-            content: Arc::<str>::from(agents_block.clone()),
-            priority: SectionPriority::High,
-        },
-        SystemBlock {
-            name: "workflow",
-            content: Arc::<str>::from(workflow_text.to_string()),
-            priority: SectionPriority::High,
-        },
-        SystemBlock {
-            name: "delegation_criteria",
-            content: Arc::<str>::from(delegation_text.to_string()),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "tool_patterns",
-            content: Arc::<str>::from(tool_patterns_text.to_string()),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "failure_recovery",
-            content: Arc::<str>::from(failure_recovery_text.to_string()),
-            priority: SectionPriority::Normal,
-        },
-        SystemBlock {
-            name: "output_expectations",
-            content: Arc::<str>::from(output_expectations_text.to_string()),
-            priority: SectionPriority::Normal,
-        },
-    ];
-
-    let persona_input = PersonaInput {
-        system_persona: Arc::new(SystemPersona::default()),
-        user_document: Arc::new(None),
-        identity_document: Arc::new(None),
-        persona_version: 0,
-        mode: PersonaMode::Skip,
-        identity_budget: None,
-        user_budget: None,
-    };
-    let persona_output = Arc::new(super::persona::compute(&persona_input));
-
-    let static_prompt_input = StaticPromptInput {
-        persona_output,
-        agent_persona: None,
-        agent_config_fingerprint: [0u8; 32],
-        skill_block: None,
-        skills_catalog: None,
-        bootstrap: None,
-        tools: Arc::new(Vec::new()),
-        connector_status: Arc::new(Vec::new()),
-        send_tool_context: None,
-        message_source: None,
-        raw_blocks: raw_blocks_for_engine,
-        mode: StaticPromptMode::SubagentMinimal,
-        model_window: model_window as u32,
-    };
-
-    // No context bundle, no history — build_lead_agent_prompt_from_templates
-    // returns ONLY the system prompt string.
-    let dynamic_context_input = DynamicContextInput {
-        context_bundle: Arc::new(ContextBundle::empty()),
-        query: Arc::from(""),
-        memory_retrieval_hash: [0u8; 32],
-        path: ExecutionPath::LeadAgent,
-        reserved_tokens: 0,
-        mode: DynamicContextMode::Skip,
-    };
-
-    let history_input = HistoryInput {
-        lane_tip_fingerprint: [0u8; 32],
-        summary: None,
-        summary_wrap_mode: SummaryWrapMode::Plain,
-        recent_messages: Arc::new(Vec::new()),
-        current_user_turn: None,
-        mode: HistoryMode::Skip,
-    };
-
-    let request = ComposeRequest::LeadAgent {
-        base_persona: Arc::<str>::from(base_persona.to_string()),
-        agents_catalog: Arc::<str>::from(agents_block.clone()),
-        objective: Arc::<str>::from(""),
-        overrides: ComposeOverrides::default(),
-    };
-
-    let composed = engine.compose(
-        &request,
-        persona_input,
-        static_prompt_input,
-        dynamic_context_input,
-        history_input,
-        model_window as u32,
-        Arc::new(Vec::new()),
+    let got = build_lead_agent_prompt_from_templates(
+        &engine,
+        base_persona,
+        &templates,
+        model_window,
         None,
         None,
     );
 
     // ── Byte-identical assertion on system message content. ─────────────
     assert_eq!(
-        composed.messages.len(),
-        1,
-        "Lead Agent prompt should yield exactly 1 system message (got {} messages)",
-        composed.messages.len()
-    );
-    assert_eq!(composed.messages[0].role, Role::System);
-    assert_eq!(
-        composed.messages[0].content, expected_system,
-        "Lead Agent migration system_message mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
-        composed.messages[0].content, expected_system
+        got, expected_system,
+        "Lead Agent system prompt mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+        got, expected_system
     );
 }
 
@@ -3108,7 +3043,6 @@ fn test_golden_lead_agent_spawn_subagent_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(bundle),
         query: Arc::from(objective),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::LeadAgent,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
@@ -3117,7 +3051,8 @@ fn test_golden_lead_agent_spawn_subagent_byte_identical() {
     // objective → current_user_turn; no summary/recent.
     let history_input = HistoryInput {
         lane_tip_fingerprint: [0u8; 32],
-        summary: None,
+        working_state: None,
+        previous: None,
         summary_wrap_mode: SummaryWrapMode::Plain,
         recent_messages: Arc::new(Vec::new()),
         current_user_turn: Some(ChatMessage::user(objective)),
@@ -3670,4 +3605,481 @@ fn test_per_lane_cache_busts_on_tip_advance_social() {
     );
     assert!(!composed.layer_trace.memo_hits.history, "L4 must bust when tip advances");
     assert!(composed.layer_trace.memo_hits.dynamic_context, "L3 stays hit");
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Plan 3.3 — the memory section lives outside the cached dynamic-context
+// layer
+// ──────────────────────────────────────────────────────────────────────────
+
+fn bundle_with_memory(text: &str) -> ContextBundle {
+    ContextBundle {
+        sections: vec![ContextSection {
+            source: "memory",
+            kind: ContextKind::Memory,
+            content: text.to_string(),
+            token_estimate: text.len() / 4,
+            priority: SectionPriority::Normal,
+            relevance: 1.0,
+            key: ContextKey::Memory(test_memory_used()),
+            injection: InjectionMode::UserMessage {
+                tag: "retrieved_memory".to_string(),
+                trust: TrustLevel::Untrusted,
+            },
+        }],
+        total_tokens: text.len() / 4,
+        available_budget: 10_000,
+    }
+}
+
+/// **Plan 3.3.** Two turns, the same query text, the same lane, a memory
+/// note written between them. Layer 3 is cached per lane by query text, so
+/// the second turn is a cache hit — which is fine only because the memory
+/// notes are not in the cached output at all: what the model reads about
+/// memory is what *this* turn recalled, appended outside the layer.
+#[test]
+fn a_repeated_identical_query_does_not_reuse_a_stale_memory_section() {
+    let engine = ComposeEngine::new(16);
+    let lane = ConversationLane::new(LaneKey::new("user", "gui"));
+
+    let mut first = make_dyn_ctx_input(DynamicContextMode::Default);
+    first.context_bundle = Arc::new(bundle_with_memory("note A: the user prefers vim"));
+    let mut second = make_dyn_ctx_input(DynamicContextMode::Default);
+    second.context_bundle = Arc::new(bundle_with_memory("note B: the user prefers emacs now"));
+
+    let out_a = engine.lookup_or_build_dynamic_context(&first, Some(&lane));
+    let out_b = engine.lookup_or_build_dynamic_context(&second, Some(&lane));
+    assert!(!out_a.hit);
+    assert!(out_b.hit, "same query, same lane: Layer 3 is a hit");
+
+    let served: String = out_b
+        .output
+        .context_messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+    assert!(
+        !served.contains("prefers vim"),
+        "the cached layer served the first turn's memory: {served}"
+    );
+
+    // What the second turn appends is what the second turn recalled.
+    let turn = crate::prompt_ctx::sources::memory::memory_turn(&second.context_bundle)
+        .expect("the bundle carries a memory section");
+    assert!(turn.content.contains("prefers emacs now"), "{}", turn.content);
+    assert!(!turn.content.contains("prefers vim"), "{}", turn.content);
+    assert!(turn.content.starts_with("<memory_context>\n"), "{}", turn.content);
+    assert_eq!(turn.used, vec![test_memory_used()]);
+}
+
+// ── Design 11 §4: the working state in the history layer (slice 2) ─────
+
+fn a_working_state(next: &str) -> crate::orchestrator::working_state::WorkingState {
+    crate::orchestrator::working_state::WorkingState {
+        v: crate::orchestrator::working_state::VERSION,
+        topic: "Lisbon trip in October".to_string(),
+        goal: "Book flights and a hotel".to_string(),
+        done: vec!["Flight booked (task 1a2b3c4d)".to_string()],
+        asked: Vec::new(),
+        decisions: vec!["A hotel in Alfama".to_string()],
+        open: vec!["Which museum pass".to_string()],
+        next: next.to_string(),
+        refs: vec!["task 1a2b3c4d".to_string()],
+    }
+}
+
+const STATE_AT: &str = "2026-09-28 10:00:00";
+
+/// The working state takes the session summary's old slot — the history
+/// layer's first message, before the rows and the current turn — and that
+/// message is exactly the block `WorkingState::render` writes: one
+/// rendering, quoted data under the trust label.
+#[test]
+fn the_working_state_is_the_history_layers_first_message_as_render_writes_it() {
+    let state = a_working_state("Compare the hotels");
+    let mut input = make_history_input(HistoryMode::Default);
+    input.working_state = Some(Arc::from(state.text(STATE_AT, 4000).as_str()));
+    input.recent_messages = Arc::new(vec![ChatMessage::user("u1"), ChatMessage::assistant("a2")]);
+    input.current_user_turn = Some(ChatMessage::user("what next?"));
+
+    let out = super::history::compute(&input);
+
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(contents.len(), 4);
+    assert_eq!(contents[0], state.render(STATE_AT, 4000));
+    assert!(contents[0].starts_with(crate::orchestrator::working_state::BLOCK_PREFIX));
+    assert!(matches!(out.messages[0].role, Role::User));
+    assert_eq!(&contents[1..], ["u1", "a2", "what next?"]);
+}
+
+/// CQ-4: under window pressure the assembly trim takes the first **row**
+/// and never the working-state block ahead of it.
+#[test]
+fn a_trim_under_pressure_removes_the_first_row_never_the_state_block() {
+    use super::assembly::{self, AssemblyInput};
+
+    let state = a_working_state("Compare the hotels");
+    let mut input = make_history_input(HistoryMode::Default);
+    input.working_state = Some(Arc::from(state.text(STATE_AT, 4000).as_str()));
+    // Each row is ~1 000 tokens; the window's 75 % threshold is 1 500.
+    input.recent_messages = Arc::new(vec![
+        ChatMessage::user(&format!("first row {}", "a".repeat(4000))),
+        ChatMessage::assistant(&format!("second row {}", "b".repeat(4000))),
+    ]);
+    input.current_user_turn = Some(ChatMessage::user("what next?"));
+    let history = super::history::compute(&input);
+
+    let out = assembly::compose(AssemblyInput {
+        persona: &PersonaOutput {
+            blocks: vec![],
+            fingerprint: [0u8; 32],
+        },
+        static_prompt: &StaticPromptOutput {
+            system_message: Arc::from("system"),
+            section_registry: vec!["system"],
+            fingerprint: [0u8; 32],
+        },
+        dynamic_context: &DynamicContextOutput {
+            context_messages: vec![],
+            additional_system_blocks: vec![],
+            fingerprint: [0u8; 32],
+        },
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: 2000,
+        layer_trace: LayerTrace {
+            persona_mode: PersonaMode::Minimal,
+            static_prompt_mode: StaticPromptMode::Default,
+            dynamic_context_mode: DynamicContextMode::Skip,
+            history_mode: HistoryMode::Default,
+            memo_hits: LayerMemoHits::default(),
+        },
+    });
+
+    assert!(
+        out.section_registry.contains(&"<trimmed:history>"),
+        "the trim fired"
+    );
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(
+        contents.len(),
+        4,
+        "exactly one message was trimmed: {contents:?}"
+    );
+    assert_eq!(contents[0], "system");
+    assert_eq!(
+        contents[1],
+        state.render(STATE_AT, 4000),
+        "the state block stays"
+    );
+    assert!(contents[2].starts_with("second row"), "the first row went");
+    assert_eq!(contents[3], "what next?");
+}
+
+/// Design 11 §3.2: the assembly reports how many of the history layer's
+/// leading rows its trim dropped — rows the working state's writer never
+/// reads — and counts nothing it took from ahead of the history (a
+/// dynamic-context message goes first) and nothing when it trims nothing.
+#[test]
+fn the_trim_reports_the_history_rows_it_dropped_and_nothing_else() {
+    use super::assembly::{self, AssemblyInput};
+
+    let compose = |context_messages: Vec<ChatMessage>, window: u32| {
+        let mut input = make_history_input(HistoryMode::Default);
+        input.working_state = Some(Arc::from(
+            a_working_state("Compare the hotels")
+                .text(STATE_AT, 4000)
+                .as_str(),
+        ));
+        // Each row is ~1 000 tokens.
+        input.recent_messages = Arc::new(vec![
+            ChatMessage::user(&format!("first row {}", "a".repeat(4000))),
+            ChatMessage::assistant(&format!("second row {}", "b".repeat(4000))),
+        ]);
+        input.current_user_turn = Some(ChatMessage::user("what next?"));
+        let history = super::history::compute(&input);
+        assembly::compose(AssemblyInput {
+            persona: &PersonaOutput {
+                blocks: vec![],
+                fingerprint: [0u8; 32],
+            },
+            static_prompt: &StaticPromptOutput {
+                system_message: Arc::from("system"),
+                section_registry: vec!["system"],
+                fingerprint: [0u8; 32],
+            },
+            dynamic_context: &DynamicContextOutput {
+                context_messages,
+                additional_system_blocks: vec![],
+                fingerprint: [0u8; 32],
+            },
+            history: &history,
+            tools: Arc::new(vec![]),
+            model_window: window,
+            layer_trace: LayerTrace {
+                persona_mode: PersonaMode::Minimal,
+                static_prompt_mode: StaticPromptMode::Default,
+                dynamic_context_mode: DynamicContextMode::Default,
+                history_mode: HistoryMode::Default,
+                memo_hits: LayerMemoHits::default(),
+            },
+        })
+    };
+
+    // The 75 % threshold is 1 500: the context message goes, then one row.
+    let context = vec![ChatMessage::user(&format!("context {}", "c".repeat(400)))];
+    let out = compose(context.clone(), 2000);
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
+    assert!(
+        !contents.iter().any(|c| c.starts_with("context ")),
+        "the context message went first: {contents:?}"
+    );
+    assert!(!contents.iter().any(|c| c.starts_with("first row")));
+    assert_eq!(out.history_head_dropped, 1, "one history row, not two");
+
+    let out = compose(context, 100_000);
+    assert!(!out.section_registry.contains(&"<trimmed:history>"));
+    assert_eq!(out.history_head_dropped, 0, "nothing trimmed");
+}
+
+/// Design 11 §3.2 at the seam (the slice-3 review's F3): the §3.2 cursor
+/// built from a composed request, as the main loop builds it, does not pass
+/// a row the trim dropped. A system block ahead of the history — which the
+/// trim never takes — puts the rows past `messages[2]`, where the cursor's
+/// other guard (a first row at `messages[1]`) cannot hide a miscount: with
+/// the count read as 0 the state would pass `r1`, which no writer read.
+#[test]
+fn the_cursor_built_from_a_composed_request_never_passes_a_trimmed_row() {
+    use super::assembly::{self, AssemblyInput};
+    use crate::orchestrator::working_state::Cursor;
+
+    let mut input = make_history_input(HistoryMode::Default);
+    input.working_state = Some(Arc::from(
+        a_working_state("Compare the hotels")
+            .text(STATE_AT, 4000)
+            .as_str(),
+    ));
+    // Each row is ~1 000 tokens; at a 3 400-token window the 75 % threshold
+    // (2 550) takes exactly the first.
+    input.recent_messages = Arc::new(
+        ["r1", "r2", "r3"]
+            .iter()
+            .map(|label| ChatMessage::user(&format!("{label} {}", "a".repeat(4000))))
+            .collect(),
+    );
+    input.current_user_turn = Some(ChatMessage::user("what next?"));
+    let history = super::history::compute(&input);
+    let out = assembly::compose(AssemblyInput {
+        persona: &PersonaOutput {
+            blocks: vec![],
+            fingerprint: [0u8; 32],
+        },
+        static_prompt: &StaticPromptOutput {
+            system_message: Arc::from("system"),
+            section_registry: vec!["system"],
+            fingerprint: [0u8; 32],
+        },
+        dynamic_context: &DynamicContextOutput {
+            context_messages: vec![],
+            additional_system_blocks: vec![SystemBlock {
+                name: "assignment",
+                content: Arc::from("the assignment"),
+                priority: SectionPriority::Critical,
+            }],
+            fingerprint: [0u8; 32],
+        },
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: 3400,
+        layer_trace: LayerTrace {
+            persona_mode: PersonaMode::Minimal,
+            static_prompt_mode: StaticPromptMode::Default,
+            dynamic_context_mode: DynamicContextMode::Default,
+            history_mode: HistoryMode::Default,
+            memo_hits: LayerMemoHits::default(),
+        },
+    });
+    let heads: Vec<&str> = out
+        .messages
+        .iter()
+        .map(|m| m.content.split(' ').next().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        heads,
+        vec!["system", "the", "<context_data", "r2", "r3", "what"],
+        "the trim took r1 and nothing else"
+    );
+    assert_eq!(out.history_head_dropped, 1);
+
+    // The compaction reads messages[2..4]: the block, then r2.
+    let cursor = Cursor::new(
+        0,
+        &[1, 2, 3],
+        out.history_head_dropped,
+        &[],
+        out.messages.len(),
+    );
+    assert_eq!(cursor.after(4), 0, "`through` does not pass r1");
+    let miscounted = Cursor::new(0, &[1, 2, 3], 0, &[], out.messages.len());
+    assert_eq!(miscounted.after(4), 2, "a count of 0 would have passed r1");
+}
+
+/// The history layer's cache key follows the working state: the same state
+/// keys the same, a changed state (or one written again later) keys anew,
+/// and so does a state appearing where there was none.
+#[test]
+fn the_history_fingerprint_changes_with_the_state_and_not_otherwise() {
+    let fingerprint = |state: Option<String>| {
+        let mut input = make_history_input(HistoryMode::Default);
+        input.lane_tip_fingerprint = [7u8; 32];
+        input.current_user_turn = Some(ChatMessage::user("what next?"));
+        input.working_state = state.map(|text| Arc::from(text.as_str()));
+        super::history::compute(&input).fingerprint
+    };
+    let one = a_working_state("Compare the hotels");
+    let other = a_working_state("Book the Alfama hotel");
+
+    assert_eq!(
+        fingerprint(Some(one.text(STATE_AT, 4000))),
+        fingerprint(Some(one.text(STATE_AT, 4000))),
+        "the same state keys the same"
+    );
+    assert_eq!(fingerprint(None), fingerprint(None));
+    assert_ne!(
+        fingerprint(Some(one.text(STATE_AT, 4000))),
+        fingerprint(Some(other.text(STATE_AT, 4000))),
+        "a changed state keys anew"
+    );
+    assert_ne!(
+        fingerprint(Some(one.text(STATE_AT, 4000))),
+        fingerprint(Some(one.text("2026-09-29 08:00:00", 4000))),
+        "the same state written again later keys anew"
+    );
+    assert_ne!(
+        fingerprint(None),
+        fingerprint(Some(one.text(STATE_AT, 4000)))
+    );
+}
+
+// ── Design 11 §4 (b): the previous conversation in the history layer ───
+
+const PREVIOUS: &str = "The previous conversation on this project ended 2026-09-28 11:00:00; \
+                        if a summary of it was written, memory_timeline lists it under \
+                        Conversation on 2026-09-28.\nTopic: Lisbon trip";
+
+/// While a new conversation is given the previous one, its block is the
+/// history layer's first message — quoted data under the trust label, of
+/// its own type — ahead of the rows and the current turn.
+#[test]
+fn the_previous_conversation_is_the_history_layers_first_message_quoted() {
+    let mut input = make_history_input(HistoryMode::Default);
+    input.previous = Some(Arc::from(PREVIOUS));
+    input.recent_messages = Arc::new(vec![ChatMessage::user("u1"), ChatMessage::assistant("a2")]);
+    input.current_user_turn = Some(ChatMessage::user("go on"));
+
+    let out = super::history::compute(&input);
+
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(contents.len(), 4);
+    assert_eq!(
+        contents[0],
+        crate::orchestrator::wrap_untrusted_context(
+            PREVIOUS,
+            "previous_conversation",
+            "user_derived"
+        )
+    );
+    assert!(contents[0].starts_with(crate::orchestrator::working_state::PREVIOUS_BLOCK_PREFIX));
+    assert!(matches!(out.messages[0].role, Role::User));
+    assert_eq!(&contents[1..], ["u1", "a2", "go on"]);
+}
+
+/// The history layer's cache key follows the previous conversation too: the
+/// same block keys the same, another (or the block going away) keys anew.
+#[test]
+fn the_history_fingerprint_changes_with_the_previous_conversation_and_not_otherwise() {
+    let fingerprint = |previous: Option<&str>| {
+        let mut input = make_history_input(HistoryMode::Default);
+        input.lane_tip_fingerprint = [7u8; 32];
+        input.current_user_turn = Some(ChatMessage::user("go on"));
+        input.previous = previous.map(Arc::from);
+        super::history::compute(&input).fingerprint
+    };
+    assert_eq!(fingerprint(Some(PREVIOUS)), fingerprint(Some(PREVIOUS)));
+    assert_ne!(fingerprint(None), fingerprint(Some(PREVIOUS)));
+    assert_ne!(
+        fingerprint(Some(PREVIOUS)),
+        fingerprint(Some(&format!("{PREVIOUS}\nNext: book it")))
+    );
+}
+
+/// Design 11 §3.2 (the slice-3 review's F3): the previous conversation's
+/// block is not a row — a trim that takes it reports no dropped history
+/// row, so a compaction on that turn may still pass the rows it reads; a
+/// trim that goes on to a row counts that row.
+#[test]
+fn a_trim_that_takes_the_previous_block_counts_no_row() {
+    use super::assembly::{self, AssemblyInput};
+
+    let compose = |window: u32| {
+        let mut input = make_history_input(HistoryMode::Default);
+        // ~1 000 tokens of previous conversation, then two short rows.
+        input.previous = Some(Arc::from(
+            format!("{PREVIOUS} {}", "p".repeat(4000)).as_str(),
+        ));
+        input.recent_messages = Arc::new(vec![
+            ChatMessage::user(&format!("first row {}", "a".repeat(400))),
+            ChatMessage::assistant("second row"),
+        ]);
+        input.current_user_turn = Some(ChatMessage::user("go on"));
+        let history = super::history::compute(&input);
+        assembly::compose(AssemblyInput {
+            persona: &PersonaOutput {
+                blocks: vec![],
+                fingerprint: [0u8; 32],
+            },
+            static_prompt: &StaticPromptOutput {
+                system_message: Arc::from("system"),
+                section_registry: vec!["system"],
+                fingerprint: [0u8; 32],
+            },
+            dynamic_context: &DynamicContextOutput {
+                context_messages: vec![],
+                additional_system_blocks: vec![],
+                fingerprint: [0u8; 32],
+            },
+            history: &history,
+            tools: Arc::new(vec![]),
+            model_window: window,
+            layer_trace: LayerTrace {
+                persona_mode: PersonaMode::Minimal,
+                static_prompt_mode: StaticPromptMode::Default,
+                dynamic_context_mode: DynamicContextMode::Skip,
+                history_mode: HistoryMode::Default,
+                memo_hits: LayerMemoHits::default(),
+            },
+        })
+    };
+
+    // The 75 % threshold is 750: the block goes, the rows fit.
+    let out = compose(1000);
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
+    assert!(out.section_registry.contains(&"<trimmed:history>"));
+    assert!(
+        !contents
+            .iter()
+            .any(|c| c.starts_with(crate::orchestrator::working_state::PREVIOUS_BLOCK_PREFIX)),
+        "the block went: {contents:?}"
+    );
+    assert!(contents.iter().any(|c| c.starts_with("first row")));
+    assert_eq!(out.history_head_dropped, 0, "the block is not a row");
+
+    // At 120 the threshold is 90: the block and the first row go.
+    let out = compose(120);
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
+    assert!(
+        !contents.iter().any(|c| c.starts_with("first row")),
+        "{contents:?}"
+    );
+    assert_eq!(out.history_head_dropped, 1, "one row, not two");
 }

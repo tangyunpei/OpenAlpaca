@@ -10,11 +10,16 @@
 //! - `Skip`    — produce an empty output (used by planner, replanner, social,
 //!   pipeline, dag, lead-agent paths per the spec default-modes table).
 //!
-//! Fingerprint: `blake3(query_hash || memory_retrieval_hash || path_tag ||
-//! reserved_tokens || mode_tag)`. The `query_hash` captures the request text;
-//! the `memory_retrieval_hash` is pre-computed by the caller over the
-//! bundle's serialized content so identical retrieval outputs map to the
-//! same fingerprint even when the bundle's internal timestamps differ.
+//! Fingerprint: `blake3(query_hash || path_tag || reserved_tokens ||
+//! mode_tag)`. The `query_hash` captures the request text.
+//!
+//! **Memory is not in this layer's output.** Layer 3 is cached per lane by
+//! that fingerprint, so a memory section here would be served again to a
+//! repeated question after the notes had changed (design §5; review finding
+//! 3 — the old `memory_retrieval_hash` was zeroed at every call site, so it
+//! never told the two apart). The bundle's `ContextKind::Memory` sections are
+//! skipped by [`compute`]; the caller appends
+//! `prompt_ctx::sources::memory::memory_turn` per turn, outside the cache.
 
 use std::sync::Arc;
 
@@ -23,7 +28,7 @@ use openalpaca_llm::ChatMessage;
 use super::types::{
     DynamicContextInput, DynamicContextMode, DynamicContextOutput, SystemBlock,
 };
-use crate::prompt_ctx::{ExecutionPath, InjectionMode, SectionPriority, TrustLevel};
+use crate::prompt_ctx::{ContextKind, ExecutionPath, InjectionMode, SectionPriority, TrustLevel};
 
 fn mode_tag(mode: DynamicContextMode) -> u8 {
     match mode {
@@ -75,6 +80,10 @@ fn build_from_bundle(
         if section.content.is_empty() {
             continue;
         }
+        // Per turn and outside this cached layer (module doc).
+        if section.kind == ContextKind::Memory {
+            continue;
+        }
         match &section.injection {
             InjectionMode::SystemPrompt => {
                 additional_system_blocks.push(SystemBlock {
@@ -112,7 +121,6 @@ fn build_from_bundle(
 pub(super) fn compute_fingerprint(input: &DynamicContextInput) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(blake3::hash(input.query.as_bytes()).as_bytes());
-    h.update(&input.memory_retrieval_hash);
     h.update(&[path_tag(&input.path)]);
     h.update(&(input.reserved_tokens as u64).to_le_bytes());
     h.update(&[mode_tag(input.mode)]);

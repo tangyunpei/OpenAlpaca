@@ -98,7 +98,7 @@ impl StreamResult {
 /// be escaped is what a header value cannot carry; `%` goes with it so that a
 /// directory literally named `50%20off` does not decode into `50 off` at the
 /// other end.
-fn encode_header_path(path: &str) -> String {
+pub(crate) fn encode_header_path(path: &str) -> String {
     let mut encoded = String::with_capacity(path.len());
     for byte in path.bytes() {
         if byte == b'%' || !(0x20..=0x7e).contains(&byte) {
@@ -127,6 +127,9 @@ fn encode_header_path(path: &str) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct ChatTarget {
     workspace_path: Option<String>,
+    /// `workspace_path` is a root the daemon answered or recorded — `--project`'s
+    /// answer, a resumed conversation's project — not a directory to resolve.
+    resolved: bool,
     session_id: Option<String>,
     unattended: bool,
 }
@@ -142,17 +145,51 @@ impl ChatTarget {
         Self::for_workspace(workspace_path)
     }
 
+    /// The root `--project` chose: what `POST /v1/workspaces` answered.
+    pub fn for_project(root: String) -> Self {
+        Self {
+            resolved: true,
+            ..Self::for_workspace(Some(root))
+        }
+    }
+
     pub fn for_workspace(workspace_path: Option<String>) -> Self {
         Self {
             workspace_path,
+            resolved: false,
             session_id: None,
             unattended: false,
+        }
+    }
+
+    /// The project path this turn carries as `x-workspace-path`, if any.
+    pub fn workspace_path(&self) -> Option<&str> {
+        self.workspace_path.as_deref()
+    }
+
+    /// The path this turn carries when it is already a project root the
+    /// daemon answered or recorded ([`for_project`](Self::for_project),
+    /// [`in_project`](Self::in_project)) — `None` for a directory that still
+    /// needs resolving, such as [`for_cwd`](Self::for_cwd)'s.
+    pub fn project_root(&self) -> Option<&str> {
+        match self.resolved {
+            true => self.workspace_path.as_deref(),
+            false => None,
         }
     }
 
     /// Address a stored conversation from here on.
     pub fn resuming(mut self, session_id: String) -> Self {
         self.session_id = Some(session_id);
+        self
+    }
+
+    /// Carry `root` — a project root the daemon recorded — from here on, in
+    /// place of the path this target was made with: a resumed conversation's
+    /// project, where R49 runs its turns (R6).
+    pub fn in_project(mut self, root: String) -> Self {
+        self.workspace_path = Some(root);
+        self.resolved = true;
         self
     }
 
@@ -307,6 +344,19 @@ enum Reconciliation {
     Redraw(String),
 }
 
+impl Reconciliation {
+    /// What `done` prints for the answer: the tail, or the whole answer on a
+    /// fresh line — at a terminal with no control character in it
+    /// ([`model_text`]), into a pipe exactly as the daemon sent it.
+    fn text(&self, tty: bool) -> Option<String> {
+        match self {
+            Reconciliation::Nothing => None,
+            Reconciliation::Append(tail) => Some(model_text(tty, tail).into_owned()),
+            Reconciliation::Redraw(answer) => Some(format!("\n{}", model_text(tty, answer))),
+        }
+    }
+}
+
 /// Reconcile the authoritative `done.content` against what was printed.
 fn reconcile(shown: &str, content: &str) -> Reconciliation {
     if content.is_empty() || shown == content {
@@ -327,9 +377,55 @@ fn reconcile(shown: &str, content: &str) -> Reconciliation {
 /// A terminal watches the model type. A pipe waits: its bytes are somebody
 /// else's input, and it must contain the final answer once and nothing else —
 /// which, now that deltas no longer concatenate to `done.content`, is only
-/// true if nothing is written before `done` (S13).
-fn delta_to_print(tty: bool, content: &str) -> Option<&str> {
-    (tty && !content.is_empty()).then_some(content)
+/// true if nothing is written before `done` (S13). What a terminal is shown
+/// is the model's text with no control character in it ([`model_text`]).
+fn delta_to_print(tty: bool, content: &str) -> Option<String> {
+    (tty && !content.is_empty()).then(|| model_text(tty, content).into_owned())
+}
+
+/// The model's prose as this process writes it: at a terminal, every control
+/// character but `\n` and `\t` shown as `<U+XXXX>`
+/// (`openalpaca_core::utils::text::escape_controls`); into a pipe, as the
+/// daemon sent it.
+///
+/// A terminal acts on a control character instead of showing it, and the
+/// state an ESC or a C1 CSI sets outlives the text: the model that wrote this
+/// answer also writes the arguments of the tool call whose `[y/N]` prompt is
+/// printed next, into the same terminal, and turning auto-wrap off first
+/// would cut the argument that runs at the margin, with nothing hidden in it
+/// for the prompt's notice to count. Display only: `SseState::shown` keeps
+/// what the daemon sent, so `done` still reconciles against it.
+///
+/// Every text of the model's or a tool's that `openalpaca chat` prints goes
+/// through here: the streamed answer and its reasoning, what `done` adds, a
+/// delegated run's result ([`task_outcome_text`]), a resumed conversation's
+/// turns (`commands::chat::render_tail`) and a failed turn's message
+/// ([`failure_line`], `commands::chat::refuse_failed_turn`, by stderr's own
+/// terminal) — and so does the provider's model id, a catalogue entry a
+/// remote Ollama or a gateway names, on the usage line after every turn and
+/// in the REPL's `/models`. So none of it can set a mode, a scroll region,
+/// the cursor or a palette colour; the prompt's reset
+/// (`crate::output::TERMINAL_RESET`) is for what other programs left in the
+/// terminal.
+pub(crate) fn model_text(tty: bool, text: &str) -> std::borrow::Cow<'_, str> {
+    if tty {
+        std::borrow::Cow::Owned(openalpaca_core::utils::text::escape_controls(text))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+/// The line the REPL prints on stderr for a turn that failed:
+/// `Error: <message>`, the message through [`model_text`] for a stderr
+/// that is a terminal.
+///
+/// The message is the daemon's `error` frame, and for a loop that ended in
+/// an error it quotes the last tool's own error text — an MCP server's or a
+/// plugin's words. The REPL prints it into the terminal the next turn's
+/// inline prompt is printed into, where a scroll region or a palette change
+/// in it would outlive it.
+pub(crate) fn failure_line(message: &str, tty: bool) -> String {
+    format!("{} {}", "Error:".red(), model_text(tty, message))
 }
 
 /// U3(d) — one line per attachment the daemon says never reached the model.
@@ -355,14 +451,38 @@ fn skipped_attachment_lines(done: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+/// Design 11 §5 (owner decision CQ-7): the one line a terminal is shown when
+/// the turn was given the previous conversation — `continuing from: <topic>`,
+/// from `done.continued_from` — or `None`: into a pipe, which carries the
+/// answer alone (S13), and on a turn that continued from nothing. The topic is
+/// the working-state writer's text, so every hidden character in it is shown
+/// as `<U+XXXX>` (`escape_hidden_line`); a previous conversation that left no
+/// state is named as such.
+fn continued_from_line(done: &serde_json::Value, tty: bool) -> Option<String> {
+    if !tty {
+        return None;
+    }
+    let from = done.get("continued_from").filter(|v| v.is_object())?;
+    let topic = from["topic"].as_str().unwrap_or("");
+    Some(if topic.is_empty() {
+        "continuing from: the previous conversation".to_string()
+    } else {
+        format!(
+            "continuing from: {}",
+            openalpaca_core::utils::text::escape_hidden_line(topic).text
+        )
+    })
+}
+
 /// What a `reasoning` frame prints (S2).
 ///
 /// Dim, on a terminal, as it arrives — it is the 13 s a thinking model spends
 /// before its first token, and printing nothing made that look like a hang.
 /// Never on a pipe: reasoning is not the answer, and a script must not have to
-/// tell them apart.
-fn reasoning_to_print(tty: bool, text: &str) -> Option<&str> {
-    (tty && !text.is_empty()).then_some(text)
+/// tell them apart. Like a delta, it reaches a terminal with no control
+/// character in it ([`model_text`]).
+fn reasoning_to_print(tty: bool, text: &str) -> Option<String> {
+    (tty && !text.is_empty()).then(|| model_text(tty, text).into_owned())
 }
 
 async fn stream_sse_events(
@@ -385,7 +505,7 @@ async fn stream_sse_events(
                             let skip = if buffer[pos..].starts_with("\r\n\r\n") { 4 } else { 2 };
                             buffer = buffer[pos + skip..].to_string();
                             if is_confirmation_event(&event_text) {
-                                handle_confirmation_prompt(client, &event_text).await?;
+                                handle_confirmation_prompt(client, &event_text, opts.tty).await?;
                             } else {
                                 process_sse_event(&event_text, opts, &mut state)?;
                             }
@@ -433,6 +553,110 @@ async fn stream_sse_events(
     Ok(StreamResult::Response(state.usage))
 }
 
+/// What the inline `[y/N]` prompt prints, in order.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ConfirmationDetails {
+    /// `Tool '<name>' requires confirmation`.
+    pub headline: String,
+    /// The daemon-authored preview, under `From OpenAlpaca:`.
+    pub preview: Option<String>,
+    /// `Arguments: ` and the pretty-printed JSON.
+    pub arguments: Option<String>,
+    /// The hidden-character notice, directly under the arguments.
+    pub notice: Option<String>,
+}
+
+impl ConfirmationDetails {
+    /// Everything the inline prompt writes before it asks, painted, one line
+    /// each: on a terminal first [`crate::output::TERMINAL_RESET`], then a
+    /// blank line, the headline, the preview, the arguments and, directly
+    /// under them, the notice.
+    pub(crate) fn text(&self, tty: bool) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::from(crate::output::terminal_reset(tty));
+        // Writing into a `String` cannot fail.
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{}", self.headline.yellow().bold());
+        if let Some(preview) = &self.preview {
+            let _ = writeln!(out, "{preview}");
+        }
+        if let Some(arguments) = &self.arguments {
+            let _ = writeln!(out, "{}", arguments.dimmed());
+        }
+        if let Some(notice) = &self.notice {
+            let _ = writeln!(out, "{}", notice.yellow());
+        }
+        out
+    }
+}
+
+/// What the inline prompt prints (design 09 §4.4): the headline naming the
+/// tool, the daemon-authored preview, labelled as OpenAlpaca's own text, then
+/// the literal arguments, which stay. Either of the last two may be absent.
+///
+/// The name and the arguments are what the person approves, and a terminal
+/// is the renderer where a raw ESC or C1 CSI rewrites the line and a bidi
+/// override reorders it, so every hidden character in them is shown as
+/// `<U+XXXX>` (`openalpaca_core::utils::text::escape_hidden`, after the
+/// JSON is serialized) and one notice under the arguments counts them. The
+/// name is one line — an MCP `<server>__<tool>` or plugin `<plugin>::<tool>`
+/// name is whatever its third party lists — so it takes `escape_hidden_line`,
+/// which also shows a line break and a tab: a name cannot print a forged
+/// `Arguments:` block above the real one. The preview is left as it comes,
+/// because nothing the model wrote reaches it raw: `memory_confirm`'s preview
+/// has every character the escape would show taken out of what it quotes
+/// (`utils::text::one_line`), and the previews of `shell_execute`,
+/// `file_write`, `file_edit` and `send` show the ones in what they quote
+/// escaped (`<U+XXXX>`), with their own count line. The one field in it
+/// printed as it is is the folder a card names — the project's root, the
+/// conversation's scratch folder or the artifact store — the person's own
+/// path or OpenAlpaca's, not the model's.
+/// Display only — the answer is built from the frame's `request_id`, untouched.
+pub(crate) fn confirmation_details(frame: &serde_json::Value) -> ConfirmationDetails {
+    use openalpaca_core::utils::text::{escape_hidden, escape_hidden_line, hidden_notice};
+
+    let name = escape_hidden_line(frame["tool_name"].as_str().unwrap_or(""));
+    let preview = frame["preview"]
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("From OpenAlpaca:\n{}", indent(p)));
+    let args = &frame["tool_arguments"];
+    let arguments = (!args.is_null())
+        .then(|| escape_hidden(&serde_json::to_string_pretty(args).unwrap_or_default()));
+    let hidden = name.hidden + arguments.as_ref().map_or(0, |args| args.hidden);
+    ConfirmationDetails {
+        headline: format!("Tool '{}' requires confirmation", name.text),
+        preview,
+        arguments: arguments.map(|args| format!("Arguments: {}", args.text)),
+        notice: hidden_notice(hidden),
+    }
+}
+
+/// Where the inline prompt's answer goes, and what it says: `watch`'s and
+/// `approve`'s own path and body (`commands::confirmations`), so the id is
+/// one path segment and the body is `{"approved"}` with no scope — the
+/// inline prompt offers no "always". Both come from the frame's
+/// `request_id` as the daemon sent it, never from [`ConfirmationDetails`]:
+/// nothing the prompt showed, escaped or not, reaches the broker.
+pub(crate) fn inline_answer(
+    frame: &serde_json::Value,
+    approved: bool,
+) -> (String, serde_json::Value) {
+    use crate::commands::confirmations::{answer_body, answer_path};
+
+    let request_id = frame["request_id"].as_str().unwrap_or("");
+    (answer_path(request_id), answer_body(approved, false))
+}
+
+/// Every line of `text`, two spaces in.
+pub(crate) fn indent(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Check if an SSE event is a tool confirmation request.
 fn is_confirmation_event(event_text: &str) -> bool {
     event_text
@@ -447,7 +671,11 @@ fn is_confirmation_event(event_text: &str) -> bool {
 /// fine for CLI — the user can only answer one prompt at a time, and the 300s
 /// server timeout (configurable via `confirmation_timeout_secs`) is sufficient
 /// for sequential multi-prompt scenarios.
-async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> Result<()> {
+async fn handle_confirmation_prompt(
+    client: &DaemonClient,
+    event_text: &str,
+    tty: bool,
+) -> Result<()> {
     let mut data = String::new();
     for line in event_text.lines() {
         if let Some(val) = line.strip_prefix("data:") {
@@ -455,24 +683,8 @@ async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> 
         }
     }
     let parsed: serde_json::Value = serde_json::from_str(&data)?;
-    let request_id = parsed["request_id"].as_str().unwrap_or("");
-    let tool_name = parsed["tool_name"].as_str().unwrap_or("");
-    let args = &parsed["tool_arguments"];
 
-    println!();
-    println!(
-        "{}",
-        format!("Tool '{}' requires confirmation", tool_name)
-            .yellow()
-            .bold()
-    );
-    if !args.is_null() {
-        println!(
-            "{}",
-            format!("Arguments: {}", serde_json::to_string_pretty(args).unwrap_or_default())
-                .dimmed()
-        );
-    }
+    print!("{}", confirmation_details(&parsed).text(tty));
 
     let approved = tokio::task::block_in_place(|| {
         print!("Allow execution? [y/N] ");
@@ -482,13 +694,8 @@ async fn handle_confirmation_prompt(client: &DaemonClient, event_text: &str) -> 
         matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
     });
 
-    let body = serde_json::json!({ "approved": approved });
-    client
-        .post_raw(
-            &format!("/v1/chat/confirmations/{}", request_id),
-            &body,
-        )
-        .await?;
+    let (path, body) = inline_answer(&parsed, approved);
+    client.post_raw(&path, &body).await?;
 
     let status = if approved {
         "Approved".green()
@@ -507,17 +714,32 @@ fn find_event_boundary(buf: &str) -> Option<usize> {
 }
 
 /// Close an open reasoning run so the answer starts on its own line.
-fn end_reasoning(state: &mut SseState) -> Result<()> {
+fn end_reasoning(state: &mut SseState, out: &mut impl Write) -> Result<()> {
     if !state.reasoning_open {
         return Ok(());
     }
     state.reasoning_open = false;
-    println!();
-    std::io::stdout().flush()?;
+    writeln!(out)?;
+    out.flush()?;
     Ok(())
 }
 
+/// [`process_sse_event_to`] on this process's stdout.
 fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseState) -> Result<()> {
+    process_sse_event_to(event_text, opts, state, &mut std::io::stdout())
+}
+
+/// Handle one SSE frame: record what it says in `state` and write what it
+/// shows to `out` — stdout in production, a buffer in a test, so what the
+/// model's text looks like on a terminal is observed where it is written,
+/// not only in the helpers that compute it. The skipped-attachment lines go
+/// to stderr whatever `out` is.
+fn process_sse_event_to(
+    event_text: &str,
+    opts: &StreamOptions,
+    state: &mut SseState,
+    out: &mut impl Write,
+) -> Result<()> {
     let mut event_type = String::new();
     let mut data = String::new();
 
@@ -532,10 +754,10 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
     match event_type.as_str() {
         "thinking" => {
             if opts.verbose {
-                print!("{}", "Thinking...".dimmed());
-                std::io::stdout().flush()?;
-                print!("\r            \r");
-                std::io::stdout().flush()?;
+                write!(out, "{}", "Thinking...".dimmed())?;
+                out.flush()?;
+                write!(out, "\r            \r")?;
+                out.flush()?;
             }
         }
         // S2: the model's own reasoning, live. Never recorded in `shown` — it
@@ -545,8 +767,8 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 && let Some(text) = parsed["text"].as_str()
                 && let Some(visible) = reasoning_to_print(opts.tty, text)
             {
-                print!("{}", visible.dimmed());
-                std::io::stdout().flush()?;
+                write!(out, "{}", visible.dimmed())?;
+                out.flush()?;
                 state.reasoning_open = true;
             }
         }
@@ -555,10 +777,12 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 && let Some(content) = parsed["content"].as_str()
                 && let Some(visible) = delta_to_print(opts.tty, content)
             {
-                end_reasoning(state)?;
-                print!("{}", visible);
-                std::io::stdout().flush()?;
-                state.shown.push_str(visible);
+                end_reasoning(state, out)?;
+                write!(out, "{}", visible)?;
+                out.flush()?;
+                // What the daemon sent, not its escaped form: `done` is
+                // reconciled against this.
+                state.shown.push_str(content);
             }
         }
         // Terminal (V7): `done` is the last frame of an answered turn — the
@@ -569,19 +793,15 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 // S13: the terminal ends on the authoritative answer, exactly
                 // once, whatever the deltas showed.
                 if let Some(content) = parsed["content"].as_str() {
-                    match reconcile(&state.shown, content) {
-                        Reconciliation::Nothing => end_reasoning(state)?,
-                        Reconciliation::Append(tail) => {
-                            end_reasoning(state)?;
-                            print!("{}", tail);
-                            state.shown.push_str(&tail);
-                        }
-                        Reconciliation::Redraw(answer) => {
-                            end_reasoning(state)?;
-                            println!();
-                            print!("{}", answer);
-                            state.shown = answer;
-                        }
+                    let reconciliation = reconcile(&state.shown, content);
+                    end_reasoning(state, out)?;
+                    if let Some(text) = reconciliation.text(opts.tty) {
+                        write!(out, "{text}")?;
+                    }
+                    match reconciliation {
+                        Reconciliation::Nothing => {}
+                        Reconciliation::Append(tail) => state.shown.push_str(&tail),
+                        Reconciliation::Redraw(answer) => state.shown = answer,
                     }
                 }
 
@@ -592,13 +812,19 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                     state.delegation = Some(delegation);
                 }
 
-                println!();
+                writeln!(out)?;
 
                 // U3(d): what the turn answered *without*, before the usage
                 // line — one line per withheld attachment, naming the reason
                 // the daemon gave.
                 for line in skipped_attachment_lines(&parsed) {
                     eprintln!("{}", line.yellow());
+                }
+
+                // Design 11 §5: the previous conversation this turn was
+                // given, dim, at a terminal only.
+                if let Some(line) = continued_from_line(&parsed, opts.tty) {
+                    writeln!(out, "{}", line.dimmed())?;
                 }
 
                 let model = parsed["model"].as_str().unwrap_or("").to_string();
@@ -613,7 +839,11 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                         tokens_out,
                         duration_ms,
                     };
-                    println!("{}", format_usage_line(&info).dimmed());
+                    // The id is the provider catalogue's, a third party's
+                    // string printed where the next prompt will be: A10's
+                    // rule, like the model's own text.
+                    let line = format_usage_line(&info);
+                    writeln!(out, "{}", model_text(opts.tty, &line).dimmed())?;
                     state.usage = Some(info);
                 }
             }
@@ -671,61 +901,9 @@ pub async fn poll_task_completion(client: &DaemonClient, task_id: &str) -> Resul
         };
 
         // GET /v1/tasks/{id} returns { "task": {...}, "outcome": {...}? }
-        let task = &resp["task"];
-        let status = task["status"].as_str().unwrap_or("");
-
-        match status {
-            "completed" => {
-                let summary = task["result_summary"].as_str().unwrap_or("");
-                // Calculate duration from created_at → completed_at
-                let duration_str =
-                    match (task["created_at"].as_str(), task["completed_at"].as_str()) {
-                        (Some(start), Some(end)) => {
-                            match (
-                                chrono::DateTime::parse_from_rfc3339(start),
-                                chrono::DateTime::parse_from_rfc3339(end),
-                            ) {
-                                (Ok(s), Ok(e)) => {
-                                    let secs = (e - s).num_seconds().max(0);
-                                    format!(" in {}s", secs)
-                                }
-                                _ => String::new(),
-                            }
-                        }
-                        _ => String::new(),
-                    };
-                println!("{}", format!("[Task completed{}]", duration_str).green());
-                if !summary.is_empty() {
-                    println!("{} {}", "Result:".bold(), summary);
-                }
-                return Ok(());
-            }
-            "failed" | "cancelled" => {
-                let summary = task["result_summary"].as_str().unwrap_or("");
-                println!("{}", format!("[Task {}]", status).red());
-                if !summary.is_empty() {
-                    println!("{} {}", "Error:".red(), summary);
-                }
-                return Ok(());
-            }
-            // Terminal, but not a failure: the daemon went away mid-run
-            // (§5.6b). Polling must stop — the run will never move again — and
-            // the restart verb is `rerun`, not `start` (R43).
-            "interrupted" => {
-                let summary = task["result_summary"].as_str().unwrap_or("");
-                println!("{}", "[Task interrupted — the daemon restarted]".yellow());
-                if !summary.is_empty() {
-                    println!("{} {}", "Detail:".yellow(), summary);
-                }
-                println!(
-                    "{}",
-                    "Nothing was lost — re-run it to start the same goal again.".dimmed()
-                );
-                return Ok(());
-            }
-            _ => {
-                // Still running — continue polling
-            }
+        if let Some(text) = task_outcome_text(&resp["task"], std::io::stdout().is_terminal()) {
+            print!("{text}");
+            return Ok(());
         }
     }
 
@@ -734,6 +912,80 @@ pub async fn poll_task_completion(client: &DaemonClient, task_id: &str) -> Resul
         "(stopped waiting — task still running, check /tasks)".yellow()
     );
     Ok(())
+}
+
+/// What a delegated run's outcome prints once the run has stopped, one line
+/// each, painted — or `None` while it is still running.
+///
+/// The summary is the run's `result_summary`: the lead model's own final
+/// answer, followed, when a tool was refused because nobody could approve
+/// it, by a line naming that tool — a name an MCP server or a plugin chose.
+/// In the REPL it is printed into the
+/// terminal the next turn's inline `[y/N]` prompt is printed into, so a
+/// terminal gets it as it gets the streamed answer ([`model_text`]): a
+/// scroll region or a palette change in it would outlive it, and the
+/// prompt's reset undoes neither. A pipe gets it as the daemon sent it.
+fn task_outcome_text(task: &serde_json::Value, tty: bool) -> Option<String> {
+    use std::fmt::Write as _;
+
+    let summary = model_text(tty, task["result_summary"].as_str().unwrap_or(""));
+    let mut out = String::new();
+    // Writing into a `String` cannot fail.
+    match task["status"].as_str().unwrap_or("") {
+        "completed" => {
+            // Calculate duration from created_at → completed_at
+            let duration_str = match (task["created_at"].as_str(), task["completed_at"].as_str()) {
+                (Some(start), Some(end)) => {
+                    match (
+                        chrono::DateTime::parse_from_rfc3339(start),
+                        chrono::DateTime::parse_from_rfc3339(end),
+                    ) {
+                        (Ok(s), Ok(e)) => {
+                            let secs = (e - s).num_seconds().max(0);
+                            format!(" in {}s", secs)
+                        }
+                        _ => String::new(),
+                    }
+                }
+                _ => String::new(),
+            };
+            let _ = writeln!(
+                out,
+                "{}",
+                format!("[Task completed{}]", duration_str).green()
+            );
+            if !summary.is_empty() {
+                let _ = writeln!(out, "{} {}", "Result:".bold(), summary);
+            }
+        }
+        status @ ("failed" | "cancelled") => {
+            let _ = writeln!(out, "{}", format!("[Task {}]", status).red());
+            if !summary.is_empty() {
+                let _ = writeln!(out, "{} {}", "Error:".red(), summary);
+            }
+        }
+        // Terminal, but not a failure: the daemon went away mid-run
+        // (§5.6b). Polling must stop — the run will never move again — and
+        // the restart verb is `rerun`, not `start` (R43).
+        "interrupted" => {
+            let _ = writeln!(
+                out,
+                "{}",
+                "[Task interrupted — the daemon restarted]".yellow()
+            );
+            if !summary.is_empty() {
+                let _ = writeln!(out, "{} {}", "Detail:".yellow(), summary);
+            }
+            let _ = writeln!(
+                out,
+                "{}",
+                "Nothing was lost — re-run it to start the same goal again.".dimmed()
+            );
+        }
+        // Still running — continue polling
+        _ => return None,
+    }
+    Some(out)
 }
 
 pub fn format_usage_line(info: &UsageInfo) -> String {

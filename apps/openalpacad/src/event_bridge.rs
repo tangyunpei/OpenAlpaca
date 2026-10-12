@@ -241,6 +241,27 @@ pub fn spawn_event_bridge(
                     );
                     eb.soul_updated(&actor, &mode, &content_sha256, backup_path);
                 }
+                // A memory note changed (memory redesign, design §7a; G30):
+                // forwarded so the Memory view invalidates instead of polling.
+                // The broadcaster does not persist it.
+                openalpaca_core::events::SystemEvent::MemoryChanged {
+                    partition_key,
+                    note_id,
+                    change,
+                    revision,
+                    origin,
+                    surface,
+                    ..
+                } => {
+                    eb.memory_changed(
+                        &partition_key,
+                        &note_id,
+                        &change,
+                        revision,
+                        &origin,
+                        surface,
+                    );
+                }
                 // ── Log-only (NOT forwarded to clients) ───────────────────
                 openalpaca_core::events::SystemEvent::ModelAccessDenied {
                     agent_id,
@@ -404,6 +425,8 @@ pub fn spawn_event_bridge(
                     ref stream_id,
                     ref lane_key,
                     ref task_id,
+                    ref preview,
+                    per_call,
                     ..
                 } => {
                     tracing::info!(
@@ -418,6 +441,8 @@ pub fn spawn_event_bridge(
                         stream_id.as_deref(),
                         lane_key.as_deref(),
                         task_id.as_deref(),
+                        preview.as_deref(),
+                        per_call,
                     );
                     // 2. Forward to SSE chat stream (CLI + GUI active chat)
                     if let (Some(csm), Some(sid)) = (&chat_streams, &stream_id) {
@@ -427,6 +452,8 @@ pub fn spawn_event_bridge(
                                 request_id,
                                 tool_name,
                                 tool_arguments: tool_arguments.clone(),
+                                preview: preview.clone(),
+                                per_call,
                             },
                         );
                     }
@@ -476,10 +503,13 @@ pub fn spawn_event_bridge(
                     );
                 }
                 openalpaca_core::events::SystemEvent::CompactionTriggered {
-                    request_id, messages_before, messages_after, memories_extracted, ..
+                    request_id,
+                    messages_before,
+                    messages_after,
+                    ..
                 } => {
                     tracing::info!(
-                        %request_id, messages_before, messages_after, memories_extracted,
+                        %request_id, messages_before, messages_after,
                         "Context compaction triggered"
                     );
                 }
@@ -542,10 +572,12 @@ pub fn spawn_event_bridge(
                     ref kind,
                     version,
                     ref path,
+                    in_project,
+                    openable,
                     ..
                 } => {
                     tracing::info!(
-                        %artifact_id, ?task_id, %name, %kind, version,
+                        %artifact_id, ?task_id, %name, %kind, version, in_project,
                         "Artifact written"
                     );
                     eb.artifact_written(
@@ -556,6 +588,8 @@ pub fn spawn_event_bridge(
                         kind,
                         version,
                         path,
+                        in_project,
+                        openable,
                     );
                 }
                 openalpaca_core::events::SystemEvent::SubagentSpan {
@@ -718,6 +752,65 @@ mod tests {
         cancel.cancel();
     }
 
+    /// `memory_changed` crosses the bridge with every field the service
+    /// published, `surface` included when it was set and absent — not
+    /// `null` — when a reconciliation scan published it (design §7a, §7b P13).
+    #[tokio::test]
+    async fn test_memory_changed_bridged_with_and_without_a_surface() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::MemoryChanged {
+            partition_key: "home-32acea7eb739b08afd959db91e46d450".into(),
+            note_id: "55e811b6-3220-4758-a47b-034bd1023f38".into(),
+            change: "created".into(),
+            revision: Some("9f".repeat(32)),
+            origin: "user".into(),
+            surface: Some("user".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        let first = recv_event(&mut rx).await;
+        match &first {
+            ServerEvent::MemoryChanged {
+                partition_key,
+                note_id,
+                change,
+                revision,
+                origin,
+                surface,
+                instance_id,
+                ..
+            } => {
+                assert_eq!(partition_key, "home-32acea7eb739b08afd959db91e46d450");
+                assert_eq!(note_id, "55e811b6-3220-4758-a47b-034bd1023f38");
+                assert_eq!(change, "created");
+                assert_eq!(revision.as_deref(), Some("9f".repeat(32).as_str()));
+                assert_eq!(origin, "user");
+                assert_eq!(surface.as_deref(), Some("user"));
+                assert_eq!(instance_id, "test-instance");
+            }
+            other => panic!("Expected MemoryChanged, got {other:?}"),
+        }
+        let wire = serde_json::to_value(&first).unwrap();
+        assert_eq!(wire["type"], "memory_changed");
+        assert_eq!(wire["surface"], "user");
+
+        bus.publish(SystemEvent::MemoryChanged {
+            partition_key: "home-32acea7eb739b08afd959db91e46d450".into(),
+            note_id: "55e811b6-3220-4758-a47b-034bd1023f38".into(),
+            change: "external".into(),
+            revision: Some("ab".repeat(32)),
+            origin: "external".into(),
+            surface: None,
+            timestamp: chrono::Utc::now(),
+        });
+        let second = serde_json::to_value(recv_event(&mut rx).await).unwrap();
+        assert_eq!(second["change"], "external");
+        assert!(
+            second.get("surface").is_none(),
+            "a scan's finding carries no surface key at all: {second}"
+        );
+        cancel.cancel();
+    }
+
     /// The S4 withholding frame carries `ts` **and** `instance_id` — the two
     /// fields the six `plugin_*` variants omit (GAP-22), which is what makes
     /// this family's rows orderable.
@@ -831,6 +924,8 @@ mod tests {
             kind: "markdown".into(),
             version: 2,
             path: "/p/.openalpaca/artifacts/run/01-quarterly-report.md".into(),
+            in_project: false,
+            openable: true,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {
@@ -842,6 +937,8 @@ mod tests {
                 kind,
                 version,
                 path,
+                in_project,
+                openable,
                 ts,
                 instance_id,
             } => {
@@ -852,6 +949,8 @@ mod tests {
                 assert_eq!(kind, "markdown");
                 assert_eq!(version, 2);
                 assert_eq!(path, "/p/.openalpaca/artifacts/run/01-quarterly-report.md");
+                assert!(!in_project);
+                assert!(openable);
                 assert!(ts >= before);
                 assert_eq!(instance_id, "test-instance");
             }
@@ -872,6 +971,8 @@ mod tests {
             kind: "markdown".into(),
             version: 1,
             path: "/h/.openalpaca/artifacts/loose/01-notes.md".into(),
+            in_project: false,
+            openable: true,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {
@@ -880,6 +981,39 @@ mod tests {
             } => {
                 assert_eq!(task_id, None);
                 assert_eq!(agent_id, None);
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// Stage 2: a result file crosses the bridge as one — `in_project` and
+    /// `openable` as the record said (R35, ST-18).
+    #[tokio::test]
+    async fn test_artifact_written_bridges_a_result_file_in_the_project() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::ArtifactWritten {
+            artifact_id: "a-3".into(),
+            task_id: None,
+            agent_id: Some("code_agent".into()),
+            name: "scripts/build.sh".into(),
+            kind: "code".into(),
+            version: 1,
+            path: "/w/app/scripts/build.sh".into(),
+            in_project: true,
+            openable: false,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ArtifactWritten {
+                in_project,
+                openable,
+                name,
+                ..
+            } => {
+                assert!(in_project);
+                assert!(!openable);
+                assert_eq!(name, "scripts/build.sh");
             }
             other => panic!("Expected ArtifactWritten, got {other:?}"),
         }
@@ -1059,6 +1193,8 @@ mod tests {
             stream_id: None,
             lane_key: None,
             task_id: Some("t-1".into()),
+            preview: None,
+            per_call: false,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {
@@ -1068,6 +1204,62 @@ mod tests {
             other => panic!("Expected ToolConfirmationRequested, got {other:?}"),
         }
 
+        cancel.cancel();
+    }
+
+    /// Design 09 §4.4: a memory card's daemon-authored `preview` and its
+    /// `per_call` flag reach both channels the card goes out on — the
+    /// WebSocket frame and the turn's SSE stream — so the person approves the
+    /// text, not three opaque ids.
+    #[tokio::test]
+    async fn a_card_bridges_its_preview_and_per_call_on_both_channels() {
+        let bus = EventBus::new(16);
+        let eb = EventBroadcaster::new(16, "test-instance".to_string(), None);
+        let mut rx = eb.subscribe();
+        let streams = Arc::new(ChatStreamManager::new());
+        let (stream_id, mut sse, _sink) = streams.create_stream("u:gui");
+        let cancel = CancellationToken::new();
+        spawn_event_bridge(eb, &bus, Some(streams.clone()), cancel.clone());
+
+        let preview = "Replace your saved note “Editor” with “Editor”?";
+        bus.publish(SystemEvent::ToolConfirmationRequested {
+            request_id: "req-9".into(),
+            agent_id: "orchestrator".into(),
+            tool_name: "memory_confirm".into(),
+            tool_arguments: serde_json::json!({}),
+            stream_id: Some(stream_id),
+            lane_key: Some("u:gui".into()),
+            task_id: None,
+            preview: Some(preview.into()),
+            per_call: true,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ToolConfirmationRequested {
+                preview: got,
+                per_call,
+                ..
+            } => {
+                assert_eq!(got.as_deref(), Some(preview));
+                assert!(per_call);
+            }
+            other => panic!("Expected ToolConfirmationRequested, got {other:?}"),
+        }
+        let frame = tokio::time::timeout(Duration::from_secs(2), sse.recv())
+            .await
+            .expect("timed out waiting for the SSE frame")
+            .expect("stream closed");
+        match frame {
+            openalpaca_core::chat::ChatStreamEvent::ConfirmationRequested {
+                preview: got,
+                per_call,
+                ..
+            } => {
+                assert_eq!(got.as_deref(), Some(preview));
+                assert!(per_call);
+            }
+            other => panic!("Expected ConfirmationRequested, got {other:?}"),
+        }
         cancel.cancel();
     }
 

@@ -73,8 +73,10 @@ use crate::models::ArtifactKind;
 const RUN_DIR_TITLE_SLUG_BYTES: usize = 48;
 
 /// `slug(name, 60)` — leaves room for `NN-` (3 bytes) + `.` + `ext` (≤ 9 bytes)
-/// so `file` never exceeds 72 bytes for a two-digit sequence number.
-const FILE_NAME_SLUG_BYTES: usize = 60;
+/// so `file` never exceeds 72 bytes for a two-digit sequence number. Public so
+/// a caller that appends to a slug of its own (`file_write`'s path hash, G2)
+/// can keep its suffix inside the budget.
+pub const FILE_NAME_SLUG_BYTES: usize = 60;
 
 /// `taskid[0..8]` — task ids are UUIDv4 (`Uuid::new_v4().to_string()`), so the
 /// first 8 characters are the first hyphen-delimited group, e.g. `3f2a1b7c`.
@@ -429,6 +431,42 @@ fn kind_allowed_extensions(kind: ArtifactKind) -> &'static [&'static str] {
             "zip", "tar", "gz", "tgz", "7z", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
         ],
     }
+}
+
+/// The kind a file name's own extension maps to, read off
+/// [`kind_allowed_extensions`] — R21's per-kind sets, the one table that
+/// relates an extension to a kind — in the order the kinds are declared, so an
+/// extension two kinds share goes to the first: `txt` and `pdf` to `Markdown`,
+/// `json` to `Code`. The kind returned therefore always keeps the name's
+/// extension through [`artifact_extension`].
+///
+/// `None` for a name with no extension, or one no kind admits (`sh`, `svg`,
+/// `exe` — R21's active content); the caller picks the fallback. `file_write`
+/// saving an artifact is the caller (G2).
+pub fn kind_for_file_name(name: &str) -> Option<ArtifactKind> {
+    let raw = Path::new(name).extension()?.to_str()?;
+    let ext = normalize_ext(raw)?;
+    [
+        ArtifactKind::Markdown,
+        ArtifactKind::Code,
+        ArtifactKind::Terminal,
+        ArtifactKind::Table,
+        ArtifactKind::Plan,
+        ArtifactKind::Image,
+        ArtifactKind::Html,
+        ArtifactKind::Binary,
+    ]
+    .into_iter()
+    .find(|kind| kind_allowed_extensions(*kind).contains(&ext.as_str()))
+}
+
+/// ST-18: whether Open hands a file named `name` to the system's default app —
+/// only when a kind keeps its extension (R21's sets, [`kind_for_file_name`]).
+/// `false` for `.sh`, `.command`, `.svg`, `.exe` and every name with no
+/// extension (`Makefile`, `Dockerfile`, a dotfile such as `.env`): those get
+/// Reveal only, since a default app could run them.
+pub fn opens_in_default_app(name: &str) -> bool {
+    kind_for_file_name(name).is_some()
 }
 
 fn mime_extension(mime: &str) -> Option<String> {

@@ -169,7 +169,11 @@ fn system_persona_block_full(persona: &SystemPersona) -> SystemBlock {
     }
 }
 
-fn user_document_block(doc: &UserDocument, budget: Option<usize>) -> Option<SystemBlock> {
+/// The one profile injection (design §5): rendered here for Layer 1's
+/// `Default` mode, and for the lead agent, whose persona mode is `Skip`
+/// and which carries this block among its raw blocks
+/// (`runner/lead_agent/prompt.rs`) — one renderer, one budget.
+pub(crate) fn user_document_block(doc: &UserDocument, budget: Option<usize>) -> Option<SystemBlock> {
     let rendered = crate::middleware::user::user_to_prompt_block(doc, budget);
     if rendered.is_empty() {
         None

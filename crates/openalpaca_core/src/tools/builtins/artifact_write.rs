@@ -1,23 +1,32 @@
-//! `artifact_write` — the producer of durable agent deliverables (plan §4.6).
+//! `artifact_write` — the producer of by-products (plan §4.6; storage design
+//! ST-11): drafts, pictures and hand-offs, never a project's result files.
 //!
-//! The first **per-request** file writer in the codebase. `file_write` writes
-//! under a `workspace_root` captured once at daemon startup
-//! (`services/tools.rs` → `builtins::builtin_tools`); `artifact_write` resolves
-//! its store from [`ToolContext::request_workspace_root`] on every call, so an
-//! artifact produced for a request that arrived with a workspace lands in
-//! *that* project's store, and one produced for a turn that carried no
-//! workspace — every connector lane, every scheduled skill — lands in the home
-//! store, never in the daemon's current directory (ruling R22).
+//! The first **per-request** file writer in the codebase: `artifact_write`
+//! resolves its store from [`ToolContext::request_workspace_root`] on every
+//! call, so an artifact produced for a request that arrived with a project
+//! lands in *that* project's folder under the home store's `projects/`, and
+//! one produced for a turn that carried none — every connector lane, every
+//! scheduled skill — lands in the home store, never in the daemon's current
+//! directory (ruling R22).
+//!
+//! `file_write` takes this file's store path, [`put_tool_artifact`], when the
+//! turn has no project (a by-product, ST-10); in a project it writes the real
+//! file and records its pointer row through [`record_tool_project_file`]
+//! (ST-12, R35).
+//!
+//! `artifact_read` reads a by-product back by the id this tool returns (R41).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::ToolDefinition;
-use openalpaca_storage::store::StoreScope;
-use openalpaca_storage::{ArtifactKind, ArtifactStore, Database, NewArtifact};
+use openalpaca_storage::store::{StoreScope, projects};
+use openalpaca_storage::{
+    ArtifactKind, ArtifactRecord, ArtifactStore, Database, NewArtifact, NewProjectFile,
+};
 
 use super::annotations_for_builtin;
 use crate::daemon_config::{ArtifactsConfig, DaemonConfig};
@@ -40,16 +49,16 @@ const KINDS: &[&str] = &[
 /// The **only** input is [`ToolContext::request_workspace_root`]: the project
 /// root a client actually sent with the turn (`x-workspace-path` on
 /// `/v1/chat`, `workspace_path` on `/v1/command`), already resolved to its
-/// root. `ToolContext::workspace_id` is deliberately not read — it falls back
-/// to the daemon's current directory for memory scoping, and placing files by
-/// it would drop a Telegram lane's deliverables into whatever repository the
-/// daemon was started in.
+/// root. `ToolContext::workspace_id` is deliberately not read — it is memory
+/// scoping's field, and until the lead's R-S13 it fell back to the daemon's
+/// current directory: placing files by it would drop a Telegram lane's
+/// deliverables into whatever repository the daemon was started in.
 ///
 /// Absent — a connector turn, a scheduled skill, a detached loop — the
 /// artifact belongs to the home store. A non-absolute value is not a project
 /// root: `store_root` would reject it, so it degrades to the home store with a
 /// warning rather than failing a write.
-fn scope_from_context(ctx: &ToolContext) -> StoreScope {
+pub(super) fn scope_from_context(ctx: &ToolContext) -> StoreScope {
     match ctx.request_workspace_root.as_deref() {
         Some(root) if !root.trim().is_empty() => {
             let root = PathBuf::from(root);
@@ -58,7 +67,7 @@ fn scope_from_context(ctx: &ToolContext) -> StoreScope {
             } else {
                 tracing::warn!(
                     request_workspace_root = %root.display(),
-                    "artifact_write: the request workspace root is not an absolute path — using the home store"
+                    "the request workspace root is not an absolute path — saving the artifact in the home store"
                 );
                 StoreScope::Home
             }
@@ -79,7 +88,7 @@ fn scope_from_context(ctx: &ToolContext) -> StoreScope {
 /// A context with no bus is the ordinary case in unit tests and on any path
 /// that never threaded one: log at `debug` and carry on. Announcing is not
 /// part of writing, and must never fail a write.
-fn announce_artifact_written(ctx: &ToolContext, record: &openalpaca_storage::ArtifactRecord) {
+fn announce_artifact_written(ctx: &ToolContext, record: &ArtifactRecord) {
     let Some(bus) = ctx.event_bus.as_ref() else {
         tracing::debug!(
             artifact_id = %record.id,
@@ -99,6 +108,8 @@ fn announce_artifact_written(ctx: &ToolContext, record: &openalpaca_storage::Art
             .to_string(),
         version: record.version,
         path: record.storage_path.clone(),
+        in_project: record.in_project,
+        openable: record.openable(),
         timestamp: Utc::now(),
     });
 }
@@ -111,7 +122,7 @@ fn announce_artifact_written(ctx: &ToolContext, record: &openalpaca_storage::Art
 /// slugify the dot into a hyphen and produce `01-quarterly-report-md.md`.
 /// A trailing segment that is not extension-shaped (`ext := [a-z0-9]{1,8}`)
 /// is part of the title — `"v1.2 plan"` keeps its dot.
-fn split_name(name: &str) -> (&str, Option<&str>) {
+pub(super) fn split_name(name: &str) -> (&str, Option<&str>) {
     match name.rsplit_once('.') {
         Some((stem, ext))
             if !stem.is_empty()
@@ -144,15 +155,168 @@ fn metadata_json(value: Option<&serde_json::Value>) -> Result<Option<String>, St
     }
 }
 
+/// One tool call's artifact, as the two tools that save one hand it over:
+/// `artifact_write` with the model's own kind, note, summary and metadata, and
+/// `file_write` — when its file is not written into a project folder (G2) —
+/// with the path it was given and the kind that path's extension maps to.
+pub(super) struct ToolArtifact<'a> {
+    /// The calling tool's name, for the refusals this path words.
+    pub(super) tool: &'static str,
+    /// The title plus the extension hint, split by [`split_name`].
+    pub(super) name: &'a str,
+    pub(super) kind: ArtifactKind,
+    pub(super) content: &'a str,
+    pub(super) note: Option<&'a str>,
+    pub(super) summary: Option<&'a str>,
+    /// The raw `metadata` argument; [`metadata_json`] reads it.
+    pub(super) metadata: Option<&'a serde_json::Value>,
+}
+
+/// The store path a tool's artifact takes — `artifact_write`'s, and since G2
+/// `file_write`'s whenever its file is not written into a project folder: the
+/// size cap, the attribution (the task row, the owner), the placement in
+/// `scope`, [`ArtifactStore::put`] and the announcement. One function both
+/// tools call, so neither can drift from the other.
+///
+/// `scope` is the caller's: `artifact_write`'s [`scope_from_context`], and
+/// `file_write`'s home store — it saves a by-product only with no project.
+pub(super) fn put_tool_artifact(
+    db: &Database,
+    ctx: &ToolContext,
+    scope: &StoreScope,
+    daemon_config: Option<&Arc<ArcSwap<DaemonConfig>>>,
+    artifact: ToolArtifact<'_>,
+) -> Result<ArtifactRecord, String> {
+    let ToolArtifact {
+        tool,
+        name,
+        kind,
+        content,
+        note,
+        summary,
+        metadata,
+    } = artifact;
+
+    let caps = artifact_caps(daemon_config);
+    if content.len() as u64 > caps.max_artifact_bytes {
+        return Err(format!(
+            "Artifact '{name}' is {} bytes, exceeding the {} byte limit. \
+             Write a shorter artifact, or split it into parts.",
+            content.len(),
+            caps.max_artifact_bytes
+        ));
+    }
+    let metadata = metadata_json(metadata)?;
+
+    // Attribution. The task row also carries the title `run_dir` is named
+    // for, and the owner when the context did not thread one.
+    let task = match ctx.task_id.as_deref() {
+        Some(task_id) => openalpaca_storage::repository::TaskRepository::new(db)
+            .get(task_id)
+            .map_err(|e| format!("Failed to load task: {e}"))?,
+        None => None,
+    };
+    let owner_id = ctx
+        .owner_id
+        .as_deref()
+        .or(task.as_ref().map(|t| t.created_by.as_str()))
+        .ok_or_else(|| {
+            format!(
+                "{tool} cannot save an artifact on this turn: it has no owner context (it was \
+                 not sent on a person's behalf), and every artifact belongs to an owner."
+            )
+        })?;
+
+    let (title, name_hint) = split_name(name);
+
+    let mut new = NewArtifact::new(owner_id, scope, kind, title, content.as_bytes());
+    new.name_hint = name_hint;
+    new.note = note;
+    new.summary = summary;
+    new.metadata_json = metadata.as_deref();
+    new.task_id = ctx.task_id.as_deref();
+    new.task_title = task.as_ref().map(|t| t.title.as_str());
+    new.agent_id = ctx.agent_id.as_deref();
+    new.created = Utc::now();
+    new.max_versions = Some(caps.max_versions_per_artifact);
+
+    // `created` is deliberately unread: a supersede is a write too, and the
+    // Library wants to hear about the new version.
+    let (record, _created) = ArtifactStore::new(db)
+        .put(new)
+        .map_err(|e| format!("Failed to write artifact '{name}': {e}"))?;
+    announce_artifact_written(ctx, &record);
+    Ok(record)
+}
+
+/// R35 for a tool: a result file the tool just wrote into its project gets
+/// its pointer row — the owner (`ctx.owner_id`, else the run's `created_by`),
+/// [`ArtifactStore::record_project_file`], then the announcement, which is the
+/// caller's because storage has no bus (interfaces §10 C5). `project_root` is
+/// the turn's `WorkingFolder::Project` root (canonical) and `resolved` the
+/// path the write resolver returned under it, so a write through a link
+/// inside the root records where it landed. A root `projects/` no longer
+/// records, or whose folder is missing, gets no row (R-T30). `Err` is the
+/// sentence R36's result quotes: the file is written either way.
+pub(super) fn record_tool_project_file(
+    db: &Database,
+    ctx: &ToolContext,
+    project_root: &Path,
+    resolved: &Path,
+    content: &str,
+) -> Result<ArtifactRecord, String> {
+    let task = match ctx.task_id.as_deref() {
+        Some(task_id) => openalpaca_storage::repository::TaskRepository::new(db)
+            .get(task_id)
+            .map_err(|e| format!("the run could not be read: {e}"))?,
+        None => None,
+    };
+    let owner_id = ctx
+        .owner_id
+        .as_deref()
+        .or(task.as_ref().map(|t| t.created_by.as_str()))
+        .ok_or_else(|| {
+            "this turn has no owner context, and every listed file belongs to an owner".to_string()
+        })?;
+    let rel_path = openalpaca_storage::store::relative_to(project_root, resolved)
+        .map_err(|e| format!("{e:#}"))?;
+    // R-T30 (d5-results-2): asked again just before the row, since the
+    // write's plan read it — a project deleted, re-pointed or moved away
+    // meanwhile gets no row naming a root that no Delete data reaches.
+    match projects::lookup(project_root) {
+        Ok(Some(project)) if !project.missing => {}
+        Ok(Some(_)) => {
+            return Err(format!(
+                "the project folder {} is gone or has moved",
+                project_root.display()
+            ));
+        }
+        Ok(None) => {
+            return Err(projects::ProjectError::NotRegistered {
+                root: project_root.to_string_lossy().into_owned(),
+            }
+            .to_string());
+        }
+        Err(e) => return Err(format!("the project could not be read: {e:#}")),
+    }
+    let root = project_root.to_string_lossy();
+    let (record, _inserted) = ArtifactStore::new(db)
+        .record_project_file(NewProjectFile {
+            owner_id,
+            project_root: &root,
+            rel_path: &rel_path,
+            content: content.as_bytes(),
+            task_id: ctx.task_id.as_deref(),
+            agent_id: ctx.agent_id.as_deref(),
+        })
+        .map_err(|e| format!("{e:#}"))?;
+    announce_artifact_written(ctx, &record);
+    Ok(record)
+}
+
 struct ArtifactWriteTool {
     db: Option<Database>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
-}
-
-impl ArtifactWriteTool {
-    fn caps(&self) -> ArtifactsConfig {
-        artifact_caps(self.daemon_config.as_ref())
-    }
 }
 
 #[async_trait]
@@ -192,54 +356,21 @@ impl BuiltInTool for ArtifactWriteTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: content".to_string())?;
 
-        let caps = self.caps();
-        if content.len() as u64 > caps.max_artifact_bytes {
-            return Err(format!(
-                "Artifact '{name}' is {} bytes, exceeding the {} byte limit. \
-                 Write a shorter artifact, or split it into parts.",
-                content.len(),
-                caps.max_artifact_bytes
-            ));
-        }
-
-        let note = arguments.get("note").and_then(|v| v.as_str());
-        let summary = arguments.get("summary").and_then(|v| v.as_str());
-        let metadata = metadata_json(arguments.get("metadata"))?;
-
-        // Attribution. The task row also carries the title `run_dir` is named
-        // for, and the owner when the context did not thread one.
-        let task = match ctx.task_id.as_deref() {
-            Some(task_id) => openalpaca_storage::repository::TaskRepository::new(db)
-                .get(task_id)
-                .map_err(|e| format!("Failed to load task: {e}"))?,
-            None => None,
-        };
-        let owner_id = ctx
-            .owner_id
-            .as_deref()
-            .or(task.as_ref().map(|t| t.created_by.as_str()))
-            .ok_or_else(|| "artifact_write requires an owner context".to_string())?;
-
-        let scope = scope_from_context(ctx);
-        let (title, name_hint) = split_name(name);
-
-        let mut new = NewArtifact::new(owner_id, &scope, kind, title, content.as_bytes());
-        new.name_hint = name_hint;
-        new.note = note;
-        new.summary = summary;
-        new.metadata_json = metadata.as_deref();
-        new.task_id = ctx.task_id.as_deref();
-        new.task_title = task.as_ref().map(|t| t.title.as_str());
-        new.agent_id = ctx.agent_id.as_deref();
-        new.created = Utc::now();
-        new.max_versions = Some(caps.max_versions_per_artifact);
-
-        // `created` is deliberately unread: a supersede is a write too, and the
-        // Library wants to hear about the new version.
-        let (record, _created) = ArtifactStore::new(db)
-            .put(new)
-            .map_err(|e| format!("Failed to write artifact '{name}': {e}"))?;
-        announce_artifact_written(ctx, &record);
+        let record = put_tool_artifact(
+            db,
+            ctx,
+            &scope_from_context(ctx),
+            self.daemon_config.as_ref(),
+            ToolArtifact {
+                tool: "artifact_write",
+                name,
+                kind,
+                content,
+                note: arguments.get("note").and_then(|v| v.as_str()),
+                summary: arguments.get("summary").and_then(|v| v.as_str()),
+                metadata: arguments.get("metadata"),
+            },
+        )?;
 
         serde_json::to_string(&serde_json::json!({
             "artifact_id": record.id,
@@ -332,15 +463,19 @@ pub(super) fn spill_workspace_entry(
 pub(super) fn artifact_write_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "artifact_write".to_string(),
-        description: "Save a deliverable — a document, plan, table, snippet or report — \
-            to the artifact store, where it is versioned, listed in the Library and \
-            attached to the task that produced it. Prefer this over file_write for \
-            anything the user is meant to keep or receive: file_write drops bytes in \
-            the daemon's workspace, artifact_write records an owned, versioned \
-            artifact under the project's .openalpaca/artifacts directory. Writing the \
-            same name again supersedes the previous version instead of overwriting it \
-            (the old version stays retrievable). Content is limited to 10MB. Returns \
-            the artifact id, its path on disk, and the version number just written."
+        description: "Save a by-product — a draft, notes, a picture, or a hand-off another \
+            agent picks up — to OpenAlpaca's artifact store, where it is versioned, listed in \
+            the Library and attached to the task that produced it. In a project, the files \
+            the job is asked to produce are not saved here: they are written into the \
+            project with file_write or changed with file_edit — when you hold neither, by a \
+            subagent whose template grants file_write. With no project, what you \
+            save here is the saved file. The store is OpenAlpaca's own: the project's folder \
+            in OpenAlpaca's home store when the conversation has a project, the home store's \
+            artifacts/ when it has none — never inside the project's own folder. Writing the \
+            same name again supersedes the previous version instead of overwriting it (the \
+            old version stays retrievable). Saving never asks for approval. Content is \
+            limited to 10MB. Returns the artifact id — read it back with artifact_read — its \
+            path on disk, and the version number just written."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -436,6 +571,10 @@ mod tests {
             std::fs::create_dir(&home).unwrap();
             let env = HomeStoreGuard::set(&home.canonicalize().unwrap());
             let project = TempDir::new().unwrap();
+            // A project scope is a registered project's (design §3, R12) —
+            // registered under this fixture's home, never the developer's.
+            openalpaca_storage::store::projects::register(&project.path().canonicalize().unwrap())
+                .unwrap();
             let db_dir = TempDir::new().unwrap();
             let db = Database::open(&db_dir.path().join("test.db")).unwrap();
             Self {
@@ -515,8 +654,8 @@ mod tests {
     /// A turn that arrived with a workspace. Only `request_workspace_root` is
     /// set: it is the field that places content, and leaving `workspace_id`
     /// empty keeps every project-store assertion below a statement about the
-    /// *request*. The reverse shape — a CWD-derived `workspace_id` and no
-    /// request root — is the connector regression above.
+    /// *request*. The reverse shape — a `workspace_id` and no request root,
+    /// which no turn builds since R-S13 — is the connector regression above.
     fn ctx(request_workspace_root: Option<&str>, task_id: Option<&str>) -> ToolContext {
         ToolContext {
             agent_id: Some("writing_agent".to_string()),
@@ -584,7 +723,11 @@ mod tests {
         assert_eq!(v["version"], 1);
         assert!(!v["artifact_id"].as_str().unwrap().is_empty());
         assert!(
-            path.starts_with(root.join(".openalpaca").join("artifacts")),
+            path.starts_with(
+                openalpaca_storage::store::store_root(&StoreScope::Project(root.clone()))
+                    .unwrap()
+                    .join("artifacts")
+            ),
             "artifact must land in the project store, got {}",
             path.display()
         );
@@ -600,7 +743,7 @@ mod tests {
     }
 
     /// The whole point of the tool: the scope comes from the *request*, never
-    /// from the daemon's current directory or the startup `workspace_root`.
+    /// from the daemon's current directory.
     #[tokio::test]
     async fn never_writes_under_the_daemon_working_directory() {
         let fx = Fixture::new();
@@ -617,7 +760,9 @@ mod tests {
             .unwrap();
 
         let path = PathBuf::from(parse(&out)["path"].as_str().unwrap());
-        assert!(path.starts_with(&root));
+        assert!(path.starts_with(
+            openalpaca_storage::store::store_root(&StoreScope::Project(root.clone())).unwrap()
+        ));
         assert!(
             !path.starts_with(&cwd),
             "artifact escaped into the daemon CWD: {}",
@@ -626,29 +771,31 @@ mod tests {
     }
 
     /// R22, the regression this fix exists for. A Telegram/iMessage/Discord
-    /// turn and every scheduled skill pass `workspace_path: None`, and
-    /// `handlers.rs` then derives `workspace_id` by walking up from the
-    /// *daemon's* current directory — a plausible absolute project root. That
-    /// id scopes memory; it must never place an artifact, or a daemon started
-    /// from a checkout writes chat deliverables into the developer's working
-    /// tree (`artifacts/` is deliberately not in the store's `.gitignore`).
+    /// turn and every scheduled skill pass `workspace_path: None`; until R-S13
+    /// `handlers.rs` derived `workspace_id` from the *daemon's* current
+    /// directory. No turn builds that context now, but the field is still
+    /// there: it must never place an artifact, or a daemon started from a
+    /// checkout writes chat deliverables into the developer's working tree
+    /// (`artifacts/` is deliberately not in the store's `.gitignore`).
     #[tokio::test]
     async fn a_connector_turn_never_places_an_artifact_in_the_daemons_project() {
         let fx = Fixture::new();
 
-        // The daemon's CWD, inside a marker-bearing project — resolved exactly
-        // as `handlers.rs` resolves it.
+        // A project the daemon might have been started in, resolved the way a
+        // client's path is.
         let cwd_project = TempDir::new().unwrap();
         std::fs::create_dir(cwd_project.path().join(".git")).unwrap();
         let cwd_root = cwd_project.path().canonicalize().unwrap();
-        let cwd_workspace_id =
-            crate::memory::workspace::resolve_workspace_id(cwd_project.path()).unwrap();
+        let cwd_workspace_id = openalpaca_storage::store::projects::resolve(cwd_project.path())
+            .unwrap()
+            .expect("a directory holding .git is a project")
+            .root_string();
         assert_eq!(PathBuf::from(&cwd_workspace_id), cwd_root);
 
         let telegram_ctx = ToolContext {
             agent_id: Some("writing_agent".to_string()),
             owner_id: Some(OWNER.to_string()),
-            // Memory scoping keeps its CWD-derived id …
+            // A memory-scoping id naming that project …
             workspace_id: Some(cwd_workspace_id),
             // … and the request carried no workspace at all.
             request_workspace_root: None,
@@ -1141,9 +1288,7 @@ mod tests {
         let registry = ToolRegistry::default();
         for tool in super::super::builtin_tools(
             Some(fx.db.clone()),
-            None,
             Some(Arc::new(ArcSwap::from_pointee(DaemonConfig::default()))),
-            None,
             None,
         ) {
             registry.register(tool).unwrap();
@@ -1156,14 +1301,16 @@ mod tests {
             bus.clone(),
             &CircuitBreakerConfig::default(),
         );
-        let mut policy = SandboxPolicy::from_constraints(
+        // No `auto_approve`: `artifact_write` asks nobody since ST-15
+        // (`local_write_annotations`), so the call never reaches the
+        // confirmation branch.
+        let policy = SandboxPolicy::from_constraints(
             "writing_agent",
             &AgentConstraints {
                 allowed_capabilities: vec!["artifact_write".to_string()],
                 ..Default::default()
             },
         );
-        policy.auto_approve = true;
 
         // The runner's context: no bus on it at all.
         let call_ctx = ctx(Some(project.to_str().unwrap()), None);
@@ -1198,9 +1345,8 @@ mod tests {
     /// The Phase 2 verify item, as far as a test without a live model can take
     /// it: a subagent-shaped call — capability-resolved from a template,
     /// dispatched through the sandboxed execute path an agentic round uses —
-    /// lands its artifact under the *request's* project store, while the
-    /// registry's own `workspace_root` (what `file_write` writes under) points
-    /// somewhere else entirely.
+    /// lands its artifact under the *request's* project store, whatever
+    /// directory the daemon was started in.
     #[tokio::test]
     async fn a_sandboxed_agent_call_lands_in_the_requests_project_store() {
         use crate::agent::subagent::AgentConstraints;
@@ -1214,17 +1360,13 @@ mod tests {
         let fx = Fixture::new();
         fx.task("t-5555ffff-0000-0000-0000-000000000000", "Sandbox run");
         let project = fx.project_root();
-        let startup_root = TempDir::new().unwrap();
 
-        // The registry the daemon builds at boot: a startup workspace_root that
-        // is NOT this request's project.
+        // The registry the daemon builds at boot.
         let registry = ToolRegistry::default();
         for tool in super::super::builtin_tools(
             Some(fx.db.clone()),
-            None,
             Some(Arc::new(ArcSwap::from_pointee(DaemonConfig::default()))),
             None,
-            Some(startup_root.path().to_path_buf()),
         ) {
             registry.register(tool).unwrap();
         }
@@ -1245,7 +1387,7 @@ mod tests {
             allowed_capabilities: vec!["artifact_write".to_string()],
             ..Default::default()
         };
-        let mut policy = SandboxPolicy::from_constraints("writing_agent", &constraints);
+        let policy = SandboxPolicy::from_constraints("writing_agent", &constraints);
         let call = ToolCall {
             id: "call-1".to_string(),
             name: "artifact_write".to_string(),
@@ -1260,17 +1402,10 @@ mod tests {
             Some("t-5555ffff-0000-0000-0000-000000000000"),
         );
 
-        // artifact_write carries the same destructive annotation as its sibling
-        // writers, so an agent that declares no confirmation list gates it
-        // exactly like `file_write`/`workspace_write` — fail-closed with no
-        // broker wired. A real run has a broker (or the daemon's auto-approve).
-        let refusal = sandbox
-            .execute_tool(&call, &policy, &call_ctx)
-            .await
-            .unwrap_err();
-        assert!(refusal.contains("requires human confirmation"), "{refusal}");
-        policy.auto_approve = true;
-
+        // ST-15 (storage design §12): artifact_write writes only under
+        // ~/.openalpaca and never asks, so with no broker wired and no
+        // auto-approve the call runs; `file_write` here would be refused
+        // fail-closed.
         let out = sandbox
             .execute_tool(&call, &policy, &call_ctx)
             .await
@@ -1278,13 +1413,13 @@ mod tests {
 
         let path = PathBuf::from(parse(&out)["path"].as_str().unwrap());
         assert!(
-            path.starts_with(project.join(".openalpaca").join("artifacts")),
+            path.starts_with(
+                openalpaca_storage::store::store_root(&StoreScope::Project(project.clone()))
+                    .unwrap()
+                    .join("artifacts")
+            ),
             "expected the request's project store, got {}",
             path.display()
-        );
-        assert!(
-            !path.starts_with(startup_root.path()),
-            "the startup workspace_root must not attract artifacts"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Deliverable\n");
     }
@@ -1323,6 +1458,47 @@ mod tests {
         );
     }
 
+    /// Storage design ST-1: nothing is written inside a project's folder, so
+    /// the model is not told an artifact lands there — it lands in the
+    /// project's folder under the home store's `projects/`, or in the home
+    /// store's own `artifacts/` with no project.
+    #[test]
+    fn the_description_names_no_store_inside_the_project() {
+        let description = artifact_write_tool_definition().description;
+        assert!(!description.contains(".openalpaca"), "{description}");
+        assert!(
+            description.contains("never inside the project's own folder"),
+            "{description}"
+        );
+    }
+
+    /// ST-11 and §15: `artifact_write` is for by-products — drafts, pictures,
+    /// hand-offs. In a project the files a job is asked for are written into
+    /// the project with file_write or file_edit — by a subagent when the
+    /// reader holds neither, as the lead never does (R42; the lead's ruling
+    /// R-T22) — and with no project what is saved here is the saved file. It
+    /// never asks (ST-15), and its id reads back with artifact_read (R41).
+    /// The old preference for it over file_write is gone.
+    #[test]
+    fn the_description_says_it_saves_by_products_and_where_result_files_go() {
+        let description = artifact_write_tool_definition().description;
+        for clause in [
+            "Save a by-product",
+            "written into the project with file_write or changed with file_edit — when you \
+             hold neither, by a subagent whose template grants file_write.",
+            "With no project, what you save here is the saved file",
+            "Saving never asks for approval",
+            "read it back with artifact_read",
+            "never inside the project's own folder",
+        ] {
+            assert!(description.contains(clause), "{clause:?}:\n{description}");
+        }
+        assert!(
+            !description.contains("Prefer this over file_write"),
+            "{description}"
+        );
+    }
+
     #[test]
     fn split_name_only_honours_extension_shaped_suffixes() {
         assert_eq!(split_name("report.md"), ("report", Some("report.md")));
@@ -1334,5 +1510,135 @@ mod tests {
         );
         assert_eq!(split_name("notes"), ("notes", Some("notes")));
         assert_eq!(split_name(".hidden"), (".hidden", Some(".hidden")));
+    }
+
+    // ── R35 for a tool: record_tool_project_file ─────────────────────────
+
+    /// The row, then the announcement — `in_project` and `openable` from the
+    /// record — and the same path again is the same row.
+    #[test]
+    fn a_tool_written_result_file_is_recorded_and_announced() {
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = TempDir::new().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let bus = crate::bus::EventBus::new(8);
+        let mut rx = bus.subscribe();
+        let ctx = ToolContext {
+            agent_id: Some("code_agent".to_string()),
+            event_bus: Some(bus.clone()),
+            ..gp.ctx()
+        };
+        let file = gp.root.join("scripts").join("build.sh");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "echo hi\n").unwrap();
+
+        let first = record_tool_project_file(&db, &ctx, &gp.root, &file, "echo hi\n").unwrap();
+        let again = record_tool_project_file(&db, &ctx, &gp.root, &file, "echo hi\n").unwrap();
+
+        assert_eq!(again.id, first.id, "the same path is the same row");
+        assert!(first.in_project);
+        assert_eq!(first.owner_id, "owner-test");
+        assert_eq!(first.rel_path.as_deref(), Some("scripts/build.sh"));
+        assert_eq!(first.agent_id.as_deref(), Some("code_agent"));
+        match next_artifact_written(&mut rx) {
+            crate::events::SystemEvent::ArtifactWritten {
+                artifact_id,
+                in_project,
+                openable,
+                name,
+                kind,
+                ..
+            } => {
+                assert_eq!(artifact_id, first.id);
+                assert!(in_project);
+                assert!(!openable, "a shell script is Reveal only (ST-18)");
+                assert_eq!(name, "scripts/build.sh");
+                assert_eq!(kind, "code");
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+    }
+
+    /// With no owner the row cannot be written, and the sentence says why —
+    /// R36 quotes it in `file_write`'s result.
+    #[test]
+    fn a_tool_written_result_file_with_no_owner_is_not_listed() {
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = TempDir::new().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let ctx = ToolContext {
+            owner_id: None,
+            ..gp.ctx()
+        };
+        let file = gp.root.join("notes.md");
+        std::fs::write(&file, "n\n").unwrap();
+
+        assert_eq!(
+            record_tool_project_file(&db, &ctx, &gp.root, &file, "n\n").unwrap_err(),
+            "this turn has no owner context, and every listed file belongs to an owner"
+        );
+        assert!(
+            ArtifactStore::new(&db)
+                .list(&openalpaca_storage::ArtifactQuery::new("owner-test"))
+                .unwrap()
+                .0
+                .is_empty()
+        );
+    }
+
+    /// The owner's rows, pointer rows and by-products alike.
+    fn owner_rows(db: &Database) -> Vec<ArtifactRecord> {
+        ArtifactStore::new(db)
+            .list(&openalpaca_storage::ArtifactQuery::new("owner-test"))
+            .unwrap()
+            .0
+    }
+
+    /// R-T30 (d5-results-2): a project whose data was deleted while a write
+    /// was in flight (its folder under `projects/` removed, as Delete data
+    /// does) gets no row for the file: `Err`, the sentence R36's result
+    /// quotes — no row names a root that no Delete data can reach.
+    #[test]
+    fn a_tool_written_result_file_of_a_deleted_project_is_not_listed() {
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = TempDir::new().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let file = gp.root.join("notes.md");
+        std::fs::write(&file, "n\n").unwrap();
+        let project = openalpaca_storage::store::projects::lookup(&gp.root)
+            .unwrap()
+            .expect("registered");
+        std::fs::remove_dir_all(&project.dir).unwrap();
+
+        assert_eq!(
+            record_tool_project_file(&db, &gp.ctx(), &gp.root, &file, "n\n").unwrap_err(),
+            format!(
+                "{} is not a project OpenAlpaca knows: no folder under projects/ records it",
+                gp.root.display()
+            )
+        );
+        assert!(owner_rows(&db).is_empty(), "no row was recorded");
+    }
+
+    /// The same for a project whose folder moved away since the write's
+    /// plan (ST-23's `missing`): it is not listed under its old root.
+    #[test]
+    fn a_tool_written_result_file_of_a_missing_project_is_not_listed() {
+        let gp = crate::test_util::GuardedProject::new();
+        let db_dir = TempDir::new().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        let file = gp.root.join("notes.md");
+        std::fs::write(&file, "n\n").unwrap();
+        let away = TempDir::new().unwrap();
+        std::fs::rename(&gp.root, away.path().join("app")).unwrap();
+
+        assert_eq!(
+            record_tool_project_file(&db, &gp.ctx(), &gp.root, &file, "n\n").unwrap_err(),
+            format!(
+                "the project folder {} is gone or has moved",
+                gp.root.display()
+            )
+        );
+        assert!(owner_rows(&db).is_empty(), "no row was recorded");
     }
 }

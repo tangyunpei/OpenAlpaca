@@ -8,14 +8,14 @@
  * daemon's UTC date rather than the browser's local one, so the runs filter
  * and the spend figure are the same day.
  *
- * Also real: **the project** (plan §4.7 item 2). The daemon reads
- * `x-workspace-path` on `POST /v1/chat`; until this field existed no client
- * sent it, so every GUI run was project-less. It lives here rather than in a
- * section of its own because the eight sections are the design's (§5.4) and a
- * single machine-local path is Connection's kind of fact — where this daemon
- * is pointed. There is no project *list* and no browse dialog: the daemon has
- * no project concept to enumerate (plan §10), so the honest control is the one
- * path the owner types.
+ * Also real: **the project** (plan §4.7 item 2; storage design §6, §9). The
+ * daemon reads `x-workspace-path` on `POST /v1/chat`; the Project card is
+ * where this window chooses the one it sends (`Use` → `POST /v1/workspaces`),
+ * and the Projects list under it (`ProjectsCard.tsx`) is every project the
+ * home store records (`GET /v1/workspaces`) with its life-cycle actions. Both
+ * live here rather than in a section of their own because the eight sections
+ * are the design's (§5.4) and where this daemon files its work is
+ * Connection's kind of fact.
  *
  * Also real since Phase 8: **uptime, `Schema vNN` and `Copy log path`** —
  * GAP-14, closed. `GET /v1/status` carries `started_at`/`uptime_secs`, the open
@@ -64,9 +64,13 @@ import {
 import { stopDaemon, stopToast } from "@/lib/daemon-control";
 import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
-import { useMovedProject, useRebaseWorkspace } from "@/hooks/useWorkspaces";
+import { useChooseProject } from "@/hooks/useWorkspaces";
 import { formatFileSize, type DaemonStatus } from "@/lib/api/types";
-import { isAbsolutePath, useProjectStore } from "@/stores/project";
+import {
+  isAbsolutePath,
+  RELATIVE_PATH_COPY,
+  useProjectStore,
+} from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import { relativeTime } from "@/views/library/format";
@@ -74,6 +78,7 @@ import { relativeTime } from "@/views/library/format";
 import { isEnabled as connectorIsOn } from "./ConnectorsSection";
 import { Card, GapNote, StatCard, StatusCard } from "./primitives";
 import { compactCount, formatUptime } from "./format";
+import { ProjectsCard } from "./ProjectsCard";
 
 export function ConnectionSection() {
   const connection = useConnectionStatus();
@@ -233,7 +238,14 @@ export function ConnectionSection() {
         )}
       </StatCard>
 
-      <ProjectCard homeRoot={status.data?.home_root ?? null} />
+      <ProjectCard
+        homeRoot={status.data?.home_root ?? null}
+        resolvedRoot={
+          status.data === undefined ? undefined : status.data.project_root
+        }
+      />
+
+      <ProjectsCard currentRoot={status.data?.project_root ?? null} />
     </div>
   );
 }
@@ -478,35 +490,89 @@ export function homeStoreLabel(homeRoot: string | null): string {
 }
 
 /**
- * The chosen project — one absolute path, kept on this machine.
- *
- * What it changes is concrete, so the copy says it: runs started from here
- * record that project and the files they produce land in
- * `<project>/.openalpaca/`. With no project chosen the GUI sends no header at
- * all and the daemon puts everything in the home store — stated plainly rather
- * than left for the owner to discover from a file that appeared in the wrong
- * place.
- *
- * The home store is named from `GET /v1/status`'s `home_root`, never from the
- * literal `~/.openalpaca` (G7): `OPENALPACA_HOME_STORE` moves the root, and a
- * path printed from this side would then be a confident lie about where the
- * owner's files went. A daemon that has not answered yet is "the home store".
+ * What the Project card names (storage design §9: the resolved root, not the
+ * typed text): the root `GET /v1/status` resolved the window's path to; the
+ * stored path while the daemon has not answered; and the stored path,
+ * flagged, when the daemon answered that it is in no project — a value an
+ * earlier build kept as typed, such as a folder an `.openalpaca` directory
+ * used to mark, or a root whose project was re-pointed from elsewhere and
+ * which the window could not follow (it held no id, or the project is not
+ * listed any more; `hooks/useProjectFollow`, R22).
  */
-function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
+export function projectCardRoot(
+  path: string | null,
+  resolved: string | null | undefined,
+): { text: string; unresolved: boolean } {
+  if (path === null) return { text: "none", unresolved: false };
+  if (typeof resolved === "string") {
+    return { text: resolved, unresolved: false };
+  }
+  return { text: path, unresolved: resolved === null };
+}
+
+/**
+ * The window's project (storage design §3, §9).
+ *
+ * `Use` asks the daemon what the typed folder is — `POST /v1/workspaces`:
+ * the git repository it is in, or, when there is none, the folder itself,
+ * which becomes a project (R10) — and keeps the root it answered, never the
+ * text typed. A refusal (`WORKSPACE_IS_HOME`, `WORKSPACE_NOT_A_DIRECTORY`,
+ * `INVALID_PATH`, `WORKSPACE_REGISTER_FAILED`) is the daemon's sentence,
+ * shown as written, and the project the window had stays.
+ *
+ * Where a run's files go is said plainly: with no project, the home store;
+ * with one, its folder under `projects/` in the home store — never the
+ * project folder itself (ST-1). The home store is named from
+ * `GET /v1/status`'s `home_root`, never from the literal `~/.openalpaca`
+ * (G7): `OPENALPACA_HOME_STORE` moves the root, and a path printed from this
+ * side would then be a confident lie. A daemon that has not answered yet is
+ * "the home store".
+ */
+function ProjectCard({
+  homeRoot,
+  resolvedRoot,
+}: {
+  homeRoot: string | null;
+  /** `GET /v1/status.project_root`; `undefined` until the daemon answered. */
+  resolvedRoot: string | null | undefined;
+}) {
   const path = useProjectStore((s) => s.path);
   const setPath = useProjectStore((s) => s.setPath);
   const showToast = useUiStore((s) => s.showToast);
+  const choose = useChooseProject();
   const [draft, setDraft] = useState(path ?? "");
+  const [refusal, setRefusal] = useState<string | null>(null);
+
+  // The field follows the window's project when something else moves it — a
+  // re-point or a delete from the Projects list below. Left on the old root,
+  // `Use` would post it again, and after a delete that registers the deleted
+  // project again, empty. Adjusted during render when the stored path changes
+  // rather than remounted by `key`: a remount would drop the callbacks of a
+  // `Use` still in flight.
+  const [seenPath, setSeenPath] = useState(path);
+  if (path !== seenPath) {
+    setSeenPath(path);
+    setDraft(path ?? "");
+    setRefusal(null);
+  }
 
   const trimmed = draft.trim();
   // Only a genuine typo is an error: an empty box is "no project", not a
   // mistake, and Use is simply inert there.
   const invalid = trimmed !== "" && !isAbsolutePath(trimmed);
+  const shown = projectCardRoot(path, resolvedRoot);
 
   function applyPath() {
-    if (trimmed === "" || invalid) return;
-    setPath(trimmed);
-    showToast("Project set — new runs will use it");
+    if (trimmed === "" || invalid || choose.isPending) return;
+    setRefusal(null);
+    choose.mutate(trimmed, {
+      onSuccess: (project) => {
+        setPath(project.root, project.id);
+        setDraft(project.root);
+        showToast(`Project set to ${project.root} — new runs will use it`);
+      },
+      onError: (error) => setRefusal(error.message),
+    });
   }
 
   return (
@@ -514,7 +580,7 @@ function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
       <div className="flex items-center gap-[10px]">
         <span className="text-md-plus font-semibold text-ink">Project</span>
         <span className="ml-auto font-mono text-xs-plus text-muted-fg">
-          {path ?? "none"}
+          {shown.text}
         </span>
       </div>
 
@@ -527,7 +593,10 @@ function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
             aria-label="Project path"
             placeholder="/Users/you/code/your-project"
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              setRefusal(null);
+            }}
             onKeyDown={(event) => {
               if (event.key === "Enter") applyPath();
             }}
@@ -535,16 +604,17 @@ function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
           />
           <Button
             variant="primarySm"
-            disabled={trimmed === "" || invalid}
+            disabled={trimmed === "" || invalid || choose.isPending}
             onClick={applyPath}
           >
-            Use
+            {choose.isPending ? "Using…" : "Use"}
           </Button>
           <Button
             variant="ghostSm"
             disabled={path === null && trimmed === ""}
             onClick={() => {
               setDraft("");
+              setRefusal(null);
               setPath(null);
               showToast("Project cleared");
             }}
@@ -554,150 +624,25 @@ function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
         </div>
       </div>
 
-      <MovedProjectOffer path={path} />
+      {refusal !== null && (
+        <p className="mt-[6px] mb-0 text-base leading-[1.6] text-red-ink">
+          {refusal}
+        </p>
+      )}
+
+      {shown.unresolved && (
+        <GapNote>
+          {`${path} is in no project: no git repository holds it and it was not chosen with Use. Its folder may have moved: Use its new folder, or Re-point… its project in the list below. If the folder is still there, press Use to make it one.`}
+        </GapNote>
+      )}
 
       <GapNote>
         {invalid
-          ? "An absolute path, please — a relative one would be read against the daemon's own directory, not this one."
-          : path === null
+          ? RELATIVE_PATH_COPY
+          : path === null || shown.unresolved
             ? `No project: runs are recorded without one and their files go to ${homeStoreLabel(homeRoot)}.`
-            : "Runs started here record this project; files they produce land in <project>/.openalpaca/."}
+            : `Runs started here record this project. What they produce is kept under projects/ in ${homeStoreLabel(homeRoot)}; nothing is written into the project folder.`}
       </GapNote>
     </Card>
-  );
-}
-
-/**
- * The moved-project offer (plan §4.8, P-12).
- *
- * A project's path is its identity in four places — its artifacts, its
- * conversations, its runs and its workspace memories — so moving the directory
- * strands all four at once. The daemon can re-attach them in one transaction,
- * but it cannot know where the project went; the owner does, and has just said
- * so by choosing this path.
- *
- * So this offers, and never acts. The detection is exact (the store records the
- * root it was seeded at, and one standing at a path it does not name has
- * moved), the counts are the daemon's, and the re-base is one deliberate
- * confirmation away. Auto-re-basing on a path the owner merely typed would
- * re-address someone's whole history on a guess.
- *
- * Every state is stated rather than hidden: checking, a lookup that failed, a
- * project that has not moved (nothing at all), the offer, and a refusal with
- * the daemon's own reason — `WORKSPACE_BUSY` while a run is in flight,
- * `WORKSPACE_EXISTS` when the new root already has a history of its own,
- * `WORKSPACE_NOT_A_ROOT` when the path chosen here sits inside another
- * project's root (the daemon names that root, and this shows what it said),
- * `WORKSPACE_IS_HOME` when it resolves to the home store, and
- * `WORKSPACE_NOT_FOUND` when the rows there belong to another owner. The
- * daemon's sentence is rendered verbatim: it is the only thing that knows
- * which root it resolved.
- *
- * `WORKSPACE_BUSY` is the one refusal this card can see coming, because
- * `GET /v1/workspaces` already counts the runs in flight under the old root.
- * The copy used to say a re-base "waits until they finish"; it does not — the
- * daemon answers `409` and changes nothing — so the sentence says that, and
- * the button is disabled while the count is above zero rather than offering a
- * press that is already known to be refused.
- */
-function MovedProjectOffer({ path }: { path: string | null }) {
-  const { moved, pending, error } = useMovedProject(path);
-  const rebase = useRebaseWorkspace();
-  const showToast = useUiStore((s) => s.showToast);
-  const [confirming, setConfirming] = useState(false);
-
-  // A new project (or a completed re-base) puts the confirmation away: the
-  // question it was asking is no longer the one on screen.
-  const offerKey = moved === null ? null : `${moved.from}→${moved.to}`;
-  const [lastOffer, setLastOffer] = useState(offerKey);
-  if (lastOffer !== offerKey) {
-    setLastOffer(offerKey);
-    setConfirming(false);
-  }
-
-  if (path === null) return null;
-  if (pending) {
-    return <GapNote>Checking whether this project has moved…</GapNote>;
-  }
-  if (error !== null) {
-    return (
-      <GapNote>
-        Could not check whether this project has moved: {error.message}
-      </GapNote>
-    );
-  }
-  if (moved === null) return null;
-
-  const { artifacts, sessions, tasks, memories } = moved.rows;
-  const failure = rebase.error;
-  // The daemon refuses a re-base while anything under the old root is still
-  // running (`409 WORKSPACE_BUSY`), and this card already has the count.
-  const busy = moved.activeTasks > 0;
-
-  return (
-    <div className="mt-[12px] rounded-2xl border border-amber-line bg-amber-surface px-[13px] py-[11px]">
-      <p className="m-0 text-base leading-[1.6] text-ink">
-        This project&rsquo;s store records{" "}
-        <span className="font-mono text-2xs-plus">{moved.from}</span>. Its{" "}
-        {artifacts} artifacts, {sessions} conversations, {tasks} runs and{" "}
-        {memories} memories still point there.
-      </p>
-
-      {moved.activeTasks > 0 && (
-        <p className="mt-[6px] mb-0 text-base leading-[1.6] text-secondary">
-          {moved.activeTasks} run(s) there are still in flight — a re-base is
-          refused while a run is in flight; retry once it finishes.
-        </p>
-      )}
-
-      {failure !== null && (
-        <p className="mt-[6px] mb-0 text-base leading-[1.6] text-red-ink">
-          {failure.message}
-        </p>
-      )}
-
-      <div className="mt-[9px] flex flex-wrap items-center gap-[6px]">
-        {confirming ? (
-          <>
-            <span className="text-base text-secondary">
-              Re-base all four onto this path?
-            </span>
-            <Button
-              variant="primarySm"
-              disabled={rebase.isPending}
-              onClick={() => {
-                rebase.mutate(
-                  { from: moved.from, to: moved.to },
-                  {
-                    onSuccess: (result) => {
-                      setConfirming(false);
-                      showToast(
-                        `Re-based ${result.moved.artifacts} artifacts, ` +
-                          `${result.moved.sessions} conversations, ` +
-                          `${result.moved.tasks} runs and ` +
-                          `${result.moved.memories} memories`,
-                      );
-                    },
-                  },
-                );
-              }}
-            >
-              {rebase.isPending ? "Re-basing…" : "Re-base"}
-            </Button>
-            <Button variant="ghostSm" onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
-          </>
-        ) : (
-          <Button
-            variant="outlineRaised"
-            disabled={busy}
-            onClick={() => setConfirming(true)}
-          >
-            Re-base to this path
-          </Button>
-        )}
-      </div>
-    </div>
   );
 }

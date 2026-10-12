@@ -531,6 +531,8 @@ fn test_confirmation_intercept_broker_roundtrip() {
         lane_key: Some("global1:imessage".to_string()),
         task_id: None,
         agent_instance_id: None,
+        preview: None,
+        per_call: false,
         timestamp: chrono::Utc::now(),
     });
 

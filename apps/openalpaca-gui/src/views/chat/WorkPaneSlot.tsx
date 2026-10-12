@@ -28,6 +28,11 @@ export interface WorkPaneSlotProps {
    * instead of staying on `RUNNING` behind a red dot (G1).
    */
   blockedOn: string | null;
+  /**
+   * The hidden characters that request holds — its card's count — so a card
+   * that shows only the tool's name can say how many (`hiddenOnCard`).
+   */
+  blockedHidden: number;
   /** `Full view` — switches to the Work view. */
   onFullView: () => void;
   /** `›` — collapses the aside entirely. */

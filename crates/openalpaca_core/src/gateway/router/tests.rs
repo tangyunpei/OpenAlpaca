@@ -610,14 +610,17 @@ async fn test_handle_event_malformed_lane_override_falls_back() {
 
 /// A handler that opens a **new** session on the lane while the turn is still
 /// running — what `POST /v1/sessions` (the GUI's "New chat") does to a lane
-/// whose agentic loop is mid-flight.
+/// whose agentic loop is mid-flight — and records the session the request
+/// carried to it.
 struct NewChatMidTurnHandler {
     db: openalpaca_storage::Database,
+    carried: std::sync::Mutex<Option<Option<String>>>,
 }
 
 #[async_trait]
 impl MessageHandler for NewChatMidTurnHandler {
     async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        *self.carried.lock().unwrap() = Some(request.session_id.clone());
         openalpaca_storage::ConversationRepository::new(&self.db)
             .create_session(&request.lane_key, "gui", None, Some("New chat"))
             .map_err(|e| e.to_string())?;
@@ -633,10 +636,14 @@ impl MessageHandler for NewChatMidTurnHandler {
 async fn test_a_new_chat_mid_turn_keeps_the_turn_in_one_session() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let handler = Arc::new(NewChatMidTurnHandler {
+        db: db.clone(),
+        carried: std::sync::Mutex::new(None),
+    });
     let gw = Gateway::new(
         Arc::new(SharedContext::new()),
         Arc::new(LaneManager::new()),
-        Arc::new(NewChatMidTurnHandler { db: db.clone() }),
+        handler.clone(),
         EventBus::default(),
         Some(db.clone()),
     );
@@ -670,6 +677,14 @@ async fn test_a_new_chat_mid_turn_keeps_the_turn_in_one_session() {
         Some(asked_in.as_str()),
         "the answer must land in the session the question was asked in"
     );
+    // R-T27's gateway half (residual X11): the handler is told that same
+    // session, so the turn's tools act in its conversation and not in the
+    // one the "New chat" made active.
+    assert_eq!(
+        handler.carried.lock().unwrap().clone(),
+        Some(Some(asked_in.clone())),
+        "the request carries the session the turn was persisted in"
+    );
 
     // And that session is the one the turn started in — the "New chat" the
     // handler opened archived it, and the turn stayed behind with it.
@@ -692,6 +707,102 @@ fn project_path(dir: &tempfile::TempDir) -> String {
     dir.path().to_string_lossy().to_string()
 }
 
+/// A temp home store for a test whose turns name a project: the gateway
+/// records every turn's project under `projects/` (storage design §3), and
+/// recording outside a test's own home store panics in a test build.
+fn guarded_home() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    crate::test_util::HomeStoreGuard,
+) {
+    let home = tempfile::tempdir().unwrap();
+    let home_store = home.path().canonicalize().unwrap().join(".openalpaca");
+    std::fs::create_dir_all(&home_store).unwrap();
+    let guard = crate::test_util::HomeStoreGuard::set(&home_store);
+    (home, home_store, guard)
+}
+
+/// Counts the turns that reached the handler.
+#[derive(Default)]
+struct CountingHandler {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl MessageHandler for CountingHandler {
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(HandleResult::text(format!("Echo: {}", request.content)))
+    }
+}
+
+/// Storage design §3: a chat turn accepts work for its root, so the gateway
+/// records the root under `projects/` before anything of the turn is written.
+#[tokio::test]
+async fn a_turn_records_its_project() {
+    let (_home, _home_store, _env) = guarded_home();
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(StubHandler),
+        EventBus::default(),
+        Some(db),
+    );
+    let project = project_dir();
+
+    let resp = gw
+        .handle_event(learning_turn("in a project", Some(project_path(&project))))
+        .await;
+    assert!(!resp.is_error, "{}", resp.content);
+    let root = project.path().canonicalize().unwrap();
+    let recorded = openalpaca_storage::store::projects::lookup(&root)
+        .unwrap()
+        .expect("the turn recorded its project");
+    assert_eq!(recorded.root, root);
+}
+
+/// A root that cannot be recorded ends the turn before anything of it is
+/// persisted or run: no row would ever name a project with no folder.
+#[tokio::test]
+async fn a_turn_whose_project_cannot_be_recorded_ends_before_anything_is_persisted() {
+    let (_home, home_store, _env) = guarded_home();
+    std::fs::write(home_store.join("projects"), "not a directory\n").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let handler = Arc::new(CountingHandler::default());
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        handler.clone(),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+    let project = project_dir();
+    let path = project_path(&project);
+
+    let resp = gw
+        .handle_event(learning_turn("in a project", Some(path.clone())))
+        .await;
+    assert!(resp.is_error);
+    assert!(
+        resp.content
+            .starts_with(&format!("Could not record the project for {path}: ")),
+        "{}",
+        resp.content
+    );
+    assert_eq!(
+        handler.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing ran"
+    );
+    let rows = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:gui", 50, 0)
+        .unwrap();
+    assert!(rows.is_empty(), "nothing was persisted");
+}
+
 /// §5.1: a session belongs to exactly one project, and changing project is a
 /// **new** session, never a re-pointed one. The repository half of that rule
 /// (never re-bind) was already there; this is the half that opens the new
@@ -699,6 +810,7 @@ fn project_path(dir: &tempfile::TempDir) -> String {
 /// about which project they belong to.
 #[tokio::test]
 async fn test_changing_project_opens_a_new_session() {
+    let (_home, _home_store, _env) = guarded_home();
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let bus = EventBus::default();
@@ -761,6 +873,18 @@ async fn test_changing_project_opens_a_new_session() {
     assert_eq!(second.workspace_id, root(&project_path(&two)));
     assert_eq!(second.status, "active");
 
+    // Both projects were recorded by their turns (storage design §3).
+    for project in [&one, &two] {
+        let root = project.path().canonicalize().unwrap();
+        assert!(
+            openalpaca_storage::store::projects::lookup(&root)
+                .unwrap()
+                .is_some(),
+            "{} was not recorded",
+            root.display()
+        );
+    }
+
     // The switch is announced, so a second window's sidebar does not keep
     // showing the conversation that is no longer the live one.
     let announced = std::iter::from_fn(|| rx.try_recv().ok())
@@ -772,6 +896,68 @@ async fn test_changing_project_opens_a_new_session() {
         })
         .collect::<Vec<_>>();
     assert_eq!(announced, vec![(second.id.clone(), "active".to_string())]);
+}
+
+/// Records the workspace each turn handed the handler.
+#[derive(Default)]
+struct WorkspaceRecordingHandler(std::sync::Mutex<Vec<Option<String>>>);
+
+#[async_trait]
+impl MessageHandler for WorkspaceRecordingHandler {
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        self.0.lock().unwrap().push(request.workspace_path.clone());
+        Ok(HandleResult::text("ok".to_string()))
+    }
+}
+
+/// R7 (the final fix wave): the gateway resolves and records the turn's
+/// project and binds the conversation row to it; the handler is handed that
+/// same root — not the raw path the client sent, which it would resolve a
+/// second time and might answer differently — so the turn's tools, recall
+/// and memory use the project the row was bound to. A path under no project
+/// hands the handler none.
+#[tokio::test]
+async fn the_handler_is_handed_the_root_the_gateway_recorded_not_the_raw_path() {
+    let (_home, _home_store, _env) = guarded_home();
+    let handler = Arc::new(WorkspaceRecordingHandler::default());
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        handler.clone(),
+        EventBus::default(),
+        None,
+    );
+    let project = project_dir();
+    let below = project.path().join("src").join("lib");
+    std::fs::create_dir_all(&below).unwrap();
+    let plain = tempfile::tempdir().unwrap();
+    let turn = |workspace_path: Option<String>| GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: "hello".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        attachments: Vec::new(),
+        workspace_path,
+        stream_id: None,
+        lane_override: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+    };
+
+    gw.handle_event(turn(Some(below.to_string_lossy().into_owned())))
+        .await;
+    gw.handle_event(turn(Some(plain.path().to_string_lossy().into_owned())))
+        .await;
+    gw.handle_event(turn(None)).await;
+
+    let root = project.path().canonicalize().unwrap();
+    assert_eq!(
+        *handler.0.lock().unwrap(),
+        vec![Some(root.to_string_lossy().into_owned()), None, None]
+    );
 }
 
 // ── Session event log (§5.5) ────────────────────────────────────────
@@ -1075,4 +1261,205 @@ async fn a_turn_that_says_nothing_is_attended() {
 
     let seen = seen.lock().unwrap();
     assert!(!seen[0].unattended);
+}
+
+// ── Learning v2: the turn's id, its root, and the queue's hook (design 09 §1.3, §1.5) ──
+
+fn learning_turn(content: &str, workspace_path: Option<String>) -> GatewayRequest {
+    GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: content.to_string(),
+        principal: Principal::User {
+            global_id: "user1".to_string(),
+        },
+        scope: Scope::Global,
+        attachments: Vec::new(),
+        workspace_path,
+        stream_id: None,
+        lane_override: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+    }
+}
+
+/// Migration 044: both halves of a turn carry the gateway's request id, and
+/// the user half carries the canonical root the turn named — NULL when it
+/// named none. A row a turn did not write (a completion report, a notice)
+/// is what keeps NULL, and learning reads that as "not a turn".
+#[tokio::test]
+async fn the_gateway_stamps_the_turn_id_on_both_halves_and_the_root_on_the_user_half() {
+    let (_home, _home_store, _env) = guarded_home();
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(StubHandler),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+    let project = project_dir();
+    gw.handle_event(learning_turn("in a project", Some(project_path(&project))))
+        .await;
+    gw.handle_event(learning_turn("no project named", None))
+        .await;
+
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let rows = repo.list_by_lane("user1:gui", 50, 0).unwrap();
+    assert_eq!(rows.len(), 4);
+    let root = crate::memory::scope_context::MemoryScopeContext::for_request(Some(&project_path(
+        &project,
+    )))
+    .request_workspace_root;
+    assert!(root.is_some());
+
+    let first_turn = rows[0]
+        .request_id
+        .clone()
+        .expect("the user half has the turn id");
+    assert_eq!(rows[1].request_id.as_deref(), Some(first_turn.as_str()));
+    assert_eq!(rows[0].workspace_root, root, "the user half names its root");
+    assert_eq!(
+        rows[1].workspace_root, None,
+        "an answer learns under its question's root"
+    );
+
+    let second_turn = rows[2].request_id.clone().expect("every turn has an id");
+    assert_ne!(second_turn, first_turn);
+    assert_eq!(rows[3].request_id.as_deref(), Some(second_turn.as_str()));
+    assert_eq!(
+        rows[2].workspace_root, None,
+        "a turn that named no project stores none"
+    );
+}
+
+/// A manual learning queue over `db`: nothing flushes on its own.
+fn manual_queue(db: &openalpaca_storage::Database) -> Arc<crate::memory::learning::LearningQueue> {
+    let service = crate::memory::service::MemoryService::new(
+        Some(db.clone()),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    );
+    crate::memory::learning::LearningQueue::new(
+        crate::memory::learning::LearningDeps {
+            db: db.clone(),
+            router: crate::test_util::router_recording(crate::test_util::RecordingProvider::new(
+                r#"{"items": []}"#,
+            )),
+            daemon_config: Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::daemon_config::DaemonConfig::default(),
+            )),
+            memory_service: Arc::new(service),
+        },
+        crate::memory::learning::QueueMode::Manual,
+    )
+}
+
+/// Reports what the learning queue says about the turn it is handling.
+struct InFlightProbe {
+    queue: Arc<crate::memory::learning::LearningQueue>,
+    seen: std::sync::Mutex<Vec<(bool, Option<String>)>>,
+}
+
+#[async_trait]
+impl MessageHandler for InFlightProbe {
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        self.seen.lock().unwrap().push((
+            self.queue.is_in_flight(request.request_id),
+            self.queue.in_flight_session(request.request_id),
+        ));
+        Ok(HandleResult::text("ok".to_string()))
+    }
+}
+
+/// Design §1.5: the turn is in the queue's in-flight set, attached to its
+/// session, for the whole time its handler runs; it leaves the set once the
+/// answer is written, and only a user-authored turn is counted — a `/slash`
+/// turn and the assistant's own follow-up text are not.
+#[tokio::test]
+async fn a_turn_is_in_flight_from_before_its_row_until_after_its_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let queue = manual_queue(&db);
+    let probe = Arc::new(InFlightProbe {
+        queue: queue.clone(),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        probe.clone(),
+        EventBus::default(),
+        Some(db.clone()),
+    )
+    .with_learning(queue.clone());
+
+    gw.handle_event(learning_turn("I prefer vim for editing.", None))
+        .await;
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .active_session_id("user1:gui")
+        .unwrap()
+        .expect("the turn opened a session");
+    assert_eq!(
+        probe.seen.lock().unwrap().clone(),
+        vec![(true, Some(session.clone()))],
+        "in flight, attached to its session, while the handler ran"
+    );
+    assert_eq!(
+        queue.in_flight_count(),
+        0,
+        "gone once the answer is written"
+    );
+    assert_eq!(queue.pending_turns(&session), 1);
+
+    gw.handle_event(learning_turn("/status", None)).await;
+    assert_eq!(
+        queue.pending_turns(&session),
+        1,
+        "a /slash turn is not counted"
+    );
+
+    let followup = GatewayRequest {
+        source: EventSource::Internal,
+        lane_override: Some("user1:gui".to_string()),
+        ..learning_turn("Next, set up the editor.", None)
+    };
+    gw.handle_event(followup).await;
+    assert_eq!(
+        queue.pending_turns(&session),
+        1,
+        "the assistant's own follow-up text is not a user turn"
+    );
+    assert_eq!(queue.in_flight_count(), 0);
+}
+
+/// A turn whose handler fails still leaves the in-flight set: the guard
+/// runs on every exit, not only after an answer.
+#[tokio::test]
+async fn a_failed_turn_leaves_the_in_flight_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let queue = manual_queue(&db);
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(FailHandler),
+        EventBus::default(),
+        Some(db.clone()),
+    )
+    .with_learning(queue.clone());
+    let resp = gw.handle_event(learning_turn("this one fails", None)).await;
+    assert!(resp.is_error);
+    assert_eq!(queue.in_flight_count(), 0);
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .active_session_id("user1:gui")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        queue.pending_turns(&session),
+        1,
+        "its question is still in the window"
+    );
 }

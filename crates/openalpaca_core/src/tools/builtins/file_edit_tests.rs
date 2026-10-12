@@ -1,0 +1,1080 @@
+//! `file_edit` (ST-22; storage design §13, R47–R49): the match, the body,
+//! the pre-edit copy and the pointer row. Every test that touches a file does
+//! it in a guarded temp project (`GuardedProject`, interfaces §1.7) — never in
+//! the repository, never in the process's current directory.
+
+use super::*;
+use crate::session_log::{RecordType, SNAPSHOTS_DIR, SessionLogLimits, SessionLogService};
+use crate::test_util::GuardedProject;
+use sha2::{Digest, Sha256};
+use std::fs;
+
+const SESSION: &str = "sess-edit";
+const OWNER: &str = "owner-test";
+
+// ── R47's match, pure ───────────────────────────────────────────────────
+
+#[test]
+fn one_occurrence_is_replaced_and_every_other_byte_kept() {
+    let text = "keep\tthis  \nold line\r\nlast line, no newline at the end";
+    let edited = apply_edit("a.txt", text, "old line", "new line", false).unwrap();
+    assert_eq!(
+        edited,
+        Edited {
+            text: "keep\tthis  \nnew line\r\nlast line, no newline at the end".to_string(),
+            replacements: 1,
+            first_line: 2,
+        }
+    );
+}
+
+#[test]
+fn two_occurrences_without_replace_all_are_refused_naming_the_count() {
+    let refused = apply_edit(
+        "src/a.rs",
+        "x = 1;\ny = 2;\nx = 1;\n",
+        "x = 1;",
+        "x = 3;",
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(
+        refused,
+        "old_string occurs 2 times in 'src/a.rs'. Give more of the surrounding text so it \
+         occurs once, or set replace_all to true to change every one."
+    );
+}
+
+#[test]
+fn replace_all_changes_every_occurrence_and_names_the_first_line() {
+    let edited = apply_edit("a.txt", "x\na\nb\na\n", "a", "c", true).unwrap();
+    assert_eq!(
+        edited,
+        Edited {
+            text: "x\nc\nb\nc\n".to_string(),
+            replacements: 2,
+            first_line: 2,
+        }
+    );
+}
+
+#[test]
+fn an_absent_old_string_is_refused_naming_file_read() {
+    let refused = apply_edit("a.txt", "alpha\n", "beta", "gamma", false).unwrap_err();
+    assert_eq!(
+        refused,
+        "old_string was not found in 'a.txt'. Read the file with file_read and copy the exact \
+         text, whitespace and line breaks included."
+    );
+}
+
+#[test]
+fn an_empty_old_string_is_refused_naming_file_write() {
+    let refused = apply_edit("a.txt", "alpha\n", "", "beta", false).unwrap_err();
+    assert_eq!(
+        refused,
+        "old_string is empty. Give the exact text to replace; to create a file, use file_write."
+    );
+}
+
+#[test]
+fn identical_strings_are_refused() {
+    let refused = apply_edit("a.txt", "alpha\n", "alpha", "alpha", false).unwrap_err();
+    assert_eq!(
+        refused,
+        "old_string and new_string are the same, so there is nothing to change."
+    );
+}
+
+/// R47: a model writes LF; a CRLF file keeps its endings.
+#[test]
+fn an_lf_old_string_matches_a_crlf_file_and_the_file_keeps_its_endings() {
+    let text = "fn a() {\r\n    1\r\n}\r\n";
+    let edited = apply_edit("a.rs", text, "    1\n}", "    2\n    // two\n}", false).unwrap();
+    assert_eq!(
+        edited,
+        Edited {
+            text: "fn a() {\r\n    2\r\n    // two\r\n}\r\n".to_string(),
+            replacements: 1,
+            first_line: 2,
+        }
+    );
+}
+
+/// The CRLF retry may make the two strings one: that is still nothing to do.
+#[test]
+fn a_crlf_retry_that_makes_the_strings_equal_is_refused_as_identical() {
+    let refused = apply_edit("a.txt", "a\r\nb\r\n", "a\nb", "a\r\nb", false).unwrap_err();
+    assert_eq!(
+        refused,
+        "old_string and new_string are the same, so there is nothing to change."
+    );
+}
+
+#[test]
+fn lf_to_crlf_leaves_an_existing_crlf_alone() {
+    assert_eq!(lf_to_crlf("a\nb\r\nc\n"), "a\r\nb\r\nc\r\n");
+    assert_eq!(lf_to_crlf("no break"), "no break");
+}
+
+/// The lead's ruling R-T11 (R47: "line endings included"): a file whose
+/// every line break is `\r\n` stays all-CRLF when a one-line `old_string` is
+/// replaced by a two-line `new_string`; a file that already mixes the two
+/// keeps what the model wrote.
+#[test]
+fn a_two_line_new_string_in_an_all_crlf_file_keeps_it_all_crlf() {
+    let text = "[a]\r\nkey = 1\r\n";
+    let edited = apply_edit("a.toml", text, "key = 1", "key = 2\nother = 3", false).unwrap();
+    assert_eq!(
+        edited,
+        Edited {
+            text: "[a]\r\nkey = 2\r\nother = 3\r\n".to_string(),
+            replacements: 1,
+            first_line: 2,
+        }
+    );
+
+    let mixed = "[a]\nkey = 1\r\n";
+    let edited = apply_edit("a.toml", mixed, "key = 1", "key = 2\nother = 3", false).unwrap();
+    assert_eq!(edited.text, "[a]\nkey = 2\nother = 3\r\n");
+}
+
+/// R-T11's edge: in an all-CRLF file an `old_string` that starts with a line
+/// break is found as given — its `\n` right after the file's `\r` — so a
+/// `new_string` written `\r\n` would leave `\r\r\n` behind. Both strings are
+/// written `\r\n` there, and the file stays all-CRLF.
+#[test]
+fn an_old_string_that_starts_with_a_line_break_keeps_an_all_crlf_file_all_crlf() {
+    let text = "[a]\r\nkey = 1\r\n";
+    let edited = apply_edit("a.toml", text, "\nkey = 1", "\nkey = 2", false).unwrap();
+    assert_eq!(
+        edited,
+        Edited {
+            text: "[a]\r\nkey = 2\r\n".to_string(),
+            replacements: 1,
+            first_line: 1,
+        }
+    );
+}
+
+/// The lead's ruling R-T21: in an all-CRLF file both strings' lone `\n` are
+/// written `\r\n`, so an `old_string` that mixes a `\r\n` with a lone `\n`
+/// still matches — every `\n` of such a file follows a `\r` — and the file
+/// stays all-CRLF.
+#[test]
+fn an_old_string_mixing_crlf_and_a_lone_lf_matches_an_all_crlf_file() {
+    let edited = apply_edit("a.txt", "a\r\nb\r\nc\r\n", "a\r\nb\nc", "x", false).unwrap();
+    assert_eq!(
+        edited,
+        Edited {
+            text: "x\r\n".to_string(),
+            replacements: 1,
+            first_line: 1,
+        }
+    );
+}
+
+// ── The tool, in a guarded project ──────────────────────────────────────
+
+/// A guarded project, this conversation's log and a database for its
+/// pointer rows. Declared so the log and the database drop before the
+/// project's guard and folders.
+struct Bench {
+    service: Arc<SessionLogService>,
+    db: Database,
+    _db_dir: tempfile::TempDir,
+    gp: GuardedProject,
+}
+
+impl Bench {
+    fn new() -> Self {
+        let gp = GuardedProject::new();
+        fs::create_dir_all(gp.home_root().join("sessions")).unwrap();
+        let service = SessionLogService::new(
+            gp.home_root().join("sessions"),
+            None,
+            SessionLogLimits::default(),
+            "test".to_string(),
+        )
+        .into_arc();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        Self {
+            service,
+            db,
+            _db_dir: db_dir,
+            gp,
+        }
+    }
+
+    /// The tool with a database; `cap` sets `snapshot_max_bytes`.
+    fn tool(&self, cap: Option<u64>) -> FileEditTool {
+        let daemon_config = cap.map(|bytes| {
+            let mut config = DaemonConfig::default();
+            config.orchestrator.sessions.snapshot_max_bytes = bytes;
+            Arc::new(ArcSwap::from_pointee(config))
+        });
+        FileEditTool {
+            db: Some(self.db.clone()),
+            daemon_config,
+        }
+    }
+
+    /// A project turn whose loop writes this conversation's log — what the
+    /// main loop and a subagent hand the tool.
+    fn ctx(&self) -> ToolContext {
+        ToolContext {
+            session_id: Some(SESSION.to_string()),
+            session_log: Some(self.service.handle_for(SESSION)),
+            ..self.gp.ctx()
+        }
+    }
+
+    fn put(&self, rel: &str, bytes: &[u8]) {
+        let file = self.gp.root.join(rel);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, bytes).unwrap();
+    }
+
+    fn bytes(&self, rel: &str) -> Vec<u8> {
+        fs::read(self.gp.root.join(rel)).unwrap()
+    }
+
+    /// Every copy this conversation kept, by name.
+    fn images(&self) -> Vec<std::path::PathBuf> {
+        let mut out: Vec<std::path::PathBuf> =
+            fs::read_dir(self.service.session_dir(SESSION).join(SNAPSHOTS_DIR))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file())
+                .collect();
+        out.sort();
+        out
+    }
+
+    /// The owner's pointer rows (interfaces §5.2).
+    fn rows(&self) -> Vec<openalpaca_storage::ArtifactRecord> {
+        let mut query = openalpaca_storage::ArtifactQuery::new(OWNER);
+        query.in_project = Some(true);
+        openalpaca_storage::ArtifactStore::new(&self.db)
+            .list(&query)
+            .unwrap()
+            .0
+    }
+}
+
+fn args(path: &str, old: &str, new: &str) -> serde_json::Value {
+    serde_json::json!({"path": path, "old_string": old, "new_string": new})
+}
+
+const LIB: &str = "pub fn retries() -> u32 {\n    3\n}\n";
+
+#[tokio::test]
+async fn an_edit_changes_the_file_in_the_project_and_says_where() {
+    let b = Bench::new();
+    b.put("src/lib.rs", LIB.as_bytes());
+
+    let out = b
+        .tool(None)
+        .execute_with_context(&args("src/lib.rs", "    3", "    5"), &b.ctx())
+        .await
+        .unwrap();
+
+    let after = "pub fn retries() -> u32 {\n    5\n}\n";
+    assert_eq!(b.bytes("src/lib.rs"), after.as_bytes());
+    assert_eq!(
+        out,
+        format!(
+            "Edited src/lib.rs in the project: 1 replacement, the first at line 2; {} bytes at {}. \
+             Its previous content is kept in this conversation's log.",
+            after.len(),
+            b.gp.root.join("src/lib.rs").display()
+        )
+    );
+}
+
+/// R47 (§13's first test): refused, and nothing is touched — no copy, no row.
+#[tokio::test]
+async fn old_string_found_twice_without_replace_all_is_refused_and_the_file_unchanged() {
+    let b = Bench::new();
+    let before = "x = 1;\ny = 2;\nx = 1;\n";
+    b.put("src/a.rs", before.as_bytes());
+    let ctx = b.ctx();
+
+    let refused = b
+        .tool(None)
+        .execute_with_context(&args("src/a.rs", "x = 1;", "x = 3;"), &ctx)
+        .await
+        .unwrap_err();
+
+    assert!(
+        refused.starts_with("old_string occurs 2 times in 'src/a.rs'."),
+        "{refused}"
+    );
+    assert_eq!(b.bytes("src/a.rs"), before.as_bytes());
+    assert!(ctx.session_log.as_ref().unwrap().flush().await);
+    assert!(b.images().is_empty(), "a refusal keeps no copy");
+    assert!(b.rows().is_empty(), "a refusal records no row");
+}
+
+/// R47 (§13's second test): a missing file's refusal names file_write, and
+/// nothing is created.
+#[tokio::test]
+async fn a_missing_file_is_refused_naming_file_write() {
+    let b = Bench::new();
+
+    let refused = b
+        .tool(None)
+        .execute_with_context(&args("docs/new.md", "a", "b"), &b.ctx())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        refused,
+        "'docs/new.md' does not exist in the project. file_edit changes an existing file; \
+         use file_write to create it."
+    );
+    assert!(!b.gp.root.join("docs").exists(), "nothing was created");
+}
+
+/// ST-17 (§13's third test): the bytes the edit destroys are in this
+/// conversation's `snapshots/`, committed by a `file_snapshot` record.
+#[tokio::test]
+async fn the_pre_edit_copy_is_kept_before_the_change() {
+    let b = Bench::new();
+    b.put("src/lib.rs", LIB.as_bytes());
+    let ctx = b.ctx();
+
+    b.tool(None)
+        .execute_with_context(&args("src/lib.rs", "    3", "    5"), &ctx)
+        .await
+        .unwrap();
+    assert!(ctx.session_log.as_ref().unwrap().flush().await);
+
+    let images = b.images();
+    assert_eq!(images.len(), 1, "{images:?}");
+    assert_eq!(
+        fs::read(&images[0]).unwrap(),
+        LIB.as_bytes(),
+        "the copy holds the old bytes"
+    );
+    let records = crate::session_log::read_records(&b.service.session_dir(SESSION)).unwrap();
+    let snapshot = records
+        .iter()
+        .find(|r| r.kind == RecordType::FileSnapshot.as_str())
+        .expect("the copy is committed by a record");
+    assert_eq!(snapshot.data["path"], "src/lib.rs");
+}
+
+/// ST-17's second refusal, and the proof of the order: a copy that cannot be
+/// taken stops the edit before the file is touched.
+#[tokio::test]
+async fn a_copy_that_fails_refuses_the_edit_and_leaves_the_file() {
+    let b = Bench::new();
+    b.put("src/lib.rs", LIB.as_bytes());
+    // `snapshots/` cannot be created: a file stands at its name.
+    fs::create_dir_all(b.service.session_dir(SESSION)).unwrap();
+    fs::write(
+        b.service.session_dir(SESSION).join(SNAPSHOTS_DIR),
+        "in the way",
+    )
+    .unwrap();
+
+    let refused = b
+        .tool(None)
+        .execute_with_context(&args("src/lib.rs", "    3", "    5"), &b.ctx())
+        .await
+        .unwrap_err();
+
+    assert!(
+        refused.starts_with(
+            "Refusing to edit 'src/lib.rs': its pre-edit snapshot could not be taken ("
+        ),
+        "{refused}"
+    );
+    assert!(refused.ends_with("). The file is unchanged."), "{refused}");
+    assert_eq!(b.bytes("src/lib.rs"), LIB.as_bytes());
+    assert!(b.rows().is_empty());
+}
+
+/// R35 (§13's fourth test): one row per project file, updated in place.
+#[tokio::test]
+async fn a_second_edit_updates_the_same_pointer_row() {
+    let b = Bench::new();
+    b.put("src/lib.rs", LIB.as_bytes());
+    let tool = b.tool(None);
+
+    tool.execute_with_context(&args("src/lib.rs", "    3", "    5"), &b.ctx())
+        .await
+        .unwrap();
+    let first = b.rows();
+    assert_eq!(first.len(), 1, "{first:?}");
+    tool.execute_with_context(&args("src/lib.rs", "    5", "    8"), &b.ctx())
+        .await
+        .unwrap();
+    let second = b.rows();
+
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert_eq!(second[0].id, first[0].id, "the same row");
+    let after = b.bytes("src/lib.rs");
+    assert_eq!(after, "pub fn retries() -> u32 {\n    8\n}\n".as_bytes());
+    assert!(second[0].in_project);
+    assert_eq!(second[0].rel_path.as_deref(), Some("src/lib.rs"));
+    assert_eq!(second[0].size_bytes, after.len() as i64);
+    assert_eq!(second[0].sha256, format!("{:x}", Sha256::digest(&after)));
+    assert_ne!(
+        second[0].sha256, first[0].sha256,
+        "the row follows the file"
+    );
+}
+
+/// R47 (§13's last test), through the tool.
+#[tokio::test]
+async fn a_crlf_file_keeps_its_line_endings() {
+    let b = Bench::new();
+    b.put("notes.txt", b"one\r\ntwo\r\nthree\r\n");
+
+    b.tool(None)
+        .execute_with_context(&args("notes.txt", "two\nthree", "2\n3"), &b.ctx())
+        .await
+        .unwrap();
+
+    assert_eq!(b.bytes("notes.txt"), b"one\r\n2\r\n3\r\n");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_edit_keeps_the_files_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let b = Bench::new();
+    b.put("run.sh", b"#!/bin/sh\necho 1\n");
+    fs::set_permissions(b.gp.root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    b.tool(None)
+        .execute_with_context(&args("run.sh", "echo 1", "echo 2"), &b.ctx())
+        .await
+        .unwrap();
+
+    let mode = fs::metadata(b.gp.root.join("run.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755);
+}
+
+/// R46: a loop with no session log keeps no copy, so an existing file —
+/// every file `file_edit` changes — is not changed.
+#[tokio::test]
+async fn without_a_session_log_an_existing_file_is_not_edited() {
+    let b = Bench::new();
+    b.put("notes.md", b"draft\n");
+
+    let refused = b
+        .tool(None)
+        .execute_with_context(&args("notes.md", "draft", "final"), &b.gp.ctx())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        refused,
+        "Refusing to edit 'notes.md': it already exists, and no copy of its current content can \
+         be kept here — a skill or a plugin agent keeps no conversation log. The file is \
+         unchanged. Write the result to a new file, or ask for the change in the conversation \
+         itself."
+    );
+    assert_eq!(b.bytes("notes.md"), b"draft\n");
+}
+
+/// ST-17's cap, asked before the file is read: the bytes above the cap are
+/// not UTF-8, so a plan that read the file first would answer the UTF-8
+/// refusal instead of the cap's (S4b's deferred minor).
+#[tokio::test]
+async fn a_file_above_the_snapshot_cap_is_refused() {
+    let b = Bench::new();
+    let bytes = [0xffu8; 25];
+    b.put("big.txt", &bytes);
+
+    let refused = b
+        .tool(Some(8))
+        .execute_with_context(&args("big.txt", "far", "near"), &b.ctx())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        refused,
+        "Refusing to edit 'big.txt': it is 25 bytes, above the 8 byte [orchestrator.sessions] \
+         snapshot_max_bytes limit, so no pre-edit snapshot can be kept for it. The file is \
+         unchanged. Raise snapshot_max_bytes, or copy the file aside yourself first."
+    );
+    assert_eq!(b.bytes("big.txt"), bytes);
+}
+
+/// R48: in a project only, and the refusal names file_write.
+#[tokio::test]
+async fn with_no_project_file_edit_is_refused_naming_file_write() {
+    let b = Bench::new();
+    let ctx = ToolContext {
+        session_id: Some(SESSION.to_string()),
+        session_log: Some(b.service.handle_for(SESSION)),
+        ..b.gp.scratch_ctx()
+    };
+
+    let refused = b
+        .tool(None)
+        .execute_with_context(&args("notes.md", "a", "b"), &ctx)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        refused,
+        "file_edit changes a file in a project, and this conversation has no project. Use \
+         file_write to save a file instead."
+    );
+}
+
+/// R48 with neither a project nor a conversation (S4b's deferred minor): the
+/// same sentence as a scratch-folder turn's — file_edit needs a project, and
+/// naming file_write is the way on — for the card and the body alike.
+#[tokio::test]
+async fn with_neither_a_project_nor_a_conversation_file_edit_is_refused_naming_file_write() {
+    let b = Bench::new();
+    let ctx = ToolContext {
+        owner_id: Some(OWNER.to_string()),
+        ..Default::default()
+    };
+    let tool = b.tool(None);
+    let expected = "file_edit changes a file in a project, and this conversation has no \
+                    project. Use file_write to save a file instead.";
+
+    assert_eq!(
+        tool.execute_with_context(&args("notes.md", "a", "b"), &ctx)
+            .await
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        tool.confirmation_preview(&args("notes.md", "a", "b"), &ctx)
+            .await
+            .unwrap_err(),
+        expected
+    );
+}
+
+/// R32: `.git` is git's.
+#[tokio::test]
+async fn a_path_inside_dot_git_is_refused() {
+    let b = Bench::new();
+    b.put(".git/config", b"[core]\n\tbare = false\n");
+
+    let refused = b
+        .tool(None)
+        .execute_with_context(&args(".git/config", "false", "true"), &b.ctx())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        refused,
+        "Writing '.git/config' is refused: it is inside the project's .git folder, which git \
+         keeps. Run git through shell_execute instead."
+    );
+    assert_eq!(b.bytes(".git/config"), b"[core]\n\tbare = false\n");
+}
+
+#[tokio::test]
+async fn a_file_that_is_not_utf8_is_refused_and_left_alone() {
+    let b = Bench::new();
+    b.put("logo.bin", &[0xff, 0xfe, 0x00, 0x41]);
+
+    let refused = b
+        .tool(None)
+        .execute_with_context(&args("logo.bin", "A", "B"), &b.ctx())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        refused,
+        "'logo.bin' is not UTF-8 text, so file_edit cannot change it."
+    );
+    assert_eq!(b.bytes("logo.bin"), [0xff, 0xfe, 0x00, 0x41]);
+}
+
+#[tokio::test]
+async fn a_folder_is_refused() {
+    let b = Bench::new();
+    fs::create_dir_all(b.gp.root.join("src")).unwrap();
+
+    let refused = b
+        .tool(None)
+        .execute_with_context(&args("src", "a", "b"), &b.ctx())
+        .await
+        .unwrap_err();
+
+    assert_eq!(refused, "'src' is a folder, not a file.");
+}
+
+/// C-S4b-5: anything but a regular file — here a named pipe, which an open
+/// for reading would block on — is refused by the plan from its `stat`
+/// alone, before any open: no card, no copy, no row, the pipe left as it is.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_named_pipe_is_refused_as_not_a_regular_file_before_it_is_opened() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
+
+    let b = Bench::new();
+    let fifo = b.gp.root.join("pipe");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `c_path` is a NUL-terminated path that outlives the call, and
+    // `mkfifo` only creates a node there; it reads no other memory.
+    let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+    assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    let ctx = b.ctx();
+    let tool = b.tool(None);
+    let expected = "'pipe' is not a regular file, so file_edit cannot change it.";
+
+    assert_eq!(
+        tool.confirmation_preview(&args("pipe", "a", "b"), &ctx)
+            .await
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        tool.execute_with_context(&args("pipe", "a", "b"), &ctx)
+            .await
+            .unwrap_err(),
+        expected
+    );
+    assert!(
+        fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo(),
+        "the pipe is left as it was"
+    );
+    assert!(ctx.session_log.as_ref().unwrap().flush().await);
+    assert!(b.images().is_empty(), "a refusal keeps no copy");
+    assert!(b.rows().is_empty(), "a refusal records no row");
+}
+
+/// R31 (Review Focus 1, d1-confine-3): a link at the leaf pointing outside
+/// the project is never edited through — the card is refused (no card is
+/// raised), the body is refused with the boundary sentence, the outside
+/// file is byte-identical, and nothing is copied into `snapshots/`. Pinned
+/// at the tool, so a plan that read or wrote `root.join(path)` instead of
+/// the resolver's answer would fail here.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_edit_of_a_link_pointing_out_of_the_project_is_refused_and_raises_no_card() {
+    let b = Bench::new();
+    let outside = tempfile::tempdir().unwrap();
+    let elsewhere = outside.path().join("a.md");
+    fs::write(&elsewhere, "the outside text\n").unwrap();
+    fs::create_dir_all(b.gp.root.join("docs")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, b.gp.root.join("docs/a.md")).unwrap();
+    let ctx = b.ctx();
+    let tool = b.tool(None);
+    let edit = args("docs/a.md", "outside", "inside");
+    let boundary = "Path 'docs/a.md' resolves outside the workspace boundary";
+
+    assert_eq!(
+        tool.confirmation_preview(&edit, &ctx).await,
+        Err(boundary.to_string()),
+        "no card"
+    );
+    assert_eq!(
+        tool.execute_with_context(&edit, &ctx).await,
+        Err(boundary.to_string())
+    );
+
+    assert_eq!(
+        fs::read_to_string(&elsewhere).unwrap(),
+        "the outside text\n",
+        "the file outside is byte-identical"
+    );
+    assert!(ctx.session_log.as_ref().unwrap().flush().await);
+    assert!(b.images().is_empty(), "nothing was copied into snapshots/");
+    assert!(b.rows().is_empty(), "no row was recorded");
+}
+
+/// R36: the file is the result; the row is a view of it.
+#[tokio::test]
+async fn without_a_database_the_edit_lands_and_says_the_app_could_not_list_it() {
+    let b = Bench::new();
+    b.put("src/lib.rs", LIB.as_bytes());
+    let tool = FileEditTool {
+        db: None,
+        daemon_config: None,
+    };
+
+    let out = tool
+        .execute_with_context(&args("src/lib.rs", "    3", "    5"), &b.ctx())
+        .await
+        .unwrap();
+
+    assert!(
+        out.ends_with(
+            "Its previous content is kept in this conversation's log. The file is written, but \
+             the app could not list it (no database is wired to this tool)."
+        ),
+        "{out}"
+    );
+    assert_eq!(
+        b.bytes("src/lib.rs"),
+        "pub fn retries() -> u32 {\n    5\n}\n".as_bytes()
+    );
+}
+
+/// R26: a call with no context names no folder.
+#[tokio::test]
+async fn execute_without_a_context_is_refused() {
+    let tool = FileEditTool {
+        db: None,
+        daemon_config: None,
+    };
+    let refused = tool.execute(&args("a.txt", "a", "b")).await.unwrap_err();
+    assert_eq!(
+        refused,
+        crate::tools::working_folder::WorkingFolderRefusal::NoContext.to_string()
+    );
+}
+
+// ── R49: the card ───────────────────────────────────────────────────────
+
+/// §13's fifth test: a U+202E in either string is shown escaped on the card,
+/// which names the folder, the file and the line.
+#[tokio::test]
+async fn the_card_shows_both_strings_escaped_and_names_the_folder_the_file_and_the_line() {
+    let b = Bench::new();
+    b.put("src/a.rs", "fn main() {}\nlet a = 1;\u{202E}\n".as_bytes());
+
+    let card = b
+        .tool(None)
+        .confirmation_preview(
+            &args("src/a.rs", "let a = 1;\u{202E}", "let a = 2;\u{202E}"),
+            &b.ctx(),
+        )
+        .await
+        .unwrap()
+        .expect("file_edit's card carries the daemon's preview");
+
+    assert!(!card.contains('\u{202E}'), "{card}");
+    let lines: Vec<&str> = card.lines().collect();
+    assert_eq!(
+        lines[0],
+        format!(
+            "Edits src/a.rs in the project folder {}: 1 replacement, the first at line 2. Its \
+             current content is kept in this conversation's log.",
+            b.gp.root.display()
+        )
+    );
+    assert_eq!(
+        lines[1..].to_vec(),
+        vec![
+            "Replace:",
+            "let a = 1;<U+202E>",
+            "With:",
+            "let a = 2;<U+202E>",
+            "Note: this request contains 2 hidden characters, shown as <U+…>.",
+        ]
+    );
+}
+
+/// S4a's review (a folder at `file_write`'s target raised a card, then failed
+/// EISDIR): `file_edit`'s card is built from the plan that refuses a folder,
+/// so no card is raised for one — the preview answers R47's sentence.
+#[tokio::test]
+async fn a_folder_at_the_target_raises_no_card() {
+    let b = Bench::new();
+    fs::create_dir_all(b.gp.root.join("src")).unwrap();
+
+    let refused = b
+        .tool(None)
+        .confirmation_preview(&args("src", "a", "b"), &b.ctx())
+        .await
+        .unwrap_err();
+
+    assert_eq!(refused, "'src' is a folder, not a file.");
+}
+
+/// Interfaces §4.3: a call the body would refuse raises no card — the preview
+/// refuses with the body's own sentence — and a card's plan writes nothing:
+/// no copy, no row, the file as it was.
+#[tokio::test]
+async fn a_refused_edit_raises_no_card_and_a_card_writes_nothing() {
+    let b = Bench::new();
+    let before = "x = 1;\ny = 2;\nx = 1;\n";
+    b.put("src/a.rs", before.as_bytes());
+    let ctx = b.ctx();
+    let tool = b.tool(None);
+
+    let refused = tool
+        .confirmation_preview(&args("src/a.rs", "x = 1;", "x = 3;"), &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        refused.starts_with("old_string occurs 2 times in 'src/a.rs'."),
+        "{refused}"
+    );
+
+    let card = tool
+        .confirmation_preview(&args("src/a.rs", "y = 2;", "y = 4;"), &ctx)
+        .await
+        .unwrap();
+    assert!(card.is_some());
+    assert_eq!(b.bytes("src/a.rs"), before.as_bytes());
+    assert!(ctx.session_log.as_ref().unwrap().flush().await);
+    assert!(b.images().is_empty(), "a card keeps no copy");
+    assert!(b.rows().is_empty(), "a card records no row");
+}
+
+/// The card through the sandbox, as the main loop raises it: `file_edit` is
+/// destructive, so a card goes out carrying the escaped strings, and a Deny
+/// leaves the file as it was.
+#[tokio::test]
+async fn the_sandbox_raises_file_edits_card_and_a_deny_leaves_the_file() {
+    use crate::agent::subagent::AgentConstraints;
+    use crate::bus::EventBus;
+    use crate::daemon_config::CircuitBreakerConfig;
+    use crate::security::confirmation::{ConfirmationBroker, ConfirmationResponse};
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::ToolRegistry;
+
+    let b = Bench::new();
+    let before = "let a = 1;\u{202E}\n";
+    b.put("src/a.rs", before.as_bytes());
+    let registry = ToolRegistry::default();
+    registry
+        .register(file_edit_tool(Some(b.db.clone()), None))
+        .unwrap();
+    let mut sandbox = SandboxManager::new(
+        Arc::new(registry),
+        EventBus::new(16),
+        &CircuitBreakerConfig::default(),
+    );
+    let broker = Arc::new(ConfirmationBroker::new());
+    sandbox.set_confirmation_broker(broker.clone());
+    let mut policy = SandboxPolicy::from_constraints(
+        "orchestrator",
+        &AgentConstraints {
+            allowed_capabilities: vec!["file_edit".to_string()],
+            ..Default::default()
+        },
+    );
+    // Fail fast rather than wait out the 300 s default should no card come.
+    policy.confirmation_timeout_secs = Some(5);
+    let answering = {
+        let broker = broker.clone();
+        tokio::spawn(async move {
+            for _ in 0..300 {
+                if let Some(card) = broker.pending_requests().into_iter().next() {
+                    broker
+                        .respond(
+                            &card.request_id,
+                            ConfirmationResponse {
+                                approved: false,
+                                approval_scope: None,
+                            },
+                        )
+                        .unwrap();
+                    return Some(card);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            None
+        })
+    };
+    let call = openalpaca_llm::ToolCall {
+        id: "tc-1".to_string(),
+        name: "file_edit".to_string(),
+        arguments: args("src/a.rs", "let a = 1;\u{202E}", "let a = 2;\u{202E}"),
+    };
+    let ctx = ToolContext {
+        agent_id: Some("orchestrator".to_string()),
+        ..b.ctx()
+    };
+
+    let refused = sandbox
+        .execute_tool(&call, &policy, &ctx)
+        .await
+        .unwrap_err();
+
+    let card = answering.await.unwrap().expect("a card was raised");
+    let preview = card.preview.expect("the card carries file_edit's preview");
+    assert!(preview.contains("let a = 1;<U+202E>"), "{preview}");
+    assert!(preview.contains("let a = 2;<U+202E>"), "{preview}");
+    assert!(!preview.contains('\u{202E}'), "{preview}");
+    assert!(refused.contains("denied by user"), "{refused}");
+    assert_eq!(b.bytes("src/a.rs"), before.as_bytes());
+}
+
+// ── R-T35: a confirmation list naming file_write asks before file_edit ───
+
+/// The builtins as the agent paths register them, with this bench's
+/// database, behind a sandbox with a broker.
+fn builtins_sandbox(
+    b: &Bench,
+) -> (
+    Arc<crate::tools::ToolRegistry>,
+    crate::security::sandbox::SandboxManager,
+    Arc<crate::security::confirmation::ConfirmationBroker>,
+) {
+    use crate::bus::EventBus;
+    use crate::daemon_config::CircuitBreakerConfig;
+    use crate::security::confirmation::ConfirmationBroker;
+    use crate::security::sandbox::SandboxManager;
+    use crate::tools::ToolRegistry;
+
+    let registry = ToolRegistry::default();
+    for tool in crate::tools::builtins::builtin_tools(Some(b.db.clone()), None, None) {
+        registry.register(tool).unwrap();
+    }
+    let registry = Arc::new(registry);
+    let mut sandbox = SandboxManager::new(
+        registry.clone(),
+        EventBus::new(16),
+        &CircuitBreakerConfig::default(),
+    );
+    let broker = Arc::new(ConfirmationBroker::new());
+    sandbox.set_confirmation_broker(broker.clone());
+    (registry, sandbox, broker)
+}
+
+/// `file_edit` of `docs/notes.md` in this bench's project turn, run under
+/// `policy` while a person denies the first card that comes. Returns the
+/// tool the card named (`None` when no card came within three seconds) and
+/// the call's answer.
+async fn file_edit_with_cards_denied(
+    b: &Bench,
+    sandbox: &crate::security::sandbox::SandboxManager,
+    broker: &Arc<crate::security::confirmation::ConfirmationBroker>,
+    policy: &crate::security::sandbox::SandboxPolicy,
+) -> (Option<String>, Result<String, String>) {
+    use crate::security::confirmation::ConfirmationResponse;
+
+    let answering = {
+        let broker = broker.clone();
+        tokio::spawn(async move {
+            for _ in 0..300 {
+                if let Some(card) = broker.pending_requests().into_iter().next() {
+                    broker
+                        .respond(
+                            &card.request_id,
+                            ConfirmationResponse {
+                                approved: false,
+                                approval_scope: None,
+                            },
+                        )
+                        .unwrap();
+                    return Some(card.tool_name);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            None
+        })
+    };
+    let call = openalpaca_llm::ToolCall {
+        id: "tc-r-t35".to_string(),
+        name: "file_edit".to_string(),
+        arguments: args("docs/notes.md", "old line", "new line"),
+    };
+    let ctx = ToolContext {
+        agent_id: Some(policy.agent_id.clone()),
+        ..b.ctx()
+    };
+    let answer = sandbox.execute_tool(&call, policy, &ctx).await;
+    (answering.await.unwrap(), answer)
+}
+
+/// The lead's ruling R-T35 on an agent template: one granted the
+/// `file_write` capability holds `file_edit` beside it (R42), so a
+/// `require_confirmation_for` naming `file_write` asks before `file_edit`
+/// too — the card is raised, a Deny leaves the file as it was, and no
+/// pre-edit copy or row is kept. Walked as the subagent spawn walks it:
+/// `to_subagent`, the surface the capability resolves to, the policy from
+/// the constraints with that surface admitted.
+#[tokio::test]
+async fn a_template_whose_confirmation_list_names_file_write_asks_before_file_edit() {
+    use crate::security::sandbox::SandboxPolicy;
+
+    let b = Bench::new();
+    b.put("docs/notes.md", b"old line\n");
+    let (registry, sandbox, broker) = builtins_sandbox(&b);
+    let doc = crate::agent::template::parse_agent_markdown(
+        "---\nid: \"careful_writer\"\nname: \"Careful Writer\"\ndescription: \"Writes \
+         files\"\ncapabilities:\n  - \"file_write\"\nrequire_confirmation_for:\n  - \
+         \"file_write\"\n---\n\n## Persona\n\nYou write files.\n",
+    )
+    .unwrap();
+    let agent = doc.to_subagent("careful_writer::r-t35", "task-1");
+    let surface = crate::tools::resolve_agent_tools(&agent, &registry, None);
+    let names: Vec<&str> = surface.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"file_edit"),
+        "the capability brings file_edit: {names:?}"
+    );
+    let mut policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+    policy.admit_tool_surface(&surface);
+    policy.confirmation_timeout_secs = Some(5);
+
+    let (card, answer) = file_edit_with_cards_denied(&b, &sandbox, &broker, &policy).await;
+
+    assert_eq!(card.as_deref(), Some("file_edit"), "{answer:?}");
+    assert!(answer.unwrap_err().contains("denied by user"));
+    assert_eq!(b.bytes("docs/notes.md"), b"old line\n");
+    assert!(b.images().is_empty(), "a denied edit keeps no copy");
+    assert!(b.rows().is_empty(), "a denied edit records no row");
+}
+
+/// The lead's ruling R-T35 on a skill: one whose legacy `tools.allow` names
+/// `file_write` is handed `file_edit` with it (`constraints::paired_tools`,
+/// residual X5), so its `permissions.confirm.tools` naming `file_write` asks
+/// before `file_edit` too. The policy is the skill tier's
+/// (`orchestrator/skill/invocation.rs`): the closed set of the tools
+/// resolved for it, its deny list, its confirm list. The call runs in a turn
+/// that keeps a conversation log; on the skill tiers themselves no log is
+/// kept, so `file_edit` of an existing file is refused before any card
+/// (R46), and this is where the card shows.
+#[tokio::test]
+async fn a_skill_whose_confirm_list_names_file_write_asks_before_file_edit() {
+    use crate::security::capabilities::Allowlist;
+    use crate::security::sandbox::SandboxPolicy;
+
+    let b = Bench::new();
+    b.put("docs/notes.md", b"old line\n");
+    let (_registry, sandbox, broker) = builtins_sandbox(&b);
+    let skill = crate::middleware::skill::parse_skill_markdown(
+        "---\nname: \"careful-writer\"\ndescription: \"Writes files\"\ntools:\n  allow:\n    - \
+         file_write\npermissions:\n  confirm:\n    tools:\n      - file_write\n---\n\n## \
+         Instructions\n\nWrite.\n",
+    )
+    .unwrap();
+    let fm = &skill.frontmatter;
+    let mut resolved: Vec<&str> = fm.tools.allow.iter().map(String::as_str).collect();
+    let partners = crate::orchestrator::skill::constraints::paired_tools(
+        resolved.iter().copied(),
+        &fm.tools.deny,
+    );
+    resolved.extend(partners);
+    assert_eq!(resolved, ["file_write", "file_edit"]);
+    let policy = SandboxPolicy {
+        agent_id: "orchestrator".to_string(),
+        allowed_capabilities: Allowlist::only(resolved),
+        denied_capabilities: fm.tools.deny.clone(),
+        require_confirmation_for: fm.permissions.confirm.tools.clone(),
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: Some(5),
+        auto_approve: false,
+        unattended: false,
+    };
+
+    let (card, answer) = file_edit_with_cards_denied(&b, &sandbox, &broker, &policy).await;
+
+    assert_eq!(card.as_deref(), Some("file_edit"), "{answer:?}");
+    assert!(answer.unwrap_err().contains("denied by user"));
+    assert_eq!(b.bytes("docs/notes.md"), b"old line\n");
+    assert!(b.images().is_empty(), "a denied edit keeps no copy");
+    assert!(b.rows().is_empty(), "a denied edit records no row");
+}

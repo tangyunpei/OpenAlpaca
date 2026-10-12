@@ -20,6 +20,7 @@ use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
 use crate::lane::LaneManager;
+use crate::middleware::user::UserDocument;
 use crate::orchestrator::ConnectorStatusProvider;
 use crate::prompt_ctx::ContextManager;
 use crate::security::gate::SecurityGate;
@@ -62,7 +63,6 @@ pub struct TaskDispatcher {
     _security_gate: Arc<SecurityGate>,
     tool_registry: Arc<ToolRegistry>,
     db: Option<Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
     /// Cached connector guidance with 10s TTL (Opt-8b).
@@ -79,6 +79,16 @@ pub struct TaskDispatcher {
     /// Layered compose engine. Shared with the owning `Orchestrator` so
     /// prompt caches are global across conversation + task paths (Phase 4).
     pub(crate) compose_engine: Arc<crate::compose::ComposeEngine>,
+    /// The daemon's `USER.md`, shared with the owning `Orchestrator`: the one
+    /// profile block a lead prompt carries (plan 3.3).
+    user_document: Arc<RwLock<Option<UserDocument>>>,
+    /// The memory service's slot, shared with the owning `Orchestrator` and
+    /// filled by the daemon after construction (`set_memory_service`): the
+    /// lead's opening recall (design §7a) and the task-output extraction.
+    memory_service: Arc<RwLock<Option<Arc<crate::memory::service::MemoryService>>>>,
+    /// The orchestrator's post-turn jobs: a finished run's memory extraction
+    /// runs on it, tracked and cancellable (design §6).
+    background: Arc<crate::orchestrator::BackgroundJobs>,
 }
 
 impl TaskDispatcher {
@@ -91,12 +101,14 @@ impl TaskDispatcher {
         security_gate: Arc<SecurityGate>,
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
-        embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
         skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
         context_manager: Arc<ContextManager>,
         compose_engine: Arc<crate::compose::ComposeEngine>,
+        user_document: Arc<RwLock<Option<UserDocument>>>,
+        memory_service: Arc<RwLock<Option<Arc<crate::memory::service::MemoryService>>>>,
+        background: Arc<crate::orchestrator::BackgroundJobs>,
     ) -> Self {
         Self {
             shared_context,
@@ -106,7 +118,6 @@ impl TaskDispatcher {
             _security_gate: security_gate,
             tool_registry,
             db,
-            embedder,
             daemon_config,
             connector_status,
             skill_catalog,
@@ -115,6 +126,9 @@ impl TaskDispatcher {
             followup_runner: Arc::new(RwLock::new(None)),
             context_manager,
             compose_engine,
+            user_document,
+            memory_service,
+            background,
         }
     }
 

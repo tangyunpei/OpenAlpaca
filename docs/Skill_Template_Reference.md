@@ -206,7 +206,7 @@ Controls what the skill is allowed to do.
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names requiring confirmation. Passed to `SandboxPolicy.require_confirmation_for`. When the list is empty, every tool flagged destructive requires confirmation instead (built-ins: `file_write`, `artifact_write`, `workspace_write`, `update_persona`, `shell_execute`, `send`). A non-empty list replaces that default. |
+| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names requiring confirmation. Passed to `SandboxPolicy.require_confirmation_for`. When the list is empty, every tool flagged destructive requires confirmation instead (built-ins: `file_write`, `file_edit`, `update_persona`, `shell_execute`, `send`; `artifact_write` and `workspace_write` are not among them). A non-empty list replaces that default — and one that names `file_write` asks for `file_edit` too, since a skill holding `file_write` holds `file_edit` (Section 7, *Tool Set Algorithm*). |
 
 > **Interactive Confirmation**: When a tool in the confirmation set is invoked, the sandbox pauses execution and requests approval through the `ConfirmationBroker` (a `ToolConfirmationRequested` event routed to the active client; the answer comes back via `POST /v1/chat/confirmations/{request_id}`). The approval timeout comes from `execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml` (default 300s). Section 7 lists every way a prompt can end.
 
@@ -222,7 +222,7 @@ Controls which tools the skill can use. **Ignored when `requires_capabilities` i
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `tools.allow` | `Vec<String>` | `[]` | ENFORCED | Tool allowlist (legacy name-based path). Only these tools are available during the skill's agentic loop. Empty (with no `requires_capabilities`) means no tools. |
+| `tools.allow` | `Vec<String>` | `[]` | ENFORCED | Tool allowlist (legacy name-based path). Only these tools are available during the skill's agentic loop, with the partner `file_read`, `file_write` or `read_result` brings (Section 7, *Tool Set Algorithm*). Empty (with no `requires_capabilities`) means no tools. |
 | `tools.deny` | `Vec<String>` | `[]` | ENFORCED | Tool denylist. Removed from the resolved tool set (both resolution paths) and folded into the sandbox policy's denied capabilities. |
 | `tools.defaults` | `HashMap<String, Value>` | `{}` | DEPRECATED | No runtime effect. A non-empty map logs a deprecation warning at scan time. |
 | `tools.rate_limit` | `RateLimitConfig` | `{max_calls: null}` | ENFORCED | `max_calls` is enforced as a total cap for the invocation. |
@@ -298,7 +298,7 @@ LLM calls skill_script:<name>({"key": "value", ...})
         → args: ["--key=value", ...] (json_to_cli_args conversion)
         → cwd: skill directory (<skill-dir>/)
         → timeout: per-script (default 30s), enforced via tokio::time::timeout
-      → stdout (capped at 512 KB) → Ok(result)
+      → stdout (cut at 512 KB, the cut said on a line of its own) → Ok(result)
       → non-zero exit → Err("Script failed (exit N): <stderr, first 500 chars>")
 ```
 
@@ -324,7 +324,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
 - **Path traversal prevention**: Script paths are canonicalized via `canonicalize()` and verified to resolve within the skill's `scripts/` directory. Paths that escape (including via symlinks) are blocked at registration time.
 - **Timeout enforcement**: Each script has a configurable timeout (default 30s); timed-out scripts are killed and the tool call fails with `"Script timed out after {N}s"`.
-- **Output cap**: stdout/stderr are capped at 512 KB to prevent memory pressure.
+- **Output cap**: stdout/stderr are capped at 512 KB each to prevent memory pressure — the rest is read and dropped while the script runs — and an output cut there ends with a line saying so (`[stdout cut at 512 KB; the rest was not kept]`). A failed script's message shows the first 500 characters of its stderr.
 - **Namespace isolation**: The `skill_script:` prefix prevents collision with global registry tools; script tools never leak outside their skill invocation.
 - **Sandbox integration**: Script tool names are added to `SandboxPolicy.allowed_capabilities` and pass through the full sandbox pipeline.
 - **No shell injection**: Arguments are passed directly to the process (no shell), so shell metacharacters in argument values are inert.
@@ -507,7 +507,7 @@ The total injected context is capped at `budget_tokens * 4` characters (16,000 c
 
 ### What Else the Skill's Model Sees
 
-A slash or auto-routed skill runs as the turn's answer, so beyond the two blocks above its prompt carries the usual chat context: the persona documents, relevant memories, the lane's conversation summary and recent messages, and the query as the user message.
+A slash or auto-routed skill runs as the turn's answer, so beyond the two blocks above its prompt carries the usual chat context: the persona documents, relevant memories, the conversation's working state (and, on a new conversation's first turns, the previous conversation's) and recent messages, and the query as the user message.
 
 **Attachments.** Files attached to the turn travel in the skill's user message, exactly as they do on a normal chat turn:
 
@@ -545,7 +545,7 @@ Before a skill runs, `preflight_permissions()` validates:
 The invocation handler builds the tool set as follows:
 
 1. **Capability path** — if `requires_capabilities` is non-empty: resolve tools via the registry's capability index (`resolve_capabilities`) — every registered tool whose `provides_capabilities` includes one of the listed capabilities. **`tools.allow` is ignored on this path.**
-2. **Legacy path** — otherwise, if `tools.allow` is non-empty: resolve each name against the tool registry. Unknown names trigger a warning (`Skill '<x>' references unknown tools: [...]`) but don't block invocation.
+2. **Legacy path** — otherwise, if `tools.allow` is non-empty: resolve each name against the tool registry. Unknown names trigger a warning (`Skill '<x>' references unknown tools: [...]`) but don't block invocation. Three names bring their partner, as their capability does: a skill allowed `file_read` also holds `file_list`, one allowed `file_write` also holds `file_edit`, and one allowed `read_result` also holds `artifact_read` — unless `tools.deny` names either of the two. A skill another skill invokes is resolved the same way.
 3. Otherwise: no tools (pure LLM prompt).
 4. **Availability check** (see below): refuse the skill if a requirement is wholly unavailable.
 5. **Bootstrap exception**: during persona bootstrap mode, `update_persona` is force-added to the tool set even if not allowed.
@@ -556,7 +556,7 @@ The resolved names become the invocation's allow list: the sandbox refuses any t
 
 Intent-suggested tools from the orchestrator are intentionally **not** merged, preserving skill-level tool isolation.
 
-Capability names provided by built-in tools: `file_read`, `file_write`, `artifact_write`, `shell_execute`, `web_access` (both `web_search` and `web_fetch`), `memory_read` (memory_search), `read_result`, `workspace_read`, `workspace_write`, `persona_write` (update_persona), `messaging` (send). An MCP tool provides a capability equal to its own name (`<server>__<tool>`). A plugin's tools provide the capabilities its manifest declares.
+Capability names provided by built-in tools: `file_read` (`file_read`, `file_list`), `file_write` (`file_write`, `file_edit`), `artifact_write`, `shell_execute`, `web_access` (both `web_search` and `web_fetch`), `memory_read` (`memory_search`, `memory_read`, `memory_list`, `memory_timeline`), `read_result` (`read_result`, `artifact_read`), `workspace_read`, `workspace_write`, `persona_write` (update_persona), `messaging` (send). An MCP tool provides a capability equal to its own name (`<server>__<tool>`). A plugin's tools provide the capabilities its manifest declares.
 
 ### When a Required Tool Is Unavailable
 
@@ -583,7 +583,7 @@ The skill agentic loop runs with limits from `daemon.toml` `[execution.skill_def
 
 ### Confirmation Tools
 
-The confirmation set is `permissions.confirm.tools` when that list is non-empty. Otherwise it is every tool flagged destructive — among the built-ins: `file_write`, `artifact_write`, `workspace_write`, `update_persona`, `shell_execute` and `send`. So a skill that uses `shell_execute` asks for approval even if it lists nothing.
+The confirmation set is `permissions.confirm.tools` when that list is non-empty. Otherwise it is every tool flagged destructive — among the built-ins: `file_write`, `file_edit`, `update_persona`, `shell_execute` and `send` (`artifact_write` and `workspace_write` write only under `~/.openalpaca` and are not flagged). So a skill that uses `shell_execute` asks for approval even if it lists nothing.
 
 When a tool in the set is invoked, the first matching rule applies:
 
@@ -792,7 +792,7 @@ context:
 permissions:
   level: readwrite               # readonly | readwrite | admin
   confirm:
-    tools:                       # These tools require user confirmation (replaces the default set)
+    tools:                       # These tools require user confirmation (replaces the default set; file_write brings file_edit)
       - shell_execute
       - file_write
   sandbox:
@@ -985,14 +985,20 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 
 | Tool Name | Capability | Description | Availability |
 |-----------|-----------|-------------|--------------|
-| `file_read` | `file_read` | Read file contents from the workspace | Always registered |
-| `file_write` | `file_write` | Write/create files in the workspace | Always registered |
-| `artifact_write` | `artifact_write` | Save a versioned deliverable to the artifact store (shown in the GUI Library) | Always registered; requires a database at execution time |
-| `shell_execute` | `shell_execute` | Execute shell commands | Always registered |
+| `file_read` | `file_read` | Read a file of the working folder — the project, or the conversation's scratch folder; does not ask by default | Always registered |
+| `file_list` | `file_read` | List one folder of the working folder; does not ask by default | Always registered |
+| `file_write` | `file_write` | Write a whole file; asks by default. In a project, the real file under the project folder — a replaced file's old content is kept in the conversation's log, and a skill keeps none, so in a skill it creates a new file but refuses to replace one. With no project, save the file as a by-product named after its path (shown in the GUI Library) | Always registered; the by-product, and a project file's Library row, need a database at execution time |
+| `file_edit` | `file_write` | In a project, change part of one existing file — the exact text to find and the text to put in its place; asks by default. In a skill it is refused: a skill keeps no conversation log, so no copy of the old content can be kept | Always registered |
+| `artifact_write` | `artifact_write` | Save a versioned by-product — a draft, a picture, a hand-off — to the artifact store (shown in the GUI Library); does not ask by default | Always registered; requires a database at execution time |
+| `shell_execute` | `shell_execute` | Run a shell command, starting in the working folder; asks by default, and an approved command can reach files outside that folder | Always registered |
 | `web_search` | `web_access` | Search the web | Always registered; needs the `[web_search]` section (API key) in `config/llm.toml` |
 | `web_fetch` | `web_access` | Fetch and read content from a URL | Always registered |
-| `memory_search` | `memory_read` | Search stored memories (hybrid FTS + vector when an embedder is configured) | Registered only when a database is available |
+| `memory_search` | `memory_read` | Search the owner's memory notes by keyword — whole words and word beginnings, and substrings of titles, aliases, tags and Chinese, Japanese, Korean, Thai, Hindi, Tamil and similar scripts; no meaning-based search. Answers an index (one row per note: id, date, kind, status, title, why it matched, size) by default, or cited excerpts with `detail: "snippets"`; filters by date range, sorts by relevance or date | Registered by the daemon over its memory service |
+| `memory_read` | `memory_read` | Read the notes picked from an index, 1–10 ids in one call, the bodies sharing 32 KiB (one id may take a single section) | Same |
+| `memory_list` | `memory_read` | List memory notes by kind, status and scope, paged | Same |
+| `memory_timeline` | `memory_read` | The notes dated around one note, a search's best match or a date, in time order, as index rows — superseded, archived and ended ones marked, candidates never listed | Same |
 | `read_result` | `read_result` | Page back a tool result that was too large to show inline | Always registered, but only useful where results spill to a session log (chat turns and workflows). A skill loop has no session log, so its oversized results are cut inline instead and this tool has nothing to read |
+| `artifact_read` | `read_result` | Read a by-product back by its id, paged like `read_result`; does not ask by default | Always registered; requires a database at execution time |
 | `workspace_read` | `workspace_read` | Read entries from the shared task workspace | Always registered; requires database + task context at execution time |
 | `workspace_write` | `workspace_write` | Write entries to the shared task workspace (32 KB per entry, optimistic-locking retries) | Always registered; requires database + task context at execution time |
 | `update_persona` | `persona_write` | Update persona documents (SOUL.md, USER.md, or IDENTITY.md via `target` param) | Registered by the daemon with persona context |
@@ -1000,7 +1006,7 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 
 **`send` in skill loops** gets special handling: when `send` is in the resolved tool set, the loop's initial tool choice is forced to `send`, a send-context block (available channels) is injected into the prompt, and a post-hoc guard detects "hallucinated send" responses (confirmation text without an actual tool call) and replaces them with a warning asking the user to retry.
 
-The chat-only tools (`start_workflow`, `task_status`, `memory_store`, `memory_forget`, `steer_workflow`, `queue_followup`, the general `invoke_skill`) and the lead agent's coordination tools are created per request and are **not** in the shared registry, so a skill cannot list them.
+The chat-only tools (`start_workflow`, `task_status`, `memory_store`, `memory_update`, `memory_forget`, `steer_workflow`, `queue_followup`, the general `invoke_skill`) and the lead agent's coordination tools are created per request and are **not** in the shared registry, so a skill cannot list them.
 
 **Beyond built-ins**, the registry can also contain:
 - **MCP tools** from `config/mcp.toml`, named `<server>__<tool>`;
@@ -1051,7 +1057,7 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 **"Skill '<x>' references unknown tools: [...]" (warning in logs)**
 - Use exact registered names (Section 14). This is the legacy `tools.allow` path; unknown names are skipped, not fatal.
 - If `requires_capabilities` is set, `tools.allow` is ignored entirely — a common source of confusion when the tool set doesn't match expectations.
-- `memory_search` is registered only when the daemon has a database. `send` is always registered by the daemon, but a call fails when no connector can deliver to the requested channel.
+- `memory_search`, `memory_read`, `memory_list` and `memory_timeline` are registered by the daemon over its memory service; a registry built without one (a test harness) has none of them. A skill can read memory but never write it: the writers are chat-only. `send` is always registered by the daemon, but a call fails when no connector can deliver to the requested channel.
 
 **`routing.score` vs `routing.weights`**
 - Both keys are accepted (serde alias). `weights` is canonical; `score` is kept for backward compatibility (the shipped `code-review` skill uses it).
@@ -1103,4 +1109,4 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 - Each entry requires `file`, `name`, and `description`. A missing required field is a **frontmatter parse error — the entire skill fails to load** (check the daemon log for `SkillCatalog: failed to load ...`).
 
 **Script output truncated**
-- stdout is capped at 512 KB. Emit summaries, not full dumps; write large artifacts to files and return their paths.
+- stdout is cut at 512 KB, and the result then ends with `[stdout cut at 512 KB; the rest was not kept]`. Emit summaries, not full dumps; write large artifacts to files and return their paths.

@@ -17,6 +17,12 @@ impl EventBroadcaster {
                 // `Ok(0)` — a shutdown is not an `event_log` row, and the
                 // table is never pruned (CLAUDE.md, W6).
                 ServerEvent::DaemonShuttingDown { .. } => Ok(0),
+                // A memory note's change is the note file's and its control
+                // snapshot's to record (memory redesign, design §7a; G30):
+                // the frame exists so a client invalidates instead of
+                // polling, and `event_log` — never pruned (W6) — must not
+                // grow by one row per remembered fact.
+                ServerEvent::MemoryChanged { .. } => Ok(0),
                 ServerEvent::CommandReceived {
                     request_id,
                     command,
@@ -458,6 +464,8 @@ impl EventBroadcaster {
                     kind,
                     version,
                     path,
+                    in_project,
+                    openable,
                     ..
                 } => {
                     let detail = serde_json::json!({
@@ -468,6 +476,8 @@ impl EventBroadcaster {
                         "kind": kind,
                         "version": version,
                         "path": path,
+                        "in_project": in_project,
+                        "openable": openable,
                     });
                     repo.log_for_task(
                         "artifact_written",
@@ -655,6 +665,8 @@ mod tests {
             "markdown",
             2,
             "/p/.openalpaca/artifacts/run/01-quarterly-report.md",
+            false,
+            true,
         );
 
         let rows = EventLogRepository::new(&db).recent(10).unwrap();
@@ -674,6 +686,84 @@ mod tests {
             detail["path"],
             "/p/.openalpaca/artifacts/run/01-quarterly-report.md"
         );
+        assert_eq!(detail["in_project"], false);
+        assert_eq!(detail["openable"], true);
+    }
+
+    /// Stage 2: a result file's row in the event log says it was written in
+    /// the project — the run's log reads it (`lib/api/run-events.ts`, S6a).
+    #[test]
+    fn a_result_file_is_persisted_with_its_two_flags() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.artifact_written(
+            "a-3",
+            Some("t-1"),
+            Some("code_agent"),
+            "scripts/build.sh",
+            "code",
+            1,
+            "/w/app/scripts/build.sh",
+            true,
+            false,
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let detail = rows
+            .iter()
+            .find(|r| r.event_type == "artifact_written")
+            .and_then(|r| r.detail.clone())
+            .expect("the write reaches the event log with a detail blob");
+        assert_eq!(detail["in_project"], true);
+        assert_eq!(detail["openable"], false);
+        assert_eq!(detail["name"], "scripts/build.sh");
+    }
+
+    /// Design 09 §4.4 and 03 §6's forget contract: a `memory_confirm` card's
+    /// preview carries note titles and text, and a note forgotten later must
+    /// not survive in the audit log — so the `event_log` row keeps ids only,
+    /// while the live event every client hears carries the preview and
+    /// `per_call`.
+    #[test]
+    fn the_preview_never_reaches_event_log() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+        let mut live = eb.subscribe();
+        let preview = "Replace your saved note “Salary band” with “Salary band”?\nYours: 95k.";
+        eb.tool_confirmation_requested(
+            "req-1",
+            "orchestrator",
+            "memory_confirm",
+            &serde_json::json!({"id": "s", "expected_revision": "r", "target_revision": "t"}),
+            Some("stream-1"),
+            Some("u:gui"),
+            None,
+            Some(preview),
+            true,
+        );
+
+        match live.try_recv().expect("the live event") {
+            ServerEvent::ToolConfirmationRequested {
+                preview: sent,
+                per_call,
+                ..
+            } => {
+                assert_eq!(sent.as_deref(), Some(preview));
+                assert!(per_call);
+            }
+            other => panic!("Expected ToolConfirmationRequested, got {other:?}"),
+        }
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event_type == "tool_confirmation_requested")
+            .expect("the request is audited");
+        let persisted = serde_json::to_string(&(&row.detail, &row.result)).unwrap();
+        assert!(!persisted.contains("Salary band"), "{persisted}");
+        assert!(!persisted.contains("95k"), "{persisted}");
+        assert!(!persisted.contains("preview"), "{persisted}");
+        assert_eq!(row.detail.as_ref().unwrap()["request_id"], "req-1");
     }
 
     /// A loose artifact still logs; it simply has no agent column to fill.
@@ -690,6 +780,8 @@ mod tests {
             "markdown",
             1,
             "/h/.openalpaca/artifacts/loose/01-notes.md",
+            false,
+            true,
         );
 
         let rows = EventLogRepository::new(&db).recent(10).unwrap();
@@ -726,6 +818,31 @@ mod tests {
         );
     }
 
+    /// `memory_changed` is a client's cue to refetch, not history: it must
+    /// never become an `event_log` row (design §7a, G30; the table is never
+    /// pruned, W6).
+    #[test]
+    fn memory_changed_is_never_persisted() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.memory_changed(
+            "home-32acea7eb739b08afd959db91e46d450",
+            "55e811b6-3220-4758-a47b-034bd1023f38",
+            "created",
+            Some("9f".repeat(32)),
+            "user",
+            Some("user".to_string()),
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        assert!(
+            rows.is_empty(),
+            "a memory_changed frame must not reach event_log, found {:?}",
+            rows.iter().map(|r| &r.event_type).collect::<Vec<_>>()
+        );
+    }
+
     // ── GAP-10: the run goes in the indexed column ──────────────────────
 
     /// Every arm that knows its run writes the id to `event_log.task_id`, not
@@ -748,6 +865,8 @@ mod tests {
             None,
             None,
             Some("t-1"),
+            None,
+            false,
         );
         eb.workflow_steered("t-1", "junpei:cli");
         eb.workflow_started("t-1", "junpei:cli", "A run");
@@ -760,6 +879,8 @@ mod tests {
             "markdown",
             1,
             "/p/.openalpaca/artifacts/run/01-report.md",
+            false,
+            true,
         );
         eb.subagent_span(
             "t-1",

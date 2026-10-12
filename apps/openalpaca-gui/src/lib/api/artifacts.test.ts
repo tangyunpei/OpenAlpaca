@@ -65,6 +65,8 @@ const row: Artifact = {
   path: "/home/.openalpaca/artifacts/loose/2026-09-05/findings.md",
   project_root: null,
   rel_path: "loose/2026-09-05/findings.md",
+  in_project: false,
+  openable: true,
 };
 
 beforeEach(() => {
@@ -120,6 +122,18 @@ describe("listArtifacts", () => {
     const url = new URL(requests[0]?.url ?? "");
     expect(url.searchParams.get("include_missing")).toBe("true");
   });
+
+  it("asks for one side of the Library when told to", async () => {
+    await listArtifacts({ inProject: false });
+    await listArtifacts({ inProject: true, taskId: "task-1", limit: 500 });
+
+    const byProducts = new URL(requests[0]?.url ?? "");
+    const results = new URL(requests[1]?.url ?? "");
+    expect(byProducts.searchParams.get("in_project")).toBe("false");
+    expect(results.searchParams.get("in_project")).toBe("true");
+    expect(results.searchParams.get("task_id")).toBe("task-1");
+    expect(results.searchParams.get("limit")).toBe("500");
+  });
 });
 
 describe("getArtifact", () => {
@@ -131,6 +145,20 @@ describe("getArtifact", () => {
     expect(requests[0]?.url).toContain("/v1/artifacts/art-1");
   });
 
+  it("carries the row's side and whether Open is offered", async () => {
+    reply = () =>
+      json({
+        ...row,
+        name: "scripts/release.sh",
+        rel_path: "scripts/release.sh",
+        in_project: true,
+        openable: false,
+      });
+    const artifact = await getArtifact("art-1");
+    expect(artifact.in_project).toBe(true);
+    expect(artifact.openable).toBe(false);
+  });
+
   it("surfaces a 404 as an ApiError the caller can branch on", async () => {
     reply = () =>
       json(
@@ -140,6 +168,48 @@ describe("getArtifact", () => {
     await expect(getArtifact("ghost")).rejects.toMatchObject({
       status: 404,
       code: "ARTIFACT_NOT_FOUND",
+    });
+  });
+});
+
+describe("a row from a daemon older than result files (d7-app-4)", () => {
+  /** What a pre-S4a `GET /v1/artifacts` serves: no `in_project`, no `openable`. */
+  const { in_project: _side, openable: _open, ...older } = row;
+
+  it("is read as a by-product that opens, in a list", async () => {
+    reply = () => json({ artifacts: [older], total: 1 });
+
+    const page = await listArtifacts();
+
+    expect(page.artifacts[0]).toMatchObject({
+      in_project: false,
+      openable: true,
+    });
+  });
+
+  it("is read as a by-product that opens, on its own", async () => {
+    reply = () => json(older);
+
+    await expect(getArtifact("art-1")).resolves.toMatchObject({
+      in_project: false,
+      openable: true,
+    });
+  });
+
+  it("keeps what a newer daemon says", async () => {
+    const script = { ...row, in_project: true, openable: false };
+    reply = (url) =>
+      url.includes("/v1/artifacts?") || url.endsWith("/v1/artifacts")
+        ? json({ artifacts: [script], total: 1 })
+        : json(script);
+
+    expect((await listArtifacts()).artifacts[0]).toMatchObject({
+      in_project: true,
+      openable: false,
+    });
+    await expect(getArtifact("art-1")).resolves.toMatchObject({
+      in_project: true,
+      openable: false,
     });
   });
 });

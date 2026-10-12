@@ -42,65 +42,16 @@ impl DaemonConfig {
             "msg_trunc_chars",
         );
         clamp_val(
-            &mut self.orchestrator.memory.supersession_distance_threshold,
-            0.0,
-            10.0,
-            "supersession_distance_threshold",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.fts_jaccard_threshold,
-            0.0,
-            1.0,
-            "fts_jaccard_threshold",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.profile_confidence_threshold,
-            0.0,
-            1.0,
-            "profile_confidence_threshold",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.profile_update_confidence_threshold,
-            0.0,
-            1.0,
-            "profile_update_confidence_threshold",
-        );
-        clamp_val(
             &mut self.orchestrator.memory.memory_confidence_threshold,
             0.0,
             1.0,
             "memory_confidence_threshold",
         );
-        // ── Orchestrator > Memory > Decay ──
         clamp_val(
-            &mut self.orchestrator.memory.decay.poll_interval_secs,
-            60,
-            86400,
-            "decay.poll_interval_secs",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.decay.half_life_days,
-            1.0,
-            365.0,
-            "decay.half_life_days",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.decay.min_importance,
-            0.0,
-            1.0,
-            "decay.min_importance",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.decay.soft_cap,
-            10,
-            100_000,
-            "decay.soft_cap",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.decay.access_boost,
-            0.0,
-            1.0,
-            "decay.access_boost",
+            &mut self.orchestrator.memory.carry_over_turns,
+            0,
+            20,
+            "carry_over_turns",
         );
         // ── Orchestrator > Costs ──
         clamp_val(
@@ -116,16 +67,41 @@ impl DaemonConfig {
             "extract_max_daily_cost_usd",
         );
         clamp_val(
-            &mut self.orchestrator.costs.extract_every_n_turns,
-            1,
-            100,
-            "extract_every_n_turns",
-        );
-        clamp_val(
             &mut self.orchestrator.costs.task_extract_max_daily_cost_usd,
             0.0,
             100.0,
             "task_extract_max_daily_cost_usd",
+        );
+        clamp_val(
+            &mut self.orchestrator.costs.extract_max_items_per_call,
+            1,
+            50,
+            "extract_max_items_per_call",
+        );
+        clamp_val(
+            &mut self.orchestrator.costs.task_extract_max_items_per_run,
+            1,
+            100,
+            "task_extract_max_items_per_run",
+        );
+        clamp_val(
+            &mut self.orchestrator.costs.extract_max_calls_per_day,
+            0,
+            10000,
+            "extract_max_calls_per_day",
+        );
+        // ── Orchestrator > Learning (Learning v2, design 09 §1.10) ──
+        clamp_val(
+            &mut self.orchestrator.learning.idle_secs,
+            0,
+            3600,
+            "learning.idle_secs",
+        );
+        clamp_val(
+            &mut self.orchestrator.learning.turns_per_flush,
+            1,
+            100,
+            "learning.turns_per_flush",
         );
         // ── Orchestrator > Prompt Budgets ──
         clamp_val(

@@ -94,8 +94,39 @@ fn test_daemon_keys_in_category() {
     let keys = keys_in_category("Daemon");
     // 41 keys plus the 8 [orchestrator.routing] keys (2026-08-30 wiring audit)
     // plus the 2 [execution.artifacts] keys (plan §4.6), less the 2
-    // simulated-chunking keys the real chat stream retired (S1).
+    // simulated-chunking keys the real chat stream retired (S1), plus the 2
+    // extraction count keys (memory redesign, plan 3.4), less the 8 keys of
+    // the deleted SQL memory engine — the two supersession thresholds, the
+    // four decay knobs and the two embedding-indexer knobs (plan 3.6), plus
+    // Learning v2's five (design 09 §1.10: the three
+    // `[orchestrator.learning]` keys, `extract_max_calls_per_day`, and the
+    // `memory_confidence_threshold` row it never had), less
+    // `extract_every_n_turns`, which Learning v2's cadence replaced, plus
+    // index-first recall's `recall_mode` (design 09 §13.2) — the
+    // conversation summaries' `learning.episode_max_per_day` (§13.3) came
+    // and went: a summary is projected with no call (design 11 §8, CQ-2) —
+    // plus the carry-over's `carry_over_turns` (design 11 §8, CQ-5).
     assert_eq!(keys.len(), 49);
+    for gone in [
+        "daemon.orchestrator.extract_every_n_turns",
+        "daemon.orchestrator.learning.episode_max_per_day",
+    ] {
+        assert!(!keys.iter().any(|d| d.key == gone), "{gone} has a row");
+    }
+    for key in [
+        "daemon.orchestrator.learning.enabled",
+        "daemon.orchestrator.learning.idle_secs",
+        "daemon.orchestrator.learning.turns_per_flush",
+        "daemon.orchestrator.extract_max_calls_per_day",
+        "daemon.orchestrator.memory_confidence_threshold",
+        "daemon.orchestrator.recall_mode",
+        "daemon.orchestrator.carry_over_turns",
+    ] {
+        assert!(
+            keys.iter().any(|d| d.key == key),
+            "{key} has no registry row"
+        );
+    }
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.execution.artifacts.max_artifact_bytes")
@@ -142,14 +173,19 @@ fn test_daemon_keys_in_category() {
         keys.iter()
             .any(|d| d.key == "daemon.server.heartbeat_interval_secs")
     );
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.server.embedding_batch_size")
-    );
     // Memory lifecycle keys
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.orchestrator.task_extract_enabled")
+    );
+    // The two extraction count keys (memory redesign, plan 3.4)
+    assert!(
+        keys.iter()
+            .any(|d| d.key == "daemon.orchestrator.extract_max_items_per_call")
+    );
+    assert!(
+        keys.iter()
+            .any(|d| d.key == "daemon.orchestrator.task_extract_max_items_per_run")
     );
     assert!(
         keys.iter()
@@ -159,30 +195,14 @@ fn test_daemon_keys_in_category() {
         keys.iter()
             .any(|d| d.key == "daemon.orchestrator.task_extract_min_content_len")
     );
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.orchestrator.supersession_distance_threshold")
-    );
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.orchestrator.fts_jaccard_threshold")
-    );
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.orchestrator.decay_poll_interval_secs")
-    );
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.orchestrator.decay_half_life_days")
-    );
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.orchestrator.decay_min_importance")
-    );
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.orchestrator.decay_soft_cap")
-    );
+    // The SQL memory engine's knobs went with it (memory redesign, plan 3.6):
+    // nothing supersedes by distance, decays, or indexes embeddings.
+    assert!(keys.iter().all(|d| {
+        !d.key.starts_with("daemon.orchestrator.decay_")
+            && !d.key.starts_with("daemon.server.embedding_")
+            && d.key != "daemon.orchestrator.supersession_distance_threshold"
+            && d.key != "daemon.orchestrator.fts_jaccard_threshold"
+    }));
     // S1: the two simulated-chunking keys are gone with the fake they
     // paced — the provider's own deltas are the chunks now.
     assert!(
@@ -207,13 +227,11 @@ fn test_api_keys_in_category() {
 #[test]
 fn test_agents_in_category() {
     let keys = keys_in_category("Agents");
-    assert_eq!(keys.len(), 6);
+    // The four `ai.embeddings.*` rows went with the embedder (plan 3.6).
+    assert_eq!(keys.len(), 2);
     assert!(keys.iter().any(|d| d.key == "ai.default_model"));
     assert!(keys.iter().any(|d| d.key == "ai.fallback_models"));
-    assert!(keys.iter().any(|d| d.key == "ai.embeddings.enabled"));
-    assert!(keys.iter().any(|d| d.key == "ai.embeddings.provider"));
-    assert!(keys.iter().any(|d| d.key == "ai.embeddings.model"));
-    assert!(keys.iter().any(|d| d.key == "ai.embeddings.dimensions"));
+    assert!(keys.iter().all(|d| !d.key.starts_with("ai.embeddings.")));
     assert!(keys.iter().all(|d| d.backend == ConfigBackend::LlmToml));
 }
 
@@ -240,9 +258,9 @@ fn test_subcategories() {
     assert!(api_subs.contains(&"Codex"));
 
     let agent_subs = subcategories_in_category("Agents");
-    assert_eq!(agent_subs.len(), 2);
+    assert_eq!(agent_subs.len(), 1);
     assert!(agent_subs.contains(&"Orchestrator"));
-    assert!(agent_subs.contains(&"Embeddings"));
+    assert!(!agent_subs.contains(&"Embeddings"));
 
     // Connectors/System have no subcategories
     assert!(subcategories_in_category("Connectors").is_empty());
@@ -274,12 +292,7 @@ fn test_keys_in_subcategory() {
     assert!(orch.iter().any(|d| d.key == "ai.default_model"));
     assert!(orch.iter().any(|d| d.key == "ai.fallback_models"));
 
-    let emb = keys_in_subcategory("Agents", "Embeddings");
-    assert_eq!(emb.len(), 4);
-    assert!(emb.iter().any(|d| d.key == "ai.embeddings.enabled"));
-    assert!(emb.iter().any(|d| d.key == "ai.embeddings.provider"));
-    assert!(emb.iter().any(|d| d.key == "ai.embeddings.model"));
-    assert!(emb.iter().any(|d| d.key == "ai.embeddings.dimensions"));
+    assert!(keys_in_subcategory("Agents", "Embeddings").is_empty());
 }
 
 #[test]
@@ -328,8 +341,9 @@ fn test_validate_daemon_int_range() {
 #[test]
 fn test_daemon_server_keys() {
     let server_keys = keys_in_subcategory("Daemon", "Server");
-    // Ten, less `stream_chunk_delay_ms` and `stream_chunk_words` (S1).
-    assert_eq!(server_keys.len(), 8);
+    // Ten, less `stream_chunk_delay_ms` and `stream_chunk_words` (S1), less
+    // the two embedding-indexer knobs (plan 3.6).
+    assert_eq!(server_keys.len(), 6);
     assert!(
         server_keys
             .iter()
@@ -363,16 +377,6 @@ fn test_daemon_server_keys() {
     assert!(
         server_keys
             .iter()
-            .any(|d| d.key == "daemon.server.embedding_poll_interval_secs")
-    );
-    assert!(
-        server_keys
-            .iter()
-            .any(|d| d.key == "daemon.server.embedding_batch_size")
-    );
-    assert!(
-        server_keys
-            .iter()
             .all(|d| d.backend == ConfigBackend::DaemonToml)
     );
 }
@@ -383,17 +387,39 @@ fn test_validate_new_daemon_keys() {
     assert!(validate("daemon.server.heartbeat_interval_secs", "5").is_ok());
     assert!(validate("daemon.server.heartbeat_interval_secs", "0").is_err());
     assert!(validate("daemon.server.heartbeat_interval_secs", "301").is_err());
-    assert!(validate("daemon.server.embedding_batch_size", "50").is_ok());
-    assert!(validate("daemon.server.embedding_batch_size", "0").is_err());
+    assert!(validate("daemon.server.stale_timeout_secs", "30").is_ok());
+    assert!(validate("daemon.server.stale_timeout_secs", "0").is_err());
 
     // Orchestrator keys
     assert!(validate("daemon.orchestrator.summary_min_new_older_messages", "12").is_ok());
-    assert!(validate("daemon.orchestrator.extract_every_n_turns", "5").is_ok());
+    // Learning v2 (design 09 §1.10)
+    assert!(validate("daemon.orchestrator.learning.enabled", "false").is_ok());
+    assert!(validate("daemon.orchestrator.learning.idle_secs", "0").is_ok());
+    assert!(validate("daemon.orchestrator.learning.idle_secs", "3601").is_err());
+    assert!(validate("daemon.orchestrator.learning.turns_per_flush", "0").is_err());
+    assert!(validate("daemon.orchestrator.learning.turns_per_flush", "100").is_ok());
+    assert!(validate("daemon.orchestrator.extract_max_calls_per_day", "0").is_ok());
+    assert!(validate("daemon.orchestrator.extract_max_calls_per_day", "10001").is_err());
+    assert!(validate("daemon.orchestrator.memory_confidence_threshold", "0.65").is_ok());
+    assert!(validate("daemon.orchestrator.memory_confidence_threshold", "1.5").is_err());
+    assert!(validate("daemon.orchestrator.extract_max_items_per_call", "12").is_ok());
+    assert!(validate("daemon.orchestrator.extract_max_items_per_call", "51").is_err());
+    // Index-first recall (design 09 §13.2): two values, `index` the default.
+    assert!(validate("daemon.orchestrator.recall_mode", "index").is_ok());
+    assert!(validate("daemon.orchestrator.recall_mode", "excerpts").is_ok());
+    assert!(validate("daemon.orchestrator.recall_mode", "snippets").is_err());
+    assert_eq!(
+        normalize("daemon.orchestrator.recall_mode", "EXCERPTS"),
+        "excerpts"
+    );
+    assert_eq!(
+        lookup("daemon.orchestrator.recall_mode").and_then(|d| d.default),
+        Some("index")
+    );
 
     // Execution keys
     assert!(validate("daemon.execution.max_tools_per_round", "5").is_ok());
     assert!(validate("daemon.execution.max_tools_per_round", "0").is_err());
-
 }
 
 #[test]

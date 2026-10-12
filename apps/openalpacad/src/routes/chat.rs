@@ -371,12 +371,15 @@ fn plan_turn(
 /// A bad or foreign attachment id is a client error, not a gateway failure — map
 /// it to 4xx so the GUI/CLI can tell report-from-retry instead of treating
 /// everything as a `500`. Shared by the preflight and by the send itself, which
-/// runs the same check a second time for its other callers.
+/// runs the same check a second time for its other callers. A result file in
+/// the project is not an attachment (ruling R-T8): `422 ATTACHMENT_IN_PROJECT`.
 fn attachment_refusal(message: &str) -> Response {
     let (status, code) = if message.starts_with("Attachment not found") {
         (StatusCode::NOT_FOUND, "ATTACHMENT_NOT_FOUND")
     } else if message.starts_with("Access denied to attachment") {
         (StatusCode::FORBIDDEN, "ATTACHMENT_ACCESS_DENIED")
+    } else if message.starts_with("Not an attachment") {
+        (StatusCode::UNPROCESSABLE_ENTITY, "ATTACHMENT_IN_PROJECT")
     } else {
         (StatusCode::INTERNAL_SERVER_ERROR, "GATEWAY_ERROR")
     };
@@ -601,16 +604,22 @@ fn sse_frame(event: &openalpaca_core::chat::ChatStreamEvent) -> (&'static str, S
             "error",
             serde_json::json!({ "message": message }).to_string(),
         ),
+        // Design 09 §4.4: the daemon-authored `preview` (`null` for the
+        // ordinary card) and `per_call` (no *Always allow*) ride the frame.
         E::ConfirmationRequested {
             request_id,
             tool_name,
             tool_arguments,
+            preview,
+            per_call,
         } => (
             "confirmation_requested",
             serde_json::json!({
                 "request_id": request_id,
                 "tool_name": tool_name,
                 "tool_arguments": tool_arguments,
+                "preview": preview,
+                "per_call": per_call,
             })
             .to_string(),
         ),
@@ -631,8 +640,10 @@ fn sse_frame(event: &openalpaca_core::chat::ChatStreamEvent) -> (&'static str, S
 }
 
 /// SSE data payload for a `done` event: the serde form of the event minus the
-/// `"event"` tag. Optional fields (attachments_used, delegation) appear only
-/// when present.
+/// `"event"` tag. Optional fields (`attachments_used`, `attachments_skipped`,
+/// `memory_used`, `delegation`) appear only when present; the turn's
+/// continuity (`working_state_updated`, `continued_from` — design 11 §5) is
+/// always there, `false` and `null` on an ordinary turn.
 fn done_event_data(event: &openalpaca_core::chat::ChatStreamEvent) -> String {
     let mut value = serde_json::to_value(event).unwrap_or_default();
     if let Some(obj) = value.as_object_mut() {
@@ -719,14 +730,18 @@ pub async fn delete_chat_history_handler(
         return Json(ChatDeleteResponse { deleted: 0 }).into_response();
     };
 
+    let cleared = before_history_cleared(&state.db, &session_id);
     match chat_service.clear_history(&session_id) {
         Ok(deleted) => {
-            // Also clear that conversation's summary — the compactor's notes
-            // describe messages that no longer exist. The session row itself
-            // survives: this empties a conversation, it does not delete one
-            // (`DELETE /v1/sessions/{id}` does).
-            let conv_repo = openalpaca_storage::ConversationRepository::new(&state.db);
-            let _ = conv_repo.clear_summary_for_session(&session_id);
+            after_history_cleared(
+                &state.db,
+                state.gateway.learning(),
+                Some(state.memory_service.clone()),
+                &state.local_user_id,
+                &session_id,
+                cleared,
+            )
+            .await;
             Json(ChatDeleteResponse { deleted }).into_response()
         }
         Err(e) => error_response(
@@ -736,6 +751,59 @@ pub async fn delete_chat_history_handler(
         )
         .into_response(),
     }
+}
+
+/// What a clear reads before the messages go: their ids and the
+/// conversation's project root — its summaries are forgotten by them
+/// (design 09 §13.3). A read that fails forgets nothing.
+struct ClearedConversation {
+    message_ids: Vec<i64>,
+    root: Option<String>,
+}
+
+fn before_history_cleared(
+    db: &openalpaca_storage::Database,
+    session_id: &str,
+) -> ClearedConversation {
+    let repo = openalpaca_storage::ConversationRepository::new(db);
+    ClearedConversation {
+        message_ids: repo.message_ids(session_id).unwrap_or_default(),
+        root: repo
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.workspace_id),
+    }
+}
+
+/// What clearing a conversation's messages leaves to tidy. The session row
+/// survives: this empties a conversation, it does not delete one
+/// (`DELETE /v1/sessions/{id}` does).
+async fn after_history_cleared(
+    db: &openalpaca_storage::Database,
+    learning: Option<&Arc<openalpaca_core::memory::learning::LearningQueue>>,
+    memory: Option<Arc<openalpaca_core::memory::service::MemoryService>>,
+    owner: &str,
+    session_id: &str,
+    cleared: ClearedConversation,
+) {
+    // The compactor's summary describes messages that no longer exist.
+    let _ =
+        openalpaca_storage::ConversationRepository::new(db).clear_summary_for_session(session_id);
+    // LQ4: the cleared turns are not learned — they went with the messages.
+    // The cursor stays where it is: message ids are never reused, so it
+    // still reads correctly for the turns that follow.
+    if let Some(queue) = learning {
+        queue.forget_session(session_id);
+    }
+    // Design 09 §13.3: its summaries go with the messages they summarise.
+    crate::routes::sessions::forget_conversation_summaries(
+        memory,
+        owner,
+        cleared.root.as_deref(),
+        cleared.message_ids,
+    )
+    .await;
 }
 
 // ── PUT /v1/chat/messages/:message_id/feedback ────────────────────
@@ -862,6 +930,8 @@ fn pending_confirmations(
                 task_id: r.task_id,
                 agent_id: r.agent_id,
                 lane_key: r.lane_key,
+                preview: r.preview,
+                per_call: r.per_call,
                 raised_at: r.timestamp.to_rfc3339(),
             })
             .collect(),
@@ -1046,6 +1116,49 @@ mod tests {
         assert_eq!(payload["error"]["code"], "TOO_MANY_ATTACHMENTS");
     }
 
+    /// The lead's ruling R-T8: a result file in the project is not an
+    /// attachment — `422 ATTACHMENT_IN_PROJECT` with core's sentence, among
+    /// the pure checks, before the lane is touched.
+    #[tokio::test]
+    async fn a_result_file_named_as_an_attachment_is_a_422() {
+        let (_dir, db) = sessions_db();
+        let bus = openalpaca_core::bus::EventBus::default();
+        let (row, _) = openalpaca_storage::ArtifactStore::new(&db)
+            .record_project_file(openalpaca_storage::NewProjectFile {
+                owner_id: "user1",
+                project_root: "/w/app",
+                rel_path: "src/lib.rs",
+                content: b"pub fn a() {}\n",
+                task_id: None,
+                agent_id: None,
+            })
+            .expect("the pointer row");
+        let body = ChatSendRequest {
+            content: "look at this".to_string(),
+            attachments: vec![openalpaca_storage::AttachmentRef {
+                file_id: row.id.clone(),
+                caption: None,
+            }],
+            session_id: None,
+            activate: false,
+            model: None,
+            unattended: false,
+        };
+        let response = plan_turn(&db, &bus, "user1", None, 10, &body, None)
+            .err()
+            .expect("the result file is refused");
+        let (status, payload) = refusal(response).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(payload["error"]["code"], "ATTACHMENT_IN_PROJECT");
+        assert_eq!(
+            payload["error"]["message"],
+            format!(
+                "Not an attachment: '{}' is a file in the project (src/lib.rs); read it with file_read.",
+                row.id
+            )
+        );
+    }
+
     fn make_done(
         delegation: Option<openalpaca_core::gateway::DelegationInfo>,
     ) -> openalpaca_core::chat::ChatStreamEvent {
@@ -1057,8 +1170,49 @@ mod tests {
             duration_ms: 42,
             attachments_used: None,
             attachments_skipped: None,
+            memory_used: None,
             delegation,
+            working_state_updated: false,
+            continued_from: None,
         }
+    }
+
+    /// **Plan 3.3 (design §7a).** The `done` payload names the memory notes
+    /// the turn delivered — id, the revision read, and why — and omits the
+    /// field when none was, so every existing client is unchanged. Live only:
+    /// nothing persists it and `GET /v1/chat/history` never serves it.
+    #[test]
+    fn done_names_the_memory_notes_the_turn_used() {
+        let id = openalpaca_storage::memory_files::NoteId::parse(
+            "00000021-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let event = openalpaca_core::chat::ChatStreamEvent::Done {
+            content: "vim".to_string(),
+            model: "qwen3:8b".to_string(),
+            tokens_in: 10,
+            tokens_out: 5,
+            duration_ms: 90,
+            attachments_used: None,
+            attachments_skipped: None,
+            memory_used: Some(vec![openalpaca_core::gateway::MemoryUsed {
+                id,
+                revision: "a".repeat(64),
+                reason: openalpaca_core::memory::service::UsedReason::Recall,
+            }]),
+            delegation: None,
+            working_state_updated: false,
+            continued_from: None,
+        };
+        let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
+        assert_eq!(data["memory_used"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            data["memory_used"][0]["id"],
+            "00000021-0000-4000-8000-000000000001"
+        );
+        assert_eq!(data["memory_used"][0]["revision"], "a".repeat(64));
+        assert_eq!(data["memory_used"][0]["reason"], "recall");
+        assert_eq!(data["memory_used"][0].as_object().map(|o| o.len()), Some(3));
     }
 
     /// **U3(c).** The `done` payload names what the turn answered *without*.
@@ -1076,7 +1230,10 @@ mod tests {
                 id: "img-1".to_string(),
                 reason: "the answering model does not support image input".to_string(),
             }]),
+            memory_used: None,
             delegation: None,
+            working_state_updated: false,
+            continued_from: None,
         };
         let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
         assert_eq!(data["attachments_skipped"][0]["id"], "img-1");
@@ -1242,6 +1399,38 @@ mod tests {
         assert_eq!(parsed["content"], "Paris");
     }
 
+    /// Design 09 §4.4: the `confirmation_requested` frame carries the
+    /// daemon-authored `preview` and `per_call`, so the GUI's card and the
+    /// CLI's inline prompt can show the text and drop *Always allow*; the
+    /// ordinary card says `null` and `false`.
+    #[test]
+    fn the_sse_frame_carries_preview_and_per_call() {
+        use openalpaca_core::chat::ChatStreamEvent as E;
+        let (name, data) = sse_frame(&E::ConfirmationRequested {
+            request_id: "req-1".to_string(),
+            tool_name: "memory_confirm".to_string(),
+            tool_arguments: serde_json::json!({"id": "s"}),
+            preview: Some("Replace your saved note “A” with “B”?".to_string()),
+            per_call: true,
+        });
+        assert_eq!(name, "confirmation_requested");
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(parsed["preview"], "Replace your saved note “A” with “B”?");
+        assert_eq!(parsed["per_call"], true);
+        assert_eq!(parsed["tool_arguments"]["id"], "s");
+
+        let (_, data) = sse_frame(&E::ConfirmationRequested {
+            request_id: "req-2".to_string(),
+            tool_name: "memory_forget".to_string(),
+            tool_arguments: serde_json::json!({}),
+            preview: None,
+            per_call: false,
+        });
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(parsed["preview"], serde_json::Value::Null);
+        assert_eq!(parsed["per_call"], false);
+    }
+
     #[test]
     fn test_done_event_data_without_delegation() {
         let data: serde_json::Value =
@@ -1256,6 +1445,7 @@ mod tests {
         assert!(data.get("delegation").is_none());
         assert!(data.get("attachments_used").is_none());
         assert!(data.get("attachments_skipped").is_none());
+        assert!(data.get("memory_used").is_none());
     }
 
     #[test]
@@ -1267,6 +1457,109 @@ mod tests {
         let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
         assert_eq!(data["delegation"]["task_id"], "task-123");
         assert_eq!(data["delegation"]["title"], "Research Rust");
+    }
+
+    /// **Design 11 §5 (owner decision CQ-7).** `done` says whether the turn
+    /// compacted — its working state changed — and which previous
+    /// conversation it was given, `{session_id, topic}`; an ordinary turn
+    /// says `false` and `null`, both always present.
+    #[test]
+    fn done_says_whether_the_working_state_changed_and_what_it_continued_from() {
+        let data: serde_json::Value =
+            serde_json::from_str(&done_event_data(&make_done(None))).unwrap();
+        assert_eq!(data["working_state_updated"], false);
+        assert!(data["continued_from"].is_null());
+        assert!(data.as_object().unwrap().contains_key("continued_from"));
+
+        let mut event = make_done(None);
+        if let openalpaca_core::chat::ChatStreamEvent::Done {
+            working_state_updated,
+            continued_from,
+            ..
+        } = &mut event
+        {
+            *working_state_updated = true;
+            *continued_from = Some(openalpaca_core::gateway::ContinuedFrom {
+                session_id: "s-prev".to_string(),
+                topic: "Lisbon trip".to_string(),
+            });
+        }
+        let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
+        assert_eq!(data["working_state_updated"], true);
+        assert_eq!(
+            data["continued_from"],
+            serde_json::json!({"session_id": "s-prev", "topic": "Lisbon trip"})
+        );
+    }
+
+    /// LQ4: clearing a conversation drops its turns not yet learned — the
+    /// learning queue forgets the session — as well as its summary.
+    #[tokio::test]
+    async fn clearing_a_conversation_drops_its_unlearned_turns() {
+        let (_dir, db) = sessions_db();
+        let session = openalpaca_storage::ConversationRepository::new(&db)
+            .create_session("user1:gui", "gui", None, None)
+            .expect("session")
+            .id;
+        let queue = crate::test_util::learning_queue(&db);
+        crate::test_util::finish_turn(&queue, "user1:gui", &session);
+        assert_eq!(queue.pending_turns(&session), 1);
+
+        after_history_cleared(
+            &db,
+            Some(&queue),
+            None,
+            "user1",
+            &session,
+            before_history_cleared(&db, &session),
+        )
+        .await;
+        assert_eq!(queue.pending_turns(&session), 0, "the turns were dropped");
+        assert!(!queue.is_due(&session));
+    }
+
+    /// Design 09 §13.3 (LQ4): clearing a conversation also forgets the
+    /// summaries whose sources all lie in it — read before the rows go —
+    /// and nothing it taught.
+    #[tokio::test]
+    async fn clearing_a_conversation_forgets_its_summaries() {
+        let (_dir, db) = sessions_db();
+        let (_home, _guard, memory) = crate::test_util::memory_service(&db, "user1");
+        let repo = openalpaca_storage::ConversationRepository::new(&db);
+        let session = repo
+            .create_session("user1:gui", "gui", None, None)
+            .expect("session")
+            .id;
+        let rows: Vec<i64> = ["Plan the Lisbon trip.", "Sure."]
+            .iter()
+            .map(|text| {
+                repo.insert(&openalpaca_storage::ConversationMessage {
+                    lane_key: "user1:gui".to_string(),
+                    role: "user".to_string(),
+                    content: text.to_string(),
+                    session_id: Some(session.clone()),
+                    ..Default::default()
+                })
+                .expect("message")
+            })
+            .collect();
+        crate::test_util::extracted_note(
+            &memory,
+            "user1",
+            None,
+            "Conversation on 2026-09-20: Lisbon",
+            &rows,
+            true,
+        );
+        crate::test_util::extracted_note(&memory, "user1", None, "Lisbon trip", &rows[..1], false);
+
+        let cleared = before_history_cleared(&db, &session);
+        repo.delete_by_session(&session).expect("clear");
+        after_history_cleared(&db, None, Some(memory.clone()), "user1", &session, cleared).await;
+        assert_eq!(
+            crate::test_util::note_titles(&memory, "user1", None),
+            vec!["Lisbon trip".to_string()]
+        );
     }
 
     // ── Phase 7a: which conversation a chat turn lands in ───────────
@@ -1577,7 +1870,13 @@ mod tests {
         workspace: Option<&str>,
     ) -> openalpaca_core::gateway::persistence::PersistedUserMessage {
         openalpaca_core::gateway::persistence::GatewayPersistence::new(db.clone())
-            .persist_user_message("user1:gui", "carry on", "gui", root(workspace).as_deref())
+            .persist_user_message(
+                "user1:gui",
+                "carry on",
+                "gui",
+                root(workspace).as_deref(),
+                None,
+            )
             .expect("persist the user message")
     }
 
@@ -1595,6 +1894,8 @@ mod tests {
     #[tokio::test]
     async fn resuming_a_named_session_keeps_its_workspace_and_does_not_switch() {
         let (_dir, db) = sessions_db();
+        let home = tempfile::tempdir().expect("home store");
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let bus = openalpaca_core::bus::EventBus::default();
         let mut rx = bus.subscribe();
         let repo = openalpaca_storage::ConversationRepository::new(&db);
@@ -1679,6 +1980,8 @@ mod tests {
     #[tokio::test]
     async fn a_named_session_with_no_project_takes_the_header() {
         let (_dir, db) = sessions_db();
+        let home = tempfile::tempdir().expect("home store");
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let bus = openalpaca_core::bus::EventBus::default();
         let unbound = openalpaca_storage::ConversationRepository::new(&db)
             .get_or_create_active_session("user1:gui", "gui", None)
@@ -1706,6 +2009,8 @@ mod tests {
     #[tokio::test]
     async fn a_turn_naming_no_session_still_switches_project() {
         let (_dir, db) = sessions_db();
+        let home = tempfile::tempdir().expect("home store");
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
         let bus = openalpaca_core::bus::EventBus::default();
         let repo = openalpaca_storage::ConversationRepository::new(&db);
 
@@ -1802,6 +2107,8 @@ mod tests {
             lane_key: Some("user1:gui".to_string()),
             task_id: Some("task-1".to_string()),
             agent_instance_id: Some("lead_agent::abcd1234".to_string()),
+            preview: None,
+            per_call: false,
             timestamp: at,
         }
     }
@@ -1835,6 +2142,27 @@ mod tests {
         assert_eq!(first.agent_id, "lead_agent");
         assert_eq!(first.lane_key.as_deref(), Some("user1:gui"));
         assert_eq!(first.raised_at, base.to_rfc3339());
+        assert_eq!(first.preview, None);
+        assert!(!first.per_call);
+    }
+
+    /// Design 09 §4.4: a card restored from the pending list after a reload
+    /// says what the live one said — the preview and `per_call` ride along.
+    #[test]
+    fn a_pending_confirmation_carries_its_preview_and_per_call() {
+        let broker = openalpaca_core::security::confirmation::ConfirmationBroker::new();
+        let _rx = broker.request(
+            &openalpaca_core::security::confirmation::ConfirmationRequest {
+                tool_name: "memory_confirm".to_string(),
+                preview: Some("Replace your saved note “A” with “B”?".to_string()),
+                per_call: true,
+                ..raised("req-1", "memory_confirm", chrono::Utc::now())
+            },
+        );
+        let body = pending_confirmations(Some(&broker));
+        let json = serde_json::to_value(&body.confirmations[0]).unwrap();
+        assert_eq!(json["preview"], "Replace your saved note “A” with “B”?");
+        assert_eq!(json["per_call"], true);
     }
 
     /// Answered is gone: this is the pending set, never a history.

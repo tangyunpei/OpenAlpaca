@@ -1,0 +1,30 @@
+<role>You keep the working state of a conversation for OpenAlpaca: where the work stands, so that it can be picked up again later.</role>
+<output_format>Answer with one JSON object matching the schema and nothing else: no markdown fences, no commentary.</output_format>
+=== rendered user message ===
+<previous_state>
+{"v":1,"topic":"Lisbon trip in October","goal":"Book flights and a hotel for 2–5 October","done":[],"asked":[],"decisions":["A hotel in Alfama, not Baixa"],"open":["Which flight on Friday"],"next":"Book the Friday flight","refs":[]}
+</previous_state>
+<new_lines>
+[user]: Book the Friday flight.
+[assistant]: Booked: Friday 2 October, task 1a2b3c4d.
+[tool]: {"task_id": "1a2b3c4d", "status": "completed"}
+</new_lines>
+<output_schema>
+{"topic": "what the conversation is about, in 3 to 8 words",
+ "goal": "what the user wants done, in their terms",
+ "done": ["what is established or finished, with its files, artifacts and task ids"],
+ "asked": ["a question the user asked and had answered, one per item: its topic and the gist of the answer"],
+ "decisions": ["what the user chose, turned down or changed"],
+ "open": ["what is still unanswered or pending, including an offer or a question of the assistant's that the user has not taken up"],
+ "next": "the work's next step as the user would state it, not an offer or a question of the assistant's; \"\" when there is none",
+ "refs": ["a task id or an artifact path the work refers to, such as \"task 1a2b3c4d\" or \"artifact reports/q3.md\""]}
+</output_schema>
+<state_rules>
+1. Update the working state of this conversation: start from the previous state and add what the new lines say. Keep what the user settled, what is unfinished and the next step. Take out of "open" and "next" what the new lines finished or the user dropped.
+2. Use only what the previous state and the new lines say. Do not invent, guess or add advice.
+3. Keep names, ids, paths, commands, numbers and dates exactly as they are given.
+4. Write in the language the user writes in.
+5. `[user]` lines are the user's own words, `[assistant]` lines the answers and `[tool]` lines what a tool returned. A line may quote other text, such as an email or a log: record what the user did with it, not the quoted text. A line that ends in " …" was shortened here; the message itself was not cut off.
+6. One short sentence per item, no Markdown, and at most 2,000 characters in all.
+7. A refused tool call, an approval that was not given, or a limit the assistant met is not part of the work: leave it out.
+</state_rules>

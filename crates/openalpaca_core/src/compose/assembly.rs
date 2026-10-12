@@ -40,6 +40,7 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
         messages.push(ChatMessage::system(&block.content));
     }
     messages.extend(input.dynamic_context.context_messages.iter().cloned());
+    let mut history_start = messages.len();
     messages.extend(input.history.messages.iter().cloned());
 
     // === Per-layer token accounting ==========================================
@@ -67,20 +68,34 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
     // If the stitched messages exceed `model_window * TRIM_THRESHOLD`, drop the
     // oldest non-system messages until we fit. The system message at index 0
     // is preserved — the spec is explicit that Layer 5 trims from the head of
-    // history, not from the system prompt.
+    // history, not from the system prompt. So is the working-state block
+    // (design 11 §4, CQ-4): it is the one carrier of what the trim removes,
+    // so the trim takes the message after it. The previous conversation's
+    // block may go, and is not counted as a history row when it does (§3.2).
     let threshold = (input.model_window as f64 * TRIM_THRESHOLD) as u32;
     let mut total = crate::runner::estimate_messages_tokens(&messages);
     let mut trimmed = 0usize;
+    let mut history_head_dropped = 0usize;
     while total > threshold && messages.len() > 1 {
-        let Some(idx_to_trim) = messages
-            .iter()
-            .position(|m| !matches!(m.role, Role::System))
-        else {
-            // No non-system messages left — stop trimming (spec forbids
-            // removing the system prompt).
+        let Some(idx_to_trim) = messages.iter().position(|m| {
+            !matches!(m.role, Role::System)
+                && !m
+                    .content
+                    .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
+        }) else {
+            // Nothing left the trim may take — stop (spec forbids removing
+            // the system prompt, and the working state stays).
             break;
         };
         let removed = messages.remove(idx_to_trim);
+        if idx_to_trim < history_start {
+            history_start -= 1;
+        } else if !removed
+            .content
+            .starts_with(crate::orchestrator::working_state::PREVIOUS_BLOCK_PREFIX)
+        {
+            history_head_dropped += 1;
+        }
         let removed_tokens = crate::runner::estimate_messages_tokens(std::slice::from_ref(&removed));
         total = total.saturating_sub(removed_tokens);
         history_tokens = history_tokens.saturating_sub(removed_tokens);
@@ -127,6 +142,7 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
         token_budget,
         section_registry,
         layer_trace: input.layer_trace,
+        history_head_dropped,
     }
 }
 

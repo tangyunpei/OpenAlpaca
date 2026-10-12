@@ -63,6 +63,7 @@ export function useRunController(): RunController {
   const setSteerTarget = useUiStore((s) => s.setSteerTarget);
   const clearSteerTarget = useUiStore((s) => s.clearSteerTarget);
   const setLibraryKind = useUiStore((s) => s.setLibraryKind);
+  const setLibraryResults = useUiStore((s) => s.setLibraryResults);
   const openArtifact = useUiStore((s) => s.openArtifact);
   const showToast = useUiStore((s) => s.showToast);
   const [busy, setBusy] = useState<RunBusy | null>(null);
@@ -150,13 +151,16 @@ export function useRunController(): RunController {
   const openRunFiles = useCallback(
     (run: Run) => {
       setLibraryKind("All");
+      // A run's outcome lists its by-products only (R38), so the Library opens
+      // on that side whatever side the reader left it on.
+      setLibraryResults(false);
       const first = run.artifacts.find((artifact) => artifact.id !== null);
       // Without an artifact id there is nothing to select — the Library opens
       // unfiltered rather than on a guessed row.
       if (first?.id !== undefined && first.id !== null) openArtifact(first.id);
       else setView("library");
     },
-    [openArtifact, setLibraryKind, setView],
+    [openArtifact, setLibraryKind, setLibraryResults, setView],
   );
 
   const busyFor = useCallback(

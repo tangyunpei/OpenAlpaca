@@ -35,13 +35,14 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use colored::Colorize;
 use futures_util::StreamExt;
+use openalpaca_core::utils::text::{Escaped, escape_hidden, escape_hidden_line, hidden_notice};
 use openalpaca_storage::discovery;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, print_list};
+use crate::output::{OutputFormat, TableRow, json_with_hidden_escaped, table_header_lines};
 
 #[derive(Subcommand)]
 pub enum ConfirmationCommands {
@@ -99,6 +100,14 @@ pub struct PendingPrompt {
     pub agent_id: String,
     #[serde(default)]
     pub lane_key: Option<String>,
+    /// The daemon-authored text of the card (design 09 §4.4), for
+    /// `memory_confirm`; absent for the ordinary card.
+    #[serde(default)]
+    pub preview: Option<String>,
+    /// The approval is good for this one call only: `--entire-tool` is
+    /// refused for it.
+    #[serde(default)]
+    pub per_call: bool,
     pub raised_at: String,
 }
 
@@ -129,7 +138,7 @@ impl TableRow for PendingPrompt {
         format!(
             "{:<38} {:<18} {:<10} {:<20}",
             self.request_id,
-            self.tool_name,
+            escape_hidden_line(&self.tool_name).text,
             run,
             self.raised_at.chars().take(19).collect::<String>(),
         )
@@ -163,16 +172,161 @@ fn listing_note(count: usize) -> String {
 async fn list(format: OutputFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
     let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
-    let prompts = pending_prompts(page);
+    print!(
+        "{}",
+        listing(
+            &pending_prompts(page),
+            format,
+            std::io::stdout().is_terminal()
+        )
+    );
+    Ok(())
+}
 
-    if matches!(format, OutputFormat::Table) {
-        println!("{}", listing_note(prompts.len()).dimmed());
-        if prompts.is_empty() {
-            return Ok(());
+/// Everything `list` prints, painted, one line each: `--format json`'s
+/// document alone ([`listing_json`] — never the generic `print_list`, whose
+/// JSON passes a bidi override or a C1 control through raw); or, on a
+/// terminal first [`crate::output::TERMINAL_RESET`] as before a prompt,
+/// then the note, the table with its `TOOL` cell escaped, one notice for
+/// each request that hides anything ([`notice_lines`]) and the previews.
+/// The table is where a person reads those notices before `approve <id>`,
+/// so it gets the reset too; the JSON is a machine format and gets none.
+fn listing(prompts: &[PendingPrompt], format: OutputFormat, tty: bool) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    // Writing into a `String` cannot fail.
+    if matches!(format, OutputFormat::Json) {
+        let _ = writeln!(out, "{}", listing_json(prompts));
+        return out;
+    }
+    out.push_str(crate::output::terminal_reset(tty));
+    let _ = writeln!(out, "{}", listing_note(prompts.len()).dimmed());
+    if prompts.is_empty() {
+        return out;
+    }
+    let (header, rule) = table_header_lines(&PendingPrompt::headers());
+    let _ = writeln!(out, "{}", header.dimmed());
+    let _ = writeln!(out, "{}", rule.dimmed());
+    for prompt in prompts {
+        let _ = writeln!(out, "{}", prompt.table_row());
+    }
+    let notices = notice_lines(prompts);
+    for line in &notices {
+        let _ = writeln!(out, "{}", line.yellow());
+    }
+    if !notices.is_empty() {
+        let _ = writeln!(out, "{}", NOTICE_COUNTS_UNPRINTED.dimmed());
+    }
+    for block in preview_blocks(prompts) {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{block}");
+    }
+    out
+}
+
+/// A prompt's tool-controlled text as a person is shown it: the tool's name
+/// and the agent's id on one line each (`escape_hidden_line`, which also
+/// shows a line break and a tab), the arguments serialized on one line and
+/// then escaped (`escape_hidden`). The name comes from a third party (an MCP
+/// `<server>__<tool>` or plugin `<plugin>::<tool>` name), the id from a
+/// template, the arguments from the model.
+struct EscapedPrompt {
+    name: Escaped,
+    agent: Option<Escaped>,
+    arguments: Option<Escaped>,
+}
+
+impl EscapedPrompt {
+    fn new(tool_name: &str, agent_id: Option<&str>, arguments: &serde_json::Value) -> Self {
+        Self {
+            name: escape_hidden_line(tool_name),
+            agent: agent_id.map(escape_hidden_line),
+            arguments: (!arguments.is_null())
+                .then(|| escape_hidden(&serde_json::to_string(arguments).unwrap_or_default())),
         }
     }
-    print_list(&prompts, format);
-    Ok(())
+
+    /// The one line that counts every character shown escaped, or `None`.
+    fn notice(&self) -> Option<String> {
+        let hidden = |escaped: &Option<Escaped>| escaped.as_ref().map_or(0, |e| e.hidden);
+        hidden_notice(self.name.hidden + hidden(&self.agent) + hidden(&self.arguments))
+    }
+}
+
+/// Under the table, one notice for each prompt that carries a hidden
+/// character, named by its id: `<request_id> — Note: this request contains
+/// 2 hidden characters, shown as <U+…>.`
+///
+/// It counts the whole request — the name, the agent and the arguments —
+/// not only the name the table shows escaped: the arguments are what
+/// `approve <id>` lets run and the table has no room for them, so this line
+/// is the one warning a person answering by id gets. [`listing`] prints one
+/// line under these saying so and pointing at `--format json`, which carries
+/// the agent and the arguments; `watch` shows a new prompt's arguments
+/// escaped.
+fn notice_lines(prompts: &[PendingPrompt]) -> Vec<String> {
+    prompts
+        .iter()
+        .filter_map(|prompt| {
+            EscapedPrompt::new(
+                &prompt.tool_name,
+                Some(&prompt.agent_id),
+                &prompt.tool_arguments,
+            )
+            .notice()
+            .map(|notice| format!("{} — {notice}", prompt.request_id))
+        })
+        .collect()
+}
+
+/// Under the notices, once: a notice counts the whole request (see
+/// [`notice_lines`]) and says the characters are "shown as <U+…>", yet the
+/// table prints only the name — so this says where the rest are shown.
+const NOTICE_COUNTS_UNPRINTED: &str = "The count includes the agent id and the arguments, \
+     which the table does not print: --format json prints them, each hidden character as a \
+     JSON \\u escape.";
+
+/// `--format json`: the daemon's own fields, as they came, with every
+/// character a one-line field would show as `<U+XXXX>` written instead with
+/// JSON's own escape (a backslash, `u` and four hex digits; a surrogate pair
+/// past U+FFFF). A JSON reader gets exactly the values the daemon sent; a
+/// terminal never receives a raw C1 control, bidi override or zero-width
+/// character, which `serde_json` writes as they are (it escapes only the C0
+/// controls). No notice line: it would not be JSON.
+fn listing_json(prompts: &[PendingPrompt]) -> String {
+    json_with_hidden_escaped(&serde_json::to_string_pretty(prompts).unwrap_or_default())
+}
+
+/// Under the table, what each card with a daemon-authored preview says
+/// (design 09 §4.4) — the table has no room for it, and without it a
+/// `memory_confirm` row is three opaque ids.
+fn preview_blocks(prompts: &[PendingPrompt]) -> Vec<String> {
+    prompts
+        .iter()
+        .filter_map(|prompt| {
+            let preview = prompt.preview.as_deref().filter(|p| !p.is_empty())?;
+            Some(format!(
+                "{} — from OpenAlpaca:\n{}",
+                prompt.request_id,
+                crate::chat_stream::indent(preview)
+            ))
+        })
+        .collect()
+}
+
+/// `--entire-tool` on a prompt whose approval is good for one call only
+/// (design 09 §4.2 rule 2): refused here, before anything is sent — the
+/// daemon would ignore the scope, and "every later call" would be untrue.
+fn refuse_entire_tool(request_id: &str, prompt: Option<&PendingPrompt>) -> Result<()> {
+    match prompt {
+        Some(prompt) if prompt.per_call => bail!(
+            "`{}` asks about one call only, so --entire-tool does not apply to it: run \
+             `openalpaca tasks confirmations approve {request_id}` without it. Nothing was answered.",
+            escape_hidden_line(&prompt.tool_name).text
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// The body `POST /v1/chat/confirmations/{request_id}` takes.
@@ -180,7 +334,7 @@ async fn list(format: OutputFormat) -> Result<()> {
 /// `approval_scope` is only meaningful on an approval, and `entire_tool` is the
 /// owner widening it deliberately — it is never inferred, and never sent with a
 /// denial.
-fn answer_body(approved: bool, entire_tool: bool) -> serde_json::Value {
+pub(crate) fn answer_body(approved: bool, entire_tool: bool) -> serde_json::Value {
     let mut body = serde_json::json!({ "approved": approved });
     if approved && entire_tool {
         body["approval_scope"] = serde_json::json!("entire_tool");
@@ -188,7 +342,7 @@ fn answer_body(approved: bool, entire_tool: bool) -> serde_json::Value {
     body
 }
 
-fn answer_path(request_id: &str) -> String {
+pub(crate) fn answer_path(request_id: &str) -> String {
     format!(
         "/v1/chat/confirmations/{}",
         urlencoding::encode(request_id)
@@ -199,8 +353,13 @@ fn answer_path(request_id: &str) -> String {
 ///
 /// It reports the **answer**, not the outcome: the tool runs on the daemon
 /// after this returns, and whether it then succeeded is the run's to say.
+/// The name is escaped on one line like the prompt's, with no notice: the
+/// prompt above it already counted it.
 fn answered_line(approved: bool, entire_tool: bool, tool_name: Option<&str>) -> String {
-    let what = tool_name.unwrap_or("the tool call");
+    let what = tool_name.map_or_else(
+        || "the tool call".to_string(),
+        |name| escape_hidden_line(name).text,
+    );
     match (approved, entire_tool) {
         (true, true) => {
             format!("Approved — {what}, and every later call of it this session. The run continues.")
@@ -228,6 +387,14 @@ fn refusal_line(request_id: &str, error: &str) -> String {
 
 async fn answer(request_id: &str, approved: bool, entire_tool: bool) -> Result<()> {
     let client = DaemonClient::connect()?;
+    if approved && entire_tool {
+        let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
+        let prompts = pending_prompts(page);
+        refuse_entire_tool(
+            request_id,
+            prompts.iter().find(|p| p.request_id == request_id),
+        )?;
+    }
     match client
         .post_raw(&answer_path(request_id), &answer_body(approved, entire_tool))
         .await
@@ -257,6 +424,12 @@ struct ConfirmationFrame {
     agent_id: Option<String>,
     #[serde(default)]
     task_id: Option<String>,
+    /// The daemon-authored text of the card (design 09 §4.4).
+    #[serde(default)]
+    preview: Option<String>,
+    /// The approval is good for this call only: no `[a]lways`.
+    #[serde(default)]
+    per_call: bool,
 }
 
 /// The frame this socket message is, or `None` for every other event.
@@ -273,22 +446,59 @@ fn confirmation_frame(text: &str) -> Option<ConfirmationFrame> {
 }
 
 /// The block printed when a prompt arrives — what is being asked, and by whom.
+///
+/// The tool's name, the agent's id and the arguments come from outside
+/// OpenAlpaca, and this prints them at a terminal, where a raw ESC or C1 CSI
+/// rewrites the line and a bidi override reorders it: every hidden character
+/// in them is shown as `<U+XXXX>` ([`EscapedPrompt`]) and one notice directly
+/// under the arguments counts them. The run and request ids are the daemon's
+/// own; the preview is the daemon's text, printed as it comes, because
+/// nothing the model wrote reaches it raw: `memory_confirm`'s has every
+/// character the escape would show taken out of what it quotes
+/// (`utils::text::one_line`), and those of `shell_execute`, `file_write`,
+/// `file_edit` and `send` show the ones in what they quote escaped
+/// (`<U+XXXX>`), with their own count line. The folder a card names — the
+/// project's root, the conversation's scratch folder or the artifact store —
+/// is printed as it is: the person's own path or OpenAlpaca's.
 fn prompt_block(frame: &ConfirmationFrame) -> String {
-    let mut out = format!("Tool '{}' needs your approval", frame.tool_name);
+    let shown = EscapedPrompt::new(
+        &frame.tool_name,
+        frame.agent_id.as_deref(),
+        &frame.tool_arguments,
+    );
+    let mut out = format!("Tool '{}' needs your approval", shown.name.text);
     if let Some(task_id) = &frame.task_id {
         out.push_str(&format!("\n  run:   {task_id}"));
     }
-    if let Some(agent_id) = &frame.agent_id {
-        out.push_str(&format!("\n  agent: {agent_id}"));
+    if let Some(agent) = &shown.agent {
+        out.push_str(&format!("\n  agent: {}", agent.text));
     }
     out.push_str(&format!("\n  id:    {}", frame.request_id));
-    if !frame.tool_arguments.is_null() {
+    if let Some(preview) = frame.preview.as_deref().filter(|p| !p.is_empty()) {
         out.push_str(&format!(
-            "\n  args:  {}",
-            serde_json::to_string(&frame.tool_arguments).unwrap_or_default()
+            "\n  from OpenAlpaca:\n{}",
+            crate::chat_stream::indent(&crate::chat_stream::indent(preview))
         ));
     }
+    if let Some(arguments) = &shown.arguments {
+        out.push_str(&format!("\n  args:  {}", arguments.text));
+    }
+    if let Some(notice) = shown.notice() {
+        out.push_str(&format!("\n  {notice}"));
+    }
     out
+}
+
+/// What `watch` writes when a prompt arrives: on a terminal first
+/// [`crate::output::TERMINAL_RESET`] — whatever ran in this terminal before,
+/// the prompt reads as printed — then a blank line and the [`prompt_block`],
+/// painted.
+fn watch_prompt_text(frame: &ConfirmationFrame, tty: bool) -> String {
+    format!(
+        "{}\n{}\n",
+        crate::output::terminal_reset(tty),
+        prompt_block(frame).yellow().bold()
+    )
 }
 
 /// Sit on the daemon's event socket and answer prompts as they are raised.
@@ -317,6 +527,7 @@ async fn watch() -> Result<()> {
             .dimmed()
     );
 
+    let tty = std::io::stdout().is_terminal();
     let (_, mut read) = ws_stream.split();
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
@@ -326,9 +537,8 @@ async fn watch() -> Result<()> {
             message = read.next() => match message {
                 Some(Ok(Message::Text(text))) => {
                     let Some(frame) = confirmation_frame(&text) else { continue };
-                    println!();
-                    println!("{}", prompt_block(&frame).yellow().bold());
-                    let (approved, entire_tool) = ask();
+                    print!("{}", watch_prompt_text(&frame, tty));
+                    let (approved, entire_tool) = ask(frame.per_call);
                     match client
                         .post_raw(
                             &answer_path(&frame.request_id),
@@ -366,23 +576,34 @@ async fn watch() -> Result<()> {
     Ok(())
 }
 
-/// The three answers, read from the terminal. Anything else is a denial —
-/// fail-closed is the rule, and a typo must never widen anything.
-fn ask() -> (bool, bool) {
+/// The answers, read from the terminal. Anything else is a denial —
+/// fail-closed is the rule, and a typo must never widen anything. A per-call
+/// prompt (design 09 §4.2) offers no `[a]lways`.
+fn ask(per_call: bool) -> (bool, bool) {
     tokio::task::block_in_place(|| {
-        print!("Allow? [y]es / [a]lways this tool / [N]o ");
+        print!("{}", ask_line(per_call));
         std::io::stdout().flush().ok();
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).ok();
-        read_answer(&input)
+        read_answer(&input, per_call)
     })
 }
 
-/// `(approved, entire_tool)` for what was typed.
-fn read_answer(input: &str) -> (bool, bool) {
+fn ask_line(per_call: bool) -> &'static str {
+    if per_call {
+        "Allow this one call? [y]es / [N]o "
+    } else {
+        "Allow? [y]es / [a]lways this tool / [N]o "
+    }
+}
+
+/// `(approved, entire_tool)` for what was typed. On a per-call prompt
+/// "always" was never offered, so it is not a yes — it denies, like any
+/// other word.
+fn read_answer(input: &str, per_call: bool) -> (bool, bool) {
     match input.trim().to_lowercase().as_str() {
         "y" | "yes" => (true, false),
-        "a" | "always" => (true, true),
+        "a" | "always" if !per_call => (true, true),
         _ => (false, false),
     }
 }
@@ -521,13 +742,21 @@ mod tests {
     /// only an explicit "always" widens.
     #[test]
     fn only_a_deliberate_yes_approves() {
-        assert_eq!(read_answer("y\n"), (true, false));
-        assert_eq!(read_answer("YES\n"), (true, false));
-        assert_eq!(read_answer("a\n"), (true, true));
-        assert_eq!(read_answer("always\n"), (true, true));
-        assert_eq!(read_answer("n\n"), (false, false));
-        assert_eq!(read_answer("\n"), (false, false), "Enter alone denies");
-        assert_eq!(read_answer("yolo\n"), (false, false), "a typo denies");
+        assert_eq!(read_answer("y\n", false), (true, false));
+        assert_eq!(read_answer("YES\n", false), (true, false));
+        assert_eq!(read_answer("a\n", false), (true, true));
+        assert_eq!(read_answer("always\n", false), (true, true));
+        assert_eq!(read_answer("n\n", false), (false, false));
+        assert_eq!(
+            read_answer("\n", false),
+            (false, false),
+            "Enter alone denies"
+        );
+        assert_eq!(
+            read_answer("yolo\n", false),
+            (false, false),
+            "a typo denies"
+        );
     }
 
     /// An id the daemon is not holding is three ordinary situations, not an
@@ -591,5 +820,438 @@ mod tests {
         assert!(block.contains("task-1"), "{block}");
         assert!(block.contains("req-1"), "{block}");
         assert!(block.contains("notes.md"), "{block}");
+    }
+
+    /// Design 09 §4.2 rule 2: a per-call prompt refuses `--entire-tool`
+    /// before anything is sent; an ordinary prompt, or one the listing no
+    /// longer holds, is left to the daemon as before.
+    #[test]
+    fn entire_tool_is_refused_for_a_per_call_prompt() {
+        let prompts = pending_prompts(page(serde_json::json!([
+            {
+                "request_id": "req-memory",
+                "tool_name": "memory_confirm",
+                "tool_arguments": {"id": "s"},
+                "agent_id": "orchestrator",
+                "lane_key": "alice:gui",
+                "preview": "Replace your saved note “Editor” with “Editor”?",
+                "per_call": true,
+                "raised_at": "2026-09-24T10:00:00+00:00"
+            },
+            {
+                "request_id": "req-shell",
+                "tool_name": "shell_execute",
+                "agent_id": "orchestrator",
+                "raised_at": "2026-09-24T10:00:01+00:00"
+            }
+        ])));
+        assert!(prompts[0].per_call);
+        assert_eq!(
+            prompts[0].preview.as_deref(),
+            Some("Replace your saved note “Editor” with “Editor”?")
+        );
+        assert!(!prompts[1].per_call, "absent means false");
+
+        let err = refuse_entire_tool("req-memory", Some(&prompts[0])).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("--entire-tool"), "{err}");
+        assert!(err.contains("approve req-memory"), "{err}");
+        assert!(err.contains("Nothing was answered"), "{err}");
+        assert!(refuse_entire_tool("req-shell", Some(&prompts[1])).is_ok());
+        assert!(refuse_entire_tool("req-gone", None).is_ok());
+    }
+
+    /// Design 09 §4.4: `list` prints each card's preview under the table,
+    /// and only the cards that have one.
+    #[test]
+    fn the_listing_prints_what_a_per_call_card_says() {
+        let prompts = pending_prompts(page(serde_json::json!([
+            {
+                "request_id": "req-memory",
+                "tool_name": "memory_confirm",
+                "agent_id": "orchestrator",
+                "preview": "Replace your saved note “Editor” with “Editor”?\nYours: vim.",
+                "per_call": true,
+                "raised_at": "2026-09-24T10:00:00+00:00"
+            },
+            {
+                "request_id": "req-shell",
+                "tool_name": "shell_execute",
+                "agent_id": "orchestrator",
+                "raised_at": "2026-09-24T10:00:01+00:00"
+            }
+        ])));
+        assert_eq!(
+            preview_blocks(&prompts),
+            vec![
+                "req-memory — from OpenAlpaca:\n  Replace your saved note “Editor” with “Editor”?\n  Yours: vim."
+                    .to_string()
+            ]
+        );
+    }
+
+    /// Design 09 §4.2, §4.4 on `watch`: a per-call prompt shows the preview
+    /// before the arguments, offers no `[a]lways`, and reads "always" as the
+    /// denial it is there — fail-closed.
+    #[test]
+    fn watch_shows_the_preview_and_offers_no_always_for_a_per_call_prompt() {
+        colored::control::set_override(false);
+        let frame = confirmation_frame(
+            r#"{"type":"tool_confirmation_requested","request_id":"req-9","agent_id":"orchestrator",
+                "tool_name":"memory_confirm","tool_arguments":{"id":"s"},
+                "preview":"Replace your saved note “Editor” with “Editor”?","per_call":true}"#,
+        )
+        .expect("a prompt");
+        assert!(frame.per_call);
+        let block = prompt_block(&frame);
+        let preview_at = block.find("Replace your saved note").expect("the preview");
+        let args_at = block.find("args:").expect("the arguments stay");
+        assert!(preview_at < args_at, "{block}");
+        assert!(block.contains("from OpenAlpaca"), "{block}");
+        assert!(!ask_line(true).contains("always"));
+        assert!(ask_line(false).contains("[a]lways"));
+        assert_eq!(read_answer("a\n", true), (false, false));
+        assert_eq!(read_answer("always\n", true), (false, false));
+        assert_eq!(read_answer("y\n", true), (true, false));
+        assert_eq!(read_answer("a\n", false), (true, true));
+    }
+
+    // ── Hidden characters (approval surfaces show them as <U+XXXX>) ──
+    //
+    // Display only, and that is structural rather than a test here:
+    // rendering borrows the prompt (`&ConfirmationFrame`, `&PendingPrompt` —
+    // no interior mutability), the tool runs on the sandbox's own copy of
+    // its arguments, which never passes through the CLI, and `watch` and
+    // `approve` answer through `answer_path(&frame.request_id)` and
+    // `answer_body`, which `a_request_id_is_one_path_segment` and
+    // `the_answer_body_widens_nothing_on_its_own` pin. `--entire-tool` finds
+    // its prompt by the raw `request_id`.
+
+    /// Every character an approval surface must never print raw: a bidi
+    /// override, a zero-width space, a C1 CSI, a carriage return, a tag
+    /// character, a line break and an isolate.
+    const RAW: [char; 7] = [
+        '\u{202e}',
+        '\u{200b}',
+        '\u{9b}',
+        '\r',
+        '\u{e0041}',
+        '\n',
+        '\u{2066}',
+    ];
+
+    fn assert_no_raw(text: &str, allow_newline: bool) {
+        for c in RAW {
+            if allow_newline && c == '\n' {
+                continue;
+            }
+            assert!(
+                !text.contains(c),
+                "raw U+{:04X} printed: {text:?}",
+                c as u32
+            );
+        }
+    }
+
+    /// A pending prompt whose name, agent and arguments all hide characters.
+    fn spoofed_prompt() -> PendingPrompt {
+        PendingPrompt {
+            request_id: "req-spoof".to_string(),
+            tool_name: "srv__rm\u{202e}fdp\u{200b}".to_string(),
+            tool_arguments: serde_json::json!({
+                "path": "/srv/allow\u{200b}ed/\u{202e}txt.exe",
+                "c1": "\u{9b}31m",
+                "tag": "x\u{e0041}",
+            }),
+            task_id: None,
+            agent_id: "lead\u{2066}".to_string(),
+            lane_key: Some("alice:gui".to_string()),
+            preview: None,
+            per_call: false,
+            raised_at: "2026-09-25T10:00:00+00:00".to_string(),
+        }
+    }
+
+    /// The table's TOOL cell is a third party's name (MCP `<server>__<tool>`,
+    /// plugin `<plugin>::<tool>`): a bidi override or a zero-width space in
+    /// it is shown as an escape, and a line break cannot start a forged row.
+    #[test]
+    fn the_listing_shows_a_hidden_character_in_the_tool_name_as_an_escape() {
+        let mut prompt = spoofed_prompt();
+        let row = prompt.table_row();
+        assert!(row.contains("srv__rm<U+202E>fdp<U+200B>"), "{row}");
+        assert_no_raw(&row, false);
+
+        prompt.tool_name = "file_write\r\nreq-fake   shell_execute".to_string();
+        let row = prompt.table_row();
+        assert!(row.contains("file_write<U+000D><U+000A>req-fake"), "{row}");
+        assert_eq!(row.lines().count(), 1, "one prompt, one row: {row:?}");
+    }
+
+    /// Under the table, one notice per prompt that hides anything, named by
+    /// its id. It counts the whole request — name, agent and arguments —
+    /// because the table prints only the name, and the arguments it does
+    /// not print are what `approve <id>` lets run.
+    #[test]
+    fn the_listing_names_each_request_that_hides_characters() {
+        let spoofed = spoofed_prompt();
+        let clean = PendingPrompt {
+            request_id: "req-clean".to_string(),
+            tool_name: "file_write".to_string(),
+            tool_arguments: serde_json::json!({ "path": "notes/日本語.md", "text": "a\r\nb\tc" }),
+            agent_id: "orchestrator".to_string(),
+            ..spoofed_prompt()
+        };
+        let only_arguments = PendingPrompt {
+            request_id: "req-args".to_string(),
+            tool_name: "shell_execute".to_string(),
+            tool_arguments: serde_json::json!({ "command": "ls\u{200b}" }),
+            agent_id: "orchestrator".to_string(),
+            ..spoofed_prompt()
+        };
+        assert_eq!(
+            notice_lines(&[spoofed, clean, only_arguments]),
+            vec![
+                // Name 2, agent 1, arguments 4 (U+200B, U+202E, U+009B, U+E0041).
+                "req-spoof — Note: this request contains 7 hidden characters, shown as <U+…>."
+                    .to_string(),
+                "req-args — Note: this request contains 1 hidden character, shown as <U+…>."
+                    .to_string(),
+            ]
+        );
+    }
+
+    /// What `list` prints is `listing`, whichever the format: a spoofed
+    /// prompt reaches the terminal escaped in both, the JSON never through
+    /// the generic `print_list` (which writes the characters raw), and the
+    /// table with its notice under the rows.
+    #[test]
+    fn list_prints_a_spoofed_prompt_escaped_in_either_format() {
+        colored::control::set_override(false);
+        let prompts = vec![spoofed_prompt()];
+
+        let json = listing(&prompts, OutputFormat::Json, false);
+        assert_no_raw(&json, true);
+        assert_eq!(json, format!("{}\n", listing_json(&prompts)));
+
+        let table = listing(&prompts, OutputFormat::Table, false);
+        assert_no_raw(&table, true);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines[0], listing_note(1));
+        assert!(lines[1].starts_with("REQUEST_ID"), "{table}");
+        assert!(lines[3].starts_with("req-spoof"), "{table}");
+        assert!(lines[3].contains("srv__rm<U+202E>fdp<U+200B>"), "{table}");
+        assert_eq!(
+            lines[4],
+            "req-spoof — Note: this request contains 7 hidden characters, shown as <U+…>."
+        );
+        // The count covers what the table does not print, so the listing says
+        // where those escapes are to be seen.
+        assert_eq!(
+            lines[5],
+            "The count includes the agent id and the arguments, which the table does not \
+             print: --format json prints them, each hidden character as a JSON \\u escape."
+        );
+        assert_eq!(lines.len(), 6, "{table}");
+
+        let clean = PendingPrompt {
+            tool_name: "file_write".to_string(),
+            tool_arguments: serde_json::json!({ "path": "notes.md" }),
+            agent_id: "orchestrator".to_string(),
+            ..spoofed_prompt()
+        };
+        let table = listing(&[clean], OutputFormat::Table, false);
+        assert!(!table.contains("Note:"), "{table}");
+        assert!(
+            !table.contains("The count"),
+            "no notice, nothing to explain: {table}"
+        );
+
+        assert_eq!(
+            listing(&[], OutputFormat::Table, false),
+            format!("{}\n", listing_note(0)),
+            "nothing waiting: the note alone"
+        );
+    }
+
+    /// Before its table, a terminal gets the reset a prompt gets: `list` is
+    /// where a person reads the notices before `approve <id>`, and what an
+    /// earlier program left set (auto-wrap off, a line-drawing character
+    /// set, a conceal under `NO_COLOR`) would cut, garble or hide them. The
+    /// JSON is a machine format and a pipe is somebody else's input: neither
+    /// gets an escape sequence.
+    #[test]
+    fn list_resets_the_terminal_before_its_table() {
+        colored::control::set_override(false);
+        let prompts = vec![spoofed_prompt()];
+
+        let on_terminal = listing(&prompts, OutputFormat::Table, true);
+        assert_eq!(
+            on_terminal,
+            format!(
+                "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h{}",
+                listing(&prompts, OutputFormat::Table, false)
+            )
+        );
+        assert_eq!(
+            listing(&[], OutputFormat::Table, true),
+            format!(
+                "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h{}\n",
+                listing_note(0)
+            )
+        );
+
+        let json = listing(&prompts, OutputFormat::Json, true);
+        assert_eq!(json, listing(&prompts, OutputFormat::Json, false));
+        assert!(!json.contains(['\u{f}', '\u{1b}']), "{json:?}");
+        assert!(
+            !listing(&prompts, OutputFormat::Table, false).contains(['\u{f}', '\u{1b}']),
+            "no reset into a pipe"
+        );
+    }
+
+    /// `--format json` hands on the daemon's own values, so it writes a
+    /// hidden character with JSON's own escape: a JSON reader gets exactly
+    /// what the daemon sent, and a terminal never receives the character.
+    #[test]
+    fn the_json_listing_writes_hidden_characters_as_json_escapes() {
+        let prompts = vec![PendingPrompt {
+            // A wide blank, which serde_json writes raw.
+            lane_key: Some("alice\u{3000}:gui".to_string()),
+            ..spoofed_prompt()
+        }];
+        let json = listing_json(&prompts);
+        assert_no_raw(&json, true);
+        assert!(!json.contains('\u{3000}'), "{json}");
+        for escape in [
+            "u202e", "u200b", "u009b", "udb40", "udc41", "u2066", "u3000",
+        ] {
+            assert!(json.contains(&format!("\\{escape}")), "{escape}: {json}");
+        }
+        assert!(json.lines().count() > 10, "still pretty-printed: {json}");
+
+        let read: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            read,
+            serde_json::to_value(&prompts).unwrap(),
+            "the same values the daemon sent"
+        );
+    }
+
+    /// `watch` shows the name and the agent on one line each and the
+    /// arguments escaped, with one notice counting all of them directly
+    /// under the arguments.
+    #[test]
+    fn the_watch_block_shows_hidden_characters_as_escapes_and_counts_them() {
+        let frame: ConfirmationFrame = serde_json::from_value(serde_json::json!({
+            "type": "tool_confirmation_requested",
+            "request_id": "req-1",
+            "tool_name": "srv__rm\u{202e}fdp\u{200b}\r\n",
+            "agent_id": "lead\u{2066}\nagent: orchestrator",
+            "tool_arguments": {
+                "path": "/srv/allow\u{200b}ed/\u{202e}txt.exe",
+                "c1": "\u{9b}31m",
+                "tag": "x\u{e0041}",
+            },
+            "task_id": "task-1",
+        }))
+        .expect("frame");
+        let block = prompt_block(&frame);
+        assert_no_raw(&block, true);
+
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(
+            lines[0],
+            "Tool 'srv__rm<U+202E>fdp<U+200B><U+000D><U+000A>' needs your approval"
+        );
+        assert!(
+            lines.contains(&"  agent: lead<U+2066><U+000A>agent: orchestrator"),
+            "{block}"
+        );
+        let args = lines
+            .iter()
+            .position(|line| line.starts_with("  args:  "))
+            .expect("the arguments");
+        assert!(
+            lines[args].contains("allow<U+200B>ed/<U+202E>txt.exe"),
+            "{block}"
+        );
+        assert!(lines[args].contains("<U+009B>31m"), "{block}");
+        assert!(lines[args].contains("x<U+E0041>"), "{block}");
+        // Name 4, agent 2, arguments 4 — directly under the arguments.
+        assert_eq!(
+            lines.get(args + 1).copied(),
+            Some("  Note: this request contains 10 hidden characters, shown as <U+…>.")
+        );
+        assert_eq!(lines.len(), args + 2, "{block}");
+    }
+
+    /// Nothing escaped, no notice: a CJK path, a right-to-left letter and a
+    /// newline inside a string (which `serde_json` writes as `\n`) are not
+    /// hidden characters.
+    #[test]
+    fn the_watch_block_prints_no_notice_when_nothing_is_hidden() {
+        let frame: ConfirmationFrame = serde_json::from_value(serde_json::json!({
+            "request_id": "req-1",
+            "tool_name": "file_write",
+            "agent_id": "lead_agent",
+            "tool_arguments": { "path": "notes/日本語.md", "text": "שלום\r\nb\tc" },
+        }))
+        .expect("frame");
+        let block = prompt_block(&frame);
+        assert!(!block.contains("Note:"), "{block}");
+        assert!(!block.contains("<U+"), "{block}");
+        assert!(block.contains("notes/日本語.md"), "{block}");
+        assert!(block.contains(r"שלום\r\nb\tc"), "{block}");
+    }
+
+    /// Before each prompt, a terminal gets a reset of the modes that change
+    /// how it reads (shift-in, the ASCII character set, SGR 0, replace mode,
+    /// auto-wrap on): whatever an earlier program left set in this terminal
+    /// — auto-wrap off would cut the one-line arguments at the margin with
+    /// no notice. A pipe gets no escape sequence.
+    #[test]
+    fn watch_resets_the_terminal_before_each_prompt() {
+        colored::control::set_override(false);
+        let frame = confirmation_frame(
+            r#"{"type":"tool_confirmation_requested","request_id":"req-1","agent_id":"lead_agent",
+                "tool_name":"artifact_write","tool_arguments":{"path":"notes.md"}}"#,
+        )
+        .expect("frame");
+        assert_eq!(
+            watch_prompt_text(&frame, true),
+            format!(
+                "\u{f}\u{1b}(B\u{1b}[0m\u{1b}[4l\u{1b}[?7h\n{}\n",
+                prompt_block(&frame)
+            )
+        );
+        assert_eq!(
+            watch_prompt_text(&frame, false),
+            format!("\n{}\n", prompt_block(&frame))
+        );
+    }
+
+    /// The name repeated after an answer, and in the refusal of
+    /// `--entire-tool`, is escaped on one line like the prompt's.
+    #[test]
+    fn the_answer_and_the_refusal_escape_the_tool_name() {
+        let name = "srv__rm\u{202e}fdp\u{200b}\n";
+        let line = answered_line(true, false, Some(name));
+        assert!(
+            line.contains("srv__rm<U+202E>fdp<U+200B><U+000A>"),
+            "{line}"
+        );
+        assert_no_raw(&line, false);
+
+        let per_call = PendingPrompt {
+            tool_name: name.to_string(),
+            per_call: true,
+            ..spoofed_prompt()
+        };
+        let err = refuse_entire_tool("req-spoof", Some(&per_call))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("srv__rm<U+202E>fdp<U+200B><U+000A>"), "{err}");
+        assert_no_raw(&err, false);
     }
 }

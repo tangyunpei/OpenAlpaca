@@ -4,7 +4,10 @@
 > `crates/openalpaca_core/src/security`, `crates/openalpaca_core/src/runner`,
 > `crates/openalpaca_core/src/orchestrator/skill`, `apps/openalpacad/src/services`,
 > `apps/openalpacad/src/managers` and the shipped `config/`. Workspace version 0.1.0,
-> schema version 42 (the `001_baseline.sql` baseline).
+> schema version 1 (the `001_baseline.sql` baseline, re-baselined on 2026-09-28). The memory-tool rows
+> were rewritten for the Markdown memory redesign on 2026-09-24, against
+> `feat/markdown-memory`; the rest of the page stands on the 2026-09-20
+> verification.
 >
 > Code-level reference for the OpenAlpaca tool system.  For architecture
 > and design rationale see the companion [DESIGN.md](./DESIGN.md).  Struct
@@ -87,16 +90,20 @@ under `crates/openalpaca_core/src/`.
 | `tools/builtins/mod.rs` | Registration functions, `WorkspaceReadTool`/`WorkspaceWriteTool`, `ScriptToolBuiltIn`, built-in annotations |
 | `tools/builtins/web_search.rs` | `web_search` |
 | `tools/builtins/web_fetch.rs` | `web_fetch` |
-| `tools/builtins/file_ops.rs` | `file_read`, `file_write` (incl. the pre-edit snapshot) |
-| `tools/builtins/artifact_write.rs` | `artifact_write`, the `workspace_write` artifact spill |
+| `tools/builtins/file_ops.rs` | `file_read`, `file_list`, `file_write`, `file_edit` (the real write in a project with its pointer row, and the by-product with no project) |
+| `tools/builtins/pre_edit.rs` | The pre-edit copy `file_write` and `file_edit` share (`check_pre_edit`, `keep_pre_edit_copy`; ST-17, R46) |
+| `tools/builtins/approval_preview.rs` | The approval cards' texts (`command_card`, `write_card`, `edit_card`) |
+| `tools/builtins/artifact_read.rs` | `artifact_read` |
+| `tools/working_folder.rs` | `working_folder`, `WorkingFolder`, `WorkingFolderRefusal`, the `<working_folder>` note (`working_folder_note`) and the scratch folder (`scratch_dir`, `remove_scratch`) |
+| `tools/builtins/artifact_write.rs` | `artifact_write`, the `workspace_write` artifact spill, and `put_tool_artifact` — the store path `artifact_write` and `file_write` share |
 | `tools/builtins/read_result.rs` | `read_result` |
 | `tools/builtins/shell_execute.rs` | `shell_execute` |
-| `tools/builtins/memory_search.rs` | `memory_search` |
+| `tools/builtins/memory_tools.rs` | The eight memory tools — `memory_search`, `memory_read`, `memory_list`, `memory_timeline` (the read surface, `memory_read_tools()`) and `memory_store`, `memory_update`, `memory_forget`, `memory_confirm` (per request, main loop only; `memory_confirm` on attended `gui` turns only) — thin, strictly validated adapters over `memory::service::MemoryService` |
 | `tools/builtins/update_persona/` | `update_persona` (`mod.rs` dispatcher; `soul.rs`, `user.rs`, `identity.rs`, `common.rs`) |
 | `tools/builtins/send.rs` | `send` (connector message/file delivery) |
-| `tools/builtins/helpers/mod.rs` | Workspace path validation, backup management |
+| `tools/builtins/helpers/mod.rs` | The call's folder (`acting_folder`, `named_folder`), the path resolvers (`resolve_workspace_path`, `resolve_workspace_path_for_write`, `FolderRules`), backup management |
 | `tools/builtins/main_loop.rs` | `main_loop_tool_set()` — the chat loop's per-request tools |
-| `tools/builtins/start_workflow.rs`, `task_status.rs`, `steer_workflow.rs`, `memory_ops.rs`, `invoke_skill.rs` | The per-request tools themselves |
+| `tools/builtins/start_workflow.rs`, `task_status.rs`, `steer_workflow.rs`, `invoke_skill.rs`, and the writers in `memory_tools.rs` | The per-request tools themselves |
 | `tools/builtins/tests.rs`, `helpers/tests.rs`, `update_persona/tests.rs` | Tests |
 
 ### Security
@@ -117,7 +124,7 @@ under `crates/openalpaca_core/src/`.
 | File | Purpose |
 |------|---------|
 | `runner/agentic_loop/mod.rs` | `run_agentic_loop()`, `run_agentic_loop_routed()`, the tool phase, spill planning |
-| `runner/agentic_loop/tool_helpers.rs` | `truncate_tool_result_to()`, `head_tail_tool_result()`, `format_tool_error()`, `format_tool_error_with_hint()` |
+| `runner/agentic_loop/tool_helpers.rs` | `truncate_tool_result_to()`, `format_tool_error()`, `format_tool_error_with_hint()` (the head-and-tail cut is `head_tail()` in `utils/text.rs`) |
 | `runner/agentic_loop/config.rs` | `LoopConfig`, `LoopResult` |
 | `runner/agentic_loop/answer_guard.rs` | `AnswerGuard` — a last look at the finished answer (used by the chat loop) |
 | `runner/agentic_loop/backend.rs`, `context.rs`, `cost.rs` | LLM backend abstraction, loop state, `LoopCostAccumulator` |
@@ -169,7 +176,7 @@ pub struct ToolDefinition {
     pub name: String,                                    // Unique tool identifier
     pub description: String,                             // LLM-facing documentation
     pub parameters: serde_json::Value,                   // JSON Schema for arguments
-    pub strict: Option<bool>,                            // Anthropic strict tool mode
+    pub strict: Option<bool>,                            // OpenAI strict mode; sent only for a schema it accepts
     pub input_examples: Option<Vec<serde_json::Value>>,  // Example inputs for LLM
 }
 ```
@@ -201,14 +208,15 @@ holds no database handle.
 | `task_id` | `Option<String>` | The workflow run; `None` outside one |
 | `owner_id` | `Option<String>` | The owning user |
 | `principal`, `scope` | `Option<…>` | The requesting principal and resource scope, where threaded |
-| `workspace_id` | `Option<String>` | Workspace root for **memory scoping**; derived from the daemon's current directory when the request carried none |
-| `request_workspace_root` | `Option<String>` | The project root the *request* supplied, resolved.  Never derived from the current directory.  The only field that may place content on disk (`artifact_write`, the workspace spill) |
-| `workspace_path` | `Option<String>` | The path as sent; persisted with steering and follow-up items |
+| `workspace_id` | `Option<String>` | The root the request's path resolved to — the same value as `request_workspace_root` — and `None` when the request carried none; never derived from the daemon's current directory. **No memory path reads it** — the memory tools and the per-turn recall take `request_workspace_root` (memory redesign MD-5); `start_workflow` still forwards it into the run it starts, where nothing reads it |
+| `request_workspace_root` | `Option<String>` | The project root the *request* supplied, resolved.  Never derived from the current directory.  It names the turn's working folder (`tools::working_folder`), where the file tools and the shell act, and places the turn's by-products (`artifact_write`, the workspace spill) |
+| `workspace_path` | `Option<String>` | The path as sent; threaded on the main loop and read by no tool since F4 — the steering and follow-up writers persist `request_workspace_root` |
 | `skill_stack` | `Vec<String>` | Skill invocation chain, oldest first |
 | `effective_constraints` | `Option<EffectiveToolSet>` | Tool limits inherited from a parent skill chain |
 | `lane_key`, `source`, `request_id` | `Option<…>` | The conversation lane, the channel (`cli`, `telegram`, …) and the originating request |
+| `conversation_id` | `Option<String>` | The conversation (the `session` row) this call belongs to, whether or not its loop writes a log — what names the scratch folder of a turn with no project; inherited by every context cloned from this one |
 | `session_id` | `Option<String>` | The session whose log carries this call; scopes `read_result` |
-| `session_log` | `Option<SessionLogHandle>` | Emit side of that log; `file_write` uses it for the pre-edit snapshot |
+| `session_log` | `Option<SessionLogHandle>` | Emit side of that log; `file_write` and `file_edit` keep the pre-edit copy through it, and with none they replace no existing file |
 | `event_bus` | `Option<EventBus>` | Filled in by the sandbox when the caller left it empty, so a tool can announce what it produced |
 
 Helpers: `with_skill_pushed(skill_id)` clones the context and appends to
@@ -300,7 +308,7 @@ pub trait BuiltInTool: Send + Sync {
 }
 ```
 
-Context-dependent tools (`memory_search`, `update_persona`,
+Context-dependent tools (the six memory tools, `update_persona`,
 `workspace_read`, `workspace_write`, `artifact_write`, `read_result`,
 `file_write`, `send`, and every per-request tool) override
 `execute_with_context()`.  Several of them return an error from plain
@@ -434,7 +442,7 @@ argument errors early with clear messages.
 2. Detect unsubstituted placeholders (error)
 3. Build command via `platform::shell_command()`
 4. Execute with `tokio::time::timeout`
-5. Capture stdout + stderr (cap: 512 KB each)
+5. Capture stdout + stderr (cap: 512 KB each; `platform::shown_output` cuts to the cap and appends `[stdout cut at 512 KB; the rest was not kept]`, or `stderr`, when more was written)
 6. Exit code 0 → stdout; otherwise error including exit code and output
 
 ### MCP Backend Execution
@@ -652,23 +660,31 @@ All of these are registered in the shared `ToolRegistry` at daemon startup.
 |------|-----------|------------|-----------------|
 | `web_search` | `query` (required), `count` (default 5, max 20) | `web_access` | Brave Search API; requires `web_search.api_key` in `llm.toml` |
 | `web_fetch` | `url` (required) | `web_access` | SSRF-protected; response cap 1 MB |
-| `file_read` | `path` (required) | `file_read` | Workspace-scoped (relative paths only); max 10 MB |
-| `file_write` | `path`, `content` (required) | `file_write` | Workspace-scoped; max 10 MB; blocks SOUL.md/USER.md/IDENTITY.md (use `update_persona`); inside a session it snapshots a file before overwriting it and refuses the write if the snapshot cannot be kept |
+| `file_read` | `path` (required) | `file_read` | The working folder (`tools::working_folder`: the project's root, or the conversation's scratch folder, made at first use); relative paths only, no `..`, resolved whole — a link out of the folder is refused; in a project an `.openalpaca` component is refused (`.git` is read); max 10 MB; never asks |
+| `file_list` | `path` (required) | `file_read` | One folder of the working folder, not recursive: names sorted, sizes, folders with `/`, links with `@`, at most 500 entries; strict schema; never asks |
+| `file_write` | `path`, `content` (required) | `file_write` | In a project, the real file under its root (`resolve_workspace_path_for_write` with `FolderRules::Project`: `.git` and `.openalpaca` refused), the old content kept first (`pre_edit::keep_pre_edit_copy`: above `snapshot_max_bytes` refused, no session log and a file there refused), then a pointer row (`record_tool_project_file`; with no database or no owner the file is written and the result says the app could not list it); with no project a by-product in the home store through `put_tool_artifact`, named by `artifact_name` — the path itself when the name grammar carries it whole, else its slug plus the first eight hex digits of the path's SHA-256 (a character outside ASCII, a slug past `FILE_NAME_SLUG_BYTES` (60), an extension no kind keeps, or none) — with the path as written its `summary`, its kind from the extension (`store::kind_for_file_name`; an extension no kind admits is `code`, stored as `.bin`), the same path again in one run its next version, and a turn with no owner refused; its result is Round G's five parts with `artifact_read` as the fourth; a path naming no file is refused; max 10 MB; destructive — it asks, and its card says where the file lands |
+| `file_edit` | `path`, `old_string`, `new_string` (required); `replace_all` | `file_write` | In a project only; the file must exist, be a regular file and be UTF-8, within 10 MB before and after; `old_string` must occur once unless `replace_all`, and differ from `new_string`; an LF `old_string` not found is retried against a CRLF file with both strings' line breaks written CRLF, and in a file whose every line break is CRLF both strings' lone `\n` are written `\r\n` even when `old_string` is found as given (the lead's ruling R-T21); the pre-edit copy, then the write, then the pointer row; destructive — its card quotes both strings, each cut after `EDIT_PREVIEW_BYTES` (1,000) |
 | `artifact_write` | `name`, `kind`, `content` (required); `note`, `summary`, `metadata` | `artifact_write` | `kind` ∈ `markdown`, `code`, `terminal`, `table`, `plan`, `image`, `html`, `binary`; versioned; max `max_artifact_bytes` (10 MB); store chosen from `request_workspace_root`, else the home store; needs a database |
 | `read_result` | `result_ref` (required), `offset`, `limit` | `read_result` | Reads only inside the calling session's `results/`; page 8 KB default, 64 KB max; needs `ToolContext.session_id` |
-| `shell_execute` | `command` (required) | `shell_execute` | 300s internal safety timeout; output cap 512 KB; injection patterns blocked by sanitizer |
-| `memory_search` | `query` (required), `limit` | `memory_read` | Registered only when DB + daemon config provided; hybrid FTS5 + sqlite-vec when an embedder is present; cascading workspace → global scope; owner from `ToolContext` |
+| `artifact_read` | `artifact_id` (required); `offset`, `limit` | `read_result` | A by-product of the turn's owner, of the turn's project or of none; pages like `read_result` (8 KB default, 64 KB max); refuses a result file in the project, another project's by-product, and `image` or `binary` kinds; needs a database |
+| `shell_execute` | `command` (required) | `shell_execute` | Starts in the working folder (a scratch folder is made at first use); the sandbox's per-tool timeout (`max_tool_runtime_secs`, 60 s by default) ends it first, and a 300 s timeout of its own holds when the sandbox is bypassed — on either, or when the call's future is dropped, `run_bounded` kills its process group (unix; the direct child on Windows); output cap 512 KB per stream, a cut stream ending with a line that says so; injection patterns blocked by the sanitizer, and `../` allowed (R29: a builtin's arguments are exempt); destructive — every command asks, its card naming the folder |
+| `memory_search` | `query` (required, 1–512 chars); `kind`, `scope`, `limit` (1–50, default 10), `detail` (`index` default, or `snippets`), `date_from`, `date_to` (RFC 3339 or `YYYY-MM-DD`, inclusive), `order_by` (`relevance` default, `newest`, `oldest`), `historical`, `as_of` | `memory_read` | Lexical only (index schema 5, design 09 §6.5): every term against a `unicode61` FTS5 table as a word or a word's beginning (a prefix query when its last token has ≥ 3 characters or is a number after another token, `10:30` finding `10:30am`; when that query fills its cap, each such term again as a whole word in the header and in the body), every term of ≥ 3 characters against a trigram table over titles, aliases and tags, and a term carrying a character of a script `unicode61` cannot split into words (CJK, Thai and the other scripts written without spaces; Devanagari, Tamil and the other scripts built with vowel signs — `query::is_unsegmented`) against a trigram table over those scripts' bodies; a bounded substring scan for a 1–2 character query, no model; `match` names `term`, `prefix`, `trigram`, `phrase`, `title`, `alias` or `fact_key`; filters (status, supersession, tombstones, same-`fact_key` losers, validity, the date bounds) before the limit; every hit re-read and re-hashed. `index` answers one row per note — `id`, `date`, `kind`, `scope`, `status`, `title`, `reason`, `size`, `conflict` — and no body; `snippets` answers cited excerpts by heading and line range with `freshness`, `conflict`, `valid_from`, `valid_to`; both with `partial` and `index_state` |
+| `memory_read` | `ids` (required, 1–10 distinct note ids); `expected_revision`, `section` (single id only) | `memory_read` | One entry per id in the order asked, each with provenance, the bodies sharing 32 KiB (a short one is never cut to make room); an id no note of the caller has answers `{id, error: "not_found"}` in its place; the old `id` argument is `invalid_input`; the service re-checks owner and scope |
+| `memory_timeline` | exactly one of `anchor` (a note id), `query`, `date`; `before`, `after` (0–20, default 5) | `memory_read` | The notes dated around the anchor, in date order, as `memory_search` index rows whose `reason` is `before`, `anchor` or `after`; superseded, archived and ended notes are listed and marked, candidates never |
+| `memory_list` | `kind`, `status` (default `active`), `scope`, `cursor`, `limit` (1–100), `include_history`, `include_candidates` | `memory_read` | Metadata only, paged by an opaque cursor |
 | `workspace_read` | `key` (optional) | `workspace_read` | Reads shared task workspace; requires `ToolContext.task_id` |
 | `workspace_write` | `key`, `content` (required), `entry_type`, `file_asset_id` | `workspace_write` | 32 KB content cap; optimistic locking with up to 5 jittered-backoff retries; an `artifact` entry is also saved to the artifact store and keeps a 512-character preview |
 | `update_persona` | `target` (`soul`/`user`/`identity`), `mode` (`replace`/`sections`), `content_b64`, `sections` | `persona_write` | Edits persona docs with validation + timestamped backups |
-| `send` | `action` (`message`/`file`), `channel`, `recipient` (required); `content` / `file_path` + `filename` | `messaging` | Registered when a `ConnectorSendLock` is supplied (the daemon always supplies one); errors at call time when no connector can send |
+| `send` | `action` (`message`/`file`), `channel`, `recipient` (required); `content` / `file_path` or `artifact_id` + `filename`; `mime_type`, `caption` | `messaging` | Registered when a `ConnectorSendLock` is supplied (the daemon always supplies one); errors at call time when no connector can send. `file_path` is relative to the working folder and resolved whole, a link out of it refused; `artifact_id` names a file of the turn's owner — a by-product or an upload, confined under its own row's content root, or a result file, under its project and refused when that project is missing — and one of a project the turn is not in is refused; destructive — its card names the file, its size, the channel, the recipient and the name it is sent as |
 
 Built-in tools also carry MCP-style annotations
 (`annotations_for_builtin()` in `builtins/mod.rs`):
 
-- read-only, closed-world: `file_read`, `workspace_read`, `memory_search`, `read_result`
+- read-only, closed-world: `file_read`, `file_list`, `artifact_read`, `workspace_read`, `memory_search`, `memory_read`, `memory_list`, `memory_timeline`, `read_result`
 - read-only, open-world: `web_fetch`, `web_search`
-- destructive, closed-world: `file_write`, `workspace_write`, `artifact_write`, `update_persona`
+- by-product writers, closed-world, not in the default confirmation set: `artifact_write`, `workspace_write` (`local_write_annotations`: they write only under `~/.openalpaca`)
+- destructive, closed-world: `file_write`, `file_edit`, `update_persona`, `memory_update`, `memory_forget`, `memory_confirm` — and `memory_confirm` alone is also **per call** (`approval_is_per_call`): its card is always raised, never answered from the approval cache or `auto_approve`, and never offers *Always allow*
+- none: `memory_store` — deliberately, so a plain save never prompts; what bounds a tool-issued `supersedes` is authority (a tool call can never retire a note the user wrote), not a card
 - destructive, open-world: `shell_execute`, `send`
 
 The destructive annotations feed the default confirmation set
@@ -683,23 +699,24 @@ capabilities.
 /// Core built-in tools (no persona context needed)
 pub fn builtin_tools(
     db: Option<Database>,
-    embedder: Option<Arc<dyn Embedder>>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
-    workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool>
-// Returns: web_search, web_fetch, file_read, file_write, shell_execute,
-//          read_result, artifact_write, workspace_read, workspace_write (always)
-//          + memory_search (only if db + daemon_config provided)
+// Returns: web_search, web_fetch, file_read, file_list, file_write, file_edit,
+//          shell_execute, read_result, artifact_read, artifact_write,
+//          workspace_read, workspace_write (always)
+
+/// The memory read surface, registered by the daemon over its one service
+/// (`apps/openalpacad/src/services/tools.rs`, `register_memory_read_tools`)
+pub fn memory_read_tools(service: Arc<MemoryService>) -> Vec<RegisteredTool>
+// Returns: memory_search, memory_read, memory_list, memory_timeline — each providing `memory_read`
 
 /// Full built-in tools with persona and connector context
 pub fn builtin_tools_with_persona_context(
     db: Option<Database>,
-    embedder: Option<Arc<dyn Embedder>>,
     persona_ctx: PersonaToolContext,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
-    workspace_root: Option<PathBuf>,
     connector_send_provider: Option<ConnectorSendLock>,
 ) -> Vec<RegisteredTool>
 // Returns: all of builtin_tools() PLUS update_persona,
@@ -710,9 +727,11 @@ pub fn builtin_tools_with_persona_context(
 pub fn workspace_tool_definitions() -> Vec<ToolDefinition>
 ```
 
-`workspace_root` defaults to `std::env::current_dir()` when `None`.  The
-daemon captures the workspace root once at startup; `file_read`,
-`file_write` and nothing else use it.
+No tool takes a root at registration: `file_read`, `file_list`, `file_write`,
+`file_edit`, `send` and `shell_execute` act in each call's working folder
+(`tools::working_folder`: the project's root, or the conversation's scratch
+folder), and a call that reaches one through `execute`, with no context, is
+refused.
 
 ### 6.3 Skill Scripts (`ScriptToolBuiltIn`)
 
@@ -728,7 +747,7 @@ the registry made for that one invocation:
 - Executed with the configured interpreter — or directly when none is set,
   which needs the exec bit and a shebang — with a per-script timeout
   (default 30 s), working directory = the skill directory, and a 512 KB
-  output cap.
+  output cap, a cut output ending with a line that says so.
 
 ### 6.4 Workspace Path Helpers
 
@@ -737,9 +756,11 @@ the registry made for that one invocation:
 | Function | Purpose |
 |----------|---------|
 | `validate_workspace_path(path)` | Reject absolute paths and `..` components |
-| `resolve_workspace_path(rel, root)` | Canonicalize + verify stays within workspace |
-| `resolve_workspace_path_for_write(rel, root)` | Like above but for new files (parent may not exist) |
-| `is_soul_path(path)` / `is_user_path(path)` / `is_identity_path(path)` | Case-insensitive protected-file checks |
+| `acting_folder(ctx)` | The call's working folder, ready to act in (a scratch folder is made on first use), and its `FolderRules`; `Err` is the refusal's own sentence |
+| `named_folder(ctx)` | The same for an approval card: the folder named, never made |
+| `resolve_workspace_path(rel, root, rules)` | Canonicalize the whole path, the last component included, and verify it stays within the folder; `FolderRules::Project` also refuses an `.openalpaca` component |
+| `resolve_workspace_path_for_write(rel, root, rules)` | Like above for a target that may not exist yet (the nearest existing ancestor, and the leaf when an entry stands there); `FolderRules::Project` also refuses `.git` and `.openalpaca` |
+| `is_store_owned_path(path, access)` | `workspace_write`'s key check: `state/` and a memory partition's control files |
 | `unique_backup_path(dir, prefix)` | Generate timestamped backup path with unique suffix |
 | `prune_backups(dir, max, prefix)` | Remove oldest backups exceeding retention limit |
 
@@ -753,13 +774,13 @@ the registry made for that one invocation:
 | `snapshot_max_bytes` (config) | 10 MB | `[orchestrator.sessions]` |
 | `MAX_WORKSPACE_CONTENT_SIZE` | 32 KB | `builtins/mod.rs` |
 | `SPILL_PREVIEW_CHARS` (workspace artifact entry) | 512 chars | `builtins/artifact_write.rs` |
-| `MAX_SCRIPT_OUTPUT_BYTES` | 512 KB | `builtins/mod.rs` |
+| `OUTPUT_CAP` (a skill script's, a command tool's and `shell_execute`'s output, per stream; `shown_output` names the cut) | 512 KB | `tools/platform.rs` |
 | `MAX_TOOL_RESULT_SIZE` (fallback for `tool_result_inline_bytes`) | 32 KB | `agentic_loop/tool_helpers.rs` |
 | `PREVIEW_CHARS` (result spill preview) | 2048 chars | `session_log/record.rs` |
 | `read_result` page | 8 KB default, 64 KB max | `builtins/read_result.rs` |
 | HTTP backend response cap | 1 MB (stream), 8 KB returned | `registry/mod.rs` |
-| Command backend output cap | 512 KB per stream | `registry/mod.rs` |
-| `shell_execute` output cap | 512 KB per stream | `builtins/shell_execute.rs` |
+| Command backend output cap | 512 KB per stream (`OUTPUT_CAP`) | `registry/mod.rs` |
+| `shell_execute` output cap | 512 KB per stream (`OUTPUT_CAP`) | `builtins/shell_execute.rs` |
 
 ---
 
@@ -767,7 +788,9 @@ the registry made for that one invocation:
 
 These tools are **not in the shared registry**.  Each caller value-clones
 the registry, registers its own instances into the clone, and builds its
-`SandboxManager` over that clone.  None carries annotations, and only the
+`SandboxManager` over that clone.  None carries annotations — except the
+chat loop's `memory_update`, `memory_forget` and `memory_confirm`, registered
+with their built-in destructive profile so they prompt — and only the
 lead's own tools (the coordination tools, `post_update`, `queue_followup`)
 declare a capability, `orchestration`.  They reach the model because the
 caller lists them, and the caller's allow list is built from that same list.
@@ -780,9 +803,11 @@ caller lists them, and the caller's allow list is built from that same list.
 |------|-----------|--------------|
 | `start_workflow` | `goal` (required), `title` | Always |
 | `task_status` | `task_id` (optional) | Always |
-| `memory_store` | `content` (required) | With a database |
-| `memory_forget` | `query` (required) | With a database |
-| `memory_search` | see 6.1 (definition only; the backend is shared) | When registered |
+| `memory_store` | `title`, `body`, `kind` (required); `scope`, `aliases`, `tags`, `fact_key`, `sources`, `valid_from`, `valid_to`, `supersedes: {id, expected_revision}` | When the daemon has a memory service. Records origin `extracted_user`, never `user`; an exact duplicate answers the existing id; since owner decision LQ11 a replacement of a note the user saved, edited by hand or imported — named in `supersedes`, or met as the R9 winner of its `fact_key` where the note would land — is written as a **suggestion** (a candidate naming it; the result adds `suggestion`, `replaces`, `note`, and its `superseded` is empty) |
+| `memory_update` | `id`, `expected_revision`, `action` (`edit` \| `archive` \| `confirm`) (required); `patch`, `reason` | Same. Prompts (destructive); refused on an `unattended` turn. `confirm` is always refused from a tool call, before any card — the refusal names `memory_confirm` for a suggestion that tool would take on an attended `gui` turn, and the Memory view and `openalpaca memory confirm` otherwise; `archive` of a `user` note, an `edit` of one that changes nothing a suggestion carries, and `edit` of a suggestion, is `authority_conflict`; an `edit` that changes a saved note's content — its validity included — is written as a suggestion carrying the edit (LQ11), after this tool's card, citing the note's sources and then the turn's typed row where the eight-source cap leaves room; an `edit` of a saved note a forget took out of recall is `authority_conflict`; `archive` of a suggestion is `invalid_input` |
+| `memory_forget` | `targets: [{id, expected_revision}]` (1–20, required); `reason` | Same. Prompts (destructive); refused on an `unattended` turn. Forgets by id and revision only — never "the best match"; the pending suggestions the call names take their turns first — every one of them, even after one of them fails, whose error then ends the call before the other targets — the other targets after them in the order given (the results come back in the order given); the pending suggestions that would replace a forgotten note are withdrawn once every target has had its turn (so one named in the same call is forgotten, in either order) — or, when a target fails, before its error is returned — and a pending candidate's forget, a suggestion or not, suppresses none of the sources of the note it names (whatever its origin) or of any note the user saved |
+| `memory_confirm` | `id`, `expected_revision`, `target_revision` (all required) | With a memory service, on an attended turn whose source is `gui` (the app's and the CLI's chat). The card shows a daemon-written preview of both notes, with a `Changes:` line naming every metadata field a suggestion changes, the validity window whole; only a person's Approve for this call confirms the suggestion, as a user-directed write (origin `user`); without it the tool answers `approval_required`. Deny dismisses the suggestion for good. An inferred suggestion, or one citing no message the user typed, is `not_a_suggestion`; the preview says "suggested by the assistant on <date>", the day it was saved, for one the chat model wrote |
+| `memory_search`, `memory_read`, `memory_list`, `memory_timeline` | see 6.1 (definitions only; the backends are shared) | When registered |
 | `read_result` | see 6.1 (definition only) | With a session log **and** a database |
 | every `<server>__<tool>` / `<plugin>::<tool>` | — | When its extension is enabled (`extension_tool_defs()`) |
 | `invoke_skill` | `skill`, `query` (both required) | With an LLM router |
@@ -813,7 +838,8 @@ why custom TOML tools may not use the four coordination names.
 | `queue_followup` | `description` (required) | Queues work to start after the run. Only when `steering_enabled` |
 | `invoke_skill` | `skill`, `query` | Same tool as the chat loop's |
 
-The lead's surface also lists the workspace tools, `memory_search`, every
+The lead's surface also lists the workspace tools, `memory_search`,
+`memory_read` and `memory_timeline`, every
 enabled extension tool, and — only when its own template grants the
 capability — `artifact_write` and `read_result`.  Its allow list is its
 template's capabilities plus the names on the assembled surface; a template
@@ -1137,10 +1163,12 @@ pub async fn execute_tool(
 The agent identity comes from `ctx.agent_id` (falls back to `"unknown"`).
 
 1. `CapabilityManager::check_agent_capability()` — deny list, then allow list
-2. `InputSanitizer::sanitize_tool_args()` — injection/traversal checks
+2. `InputSanitizer::sanitize_tool_args_with(.., registry.traversal_rule(name))` — injection/traversal
+   checks, the `../` check only for a tool whose arguments reach a program (R29)
    (allowlist = registered tool names; shell-like = command-backend tools)
 3. **Confirmation gate** — the *effective confirmation set* is
-   `policy.require_confirmation_for` if non-empty, otherwise all
+   `policy.require_confirmation_for` if non-empty (with `file_edit` added
+   when it names `file_write`, R-T35), otherwise all
    registered tools with `destructive_hint = Some(true)`.  For a tool in
    the set, the first matching arm applies:
    - **ApprovalCache hit** (prior approval in this sandbox for these args
@@ -1212,7 +1240,7 @@ called **tool's name**.  The two are the same word for `file_read`,
 `file_write`, `artifact_write`, `shell_execute`, `read_result`, the
 workspace tools and any `<server>__<tool>`, and different words wherever
 one capability is served by tools with names of their own: `web_access`
-is `web_search` and `web_fetch`, `memory_read` is `memory_search`,
+is `web_search` and `web_fetch`, `memory_read` is `memory_search`, `memory_read`, `memory_list` and `memory_timeline`,
 `messaging` is `send`.  So one rule holds for every row: **the allow list
 admits the tools the loop was handed.**  The first three rows build their
 list from the exposed definitions directly.  The lead and the subagent
@@ -1300,8 +1328,12 @@ pub fn sanitize_tool_args(
 
 **Checks performed:**
 - Tool name in allowlist (if non-empty)
-- Recursively, for every string value: path traversal (`../`, `..\`)
-  and null bytes
+- Recursively, for every string value: null bytes, and path traversal
+  (`../`, `..\`) when `traversal` is `TraversalRule::Refuse` —
+  `sanitize_tool_args_with`'s fifth argument, which the sandbox takes from
+  `ToolRegistry::traversal_rule`: `Allow` only for a builtin whose
+  `arguments_reach_a_program()` is false (R29); `sanitize_tool_args`
+  delegates with `Refuse`
 - For shell-like tools only: backtick command substitution, `$(`
   subshell, newline, and carriage return.  Ordinary shell operators
   (pipes, redirection, `&&`) are intentionally allowed.
@@ -1504,7 +1536,7 @@ The threshold is `LoopConfig.tool_result_inline_bytes`, set from
 |--------|------------------------|---------------|
 | `Ok`, within the threshold | As is | As is |
 | `Ok`, over the threshold | **Spilled**: the full text goes to `sessions/<id>/results/`; the model gets the stub below | Cut at the threshold by `truncate_tool_result_to()` |
-| `Err`, over the threshold | Head **and** tail inline (`head_tail_tool_result()`); the full text is still spilled for the log | Head and tail inline |
+| `Err`, over the threshold | Head **and** tail inline (`utils::text::head_tail()`); the full text is still spilled for the log | Head and tail inline |
 
 The chat loop, the lead agent and its subagents run with a session log.  A
 skill invocation does not.
@@ -1537,8 +1569,9 @@ boundary, but a boundary is only used if it keeps at least 75% of the
 limit (avoids discarding most of the content for a distant sentence end).
 Appends `[... truncated: showing first X of Y bytes]`.
 
-`head_tail_tool_result()` keeps half the budget at each end, with a marker
-saying how many bytes were elided.
+`head_tail()` (`crate::utils::text`, `crates/openalpaca_core/src/utils/text.rs`)
+keeps half the budget at each end, with a marker saying how many bytes were
+elided.
 
 ### Error Formatting
 
@@ -1554,13 +1587,12 @@ pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String
 
 | Tool | Error Pattern | Hint |
 |------|--------------|------|
-| `file_read` | "not found" / "No such file" | verify the path exists using shell_execute with `ls` |
+| `file_read` | "not found" / "No such file" | paths are relative to the working folder; file_list shows what a folder holds |
 | `file_write` | "Permission denied" | check file permissions or try a different output path |
 | `web_fetch` | "404" / "not found" | use web_search to find the correct URL first |
 | `web_fetch` | "timeout" | the URL may be unreachable; try a different source |
 | `shell_execute` | "timed out" | break the command into smaller steps or increase timeout |
 | `shell_execute` | "not found" | check if the command is installed or use the full path |
-| `memory_search` | "no results" | try broader search terms or check workspace_read for shared context |
 
 ---
 
@@ -1568,7 +1600,7 @@ pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String
 
 ### Database Tables
 
-Defined in `crates/openalpaca_storage/src/migrations/001_baseline.sql` (schema version 42).
+Defined in `crates/openalpaca_storage/src/migrations/001_baseline.sql` (schema version 1).
 The generated [schema reference](../api/database/schema.md) is
 authoritative.
 

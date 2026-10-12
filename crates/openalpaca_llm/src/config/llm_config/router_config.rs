@@ -11,7 +11,6 @@ pub struct LlmRouterConfig {
     pub rate_limits: Option<crate::routing::rate_limiter::RateLimitConfig>,
     pub credential_discovery: Option<crate::keys::credential_discovery::CredentialDiscoveryConfig>,
     pub cli_backends: Option<crate::cli_backend::CliBackendsConfig>,
-    pub embeddings: Option<EmbeddingsConfig>,
     pub security: Option<SecurityConfig>,
     pub timeouts: Option<super::runtime::TimeoutsConfig>,
     pub endpoints: Option<super::runtime::EndpointsConfig>,
@@ -44,15 +43,6 @@ pub struct SecurityConfig {
     /// Default: false — uses AES-encrypted local storage (`secret_encrypted`) instead.
     #[serde(default)]
     pub use_keychain: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingsConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    pub provider: String,
-    pub model: Option<String>,
-    pub dimensions: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

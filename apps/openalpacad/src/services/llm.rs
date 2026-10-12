@@ -1,4 +1,4 @@
-//! LLM router, secret store, embedder, token manager, and cost tracker initialization.
+//! LLM router, secret store, token manager, and cost tracker initialization.
 
 use openalpaca_llm::CostSnapshot;
 use openalpaca_storage::Database;
@@ -167,69 +167,6 @@ pub(super) async fn build_llm_settings_service(
     }
 
     service
-}
-
-pub(super) fn build_embedder(
-    llm_config: &Option<openalpaca_llm::LlmRouterConfig>,
-    secret_store: &Arc<dyn openalpaca_llm::SecretStore>,
-) -> Option<Arc<dyn openalpaca_llm::Embedder>> {
-    let emb_config = llm_config.as_ref().and_then(|c| c.embeddings.clone());
-    match emb_config {
-        Some(ref cfg) if cfg.enabled => {
-            let provider_config = llm_config
-                .as_ref()
-                .and_then(|c| c.providers.as_ref())
-                .and_then(|p| p.get(&cfg.provider));
-            // L11: a local model's ~1 GB of weights belongs inside the store,
-            // not in whatever directory the daemon was started from. Resolved
-            // only for the local backend, so a remote one does not create a
-            // cache directory nothing will ever use. A store that cannot be
-            // created is not a reason to refuse the embedder — it falls back
-            // to the library's own default with a WARN saying so, rather than
-            // silently putting a gigabyte somewhere unexpected.
-            let cache_dir = if cfg.provider == "local" {
-                match openalpaca_storage::store::embedding_cache_dir() {
-                    Ok(dir) => Some(dir),
-                    Err(e) => {
-                        warn!(
-                            "Cannot use the store for the embedding model cache ({e}); \
-                             falling back to the library default under the working directory"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            match openalpaca_llm::build_embedder(
-                cfg,
-                Some(&**secret_store),
-                provider_config,
-                cache_dir.as_deref(),
-            ) {
-                Ok(e) => {
-                    info!(
-                        "Embedder initialized: {} ({}d){}",
-                        cfg.provider,
-                        e.dimensions(),
-                        cache_dir
-                            .as_ref()
-                            .map(|d| format!(", cache {}", d.display()))
-                            .unwrap_or_default()
-                    );
-                    Some(e)
-                }
-                Err(e) => {
-                    warn!("Failed to build embedder: {e}");
-                    None
-                }
-            }
-        }
-        _ => {
-            info!("Embeddings disabled");
-            None
-        }
-    }
 }
 
 pub(super) async fn build_token_manager(

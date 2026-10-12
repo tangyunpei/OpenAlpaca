@@ -1,0 +1,42 @@
+<role>You are the memory extractor for OpenAlpaca.</role>
+<output_format>Output ONLY valid JSON matching the schema. No markdown fences, no commentary.</output_format>
+=== rendered user message ===
+<today>2026-09-24</today>
+<known_notes>
+n1 key=user.editor origin=learned kind=preference scope=global "Editor preference" — The user edits with vim.
+n2 key=user.commute origin=saved-by-you kind=preference scope=global "Commute" — The user commutes by bus.
+</known_notes>
+<known_keys>user.editor, user.commute, user.laptop</known_keys>
+<conversation>
+R1 context user 2026-09-24T10:00:03Z: I edit with vim.
+R2 context assistant 2026-09-24T10:00:20Z: Noted: vim.
+R3 user 2026-09-24T10:02:11Z: I switched to Helix in June, and I commute by train now.
+R4 assistant 2026-09-24T10:02:40Z: Got it: Helix, and the train.
+</conversation>
+<output_schema>
+{"items": [{
+  "title": "a short title, at most 80 characters",
+  "content": "the knowledge in one to three sentences, in the user's language",
+  "kind": "preference" | "fact" | "decision" | "procedure" | "reference" | "episode",
+  "stated_by": "user" | "assistant",
+  "confidence": 0.0 to 1.0,
+  "rows": [the numbers of the rows that state it, e.g. 3],
+  "aliases": ["other names a later question might use"],
+  "fact_key": "subject.attribute" | null,
+  "replaces": "n1" | null,
+  "replace_reason": "why it replaces that note" | null,
+  "valid_from": "YYYY-MM-DD" | null,
+  "valid_to": "YYYY-MM-DD" | null
+}]}
+</output_schema>
+<extraction_rules>
+1. Extract durable knowledge about the user that the conversation clearly states or strongly implies: their preferences, facts about them or their work, decisions, procedures, references and episodes. Do not invent anything.
+2. Use "stated_by": "user" only when a `user` row says it in the user's own voice, and then cite only `user` rows. A user row may quote other text, such as an email, a web page or a log: from a quotation extract only what the user says about it. Anything supported by an `assistant`, `queued-task` or long `user` row is "assistant".
+3. Cite in "rows" the numbers of the rows that state it. A `context` row is never enough on its own.
+4. When the conversation shows a value changing, output only the current value, say in "content" what it replaced and when, and set "replaces" to the older value's note when it is one of the known_notes. A note with origin=assistant is the assistant's own unconfirmed record: when a note the user saved (origin=saved-by-you) states an older value of the same fact, output the current value with "replaces" naming the saved note, even if an origin=assistant note already states it.
+5. Give "aliases": other names a later question might use, including the other language (Chinese for an English statement, English for a Chinese one), plus common alternative spellings and proper nouns. Give 0 to 8. Never repeat the title.
+6. Give "fact_key" as <subject>.<attribute>[.<qualifier>] in lowercase English. The subject is "user" for anything about the user themselves (their devices, commute, habits, people, schedule) and the project's name for a fact about a project. Reuse a key from known_keys when the item is about the same attribute; mint a new one only when none fits. Never put the value in the key: "user.editor", not "user.editor.helix".
+7. Set "valid_from" and "valid_to" only when the text gives the dates of an effective window, such as a trip or a contract. Keep every date the user states inside "content", as an absolute date when the text allows.
+8. Write "title" and "content" in the language the user used.
+9. Skip pleasantries, the questions themselves, anything true only for one reply, and anything already in known_notes unchanged (an origin=assistant note counts too, except in rule 4's case). Return at most 12 items, most important first, and {"items": []} when there is nothing to keep.
+</extraction_rules>

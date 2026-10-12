@@ -190,11 +190,16 @@ pub(super) fn unapprovable_tools(
 /// "Done, with one snag:" because the summary was cut at 500 characters, and
 /// a sentence the model wrote is exactly what a cut can take away. This line
 /// is appended by the runtime and [`truncate_summary`] keeps it whole.
+///
+/// An extension tool's name is any UTF-8 its server chose, up to 256 bytes,
+/// so each is shown through `utils::text::escape_hidden_line` and the names
+/// share [`REFUSED_TOOLS_LIST_CHARS`] as [`project_files_note`]'s paths share
+/// theirs, the rest counted (residual X21; no count line, as there).
 pub(super) fn unapprovable_note(tools: &[String]) -> Option<String> {
     if tools.is_empty() {
         return None;
     }
-    let list = tools.join(", ");
+    let list = bounded_list(tools, REFUSED_TOOLS_SHOWN, REFUSED_TOOLS_LIST_CHARS);
     let (subject, verb) = if tools.len() == 1 {
         ("tool", "was")
     } else {
@@ -207,14 +212,137 @@ pub(super) fn unapprovable_note(tools: &[String]) -> Option<String> {
     ))
 }
 
+/// How many tools [`unapprovable_note`] names before it counts the rest.
+const REFUSED_TOOLS_SHOWN: usize = 20;
+
+/// How many characters the tool names [`unapprovable_note`] lists may take
+/// together, `, ` between them included. With [`PROJECT_FILES_LIST_CHARS`]
+/// and the two lines' own words the runtime's lines stay under about 1,550
+/// characters, so the summary's [`MAX_SUMMARY_LENGTH`] cut always keeps them
+/// whole with some of the report's prose before them.
+const REFUSED_TOOLS_LIST_CHARS: usize = 400;
+
+/// How many paths [`project_files_note`] names before it counts the rest.
+const PROJECT_FILES_SHOWN: usize = 20;
+
+/// How many characters the paths [`project_files_note`] names may take
+/// together, `, ` between them included: the line stays under 1,000
+/// characters, so the summary's [`MAX_SUMMARY_LENGTH`] cut
+/// ([`truncate_summary`]) keeps it and the refusal line whole with the
+/// report's own prose before them (S4a's deferred (2): twenty paths a run can
+/// write ran to thousands of characters).
+const PROJECT_FILES_LIST_CHARS: usize = 900;
+
+/// **R38.** The runtime-authored line naming what a run wrote into its
+/// project — `None` when it wrote nothing there. Result files are the user's
+/// files, not the run's artifacts: the run's count, its chips and connector
+/// delivery read by-products only, and this line is how the report lists the
+/// rest. At most [`PROJECT_FILES_SHOWN`] paths, and only as many as fit in
+/// [`PROJECT_FILES_LIST_CHARS`], then "and N more"; a first path longer than
+/// that alone is named cut, `…` where the cut is.
+///
+/// A path is the agent's choice, so each is shown through
+/// `utils::text::escape_hidden_line`: every hidden character, a line break
+/// among them, as `<U+XXXX>` (S4a's deferred (1)). No count line follows:
+/// the report is not an approval surface (the lead's ruling on S6a's M4 for
+/// the event log's written-file row, the same text).
+pub(super) fn project_files_note(rel_paths: &[String]) -> Option<String> {
+    if rel_paths.is_empty() {
+        return None;
+    }
+    let list = bounded_list(rel_paths, PROJECT_FILES_SHOWN, PROJECT_FILES_LIST_CHARS);
+    Some(format!("Written in the project: {list}."))
+}
+
+/// `items` as a runtime line lists them: each escaped on one line
+/// (`utils::text::escape_hidden_line`), joined by `, `, at most `shown_max`
+/// of them and only as many as fit in `budget` characters together, then
+/// ", and N more" for the rest. A first item longer than the whole budget is
+/// named cut on a whole piece ([`escaped_within`]), so the list is never
+/// empty.
+fn bounded_list(items: &[String], shown_max: usize, budget: usize) -> String {
+    use crate::utils::text::escape_hidden_line;
+
+    let mut shown: Vec<String> = Vec::new();
+    let mut used = 0;
+    for item in items.iter().take(shown_max) {
+        let escaped = escape_hidden_line(item).text;
+        let cost = escaped.chars().count() + if shown.is_empty() { 0 } else { 2 };
+        if used + cost > budget {
+            if shown.is_empty() {
+                shown.push(escaped_within(item, budget));
+            }
+            break;
+        }
+        used += cost;
+        shown.push(escaped);
+    }
+    let more = items.len() - shown.len();
+    let shown = shown.join(", ");
+    if more == 0 {
+        shown
+    } else {
+        format!("{shown}, and {more} more")
+    }
+}
+
+/// `text` as [`bounded_list`] shows it, cut to at most `max` characters on a
+/// whole piece — a character, or its whole `<U+XXXX>` escape, never part of
+/// one — with `…` where the cut is.
+fn escaped_within(text: &str, max: usize) -> String {
+    use crate::utils::text::escape_hidden_line;
+
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let piece = escape_hidden_line(c.encode_utf8(&mut [0; 4])).text;
+        let len = piece.chars().count();
+        if used + len + 1 > max {
+            out.push('…');
+            break;
+        }
+        used += len;
+        out.push_str(&piece);
+    }
+    out
+}
+
+/// The files a run wrote into its project, oldest first — none when they
+/// cannot be read: a failed read costs the line, never the finalisation.
+fn project_files(db: &openalpaca_storage::Database, task_id: &str) -> Vec<String> {
+    openalpaca_storage::FileAssetRepository::new(db)
+        .project_files_for_task(task_id)
+        .map(|files| files.into_iter().map(|file| file.filename).collect())
+        .unwrap_or_else(|e| {
+            tracing::warn!(task_id, "Failed to read the run's result files: {e}");
+            Vec::new()
+        })
+}
+
+/// The runtime's own lines a run's report and its summary end with — what
+/// nobody could approve (S4), then what it wrote into the project (R38) —
+/// joined by a blank line, or `None` when there is neither. One function for
+/// the report message and the summary's cut, so both keep the same lines.
+pub(super) fn runtime_notes(db: &openalpaca_storage::Database, task_id: &str) -> Option<String> {
+    let notes: Vec<String> = [
+        unapprovable_note(&unapprovable_tools(db, task_id)),
+        project_files_note(&project_files(db, task_id)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!notes.is_empty()).then(|| notes.join("\n\n"))
+}
+
 /// Cut `summary` to `max` characters, keeping a runtime-authored `note` at
 /// the end whole (S4).
 ///
 /// The note is the point of the cut: a summary long enough to be truncated is
 /// exactly the one whose last line would otherwise be lost, and the last line
 /// is the only part the runtime wrote. When the note alone is longer than
-/// `max` — it cannot be, at 2 000, but the function must still be total — the
-/// note wins and the prose goes.
+/// `max` the note wins and the prose goes. At [`MAX_SUMMARY_LENGTH`] that
+/// never happens: both runtime lines are bounded ([`unapprovable_note`],
+/// [`project_files_note`]; residual X21). The function must still be total.
 pub(super) fn truncate_summary(summary: &str, note: Option<&str>, max: usize) -> String {
     if summary.chars().count() <= max {
         return summary.to_string();
@@ -367,11 +495,10 @@ pub(super) fn finalize_task_with_outcome(
 ) -> TaskOutcome {
     let mut outcome = build_task_outcome(db, task_id, final_content, success);
 
-    // S4: what nobody could approve, in the runtime's own words, appended to
-    // the summary so it reaches `outcome_json` as well as `result_summary`.
-    let note = db
-        .map(|db| unapprovable_tools(db, task_id))
-        .and_then(|tools| unapprovable_note(&tools));
+    // S4 and R38: what nobody could approve and what the run wrote into the
+    // project, in the runtime's own words, appended to the summary so they
+    // reach `outcome_json` as well as `result_summary`.
+    let note = db.and_then(|db| runtime_notes(db, task_id));
     if let Some(ref note) = note {
         outcome.summary = if outcome.summary.trim().is_empty() {
             note.clone()

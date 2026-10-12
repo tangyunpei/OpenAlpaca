@@ -19,10 +19,26 @@
  *
  * The location-bearing states name where the bit lives (X-10): that is what
  * teaches the declaration/disposition model without documentation.
+ *
+ * **The consent row is an approval** (`lib/hidden-chars`). What Approve
+ * grants is exactly the plugin's own strings — its id (the directory name)
+ * and the capabilities its manifest declares, or the ones an update added —
+ * so on an `unapproved` row every hidden character in them, and in the
+ * manifest's version the row shows beside Approve, is shown as `<U+XXXX>`
+ * (the one-line escape: a name, a version or a capability has no layout of
+ * its own) and the row counts them in the words every approval surface
+ * uses, as the CLI's manifest does. Every other row's text — a failed row's
+ * quoted detail among it — is shown as it came. Display only: every verb is
+ * sent the id the daemon listed.
  */
 
 import type { TagTone } from "@/components/ui";
 import type { ExtensionRow } from "@/lib/api/types";
+import {
+  escapeHiddenLine,
+  hiddenNotice,
+  type Escaped,
+} from "@/lib/hidden-chars";
 
 import { whenStamp } from "./format";
 
@@ -59,6 +75,22 @@ export interface ExtensionRowView {
   rank: 0 | 1 | 2;
   /** `hint` on a `needs_authorization` row — the URL the owner must visit. */
   authorizeUrl: string | null;
+  /**
+   * On a row that asks for consent (`unapproved`), what Approve answers for,
+   * escaped: the plugin's id, the description (`asks`, whose plain-text form
+   * is `description`), the manifest's version and the notice counting all
+   * three — `null` when nothing was escaped. `null` on every other row.
+   */
+  consent: RowConsent | null;
+}
+
+/** What a consent row shows of the plugin's own strings (`lib/hidden-chars`). */
+export interface RowConsent {
+  name: Escaped;
+  asks: Escaped;
+  /** The manifest's version, drawn beside Approve; `null` when it has none. */
+  version: Escaped | null;
+  notice: string | null;
 }
 
 const plural = (n: number, one: string, many = `${one}s`) =>
@@ -158,6 +190,7 @@ function describe(row: ExtensionRow): ExtensionRowView {
     actions: [] as ExtensionAction[],
     menu: [] as ExtensionMenuItem[],
     authorizeUrl: null,
+    consent: null,
   };
 
   switch (row.state) {
@@ -224,7 +257,28 @@ type Base = Omit<
   "tag" | "tone" | "description" | "rank" | "disabledReason"
 >;
 
-/** Consent pre-empts the switch: a switch would misrepresent the gate. */
+/**
+ * What `Approve` grants a never-seen or denied plugin: the capabilities its
+ * manifest declares. Listed from the row's **static** `declared` object,
+ * never from runtime `tools`, which is empty here (X-19).
+ */
+function asksFor(row: ExtensionRow): string {
+  const declared = row.declared?.capabilities ?? [];
+  return declared.length > 0
+    ? `Asks for: ${declared.join(", ")}`
+    : "Declares no capabilities";
+}
+
+/**
+ * Consent pre-empts the switch: a switch would misrepresent the gate.
+ *
+ * The description is escaped whole with the one-line escape. The row's own
+ * words hold no character of the escape's set, so what is shown escaped and
+ * counted is exactly the plugin's: the capabilities it names. Every consent
+ * row names what `Approve` grants — a denied one too, because a denied
+ * plugin stays denied whatever its manifest declares since, and `Approve`
+ * grants what it declares now (A8).
+ */
 function unapproved(row: ExtensionRow, base: Base): ExtensionRowView {
   const shared = {
     ...base,
@@ -232,13 +286,31 @@ function unapproved(row: ExtensionRow, base: Base): ExtensionRowView {
     secondary: dispositionLocation(row),
     rank: 0 as const,
   };
+  const consented = (description: string) => {
+    const name = escapeHiddenLine(row.id);
+    const asks = escapeHiddenLine(description);
+    const version = row.version === null ? null : escapeHiddenLine(row.version);
+    return {
+      description: asks.text,
+      consent: {
+        name,
+        asks,
+        version,
+        notice: hiddenNotice(
+          name.hidden + asks.hidden + (version?.hidden ?? 0),
+        ),
+      },
+    };
+  };
 
   if (row.reason === "denied") {
     return {
       ...shared,
       tag: "denied",
       tone: "neutral",
-      description: `You denied this plugin${approvalSuffix(row)}`,
+      ...consented(
+        `You denied this plugin. ${asksFor(row)}${approvalSuffix(row)}`,
+      ),
       actions: ["approve"],
     };
   }
@@ -250,23 +322,17 @@ function unapproved(row: ExtensionRow, base: Base): ExtensionRowView {
       ...shared,
       tag: "waiting-approval",
       tone: "asks",
-      description: `Now also asks for: ${added}${approvalSuffix(row)}`,
+      ...consented(`Now also asks for: ${added}${approvalSuffix(row)}`),
       actions: ["approve", "deny"],
     };
   }
 
-  // `never_seen`. Listed from the row's **static** `declared` object, never
-  // from runtime `tools`, which is empty here (X-19).
-  const declared = row.declared?.capabilities ?? [];
-  const asks =
-    declared.length > 0
-      ? `Asks for: ${declared.join(", ")}`
-      : "Declares no capabilities";
+  // `never_seen`.
   return {
     ...shared,
     tag: "waiting-approval",
     tone: "asks",
-    description: `${asks}${approvalSuffix(row)}`,
+    ...consented(`${asksFor(row)}${approvalSuffix(row)}`),
     actions: ["approve", "deny"],
   };
 }

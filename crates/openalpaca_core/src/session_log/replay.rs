@@ -29,14 +29,17 @@
 //!   is the boundary — and per T41's hand-off it is *the last seq written
 //!   before the compaction record*, **not** the boundary of the tail
 //!   compaction retained, so the retained tail is added back explicitly
-//!   ([`rebuild`]'s `tail_keep`). What is left out is announced in one
-//!   `context_compacted` note rather than summarised: the `compaction` record
-//!   carries counts, not the summary text, and inventing one would be worse
-//!   than saying what happened.
+//!   ([`rebuild`]'s `tail_keep`). What is left out is replaced by the working
+//!   state that compaction wrote, which its record carries (design 11 §6,
+//!   CQ-8) — or, for a record that carries none (a heuristic compaction, a
+//!   build before the working state), announced in one `context_compacted`
+//!   note rather than summarised: inventing a summary would be worse than
+//!   saying what happened.
 
 use super::reader::{LoggedRecord, read_records_after_torn};
 use super::record::RESULTS_DIR;
 use super::spill_stub;
+use crate::orchestrator::working_state::WorkingState;
 use chrono::{DateTime, Utc};
 use openalpaca_llm::{ChatMessage, ToolCall};
 use serde_json::Value;
@@ -188,6 +191,8 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
     // one lookup however far it landed from the round that asked for it.
     let mut slots: HashMap<String, (usize, usize)> = HashMap::new();
     let mut compaction: Option<(u64, u64)> = None; // (record seq, preserved_from_seq)
+    // The working state that compaction wrote, and when (design 11 §6).
+    let mut compaction_state: Option<(WorkingState, DateTime<Utc>)> = None;
 
     // What the log itself says it lost, and what the rebuild noticed: a
     // trimmed head is invisible from the records that survived it, so the
@@ -262,6 +267,11 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
                         record.data.get("preserved_from_seq").and_then(Value::as_u64)
                     {
                         compaction = Some((record.seq, preserved));
+                        compaction_state = record
+                            .data
+                            .get("working_state")
+                            .and_then(|v| serde_json::from_value::<WorkingState>(v.clone()).ok())
+                            .map(|state| (state, record.ts));
                     }
                 }
                 // R67: a `resume` record is a round boundary. Everything
@@ -326,9 +336,15 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
             .push(ChatMessage::user(&trim_note(plan.trimmed_from_seq, reason)));
     }
     if plan.compacted_rounds_dropped > 0 {
-        plan.messages.push(ChatMessage::user(&compaction_note(
-            plan.compacted_rounds_dropped,
-        )));
+        // The state the compaction wrote stands in for what it dropped, as
+        // it did in the loop; its size is the writer's own output ceiling.
+        let stand_in = match &compaction_state {
+            Some((state, at)) => {
+                state.render(&at.format("%Y-%m-%d %H:%M:%S").to_string(), usize::MAX)
+            }
+            None => compaction_note(plan.compacted_rounds_dropped),
+        };
+        plan.messages.push(ChatMessage::user(&stand_in));
     }
     let mut span: Option<(u64, u64)> = None;
     for round in rounds {
@@ -518,11 +534,12 @@ fn trim_note(from_seq: Option<u64>, reason: &str) -> String {
     }
 }
 
-/// The one message that stands in for the head a compaction dropped.
+/// The one message that stands in for the head a compaction dropped when its
+/// record carries no working state.
 ///
-/// Not a summary: the `compaction` record carries token and message counts
-/// and no summary text (§5.4 — the summary lives in the loop's memory, which
-/// died with it), and a fabricated one would be the worst kind of context.
+/// Not a summary: such a record carries token and message counts and no
+/// summary text (a heuristic compaction, or a build before design 11), and a
+/// fabricated one would be the worst kind of context.
 /// Naming the gap is the honest option, and it is wrapped the way every other
 /// untrusted-context block is so the model reads it as narration.
 fn compaction_note(dropped: usize) -> String {
