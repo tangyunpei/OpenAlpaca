@@ -20,6 +20,72 @@ require_cmd() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DIST_DIR="$REPO_ROOT/dist"
+GUI_DIR="$REPO_ROOT/apps/openalpaca-gui"
+
+# Sets TARGET_DIRECTORY to the target directory cargo resolves when run in $1,
+# or dies. cargo reads its config from the directory it runs in, so the answer
+# is that of a build started there: an exported CARGO_TARGET_DIR, else
+# build.target-dir from the cargo config read there, else the workspace's
+# target/. `cargo metadata` reports it as target_directory; its `..` segments
+# are resolved lexically. `die` runs in the calling shell, not in a subshell.
+read_target_directory() {
+  local dir="$1" metadata
+  require_cmd cargo
+  require_cmd bun
+  metadata="$(cd "$dir" && cargo metadata --format-version 1 --no-deps --locked)" \
+    || die "cargo metadata failed in $dir."
+  TARGET_DIRECTORY="$(
+    printf '%s' "$metadata" | bun -e '
+      const path = require("node:path");
+      const targetDir = JSON.parse(require("node:fs").readFileSync(0, "utf8")).target_directory;
+      if (typeof targetDir !== "string" || targetDir === "") process.exit(1);
+      console.log(path.resolve(targetDir));
+    '
+  )" || die "cargo metadata in $dir reported no target_directory."
+}
+
+# Sets OPENALPACA_BIN to the CLI `cargo build --release -p openalpaca` writes
+# when run at the repository root (the script builds it there), or dies naming
+# the path: <target directory at the root>/release/openalpaca. Nothing else is
+# looked at: a CLI under any other directory is an older build's.
+locate_cli() {
+  read_target_directory "$REPO_ROOT"
+  OPENALPACA_BIN="$TARGET_DIRECTORY/release/openalpaca"
+  [[ -f "$OPENALPACA_BIN" && -x "$OPENALPACA_BIN" ]] \
+    || die "CLI not found or not executable: $OPENALPACA_BIN (cargo's target directory at the repository root; no other directory is read)."
+}
+
+# Sets APP_BUNDLE_PATH to the .app `tauri build --bundles app` writes, or dies
+# naming the path: <target directory in src-tauri/>/release/bundle/macos/
+# <productName>.app. tauri runs cargo from src-tauri/, where the target
+# directory is an exported CARGO_TARGET_DIR, else src-tauri/.cargo/config.toml's
+# target-dir (target/gui); productName is read from tauri.conf.json. Nothing
+# else is looked at: a bundle under any other directory is an older build's.
+# productName names the bundle tauri writes only; the package always carries
+# it as gui/openalpaca-gui.app (install.sh).
+locate_app_bundle() {
+  local src_tauri="$GUI_DIR/src-tauri" conf product_name
+  read_target_directory "$src_tauri"
+  conf="$src_tauri/tauri.conf.json"
+  product_name="$(
+    TAURI_CONF="$conf" bun -e '
+      const productName = JSON.parse(require("node:fs").readFileSync(process.env.TAURI_CONF, "utf8")).productName;
+      if (typeof productName !== "string" || productName === "") process.exit(1);
+      console.log(productName);
+    '
+  )" || die "Could not read productName from $conf."
+  APP_BUNDLE_PATH="$TARGET_DIRECTORY/release/bundle/macos/$product_name.app"
+  [[ -d "$APP_BUNDLE_PATH" ]] \
+    || die "Tauri app bundle not found: $APP_BUNDLE_PATH (cargo's target directory for apps/openalpaca-gui/src-tauri; no other directory is read)."
+}
+
+# `source scripts/release/package-macos.sh` defines the functions above and
+# builds nothing. It turns on `set -euo pipefail` in the sourcing shell, and a
+# failing lookup's `die` exits that shell, an interactive one included: source
+# it inside `bash -c`. A manual seam: no CI job or committed test drives it,
+# unlike the Windows scripts' -DotSourceOnly, which Pester drives in CI
+# (DU-33 keeps the CI legs deferred).
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 [[ "$(uname -s)" == "Darwin" ]] || die "package-macos.sh must run on macOS."
 
@@ -51,7 +117,6 @@ STAGING_DIR="$STAGING_BASE/$PACKAGE_NAME"
 ARCHIVE_PATH="$DIST_DIR/${PACKAGE_NAME}.tar.gz"
 SHA_PATH="${ARCHIVE_PATH}.sha256"
 
-GUI_DIR="$REPO_ROOT/apps/openalpaca-gui"
 STAGED_SIDECAR="$GUI_DIR/src-tauri/bin/openalpacad-$HOST_TARGET"
 STAGED_SHA_FILE="$STAGED_SIDECAR.sha256"
 
@@ -89,7 +154,12 @@ STAGED_SHA="$(read_sha256_file "$STAGED_SHA_FILE")"
   || die "Staged sidecar does not match $STAGED_SHA_FILE"
 
 echo "==> Building the CLI"
-cargo build --release --locked -p openalpaca
+(
+  cd "$REPO_ROOT"
+  cargo build --release --locked -p openalpaca
+)
+locate_cli
+echo "==> CLI: $OPENALPACA_BIN"
 
 # beforeBuildCommand runs prepare-sidecar.ts again, as Tauri's hook: the
 # host's triple (TAURI_ENV_TARGET_TRIPLE) and, with TAURI_ENV_DEBUG unset, the
@@ -102,19 +172,8 @@ echo "==> Building Tauri app bundle"
   bunx tauri build --bundles app
 )
 
-# The shell builds into target/gui (src-tauri/.cargo/config.toml); the other
-# two are where an older tree put the bundle.
-APP_BUNDLE_PATH=""
-for candidate in \
-  "$REPO_ROOT/target/gui/release/bundle/macos/openalpaca-gui.app" \
-  "$REPO_ROOT/target/release/bundle/macos/openalpaca-gui.app" \
-  "$REPO_ROOT/apps/openalpaca-gui/src-tauri/target/release/bundle/macos/openalpaca-gui.app"; do
-  if [[ -d "$candidate" ]]; then
-    APP_BUNDLE_PATH="$candidate"
-    break
-  fi
-done
-[[ -n "$APP_BUNDLE_PATH" ]] || die "Tauri app bundle not found under target/gui/, target/ or src-tauri/target/ (release/bundle/macos/)."
+locate_app_bundle
+echo "==> App bundle: $APP_BUNDLE_PATH"
 
 echo "==> Verifying the bundled daemon against the staged sidecar"
 BUNDLED_DAEMON="$APP_BUNDLE_PATH/Contents/MacOS/openalpacad"
@@ -124,9 +183,6 @@ BUNDLED_SHA="$(sha256_of "$BUNDLED_DAEMON")"
   || die "The daemon inside the app bundle ($BUNDLED_SHA) is not the staged sidecar ($STAGED_SHA). This check assumes an unsigned bundle: with APPLE_SIGNING_IDENTITY or APPLE_CERTIFICATE set, tauri signs the binaries and their bytes change."
 [[ "$(read_sha256_file "$STAGED_SHA_FILE")" == "$STAGED_SHA" ]] \
   || die "The staged sidecar changed while the app bundle was built; rerun the script."
-
-OPENALPACA_BIN="$REPO_ROOT/target/release/openalpaca"
-[[ -x "$OPENALPACA_BIN" ]] || die "Binary not found: $OPENALPACA_BIN"
 
 echo "==> Preparing staging directory"
 rm -rf "$STAGING_DIR"
