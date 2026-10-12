@@ -16,7 +16,9 @@ env:
 jobs:
   rust:
     name: Build & test (Rust)
-    runs-on: ubuntu-latest
+    # Pinned for the dependency wave: ubuntu-latest moves to 26.04 between
+    # 2026-10-19 and 2026-11-19 (actions/runner-images#14748); P39 reverts this.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,7 +47,9 @@ jobs:
 
   gui:
     name: Build & test (GUI frontend)
-    runs-on: ubuntu-latest
+    # Pinned for the dependency wave: ubuntu-latest moves to 26.04 between
+    # 2026-10-19 and 2026-11-19 (actions/runner-images#14748); P39 reverts this.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
