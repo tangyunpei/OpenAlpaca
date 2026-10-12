@@ -492,3 +492,43 @@ fn allow_still_checks_a_shell_tool_for_injection() {
         "Input blocked: Potential command injection: command substitution ($()"
     );
 }
+
+// --- Upload sniffing verdicts on infer 0.16 (deps plan P14; DU-6) ---
+
+/// `validate_upload_with_image_limit` as the upload route calls it, with the
+/// route's default image bound; `true` when the upload passes.
+fn upload_passes(filename: &str, data: &[u8], declared_mime: &str) -> bool {
+    InputSanitizer::validate_upload_with_image_limit(filename, data, declared_mime, 1 << 20, 8192)
+        .is_ok()
+}
+
+/// A text body whose first KiB names a PDF header, and a CSV whose first cell
+/// is AutoCAD 2000's `AC1015` signature: infer 0.16 reads `%PDF` at offset 0
+/// only and has no DWG matcher, so both are undetectable and a declared
+/// `text/*` upload passes. infer 0.22 (P18) would report `application/pdf`
+/// and `image/vnd.dwg`; P17 (DU-6 b) keeps a declared text file accepted.
+#[test]
+fn a_declared_text_upload_with_a_pdf_or_dwg_signature_inside_passes_today() {
+    let notes = b"Notes on file formats.\nA PDF starts with %PDF-1.7 then a comment.\n";
+    assert!(upload_passes("notes.txt", notes, "text/plain"));
+    let html = b"<!DOCTYPE html><html><body><p>Header is %PDF-1.4</p></body></html>";
+    assert!(upload_passes("page.html", html, "text/html"));
+    let csv = b"AC1015,Widget,3\nAC1018,Gadget,5\n";
+    assert!(upload_passes("parts.csv", csv, "text/csv"));
+}
+
+/// The two connector media cases (DU-6 m): an `audio/mp3` clip whose first
+/// frame is MPEG-2 (`FF F3`) and an `image/heic` whose ftyp brand is `heix`.
+/// infer 0.16 knows MP3 by an ID3 tag or `FF FB` and HEIF by brand `heic`
+/// only, so both are undetectable and pass. infer 0.22 would report
+/// `audio/mpeg` and `image/heif` and refuse both as mismatches; P17a (DU-6
+/// m-b) accepts `audio/mp3` as an alias of `audio/mpeg`.
+#[test]
+fn the_two_connector_media_uploads_pass_today() {
+    let mut mp3 = vec![0xFF, 0xF3, 0x44, 0xC4];
+    mp3.extend_from_slice(&[0u8; 60]);
+    assert!(upload_passes("clip.mp3", &mp3, "audio/mp3"));
+    let mut heic = b"\x00\x00\x00\x18ftypheix\x00\x00\x00\x00mif1heix".to_vec();
+    heic.extend_from_slice(&[0u8; 32]);
+    assert!(upload_passes("photo.heic", &heic, "image/heic"));
+}

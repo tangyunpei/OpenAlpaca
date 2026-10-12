@@ -514,6 +514,27 @@ mod tests {
         assert!(result.is_ok(), "PPT (CFB container) should be allowed");
     }
 
+    // --- Declared text whose body carries another format's signature (deps
+    //     plan P14; DU-6). Today's verdicts on infer 0.16, which reads `%PDF`
+    //     at offset 0 only and has no DWG matcher; infer 0.22 (P18) would
+    //     report `application/pdf` and `image/vnd.dwg`, and P17 (DU-6 b)
+    //     keeps a declared text file accepted when it lands. ---
+
+    #[test]
+    fn a_declared_text_file_naming_a_pdf_header_past_offset_0_is_accepted() {
+        let notes = b"Notes on file formats.\nA PDF starts with %PDF-1.7 then a comment.\n";
+        assert_eq!(validate_magic_mime("text/plain", notes), Ok(()));
+        let html = b"<!DOCTYPE html><html><body><p>Header is %PDF-1.4</p></body></html>";
+        assert_eq!(validate_magic_mime("text/html", html), Ok(()));
+    }
+
+    #[test]
+    fn a_declared_csv_starting_with_a_dwg_signature_is_accepted() {
+        // `AC1015` is AutoCAD 2000's file signature; here it is a part number.
+        let csv = b"AC1015,Widget,3\nAC1018,Gadget,5\n";
+        assert_eq!(validate_magic_mime("text/csv", csv), Ok(()));
+    }
+
     fn open_ok(_path: &str, _file_id: &str, _filename: &str, _stage: bool) -> Result<(), String> {
         Ok(())
     }
