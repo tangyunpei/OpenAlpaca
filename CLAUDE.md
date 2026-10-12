@@ -49,6 +49,7 @@
 ## Core Principles
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs. 
+- **No compromise on migrations** (owner, 2026-10-12; overrides Minimal Impact for this work): when the toolchain, dependency and modernization programme (`tasks/deps-upgrade/`) moves to a new Rust, Tauri or React API or feature, it moves fully — no hold kept for convenience, no "not now" where the new form is available, no shim, partial adoption or older API form beside the new one. A real blocker (a dependency pinning an old major, the seven-day freshness rule DU-23) is named with its way out, never accepted silently. Safety rules and settled product decisions are not compromises and stay.
 
 ## Current Work — read first (as of 2026-10-11, branch `chore/toolchain-and-deps`)
 
