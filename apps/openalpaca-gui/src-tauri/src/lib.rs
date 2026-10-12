@@ -413,7 +413,6 @@ fn reap_when_it_exits(mut child: std::process::Child) {
 // Tauri App Entry Point
 // ============================================================================
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
