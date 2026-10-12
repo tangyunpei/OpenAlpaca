@@ -137,12 +137,12 @@ Keep this file current: when a plan phase or design commit lands, update the aff
 
 ```bash
 # Full workspace
-cargo build                      # debug build (library crates only — apps are excluded via default-members)
-cargo build --workspace          # debug build including apps (daemon, CLI, GUI backend)
+cargo build                      # debug build — every member but the Tauri shell (default-members = CI's selection)
+cargo build --workspace --exclude openalpaca_gui   # the same set, spelled out (what CI runs)
 cargo build --release            # release build
-cargo test                       # run library-crate tests
-cargo test --workspace           # run all tests including apps
-cargo clippy                     # lint
+cargo test                       # run every test but the shell's (the daemon's tests spawn processes; ~5.5 min)
+cargo test --workspace --exclude openalpaca_gui    # the same set, spelled out (what CI runs)
+cargo clippy                     # lint (CI adds --all-targets)
 
 # Individual crates
 cargo build -p openalpaca_core
@@ -164,6 +164,12 @@ bun run format:check             # prettier (CI gate) — `bun run format` fixes
 bun run build                    # production frontend build (CI gate)
 bun run prepare:sidecar:dev      # bundle the daemon as a Tauri sidecar (or :release)
 ```
+
+**Build hygiene — `target/` reached 147.6 GiB (530,884 files) before these rules; each line removes one measured growth driver** (`tasks/deps-upgrade/modernization-plan.md` §1):
+- **One invocation set.** Build, test and clippy with `--workspace --exclude openalpaca_gui` (what a bare `cargo build`/`test`/`clippy` now selects through `default-members`); use `-p <crate>` only to run a filtered test. Every distinct package or feature selection — a bare build against `--workspace`, `--all-targets`, `--features live-eval`, each different `-p` — compiles the shared crates again into its own copy, 0.4–1.7 GiB of `target/` per lock state.
+- **One toolchain in `target/`.** Only the pinned toolchain builds into the repository's `target/`; a session that tries another (`cargo +1.99.0 …`) does it in a worktree with its own `CARGO_TARGET_DIR`. A second toolchain in the same directory duplicates every artifact (+0.9 GiB per `check`, +4.9 GiB per test build, measured).
+- **`cargo clean` at a threshold.** When `du -sh target` passes a size the owner chooses, run `cargo clean`: a cold rebuild of the CI set takes 144 s (118 s with incremental compilation off). Nothing on stable cargo prunes `target/debug` by itself, and no hook, cron or agent rule may delete `target/` unasked.
+- **The Tauri shell has its own target dir.** `cargo check -p openalpaca_gui` runs with `CARGO_TARGET_DIR=target/gui`: tauri-build copies the staged sidecar into its target dir's `debug/openalpacad`, where it would overwrite the daemon the other builds share.
 
 Toolchain: Rust 1.93.0 (edition 2024, resolver v3), pinned in `rust-toolchain.toml`. Frontend: TypeScript 7.0.2, React 19.2, Tailwind 4.3, Vite 7, Vitest 4, Bun.
 

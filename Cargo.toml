@@ -12,8 +12,11 @@ members = [
     "apps/openalpaca",
     "apps/openalpaca-gui/src-tauri",
 ]
-# Bare `cargo build` / `cargo test` covers the library crates only; the apps
-# (daemon with all features, CLI, Tauri GUI) build when named with -p or --workspace.
+# A bare `cargo build` / `cargo test` / `cargo clippy` selects what CI selects:
+# every member but the Tauri shell (`--workspace --exclude openalpaca_gui`), so
+# the bare and the explicit form share one set of artifacts in target/ instead
+# of compiling the shared crates twice with different feature sets. The shell
+# builds when named (`cargo check -p openalpaca_gui`, with its own target dir).
 default-members = [
     "crates/openalpaca_api",
     "crates/openalpaca_core",
@@ -23,6 +26,8 @@ default-members = [
     "crates/openalpaca_llm",
     "crates/openalpaca_mcp",
     "crates/openalpaca_plugins",
+    "apps/openalpacad",
+    "apps/openalpaca",
 ]
 resolver = "3"
 
