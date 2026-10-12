@@ -1,6 +1,7 @@
 {
   "name": "openalpaca",
   "private": true,
+  "packageManager": "bun@1.4.2",
   "workspaces": [
     "apps/openalpaca-gui"
   ]
