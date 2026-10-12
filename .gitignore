@@ -136,8 +136,10 @@ tasks/storage-design/plan-drafts/
 # ============================================
 # Agent
 # ============================================
-.claude/
-.claude/*   
+# The directory's files are ignored one by one (not the directory itself) so
+# that the tracked, project-wide settings.json can be re-included below.
+.claude/*
+!.claude/settings.json
 config/.master_key
 config/llm.toml
 config/llm.toml.lock
