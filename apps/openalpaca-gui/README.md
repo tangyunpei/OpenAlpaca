@@ -58,11 +58,13 @@ Two things to know before the first run:
 
 `tauri dev` and `tauri build` run the sidecar step first (`beforeDevCommand` / `beforeBuildCommand` in `src-tauri/tauri.conf.json`). `scripts/prepare-sidecar.ts`:
 
-1. detects the host target triple via `rustc -vV`,
-2. runs `cargo build -p openalpacad` at the workspace root (`--release` for build),
-3. copies the binary to `src-tauri/bin/openalpacad-{triple}[.exe]`.
+1. takes the target triple from `--target <triple>` when given, else from `rustc -vV`,
+2. runs `cargo build -p openalpacad --locked [--release] --message-format=json-render-diagnostics` at the workspace root — cargo decides what is fresh, and the daemon's executable path is read from cargo's own `compiler-artifact` message, so `CARGO_TARGET_DIR`, a `[build] target-dir`, a `--target` triple and the profile are all followed (nothing hard-codes `target/<profile>`, and no two binaries' mtimes are compared),
+3. copies that artifact to `src-tauri/bin/openalpacad-<triple>[.exe]` and writes beside it `<name>.sha256` (the sha256 of the staged bytes, `shasum -a 256` format) and `<name>.provenance.json` (git HEAD and dirty flag, profile, triple, `rustc -V`, the `Cargo.lock`'s sha256, a UTC timestamp, cargo's artifact path — values read, never produced by running the daemon).
 
-Steps 2 and 3 are skipped when the copy already exists and is at least as new as `target/<profile>/openalpacad`. The script compares the two **binaries**, not the daemon's source: after editing daemon code, run `cargo build -p openalpacad` yourself (or delete the copy in `src-tauri/bin/`) so the next `tauri dev` picks the change up. Stop any daemon an earlier session left running too — it is detached, and the app reuses a live one rather than spawning the new binary.
+After editing daemon code, the next `tauri dev` rebuilds and re-stages it on its own. Stop any daemon an earlier session left running too — it is detached, and the app reuses a live one rather than spawning the new binary.
+
+To skip the build during development, `OPENALPACA_SIDECAR_REUSE=1 bun run tauri dev` (the same as `--reuse` by hand): the staged copy is kept only when its sha256 matches its `.sha256`; otherwise the script exits 1 and says to run without it. The variable is how `beforeDevCommand` — a plain command string, which Tauri's config gives no conditional for — is told; a release never reuses (`--reuse` with `--release` is refused). `--dry-run` prints the resolved target dir and the paths and builds nothing. The daemon builds into whatever cargo resolves (the workspace `target/` by default); the shell's own `cargo check -p openalpaca_gui` uses `CARGO_TARGET_DIR=target/gui`, because tauri-build copies the staged sidecar to `<target dir>/<profile>/openalpacad`, the path the daemon's own build writes.
 
 Run it by hand with `bun run prepare:sidecar:dev` or `bun run prepare:sidecar:release`. `tauri.conf.json` declares `bundle.externalBin: ["bin/openalpacad"]`, so the daemon ships inside the app bundle.
 

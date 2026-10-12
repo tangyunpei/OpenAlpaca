@@ -10,9 +10,9 @@
     "noEmit": true,
     "skipLibCheck": true,
     "strict": true,
-    // Left off for the build tooling only: `scripts/prepare-sidecar.ts` is
-    // preserved verbatim and indexes a verified regexp match. App code (see
-    // tsconfig.json) is held to the stricter bar.
+    // Left off for the build tooling only: `scripts/prepare-sidecar.ts`'s
+    // `hostTriple()` indexes the capture of a regexp match it has just
+    // checked. App code (see tsconfig.json) is held to the stricter bar.
     "noUncheckedIndexedAccess": false,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
