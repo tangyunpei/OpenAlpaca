@@ -96,6 +96,20 @@ fn partition_keys_have_the_design_shape() {
     assert_eq!(project_partition_key(&owner, &id), key);
 }
 
+/// The project half of a partition key as a literal: the test above derives
+/// it through the same `sha256_hex` the code uses, which pins nothing against
+/// a digest change (sha2 0.11, deps plan P10). The folder suffix has its own
+/// pins in `store/projects/tests.rs`; this is the memory side's.
+#[test]
+fn project_key_of_the_design_uuid_is_pinned() {
+    let id = ProjectId::parse("7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d").unwrap();
+    assert_eq!(project_key(&id), "21a5e10e73692d40");
+    assert_eq!(
+        project_partition_key(&owner_key("u_example_alice"), &id),
+        "proj-32acea7eb739b08afd959db91e46d450-21a5e10e73692d40"
+    );
+}
+
 #[test]
 fn revision_is_lowercase_hex_sha256_of_exact_bytes() {
     let rev = revision_of(b"abc");

@@ -45,3 +45,21 @@ pub(crate) fn remove_best_effort(path: &Path) {
         tracing::warn!("Failed to remove {}: {e}", path.display());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sha256_hex;
+
+    /// FIPS 180-2's first known answer, as a literal. `file_assets.sha256`,
+    /// every artifact and upload name, a memory note's revision and the
+    /// partition keys are this spelling — lower-case hex of SHA-256 — so a
+    /// digest API change that compiles but prints differently (sha2 0.11,
+    /// deps plan P10) is caught here, not in a store nothing can read back.
+    #[test]
+    fn sha256_hex_of_abc_is_the_known_answer() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+}
