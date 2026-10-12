@@ -1,6 +1,6 @@
 # Pending decisions and limitations before a beta
 
-**rev 2, 2026-10-12** (§4.3 updated: the upgrade's decisions taken, five owner questions open); **rev 1, 2026-10-11** — branch feat/markdown-memory at 7295f91b (pushed). A record, not a plan: nothing here is adopted; each decision's current behaviour is what ships.
+**rev 3, 2026-10-12** (T24: the daemon's own credential discovery and its 30 s keychain cadence); **rev 2, 2026-10-12** (§4.3 updated: the upgrade's decisions taken, five owner questions open); **rev 1, 2026-10-11** — branch feat/markdown-memory at 7295f91b (pushed). A record, not a plan: nothing here is adopted; each decision's current behaviour is what ships.
 
 This file gathers in one place what waits on the owner and what a beta tester will meet. It restates its sources and does
 not replace them: each row cites the document that holds the full text, and that document stays authoritative. To close
@@ -67,7 +67,7 @@ Short forms: *plan* = `tasks/api-fix-plan.md`; *ext design* = `tasks/extension-e
 | ID | Question | Ships today | Recommendation | Source |
 |---|---|---|---|---|
 | T20 | Should a first boot enable `[providers.ollama]` by itself when Ollama answers on `base_url` and no provider holds a key? | The seeded template ships `enabled = false`; with a running Ollama and no key the first turn fails `NoRoutableModel` until the owner flips one bit; the first-run card points to Settings → Models & keys. | Keep `enabled = false`: enabling a provider is consent, and the cost is one documented action. | plan §0 T20 |
-| T24 | Offer the OAuth tokens found from Claude Code (`~/.claude/.credentials.json` or the Keychain item) and Codex (`~/.codex/auth.json`) on the GUI's first-run surface? | `GET /v1/settings/llm/credentials` and `…/rescan` exist and the GUI wraps them, but nothing calls them; metadata only. | Not offered: it would show on screen that the machine is signed in elsewhere and use a credential minted for another product; it needs its own design with its own consent step. | plan §0 T24 |
+| T24 | Offer the OAuth tokens found from Claude Code (`~/.claude/.credentials.json` or the Keychain item) and Codex (`~/.codex/auth.json`) on the GUI's first-run surface? | `GET /v1/settings/llm/credentials` and `…/rescan` exist and the GUI wraps them, but nothing calls them; metadata only. **The daemon discovers them already** (rev 3, found 2026-10-12): the seeded `llm.toml` has no `[credential_discovery]`, so both sources default on, and from boot and then every 30 s for the daemon's lifetime (`refresh_interval_secs`, default 30, `crates/openalpaca_llm/src/keys/credential_discovery/mod.rs:119`) it reads `~/.codex/auth.json` and `~/.claude/.credentials.json` and, on macOS with the latter missing — as on the owner's machine — runs `security find-generic-password -s 'Claude Code-credentials' -w` against the login keychain, injecting any unexpired token into the router as a fallback key (in memory, never written). Whether that should stay on by default belongs to this decision (plan-rev3 rev 3.12, §5.2). | Not offered: it would show on screen that the machine is signed in elsewhere and use a credential minted for another product; it needs its own design with its own consent step. | plan §0 T24 |
 
 ### 1.7 GUI and CLI ergonomics
 
@@ -529,3 +529,10 @@ shell route-around during a re-point (closed by `NotAProject`); Stage 2 items 11
   numbers (T16, T22), the `daemon stop` ruling's source, the record of `next`'s acceptance, the deps plan's pre-wave
   decision list, the hidden-character and memory wording, the LLM survey cells filled from map-callside §3c–§3e, the
   advisory hedge, the closed-list and residue citations, and §5's §18 counts; map-router's Q10 (RT-13) added.
+- **rev 2, 2026-10-12** — §4.3 brought to the upgrade's decisions: every DU taken, DU-33 (macOS first), the five owner
+  questions of the no-compromise re-plan. (Entry added at rev 3; the header recorded it.)
+- **rev 3, 2026-10-12** — T24's "ships today" gains what the daemon already does: credential discovery defaults on
+  (no `[credential_discovery]` in the seeded `llm.toml`), and its refresh loop reads `~/.codex/auth.json` and
+  `~/.claude/.credentials.json` and, on macOS with the latter missing, queries Claude Code's keychain item every 30 s
+  for the daemon's lifetime (`credential_discovery/mod.rs:119`). Found while fixing the tests that ran the same query
+  (`9ec986ec`; plan-rev3 rev 3.12). Nothing changed in the product; the default is the owner's to decide with T24.
