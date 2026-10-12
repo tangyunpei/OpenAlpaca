@@ -55,27 +55,64 @@ fn test_oauth_token_no_expiry() {
     assert!(!token.is_expired());
 }
 
+/// A temporary home with no keychain fallback: discovery here never reads the
+/// developer's own credential files or keychain item.
+fn host_at(home: &std::path::Path) -> DiscoveryHost {
+    DiscoveryHost {
+        home: Some(home.to_path_buf()),
+        keychain: false,
+    }
+}
+
+async fn plant(home: &std::path::Path, rel: &str, access_token: &str) {
+    let path = home.join(rel);
+    tokio::fs::create_dir_all(path.parent().unwrap())
+        .await
+        .unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let json = serde_json::json!({ "accessToken": access_token, "expiresAt": now + 3600 });
+    tokio::fs::write(&path, json.to_string()).await.unwrap();
+}
+
 #[tokio::test]
 async fn test_discover_claude_code_missing_file() {
-    // With a non-existent home, discover should return None gracefully
-    let result = discover_claude_code().await;
-    // Result depends on whether ~/.claude/.credentials.json exists
-    // Main thing: no panic
-    let _ = result;
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        discover_claude_code_on(&host_at(home.path()))
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
 async fn test_discover_codex_missing_file() {
-    let result = discover_codex().await;
-    let _ = result;
+    let home = tempfile::tempdir().unwrap();
+    assert!(discover_codex_on(&host_at(home.path())).await.is_none());
 }
 
 #[tokio::test]
 async fn test_discover_all_default_config() {
     let config = CredentialDiscoveryConfig::default();
-    let results = discover_all(&config).await;
-    // Should not panic, may return empty or found credentials
-    let _ = results;
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        discover_all_on(&config, &host_at(home.path()))
+            .await
+            .is_empty()
+    );
+
+    plant(home.path(), ".claude/.credentials.json", "claude-token").await;
+    plant(home.path(), ".codex/auth.json", "codex-token").await;
+    let found = discover_all_on(&config, &host_at(home.path())).await;
+    let sources: Vec<_> = found.iter().map(|c| c.source).collect();
+    assert_eq!(
+        sources,
+        vec![CredentialSource::ClaudeCode, CredentialSource::Codex]
+    );
+    assert_eq!(found[0].token.access_token, "claude-token");
+    assert_eq!(found[1].token.access_token, "codex-token");
 }
 
 #[tokio::test]
@@ -110,11 +147,11 @@ fn test_discovered_credential_info_serialization() {
 
 #[tokio::test]
 async fn test_discover_claude_code_valid_json() {
-    // Create a temp dir to test file reading
-    let temp = std::env::temp_dir().join("openalpaca_test_cred");
-    let claude_dir = temp.join(".claude");
-    let _ = tokio::fs::create_dir_all(&claude_dir).await;
-    let cred_path = claude_dir.join(".credentials.json");
+    let home = tempfile::tempdir().unwrap();
+    let cred_path = home.path().join(".claude").join(".credentials.json");
+    tokio::fs::create_dir_all(cred_path.parent().unwrap())
+        .await
+        .unwrap();
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -130,16 +167,13 @@ async fn test_discover_claude_code_valid_json() {
         .await
         .unwrap();
 
-    // Can't directly test discover_claude_code() since it reads from $HOME,
-    // but we can test the OAuthToken parsing
-    let data = tokio::fs::read(&cred_path).await.unwrap();
-    let token: OAuthToken = serde_json::from_slice(&data).unwrap();
-    assert_eq!(token.access_token, "test-token-123");
-    assert_eq!(token.refresh_token.as_deref(), Some("refresh-456"));
-    assert!(!token.is_expired());
-
-    // Cleanup
-    let _ = tokio::fs::remove_dir_all(&temp).await;
+    let found = discover_claude_code_on(&host_at(home.path()))
+        .await
+        .expect("the planted credentials are discovered");
+    assert_eq!(found.source, CredentialSource::ClaudeCode);
+    assert_eq!(found.token.access_token, "test-token-123");
+    assert_eq!(found.token.refresh_token.as_deref(), Some("refresh-456"));
+    assert!(!found.token.is_expired());
 }
 
 #[test]

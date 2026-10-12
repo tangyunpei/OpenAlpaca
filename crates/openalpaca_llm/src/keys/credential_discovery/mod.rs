@@ -351,18 +351,52 @@ impl TokenManager {
 
 // ── Discovery Functions ──────────────────────────────────────────────
 
+/// Where discovery looks: the home folder that holds `.claude/` and `.codex/`, and
+/// whether Claude Code's macOS keychain item is a fallback. Production discovers on
+/// the machine (`$HOME`, the keychain on macOS); a test passes a temporary home and no
+/// keychain, so no test reads the owner's credential files or keychain item.
+struct DiscoveryHost {
+    home: Option<PathBuf>,
+    keychain: bool,
+}
+
+impl DiscoveryHost {
+    /// The machine this process runs on.
+    fn system() -> Self {
+        // A unit test that reaches this would read the developer's real credentials:
+        // the files under `$HOME` and, on macOS, the keychain item. Tests pass a host.
+        #[cfg(test)]
+        panic!("credential discovery reached the host in a test; pass a DiscoveryHost");
+        #[cfg(not(test))]
+        Self {
+            home: dirs_path(),
+            keychain: cfg!(target_os = "macos"),
+        }
+    }
+}
+
 /// Discover all available credentials based on config.
 pub async fn discover_all(config: &CredentialDiscoveryConfig) -> Vec<DiscoveredCredential> {
+    if !config.claude_code.unwrap_or(true) && !config.codex.unwrap_or(true) {
+        return Vec::new();
+    }
+    discover_all_on(config, &DiscoveryHost::system()).await
+}
+
+async fn discover_all_on(
+    config: &CredentialDiscoveryConfig,
+    host: &DiscoveryHost,
+) -> Vec<DiscoveredCredential> {
     let mut results = Vec::new();
 
     if config.claude_code.unwrap_or(true)
-        && let Some(cred) = discover_claude_code().await
+        && let Some(cred) = discover_claude_code_on(host).await
     {
         results.push(cred);
     }
 
     if config.codex.unwrap_or(true)
-        && let Some(cred) = discover_codex().await
+        && let Some(cred) = discover_codex_on(host).await
     {
         results.push(cred);
     }
@@ -370,9 +404,14 @@ pub async fn discover_all(config: &CredentialDiscoveryConfig) -> Vec<DiscoveredC
     results
 }
 
-/// Discover Claude Code credentials from `~/.claude/.credentials.json`.
+/// Discover Claude Code credentials from `~/.claude/.credentials.json`, falling back
+/// to Claude Code's macOS keychain item.
 pub async fn discover_claude_code() -> Option<DiscoveredCredential> {
-    let home = dirs_path()?;
+    discover_claude_code_on(&DiscoveryHost::system()).await
+}
+
+async fn discover_claude_code_on(host: &DiscoveryHost) -> Option<DiscoveredCredential> {
+    let home = host.home.as_ref()?;
     let cred_path = home.join(".claude").join(".credentials.json");
 
     match tokio::fs::read(&cred_path).await {
@@ -404,9 +443,9 @@ pub async fn discover_claude_code() -> Option<DiscoveredCredential> {
                 e
             );
 
-            // Fallback: try macOS Keychain
-            #[cfg(target_os = "macos")]
-            {
+            // Fallback: Claude Code's macOS keychain item (the machine's host only).
+            if host.keychain {
+                #[cfg(target_os = "macos")]
                 return discover_from_keychain(
                     "Claude Code-credentials",
                     ProviderType::Anthropic,
@@ -414,8 +453,6 @@ pub async fn discover_claude_code() -> Option<DiscoveredCredential> {
                 )
                 .await;
             }
-
-            #[cfg(not(target_os = "macos"))]
             None
         }
     }
@@ -423,7 +460,11 @@ pub async fn discover_claude_code() -> Option<DiscoveredCredential> {
 
 /// Discover Codex credentials from `~/.codex/auth.json`.
 pub async fn discover_codex() -> Option<DiscoveredCredential> {
-    let home = dirs_path()?;
+    discover_codex_on(&DiscoveryHost::system()).await
+}
+
+async fn discover_codex_on(host: &DiscoveryHost) -> Option<DiscoveredCredential> {
+    let home = host.home.as_ref()?;
     let cred_path = home.join(".codex").join("auth.json");
 
     match tokio::fs::read(&cred_path).await {
@@ -517,7 +558,8 @@ async fn discover_from_keychain(
     }
 }
 
-/// Get the user's home directory.
+/// Get the user's home directory (the machine's host only; tests pass a home).
+#[cfg(not(test))]
 fn dirs_path() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
