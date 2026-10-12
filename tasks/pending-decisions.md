@@ -1,6 +1,6 @@
 # Pending decisions and limitations before a beta
 
-**rev 1, 2026-10-11** — branch feat/markdown-memory at 7295f91b (pushed). A record, not a plan: nothing here is adopted; each decision's current behaviour is what ships.
+**rev 2, 2026-10-12** (§4.3 updated: the upgrade's decisions taken, five owner questions open); **rev 1, 2026-10-11** — branch feat/markdown-memory at 7295f91b (pushed). A record, not a plan: nothing here is adopted; each decision's current behaviour is what ships.
 
 This file gathers in one place what waits on the owner and what a beta tester will meet. It restates its sources and does
 not replace them: each row cites the document that holds the full text, and that document stays authoritative. To close
@@ -299,7 +299,20 @@ while `tasks/todo.md:431` puts them in the low-risk batch, which landed whole as
 defines the ids is not in the tree. (CLAUDE.md, whole-branch review paragraph; `tasks/llm-simplify/map-router.md` §8,
 `map-callside.md` §4–§5)
 
-### 4.3 The toolchain and dependency upgrade — DU-1…DU-32 unanswered, nothing applied
+### 4.3 The toolchain and dependency upgrade — decided; five owner questions open (rev 2, 2026-10-12)
+
+**Since 2026-10-11 every DU is taken** (DU-1 → `main`, DU-2 → Rust 1.99.0, DU-13 → Bun 1.4.2, the rest as recommended; plan-rev3 rev 3.4), DU-33 (macOS first) on 2026-10-12, and the owner's no-compromise rule of 2026-10-12 (`CLAUDE.md` core principles) re-answered the compromises (plan-rev3 rev 3.9, `modernization-plan.md` rev 2.0; the record is `tasks/deps-upgrade/reports/2026-10-12-no-compromise-replan.md`). **Open, each with its recommendation** (nothing that depends on one lands before its answer):
+
+| Question | Options | Recommendation |
+|---|---|---|
+| (c)-1 `<Activity>` for the view swap vs G1/P2's word "mount" (DU-W2; M70) | (a) adopt M70 in the form that keeps G1 and P2 (a reveal stamp, the daemon's-word recorder always mounted, P2's cards cleared on hide); (b) keep the unmounting swap | (a) |
+| (c)-2 the macOS floor (DU-31 (f-a) gives 10.13, which Tailwind 4 and Vite 8's output cannot run on; Q18) | (a) `minimumSystemVersion` 13.3; (b) 11.0 plus "Safari 16.4 or later" stated | (a) |
+| (c)-3 MCP elicitation answered by a person (DU-R4 (ii), with T35; M84) | (a) an approval card through the `ConfirmationBroker`, the capability advertised; (b) keep `Decline` | (a), decided with T35 |
+| (c)-4 MCP tasks (DU-R4 (iii); M83) | (a) a short design mapping a task onto the run model first; (b) no surface | (a) |
+| (c)-5 window chrome (DESIGN_SPEC §3.1) | (a) keep today's decorated window; (b) the overlay title bar | (a) — no change |
+
+The history below is rev 1's text, kept as written.
+
 
 DU-1…DU-32: see `tasks/deps-upgrade/plan-rev3.md` (rev 3.2, 2026-10-10, re-measured at 7295f91b on Rust 1.99.0; Part I
 the dependency wave P01–P40 with P27a/P31a, Part II the "flexible apps" programme Q00–Q10; `plan.md` rev 2.1 is frozen
