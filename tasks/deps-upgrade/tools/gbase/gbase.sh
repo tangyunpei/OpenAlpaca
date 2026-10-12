@@ -498,13 +498,31 @@ sleep_orphans() { ps -o pid= -o ppid= -o command= -A 2>/dev/null | awk '$2 == 1 
 # extraction so the wave's changes are seen; P15–P18 each move their own. The measured diff the
 # driver replays predates P14 and carries none of those moves, so on the wave's lock exactly these
 # fail — and each must, or the behaviour it pins did not move as measured (rehearsal 2026-10-12).
-P14_PINS="security::sanitizer::tests::a_declared_text_upload_with_a_pdf_or_dwg_signature_inside_passes_today P17/P18
-security::sanitizer::tests::the_two_connector_media_uploads_pass_today P17a/P18
-extraction::tests::a_docx_with_bzip2_entries_is_read_by_zip_2 P16
-extraction::tests::an_aes_128_pdf_is_a_retryable_error_today P15
-extraction::tests::xlsx_cell_text_is_pinned_as_calamine_0_26_reads_it P16
+P14_PINS="security::sanitizer::tests::a_declared_text_upload_with_a_pdf_or_dwg_signature_inside_passes_today P17/P18 renamed
+security::sanitizer::tests::the_two_connector_media_uploads_pass_today P17a/P18 renamed
+extraction::tests::a_docx_with_bzip2_entries_is_read_by_zip_2 P16 renamed
+extraction::tests::an_aes_128_pdf_is_a_retryable_error_today P15 renamed
+extraction::tests::xlsx_cell_text_is_pinned_as_calamine_0_26_reads_it P16 renamed
 routes::files::tests::a_declared_csv_starting_with_a_dwg_signature_is_accepted P17/P18
 routes::files::tests::a_declared_text_file_naming_a_pdf_header_past_offset_0_is_accepted P17/P18"
+
+# Which pins must fail depends on whether the tree under test carries P15–P18 (prep review
+# 2026-10-12). They rename the five pins marked `renamed` as they move them, and P17's rule makes
+# the two route pins pass under their own names. So: every renamed pin under its old name — the
+# branch point — expects all seven; none of them — a tip carrying all four commits — expects none;
+# a tree carrying some is neither, and returns 1. Prints the expected P14_PINS lines.
+expected_pins() { # expected_pins TREE
+  local line name fn renamed=0 present=0
+  while IFS= read -r line; do
+    case "$line" in *" renamed") ;; *) continue ;; esac
+    renamed=$((renamed + 1)); name=${line%% *}; fn=${name##*::}
+    if grep -rqs --include='*.rs' "fn ${fn}(" "$1/crates" "$1/apps"; then present=$((present + 1)); fi
+  done <<<"$P14_PINS"
+  if [ "$present" -eq "$renamed" ]; then printf '%s\n' "$P14_PINS"; return 0; fi
+  [ "$present" -eq 0 ] && return 0
+  echo "the tree carries part of P15–P18: $present of the $renamed renamed P14 pins are under their old names" >&2
+  return 1
+}
 
 final_tests() {
   CURRENT_STEP="final-tests"
@@ -535,17 +553,18 @@ final_tests() {
     say "    orphaned 'sleep 3600' children left by the daemon's tests (ppid 1, started in this run), killed: $(printf '%s ' $new)"
     kill $new 2>/dev/null || true
   fi
-  local failed unexpected missing name
+  local failed unexpected missing name pins
+  pins=$(expected_pins "$T/src") || die "G-base runs on the branch point or on a tip carrying all of P15–P18, not between them"
   failed=$(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' "$T/logs/90-test.log" | sort -u)
-  unexpected=$(comm -23 <(printf '%s\n' "$failed" | grep . || true) <(printf '%s\n' "$P14_PINS" | awk '{print $1}' | sort -u))
-  missing=$(comm -13 <(printf '%s\n' "$failed" | grep . || true) <(printf '%s\n' "$P14_PINS" | awk '{print $1}' | sort -u))
+  unexpected=$(comm -23 <(printf '%s\n' "$failed" | grep . || true) <(printf '%s\n' "$pins" | awk '{print $1}' | sort -u))
+  missing=$(comm -13 <(printf '%s\n' "$failed" | grep . || true) <(printf '%s\n' "$pins" | awk '{print $1}' | sort -u))
   [ -z "$unexpected" ] || die "the suite failed outside P14's pins: $(printf '%s ' $unexpected)(log: $T/logs/90-test.log)"
   if grep -q '^error: test failed' "$T/logs/90-test.log" && [ -z "$failed" ]; then
     die "cargo test failed with no FAILED test line (a crash or a build error; log: $T/logs/90-test.log)"
   fi
-  say "    P14's pins failing as the wave moves them: $(printf '%s\n' "$failed" | grep -c . || true) of $(printf '%s\n' "$P14_PINS" | grep -c .)"
+  say "    P14's pins expected to fail on this tree: $(printf '%s\n' "$pins" | grep -c . || true) of $(printf '%s\n' "$P14_PINS" | grep -c .) (none on a tip carrying P15–P18); failing: $(printf '%s\n' "$failed" | grep -c . || true)"
   if [ -n "$missing" ]; then
-    for name in $missing; do say "    NOTE: P14 pin did not fail — the behaviour it pins did not move as measured: $name ($(printf '%s\n' "$P14_PINS" | awk -v n="$name" '$1 == n {print $2}'))"; done
+    for name in $missing; do say "    NOTE: P14 pin did not fail — the behaviour it pins did not move as measured: $name ($(printf '%s\n' "$pins" | awk -v n="$name" '$1 == n {print $2}'))"; done
     [ "$STRICT" -eq 0 ] || die "under --strict every P14 pin must fail on the wave's lock"
   fi
   # the suite runs without --locked (G-check's rule), so hold it to step 8's lock as G-GUI is held to its own
@@ -897,6 +916,25 @@ EOF
     verdict vii-nosummary 0 "a lockdiff.py that dies before its summary (rc 1, Python's error report) stopped the driver (rc=$rc; logs/selftest-07c-no-summary.log)"
   else
     verdict vii-nosummary 1 "rc=$rc; see logs/selftest-07c-no-summary.log"
+  fi
+
+  # (viii) the pins expected to fail follow P15–P18: a toy branch point (every renamed pin under
+  # its old name) expects all seven; a toy tip (the renamed pins gone, the two route pins kept
+  # under their names, as P17 leaves them) expects none; a toy tree between them is refused
+  local t old fn got
+  for t in branch tip between; do mkdir -p "$T/toy-pins-$t/crates/x/src" "$T/toy-pins-$t/apps/y/src"; done
+  old=$(printf '%s\n' "$P14_PINS" | awk '$3 == "renamed" {print $1}')
+  for fn in $old; do printf '#[test]\nfn %s() {}\n' "${fn##*::}" >> "$T/toy-pins-branch/crates/x/src/pins.rs"; done
+  fn=$(printf '%s\n' "$old" | head -n 1)
+  printf '#[test]\nfn %s() {}\n' "${fn##*::}" > "$T/toy-pins-between/crates/x/src/pins.rs"
+  printf '#[tokio::test]\nasync fn a_declared_csv_starting_with_a_dwg_signature_is_accepted() {}\n#[test]\nfn an_aes_128_pdf_is_read() {}\n' > "$T/toy-pins-tip/apps/y/src/files.rs"
+  got=$(expected_pins "$T/toy-pins-branch")
+  if [ "$got" = "$P14_PINS" ] && [ -z "$(expected_pins "$T/toy-pins-tip")" ] \
+     && ! expected_pins "$T/toy-pins-between" > /dev/null 2> "$T/logs/selftest-08-between.log" \
+     && grep -q 'carries part of P15' "$T/logs/selftest-08-between.log"; then
+    verdict viii-pins 0 "a branch point expects all seven P14 pins to fail, a tip carrying P15–P18 none, and a tree between them is refused"
+  else
+    verdict viii-pins 1 "branch [$(printf '%s\n' "$got" | grep -c .)], tip [$(expected_pins "$T/toy-pins-tip" | grep -c .)]; see logs/selftest-08-between.log"
   fi
 
   say ""
