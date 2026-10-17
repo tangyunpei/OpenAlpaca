@@ -1,7 +1,14 @@
 //! typedprobe — E6's typed probes. Each input goes through the tree's own
-//! loader, compiled from this checkout's source, and one line per input says
-//! whether it loaded: `<index>\tok|err`. Nothing else is printed — no value, no
-//! key, no path, no error text — and nothing is written.
+//! loader, compiled from the source of the tree it is built against (the branch
+//! point, and the prep tree with the wave's manifests — README, *Build*), and
+//! one line per input says whether it loaded: `<index>\tok|err|panic`. Nothing
+//! else is printed — no value, no key, no path, no error text — and nothing is
+//! written. A panic inside a loader is caught per input and printed as `panic`;
+//! the panic hook prints one fixed line on stderr and never the panic's own
+//! message, which could quote the input (review F-13). `E6_SELFTEST_PANIC=<index>`
+//! is the self-test knob: that input panics on purpose, with its path and text
+//! as the payload (a `:old`/`:new` suffix is accepted and ignored; README,
+//! *Proving the panic path*).
 //!
 //!   typedprobe <kind> <file>...
 //!
@@ -25,6 +32,7 @@
 //! `render_config` serialises it, and one M3 toggle (a provider's `enabled`)
 //! edits to a text that re-parses to exactly the toggled config.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use openalpaca_core::agent::AgentConfigFile;
@@ -41,6 +49,11 @@ use openalpaca_llm::config::llm_config::{read_config, render_config, render_conf
 use openalpaca_plugins::PluginManifest;
 
 fn main() {
+    // A panic's message could quote the input: say only that one happened.
+    std::panic::set_hook(Box::new(|_| {
+        eprintln!("typedprobe: a panic; its message is withheld because it could quote the input");
+    }));
+    let knob = selftest_panic();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((kind, files)) = args.split_first() else {
         usage();
@@ -67,13 +80,41 @@ fn main() {
         _ => usage(),
     };
     for (i, file) in files.iter().enumerate() {
-        let word = if probe(Path::new(file)).is_some() {
-            "ok"
-        } else {
-            "err"
+        let index = i + 1;
+        let loaded = catch_unwind(AssertUnwindSafe(|| {
+            if knob == Some(index) {
+                panic!("{file}\n{}", read(Path::new(file)).unwrap_or_default());
+            }
+            probe(Path::new(file))
+        }));
+        let word = match loaded {
+            Ok(Some(())) => "ok",
+            Ok(None) => "err",
+            Err(_) => "panic",
         };
-        println!("{}\t{word}", i + 1);
+        println!("{index}\t{word}");
     }
+}
+
+/// The self-test knob, `E6_SELFTEST_PANIC=<index>[:old|new]`: the input that
+/// panics on purpose (the side suffix is accepted and ignored). A malformed
+/// value is refused.
+fn selftest_panic() -> Option<usize> {
+    let raw = std::env::var("E6_SELFTEST_PANIC").ok()?;
+    let index = match raw.split_once(':') {
+        None => raw.as_str(),
+        Some((i, "old" | "new")) => i,
+        Some(_) => knob_refused(),
+    };
+    let Ok(index) = index.parse() else {
+        knob_refused()
+    };
+    Some(index)
+}
+
+fn knob_refused() -> ! {
+    eprintln!("typedprobe: E6_SELFTEST_PANIC must be <index>[:old|new]");
+    std::process::exit(2);
 }
 
 fn usage() -> ! {

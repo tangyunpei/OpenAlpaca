@@ -5,8 +5,8 @@
 //! `yamlcmp [--facet typed|value] <file>...` prints one line per input,
 //! `<index>\t<word>`, and exits 0; `--summary` prints counts only. Nothing else
 //! is printed: no value, no key, no path. The word is `equal`, `different`,
-//! `parse-error-old`, `parse-error-new`, `parse-error-both`, `no-frontmatter`
-//! or `unreadable`.
+//! `parse-error-old`, `parse-error-new`, `parse-error-both`, `panic-old`,
+//! `panic-new`, `panic-both`, `no-frontmatter` or `unreadable`.
 //!
 //! The word is decided on the **typed** facet by default — the frontmatter
 //! read into the tree's own `SkillFrontmatter` and validated, which is what
@@ -14,8 +14,14 @@
 //! `--facet value` decides it on the generic `serde_json::Value` read instead,
 //! for a file whose real loader is not YAML at all (an agent template, a persona
 //! document — their frontmatter only looks like YAML, and the typed facet says
-//! nothing about them). Both facets are counted in `--summary`; a panic inside
-//! either library counts as that side's parse error.
+//! nothing about them). Both facets are counted in `--summary`. A panic inside
+//! either library is caught and is that side's `panic-*` word, counted as a
+//! panic only (review F-13: never folded into a parse error); the panic hook
+//! prints one fixed line on stderr and never the panic's own message, which
+//! could quote the input. `E6_SELFTEST_PANIC=<index>[:old|new]` is the
+//! self-test knob: reading that input, the named side (both when none is named)
+//! panics on both facets with the input's path and text as its payload (README,
+//! *Proving the panic path*).
 //!
 //! Inputs are the files named on the command line. Nothing is walked and
 //! nothing is written: the September tool's serializer branch, which wrote
@@ -71,16 +77,26 @@ fn guarded<T>(f: impl FnOnce() -> Option<T>) -> Outcome<T> {
     }
 }
 
-fn typed_old(yaml: &str) -> Outcome<SkillFrontmatter> {
+/// Reading the input that `E6_SELFTEST_PANIC` names on this side: panic with
+/// the input as the payload, as a library quoting its input would.
+fn knob_panic(on_purpose: bool, payload: &str) {
+    if on_purpose {
+        panic!("{payload}");
+    }
+}
+
+fn typed_old(yaml: &str, knob: (bool, &str)) -> Outcome<SkillFrontmatter> {
     guarded(|| {
+        knob_panic(knob.0, knob.1);
         let fm: SkillFrontmatter = serde_yaml::from_str(yaml).ok()?;
         fm.validate().ok()?;
         Some(fm)
     })
 }
 
-fn typed_new(yaml: &str) -> Outcome<SkillFrontmatter> {
+fn typed_new(yaml: &str, knob: (bool, &str)) -> Outcome<SkillFrontmatter> {
     guarded(|| {
+        knob_panic(knob.0, knob.1);
         let fm: SkillFrontmatter =
             serde_saphyr::from_str_with_options(yaml, yaml_options()).ok()?;
         fm.validate().ok()?;
@@ -88,12 +104,39 @@ fn typed_new(yaml: &str) -> Outcome<SkillFrontmatter> {
     })
 }
 
-fn value_old(yaml: &str) -> Outcome<serde_json::Value> {
-    guarded(|| serde_yaml::from_str::<serde_json::Value>(yaml).ok())
+fn value_old(yaml: &str, knob: (bool, &str)) -> Outcome<serde_json::Value> {
+    guarded(|| {
+        knob_panic(knob.0, knob.1);
+        serde_yaml::from_str::<serde_json::Value>(yaml).ok()
+    })
 }
 
-fn value_new(yaml: &str) -> Outcome<serde_json::Value> {
-    guarded(|| serde_saphyr::from_str_with_options::<serde_json::Value>(yaml, yaml_options()).ok())
+fn value_new(yaml: &str, knob: (bool, &str)) -> Outcome<serde_json::Value> {
+    guarded(|| {
+        knob_panic(knob.0, knob.1);
+        serde_saphyr::from_str_with_options::<serde_json::Value>(yaml, yaml_options()).ok()
+    })
+}
+
+/// The self-test knob, `E6_SELFTEST_PANIC=<index>[:old|new]`: which input, and
+/// which sides (`(old, new)`), panic on purpose. A malformed value is refused.
+fn selftest_panic() -> Option<(usize, bool, bool)> {
+    let raw = std::env::var("E6_SELFTEST_PANIC").ok()?;
+    let (index, sides) = match raw.split_once(':') {
+        None => (raw.as_str(), (true, true)),
+        Some((i, "old")) => (i, (true, false)),
+        Some((i, "new")) => (i, (false, true)),
+        Some(_) => knob_refused(),
+    };
+    let Ok(index) = index.parse() else {
+        knob_refused()
+    };
+    Some((index, sides.0, sides.1))
+}
+
+fn knob_refused() -> ! {
+    eprintln!("yamlcmp: E6_SELFTEST_PANIC must be <index>[:old|new]");
+    std::process::exit(2);
 }
 
 #[derive(Default)]
@@ -105,18 +148,26 @@ struct FacetCounts {
     parse_error_both: usize,
     panic_old: usize,
     panic_new: usize,
+    panic_both: usize,
 }
 
 impl FacetCounts {
-    /// The word for one input on this facet, counting it.
+    /// The word for one input on this facet, counting it once: a panic is
+    /// reported before a parse error and counted as a panic only.
     fn word<T: PartialEq>(&mut self, old: Outcome<T>, new: Outcome<T>) -> &'static str {
-        if matches!(old, Outcome::Panic) {
-            self.panic_old += 1;
-        }
-        if matches!(new, Outcome::Panic) {
-            self.panic_new += 1;
-        }
         match (old, new) {
+            (Outcome::Panic, Outcome::Panic) => {
+                self.panic_both += 1;
+                "panic-both"
+            }
+            (Outcome::Panic, _) => {
+                self.panic_old += 1;
+                "panic-old"
+            }
+            (_, Outcome::Panic) => {
+                self.panic_new += 1;
+                "panic-new"
+            }
             (Outcome::Ok(a), Outcome::Ok(b)) => {
                 if a == b {
                     self.equal += 1;
@@ -149,10 +200,12 @@ impl FacetCounts {
         println!("{facet}:parse-error-both\t{}", self.parse_error_both);
         println!("{facet}:panic-old\t{}", self.panic_old);
         println!("{facet}:panic-new\t{}", self.panic_new);
+        println!("{facet}:panic-both\t{}", self.panic_both);
     }
 }
 
 fn run() {
+    let knob = selftest_panic();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut summary = false;
     let mut facet_value = false;
@@ -202,8 +255,14 @@ fn run() {
             }
             continue;
         };
-        let typed_word = typed.word(typed_old(yaml), typed_new(yaml));
-        let value_word = value.word(value_old(yaml), value_new(yaml));
+        let (knob_old, knob_new) = match knob {
+            Some((at, old, new)) if at == index => (old, new),
+            _ => (false, false),
+        };
+        let payload = format!("{path}\n{text}");
+        let (ko, kn) = ((knob_old, payload.as_str()), (knob_new, payload.as_str()));
+        let typed_word = typed.word(typed_old(yaml, ko), typed_new(yaml, kn));
+        let value_word = value.word(value_old(yaml, ko), value_new(yaml, kn));
         if !summary {
             println!(
                 "{index}\t{}",
@@ -223,8 +282,10 @@ fn run() {
 
 fn main() {
     // A panic inside a library is an outcome, not a message: its text could
-    // quote the input.
-    std::panic::set_hook(Box::new(|_| {}));
+    // quote the input, so the hook says only that one happened.
+    std::panic::set_hook(Box::new(|_| {
+        eprintln!("yamlcmp: a panic; its message is withheld because it could quote the input");
+    }));
     // A deep document must end in a library's own error, never in a stack
     // overflow that loses the run.
     std::thread::Builder::new()

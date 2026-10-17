@@ -1,0 +1,15 @@
+[package]
+name = "keycount"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A standalone crate: it lives inside the repository tree but is not a member
+# of its workspace. Build it with `--manifest-path`.
+[workspace]
+
+[dependencies]
+# The parser the daemon reads `llm.toml` and the plugin files with until P29
+# (the workspace's `toml = "0.9"`, locked at 0.9.12): the count is taken at
+# plan-rev3 §5.1 item 3's consent point, before P29 moves it.
+toml = "=0.9.12"

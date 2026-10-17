@@ -11,12 +11,25 @@
 //!   tedit compare --from <file> <input>...     # the NEW binary: one line per input
 //!
 //! `compare` prints `<index>\t<word>` and exits 0 — `equal`, `different`,
-//! `parse-error-old`, `parse-error-new`, `parse-error-both` or `unreadable`;
-//! with `--summary` counts only; with `--roundtrip` a word per input on the
-//! A08 round-trip defect (`reparse_equal=false`): `roundtrip-ok`,
-//! `defect-shared`, `defect-old-only`, `defect-new-only` or `not-applicable`.
-//! The record file holds, per input, its index, a status word, a SHA-256 and two
-//! small counts — never a value, a key or a path. Nothing else is written.
+//! `parse-error-old`, `parse-error-new`, `parse-error-both`, `panic-old`,
+//! `panic-new`, `panic-both` or `unreadable`; with `--summary` counts only;
+//! with `--roundtrip` a word per input on the A08 round-trip defect
+//! (`reparse_equal=false`): `roundtrip-ok`, `defect-shared`, `defect-old-only`,
+//! `defect-new-only`, `not-applicable`, or the input's `panic-*` word. The
+//! record file (`# tedit record v2`) holds, per input, its index, a status word,
+//! a SHA-256 and two small counts — never a value, a key or a path. Nothing
+//! else is written.
+//!
+//! A panic while an input is fingerprinted — in `toml_edit`, in `toml`, or in
+//! the copied editor code — is caught and recorded as that binary's `panic`
+//! status, so the record file is still written and `compare` reports
+//! `panic-old`/`panic-new`/`panic-both`; the panic hook prints one fixed line on
+//! stderr and never the panic's own message, which could quote the input
+//! (review F-13). A panic row is counted as a panic only.
+//! `E6_SELFTEST_PANIC=<index>` is the self-test knob: that input panics, with
+//! its path and text as the payload, in whichever binary runs (a `:old`/`:new`
+//! suffix is accepted and ignored — one side per binary; README, *Proving the
+//! panic path*).
 //!
 //! What the record fingerprints, per input (the September tool's facets, nothing
 //! added): whether `DocumentMut::to_string` gives the input back byte for byte;
@@ -24,6 +37,8 @@
 //! six seeded mutations of the typed value (the September `mutate`, seeds
 //! `s * 7919 + 17`), the text `apply_delta` writes and whether `toml` 0.9.12
 //! re-parses that text to the mutated value.
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, TableLike, Value};
@@ -275,6 +290,8 @@ enum Status {
     /// `toml_edit` refused it.
     ParseError,
     Unreadable,
+    /// Fingerprinting it panicked: nothing recorded but the fact.
+    Panic,
 }
 
 impl Status {
@@ -284,6 +301,7 @@ impl Status {
             Status::EditOnly => "edit-only",
             Status::ParseError => "parse-error",
             Status::Unreadable => "unreadable",
+            Status::Panic => "panic",
         }
     }
 
@@ -293,6 +311,7 @@ impl Status {
             "edit-only" => Status::EditOnly,
             "parse-error" => Status::ParseError,
             "unreadable" => Status::Unreadable,
+            "panic" => Status::Panic,
             _ => return None,
         })
     }
@@ -331,7 +350,8 @@ impl Fingerprint {
     }
 }
 
-fn record(path: &str) -> Record {
+/// One input's record; a panic anywhere after the read is the `panic` status.
+fn record(path: &str, panic_on_purpose: bool) -> Record {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Record {
             status: Status::Unreadable,
@@ -340,6 +360,21 @@ fn record(path: &str) -> Record {
             defects: 0,
         };
     };
+    catch_unwind(AssertUnwindSafe(|| {
+        if panic_on_purpose {
+            panic!("{path}\n{text}");
+        }
+        record_text(&text)
+    }))
+    .unwrap_or(Record {
+        status: Status::Panic,
+        fingerprint: String::new(),
+        scenarios: 0,
+        defects: 0,
+    })
+}
+
+fn record_text(text: &str) -> Record {
     let doc: DocumentMut = match text.parse() {
         Ok(d) => d,
         Err(_) => {
@@ -364,7 +399,7 @@ fn record(path: &str) -> Record {
     fp.feed("fmt", formatted.to_string().as_bytes());
 
     // The mutation scenarios, with toml 0.9.12 as the typed side.
-    let Ok(before) = toml::from_str::<toml::Table>(&text) else {
+    let Ok(before) = toml::from_str::<toml::Table>(text) else {
         return Record {
             status: Status::EditOnly,
             fingerprint: fp.hex(),
@@ -416,24 +451,54 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
+/// The record file's first line. v2 added the `panic` status; a v1 record is
+/// refused, so both steps run binaries built from one source.
+const RECORD_HEADER: &str = "# tedit record v2";
+
+/// The self-test knob, `E6_SELFTEST_PANIC=<index>[:old|new]`: the input that
+/// panics on purpose (the side suffix is accepted and ignored — this binary is
+/// one side). A malformed value is refused.
+fn selftest_panic() -> Option<usize> {
+    let raw = std::env::var("E6_SELFTEST_PANIC").ok()?;
+    let index = match raw.split_once(':') {
+        None => raw.as_str(),
+        Some((i, "old" | "new")) => i,
+        Some(_) => knob_refused(),
+    };
+    let Ok(index) = index.parse() else {
+        knob_refused()
+    };
+    Some(index)
+}
+
+fn knob_refused() -> ! {
+    eprintln!("tedit: E6_SELFTEST_PANIC must be <index>[:old|new]");
+    std::process::exit(2);
+}
+
 fn main() {
+    // A panic's message could quote the input: say only that one happened.
+    std::panic::set_hook(Box::new(|_| {
+        eprintln!("tedit: a panic; its message is withheld because it could quote the input");
+    }));
+    let knob = selftest_panic();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("record") => cmd_record(&args[1..]),
-        Some("compare") => cmd_compare(&args[1..]),
+        Some("record") => cmd_record(&args[1..], knob),
+        Some("compare") => cmd_compare(&args[1..], knob),
         _ => usage(),
     }
 }
 
-fn cmd_record(args: &[String]) {
+fn cmd_record(args: &[String], knob: Option<usize>) {
     if args.len() < 3 || args[0] != "--out" {
         usage();
     }
     let out = &args[1];
     let inputs = &args[2..];
-    let mut lines = String::from("# tedit record v1\n");
+    let mut lines = format!("{RECORD_HEADER}\n");
     for (i, path) in inputs.iter().enumerate() {
-        let r = record(path);
+        let r = record(path, knob == Some(i + 1));
         lines.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\n",
             i + 1,
@@ -455,8 +520,10 @@ fn read_record(path: &str, expected: usize) -> Vec<Record> {
         std::process::exit(2);
     };
     let mut lines = text.lines();
-    if lines.next() != Some("# tedit record v1") {
-        eprintln!("tedit: not a tedit record file");
+    if lines.next() != Some(RECORD_HEADER) {
+        eprintln!(
+            "tedit: not a v2 tedit record file; record again with the old binary built from this source"
+        );
         std::process::exit(2);
     }
     let mut records = Vec::new();
@@ -497,6 +564,9 @@ struct Counts {
     parse_error_old: usize,
     parse_error_new: usize,
     parse_error_both: usize,
+    panic_old: usize,
+    panic_new: usize,
+    panic_both: usize,
     unreadable: usize,
     typed_refused_old: usize,
     typed_refused_new: usize,
@@ -509,7 +579,7 @@ struct Counts {
     inputs_with_defect_shared: usize,
 }
 
-fn cmd_compare(args: &[String]) {
+fn cmd_compare(args: &[String], knob: Option<usize>) {
     if args.len() < 2 || args[0] != "--from" {
         usage();
     }
@@ -532,8 +602,32 @@ fn cmd_compare(args: &[String]) {
     let mut c = Counts::default();
     for (i, (path, old)) in rest.iter().zip(olds.iter()).enumerate() {
         let index = i + 1;
-        let new = record(path);
+        let new = record(path, knob == Some(index));
         c.inputs += 1;
+        // A panic is reported before anything else but an unreadable file, and
+        // counted as a panic only.
+        let panic_word = match (old.status, new.status) {
+            (Status::Unreadable, _) | (_, Status::Unreadable) => None,
+            (Status::Panic, Status::Panic) => {
+                c.panic_both += 1;
+                Some("panic-both")
+            }
+            (Status::Panic, _) => {
+                c.panic_old += 1;
+                Some("panic-old")
+            }
+            (_, Status::Panic) => {
+                c.panic_new += 1;
+                Some("panic-new")
+            }
+            _ => None,
+        };
+        if let Some(word) = panic_word {
+            if !summary {
+                println!("{index}\t{word}");
+            }
+            continue;
+        }
         c.scenarios_old += old.scenarios;
         c.scenarios_new += new.scenarios;
         c.defect_seeds_old += old.defects;
@@ -604,6 +698,9 @@ fn cmd_compare(args: &[String]) {
         println!("parse-error-old\t{}", c.parse_error_old);
         println!("parse-error-new\t{}", c.parse_error_new);
         println!("parse-error-both\t{}", c.parse_error_both);
+        println!("panic-old\t{}", c.panic_old);
+        println!("panic-new\t{}", c.panic_new);
+        println!("panic-both\t{}", c.panic_both);
         println!("unreadable\t{}", c.unreadable);
         println!("typed-side-refused-old\t{}", c.typed_refused_old);
         println!("typed-side-refused-new\t{}", c.typed_refused_new);
