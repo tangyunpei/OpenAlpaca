@@ -7,6 +7,7 @@ Usage:
                PARENT.lock NEW.lock
   lockdates.py --pins crates|npm --max-date <UTC> [--waivers FILE] [--cache FILE | --date-source FILE]
                NAME@VERSION...
+  lockdates.py --bun-lock BUN.LOCK --max-date <UTC> [--waivers FILE] [--cache FILE | --date-source FILE]
 
 The annotation (no option; gbase.sh runs it only under --dates). For every
 unexpected `name: old -> new` line of lockdiff.py's output, each version on the right
@@ -24,7 +25,7 @@ mode annotates a report and decides nothing.
 The gate (--gate; plan review 2026-10-17, MF-2). DU-23's rule: a release is eligible
 7 days after its crates.io `created_at`, so at a cut instant C a version is eligible
 when it was published at or before C - 7 days — the --max-date, an instant with its
-zone (`2026-10-10T20:08Z` or `…:00Z`). For every (name, version) NEW.lock holds that
+zone (`2026-10-14T19:53Z` or `…:00Z`). For every (name, version) NEW.lock holds that
 PARENT.lock does not — what a commit adds or moves — it reads crates.io and sorts it:
 eligible (published at or before the max date), waived (listed in --waivers: a
 recorded DU-23 (c) waiver), or too young. For a too-young entry it names the version to
@@ -49,6 +50,23 @@ exact-version optionalDependencies at that version (the @tauri-apps/cli platform
 binaries, which bun.lock records and the minute table dated the cli by) are checked as
 pins too.
 
+The bun.lock check (--bun-lock; the cut-day compatibility report's C5,
+`reports/2026-10-17-cut-compatibility.md` §4). bunfig.toml's `minimumReleaseAge`
+counts seven days back from the install, DU-23 from the cut instant, and every
+transitive package floats in its range — so an install after the cut can take a
+transitive release published after the max date. This mode reads every entry of a
+bun.lock's `packages` block (lockfileVersion 1 or 2: JSON with trailing commas) by its
+value's first element, `name@version` — never by its key, which for a nested or aliased
+entry is a path (`@testing-library/jest-dom/dom-accessibility-api` holds
+`dom-accessibility-api@0.6.3`) — and checks each distinct (name, version) as a
+`--pins npm` pin: the same verdict, the same output and the same exit status. An entry
+from a workspace, a `file:` or a `link:` is not from a registry and is not dated
+(counted, like the gate's local entries); one from anywhere else — git, a tarball URL,
+another registry (a non-empty second element) — cannot be dated, and is a failed lookup.
+A file that is not such a lock (not JSON once its trailing commas go, no `packages`
+block, an empty one, an unknown lockfileVersion, an entry that is not
+`[name@version, …]`) is no verdict.
+
 Waivers (--waivers FILE): one `name@version  reason…` a line, `#` comments allowed.
 A waiver covers exactly that name at that version, never a name, and a line with no
 reason is refused (DU-23 (c): each waiver is recorded with its reason).
@@ -65,10 +83,15 @@ a name it does not hold is a failed lookup (gbase.sh's self-test). Shape:
    "npm": {"<name>": {"time": {"<version>": "<UTC>", …},
                       "optional": {"<version>": {"<dep>": "<spec>", …}}}}}
 
-Exit status of --gate and --pins: 0 — every entry eligible or waived; 1 — at least one
-entry too young (the gate printed its sequence) and only then; 2 — no verdict: a usage
-error, a file that is not a Cargo.lock, a bad waiver line, or a failed lookup (in these
-modes a lookup that fails fails the run, it never passes as "unavailable").
+One mode a run: --gate, --pins and --bun-lock exclude each other, and two of them, or one
+given twice, is no verdict (exit 2) before anything is read — never the last one alone,
+which would answer for a check nobody asked for.
+
+Exit status of --gate, --pins and --bun-lock: 0 — every entry eligible or waived; 1 — at
+least one entry too young (the gate printed its sequence) and only then; 2 — no verdict:
+a usage error (two modes among them), a file that is not a Cargo.lock (or, for
+--bun-lock, a bun.lock), a bad waiver line, or a failed lookup (in these modes a lookup
+that fails fails the run, it never passes as "unavailable").
 """
 import calendar
 import json
@@ -475,14 +498,99 @@ def pins(kind, items, reg, max_t, waived):
     return 1 if young else 0
 
 
+# ------------------------------------------------------------------ bun.lock (C5)
+BUN_LOCK_VERSIONS = (1, 2)
+BUN_LOCAL = ("workspace:", "file:", "link:")
+
+
+def strip_trailing_commas(text):
+    """bun.lock is JSON with trailing commas: drop each `,` that, outside a string, comes before `}` or `]`."""
+    out, i, n, in_str = [], 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+        elif c == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "}]":
+                i += 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def read_bun_lock(path):
+    """(lockfileVersion, entries, registry entries, sorted unique (name, version), local idents) of a bun.lock."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError) as e:
+        raise NoVerdict("cannot read %s as UTF-8 text: %s" % (path, e))
+    try:
+        doc = json.loads(strip_trailing_commas(text))
+    except ValueError as e:
+        raise NoVerdict("%s is not a bun.lock (not JSON once its trailing commas go: %s)" % (path, e))
+    if not isinstance(doc, dict) or not isinstance(doc.get("packages"), dict):
+        raise NoVerdict("%s is not a bun.lock: no `packages` block" % path)
+    version = doc.get("lockfileVersion")
+    if type(version) is not int or version not in BUN_LOCK_VERSIONS:
+        raise NoVerdict("%s: lockfileVersion %r — this reader knows %s" % (path, version, " and ".join(map(str, BUN_LOCK_VERSIONS))))
+    packages = doc["packages"]
+    if not packages:
+        raise NoVerdict("%s holds no package entry: not a bun.lock this check can read" % path)
+    pairs, local, registry = set(), [], 0
+    for key, value in packages.items():
+        if not isinstance(value, list) or not value or not isinstance(value[0], str):
+            raise NoVerdict("%s: the entry %r is not [name@version, …]" % (path, key))
+        ident = value[0]
+        at = ident.find("@", 1)  # an npm name holds no `@` but its scope's leading one
+        if at <= 0:
+            raise NoVerdict("%s: the entry %r names %r, not name@version" % (path, key, ident))
+        name, spec = ident[:at], ident[at + 1:]
+        if spec.startswith(BUN_LOCAL):
+            local.append(ident)
+            continue
+        if not SEMVER.match(spec):
+            raise NoVerdict("lookup failed: %s (the entry %r) is not from the npm registry (git, a tarball URL or another source), which this check cannot date" % (ident, key))
+        if len(value) < 2 or value[1] != "":
+            raise NoVerdict("lookup failed: %s (the entry %r) comes from the registry %r, not the npm registry this check reads" % (ident, key, value[1] if len(value) > 1 else None))
+        registry += 1
+        pairs.add((name, spec))
+    return version, len(packages), registry, sorted(pairs, key=lambda p: (p[0], order_key(p[1]))), sorted(local)
+
+
+def bun_lock(path, reg, max_t, waived):
+    version, entries, registry, pairs, local = read_bun_lock(path)
+    print("bun.lock %s: lockfileVersion %d; entries: %d; from the npm registry: %d (%d distinct name@version); "
+          "not from a registry, not dated: %d%s" % (path, version, entries, registry, len(pairs), len(local),
+                                                   (" (%s)" % ", ".join(local)) if local else ""))
+    if not pairs:
+        raise NoVerdict("%s holds no entry from the npm registry" % path)
+    return pins("npm", ["%s@%s" % p for p in pairs], reg, max_t, waived)
+
+
 def main(argv):
     if len(argv) == 1:
         return annotate()
-    mode, kind, max_date, waivers, cache, source, rest = None, None, None, None, None, None, []
+    mode, kind, max_date, waivers, cache, source, bunlock, rest = None, None, None, None, None, None, None, []
+    modes = []  # every --gate, --pins and --bun-lock as given: one is a run, two (or one twice) no verdict
     i = 1
     while i < len(argv):
         a = argv[i]
-        if a in ("--max-date", "--waivers", "--cache", "--date-source", "--pins"):
+        if a in ("--max-date", "--waivers", "--cache", "--date-source", "--pins", "--bun-lock"):
             if i + 1 >= len(argv):
                 raise NoVerdict("%s needs a value\n%s" % (a, __doc__))
             v = argv[i + 1]
@@ -495,11 +603,16 @@ def main(argv):
                 cache = v
             elif a == "--date-source":
                 source = v
+            elif a == "--bun-lock":
+                mode, bunlock = "bun-lock", v
+                modes.append(a)
             else:
                 mode, kind = "pins", v
+                modes.append(a)
             continue
         if a == "--gate":
             mode = "gate"
+            modes.append(a)
         elif a in ("-h", "--help"):
             print(__doc__)
             return 0
@@ -508,8 +621,10 @@ def main(argv):
         else:
             rest.append(a)
         i += 1
+    if len(modes) > 1:  # never the last one silently: the verdict would be another check's
+        raise NoVerdict("give one of --gate, --pins or --bun-lock (given: %s)" % ", ".join(modes))
     if mode is None:
-        raise NoVerdict("give --gate or --pins (or no argument for the annotation)\n%s" % __doc__)
+        raise NoVerdict("give --gate, --pins or --bun-lock (or no argument for the annotation)\n%s" % __doc__)
     if not max_date or not max_date.endswith("Z"):
         raise NoVerdict("--max-date takes a UTC instant ending in Z, not %r" % max_date)
     if cache and source:
@@ -522,6 +637,10 @@ def main(argv):
             if len(rest) != 2:
                 raise NoVerdict("--gate needs PARENT.lock NEW.lock\n%s" % __doc__)
             return gate(rest, reg, max_t, waived)
+        if mode == "bun-lock":
+            if rest:
+                raise NoVerdict("--bun-lock takes one BUN.LOCK and no NAME@VERSION\n%s" % __doc__)
+            return bun_lock(bunlock, reg, max_t, waived)
         if kind not in ("crates", "npm") or not rest:
             raise NoVerdict("--pins takes crates or npm, then NAME@VERSION...\n%s" % __doc__)
         return pins(kind, rest, reg, max_t, waived)

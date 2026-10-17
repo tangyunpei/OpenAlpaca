@@ -2,12 +2,15 @@
 # gbase.sh — the G-base driver: the dependency wave's re-cut, re-run at the branch point.
 #
 # plan-rev3.md §5.1 items 6, 6a and 6b (rev 3.9), §5.2's named gate G-base; amended for the plan
-# review of 2026-10-17 (MF-1, MF-2, MF-5, MF-6, A1-17). From one canonical scratch root it exports
+# review of 2026-10-17 (MF-1, MF-2, MF-5, MF-6, A1-17), then for the owner's D1 (a) and the
+# cut-day compatibility report of 2026-10-17 (the defaults at the 2026-10-21T19:53Z instant, step
+# 1b's reference re-derived, C5's bun.lock check). From one canonical scratch root it exports
 # the base commit and runs the re-cut in order — the toolchain step, the Tauri pair's Rust half
 # (step 1b, P31a: the pair first, no hold), then the re-cut's steps 2-8 — each step its anchored
 # manifest edits, its source hunks, its cargo commands, DU-23's freshness gate on what the step
 # added or moved, a `cargo check` and a lock snapshot compared with the shipped one — then the
-# full suite, the docs check, the four bun gates on the P31a+P31+P32+P33 JS set and G-GUI.
+# full suite, the docs check, the P31a+P31+P32+P33 JS set with the new bun.lock dated against the
+# cut, the four bun gates and G-GUI.
 # It refuses to start before the cut instant (--not-before) and exits non-zero at the FIRST failed
 # command; nothing is recorded-and-continued. Every log lands under $T/logs/, and a real run
 # leaves $T/evidence-<date>-gbase.tar.gz of its logs and locks. README.md beside this file says
@@ -37,20 +40,21 @@ REPO=""
 JOBS=${CARGO_BUILD_JOBS:-8}   # every cargo call's CARGO_BUILD_JOBS: the caller's, else 8
 # The cut instant (DU-23 (a)), an instant with its zone, never a date: the run refuses to start
 # before it, and every version a step adds or moves must be published at least 7 days before it.
-# Pending the owner's D1 (plan review 2026-10-17 §6, recommended 2026-10-21T19:53Z, 12:53 PDT);
-# until it is answered, rev 3.9's 2026-10-17T20:08Z (13:08 PDT). Pass the instant the owner chose.
-NOT_BEFORE="2026-10-17T20:08Z"
+# The owner's D1 (a) of 2026-10-17 (plan review 2026-10-17 §6): at or after 2026-10-21T19:53Z
+# (12:53 PDT), when the whole 2026-10-14 Tauri train is 7 days old; the max date is
+# 2026-10-14T19:53:00Z. A later instant is passed with --not-before.
+NOT_BEFORE="2026-10-21T19:53Z"
 WAIVERS=""
 MIN_PASSED=""
 ARCHIVE_TO=""
-# The Tauri pair (P31a, DU-26 (a'), plan-rev3 rev 3.9): both halves at the versions the measured
-# locks hold [M-oct10: gui D's lock, gui-B-pins.log] — today's values, each a parameter (MF-2 item 4).
-# One value per version, so the plugin crate's `=` pin and its npm twin are the same string and
-# cannot drift apart. Re-anchoring them follows the owner's D1 (README.md, "The cut instant").
-TAURI_PRECISE="2.12.3"     # `cargo update -p tauri --precise`, after the targeted update
-DIALOG="2.8.2"             # tauri-plugin-dialog = "=2.8.2" and @tauri-apps/plugin-dialog 2.8.2
-JS_API="2.12.3"            # @tauri-apps/api — shares tauri's minor
-JS_CLI="2.12.2"            # @tauri-apps/cli
+# The Tauri pair (P31a, DU-26 (a'), plan-rev3 rev 3.9): both halves at the 2026-10-14 family, the
+# newest set eligible at D1 (a)'s instant (the cut-day compatibility report of 2026-10-17, §2.2 and
+# §6.3) — each a parameter (MF-2 item 4). One value per version, so the plugin crate's `=` pin and
+# its npm twin are the same string and cannot drift apart (README.md, "The cut instant").
+TAURI_PRECISE="2.12.4"     # `cargo update -p tauri --precise`, after the targeted update
+DIALOG="2.8.3"             # tauri-plugin-dialog = "=2.8.3" and @tauri-apps/plugin-dialog 2.8.3
+JS_API="2.12.4"            # @tauri-apps/api — shares tauri's minor
+JS_CLI="2.12.3"            # @tauri-apps/cli
 TAURI_CRATE_ARGS=""        # --tauri-crate NAME=VERSION, one a line
 JS_PIN_ARGS=""             # --js-pin NAME=VERSION, one a line
 DATE_SOURCE=""             # the self-test's stand-in for the registries (lockdates.py --date-source)
@@ -65,12 +69,11 @@ usage: gbase.sh --base <commit> --bun <path> --min-passed <N> [--not-before <UTC
        gbase.sh --self-test [--toolchain <ver>]     prove the failure modes and assertions on toy workspaces
 
   --base <commit>      the branch point to export (`git archive`); required unless --self-test
-  --not-before <UTC>   the cut instant, written with its zone (`2026-10-17T20:08Z`, or `…:00Z`): a run
+  --not-before <UTC>   the cut instant, written with its zone (`2026-10-21T19:53Z`, or `…:00Z`): a run
                        refuses to start before it (exit 2), and every version a step adds or moves must
-                       be published at or before it minus 7 days (DU-23). Default 2026-10-17T20:08Z
-                       (13:08 PDT), rev 3.9's — pending the owner's D1 (recommended 2026-10-21T19:53Z,
-                       12:53 PDT): pass the instant the owner chose. --dry-run and --edits-only check
-                       its form only.
+                       be published at or before it minus 7 days (DU-23). Default 2026-10-21T19:53Z
+                       (12:53 PDT), the owner's D1 (a) — max date 2026-10-14T19:53:00Z. --dry-run and
+                       --edits-only check its form only.
   --apply-step-backs   take the freshness gate's step-backs: each `cargo update -p name@locked --precise
                        <target>` the gate names, one at a time, dependents first, the gate run again
                        after each (P04's rule, DU-23); a first entry with nothing eligible to step
@@ -93,13 +96,13 @@ usage: gbase.sh --base <commit> --bun <path> --min-passed <N> [--not-before <UTC
   --archive-to <dir>   also copy the run's evidence-<date>-gbase.tar.gz (logs/ and locks/) into <dir>
   --repo <path>        the repository to export from (default: the one holding this script)
 
-  The pins, today's values by default (each checked against its registry's dates at the pre-flight):
-  --tauri <ver>        tauri's `--precise` (2.12.3)          --dialog <ver>   tauri-plugin-dialog's `=`
-  --js-api <ver>       @tauri-apps/api (2.12.3)                               and its npm twin (2.8.2)
-  --js-cli <ver>       @tauri-apps/cli (2.12.2)
+  The pins, D1 (a)'s values by default (each checked against its registry's dates at the pre-flight):
+  --tauri <ver>        tauri's `--precise` (2.12.4)          --dialog <ver>   tauri-plugin-dialog's `=`
+  --js-api <ver>       @tauri-apps/api (2.12.4)                               and its npm twin (2.8.3)
+  --js-cli <ver>       @tauri-apps/cli (2.12.3)
   --tauri-crate NAME=VER   step 1b's exact version for one of tauri-build, tauri-codegen, tauri-macros,
                        tauri-runtime, tauri-runtime-wry, tauri-utils, tauri-plugin, tauri-plugin-fs
-                       (default: what locks/guiD-lock-01b-pair.lock holds; required for all eight
+                       (default: what locks/d1-lock-01b-pair.lock holds; required for all eight
                        when --tauri is not that lock's tauri)
   --js-pin NAME=VER    the P31/P32/P33 pin of one package of the final phase's JS set
 
@@ -156,8 +159,9 @@ gbase: --with-stepbacks is refused. It was DU-23 (b)'s fixed list for a cut befo
 after the step-2 refresh, step six crates (toml, toml_edit, uuid, serde_json, tokio-util,
 signal-hook) back to releases at least 7 days old. The list was measured on 2026-10-10, never
 covered the Tauri pair or the JS set, and is not what is young at any cut. The driver gates every
-step against the cut instant instead: --not-before <UTC> names the instant (pending the owner's
-D1), every version a step adds or moves must be published at least 7 days before it, and
+step against the cut instant instead: --not-before <UTC> names the instant (the owner's D1 (a):
+2026-10-21T19:53Z by default), every version a step adds or moves must be published at least
+7 days before it, and
 --apply-step-backs steps the young ones back one --precise at a time, dependents first, measured
 on the day. (README.md, "Exit status" and "The freshness gate".)
 EOF
@@ -232,7 +236,7 @@ refuse_before() {
   local nb=$1 t
   t=$(date -u +%s)
   [ "$t" -ge "$nb" ] && return 0
-  echo "gbase: refusing to start before the cut instant $NOT_BEFORE (--not-before); it is $(iso_of "$t") now. The cut is the owner's (DU-23 (a), pending D1); nothing was made." >&2
+  echo "gbase: refusing to start before the cut instant $NOT_BEFORE (--not-before); it is $(iso_of "$t") now. The cut is the owner's (DU-23 (a); D1 (a): at or after 2026-10-21T19:53Z); nothing was made." >&2
   exit 2
 }
 
@@ -379,10 +383,12 @@ tauri_subgraph() { # one line: the Tauri sub-graph's versions in the lock (P04's
 # ---------------------------------------------------------------------------- the Tauri set
 # MF-1 item 2: step 1b holds every crate of the pair's sub-graph at exactly one expected version,
 # each published at or before the max date. tauri and tauri-plugin-dialog are --tauri / --dialog;
-# the eight internals default to what step 1b's reference lock holds (gui D's, measured with the
-# 2.12.3 pair), so a re-derived reference re-anchors them in one file; --tauri-crate overrides one.
+# the eight internals default to what step 1b's reference lock holds (derived for D1 (a) on
+# 2026-10-17: the 2026-10-14 family over HEAD's lock, resolved under 1.99 — README.md, "The pair
+# step's reference"), so a re-derived reference re-anchors them in one file; --tauri-crate
+# overrides one.
 TAURI_INTERNALS="tauri-build tauri-codegen tauri-macros tauri-runtime tauri-runtime-wry tauri-utils tauri-plugin tauri-plugin-fs"
-TAURI_REF="$HERE/locks/guiD-lock-01b-pair.lock"
+TAURI_REF="$HERE/locks/d1-lock-01b-pair.lock"
 TAURI_SET=""
 
 tauri_expected() { printf '%s\n' "$TAURI_SET" | awk -v n="$1" '$1 == n { print $2 }'; }
@@ -414,23 +420,24 @@ $name $v"
   done
   TAURI_SET="$TAURI_SET
 tauri-plugin-dialog $DIALOG"
-  [ -z "$missing" ] || usage_fail "--tauri $TAURI_PRECISE is not the reference lock's tauri ($ref_tauri), whose internals belong to that tauri: give --tauri-crate NAME=VERSION for$missing, or re-derive locks/guiD-lock-01b-pair.lock (README.md, \"The cut instant\")"
+  [ -z "$missing" ] || usage_fail "--tauri $TAURI_PRECISE is not the reference lock's tauri ($ref_tauri), whose internals belong to that tauri: give --tauri-crate NAME=VERSION for$missing, or re-derive locks/d1-lock-01b-pair.lock (README.md, \"The pair step's reference\")"
 }
 
 # ---------------------------------------------------------------------------- the JS set
 # P31a (the three @tauri-apps/* pins, the pair's JS half — its Rust half is step 1b) + P31
 # (minor/patch pins, measured set under DU-23 (a)) + P32 (Vite 8, Vitest 5) + P33
-# (@vitejs/plugin-react) — stage B2's pins with C's and C3's [M-oct10: gui-B-pins.log]. One row a
-# pin: the base's name and version (the anchor), the new name and today's version (a --js-pin
-# overrides it), and `,` when the package.json line ends in a comma, `-` when it does not.
-JS_PINS='@tanstack/react-query 5.102.8 @tanstack/react-query 5.104.1 ,
-dompurify 3.4.14 dompurify 3.4.16 ,
-marked 18.0.11 marked 18.1.0 ,
-react 19.2.8 react 19.3.0 ,
-react-dom 19.2.8 react-dom 19.3.0 ,
+# (@vitejs/plugin-react) — stage B2's packages [M-oct10: gui-B-pins.log] at the newest release
+# eligible at D1 (a)'s instant (the cut-day compatibility report of 2026-10-17, §2.4 and §6.2).
+# One row a pin: the base's name and version (the anchor), the new name and its default version
+# (a --js-pin overrides it), and `,` when the package.json line ends in a comma, `-` when it does not.
+JS_PINS='@tanstack/react-query 5.102.8 @tanstack/react-query 5.104.2 ,
+dompurify 3.4.14 dompurify 3.4.17 ,
+marked 18.0.11 marked 18.1.1 ,
+react 19.2.8 react 19.3.1 ,
+react-dom 19.2.8 react-dom 19.3.1 ,
 tailwind-merge 3.6.0 tailwind-merge 3.7.0 ,
 @testing-library/dom 10.4.1 @testing-library/dom 10.4.2 ,
-@testing-library/user-event 14.6.6 @testing-library/user-event 14.6.7 ,
+@testing-library/user-event 14.6.6 @testing-library/user-event 14.6.8 ,
 @types/node 26.4.0 @types/node 26.6.5 ,
 @types/react 19.2.18 @types/react 19.3.0 ,
 @types/react-dom 19.2.5 @types/react-dom 19.3.0 ,
@@ -438,7 +445,7 @@ tailwind-merge 3.6.0 tailwind-merge 3.7.0 ,
 jsdom 30.0.1 jsdom 30.1.2 ,
 prettier 3.9.6 prettier 3.9.10 ,
 vite 7.3.6 vite 8.3.4 ,
-vitest 4.1.11 vitest 5.0.3 -'
+vitest 4.1.11 vitest 5.0.4 -'
 JS_OVERRIDES=""
 
 check_js_pins() {
@@ -664,8 +671,9 @@ expect_tauri_set() {
 
 # ---------------------------------------------------------------------------- the steps
 # Every manifest version below is the measured re-cut's (plan-rev3 §5.3, DU-23 (a)); the shipped
-# locks under locks/ describe this sequence at 7295f91b — the re-cut's un-held snapshots, and for
-# step 1b the gui group's stage D (README.md, "The pair step's reference").
+# locks under locks/ describe this sequence at 7295f91b — the re-cut's un-held snapshots — and for
+# step 1b the 2026-10-14 family over HEAD's lock, derived for D1 (a) on 2026-10-17 (README.md,
+# "The pair step's reference").
 
 # DU-25 (v4), rev 3.9: rmcp is taken at the newest 3.5.x — no --precise — so from step 6 on the
 # lock differs from the measured snapshots (cut with `--precise 3.5.0`) by exactly this move.
@@ -699,7 +707,7 @@ tauri-plugin-dialog = \"=$DIALOG\""
   pair_check "step 1b" "$JS_API" "$DIALOG"
   run_logged 01b-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
   live && say "    $(count_diag "$T/logs/01b-check.log")"
-  snapshot_compare 1b guiD-lock-01b-pair.lock
+  snapshot_compare 1b d1-lock-01b-pair.lock
 }
 
 step_2() {
@@ -972,15 +980,41 @@ js_pin() { # js_pin PACKAGE — the version apps/openalpaca-gui/package.json pin
 # 2026-10: every cache a confined tool keeps, then a `find` written for bash). Prints the files.
 home_writes() {
   local d
-  for d in "$HOME/.bun/install/cache" "$HOME/Library/Caches/bun" "$HOME/.cache/bun" "$HOME/.npm/_logs" "$HOME/.npm/_cacache"; do
+  for d in "$HOME/.bun/install/cache" "$HOME/Library/Caches/bun" "$HOME/.cache/bun" "$HOME/.npm/_logs" "$HOME/.npm/_cacache" \
+           "$HOME/Library/Application Support/vitest"; do
     [ -d "$d" ] || continue
     find "$d" -newer "$T/.started" -type f 2>/dev/null | head -n 5 || true
   done
 }
 
+# bun_lock_dates [LOG] — the cut-day compatibility report's C5: bunfig.toml's minimumReleaseAge
+# counts 7 days back from the install, DU-23 from the cut instant, and every transitive package
+# floats in its range, so an install after the cut can take a transitive release published after
+# the max date. Every name@version the new bun.lock holds — transitive and platform packages
+# included — is dated on npm against MAX_DATE (lockdates.py --bun-lock: the --pins npm verdict).
+# A young entry ends the run: there is no JS step-back; a recorded DU-23 (c) waiver admits it.
+bun_lock_dates() {
+  local log=${1:-92b-bun-lock-dates} young
+  [ "$MODE" = check ] && return 0
+  if ! live; then
+    plan "    freshness of the new bun.lock (C5): every name@version it holds, transitive and platform packages included, published on npm at or before $MAX_DATE, or waived (lockdates.py --bun-lock)   > logs/$log.log"
+    return 0
+  fi
+  run_logged_rc "$log" "${LOCKDATES[@]}" --bun-lock bun.lock "${REGFLAGS[@]}"
+  case "$LAST_RC" in
+    0) ;;
+    1) young=$(grep -c '^  TOO YOUNG ' "$T/logs/$log.log" || true)
+       grep '^  TOO YOUNG ' "$T/logs/$log.log" >&2 || true
+       die "final: the new bun.lock holds $young version(s) published after $MAX_DATE, younger than 7 days at the cut (logs/$log.log): bunfig.toml's minimumReleaseAge counted from the install admitted them, DU-23 counts from the cut — there is no JS step-back; a recorded DU-23 (c) waiver in --waivers, or a run nearer the cut instant (C5)" ;;
+    *) tail -n 5 "$T/logs/$log.log" >&2 || true
+       die "final: no verdict on the new bun.lock's dates (rc=$LAST_RC; a failed lookup, or a lock this check cannot read, is no verdict; logs/$log.log)" ;;
+  esac
+  say "    bun.lock freshness ($MAX_DATE): $(oneline "$(grep -m 1 '^bun.lock ' "$T/logs/$log.log" | sed 's/^bun.lock [^:]*: //')"); $(grep -m 1 '^pins (npm):' "$T/logs/$log.log" | sed 's/^pins (npm): max date [^;]*; //') — each published at or before $MAX_DATE, or waived"
+}
+
 final_js() {
   CURRENT_STEP="final-js"
-  say ""; say "== final: the P31a+P31+P32+P33 JS set, a fresh root bun.lock, the four bun gates   ($(now))"
+  say ""; say "== final: the P31a+P31+P32+P33 JS set, a fresh root bun.lock dated against the cut, the four bun gates   ($(now))"
   js_edits
   # DU-26's pair, read back from package.json against the final lock (step 8's)
   if live; then pair_check "final: package.json against Cargo.lock" "$(js_pin @tauri-apps/api)" "$(js_pin @tauri-apps/plugin-dialog)"
@@ -989,15 +1023,20 @@ final_js() {
   BUNENV=(env "BUN_INSTALL=$T/bun-home" "BUN_INSTALL_CACHE_DIR=$T/bun-cache" \
     "BUN_RUNTIME_TRANSPILER_CACHE_PATH=$T/bun-cache/transpiler" "npm_config_cache=$T/npm-cache" \
     "npm_config_logs_dir=$T/npm-logs" "OPENALPACA_HOME_STORE=$T/test-store" \
-    "OPENALPACA_CONFIG_DIR=$T/test-store/config" "XDG_CACHE_HOME=$T/xdg-cache" NO_COLOR=1 FORCE_COLOR=0 CI=1)
+    "OPENALPACA_CONFIG_DIR=$T/test-store/config" "XDG_CACHE_HOME=$T/xdg-cache" "HOME=$T/bun-gate-home" \
+    NO_COLOR=1 FORCE_COLOR=0 CI=true)
+  # HOME in scratch: vitest writes $HOME/Library/Application Support/vitest/.vitest-secret-token,
+  # which no Bun variable redirects (the D1 step's combined-tree proof, 2026-10-17). CI=true, not 1:
+  # tauri-cli 2.12.x reads CI as its --ci flag, which accepts only true or false.
   if live; then
-    mkdir -p "$T/bun-home" "$T/bun-cache" "$T/npm-cache" "$T/npm-logs" "$T/test-store/config"
+    mkdir -p "$T/bun-home" "$T/bun-cache" "$T/npm-cache" "$T/npm-logs" "$T/test-store/config" "$T/bun-gate-home"
     rm -f bun.lock; say "    removed the root bun.lock (P31: written from scratch by the pinned Bun)"
   else
     plan "    rm bun.lock   (the root lock, re-resolved from scratch)"
   fi
   run_logged 92-bun-install "${BUNENV[@]}" "$BUN" install
   live && say "    bun.lock: $(sed -n 's/^ *"lockfileVersion": *\([0-9]*\),*$/lockfileVersion \1/p' bun.lock | head -n 1)"
+  bun_lock_dates
   cd apps/openalpaca-gui
   run_logged 93-bun-check "${BUNENV[@]}" "$BUN" run check
   run_logged 94-bun-test "${BUNENV[@]}" "$BUN" run test
@@ -1090,7 +1129,8 @@ preflight_pins() {
   done <<EOF
 $JS_PINS
 EOF
-  # bunfig.toml's minimumReleaseAge is measured from the install, not from the cut: this is the cut's check
+  # bunfig.toml's minimumReleaseAge is measured from the install, not from the cut: this is the cut's
+  # check of the pins, and bun_lock_dates is the cut's check of every entry the install writes (C5)
   run_logged_rc preflight-pins-npm "${LOCKDATES[@]}" --pins npm "${REGFLAGS[@]}" $js
   case "$LAST_RC" in
     0) ;;
@@ -1114,7 +1154,7 @@ preflight() {
   local f
   for f in lockdiff.py lockdates.py patches/step-4-secrets.patch patches/step-6-rmcp.patch \
            patches/step-8-config.patch locks/recut-lock-00-head.lock locks/recut-lock-01-toolchain.lock \
-           locks/guiD-lock-01b-pair.lock locks/recut-lock-02-update.lock locks/recut-lock-03-storage.lock \
+           locks/d1-lock-01b-pair.lock locks/recut-lock-02-update.lock locks/recut-lock-03-storage.lock \
            locks/recut-lock-04-secrets.lock locks/recut-lock-05-documents.lock locks/recut-lock-06-rmcp.lock \
            locks/recut-lock-07-web.lock locks/recut-lock-99-final.lock; do
     [ -f "$HERE/$f" ] || die "pre-flight: missing shipped file $HERE/$f"
@@ -1592,6 +1632,128 @@ json.dump(d, open(sys.argv[3], "w"))' "$tt/exact.lock" "$tt/dates.json" "$tt/dat
     verdict xiv-archive 0 "the evidence archive holds logs/ and locks/ only, and --archive-to received the same file"
   else
     verdict xiv-archive 1 "rc=$rc, top-level entries: $listing; see logs/selftest-14-archive.log"
+  fi
+
+  # (xv) C5: the bun.lock check (lockdates.py --bun-lock) on toy locks written as Bun writes them —
+  # trailing commas, a workspace entry, an aliased key holding another name, a pair held twice — and a
+  # stub date source with no network: @scope/right 2.0.1 published exactly at the max date (eligible),
+  # young 3.1.0 one second after it (too young), reached only through a nested (transitive) key
+  local bl="$T/toy-bunlock" bmax="2026-10-14T19:53:00Z"
+  mkdir -p "$bl"
+  cat > "$bl/ok.lock" <<'EOF'
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "toy",
+    },
+    "apps/gui": {
+      "name": "toy-gui",
+      "dependencies": {
+        "@scope/right": "2.0.1",
+        "left": "1.0.0",
+      },
+    },
+  },
+  "packages": {
+    "@scope/right": ["@scope/right@2.0.1", "", { "dependencies": { "left": "^1.0.0" } }, "sha512-r"],
+
+    "left": ["left@1.0.0", "", {}, "sha512-l"],
+
+    "right-alias": ["@scope/right@2.0.1", "", { "dependencies": { "left": "^1.0.0" } }, "sha512-r"],
+
+    "toy-gui": ["toy-gui@workspace:apps/gui"],
+  }
+}
+EOF
+  perl -0pe 's/(\n    "toy-gui": )/\n    "\@scope\/right\/young": ["young\@3.1.0", "", {}, "sha512-y"],\n$1/' "$bl/ok.lock" > "$bl/young.lock"
+  perl -0pe 's/(\n    "toy-gui": )/\n    "gitdep": ["gitdep\@github:owner\/gitdep#0123abc", {}, "owner-gitdep-0123abc"],\n$1/' "$bl/ok.lock" > "$bl/git.lock"
+  perl -0pe 's/(\n    "toy-gui": )/\n    "private": ["private\@1.0.0", "https:\/\/npm.example.test\/", {}, "sha512-p"],\n$1/' "$bl/ok.lock" > "$bl/other-registry.lock"
+  printf '{\n  "lockfileVersion": 2,\n  "workspaces": {},\n}\n' > "$bl/no-packages.lock"
+  cat > "$bl/dates.json" <<'EOF'
+{"crates": {}, "npm": {
+  "left": {"time": {"1.0.0": "2026-09-01T00:00:00.000Z"}, "optional": {"1.0.0": {}}},
+  "@scope/right": {"time": {"2.0.1": "2026-10-14T19:53:00.000Z"}, "optional": {"2.0.1": {}}},
+  "young": {"time": {"3.1.0": "2026-10-14T19:53:01.000Z"}, "optional": {"3.1.0": {}}}}}
+EOF
+  python3 -I -c 'import json, sys
+d = json.load(open(sys.argv[1])); del d["npm"]["left"]; json.dump(d, open(sys.argv[2], "w"))' "$bl/dates.json" "$bl/dates-no-left.json"   # left cannot be dated
+  bunlock_run() { # bunlock_run LOCK DATES LOG — lockdates.py --bun-lock on a toy lock, rc in BL_RC
+    BL_RC=0; python3 -I "$HERE/lockdates.py" --bun-lock "$1" --max-date "$bmax" --date-source "$2" > "$T/logs/$3.log" 2>&1 || BL_RC=$?
+  }
+  bunlock_run "$bl/ok.lock" "$bl/dates.json" selftest-15a-bunlock-holds
+  if [ "$BL_RC" -eq 0 ] \
+     && grep -qF 'entries: 4; from the npm registry: 3 (2 distinct name@version); not from a registry, not dated: 1 (toy-gui@workspace:apps/gui)' "$T/logs/selftest-15a-bunlock-holds.log" \
+     && grep -qF 'checked: 2  too young: 0' "$T/logs/selftest-15a-bunlock-holds.log" \
+     && grep -q '^  eligible   @scope/right 2.0.1  2026-10-14T19:53:00.000Z$' "$T/logs/selftest-15a-bunlock-holds.log"; then
+    verdict xv-bunlock-holds 0 "a bun.lock with trailing commas: every entry read by its value (the aliased key's @scope/right counted once), the workspace entry not dated, a release published exactly at the max date eligible (rc=0)"
+  else
+    verdict xv-bunlock-holds 1 "rc=$BL_RC; see logs/selftest-15a-bunlock-holds.log"
+  fi
+  bunlock_run "$bl/young.lock" "$bl/dates.json" selftest-15b-bunlock-young
+  if [ "$BL_RC" -eq 1 ] && grep -q '^  TOO YOUNG  young 3.1.0  2026-10-14T19:53:01.000Z$' "$T/logs/selftest-15b-bunlock-young.log" \
+     && grep -qF 'checked: 3  too young: 1' "$T/logs/selftest-15b-bunlock-young.log"; then
+    verdict xv-bunlock-young 0 "a transitive entry published one second after the max date, reached only through a nested key, is refused (rc=1)"
+  else
+    verdict xv-bunlock-young 1 "rc=$BL_RC; see logs/selftest-15b-bunlock-young.log"
+  fi
+  bunlock_run "$bl/ok.lock" "$bl/dates-no-left.json" selftest-15c-bunlock-nolookup
+  rc=$BL_RC
+  bunlock_run "$bl/git.lock" "$bl/dates.json" selftest-15d-bunlock-source
+  rc2=$BL_RC
+  bunlock_run "$bl/other-registry.lock" "$bl/dates.json" selftest-15d-bunlock-other-registry
+  if [ "$rc" -eq 2 ] && [ "$rc2" -eq 2 ] && [ "$BL_RC" -eq 2 ] && grep -q 'left@1.0.0 is not in the date source' "$T/logs/selftest-15c-bunlock-nolookup.log" \
+     && grep -q 'gitdep@github:owner/gitdep#0123abc .* is not from the npm registry' "$T/logs/selftest-15d-bunlock-source.log" \
+     && grep -q "private@1.0.0 .* comes from the registry 'https://npm.example.test/'" "$T/logs/selftest-15d-bunlock-other-registry.log"; then
+    verdict xv-bunlock-nolookup 0 "an entry the date source cannot date, a git entry, and an entry from another registry are each no verdict (rc=$rc, $rc2, $BL_RC)"
+  else
+    verdict xv-bunlock-nolookup 1 "rc=$rc, $rc2, $BL_RC; see logs/selftest-15c-bunlock-nolookup.log, logs/selftest-15d-bunlock-source.log, logs/selftest-15d-bunlock-other-registry.log"
+  fi
+  bunlock_run "$T/locks/selftest-lock-A.lock" "$bl/dates.json" selftest-15e-bunlock-cargo-lock
+  rc=$BL_RC
+  bunlock_run "$bl/no-packages.lock" "$bl/dates.json" selftest-15f-bunlock-no-packages
+  if [ "$rc" -eq 2 ] && [ "$BL_RC" -eq 2 ] && grep -q 'is not a bun.lock (not JSON' "$T/logs/selftest-15e-bunlock-cargo-lock.log" \
+     && grep -q 'is not a bun.lock: no `packages` block' "$T/logs/selftest-15f-bunlock-no-packages.log"; then
+    verdict xv-bunlock-notalock 0 "a Cargo.lock, and JSON with no packages block, are refused as no verdict (rc=$rc, $BL_RC)"
+  else
+    verdict xv-bunlock-notalock 1 "rc=$rc, $BL_RC; see logs/selftest-15e-bunlock-cargo-lock.log, logs/selftest-15f-bunlock-no-packages.log"
+  fi
+  bunlock_case() { # bunlock_case LOCK LOG — in a subshell: the driver's step, bun_lock_dates, in $bl on that lock
+    cd "$bl" && cp "$1" bun.lock && MAX_DATE="$bmax" && DATE_SOURCE="$bl/dates.json" && WAIVERS="" && regflags_init && bun_lock_dates "$2"
+  }
+  rc=0; ( bunlock_case "$bl/ok.lock" selftest-15g-step-holds ) > "$T/logs/selftest-15g-driver-holds.log" 2>&1 || rc=$?
+  rc2=0; ( bunlock_case "$bl/young.lock" selftest-15h-step-young; touch "$T/must-not-exist-22" ) > "$T/logs/selftest-15h-driver-young.log" 2>&1 || rc2=$?
+  if [ "$rc" -eq 0 ] && [ "$rc2" -ne 0 ] && [ ! -e "$T/must-not-exist-22" ] \
+     && grep -q 'bun.lock freshness (2026-10-14T19:53:00Z): lockfileVersion 2; entries: 4' "$T/logs/selftest-15g-driver-holds.log" \
+     && grep -q 'the new bun.lock holds 1 version(s) published after 2026-10-14T19:53:00Z' "$T/logs/selftest-15h-driver-young.log" \
+     && grep -q '^  TOO YOUNG  young 3.1.0' "$T/logs/selftest-15h-driver-young.log"; then
+    verdict xv-driver 0 "the driver's step after bun install passes the eligible lock and stops the driver on the young one, naming it (rc=$rc, $rc2)"
+  else
+    verdict xv-driver 1 "rc=$rc, $rc2; see logs/selftest-15g-driver-holds.log, logs/selftest-15h-driver-young.log"
+  fi
+  # one mode a run: two of --gate, --pins and --bun-lock, or one given twice, are no verdict before anything
+  # is read — never the last one alone (the reading this replaces ran the --pins check here and passed it,
+  # left 1.0.0 being eligible; the gate on two equal locks passed too; the second --bun-lock, the young one,
+  # was checked in place of the first). The refusal's message must stay without the docstring: the docstring
+  # says `lockfileVersion`, and the negative grep below would read it as a lock read.
+  twomodes_run() { # twomodes_run LOG ARGS... — lockdates.py with the given modes, rc in BL_RC
+    local log=$1; shift
+    BL_RC=0; python3 -I "$HERE/lockdates.py" "$@" --max-date "$bmax" --date-source "$bl/dates.json" > "$T/logs/$log.log" 2>&1 || BL_RC=$?
+  }
+  twomodes_run selftest-15i-two-modes-pins --bun-lock "$bl/ok.lock" --pins npm left@1.0.0
+  rc=$BL_RC
+  twomodes_run selftest-15j-two-modes-gate --bun-lock "$bl/ok.lock" --gate "$T/locks/selftest-lock-A.lock" "$T/locks/selftest-lock-A.lock"
+  rc2=$BL_RC
+  twomodes_run selftest-15k-two-modes-twice --bun-lock "$bl/ok.lock" --bun-lock "$bl/young.lock"
+  if [ "$rc" -eq 2 ] && [ "$rc2" -eq 2 ] && [ "$BL_RC" -eq 2 ] \
+     && grep -qF 'no verdict: give one of --gate, --pins or --bun-lock (given: --bun-lock, --pins)' "$T/logs/selftest-15i-two-modes-pins.log" \
+     && grep -qF 'no verdict: give one of --gate, --pins or --bun-lock (given: --bun-lock, --gate)' "$T/logs/selftest-15j-two-modes-gate.log" \
+     && grep -qF 'no verdict: give one of --gate, --pins or --bun-lock (given: --bun-lock, --bun-lock)' "$T/logs/selftest-15k-two-modes-twice.log" \
+     && ! grep -qE 'lockfileVersion|checked:|freshness gate:' "$T/logs/selftest-15i-two-modes-pins.log" "$T/logs/selftest-15j-two-modes-gate.log" "$T/logs/selftest-15k-two-modes-twice.log"; then
+    verdict xv-two-modes 0 "--bun-lock with --pins, with --gate, or given twice is no verdict before anything is read, never the last mode alone (rc=$rc, $rc2, $BL_RC)"
+  else
+    verdict xv-two-modes 1 "rc=$rc, $rc2, $BL_RC; see logs/selftest-15i-two-modes-pins.log, logs/selftest-15j-two-modes-gate.log, logs/selftest-15k-two-modes-twice.log"
   fi
 
   say ""
