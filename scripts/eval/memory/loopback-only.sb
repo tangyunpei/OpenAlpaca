@@ -1,6 +1,15 @@
-;; Outbound networking denied except to this machine — for a live check that
-;; needs a local model (Ollama on localhost) or the app's webview reaching its
-;; daemon on 127.0.0.1, and nothing else. Use it from the daemon's FIRST launch:
+;; Outbound networking denied except to this machine — for a live check whose
+;; daemon needs a local model (Ollama on localhost) and clients on 127.0.0.1
+;; (the CLI, curl), and nothing else. Not for the app's webview: an app launched
+;; under this profile confines the daemon it spawns, but WebKit's Networking
+;; process then sets its own block-network flag and the webview's loopback
+;; connects fail with EPERM, so the window never reaches its daemon (Q00,
+;; 2026-10-12, in every launch checked; plan-rev3 §5.2's launcher (iii), kept
+;; for the spawn and daemon-ready only; review C-03). For a GUI check, start
+;; the daemon under this profile first, then the app unsandboxed with the same
+;; OPENALPACA_HOME_STORE and OPENALPACA_CONFIG_DIR — a Start from inside the
+;; app then spawns an unconfined daemon unless §5.2's confined in-app Start is
+;; used (review MF-4). Use it from the daemon's FIRST launch:
 ;; `web_fetch` raises no approval prompt and the shipped research agent has web
 ;; access, so an unsandboxed daemon reaches the internet whenever a model
 ;; delegates research (it happened in a live check on 2026-10-03).
