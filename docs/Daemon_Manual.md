@@ -1580,7 +1580,14 @@ its file through a link inside the project, the card names the file that
 changes beside it
 (`Replaces docs/notes.md (a link to scripts/release.sh) in the project folder …`).
 A path, the file a link leads to, a quoted text and a recipient show every
-hidden character as `<U+XXXX>`, with the count on a line under them. A tool can refuse a call
+hidden character as `<U+XXXX>`, with the count on a line under them. The daemon
+first puts a confirm-listed call through the checks it would meet when it runs:
+arguments the tool's schema refuses (a missing required parameter, a wrong
+type, a value outside the allowed list) and a tool whose extension is not
+enabled are refused **before** anything is asked — with the same message the
+call would have met after the click, and with no prompt emitted at all; an
+`unattended` run hears that message too, not that nobody can approve the
+call. A tool can also refuse a call
 **before** its card is raised, and then no prompt is emitted at all:
 `memory_confirm` does for a suggestion that moved, `memory_update` for any
 `confirm`, and the file tools, `send` and `shell_execute` for a call they would

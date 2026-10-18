@@ -396,7 +396,14 @@ extension events; `new()` is what tests use.  Both install the default
 ### Dispatch
 
 Both public execute methods funnel into one private `dispatch()`, so the
-extension gate is taken exactly once per call:
+extension gate is held exactly once per call.  Steps 1–3 are one private
+`admit()`, which the sandbox also asks through `precheck()` for every call on
+the confirm list, before the approval cache, `auto_approve` or a card answers
+it (N-TOOL-2): a call dispatch would refuse — arguments its schema refuses, a
+tool whose extension is not enabled — is refused with dispatch's own words and
+raises no card.  `precheck()` gives the gate's guard back before it returns;
+dispatch takes it again.  A new refusal added to `admit()` reaches both; one
+added after it, in dispatch alone, is met only after the click.
 
 1. Look the tool up.  On a **miss**, ask the ledger who used to own the
    name; if that extension is not enabled, return its attributed refusal.

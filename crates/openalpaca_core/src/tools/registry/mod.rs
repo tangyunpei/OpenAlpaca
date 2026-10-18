@@ -430,6 +430,14 @@ impl RegisteredTool {
     }
 }
 
+/// A call [`ToolRegistry::admit`] let through: the backend to run, and the
+/// extension gate's in-flight guard (`None` for a tool no extension owns),
+/// which counts the call against a drain for as long as it is held.
+struct Admitted {
+    backend: ToolBackend,
+    guard: Option<crate::tools::extensions::CallGuard>,
+}
+
 /// Central registry mapping tool names to definitions and execution backends.
 ///
 /// Backed by `DashMap` for lock-free concurrent reads and writes.
@@ -722,6 +730,26 @@ impl ToolRegistry {
         }
     }
 
+    /// Would dispatch refuse this call before its backend runs? (N-TOOL-2,
+    /// audit Z1-04.)
+    ///
+    /// The sandbox asks just before it raises a confirmation card, so a
+    /// person is never asked about a call refused the moment after the click.
+    /// It is dispatch's own admission ([`Self::admit`]) — the lookup with the
+    /// miss arm's attributed refusal, the extension gate, then the arguments
+    /// against the tool's schema, in that order — so the refusals are
+    /// dispatch's, word for word, only earlier. Nothing runs, and the gate's
+    /// in-flight guard is given back before this returns: the call is counted
+    /// against a drain only from dispatch, which takes the gate again.
+    pub(crate) fn precheck(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: Option<&ToolContext>,
+    ) -> Result<(), String> {
+        self.admit(tool_name, arguments, ctx).map(drop)
+    }
+
     /// [`BuiltInTool::on_confirmation_denied`] of the tool registered as
     /// `tool_name` (design 09 §4.3); `None` for anything that is not a
     /// builtin.
@@ -738,63 +766,26 @@ impl ToolRegistry {
     }
 
     /// The single dispatch path — **and the single place the extension gate
-    /// runs** (design §6.2 #1, §6.3).
+    /// is held across a backend call** (design §6.2 #1, §6.3).
     ///
     /// Both public execute methods funnel here so the gate is taken exactly
-    /// once per call: before the refactor, `execute_with_context`'s
+    /// once per dispatched call: before the refactor, `execute_with_context`'s
     /// `Http | Command | Plugin` arm delegated to `execute`, which would have
-    /// double-taken the `CallGuard` and double-counted the drain.
-    ///
-    /// The gate has **two arms**, because registry removal alone is not
-    /// enforcement:
-    ///
-    /// * **hit** — a run holding a deep snapshot still finds the entry
-    ///   (§3.0 Fact 1). Check the entry's extension, including the generation
-    ///   its handle carries.
-    /// * **miss** — the ordinary skill runs against the live registry and sees
-    ///   the entry vanish at T1 (§3.0 Fact 2). The DashMap miss would
-    ///   short-circuit with an unattributed *"not found"*, so ask the ledger
-    ///   who retains the name and return the same attributed refusal.
+    /// double-taken the `CallGuard` and double-counted the drain. The
+    /// sandbox's [`Self::precheck`] asks the same question earlier and gives
+    /// its guard straight back, so it counts nothing a drain waits for.
     async fn dispatch(
         &self,
         tool_name: &str,
         arguments: &serde_json::Value,
         ctx: Option<&ToolContext>,
     ) -> Result<String, String> {
-        // Extract definition + backend and drop the DashMap guard before any .await
-        let looked_up = self.tools.get(tool_name).map(|entry| {
-            (
-                entry.definition.clone(),
-                entry.backend.clone(),
-                entry.extension_id(),
-                entry.incarnation(),
-            )
-        });
-
-        let Some((definition, backend, extension, incarnation)) = looked_up else {
-            // MISS ARM. `check` returns `Ok` for an unknown owner, for an
-            // `Enabled` owner that is not server-withdrawing the name, and for
-            // an extension with no ledger record at all — all of which fall
-            // through to the ordinary not-found error.
-            if let Some(ext) = self.extensions.owner_of(tool_name) {
-                self.extensions.check(&ext, tool_name, None, ctx)?;
-            }
-            return Err(match ctx {
-                Some(_) => format!("Tool '{}' not found in registry", tool_name),
-                None => format!("Unknown tool: '{}'", tool_name),
-            });
-        };
-
-        // HIT ARM. `None` is a builtin / http / command tool — never gated.
-        // The guard lives across the awaited backend call below, which is what
-        // T3's drain counts.
-        let _guard = match &extension {
-            Some(ext) => Some(self.extensions.check(ext, tool_name, incarnation, ctx)?),
-            None => None,
-        };
-
-        // Pre-validate arguments against the tool's JSON Schema definition.
-        validate_tool_arguments(&definition, arguments)?;
+        // The guard lives across the awaited backend call below, which is
+        // what T3's drain counts.
+        let Admitted {
+            backend,
+            guard: _guard,
+        } = self.admit(tool_name, arguments, ctx)?;
 
         // A command tool reads the context for its working folder (R26);
         // these two do not.
@@ -899,6 +890,66 @@ impl ToolRegistry {
                 }
             }
         }
+    }
+
+    /// Everything that decides whether a call reaches its backend, in
+    /// dispatch's order — shared by [`Self::dispatch`] and
+    /// [`Self::precheck`], so the two can never disagree.
+    ///
+    /// The extension gate has **two arms**, because registry removal alone
+    /// is not enforcement:
+    ///
+    /// * **hit** — a run holding a deep snapshot still finds the entry
+    ///   (§3.0 Fact 1). Check the entry's extension, including the generation
+    ///   its handle carries.
+    /// * **miss** — the ordinary skill runs against the live registry and sees
+    ///   the entry vanish at T1 (§3.0 Fact 2). The DashMap miss would
+    ///   short-circuit with an unattributed *"not found"*, so ask the ledger
+    ///   who retains the name and return the same attributed refusal.
+    ///
+    /// Then the arguments are checked against the tool's schema — after the
+    /// gate, so a withheld tool reads as withheld whatever it was sent.
+    fn admit(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: Option<&ToolContext>,
+    ) -> Result<Admitted, String> {
+        // Extract definition + backend and drop the DashMap guard before the
+        // caller awaits anything
+        let looked_up = self.tools.get(tool_name).map(|entry| {
+            (
+                entry.definition.clone(),
+                entry.backend.clone(),
+                entry.extension_id(),
+                entry.incarnation(),
+            )
+        });
+
+        let Some((definition, backend, extension, incarnation)) = looked_up else {
+            // MISS ARM. `check` returns `Ok` for an unknown owner, for an
+            // `Enabled` owner that is not server-withdrawing the name, and for
+            // an extension with no ledger record at all — all of which fall
+            // through to the ordinary not-found error.
+            if let Some(ext) = self.extensions.owner_of(tool_name) {
+                self.extensions.check(&ext, tool_name, None, ctx)?;
+            }
+            return Err(match ctx {
+                Some(_) => format!("Tool '{}' not found in registry", tool_name),
+                None => format!("Unknown tool: '{}'", tool_name),
+            });
+        };
+
+        // HIT ARM. `None` is a builtin / http / command tool — never gated.
+        let guard = match &extension {
+            Some(ext) => Some(self.extensions.check(ext, tool_name, incarnation, ctx)?),
+            None => None,
+        };
+
+        // Pre-validate arguments against the tool's JSON Schema definition.
+        validate_tool_arguments(&definition, arguments)?;
+
+        Ok(Admitted { backend, guard })
     }
 
     /// The **raw**, un-deduped capability-index entry for one capability.
@@ -1642,3 +1693,6 @@ mod tests;
 #[cfg(test)]
 #[path = "command_tool_tests.rs"]
 mod command_tool_tests;
+
+#[cfg(test)]
+mod precheck_tests;

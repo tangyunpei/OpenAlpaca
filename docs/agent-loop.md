@@ -694,7 +694,11 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   confirm list blocks inside `SandboxManager::execute_tool` until it is
   approved, denied, times out or is withdrawn; the loop only sees the
   tool's result. A run that declared itself `unattended` has such a tool
-  refused at once. The contract is in the Daemon Manual's
+  refused at once. Before any of that, the sandbox asks the registry whether
+  dispatch would refuse the call (`ToolRegistry::precheck`: the extension
+  gate, then the arguments against the tool's schema); if so, the call is
+  refused with dispatch's own message and no card is raised. The contract is
+  in the Daemon Manual's
   [Tool confirmations](Daemon_Manual.md#tool-confirmations).
 - **Compaction telemetry** — see
   [Context Budget and Compaction](#context-budget-and-compaction).
