@@ -946,8 +946,8 @@ impl ToolRegistry {
             None => None,
         };
 
-        // Pre-validate arguments against the tool's JSON Schema definition.
-        validate_tool_arguments(&definition, arguments)?;
+        // The arguments, checked as they were sent.
+        check_arguments(&definition, arguments)?;
 
         Ok(Admitted { backend, guard })
     }
@@ -1576,12 +1576,53 @@ fn command_folder(ctx: Option<&ToolContext>) -> Result<PathBuf, String> {
         .map_err(|refusal| refusal.to_string())
 }
 
+/// The refusal that keeps a call's backend from running for what it was sent
+/// (N-TOOL-5, audit Z1-14), or `Ok` — the backend gets the arguments exactly
+/// as they were sent, the value the sandbox's sanitizer checked.
+///
+/// * Arguments a provider sent that could not be read as a JSON object
+///   arrive as [`openalpaca_llm::UnreadableArguments`]' stand-in, already
+///   warned about once where they were read; the call is refused naming the
+///   problem and the length — never run as `{}`, whatever its schema accepts.
+/// * Then [`validate_tool_arguments`] names every problem it finds.
+///
+/// Nothing is decoded here. A JSON string whose text is an object is read as
+/// that object where a provider's answer is parsed (`openalpaca_llm`'s
+/// reader), before the sandbox sees the call; one that reaches the registry by
+/// another path — a plugin's proxied call — stays the string it is, refused by
+/// a schema that asks for an object, as it always was. The sanitizer saw only
+/// its outer text, where a backtick, a newline, `../` or a NUL inside it are
+/// still JSON escapes, so reading it here would hand the tool what the
+/// sanitizer never checked (found by review; pinned by
+/// `a_json_string_cannot_carry_past_the_sanitizer_what_it_refuses_in_an_object`).
+fn check_arguments(
+    definition: &ToolDefinition,
+    arguments: &serde_json::Value,
+) -> Result<(), String> {
+    if let Some(unreadable) = openalpaca_llm::UnreadableArguments::of(arguments) {
+        return Err(format!(
+            "Tool '{}': the arguments sent with this call could not be read: {} bytes that \
+             were {}. The tool did not run. Call it again with its arguments as one JSON \
+             object.",
+            definition.name, unreadable.bytes, unreadable.problem
+        ));
+    }
+    validate_tool_arguments(definition, arguments)
+}
+
 /// Basic JSON Schema pre-validation for tool arguments.
 ///
 /// Checks:
 /// - Arguments must be a JSON object (if the schema specifies `type: "object"`)
 /// - All fields listed in `required` must be present
-/// - Field types match the schema's `properties.<name>.type` when specified
+/// - Field types match the schema's `properties.<name>.type` when specified,
+///   and a value is one of its `enum` when the schema lists one
+///
+/// Every problem is reported in one result (N-TOOL-5), so a model fixes them
+/// all in its next call instead of meeting them one call at a time: one
+/// problem keeps the sentence it always had (`Tool 'x': missing required
+/// parameter 'path'`); several are counted and listed, the missing
+/// parameters first. Parameters the schema does not name are not refused.
 ///
 /// This is not a full JSON Schema validator — it catches the most common
 /// argument errors early (missing required fields, wrong root type) to provide
@@ -1590,66 +1631,65 @@ fn validate_tool_arguments(
     definition: &ToolDefinition,
     arguments: &serde_json::Value,
 ) -> Result<(), String> {
-    let schema = &definition.parameters;
-
-    // Check root type is object (if schema says so)
-    if schema.get("type").and_then(|t| t.as_str()) == Some("object") && !arguments.is_object() {
-        return Err(format!(
-            "Tool '{}': arguments must be a JSON object, got {}",
+    match argument_problems(&definition.parameters, arguments).as_slice() {
+        [] => Ok(()),
+        [one] => Err(format!("Tool '{}': {one}", definition.name)),
+        several => Err(format!(
+            "Tool '{}': the arguments have {} problems: {}",
             definition.name,
+            several.len(),
+            several.join("; ")
+        )),
+    }
+}
+
+/// Every way `arguments` breaks the checks [`validate_tool_arguments`]
+/// makes, in order: a root that is not the object the schema asks for (then
+/// nothing else can be checked); every missing required parameter; every
+/// parameter of the wrong type, or — of the right type — outside its `enum`.
+fn argument_problems(schema: &serde_json::Value, arguments: &serde_json::Value) -> Vec<String> {
+    if schema.get("type").and_then(|t| t.as_str()) == Some("object") && !arguments.is_object() {
+        return vec![format!(
+            "arguments must be a JSON object, got {}",
             json_type_name(arguments)
-        ));
+        )];
+    }
+    let Some(obj) = arguments.as_object() else {
+        return Vec::new();
+    };
+    let mut problems = Vec::new();
+
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        for field_name in required.iter().filter_map(|req| req.as_str()) {
+            if !obj.contains_key(field_name) {
+                problems.push(format!("missing required parameter '{field_name}'"));
+            }
+        }
     }
 
-    // Check required fields
-    if let Some(required) = schema.get("required").and_then(|r| r.as_array())
-        && let Some(obj) = arguments.as_object()
-    {
-        for req in required {
-            if let Some(field_name) = req.as_str()
-                && !obj.contains_key(field_name)
+    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+        for (key, value) in obj {
+            let Some(prop_schema) = properties.get(key) else {
+                continue;
+            };
+            if let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str())
+                && !json_value_matches_type(value, expected_type)
             {
-                return Err(format!(
-                    "Tool '{}': missing required parameter '{}'",
-                    definition.name, field_name
+                problems.push(format!(
+                    "parameter '{key}' should be {expected_type}, got {}",
+                    json_type_name(value)
+                ));
+            } else if let Some(enum_values) = prop_schema.get("enum").and_then(|e| e.as_array())
+                && !enum_values.contains(value)
+            {
+                problems.push(format!(
+                    "parameter '{key}' value {value} not in allowed values"
                 ));
             }
         }
     }
 
-    // Check field types and enum constraints against schema properties
-    if let (Some(properties), Some(obj)) = (
-        schema.get("properties").and_then(|p| p.as_object()),
-        arguments.as_object(),
-    ) {
-        for (key, value) in obj {
-            if let Some(prop_schema) = properties.get(key) {
-                // Type check
-                if let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str())
-                    && !json_value_matches_type(value, expected_type)
-                {
-                    return Err(format!(
-                        "Tool '{}': parameter '{}' should be {}, got {}",
-                        definition.name,
-                        key,
-                        expected_type,
-                        json_type_name(value)
-                    ));
-                }
-                // Enum check
-                if let Some(enum_values) = prop_schema.get("enum").and_then(|e| e.as_array()) {
-                    if !enum_values.contains(value) {
-                        return Err(format!(
-                            "Tool '{}': parameter '{}' value {} not in allowed values",
-                            definition.name, key, value
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
+    problems
 }
 
 /// Return a human-readable type name for a JSON value.
@@ -1696,3 +1736,6 @@ mod command_tool_tests;
 
 #[cfg(test)]
 mod precheck_tests;
+
+#[cfg(test)]
+mod arguments_tests;

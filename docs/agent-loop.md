@@ -690,6 +690,19 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   first request — or the shell's own 300 s, where that comes first — so
   the model is told the limit it really runs under; the registered
   definition names none.
+- **A tool call's arguments are read, never guessed.** The provider layer
+  reads them with one reader (`openalpaca_llm`'s stream collector and the
+  OpenAI-compatible response parser): nothing or `null` is `{}`, a JSON
+  string whose text is an object is that object, and anything else — text
+  that is not JSON, or JSON that is not an object — is logged once at `warn`
+  with the tool's name, the byte length and the problem (never the text),
+  and the call is refused by the registry with a sentence naming the
+  problem; it never runs with `{}`. A call that breaks its tool's schema is
+  told every problem in one result. Only the provider layer reads a string
+  as an object: the registry decodes nothing, so a JSON string that reaches
+  it by another path (a plugin's proxied call) stays a string, which a
+  schema asking for an object refuses as it always did — the sandbox's
+  sanitizer checked only its outer text.
 - **Approval prompts live in the sandbox, not the loop.** A tool on the
   confirm list blocks inside `SandboxManager::execute_tool` until it is
   approved, denied, times out or is withdrawn; the loop only sees the

@@ -1107,3 +1107,321 @@ fn test_openai_ephemeral_notice_placement() {
     assert_eq!(last["role"], "system");
     assert!(last["content"].as_str().unwrap().contains("budget_notice"));
 }
+
+// ── N-TOOL-5: arguments that are not a plain JSON object ─────────────────
+//
+// Two sites turned arguments they could not parse into `{}`, silently: the
+// stream collector (`streaming.rs`) and this provider's non-streaming parser
+// (`response.rs`). A call with `{}` then ran — or failed on "missing
+// required parameter" with no word of why. Each stream case below uses one
+// of the shapes CLAUDE.md's *Gotchas* names for an OpenAI-compatible stream.
+
+/// Collect a raw SSE body all the way to the `ChatResponse` the loop reads.
+async fn collected(raw: &str) -> ChatResponse {
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw.to_string()))]);
+    crate::streaming::collect_stream(Box::pin(parse_openai_sse(byte_stream)), "mock".to_string())
+        .await
+        .expect("the stream collects")
+}
+
+/// The `warn` lines about tool arguments that could not be read.
+fn unreadable_warnings(lines: &[&str]) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|line| line.contains("WARN") && line.contains("arguments could not be read"))
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// The gate's first test, in the single-frame shape: arguments encoded twice
+/// — a JSON string whose text is the object — are read as that object.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_single_frame_call_whose_arguments_are_a_json_string_holding_an_object_is_read() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_s","index":0,"type":"function","function":{"name":"file_read","arguments":"\"{\\\"path\\\":\\\"a\\\"}\""}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let response = collected(raw).await;
+
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(response.tool_calls[0].name, "file_read");
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        serde_json::json!({"path": "a"})
+    );
+    logs_assert(|lines| match unreadable_warnings(lines).as_slice() {
+        [] => Ok(()),
+        warned => Err(format!("an accepted call warns nothing: {warned:?}")),
+    });
+}
+
+/// The same encoding split over two frames, as OpenAI itself streams it.
+#[tokio::test]
+async fn a_twice_encoded_object_split_over_frames_is_read() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_p","index":0,"type":"function","function":{"name":"file_read","arguments":"\"{\\\"path\\\":"}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\\"a\\\"}\""}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let response = collected(raw).await;
+
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        serde_json::json!({"path": "a"})
+    );
+}
+
+/// The gate's second test: arguments that do not parse — here an answer cut
+/// off mid-string — produce one warning naming the tool and the byte length,
+/// never the text, and the call does not reach the loop as `{}`.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn unparsable_arguments_warn_once_and_never_become_an_empty_object() {
+    let cut = r#"{"path":"SECRET-SENTINEL"#;
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_u","index":0,"type":"function","function":{"name":"file_write","arguments":"{\"path\":\"SECRET-SENTINEL"}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let response = collected(raw).await;
+
+    assert_eq!(
+        response.tool_calls.len(),
+        1,
+        "the call is kept, to be refused"
+    );
+    let arguments = &response.tool_calls[0].arguments;
+    assert_ne!(arguments, &serde_json::json!({}), "never a call with {{}}");
+    assert!(
+        arguments.get("path").is_none(),
+        "nothing is guessed from the text"
+    );
+    let bytes = format!("bytes={}", cut.len());
+    logs_assert(|lines| match unreadable_warnings(lines).as_slice() {
+        [one] if one.contains("file_write") && one.contains(&bytes) => Ok(()),
+        warned => Err(format!(
+            "one warning naming the tool and {bytes}: {warned:?}"
+        )),
+    });
+    assert!(
+        !logs_contain("SECRET-SENTINEL"),
+        "the text itself is never logged"
+    );
+}
+
+/// Two tool calls in one frame, the second unreadable: the first keeps its
+/// arguments and the one warning names only the second.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn two_calls_in_one_frame_one_unreadable_warns_about_that_one_only() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":["#,
+        r#"{"id":"call_a","index":0,"type":"function","function":{"name":"first_tool","arguments":"{\"a\":1}"}},"#,
+        r#"{"id":"call_b","index":1,"type":"function","function":{"name":"second_tool","arguments":"{\"b\":"}}"#,
+        r#"]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let response = collected(raw).await;
+
+    assert_eq!(response.tool_calls.len(), 2);
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        serde_json::json!({"a": 1})
+    );
+    assert_ne!(response.tool_calls[1].arguments, serde_json::json!({}));
+    assert!(response.tool_calls[1].arguments.get("b").is_none());
+    logs_assert(|lines| match unreadable_warnings(lines).as_slice() {
+        [one] if one.contains("second_tool") && !one.contains("first_tool") => Ok(()),
+        warned => Err(format!("one warning, about second_tool: {warned:?}")),
+    });
+}
+
+/// Content and a tool call in one frame, the call's arguments valid JSON but
+/// not an object: the text survives, and the call is not run with an array.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn content_and_a_call_whose_arguments_are_not_an_object_in_one_frame() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"content":"Saving it.","tool_calls":[{"id":"call_c","index":0,"type":"function","function":{"name":"file_write","arguments":"[1,2]"}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let response = collected(raw).await;
+
+    assert_eq!(response.content, "Saving it.");
+    assert_eq!(response.tool_calls.len(), 1);
+    let arguments = &response.tool_calls[0].arguments;
+    assert!(
+        arguments.is_object(),
+        "an array never reaches a tool as its arguments: {arguments}"
+    );
+    assert_ne!(arguments, &serde_json::json!({}));
+    logs_assert(|lines| match unreadable_warnings(lines).as_slice() {
+        [one] if one.contains("file_write") && one.contains("bytes=5") => Ok(()),
+        warned => Err(format!(
+            "one warning naming file_write and bytes=5: {warned:?}"
+        )),
+    });
+}
+
+/// A tool call and `finish_reason` in one frame, the arguments encoded twice:
+/// read as the object, and the finish still comes last.
+#[tokio::test]
+async fn a_twice_encoded_call_and_finish_reason_in_one_frame() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_d","index":0,"type":"function","function":{"name":"lookup","arguments":"\"{\\\"k\\\":\\\"v\\\"}\""}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let response = collected(raw).await;
+
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        serde_json::json!({"k": "v"})
+    );
+    assert_eq!(response.finish_reason, FinishReason::ToolUse);
+    assert_eq!(response.usage.input_tokens, 7);
+}
+
+/// `null` and blank arguments say "no arguments": `{}`, with no warning.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn null_or_blank_arguments_are_no_arguments_and_warn_nothing() {
+    for arguments in ["null", "  "] {
+        let raw = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_n","index":0,"type":"function","function":{"name":"ping","arguments":arguments}}]},"finish_reason":null}]}),
+            serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
+        );
+
+        let response = collected(&raw).await;
+
+        assert_eq!(response.tool_calls.len(), 1, "{arguments:?}");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({}),
+            "{arguments:?}"
+        );
+    }
+    logs_assert(|lines| match unreadable_warnings(lines).as_slice() {
+        [] => Ok(()),
+        warned => Err(format!(
+            "no arguments is not unreadable arguments: {warned:?}"
+        )),
+    });
+}
+
+fn one_call_response(arguments: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "model": "gpt-test",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_r",
+                    "type": "function",
+                    "function": {"name": "file_read", "arguments": arguments}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+    })
+}
+
+/// The non-streaming parser, the other site: a twice-encoded object is read.
+#[test]
+fn a_parsed_response_reads_arguments_encoded_twice() {
+    let provider = OpenAiProvider::new("k".to_string(), None, None, None);
+    let response = provider
+        .parse_response(one_call_response(serde_json::json!(
+            "\"{\\\"path\\\":\\\"a\\\"}\""
+        )))
+        .unwrap();
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        serde_json::json!({"path": "a"})
+    );
+}
+
+/// The non-streaming parser: unparsable arguments warn once and are not `{}`.
+#[test]
+#[tracing_test::traced_test]
+fn a_parsed_response_with_unparsable_arguments_warns_once() {
+    let provider = OpenAiProvider::new("k".to_string(), None, None, None);
+    let text = r#"{"path": SECRET-SENTINEL}"#;
+    let response = provider
+        .parse_response(one_call_response(serde_json::json!(text)))
+        .unwrap();
+
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_ne!(response.tool_calls[0].arguments, serde_json::json!({}));
+    let bytes = format!("bytes={}", text.len());
+    logs_assert(|lines| match unreadable_warnings(lines).as_slice() {
+        [one] if one.contains("file_read") && one.contains(&bytes) => Ok(()),
+        warned => Err(format!(
+            "one warning naming file_read and {bytes}: {warned:?}"
+        )),
+    });
+    assert!(!logs_contain("SECRET-SENTINEL"));
+}
+
+/// The non-streaming parser: a server that sends `arguments` as the object
+/// itself, not as a string of JSON, keeps it — it used to become `{}`.
+#[test]
+fn a_parsed_response_keeps_arguments_sent_as_an_object() {
+    let provider = OpenAiProvider::new("k".to_string(), None, None, None);
+    let response = provider
+        .parse_response(one_call_response(serde_json::json!({"path": "a"})))
+        .unwrap();
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        serde_json::json!({"path": "a"})
+    );
+}
+
+/// A server that streams `arguments` as the object itself, whole in one
+/// frame, keeps it: the frame decoder used to drop a field that was not a
+/// string, so the collector read nothing and the call ran with `{}`.
+#[tokio::test]
+async fn a_streamed_call_whose_arguments_arrive_as_an_object_keeps_them() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_o","index":0,"type":"function","function":{"name":"file_read","arguments":{"path":"a"}}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let response = collected(raw).await;
+
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        serde_json::json!({"path": "a"})
+    );
+}

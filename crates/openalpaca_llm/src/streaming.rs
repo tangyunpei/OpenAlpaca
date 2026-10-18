@@ -84,14 +84,15 @@ pub async fn collect_stream(
         }
     }
 
-    // Assemble tool calls from accumulated JSON
+    // Assemble tool calls from accumulated JSON. Arguments that cannot be
+    // read are warned about once and refused by the registry, never run as
+    // `{}` (N-TOOL-5).
     let mut indices: Vec<usize> = partial_json.keys().copied().collect();
     indices.sort();
     for index in indices {
         if let Some((id, name)) = tool_meta.remove(&index) {
             let json_str = partial_json.remove(&index).unwrap_or_default();
-            let arguments: serde_json::Value = serde_json::from_str(&json_str)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            let arguments = crate::tool_arguments::read_tool_arguments(&name, &json_str);
             tool_calls.push(ToolCall {
                 id,
                 name,

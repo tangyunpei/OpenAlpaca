@@ -86,12 +86,19 @@ fn frame_events(json: &serde_json::Value) -> Vec<StreamEvent> {
                 });
             }
 
-            if let Some(args) = tc["function"]["arguments"].as_str()
-                && !args.is_empty()
-            {
+            // Normally a piece of a JSON string; a server that sends the
+            // whole object instead has it written out as text, which the
+            // collector reads back — it used to be dropped, and the call ran
+            // with `{}` (N-TOOL-5).
+            let args = match &tc["function"]["arguments"] {
+                serde_json::Value::String(piece) => piece.clone(),
+                object @ serde_json::Value::Object(_) => object.to_string(),
+                _ => String::new(),
+            };
+            if !args.is_empty() {
                 out.push(StreamEvent::InputJsonDelta {
                     index,
-                    partial_json: args.to_string(),
+                    partial_json: args,
                 });
             }
         }

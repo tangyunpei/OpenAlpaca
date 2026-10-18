@@ -420,7 +420,16 @@ added after it, in dispatch alone, is met only after the click.
 
 ### Argument Validation
 
-Before executing, `validate_tool_arguments()` performs:
+`admit()`'s last step is `check_arguments()` (N-TOOL-5).  It first refuses
+the stand-in (`UnreadableArguments`) that `openalpaca_llm`'s reader puts in
+place of arguments a provider sent that could not be read — the reader has
+already warned once, with the tool, the byte length and the problem, never the
+text.  The refusal names the problem and the length, and the call never runs
+with `{}`, whatever its schema accepts.  It decodes nothing: only the provider
+layer reads a JSON string as the object it holds, before the sandbox's
+sanitizer; a string that reaches the registry by another path stays a string,
+because the sanitizer checked only its outer text.  Then
+`validate_tool_arguments()` performs:
 
 1. **Root type check:** If schema specifies `"type": "object"`, args must be an object.
 2. **Required fields:** All entries in `"required"` array must be present.
@@ -428,6 +437,13 @@ Before executing, `validate_tool_arguments()` performs:
    (`string`, `number`, `integer`, `boolean`, `array`, `object`, `null`).
 4. **Enum constraints:** If a property schema declares `"enum": [...]`, the
    argument value must be one of the listed values.
+
+Every problem is reported in one result: a single problem keeps its sentence
+(`Tool 'x': missing required parameter 'path'`); several read `Tool 'x': the
+arguments have N problems: a; b; c`, the missing parameters first, then each
+parameter of the wrong type or outside its enum.  A root that is not an
+object is the one problem reported alone.  Parameters the schema does not
+name are not refused.
 
 This is not a full JSON Schema validator — it catches the most common
 argument errors early with clear messages.
