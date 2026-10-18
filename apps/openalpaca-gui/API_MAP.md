@@ -1542,7 +1542,12 @@ already existed** rather than a second path:
 POST /v1/extensions/plugin  { "source": "path", "path": "/Users/…/my-plugin" }
 → 201 { "extension": <the §8 row>, "manifest": { name, version, description, entry,
         capabilities, virtual_capabilities, types, required_config_keys,
-        sensitive_config_keys }, "added_capabilities": [], "consent_reset": false }
+        sensitive_config_keys, warnings }, "added_capabilities": [], "consent_reset": false }
+        // `warnings` (N-PLUG-2): each key plugin.toml sets that nothing reads, and
+        // types.connector / types.provider while their bridges are unwired — never a
+        // refusal; the row's `warnings` repeats them on install, update and approve,
+        // and every listed plugin row carries them standing as `declared.warnings`
+        // (the row awaiting consent draws them before Approve)
 
 POST /v1/extensions/plugin/validate  { "path": "…" }
 → 200 { "manifest": { … }, "installed": false }          // the dry run; copies nothing

@@ -2835,6 +2835,151 @@ mod install_tests {
         assert!(!h.root.join("echo-test").exists(), "validate copies nothing");
     }
 
+    // ── N-PLUG-2: a key nobody reads, a type nothing wires ───────────
+
+    /// The manifest's own warnings, read off the serialised summary — the
+    /// shape the validate route and the install envelope hand the owner.
+    fn summary_warnings(summary: &crate::install::ManifestSummary) -> Vec<String> {
+        serde_json::to_value(summary).unwrap()["warnings"]
+            .as_array()
+            .map(|warnings| {
+                warnings
+                    .iter()
+                    .filter_map(|w| w.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **A typo is warned about, never refused** (N-PLUG-2, Z2-04). `tool =
+    /// true` at the top level — the switch is `types.tools`, and tool discovery
+    /// runs only under it — used to validate clean and load a plugin with zero
+    /// tools and no message. Now the dry run, the install preview and the
+    /// install's row each name the key, and the install still lands.
+    #[tokio::test]
+    async fn a_manifest_typo_validates_and_installs_with_a_warning_naming_the_key() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "");
+        // The stray key goes above `[plugin]`: `source`'s `extra` lands inside
+        // that table, where it would read `plugin.tool`.
+        std::fs::write(
+            source.join("plugin.toml"),
+            "tool = true\n\n[plugin]\nname = \"echo-test\"\nversion = \"0.1.0\"\n\
+             entry = \"./echo-server.sh\"\nmcp_compatible = true\n",
+        )
+        .unwrap();
+
+        let summary = h.manager.validate_source(&source).await.expect("validate");
+        let warnings = summary_warnings(&summary);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("'tool'") && w.contains("types.tools")),
+            "the dry run names the key and the switch it reads like: {warnings:?}"
+        );
+
+        let outcome = h
+            .manager
+            .install_from_path(&source)
+            .await
+            .expect("a warning is not a refusal");
+        assert!(
+            summary_warnings(&outcome.manifest)
+                .iter()
+                .any(|w| w.contains("'tool'")),
+            "the install preview carries the same warning"
+        );
+        assert!(
+            outcome.record.warnings.iter().any(|w| w.contains("'tool'")),
+            "the install's row says it too: {:?}",
+            outcome.record.warnings
+        );
+        assert_eq!(
+            outcome.record.state,
+            ExtensionState::Unapproved {
+                reason: UnapprovedReason::NeverSeen
+            }
+        );
+        assert!(h.root.join("echo-test/plugin.toml").is_file());
+
+        // Approving reads the declaration again, and its row says it again.
+        let approved = h
+            .manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        assert!(
+            approved.warnings.iter().any(|w| w.contains("'tool'")),
+            "the approve's row carries the warning: {:?}",
+            approved.warnings
+        );
+    }
+
+    /// **An unwired type is warned about, never refused.** `types.provider`
+    /// and `types.connector` are probed at load and were listed in the preview
+    /// with no caveat, though neither bridge has a production caller.
+    #[tokio::test]
+    async fn an_unwired_type_installs_with_a_warning_that_its_bridge_is_not_wired() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\nprovider = true\nconnector = true\n",
+        );
+
+        let summary = h.manager.validate_source(&source).await.expect("validate");
+        let warnings = summary_warnings(&summary);
+        assert!(
+            warnings.iter().any(|w| w.contains("types.provider") && w.contains("provider bridge is not wired")),
+            "the provider warning: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(
+                |w| w.contains("types.connector") && w.contains("connectors are not supported")
+            ),
+            "the connector warning: {warnings:?}"
+        );
+
+        let outcome = h
+            .manager
+            .install_from_path(&source)
+            .await
+            .expect("a warning is not a refusal");
+        assert!(
+            outcome
+                .record
+                .warnings
+                .iter()
+                .any(|w| w.contains("provider bridge is not wired")),
+            "the install's row: {:?}",
+            outcome.record.warnings
+        );
+        assert!(h.root.join("echo-test/plugin.toml").is_file());
+    }
+
+    /// A manifest that says only what OpenAlpaca reads carries no warning —
+    /// `plugin.env` and `config.<key>` are maps whose keys are the author's.
+    #[tokio::test]
+    async fn a_clean_manifest_carries_no_warning() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "args = [\"--quiet\"]\n[plugin.env]\nANY_NAME = \"1\"\n\
+             [capabilities]\nprovides = [\"notes\"]\n[capabilities.virtual]\nprovides = [\"x:y\"]\n\
+             [types]\ntools = true\nskill = true\nagent = true\n\
+             [config.api_key]\ntype = \"secret\"\nrequired = true\nsensitive = true\n\
+             description = \"key\"\ndefault = \"\"\n",
+        );
+
+        let summary = h.manager.validate_source(&source).await.expect("validate");
+        assert!(
+            summary_warnings(&summary).is_empty(),
+            "{:?}",
+            summary_warnings(&summary)
+        );
+    }
+
     // ── update ───────────────────────────────────────────────────────
 
     /// The child runs with `current_dir(plugin_dir)`, so a live plugin is never

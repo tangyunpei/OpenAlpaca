@@ -167,6 +167,12 @@ pub struct ManifestSummary {
     /// Keys the manifest marks `sensitive`: their values never land in
     /// `plugins/.config/<name>.toml` (X-29).
     pub sensitive_config_keys: Vec<String>,
+    /// What the manifest declares that OpenAlpaca will not act on — a key it
+    /// does not read, `types.connector` or `types.provider` while their
+    /// bridges are unwired ([`PluginManifest::warnings`], N-PLUG-2). Warnings,
+    /// never refusals: the preview says them so approving is decided on what
+    /// will actually run.
+    pub warnings: Vec<String>,
 }
 
 impl ManifestSummary {
@@ -202,6 +208,7 @@ impl ManifestSummary {
             ]),
             required_config_keys: required,
             sensitive_config_keys: sensitive,
+            warnings: manifest.warnings(),
         }
     }
 }

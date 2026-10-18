@@ -249,7 +249,20 @@ pub struct ExtensionRow {
     pub agents: Vec<String>,
     #[serde(default)]
     pub since: Option<String>,
+    /// Plugins only — what `plugin.toml` declares, read here for its standing
+    /// `warnings` (N-PLUG-2).
+    #[serde(default)]
+    pub declared: Option<DeclaredRow>,
     /// Present only on the verb that produced one (design §8).
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// The part of a row's `declared` the CLI reads.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeclaredRow {
+    /// What the manifest holds that nothing acts on — the daemon's prose
+    /// (N-PLUG-2). Standing, unlike the row's per-call `warnings`.
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -395,9 +408,39 @@ pub(crate) fn print_row(row: &ExtensionRow) {
     print_names("Withdrawn by the server:", &row.withdrawn_by_server);
     print_names("Skills:", &row.skills);
     print_names("Agents:", &row.agents);
+    print!("{}", declared_warnings_text(row));
     if let Some(since) = &row.since {
         println!("{} {}", "Since:".dimmed(), since);
     }
+}
+
+/// The manifest's standing warnings (N-PLUG-2) under `ext info`, which is
+/// what a person reads of a plugin dropped in by hand before `ext approve
+/// <id>`: one `warning:` line each, as the manifest print says them, every
+/// hidden character shown as `<U+XXXX>` and counted in the words every
+/// approval surface uses. The daemon has already escaped an author's key, so
+/// a count here means something else slipped through. Display only.
+fn declared_warnings_text(row: &ExtensionRow) -> String {
+    use openalpaca_core::utils::text::{escape_hidden_line, hidden_notice};
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let mut hidden = 0;
+    let warnings = row
+        .declared
+        .as_ref()
+        .map(|d| d.warnings.as_slice())
+        .unwrap_or_default();
+    for warning in warnings {
+        let escaped = escape_hidden_line(warning);
+        hidden += escaped.hidden;
+        // Writing into a `String` cannot fail.
+        let _ = writeln!(out, "{} {}", "warning:".yellow(), escaped.text);
+    }
+    if let Some(notice) = hidden_notice(hidden) {
+        let _ = writeln!(out, "{}", notice.yellow());
+    }
+    out
 }
 
 fn print_names(label: &str, names: &[String]) {
@@ -585,6 +628,10 @@ struct ManifestSummary {
     required_config_keys: Vec<String>,
     #[serde(default)]
     sensitive_config_keys: Vec<String>,
+    /// What the manifest declares that OpenAlpaca will not act on — a key it
+    /// does not read, an unwired type (N-PLUG-2). Never a refusal.
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 fn print_manifest(manifest: &ManifestSummary) {
@@ -657,6 +704,12 @@ fn manifest_text(manifest: &ManifestSummary, tty: bool) -> String {
         for name in names {
             let _ = writeln!(out, "  - {}", shown(name));
         }
+    }
+    // N-PLUG-2: a key nothing reads, a type nothing wires. The daemon already
+    // writes the key's hidden characters as `<U+XXXX>`; the escape here is the
+    // same one every other line takes, so an older daemon's text is safe too.
+    for warning in &manifest.warnings {
+        let _ = writeln!(out, "{} {}", "warning:".yellow(), shown(warning));
     }
     if let Some(notice) = hidden_notice(hidden) {
         let _ = writeln!(out, "{}", notice.yellow());
@@ -840,7 +893,19 @@ fn update_text(response: &InstallResponse, tty: bool) -> String {
                 .yellow()
         );
     }
-    for warning in &response.extension.warnings {
+    // The row repeats the manifest's own warnings (N-PLUG-2), which the
+    // manifest above already printed; each is said once.
+    let printed = response
+        .manifest
+        .as_ref()
+        .map(|m| m.warnings.as_slice())
+        .unwrap_or_default();
+    for warning in response
+        .extension
+        .warnings
+        .iter()
+        .filter(|w| !printed.contains(w))
+    {
         let _ = writeln!(
             out,
             "   {} {}",
@@ -1194,6 +1259,74 @@ mod tests {
         );
     }
 
+    /// What the daemon's `PluginManifest::warnings()` says for a key nothing
+    /// reads that hides a U+202E and a U+200B: the key already escaped, its
+    /// count in the warning's own last sentence (the daemon's prose also
+    /// reaches the log, the toast and `ext update`'s row lines, which count
+    /// nothing). `openalpaca_plugins`' `a_hidden_character_in_a_key_is_shown_and_counted`
+    /// pins the same text on the daemon's side.
+    const HIDDEN_KEY_WARNING: &str = "plugin.toml sets 'to<U+202E>ol<U+200B>', which OpenAlpaca \
+                                      does not read, so it is ignored. Note: this request \
+                                      contains 2 hidden characters, shown as <U+…>.";
+    const TYPO_WARNING: &str = "plugin.toml sets 'tool', which OpenAlpaca does not read, so it \
+                                is ignored — did you mean 'types.tools'?";
+
+    /// N-PLUG-2: the manifest's warnings — a key nothing reads, an unwired
+    /// type — print under it, one line each, as the daemon sends them. The
+    /// key's hidden characters arrive escaped and counted inside the warning;
+    /// the manifest's own notice, under it all, counts what the CLI escaped
+    /// in the manifest's fields — here a U+200B in the description.
+    #[test]
+    fn the_manifest_prints_its_warnings_escaped() {
+        colored::control::set_override(false);
+        let manifest: ManifestSummary = serde_json::from_value(serde_json::json!({
+            "name": "notes",
+            "version": "1.0",
+            "description": "N\u{200b}otes",
+            "warnings": [TYPO_WARNING, HIDDEN_KEY_WARNING],
+        }))
+        .unwrap();
+        assert_eq!(
+            manifest_text(&manifest, false),
+            format!(
+                "Plugin: notes v1.0\n\
+                 Description: N<U+200B>otes\n\
+                 warning: {TYPO_WARNING}\n\
+                 warning: {HIDDEN_KEY_WARNING}\n\
+                 Note: this request contains 1 hidden character, shown as <U+…>.\n"
+            )
+        );
+    }
+
+    /// N-PLUG-2: `ext info` on a plugin awaiting consent — all a person reads
+    /// of one dropped in by hand before `ext approve` — says its manifest's
+    /// standing warnings (`declared.warnings`), as the manifest print does.
+    /// The daemon's text needs no count of its own; a hidden character that
+    /// arrived raw would still be shown and counted.
+    #[test]
+    fn info_says_the_manifests_standing_warnings() {
+        colored::control::set_override(false);
+        let row = |warnings: serde_json::Value| -> ExtensionRow {
+            serde_json::from_value(serde_json::json!({
+                "kind": "plugin",
+                "id": "notes",
+                "state": "unapproved",
+                "declared": { "capabilities": [], "types": {}, "warnings": warnings },
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            declared_warnings_text(&row(serde_json::json!([TYPO_WARNING, HIDDEN_KEY_WARNING]))),
+            format!("warning: {TYPO_WARNING}\nwarning: {HIDDEN_KEY_WARNING}\n")
+        );
+        assert_eq!(
+            declared_warnings_text(&row(serde_json::json!(["sets 'x\u{202e}\u{200b}'"]))),
+            "warning: sets 'x<U+202E><U+200B>'\n\
+             Note: this request contains 2 hidden characters, shown as <U+…>.\n"
+        );
+        assert_eq!(declared_warnings_text(&row(serde_json::json!([]))), "");
+    }
+
     /// A plugin id holding `ESC [ 9 A`, `ESC [ J` (cursor up nine lines,
     /// erase below), a U+202E and a U+200B: the id is the manifest's name —
     /// `install` refuses a manifest whose name is not its directory's, and
@@ -1361,6 +1494,21 @@ mod tests {
             .strip_prefix(crate::output::TERMINAL_RESET)
             .expect("the output starts with the reset");
         assert!(!rest.contains('\u{1b}'), "{rest:?}");
+    }
+
+    /// N-PLUG-2: the row repeats the manifest's own warnings, which the
+    /// manifest has already printed — `ext update` says each one once, and
+    /// still prints the row's other warnings.
+    #[test]
+    fn update_prints_a_manifest_warning_once() {
+        colored::control::set_override(false);
+        const TYPO: &str = "plugin.toml sets 'tool', which OpenAlpaca does not read, so it is \
+                            ignored — did you mean 'types.tools'?";
+        let mut response = update_response(&[], &[], &[TYPO, "provenance gone"]);
+        response.manifest.as_mut().unwrap().warnings = vec![TYPO.to_string()];
+        let text = update_text(&response, false);
+        assert_eq!(text.matches(TYPO).count(), 1, "{text}");
+        assert!(text.contains("warning: provenance gone"), "{text}");
     }
 
     /// An added capability the manifest did not print is counted by the

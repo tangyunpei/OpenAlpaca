@@ -295,6 +295,51 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
   });
 
   /**
+   * N-PLUG-2: the row awaiting consent is the app's approve preview, so it
+   * carries the manifest's standing warnings (`declared.warnings`) — said
+   * before Approve, for a plugin dropped in by hand too. The daemon sends a
+   * key's hidden characters already escaped and counted in the warning's own
+   * last sentence, so nothing more is counted; one that arrived raw would be
+   * shown and counted with the rest.
+   */
+  it("unapproved — the manifest's standing warnings come with the consent", () => {
+    const daemonSaid =
+      "plugin.toml sets 'to<U+202E>ol<U+200B>', which OpenAlpaca does not read, so it is " +
+      "ignored. Note: this request contains 2 hidden characters, shown as <U+…>.";
+    const row = (warnings: string[]) =>
+      extensionRow({
+        id: "notes",
+        state: "unapproved",
+        reason: "never_seen",
+        declared: {
+          capabilities: [],
+          virtual_capabilities: [],
+          types: { tool: false },
+          warnings,
+        },
+      });
+
+    const view = extensionRowView(row([daemonSaid]));
+    expect(view.consent?.warnings.map((w) => w.text)).toEqual([daemonSaid]);
+    expect(view.consent?.notice).toBeNull();
+
+    const raw = extensionRowView(row(["sets 'x\u202E\u200B'"]));
+    expect(raw.consent?.warnings.map((w) => w.text)).toEqual([
+      "sets 'x<U+202E><U+200B>'",
+    ]);
+    expect(raw.consent?.notice).toBe(
+      "Note: this request contains 2 hidden characters, shown as <U+…>.",
+    );
+
+    // A daemon built before them sends none.
+    expect(
+      extensionRowView(
+        extensionRow({ state: "unapproved", reason: "never_seen" }),
+      ).consent?.warnings,
+    ).toEqual([]);
+  });
+
+  /**
    * Only the consent row: a failed row's detail — a child's stderr, an HTTP
    * body — is quoted as it came, which is its own, display-only surface.
    */

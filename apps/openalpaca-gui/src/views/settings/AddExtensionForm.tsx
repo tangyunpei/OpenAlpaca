@@ -19,7 +19,7 @@
 
 import { useState } from "react";
 
-import { Button } from "@/components/ui";
+import { Button, EscapedText } from "@/components/ui";
 import { useHomeRoot } from "@/hooks/useConnection";
 import {
   useAddMcpServer,
@@ -27,6 +27,7 @@ import {
   useValidatePlugin,
 } from "@/hooks/useExtensions";
 import type { ManifestSummary, McpDeclaration } from "@/lib/api/types";
+import { escapeHiddenLine } from "@/lib/hidden-chars";
 
 import { extensionErrorCopy } from "./extension-row";
 
@@ -219,6 +220,13 @@ export function ManifestPreview({
           Needs configuring: {manifest.required_config_keys.join(", ")}
         </span>
       )}
+      {/* N-PLUG-2: a key nothing reads, a type nothing wires — said, never
+          refused. The key is the author's text, so it is escaped. */}
+      {(manifest.warnings ?? []).map((warning) => (
+        <span key={warning} className="text-amber-ink">
+          Warning: <EscapedText escaped={escapeHiddenLine(warning)} />
+        </span>
+      ))}
       {installed && (
         <span className="text-red-ink">
           A plugin of this name is already installed — use Update on its row.

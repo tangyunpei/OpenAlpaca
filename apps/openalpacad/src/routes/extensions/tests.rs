@@ -1297,6 +1297,114 @@ async fn validate_answers_the_preview_without_installing() {
     assert!(!h.plugins_root.path().join("notion").exists());
 }
 
+/// **N-PLUG-2 — a warning, never a refusal.** A top-level `tool = true` (the
+/// switch is `types.tools`) and a `types.provider = true` (no bridge is wired)
+/// used to validate clean. Now the dry run's `manifest.warnings`, the install
+/// preview and the install's row each say so, and both still install.
+#[tokio::test]
+async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
+    let h = Harness::new();
+    let typo = h.source("typo", "1.0.0", "");
+    std::fs::write(
+        typo.join("plugin.toml"),
+        "tool = true\n\n[plugin]\nname = \"typo\"\nversion = \"1.0.0\"\nentry = \"./nope\"\n",
+    )
+    .unwrap();
+    let provider = h.source("modelish", "1.0.0", "[types]\nprovider = true\n");
+
+    let names = |value: &serde_json::Value| -> Vec<String> {
+        value
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|w| w.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let (status, body) = h
+        .validate(serde_json::json!({ "path": typo.display().to_string() }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let warnings = names(&body["manifest"]["warnings"]);
+    assert!(
+        warnings.iter().any(|w| w.contains("'tool'")),
+        "the dry run names the key: {body}"
+    );
+
+    let (status, body) = h
+        .validate(serde_json::json!({ "path": provider.display().to_string() }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        names(&body["manifest"]["warnings"])
+            .iter()
+            .any(|w| w.contains("provider bridge is not wired")),
+        "the dry run says the provider bridge is not wired: {body}"
+    );
+
+    for (source, needle) in [
+        (&typo, "'tool'"),
+        (&provider, "provider bridge is not wired"),
+    ] {
+        let (status, body) = h
+            .install(
+                "plugin",
+                serde_json::json!({ "source": "path", "path": source.display().to_string() }),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a warning is not a refusal: {body}"
+        );
+        assert_eq!(body["extension"]["state"], "unapproved");
+        assert_eq!(body["extension"]["reason"], "never_seen");
+        assert!(
+            names(&body["manifest"]["warnings"])
+                .iter()
+                .any(|w| w.contains(needle)),
+            "the install preview: {body}"
+        );
+        assert!(
+            names(&body["extension"]["warnings"])
+                .iter()
+                .any(|w| w.contains(needle)),
+            "the install's row: {body}"
+        );
+    }
+    assert!(h.plugins_root.path().join("typo/plugin.toml").is_file());
+    assert!(h.plugins_root.path().join("modelish/plugin.toml").is_file());
+
+    // **The approve preview.** In the app it is the listed row awaiting
+    // consent, which no install answer reaches — a plugin dropped in by hand
+    // never had one. So the listed row says them too, as part of what the
+    // manifest declares: `declared.warnings`, standing, while the row's own
+    // `warnings` stays per-call.
+    let rows = h.rows(false).await;
+    for (id, needle) in [
+        ("typo", "'tool'"),
+        ("modelish", "provider bridge is not wired"),
+    ] {
+        let row = rows
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("no listed row for {id}: {rows:?}"));
+        assert_eq!(row["state"], "unapproved");
+        assert!(
+            names(&row["declared"]["warnings"])
+                .iter()
+                .any(|w| w.contains(needle)),
+            "the listed row awaiting consent says it: {row}"
+        );
+        assert!(
+            row.get("warnings").is_none(),
+            "`warnings` is still per-call: {row}"
+        );
+    }
+}
+
 // ── update ───────────────────────────────────────────────────────
 
 #[tokio::test]

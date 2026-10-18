@@ -1336,17 +1336,24 @@ every hidden character (a bidi override, a zero-width or control character, a
 variation selector, any space but a plain one, an object replacement character,
 a code point Unicode has not assigned or leaves to private use, a line break or
 a tab) as a highlighted `<U+XXXX>`, and a line under them counts them: `Note:
-this request contains 1 hidden character, shown as <U+…>.` The id and the
-version wrap at the row's edge rather than being cut or pushing `Approve` aside.
-`Approve` grants exactly those strings, and it answers for the plugin by the id
-the daemon listed.
+this request contains 1 hidden character, shown as <U+…>.` Under what it asks
+for, a `Warning:` line says each thing its manifest declares that nothing acts
+on — the lines `Check` shows below — so a plugin dropped in by hand says them
+before `Approve` too. The id and the version wrap at the row's edge rather than
+being cut or pushing `Approve` aside. `Approve` grants exactly those strings,
+and it answers for the plugin by the id the daemon listed.
 
 `Add extension` installs either kind:
 
 - **A plugin is a directory.** The form takes an absolute path, picked or
   typed, and `Check` runs the daemon's dry run so the manifest is on screen
-  before anything is copied. Installing **grants nothing**: the row lands
-  unapproved, and `Approve` is the single action that starts it.
+  before anything is copied. Under it, a `Warning:` line names each key the
+  manifest sets that OpenAlpaca does not read (a top-level `tool = true`, whose
+  switch is `types.tools`, is ignored — the line says so and what it likely
+  meant), and says that `types.connector` and `types.provider` do nothing while
+  their bridges are not wired. A warning never refuses the install. Installing
+  **grants nothing**: the row lands unapproved, and `Approve` is the single
+  action that starts it.
 - **An MCP server is a declaration.** Writing it into your own
   `config/mcp.toml` is the consent, so there is no approve step — `Connect now`
   is the ENABLE bit.

@@ -577,6 +577,8 @@ impl PluginManager {
             return;
         }
 
+        log_manifest_warnings(&id, &manifest);
+
         // §5.1: the store fails closed, so an unreadable one parks *every*
         // plugin — nothing loads and nothing is written.
         let table = match table {
@@ -1676,6 +1678,13 @@ impl PluginManager {
         self.guard_orphan(&ext)?;
         let _lock = self.lock_for(name).await;
         let (dir, manifest) = self.declaration(&ext).await?;
+        // N-PLUG-2: the row an approve answers with says what the declaration
+        // it consents to holds that nothing reads, on every exit.
+        let warnings = manifest.warnings();
+        let with_warnings = |record: ExtensionRecord| ExtensionRecord {
+            warnings: [warnings.clone(), record.warnings].concat(),
+            ..record
+        };
 
         // W first: the consent decision reaches disk before anything starts.
         self.permission_gate.load_table().map_err(store_error)?;
@@ -1687,23 +1696,23 @@ impl PluginManager {
             self.ledger.state(&ext),
             Some(ExtensionState::Unapproved { .. })
         ) {
-            return self.row(&ext).await;
+            return self.row(&ext).await.map(with_warnings);
         }
 
         let table = self.permission_gate.load_table().map_err(store_error)?;
         if !table.enabled(name) {
             self.ledger.upsert(&ext, false, ExtensionState::Disabled);
             self.emit_record(&ext);
-            return self.row(&ext).await;
+            return self.row(&ext).await.map(with_warnings);
         }
 
         let Transition::Took(generation) = self.ledger.begin(&ext, ExtensionState::Enabling, None)
         else {
-            return self.row(&ext).await;
+            return self.row(&ext).await.map(with_warnings);
         };
         self.e_pre(&ext).await;
         self.load(&ext, &dir, manifest, &table, generation).await;
-        self.row(&ext).await
+        self.row(&ext).await.map(with_warnings)
     }
 
     /// **deny.** Record the refusal, then perform the full unload (design §4.1,
@@ -1792,6 +1801,10 @@ impl PluginManager {
                 capabilities: state.manifest.capabilities.provides.clone(),
                 virtual_capabilities: state.manifest.capabilities.virtual_.provides.clone(),
                 types: declared_types(&state.manifest),
+                // N-PLUG-2: on the listed row too, so the row awaiting
+                // consent — the app's approve preview — says them. Rendered
+                // from the cached parse; nothing is logged on a read.
+                warnings: state.manifest.warnings(),
             });
             record.skills = state.registered_skills.clone();
             record.agents = state.registered_agents.clone();
@@ -1832,6 +1845,7 @@ impl PluginManager {
         let (dir, manifest) = cached;
         match PluginManifest::from_dir_for_load(&dir) {
             Ok(fresh) if fresh.plugin.name == ext.name => {
+                log_manifest_warnings(&ext.name, &fresh);
                 if let Some(state) = self.plugins.write().await.get_mut(&ext.name) {
                     state.manifest = fresh.clone();
                 }
@@ -2008,6 +2022,9 @@ impl PluginManager {
         };
 
         let mut record = self.reconcile(&ext).await?;
+        // N-PLUG-2: what the manifest says that nothing reads, beside the
+        // provenance warning — the install's row says both.
+        record.warnings.extend(manifest.warnings.iter().cloned());
         record.warnings.extend(staged);
         info!(plugin = %name, from = %source.display(), "plugin installed");
         Ok(InstallOutcome {
@@ -2102,6 +2119,7 @@ impl PluginManager {
         };
 
         let mut record = self.reconcile(&ext).await?;
+        record.warnings.extend(manifest.warnings.iter().cloned());
         record.warnings.extend(warnings);
         info!(plugin = id, from = %source.display(), "plugin updated");
         Ok(InstallOutcome {
@@ -2725,6 +2743,15 @@ fn store_error(e: PluginError) -> ExtensionError {
     match e {
         PluginError::StoreUnreadable(detail) => ExtensionError::StoreUnreadable(detail),
         other => ExtensionError::WriteFailed(other.to_string()),
+    }
+}
+
+/// The log's half of N-PLUG-2: one `warn!` per thing the manifest says that
+/// nothing reads, each time a declaration is read for a load or a verb (the
+/// scan, a reconcile, enable, reload, approve) — never on a list read.
+fn log_manifest_warnings(id: &str, manifest: &PluginManifest) {
+    for warning in manifest.warnings() {
+        warn!(plugin = %id, "{warning}");
     }
 }
 

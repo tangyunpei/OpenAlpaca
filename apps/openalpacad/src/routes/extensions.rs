@@ -206,6 +206,9 @@ pub(crate) fn row_json(record: &ExtensionRecord) -> serde_json::Value {
             "capabilities": d.capabilities,
             "virtual_capabilities": d.virtual_capabilities,
             "types": d.types,
+            // Standing: what the manifest holds that nothing acts on
+            // (N-PLUG-2), for the row awaiting consent.
+            "warnings": d.warnings,
         })),
         "skills": record.skills,
         "agents": record.agents,

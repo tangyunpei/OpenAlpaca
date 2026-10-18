@@ -852,6 +852,15 @@ export interface DeclaredContributions {
   virtual_capabilities: string[];
   /** `plugin.toml`'s `[types]` table, as declared. */
   types: Record<string, boolean>;
+  /**
+   * What the manifest holds that nothing acts on — a key OpenAlpaca does not
+   * read, `types.connector` / `types.provider` while their bridges are
+   * unwired (N-PLUG-2) — in the daemon's words, a key's hidden characters
+   * already shown as `<U+XXXX>`. Standing, unlike the row's per-call
+   * `warnings`: the row awaiting consent draws them before Approve. Absent
+   * from a daemon built before them.
+   */
+  warnings?: string[];
 }
 
 /** One row of `GET /v1/extensions` (ADR-030 §8). */
@@ -916,6 +925,13 @@ export interface ManifestSummary {
   required_config_keys: string[];
   /** Values that never land in `plugins/.config/<name>.toml`. */
   sensitive_config_keys: string[];
+  /**
+   * What the manifest declares that OpenAlpaca will not act on — a key it
+   * does not read, `types.connector` / `types.provider` while their bridges
+   * are unwired (N-PLUG-2). Warnings, never refusals. Absent from a daemon
+   * built before them.
+   */
+  warnings?: string[];
 }
 
 /** `POST /v1/extensions/{kind}` and `PUT /v1/extensions/plugin/{id}`. */

@@ -153,6 +153,13 @@ pub struct DeclaredContributions {
     pub virtual_capabilities: Vec<String>,
     /// `plugin.toml`'s `[types]` table, as declared.
     pub types: std::collections::BTreeMap<String, bool>,
+    /// What the declaration holds that nothing acts on — a key OpenAlpaca does
+    /// not read, `types.connector` / `types.provider` while their bridges are
+    /// unwired (N-PLUG-2) — in the daemon's words, a key's hidden characters
+    /// already shown as `<U+XXXX>`. Standing, unlike the row's per-call
+    /// `warnings`, so the row awaiting consent says them before Approve.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// What class of thing an extension contributed. Tools are the only class
