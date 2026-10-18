@@ -5127,3 +5127,289 @@ async fn dropping_the_run_future_aborts_its_subagents() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
+
+// ── N-LEAD-2: a spawn queues under the lead's bound ──────────────────────
+
+/// A provider whose lead (when there is one) spawns two workers in one round
+/// and answers once a worker is inside its model call, and whose workers'
+/// calls each wait for a permit the test hands out. It keeps the objective of
+/// every worker call, so a test sees which subagents ever started.
+struct GatedWorkers {
+    gate: tokio::sync::Semaphore,
+    worker_objectives: std::sync::Mutex<Vec<String>>,
+}
+
+impl GatedWorkers {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            gate: tokio::sync::Semaphore::new(0),
+            worker_objectives: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn worker_calls(&self) -> usize {
+        self.worker_objectives.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for GatedWorkers {
+    fn name(&self) -> &str {
+        "gated-workers"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        if !is_lead_request(&request) {
+            let objective = request
+                .messages
+                .last()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            self.worker_objectives.lock().unwrap().push(objective);
+            self.gate
+                .acquire()
+                .await
+                .expect("the gate is never closed")
+                .forget();
+            return Ok(scripted_response("done", vec![]));
+        }
+        if tool_results_in(&request) == 0 {
+            let spawn = |id: &str, objective: &str| openalpaca_llm::ToolCall {
+                id: id.to_string(),
+                name: "spawn_subagent".to_string(),
+                arguments: serde_json::json!({"agent_id": "worker", "objective": objective}),
+            };
+            return Ok(scripted_response(
+                "",
+                vec![
+                    spawn("call-first", "the first job"),
+                    spawn("call-second", "the second job"),
+                ],
+            ));
+        }
+        while self.worker_calls() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Ok(scripted_response("done", vec![]))
+    }
+}
+
+/// A router whose every call lands on `provider`, with room for sixteen
+/// concurrent calls on its one key: the router's own per-key bound (five by
+/// default) would otherwise hold a sixth subagent's model call, and that is
+/// not the bound under test.
+fn roomy_router(provider: Arc<dyn openalpaca_llm::LlmProvider>) -> Arc<LlmRouter> {
+    let key_pool = openalpaca_llm::KeyPool::new(
+        vec![openalpaca_llm::ApiKey::new(
+            "default".to_string(),
+            openalpaca_llm::ProviderType::Anthropic,
+            String::new(),
+        )],
+        openalpaca_llm::SelectionStrategy::RoundRobin,
+    );
+    let providers = HashMap::from([(
+        openalpaca_llm::ProviderType::Anthropic,
+        openalpaca_llm::ProviderEntry {
+            provider,
+            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+        },
+    )]);
+    Arc::new(LlmRouter::new_with_runtime(
+        providers,
+        openalpaca_llm::ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::with_defaults(),
+        )),
+        "claude-sonnet-4-20250514".to_string(),
+        openalpaca_llm::LlmRuntimeConfig::default(),
+        openalpaca_llm::RateLimitConfig {
+            per_key_concurrency: 16,
+            global_concurrency: 16,
+            ..Default::default()
+        },
+    ))
+}
+
+/// `SpawnSubagentTool` as the lead builds it, with the concurrency bound the
+/// caller chooses and `router` answering every subagent.
+fn spawn_tool_bounded(
+    router: Arc<LlmRouter>,
+    shared: Arc<SharedContext>,
+    tracker: Arc<SubagentTracker>,
+    max_concurrent: usize,
+) -> SpawnSubagentTool {
+    SpawnSubagentTool::new(
+        router,
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker,
+        0,
+        max_concurrent,
+        MemoryScopeContext::global_only(),
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
+        None,
+    )
+}
+
+/// Poll `done` until it holds, failing with `what` after a minute of the
+/// test's (paused) clock.
+async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !done() {
+        assert!(tokio::time::Instant::now() < deadline, "never: {what}");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// **N-LEAD-2.** A batch of eight under a bound of six returns eight run ids
+/// at once: six run, two are queued, and each queued one starts when a slot
+/// frees. Before the fix the spawn tool waited up to 30 s for a slot inside
+/// the lead's own call before it registered anything — entries 7 and 8 each
+/// held the lead for 30 s and then failed. The clock is paused, so the old
+/// waits elapse at once and show as the call's duration.
+#[tokio::test(start_paused = true)]
+async fn a_batch_past_the_bound_returns_every_run_id_at_once_and_queues_the_rest() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(spawn_tool_bounded(
+        roomy_router(provider.clone()),
+        shared,
+        tracker.clone(),
+        6,
+    ));
+    let batch = SpawnSubagentsBatchTool::new(spawn);
+    let entries: Vec<serde_json::Value> = (1..=8)
+        .map(|n| serde_json::json!({"agent_id": "worker", "objective": format!("job {n}")}))
+        .collect();
+
+    let started = tokio::time::Instant::now();
+    let reply = batch
+        .execute(&serde_json::json!({"subagents": entries}))
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the lead's call waited {:?} for a slot: {reply}",
+        started.elapsed()
+    );
+    assert!(
+        reply.starts_with("Batch spawn: 8/8 subagents spawned successfully."),
+        "{reply}"
+    );
+    assert_eq!(reply.matches("queued").count(), 2, "{reply}");
+
+    eventually("six running, two queued", || {
+        tracker.status_counts() == (2, 6, 0, 0) && provider.worker_calls() == 6
+    })
+    .await;
+    provider.gate.add_permits(1);
+    eventually("a freed slot starts one queued subagent", || {
+        tracker.status_counts() == (1, 6, 1, 0) && provider.worker_calls() == 7
+    })
+    .await;
+    provider.gate.add_permits(1);
+    eventually("and the next one", || {
+        tracker.status_counts() == (0, 6, 2, 0) && provider.worker_calls() == 8
+    })
+    .await;
+    provider.gate.add_permits(6);
+    eventually("every subagent finished", || tracker.all_done()).await;
+}
+
+/// **N-LEAD-2 with N-LEAD-1.** Under a bound of one, the lead spawns two
+/// workers and its run ends while the first is inside its model call: the
+/// second, still queued, is stopped by the run's end and never starts — no
+/// model call carries its objective — and both lanes close as cancelled by
+/// the run's end. Before the fix the second spawn waited 30 s in the lead's
+/// call and failed, so it never had a lane at all.
+#[tokio::test(start_paused = true)]
+async fn a_queued_subagent_stopped_by_the_runs_end_never_starts() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let (_dir, db) = db_with_task("task-1");
+    let mut config = DaemonConfig::default();
+    config
+        .execution
+        .lead_agent_defaults
+        .max_concurrent_subagents = 1;
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "do two jobs",
+        Arc::new(LlmRouter::single_provider(
+            provider.clone(),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        )),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        Some(db.clone()),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(config)),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+
+    let objectives = provider.worker_objectives.lock().unwrap().clone();
+    assert_eq!(objectives.len(), 1, "one worker started: {objectives:?}");
+    assert!(
+        objectives[0].contains("the first job"),
+        "the first spawned is the one that ran: {objectives:?}"
+    );
+
+    let spans = openalpaca_storage::SubagentSpanRepository::new(&db)
+        .list_for_task("task-1")
+        .unwrap();
+    assert_eq!(spans.len(), 2, "both workers have a lane: {spans:?}");
+    for span in &spans {
+        assert_eq!(span.state, "cancelled", "{span:?}");
+        assert_eq!(
+            span.detail.as_deref(),
+            Some("the run ended before this subagent finished"),
+            "{span:?}"
+        );
+    }
+}

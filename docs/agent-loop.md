@@ -138,6 +138,17 @@ tool calls proxied through the same `SandboxManager::execute_tool` path
 subagents. Depth, concurrency-permit, and cancellation semantics are
 unchanged; the cancel token is checked between steps.
 
+**A spawn never waits** (N-LEAD-2). `spawn_subagent`, and each entry of
+`spawn_subagents_batch`, registers the subagent and returns its run id at
+once. Past the lead's bound (`[execution.lead_agent_defaults]
+max_concurrent_subagents`, 6 in the shipped `daemon.toml`) the subagent is
+`queued` — the reply says so — and waits for its slot inside its own task
+(`run_until_cancelled` on the bound's semaphore), `running` when one
+frees; the bound does not change. Its instance and its lane exist from
+the spawn, so a queued subagent's lane reads `running` in the timeline
+(a span has no queued state). A queued subagent that the run's end or a
+`/cancel` reaches never starts.
+
 **No subagent outlives its run** (N-LEAD-1). Each subagent's cancel token
 is a child of the run's *subagents token*, itself a child of the run's own
 token, and each subagent's task is held in the run's `JoinSet`

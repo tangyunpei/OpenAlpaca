@@ -231,7 +231,9 @@ pub struct SpawnSubagentTool {
     depth: u32,
     /// Configured maximum concurrent subagents for this lead agent.
     max_concurrent_subagents: usize,
-    /// Semaphore limiting concurrent subagent spawns per lead agent.
+    /// Semaphore bounding how many of this run's subagents run at once. A
+    /// subagent past the bound waits for a permit queued in its own task,
+    /// never in the lead's call (N-LEAD-2).
     concurrency_semaphore: Arc<tokio::sync::Semaphore>,
     /// Optional confirmation broker for interactive tool approval.
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
@@ -408,22 +410,6 @@ impl BuiltInTool for SpawnSubagentTool {
             ));
         }
 
-        // Enforce concurrency limit — wait up to 30s for a slot
-        let permit = tokio::time::timeout(
-            Duration::from_secs(30),
-            self.concurrency_semaphore.clone().acquire_owned(),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "Timed out waiting 30s for a subagent slot (max concurrent: {}). \
-                 Wait for existing subagents to complete before spawning new ones. \
-                 Use `wait_for_subagents` or `check_subagent_status` first.",
-                self.max_concurrent_subagents
-            )
-        })?
-        .map_err(|_| "Subagent concurrency semaphore closed unexpectedly".to_string())?;
-
         // 3. Spawn a new instance from the agent template
         //    (agent_id is really a template_id — the LLM picks from the template catalog)
         let agent = self
@@ -515,7 +501,6 @@ impl BuiltInTool for SpawnSubagentTool {
         }
 
         self.spawn_count.fetch_add(1, Ordering::SeqCst);
-        let agent_start = std::time::Instant::now();
 
         // 5. Build SandboxManager for subagent
         let subagent_tool_ctx = ToolContext {
@@ -823,12 +808,17 @@ impl BuiltInTool for SpawnSubagentTool {
             agent_id,
             &instance_id.split("::").last().unwrap_or(&instance_id)
         );
+        // N-LEAD-2: whether this one waits for a slot — this run's subagents
+        // already queued or running fill the bound — which the reply says.
+        let (queued, running, _, _) = self.tracker.status_counts();
+        let ahead = queued + running;
         self.tracker.register(&run_id);
 
         // N-LEAD-1: a child of the run's subagents token, which the run's end
         // cancels — and through it of the run's own token, which `/cancel`
         // cancels.
         let child_token = self.subagents_token.child_token();
+        let semaphore = self.concurrency_semaphore.clone();
         let tracker = self.tracker.clone();
         let run_id_clone = run_id.clone();
         let router = self.router.clone();
@@ -851,12 +841,20 @@ impl BuiltInTool for SpawnSubagentTool {
             closed: false,
         };
         let subagent = async move {
-            // Hold the concurrency permit for the lifetime of this subagent.
-            // It is automatically released when this async block completes.
-            let _permit = permit;
+            // N-LEAD-2: the subagent waits for its slot here, queued — never
+            // in the lead's call — and a cancel while it waits (the run's end,
+            // a `/cancel`) means it never starts. The permit is held for the
+            // subagent's lifetime and released when this block completes. The
+            // semaphore is never closed, so an `Err` cannot come back; were
+            // it to, the subagent could not start either.
+            let permit = child_token
+                .run_until_cancelled(semaphore.acquire_owned())
+                .await
+                .and_then(Result::ok);
 
-            // Check for cancellation before starting.
-            if child_token.is_cancelled() {
+            // Check for cancellation before starting — a cancel that landed as
+            // the slot freed wins too.
+            let Some(_permit) = permit.filter(|_| !child_token.is_cancelled()) else {
                 tracker.fail(
                     &run_id_clone,
                     "Cancelled before starting (parent task was cancelled)".to_string(),
@@ -868,9 +866,10 @@ impl BuiltInTool for SpawnSubagentTool {
                 lane.close(openalpaca_storage::SpanState::Cancelled, Some(detail), None);
                 busy_guard.restore();
                 return;
-            }
+            };
 
             tracker.set_status(&run_id_clone, SubagentStatus::Running);
+            let agent_start = std::time::Instant::now();
 
             // ── Plugin-backed template: run the plugin executor loop
             // instead of the LLM loop. Tool calls are proxied through the
@@ -1120,12 +1119,19 @@ impl BuiltInTool for SpawnSubagentTool {
         }
 
         // Return immediately — the subagent is queued/running in the background
+        let start = if ahead >= self.max_concurrent_subagents {
+            format!(
+                "queued: at most {} subagents run at once and {} of this run's are already \
+                 waiting or running, so it starts when a slot frees",
+                self.max_concurrent_subagents, ahead
+            )
+        } else {
+            "starting now".to_string()
+        };
         Ok(format!(
-            "Subagent '{}' spawned (run_id: '{}'). It will start executing when an LLM slot \
-             is available (or immediately if capacity permits). Spawn more subagents if needed, \
-             then call `wait_for_subagents` to collect all results, or `check_subagent_status` \
-             with this run_id to check individually.",
-            agent_id, run_id
+            "Subagent '{agent_id}' spawned (run_id: '{run_id}'), {start}. Spawn more subagents \
+             if needed, then call `wait_for_subagents` to collect all results, or \
+             `check_subagent_status` with this run_id to check individually."
         ))
     }
 }
@@ -1228,8 +1234,9 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
         description: format!(
             "Spawn multiple subagents in a single call (1-8). More efficient than calling \
              spawn_subagent repeatedly. Each entry specifies an agent_id and objective. \
-             All subagents start executing immediately in parallel. Use wait_for_subagents \
-             to collect results.\n\nAvailable agents:\n{}",
+             Every entry returns its run_id at once; up to this run's concurrency bound they \
+             run in parallel, and the rest are queued and start as slots free. Use \
+             wait_for_subagents to collect results.\n\nAvailable agents:\n{}",
             agents_list
         ),
         parameters: serde_json::json!({

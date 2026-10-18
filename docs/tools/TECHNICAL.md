@@ -830,7 +830,7 @@ why custom TOML tools may not use the four coordination names.
 
 | Tool | Parameters | Notes |
 |------|-----------|-------|
-| `spawn_subagent` | `agent_id`, `objective` (both required) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency semaphore sized by `max_concurrent_subagents` (waits up to 30 s for a slot) |
+| `spawn_subagent` | `agent_id`, `objective` (both required) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency bound `max_concurrent_subagents`: past it the subagent is registered `queued`, its `run_id` returned at once, and it starts when a slot frees (N-LEAD-2, 2026-10-17) |
 | `spawn_subagents_batch` | `subagents`: 1–8 × `{agent_id, objective}` | Registered when `execution.lead_agent_defaults.batch_spawn_enabled` (default `true`); more than 8 items is an error |
 | `check_subagent_status` | `subagent_run_id` (required) | `exempt_from_timeout: true` |
 | `wait_for_subagents` | none | Blocks until every spawned subagent finishes, or returns early when the user steers the run. `exempt_from_timeout: true` |
