@@ -192,6 +192,7 @@ mod tests {
                 arguments: serde_json::json!({"query": "rust"}),
             }]),
             tool_call_id: None,
+            is_error: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("tool_calls"));

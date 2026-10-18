@@ -16,7 +16,7 @@ use backend::LlmBackend;
 pub(crate) use context::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
 pub(crate) use tool_helpers::MAX_TOOL_RESULT_SIZE;
 use crate::utils::text::head_tail;
-use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result_to};
+use tool_helpers::{format_tool_error, truncate_tool_result_to};
 #[cfg(test)]
 use tool_helpers::truncate_tool_result;
 
@@ -1144,21 +1144,25 @@ async fn run_agentic_loop_core(
                     // that goes into the model's context — never on the copy
                     // the log records. The envelope cap still bounds what
                     // lands inline in the record.
+                    // N-TOOL-4 (Z1-13): each call yields its text and whether
+                    // it failed — the call's own `Err`. The flag decides
+                    // everything below; the text keeps the `[tool_error]`
+                    // marker for the wires that have no error field. A hint
+                    // is the failing tool's (or the sandbox's) own words.
                     let tool_futures = executable.iter().map(|&tc| {
                         let ctx_ref = &effective_ctx;
                         async move {
                             if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
                                 match sbx.execute_tool(tc, policy, ctx_ref).await {
-                                    Ok(output) => output,
-                                    Err(err) => {
-                                        format_tool_error_with_hint(&tc.name, &err.to_string())
-                                    }
+                                    Ok(output) => (output, false),
+                                    Err(err) => (format_tool_error(&err), true),
                                 }
                             } else {
-                                format_tool_error(&format!(
+                                let err = format_tool_error(&format!(
                                     "tool '{}' not available — sandbox not configured",
                                     tc.name
-                                ))
+                                ));
+                                (err, true)
                             }
                         }
                     });
@@ -1192,9 +1196,9 @@ async fn run_agentic_loop_core(
                     let batch_duration_ms = tool_started.elapsed().as_millis() as i64;
 
                     // Collect results in order (join_all preserves input order)
-                    for (tc, result_text) in executable.iter().zip(results.iter()) {
+                    for (tc, (result_text, failed)) in executable.iter().zip(results.iter()) {
                         state.tool_calls_made += 1;
-                        let ok = !result_text.starts_with("[tool_error]");
+                        let ok = !*failed;
                         if !ok {
                             // V3: the reason a turn that reaches no answer
                             // usually reached none. The last one wins — it is
@@ -1270,14 +1274,18 @@ async fn run_agentic_loop_core(
                                 round = state.rounds,
                                 tool = %tc.name,
                                 tool_call_number = state.tool_calls_made,
-                                success = !result_text.starts_with("[tool_error]"),
+                                success = ok,
                                 result_len = result_text.len(),
                                 model_visible_len = model_text.len(),
                                 "Tool execution completed"
                             );
                         });
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::tool_result(&tc.id, &model_text));
+                        let message = if ok {
+                            ChatMessage::tool_result(&tc.id, &model_text)
+                        } else {
+                            ChatMessage::tool_error(&tc.id, &model_text)
+                        };
+                        Arc::make_mut(&mut messages).push(message);
                     }
 
                     // Over-budget tools get error
@@ -1285,15 +1293,13 @@ async fn run_agentic_loop_core(
                         let err = format_tool_error(
                             "max_tool_calls limit reached — no more tool calls allowed",
                         );
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::tool_result(&tc.id, &err));
+                        Arc::make_mut(&mut messages).push(ChatMessage::tool_error(&tc.id, &err));
                     }
 
                     // Overflow tools (exceeding max_tools_per_round) get error
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         let err = format_tool_error("max tools per round exceeded");
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::tool_result(&tc.id, &err));
+                        Arc::make_mut(&mut messages).push(ChatMessage::tool_error(&tc.id, &err));
                     }
 
                     state.max_tokens_retries = 0;

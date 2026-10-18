@@ -2,6 +2,48 @@ use super::*;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::Arc;
 
+/// N-TOOL-4 (Z1-13): the OpenAI-compatible wire has no error field, so a
+/// failed tool's result goes out as it always did — its text, marked
+/// `[tool_error]`, and no `is_error` key — beside a successful one.
+#[test]
+fn a_failed_tool_result_keeps_its_marked_text_and_gains_no_field() {
+    let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
+    let failed: ChatMessage = serde_json::from_value(serde_json::json!({
+        "role": "tool",
+        "content": "[tool_error] boom",
+        "tool_call_id": "tc_bad",
+        "is_error": true,
+    }))
+    .unwrap();
+    let request = ChatRequest {
+        messages: Arc::new(vec![
+            ChatMessage::user("go"),
+            ChatMessage::tool_result("tc_ok", "fine"),
+            failed,
+        ]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: None,
+    };
+
+    let body = provider.build_request_body(&request);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages[1],
+        serde_json::json!({"role": "tool", "content": "fine", "tool_call_id": "tc_ok"})
+    );
+    assert_eq!(
+        messages[2],
+        serde_json::json!({"role": "tool", "content": "[tool_error] boom", "tool_call_id": "tc_bad"})
+    );
+}
+
 #[test]
 fn test_request_format() {
     let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);

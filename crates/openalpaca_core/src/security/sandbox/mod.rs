@@ -582,6 +582,15 @@ impl SandboxManager {
                 // Timeouts are transient — record for circuit breaker
                 self.circuit_breaker
                     .record_failure_for_task(agent_id, &tool_call.name, task_id);
+                // N-TOOL-4 (Z1-13): the limit is enforced here, so a command
+                // cut at it is told what to do here — the hint is this
+                // message's own, not a guess the loop makes from its words.
+                if self.registry.is_command_tool(&tool_call.name) {
+                    return Err(format!(
+                        "{reason}\n{}",
+                        crate::tools::platform::COMMAND_TIMED_OUT_HINT
+                    ));
+                }
                 Err(reason)
             }
         }

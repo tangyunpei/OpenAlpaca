@@ -84,7 +84,7 @@ impl ShellExecuteTool {
         let output = run_bounded(cmd, std::time::Duration::from_secs(SHELL_TIMEOUT_SECS))
             .await
             .map_err(|failure| match failure {
-                RunFailure::TimedOut => format!("Command timed out after {SHELL_TIMEOUT_SECS}s"),
+                RunFailure::TimedOut => timed_out(SHELL_TIMEOUT_SECS),
                 RunFailure::Spawn(e) | RunFailure::Io(e) => {
                     format!("Failed to execute command: {e}")
                 }
@@ -110,18 +110,39 @@ impl ShellExecuteTool {
             }
             Ok(result)
         } else {
-            Err(format!(
+            let code = output.status.code();
+            let mut failure = format!(
                 "Command failed (exit {}):\n{}{}",
-                output.status.code().unwrap_or(-1),
+                code.unwrap_or(-1),
                 stdout,
                 if stderr.is_empty() {
                     String::new()
                 } else {
                     format!("\nSTDERR:\n{}", stderr)
                 }
-            ))
+            );
+            // N-TOOL-4 (Z1-13): the shell's own word for "no such command"
+            // is exit 127 — sharper than the old "not found" anywhere in the
+            // output, which a failing grep could trip.
+            if code == Some(127) {
+                failure.push('\n');
+                failure.push_str(NO_SUCH_COMMAND_HINT);
+            }
+            Err(failure)
         }
     }
+}
+
+/// What a command the shell could not find is told (exit 127; N-TOOL-4).
+const NO_SUCH_COMMAND_HINT: &str =
+    "Hint: check that the command is installed, or give its full path.";
+
+/// The shell's own bound passed (N-TOOL-4): the limit, and what to do.
+fn timed_out(secs: u64) -> String {
+    format!(
+        "Command timed out after {secs}s\n{}",
+        crate::tools::platform::COMMAND_TIMED_OUT_HINT
+    )
 }
 
 #[async_trait]
@@ -276,7 +297,13 @@ mod tests {
             .unwrap_err();
         let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
         let _kill = KillOnFail(pid);
-        assert_eq!(err, "Tool 'shell_execute' timed out after 1s");
+        // N-TOOL-4: the sandbox, where the limit is enforced, tells a command
+        // it cut what to do — never to raise a `timeout` (N-TOOL-1).
+        assert_eq!(
+            err,
+            "Tool 'shell_execute' timed out after 1s\nHint: that is the most a command may run \
+             here; split the work into smaller commands that each finish sooner."
+        );
         assert!(
             wait_until_gone(pid, GONE_WITHIN).await,
             "the background sleep {pid} outlived the sandbox's timeout"
@@ -524,6 +551,40 @@ mod preview_tests {
         let whole = run(cap).await;
         assert_eq!(whole.len(), cap, "exactly the cap is shown whole");
         assert!(!whole.contains("cut at"));
+    }
+
+    /// N-TOOL-4 (Z1-13): a command the shell cannot find (exit 127) is
+    /// answered with what to do about it, in the tool's own error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_the_shell_cannot_find_is_answered_with_the_hint_to_check_it() {
+        let gp = crate::test_util::GuardedProject::new();
+        let err = ShellExecuteTool
+            .execute_with_context(
+                &command_args("openalpaca-no-such-command-n-tool-4"),
+                &gp.ctx(),
+            )
+            .await
+            .expect_err("no such command");
+        assert!(err.starts_with("Command failed (exit 127):"), "{err}");
+        assert!(
+            err.ends_with("\nHint: check that the command is installed, or give its full path."),
+            "{err}"
+        );
+    }
+
+    /// N-TOOL-4: the shell's own bound — what holds when the sandbox is
+    /// bypassed — tells a command it stopped the same thing the sandbox
+    /// does, and names no `timeout` parameter (N-TOOL-1).
+    #[test]
+    fn the_shells_own_bound_tells_a_command_what_to_do() {
+        let text = super::timed_out(SHELL_TIMEOUT_SECS);
+        assert_eq!(
+            text,
+            "Command timed out after 300s\nHint: that is the most a command may run here; \
+             split the work into smaller commands that each finish sooner."
+        );
+        assert!(!text.to_lowercase().contains("timeout"), "{text}");
     }
 
     #[cfg(unix)]

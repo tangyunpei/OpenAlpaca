@@ -58,48 +58,14 @@ pub(super) fn truncate_tool_result_to(text: String, limit: usize) -> String {
     )
 }
 
-/// Format a tool error message with the standard `[tool_error]` prefix.
-/// Centralizes the error format so the LLM always sees a consistent pattern.
+/// The text of a failed tool call as the model reads it: the error, marked
+/// `[tool_error]`.
+///
+/// The mark is what an OpenAI-compatible wire, which has no error field,
+/// shows; whether the call failed is the call's own `Err`, carried on the
+/// message as `is_error` (N-TOOL-4, Z1-13) — the loop never reads it back
+/// off this text. A recovery hint is the failing tool's own words (or the
+/// sandbox's, for a command it cut at its time limit), already in `msg`.
 pub(super) fn format_tool_error(msg: &str) -> String {
     format!("[tool_error] {}", msg)
-}
-
-/// Tool-specific recovery suggestions for common error patterns.
-fn tool_recovery_hint(tool_name: &str, error: &str) -> Option<&'static str> {
-    if tool_name == "file_read" && (error.contains("not found") || error.contains("No such file")) {
-        return Some(
-            "Hint: paths are relative to the working folder; file_list shows what a folder holds.",
-        );
-    }
-    if tool_name == "file_write" && error.contains("Permission denied") {
-        return Some("Hint: check file permissions or try a different output path.");
-    }
-    if tool_name == "web_fetch" && (error.contains("404") || error.contains("not found")) {
-        return Some("Hint: use web_search to find the correct URL first.");
-    }
-    if tool_name == "web_fetch" && error.contains("timeout") {
-        return Some("Hint: the URL may be unreachable. Try a different source.");
-    }
-    // N-TOOL-1 (Z1-05): the message this follows names the limit the call
-    // was cut at — the sandbox's ("timed out after 60s") or the tool's own —
-    // and no tool takes a parameter that raises it.
-    if tool_name == "shell_execute" && error.contains("timed out") {
-        return Some(
-            "Hint: that is the most a command may run here; split the work into smaller \
-             commands that each finish sooner.",
-        );
-    }
-    if tool_name == "shell_execute" && error.contains("not found") {
-        return Some("Hint: check if the command is installed or use the full path.");
-    }
-    None
-}
-
-/// Format a tool error with an optional recovery hint appended.
-pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String {
-    let base = format_tool_error(msg);
-    match tool_recovery_hint(tool_name, msg) {
-        Some(hint) => format!("{}\n{}", base, hint),
-        None => base,
-    }
 }

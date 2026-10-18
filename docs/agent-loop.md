@@ -636,6 +636,13 @@ If the spill record could not be handed to the log writer, the model gets
 the inline cut instead of a stub — a stub must never promise a file that
 will not exist.
 
+A failed call is the call's own `Err`, never a reading of its text: the
+loop marks the text `[tool_error]` and flags the message (`is_error`). The
+Anthropic provider sends the flag as the `tool_result` block's `is_error`;
+an OpenAI-compatible wire has no such field and reads the mark. A recovery
+hint is the failing tool's own words — or the sandbox's, for a command it
+cut at the time limit — and the loop adds none.
+
 `read_result` is a scoped builtin (`tools/builtins/read_result.rs`) and a
 **grant, not ambient**:
 

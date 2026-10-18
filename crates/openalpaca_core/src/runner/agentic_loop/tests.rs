@@ -869,28 +869,17 @@ async fn test_max_tokens_retries_exhausted_returns_truncated() {
     assert_eq!(result.rounds_used, 3);
 }
 
-// ─── tool error hint tests ────────────────────────────────────────────
+// ─── tool error text ──────────────────────────────────────────────────
 
+/// N-TOOL-4: the loop marks a failed call's text and adds nothing of its
+/// own — a hint is the failing tool's (file_read's, for instance, in
+/// `tools::builtins::file_ops`'s tests), never a guess from the words.
 #[test]
-fn test_tool_error_hint_file_read() {
-    let result = format_tool_error_with_hint("file_read", "not found: /foo/bar.txt");
-    assert!(result.starts_with("[tool_error] not found:"));
-    assert!(
-        result.contains(
-            "Hint: paths are relative to the working folder; file_list shows what a folder holds."
-        ),
-        "{result}"
+fn a_tool_error_is_marked_and_given_no_hint_by_the_loop() {
+    assert_eq!(
+        format_tool_error("not found: /foo/bar.txt"),
+        "[tool_error] not found: /foo/bar.txt"
     );
-    // ST-14: every shell command asks, so a hint must not send the model there
-    // for a question file_list answers without a card.
-    assert!(!result.contains("shell_execute"), "{result}");
-}
-
-#[test]
-fn test_tool_error_hint_no_match_returns_plain() {
-    let result = format_tool_error_with_hint("unknown_tool", "something broke");
-    assert_eq!(result, "[tool_error] something broke");
-    assert!(!result.contains("Hint:"));
 }
 
 // ─── cost warning tests ───────────────────────────────────────────────
@@ -4617,5 +4606,170 @@ mod stated_tool_timeout {
             !result.to_lowercase().contains("timeout"),
             "no `timeout` parameter exists to raise: {result}"
         );
+    }
+}
+
+/// N-TOOL-4 (Z1-13): whether a tool call failed is the call's own result —
+/// its `Err` — carried on the message as `is_error`; the loop never reads it
+/// off the text, and the text keeps its `[tool_error]` marker for the wires
+/// that have no error field.
+mod tool_error_flag {
+    use super::*;
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use std::sync::Mutex;
+
+    /// Answers with one call of `says`, then with text; keeps every request.
+    struct CallsOnce {
+        seen: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CallsOnce {
+        fn name(&self) -> &str {
+            "calls-once"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let first = {
+                let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+                seen.push(request);
+                seen.len() == 1
+            };
+            let tool_calls = if first {
+                vec![openalpaca_llm::ToolCall {
+                    id: "tc_says".to_string(),
+                    name: "says".to_string(),
+                    arguments: serde_json::json!({}),
+                }]
+            } else {
+                vec![]
+            };
+            Ok(ChatResponse {
+                content: if first {
+                    String::new()
+                } else {
+                    "done".to_string()
+                },
+                finish_reason: if first {
+                    FinishReason::ToolUse
+                } else {
+                    FinishReason::Stop
+                },
+                tool_calls,
+                model: "mock-model".to_string(),
+                usage: Usage::default(),
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// A tool that answers with exactly what it was built with.
+    struct Says(Result<&'static str, &'static str>);
+
+    #[async_trait]
+    impl BuiltInTool for Says {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            self.0.map(str::to_string).map_err(str::to_string)
+        }
+    }
+
+    /// One loop whose tool answers `answer`: its result, and the tool-result
+    /// message the model was handed next.
+    async fn run(answer: Result<&'static str, &'static str>) -> (LoopResult, ChatMessage) {
+        let registry = ToolRegistry::default();
+        registry
+            .register(RegisteredTool {
+                definition: openalpaca_llm::ToolDefinition {
+                    name: "says".to_string(),
+                    description: "Says".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                    input_examples: None,
+                },
+                backend: ToolBackend::BuiltIn(Arc::new(Says(answer))),
+                provides_capabilities: vec![],
+                exempt_from_timeout: false,
+                annotations: None,
+                version: "test-0.0.0".into(),
+                author: "test".into(),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let policy = SandboxPolicy {
+            agent_id: "test".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let provider = CallsOnce {
+            seen: Mutex::new(Vec::new()),
+        };
+        let config = LoopConfig {
+            enable_caching: false,
+            ..Default::default()
+        };
+        let result = run_agentic_loop(
+            &provider,
+            vec![ChatMessage::user("go")],
+            vec![],
+            &config,
+            Some(&sandbox),
+            "test",
+            Some(&policy),
+            None,
+            None,
+            None,
+        )
+        .await;
+        let seen = provider
+            .seen
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner());
+        let message = seen[1]
+            .messages
+            .iter()
+            .find(|m| m.role == openalpaca_llm::Role::Tool)
+            .expect("the tool's result reached the model")
+            .clone();
+        (result, message)
+    }
+
+    /// The flag as the message carries it on the wire (absent when false).
+    fn flagged(message: &ChatMessage) -> bool {
+        serde_json::to_value(message).unwrap()["is_error"] == serde_json::json!(true)
+    }
+
+    /// A successful call whose output happens to begin with the marker — a
+    /// file that quotes it, a log — is a success: the text decides nothing.
+    #[tokio::test]
+    async fn a_success_whose_text_looks_like_an_error_is_a_success() {
+        let (result, message) = run(Ok("[tool_error] is what the old log said")).await;
+        assert_eq!(result.last_tool_error, None, "no tool failed");
+        assert!(!flagged(&message), "a success is not flagged: {message:?}");
+        assert_eq!(message.content, "[tool_error] is what the old log said");
+    }
+
+    /// A failed call is flagged on the message the model reads, and its text
+    /// is still marked for an OpenAI-compatible wire, which has no field.
+    #[tokio::test]
+    async fn a_failed_call_is_flagged_on_the_message_the_model_reads() {
+        let (result, message) = run(Err("boom")).await;
+        assert!(flagged(&message), "a failure is flagged: {message:?}");
+        assert_eq!(message.content, "[tool_error] boom");
+        assert_eq!(result.last_tool_error.as_deref(), Some("[tool_error] boom"));
     }
 }

@@ -67,7 +67,8 @@ impl InputSanitizer {
     /// Tools whose arguments should be checked for shell injection patterns.
     /// Non-shell tools (file_write, workspace_write, web_search, etc.) can
     /// legitimately contain semicolons, newlines, backticks, and pipes.
-    const SHELL_TOOLS: &'static [&'static str] = &["shell_execute"];
+    /// `ToolRegistry::is_command_tool` reads the same list.
+    pub(crate) const SHELL_TOOLS: &'static [&'static str] = &["shell_execute"];
 
     /// Sanitize tool call arguments, with the `../` check on for every tool:
     /// [`Self::sanitize_tool_args_with`] and [`TraversalRule::Refuse`].

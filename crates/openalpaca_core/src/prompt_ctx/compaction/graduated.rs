@@ -268,6 +268,7 @@ mod tests {
                 parts: None,
                 tool_calls: None,
                 tool_call_id: None,
+                is_error: false,
             },
         ];
         truncate_tool_results(&mut messages);
@@ -396,6 +397,7 @@ mod tests {
                 ]),
                 tool_calls: None,
                 tool_call_id: None,
+                is_error: false,
             },
         ];
         drop_multimedia(&mut messages);

@@ -1271,6 +1271,21 @@ impl ToolRegistry {
         }
     }
 
+    /// Whether `tool_name` runs a command: the sanitizer's shell set — the
+    /// builtin `shell_execute` ([`InputSanitizer::SHELL_TOOLS`]) and every
+    /// `Command`-backend tool, the two it checks for injection. What a
+    /// command is told when it is cut at its time limit (N-TOOL-4) and how
+    /// its spilled output is previewed (N-TOOL-7) follow it.
+    ///
+    /// [`InputSanitizer::SHELL_TOOLS`]: crate::security::sanitizer::InputSanitizer::SHELL_TOOLS
+    pub(crate) fn is_command_tool(&self, tool_name: &str) -> bool {
+        crate::security::sanitizer::InputSanitizer::SHELL_TOOLS.contains(&tool_name)
+            || self
+                .tools
+                .get(tool_name)
+                .is_some_and(|entry| matches!(entry.backend, ToolBackend::Command { .. }))
+    }
+
     /// Return the names of tools that use command backends (i.e., execute via shell).
     /// These should be treated like shell tools for injection sanitization.
     pub fn command_backend_tool_names(&self) -> Vec<String> {
@@ -1623,3 +1638,7 @@ fn json_value_matches_type(value: &serde_json::Value, expected: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "command_tool_tests.rs"]
+mod command_tool_tests;

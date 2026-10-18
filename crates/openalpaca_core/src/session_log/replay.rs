@@ -443,8 +443,15 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
                         continue;
                     };
                     let content = result_text(session_dir, record, &mut plan);
-                    rounds[round].results[slot] =
-                        Some((record.seq, ChatMessage::tool_result(id, &content)));
+                    // N-TOOL-4: a failed call comes back flagged, as the loop
+                    // first sent it, so a resumed run's request says so too.
+                    let failed = record.data.get("ok").and_then(Value::as_bool) == Some(false);
+                    let message = if failed {
+                        ChatMessage::tool_error(id, &content)
+                    } else {
+                        ChatMessage::tool_result(id, &content)
+                    };
+                    rounds[round].results[slot] = Some((record.seq, message));
                 }
                 "compaction" => {
                     if let Some(preserved) =
@@ -567,6 +574,7 @@ fn assistant_message(round: &Round) -> ChatMessage {
         parts: None,
         tool_calls: (!round.calls.is_empty()).then(|| round.calls.clone()),
         tool_call_id: None,
+        is_error: false,
     }
 }
 

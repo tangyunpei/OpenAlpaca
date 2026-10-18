@@ -2603,6 +2603,13 @@ fn a_replay_rebuilds_the_rounds_and_their_results() {
     assert_eq!(m[2].content, "and now the tests");
     assert_eq!(m[3].tool_call_id.as_deref(), Some("tu-2"));
     assert_eq!(m[3].content, "[tool_error] boom", "an Err comes back as it was");
+    // N-TOOL-4: and flagged, as the loop first sent it — so a resumed run's
+    // Anthropic request carries the same `is_error`; a success is not.
+    let flagged = |m: &openalpaca_llm::ChatMessage| {
+        serde_json::to_value(m).unwrap()["is_error"] == serde_json::json!(true)
+    };
+    assert!(!flagged(&m[1]), "a success is not flagged: {:?}", m[1]);
+    assert!(flagged(&m[3]), "a failure replays flagged: {:?}", m[3]);
 }
 
 /// A spilled result is replayed as the **stub the model actually saw** — the

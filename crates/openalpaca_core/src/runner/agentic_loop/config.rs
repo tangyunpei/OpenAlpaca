@@ -532,11 +532,12 @@ fn retry_cannot_help(error: &str) -> Option<&'static str> {
 
 /// A tool error as the person reading the turn should see it (W2).
 ///
-/// `[tool_error] ` is the loop's own marker: it is how a tool result is
-/// recognised as a failure (`result_text.starts_with("[tool_error]")`) and it
-/// belongs in the transcript the model reads, not in a sentence addressed to a
-/// human. Only the leading marker goes — the message itself, hint and all, is
-/// what the reader needs.
+/// `[tool_error] ` is the loop's own marker: it is how the transcript shows a
+/// failed call on a wire with no error field (whether the call failed is its
+/// own `Err`, carried as `ChatMessage::is_error`, N-TOOL-4), and it belongs in
+/// the transcript the model reads, not in a sentence addressed to a human.
+/// Only the leading marker goes — the message itself, hint and all, is what
+/// the reader needs.
 fn user_facing(err: &str) -> &str {
     let err = err.trim();
     match err.strip_prefix("[tool_error]") {

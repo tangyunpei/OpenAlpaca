@@ -152,13 +152,19 @@ pub(super) fn build_request_body(
             }
             Role::Tool => {
                 let tool_content = build_message_content(msg);
+                let mut block = serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id,
+                    "content": tool_content,
+                });
+                // N-TOOL-4 (Z1-13): a failed call says so in the API's own
+                // field; a successful result is sent as it always was.
+                if msg.is_error {
+                    block["is_error"] = serde_json::Value::Bool(true);
+                }
                 messages.push(serde_json::json!({
                     "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": msg.tool_call_id,
-                        "content": tool_content,
-                    }],
+                    "content": [block],
                 }));
             }
         }

@@ -124,7 +124,7 @@ under `crates/openalpaca_core/src/`.
 | File | Purpose |
 |------|---------|
 | `runner/agentic_loop/mod.rs` | `run_agentic_loop()`, `run_agentic_loop_routed()`, the tool phase, spill planning |
-| `runner/agentic_loop/tool_helpers.rs` | `truncate_tool_result_to()`, `format_tool_error()`, `format_tool_error_with_hint()` (the head-and-tail cut is `head_tail()` in `utils/text.rs`) |
+| `runner/agentic_loop/tool_helpers.rs` | `truncate_tool_result_to()`, `format_tool_error()` (a recovery hint is each tool's own text; the head-and-tail cut is `head_tail()` in `utils/text.rs`) |
 | `runner/agentic_loop/config.rs` | `LoopConfig`, `LoopResult` |
 | `runner/agentic_loop/answer_guard.rs` | `AnswerGuard` — a last look at the finished answer (used by the chat loop) |
 | `runner/agentic_loop/backend.rs`, `context.rs`, `cost.rs` | LLM backend abstraction, loop state, `LoopCostAccumulator` |
@@ -1578,21 +1578,27 @@ elided.
 ```rust
 pub(super) fn format_tool_error(msg: &str) -> String
 // Returns: "[tool_error] {msg}"
-
-pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String
-// Returns the same line, plus a "Hint: …" line when one applies
 ```
 
-**Recovery hints by tool:**
+Whether a call failed is the call's own `Err`, carried on the tool-result
+message as `ChatMessage::is_error` (`ChatMessage::tool_error`); the loop
+never reads it off the text. The Anthropic provider sends it as the
+`tool_result` block's `is_error`; the OpenAI-compatible wire has no such
+field, so there the `[tool_error]` mark on the text says it (the text keeps
+the mark on every wire). A session-log replay restores the flag from the
+record's `ok`.
 
-| Tool | Error Pattern | Hint |
-|------|--------------|------|
-| `file_read` | "not found" / "No such file" | paths are relative to the working folder; file_list shows what a folder holds |
-| `file_write` | "Permission denied" | check file permissions or try a different output path |
-| `web_fetch` | "404" / "not found" | use web_search to find the correct URL first |
-| `web_fetch` | "timeout" | the URL may be unreachable; try a different source |
-| `shell_execute` | "timed out" | break the command into smaller steps or increase timeout |
-| `shell_execute` | "not found" | check if the command is installed or use the full path |
+**Recovery hints are the failing tool's own text** (N-TOOL-4), added where
+the failure is known — the loop adds none:
+
+| Tool | When | Hint |
+|------|------|------|
+| `file_read` | the path names nothing (checked after the path's shape passed) | paths are relative to the working folder; file_list shows what a folder holds |
+| `file_write` | the system refuses the write (`PermissionDenied`), on the file or on a folder it makes above it | check the file's permissions, or write it under another path |
+| `web_fetch` | HTTP 404 | use web_search to find the correct URL first |
+| `web_fetch` | the request or the body read ran out of time | the URL may be unreachable; try a different source |
+| `shell_execute`, `Command` tools | cut at the sandbox's limit, or the shell's own 300 s | that is the most a command may run here; split the work into smaller commands that each finish sooner (`tools::platform::COMMAND_TIMED_OUT_HINT`) |
+| `shell_execute` | exit 127 | check that the command is installed, or give its full path |
 
 ---
 

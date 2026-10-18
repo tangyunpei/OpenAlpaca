@@ -2724,6 +2724,7 @@ fn replayed_round() -> crate::session_log::replay::ReplayPlan {
                     arguments: serde_json::json!({"path": "a.rs"}),
                 }]),
                 tool_call_id: None,
+                is_error: false,
             },
             openalpaca_llm::ChatMessage::tool_result("tu-1", "fn main() {}"),
         ],
