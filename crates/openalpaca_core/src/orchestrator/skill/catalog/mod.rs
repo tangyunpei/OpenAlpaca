@@ -205,20 +205,26 @@ impl SkillCatalog {
     /// stay scrubbed exactly as today — keyed by the lowercased id and by the
     /// command and aliases captured *before* the removal, and consulted by the
     /// `/slash` tier and `invoke_skill` **only on a miss**.
+    ///
+    /// **Only the plugin's own entry is removed** (N-PLUG-6): the one under
+    /// the exact lowercased id whose source is `SkillSource::Plugin {
+    /// plugin_id }` ([`Self::remove_plugin_entry`]), never through
+    /// [`Self::remove`]'s scan by display name. A file skill that took the key
+    /// (a hot reload inserts over it), another plugin's skill, or a file skill
+    /// merely *named* like the id stays — and no tombstone is written, since
+    /// nothing of this plugin's was withdrawn.
     pub fn remove_plugin_skill(&self, skill_id: &str, plugin_id: &str) {
         let key = skill_id.to_lowercase();
+        let Some(entry) = self.remove_plugin_entry(skill_id, plugin_id) else {
+            return;
+        };
         let mut keys = vec![key.clone()];
-        if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(&key)
-        {
-            if let Some(cmd) = entry.frontmatter.effective_slash_command() {
-                keys.push(cmd.strip_prefix('/').unwrap_or(&cmd).to_lowercase());
-            }
-            for alias in &entry.frontmatter.invoke.aliases {
-                keys.push(alias.strip_prefix('/').unwrap_or(alias).to_lowercase());
-            }
+        if let Some(cmd) = entry.frontmatter.effective_slash_command() {
+            keys.push(cmd.strip_prefix('/').unwrap_or(&cmd).to_lowercase());
         }
-        self.remove(skill_id);
+        for alias in &entry.frontmatter.invoke.aliases {
+            keys.push(alias.strip_prefix('/').unwrap_or(alias).to_lowercase());
+        }
         if let Ok(mut tombstones) = self.tombstones.write() {
             for k in keys {
                 tombstones.insert(
@@ -230,6 +236,56 @@ impl SkillCatalog {
                 );
             }
         }
+    }
+
+    /// Take a plugin's own entry off the catalog: the one under the exact
+    /// lowercased `skill_id`, and only when its source is
+    /// `SkillSource::Plugin { plugin_id }` — with the command and alias index
+    /// entries that still point at it. Returns the entry removed, or `None`
+    /// when the key holds nothing of this plugin's.
+    ///
+    /// No display-name fallback and no tombstone (N-PLUG-6):
+    /// [`Self::remove_plugin_skill`] tombstones what this returns, and a load
+    /// that unwinds its own registration uses this alone.
+    pub fn remove_plugin_entry(&self, skill_id: &str, plugin_id: &str) -> Option<SkillEntry> {
+        let key = skill_id.to_lowercase();
+        let removed = {
+            let mut entries = self.entries.write().ok()?;
+            let owned = entries.get(&key).is_some_and(|entry| {
+                matches!(
+                    &entry.source,
+                    SkillSource::Plugin { plugin_id: owner, .. } if owner == plugin_id
+                )
+            });
+            if !owned {
+                tracing::debug!(
+                    skill = %key,
+                    plugin = plugin_id,
+                    "the catalog entry under this id is not the plugin's; left in place"
+                );
+                return None;
+            }
+            entries.remove(&key)?
+        };
+        // An index entry another skill has since claimed is that skill's.
+        let commands: Vec<String> = removed
+            .frontmatter
+            .effective_slash_command()
+            .into_iter()
+            .chain(removed.frontmatter.invoke.aliases.iter().cloned())
+            .map(|c| c.strip_prefix('/').unwrap_or(&c).to_lowercase())
+            .collect();
+        for index in [&self.command_index, &self.alias_index] {
+            if let Ok(mut index) = index.write() {
+                for command in &commands {
+                    if index.get(command) == Some(&key) {
+                        index.remove(command);
+                    }
+                }
+            }
+        }
+        self.invalidate_summary_cache();
+        Some(removed)
     }
 
     /// The tombstone for a skill id, slash command or alias, if one was left.
@@ -1184,6 +1240,9 @@ mod tests;
 
 #[cfg(test)]
 mod diagnostics_tests;
+
+#[cfg(test)]
+mod plugin_removal_tests;
 
 /// `<available_skills>`: the one renderer of the catalog for a prompt.
 mod prompt;

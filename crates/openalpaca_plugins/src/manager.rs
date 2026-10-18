@@ -1010,7 +1010,10 @@ impl PluginManager {
         // 2. skills. The removal leaves a **tombstone** (design §10 case 5(a)):
         //    `remove` scrubs the command and alias indices, so without one a
         //    `/slash` or `invoke_skill` for a withdrawn plugin skill reads as
-        //    an unknown name and gets a dump of every catalog entry.
+        //    an unknown name and gets a dump of every catalog entry. Only the
+        //    plugin's own entry goes — by its exact id, when its source is this
+        //    plugin — never a file skill that took the key or is merely named
+        //    like it (N-PLUG-6).
         let skills: Vec<String> = state.registered_skills.drain(..).collect();
         if let Some(catalog) = &self.skill_catalog {
             for skill_id in &skills {
@@ -1019,7 +1022,8 @@ impl PluginManager {
             }
         }
 
-        // 3. agent templates — same tombstone, for `spawn_subagent`.
+        // 3. agent templates — same tombstone, for `spawn_subagent`, and the
+        //    same rule: only a template whose source is this plugin.
         let agents: Vec<String> = state.registered_agents.drain(..).collect();
         if let Some(registry) = &self.agent_registry {
             for agent_id in &agents {
@@ -1493,9 +1497,23 @@ impl PluginManager {
         let mut registered_agents = Vec::new();
         if let (Some(registry), Some(template)) = (self.agent_registry.as_ref(), discovered.agent) {
             let agent_id = template.frontmatter.id.clone();
-            registry.register_template(template);
-            info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
-            registered_agents.push(agent_id);
+            // `register_template` refuses an id another template holds by
+            // answering `false`. N-PLUG-6: that answer is honoured — the id is
+            // recorded as this plugin's only when it registered, so T2 can
+            // never take a template the plugin never had (a plugin answering
+            // `agent/info` with `writing_agent` used to delete the shipped
+            // one at its next disable). What a plugin may claim over a live
+            // incumbent is the skip rule, B-05, not this.
+            if registry.register_template(template) {
+                info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
+                registered_agents.push(agent_id);
+            } else {
+                warn!(
+                    plugin = %id,
+                    agent = %agent_id,
+                    "another template already holds this id; the plugin's agent template is not registered"
+                );
+            }
         }
 
         let capability_provider_handle = if manifest.capabilities.virtual_.provides.is_empty() {
@@ -1534,8 +1552,10 @@ impl PluginManager {
                 self.tool_registry.remove_capability_provider(handle);
             }
             if let Some(catalog) = &self.skill_catalog {
+                // This attempt's own entries, by id — never `remove`'s scan by
+                // display name (N-PLUG-6).
                 for skill_id in &registered_skills {
-                    catalog.remove(skill_id);
+                    catalog.remove_plugin_entry(skill_id, &id);
                 }
             }
             if let Some(registry) = &self.agent_registry {

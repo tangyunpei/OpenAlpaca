@@ -924,26 +924,154 @@ mcp_compatible = true
     #[tokio::test]
     async fn t2_leaves_a_tombstone_for_a_withdrawn_agent_template() {
         let tmp = tempfile::tempdir().unwrap();
-        install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        // The stub answers `agent/info` from a file when one is present, so
+        // E4 registers the template itself (N-PLUG-6: T2 removes only what
+        // the plugin's own load registered).
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"reader"}"#).unwrap();
         let h = Harness::new(tmp.path());
         load_running_stub(&h, "echo-test").await;
-
-        // Stand in for E4's template registration, which needs `agent/info`.
-        h.agents.register_template(agent_template("reader", &[]));
+        assert_eq!(
+            h.registered("echo-test").await.agents,
+            vec!["reader".to_string()]
+        );
         assert!(h.agents.template_tombstone("reader").is_none());
 
-        h.agents.remove_plugin_template("reader", "echo-test");
+        h.manager.disable(&ext("echo-test")).await.unwrap();
         assert!(h.agents.get_template("reader").is_none());
         assert_eq!(
             h.agents.template_tombstone("reader").as_deref(),
             Some("echo-test")
         );
 
-        h.agents.register_template(agent_template("reader", &[]));
+        h.manager.enable(&ext("echo-test")).await.unwrap();
+        assert!(h.agents.get_template("reader").is_some());
         assert!(
             h.agents.template_tombstone("reader").is_none(),
             "a template that came back invalidates its own tombstone"
         );
+    }
+
+    // ── N-PLUG-6: a plugin's unload removes only what it owns ────────
+
+    /// **A plugin that claims a shipped template's id does not take it, and
+    /// its disable leaves it** (N-PLUG-6, Z2-01/Z3-07). `register_template`
+    /// refuses a duplicate id by answering `false`; the manager ignored the
+    /// answer, recorded the id as the plugin's own, and T2 then removed the
+    /// shipped template — `writing_agent` deleted at the plugin's next
+    /// disable. Now the refusal is honoured and T2 removes a template only
+    /// when its source is this plugin.
+    #[tokio::test]
+    async fn a_plugin_claiming_a_shipped_template_id_leaves_it_after_its_disable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"writing_agent"}"#).unwrap();
+        let h = Harness::new(tmp.path());
+        // The shipped template, loaded before any plugin.
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        load_running_stub(&h, "echo-test").await;
+
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+
+        let shipped = h
+            .agents
+            .get_template("writing_agent")
+            .expect("the shipped template survives the plugin's disable");
+        assert!(
+            matches!(
+                shipped.source,
+                openalpaca_core::agent::template::AgentSource::Internal
+            ),
+            "and it is still the shipped one: {:?}",
+            shipped.source
+        );
+        assert!(
+            h.agents.template_tombstone("writing_agent").is_none(),
+            "nothing of the plugin's was withdrawn, so nothing is attributed to it"
+        );
+        h.manager.enable(&ext("echo-test")).await.unwrap();
+        assert!(
+            h.row("echo-test").await.agents.is_empty(),
+            "a refused id is never recorded as the plugin's"
+        );
+    }
+
+    /// Lay out a file skill directory, as `config/skills/<dir>/SKILL.md`.
+    fn file_skill(root: &Path, dir: &str, name: &str) -> PathBuf {
+        let skill = root.join(dir);
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!(
+                "---\nname: \"{name}\"\ndescription: \"a file skill\"\n---\n\n## Instructions\n\nDo it.\n"
+            ),
+        )
+        .unwrap();
+        skill
+    }
+
+    /// **A plugin's unload never removes a file skill through the
+    /// display-name scan** (N-PLUG-6). `remove` falls back to a scan by
+    /// display name when the id is not a key, so once the plugin's own entry
+    /// was gone — a hot-reloaded file skill took its key, and that file skill
+    /// was then deleted — the plugin's disable deleted whichever file skill
+    /// happened to be *named* like the plugin's skill id.
+    #[tokio::test]
+    async fn a_plugin_unload_never_removes_a_file_skill_through_the_name_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nskill = true\n",
+        );
+        std::fs::write(
+            dir.join("skill-info.json"),
+            r#"{"id":"triage","name":"Plugin Triage"}"#,
+        )
+        .unwrap();
+        let skills_root = tmp.path().join(".skills");
+        // A shipped file skill whose *display name* is the plugin skill's id.
+        file_skill(&skills_root, "code-review", "triage");
+        let h = Harness::new(tmp.path());
+        h.skills.scan_directory(
+            &skills_root,
+            openalpaca_core::middleware::skill::SkillScope::Project,
+        );
+        load_running_stub(&h, "echo-test").await;
+        assert_eq!(
+            h.registered("echo-test").await.skills,
+            vec!["triage".to_string()]
+        );
+
+        // A file skill directory named `triage` hot-reloads over the plugin's
+        // key, and is then deleted: the key is gone from the catalog.
+        let taker = file_skill(&skills_root, "triage", "Taker");
+        h.skills.reload_skill(&taker).unwrap();
+        std::fs::remove_dir_all(&taker).unwrap();
+        h.skills.reload_skill(&taker).unwrap();
+        assert!(h.skills.get("code-review").is_some());
+
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+
+        let survivor = h
+            .skills
+            .get("code-review")
+            .expect("the file skill named like the plugin's skill id survives its unload");
+        assert!(matches!(
+            survivor.source,
+            openalpaca_core::orchestrator::skill_catalog::SkillSource::FileBased
+        ));
     }
 
     // ── C4 — T1 step 3: the dependent scan (§3.2 T1, §7.3) ───────────

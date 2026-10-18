@@ -512,6 +512,15 @@ You are a test agent.
 #[test]
 fn clearing_a_plugins_tombstones_leaves_every_other_plugins_alone() {
     let reg = AgentRegistry::new();
+    // A tombstone records a withdrawal that happened (N-PLUG-6), so each
+    // template is the plugin's own before it is withdrawn.
+    for (id, plugin) in [
+        ("reader", "notion"),
+        ("writer", "notion"),
+        ("summarizer", "linear"),
+    ] {
+        assert!(reg.register_template(plugin_template(id, plugin)));
+    }
     reg.remove_plugin_template("reader", "notion");
     reg.remove_plugin_template("writer", "notion");
     reg.remove_plugin_template("summarizer", "linear");
@@ -529,4 +538,98 @@ fn clearing_a_plugins_tombstones_leaves_every_other_plugins_alone() {
         "another plugin's tombstone is untouched"
     );
     assert_eq!(reg.clear_plugin_tombstones("notion"), 0, "idempotent");
+}
+
+// ── N-PLUG-6: a plugin's unload removes only what it owns ────────────────
+
+/// A plugin agent's executor that is never driven: these tests only register
+/// and remove templates.
+struct IdleExecutor;
+
+#[async_trait::async_trait]
+impl openalpaca_api::plugin_traits::PluginAgentExecutor for IdleExecutor {
+    async fn spawn(
+        &self,
+        _instance_id: &str,
+        _task_id: &str,
+        _instructions: &str,
+        _context: &serde_json::Value,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    async fn step(
+        &self,
+        _instance_id: &str,
+        _tool_results: Option<&serde_json::Value>,
+    ) -> Result<(String, String, Vec<serde_json::Value>), String> {
+        Ok(("complete".to_string(), String::new(), vec![]))
+    }
+
+    async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn plugin_id(&self) -> &str {
+        "plugin"
+    }
+
+    fn agent_id(&self) -> &str {
+        "agent"
+    }
+}
+
+/// A template a plugin's load registered.
+fn plugin_template(id: &str, plugin: &str) -> AgentTemplate {
+    AgentTemplate {
+        source: AgentSource::Plugin {
+            plugin_id: plugin.to_string(),
+            executor: std::sync::Arc::new(IdleExecutor),
+        },
+        ..make_template(id, vec![], false)
+    }
+}
+
+/// A shipped template on the id a plugin names is not the plugin's to
+/// remove: it stays, and nothing is attributed to the plugin.
+#[test]
+fn a_plugin_removal_leaves_a_shipped_template() {
+    let reg = AgentRegistry::new();
+    assert!(reg.register_template(make_template("writing_agent", vec!["file_read"], false)));
+    assert!(
+        !reg.register_template(plugin_template("writing_agent", "notion")),
+        "a duplicate id is refused"
+    );
+
+    assert!(!reg.remove_plugin_template("writing_agent", "notion"));
+
+    let shipped = reg
+        .get_template("writing_agent")
+        .expect("the shipped template stays");
+    assert!(matches!(shipped.source, AgentSource::Internal));
+    assert!(reg.template_tombstone("writing_agent").is_none());
+}
+
+/// Another plugin's template is not this plugin's to remove either.
+#[test]
+fn a_plugin_removal_leaves_another_plugins_template() {
+    let reg = AgentRegistry::new();
+    assert!(reg.register_template(plugin_template("reader", "linear")));
+
+    assert!(!reg.remove_plugin_template("reader", "notion"));
+
+    assert!(reg.get_template("reader").is_some());
+    assert!(reg.template_tombstone("reader").is_none());
+}
+
+/// The plugin's own template goes, and its tombstone names the plugin.
+#[test]
+fn a_plugin_removal_takes_its_own_template_and_tombstones_it() {
+    let reg = AgentRegistry::new();
+    assert!(reg.register_template(plugin_template("reader", "notion")));
+
+    assert!(reg.remove_plugin_template("reader", "notion"));
+
+    assert!(reg.get_template("reader").is_none());
+    assert_eq!(reg.template_tombstone("reader").as_deref(), Some("notion"));
 }
