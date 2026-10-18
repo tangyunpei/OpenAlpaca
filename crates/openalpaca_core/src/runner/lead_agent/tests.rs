@@ -4790,3 +4790,340 @@ async fn the_leads_compaction_folds_into_the_chats_working_state() {
         blocks[0]
     );
 }
+
+// ── N-LEAD-1: a lead's run stops the subagents it leaves running ────────
+
+/// The number of tool results in a request — which round of a scripted
+/// conversation the caller is on.
+fn tool_results_in(request: &openalpaca_llm::ChatRequest) -> usize {
+    request
+        .messages
+        .iter()
+        .filter(|m| m.role == openalpaca_llm::Role::Tool)
+        .count()
+}
+
+/// The lead is the caller whose surface carries `spawn_subagent`.
+fn is_lead_request(request: &openalpaca_llm::ChatRequest) -> bool {
+    request.tools.iter().any(|t| t.name == "spawn_subagent")
+}
+
+fn spawn_worker_call(objective: &str) -> openalpaca_llm::ChatResponse {
+    scripted_response(
+        "",
+        vec![openalpaca_llm::ToolCall {
+            id: "call-spawn".to_string(),
+            name: "spawn_subagent".to_string(),
+            arguments: serde_json::json!({"agent_id": "worker", "objective": objective}),
+        }],
+    )
+}
+
+/// A lead that spawns a worker, then answers once the worker's command has
+/// written its pid; the worker runs a command that starts a `sleep` in the
+/// background and waits on it.
+#[cfg(unix)]
+struct LeadEndsWhileTheWorkersCommandRuns {
+    command: String,
+    pidfile: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+#[async_trait]
+impl openalpaca_llm::LlmProvider for LeadEndsWhileTheWorkersCommandRuns {
+    fn name(&self) -> &str {
+        "lead-ends-while-the-workers-command-runs"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        if !is_lead_request(&request) {
+            return Ok(match tool_results_in(&request) {
+                0 => scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-shell".to_string(),
+                        name: "shell_execute".to_string(),
+                        arguments: serde_json::json!({"command": self.command}),
+                    }],
+                ),
+                _ => scripted_response("the command finished", vec![]),
+            });
+        }
+        if tool_results_in(&request) == 0 {
+            return Ok(spawn_worker_call("run the long command"));
+        }
+        // The lead answers — and its run ends — while the worker's command
+        // is still running.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !self.pidfile.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        Ok(scripted_response("done", vec![]))
+    }
+}
+
+/// A database holding the task row `task_id`, so the subagent spans a run
+/// writes have their parent.
+fn db_with_task(task_id: &str) -> (tempfile::TempDir, Database) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let now = chrono::Utc::now();
+    openalpaca_storage::TaskRepository::new(&db)
+        .create(&openalpaca_storage::Task {
+            id: task_id.to_string(),
+            title: "a run".to_string(),
+            description: None,
+            status: openalpaca_storage::TaskStatus::Running,
+            priority: 0,
+            progress_current: None,
+            progress_total: None,
+            result_summary: None,
+            created_by: "user-1".to_string(),
+            source_lane: "user-1:cli".to_string(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            state_json: None,
+            state_version: 0,
+            outcome_json: None,
+            outcome_kind: None,
+            artifact_count: 0,
+            workspace_id: None,
+            source_task_id: None,
+            session_id: None,
+            unattended: false,
+        })
+        .unwrap();
+    (dir, db)
+}
+
+/// **N-LEAD-1.** A subagent running a command when its lead's run ends is
+/// stopped with it — the cancel goes first, so R45's process-group kill takes
+/// the command's background `sleep` too, and the subagent closes its own lane
+/// saying the run ended before it finished. A run's end that aborted the task
+/// without cancelling first would close the lane from its guard's `Drop`,
+/// "interrupted by the daemon's stop", which this test refuses. Before the fix
+/// the subagent ran on detached past its lead, its command with it, until the
+/// sandbox's own timeout.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_subagents_command_is_killed_with_its_group_when_the_lead_ends() {
+    use crate::test_util::{
+        GONE_WITHIN, GuardedProject, KillOnFail, pid_from_file, wait_until_gone,
+    };
+
+    let gp = GuardedProject::new();
+    let pidfile = gp.root.join("sleep.pid");
+    let provider = Arc::new(LeadEndsWhileTheWorkersCommandRuns {
+        command: format!("sleep 30 & echo $! > '{}'; wait", pidfile.display()),
+        pidfile: pidfile.clone(),
+    });
+
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec!["shell_execute"], vec![]);
+    let registry = Arc::new(ToolRegistry::default());
+    let shell = crate::tools::builtins::builtin_tools(None, None, None)
+        .into_iter()
+        .find(|t| t.definition.name == "shell_execute")
+        .expect("shell_execute is a builtin");
+    registry.register(shell).unwrap();
+    let mut config = DaemonConfig::default();
+    // The worker's shell card is answered by the policy: nobody is here.
+    config.security.auto_approve_confirmations = true;
+    let root = gp.root.to_string_lossy().into_owned();
+    let (_db_dir, db) = db_with_task("task-1");
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "run the long command",
+        Arc::new(LlmRouter::single_provider(
+            provider,
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        )),
+        registry,
+        shared,
+        EventBus::default(),
+        Some(db.clone()),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(config)),
+        MemoryScopeContext {
+            workspace_id: Some(root.clone()),
+            request_workspace_root: Some(root),
+        },
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some("conv-test"),
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+
+    let pid = pid_from_file(&pidfile, std::time::Duration::from_secs(5)).await;
+    let _kill = KillOnFail(pid);
+    assert!(
+        wait_until_gone(pid, GONE_WITHIN).await,
+        "the background sleep {pid} outlived the run that started it"
+    );
+
+    // The token went first: the subagent closed its lane itself, as stopped
+    // by the run's end — not from an aborted task's `Drop`.
+    let spans = openalpaca_storage::SubagentSpanRepository::new(&db)
+        .list_for_task("task-1")
+        .unwrap();
+    let lane = spans
+        .iter()
+        .find(|s| s.template_id == "worker")
+        .expect("the worker's lane was opened");
+    assert_eq!(lane.state, "cancelled", "{lane:?}");
+    assert_eq!(
+        lane.detail.as_deref(),
+        Some(SUBAGENT_RUN_ENDED_DETAIL),
+        "{lane:?}"
+    );
+}
+
+/// Sets its flag when dropped: the worker's pending model call holds one, so
+/// a test sees the moment that call's future is dropped.
+struct SetOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A lead that spawns a worker and then waits on its own model forever; the
+/// worker's call never answers either, and says when it is dropped.
+struct LeadAndWorkerBothPend {
+    worker_calls: std::sync::atomic::AtomicUsize,
+    worker_call_dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for LeadAndWorkerBothPend {
+    fn name(&self) -> &str {
+        "lead-and-worker-both-pend"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        if !is_lead_request(&request) {
+            let _dropped = SetOnDrop(self.worker_call_dropped.clone());
+            self.worker_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return std::future::pending().await;
+        }
+        if tool_results_in(&request) == 0 {
+            return Ok(spawn_worker_call("count the alpacas"));
+        }
+        std::future::pending().await
+    }
+}
+
+/// **N-LEAD-1.** Dropping a lead's run future — what the daemon's runtime
+/// does to an in-flight run when it stops — aborts the subagents the run
+/// spawned, because their handles live in the run's `JoinSet`. Before the
+/// fix each subagent was a detached `tokio::spawn` that outlived it.
+#[tokio::test]
+async fn dropping_the_run_future_aborts_its_subagents() {
+    let provider = Arc::new(LeadAndWorkerBothPend {
+        worker_calls: std::sync::atomic::AtomicUsize::new(0),
+        worker_call_dropped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let router = Arc::new(LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    ));
+
+    let run = tokio::spawn(async move {
+        run_lead_agent(
+            &lead_subagent(),
+            "count the alpacas",
+            router,
+            Arc::new(ToolRegistry::default()),
+            shared,
+            EventBus::default(),
+            None,
+            None,
+            None,
+            "task-1",
+            "user-1",
+            "user-1:cli",
+            "cli",
+            &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            MemoryScopeContext::global_only(),
+            None,
+            None,
+            None,
+            "lead::task-1",
+            "",
+            None,
+            Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+            Arc::new(crate::prompt_ctx::ContextManager::noop()),
+            Arc::new(crate::compose::ComposeEngine::new(16)),
+            None,
+            false,
+            None,
+        )
+        .await
+    });
+
+    // The worker is inside its model call, and the lead inside its own.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while provider
+        .worker_calls
+        .load(std::sync::atomic::Ordering::SeqCst)
+        == 0
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the worker never called its model"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    run.abort();
+    let _ = run.await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !provider
+        .worker_call_dropped
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the worker's model call outlived the run future that spawned it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}

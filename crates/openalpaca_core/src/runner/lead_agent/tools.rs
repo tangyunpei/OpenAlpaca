@@ -65,6 +65,126 @@ fn emit_subagent_close(
     );
 }
 
+/// The detail a subagent's lane closes with when its lead's run ended before
+/// it finished (N-LEAD-1). The run's report lists the lanes that carry it
+/// (`dispatcher::outcome::stopped_subagents_note`).
+pub const SUBAGENT_RUN_ENDED_DETAIL: &str = "the run ended before this subagent finished";
+
+/// The detail a subagent's lane closes with when its task was dropped with
+/// neither its run cancelled nor its run's end reached — the daemon's runtime
+/// stopping under an in-flight run, which is the only thing that drops one.
+pub const SUBAGENT_DAEMON_STOP_DETAIL: &str = "interrupted by the daemon's stop";
+
+/// How long a lead's run end waits for the subagents it cancelled to close
+/// their lanes themselves. An LLM subagent's loop races its model call and
+/// its tool calls against the token and ends at once; a plugin agent's RPC is
+/// not raced (it is bounded by the plugin channel's own timeout), so one in
+/// the middle of a call is aborted when this runs out.
+const SUBAGENT_STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// How long the run end then waits for the tasks it aborted to be dropped —
+/// an aborted task ends at its next await point, where its lane closes.
+const SUBAGENT_ABORT_GRACE: Duration = Duration::from_secs(1);
+
+/// One subagent's lane — its span row, its session-log close and its tracker
+/// entry — closed exactly once (N-LEAD-1).
+///
+/// The subagent's own exit paths close it with what happened. A task the
+/// run's `JoinSet` aborted — the stop's grace ran out, or the run future
+/// itself was dropped — never reaches them, so `Drop` closes the lane
+/// instead, as cancelled, with the reason the two tokens give. The same shape
+/// as [`AgentBusyGuard`]'s restore.
+struct SubagentLane {
+    db: Option<Database>,
+    bus: EventBus,
+    log: Option<crate::session_log::SessionLogHandle>,
+    task_id: String,
+    node_id: String,
+    instance_id: String,
+    run_id: String,
+    tracker: Arc<SubagentTracker>,
+    /// The run's own token: cancelled by a person's `/cancel` of the run.
+    run_token: Option<CancellationToken>,
+    /// The parent of every subagent's token: cancelled alone at the run's end.
+    subagents_token: CancellationToken,
+    closed: bool,
+}
+
+impl SubagentLane {
+    fn close(
+        &mut self,
+        state: openalpaca_storage::SpanState,
+        detail: Option<&str>,
+        output: Option<&str>,
+    ) {
+        self.closed = true;
+        crate::runner::span::close_span(
+            self.db.as_ref(),
+            &self.bus,
+            &self.node_id,
+            state,
+            detail,
+            output,
+        );
+        emit_subagent_close(
+            self.log.as_ref(),
+            &self.task_id,
+            &self.node_id,
+            &self.instance_id,
+            state,
+            detail,
+            output,
+        );
+    }
+
+    /// Why a cancelled lane was cancelled. A cancel of the whole run reaches
+    /// the subagent through the run's token and keeps `otherwise`; the lead's
+    /// run ending cancels the subagents' token alone, and says so; a task
+    /// dropped with neither cancelled was dropped by a stopping daemon.
+    fn cancel_detail(&self, otherwise: &'static str) -> &'static str {
+        if self
+            .run_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            otherwise
+        } else if self.subagents_token.is_cancelled() {
+            SUBAGENT_RUN_ENDED_DETAIL
+        } else {
+            SUBAGENT_DAEMON_STOP_DETAIL
+        }
+    }
+}
+
+impl Drop for SubagentLane {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        // A panic unwinding through the task is a failure, not a cancel.
+        let (state, detail) = if std::thread::panicking() {
+            (
+                openalpaca_storage::SpanState::Failed,
+                "the subagent's task panicked",
+            )
+        } else {
+            (
+                openalpaca_storage::SpanState::Cancelled,
+                self.cancel_detail("cancelled"),
+            )
+        };
+        // A session log whose writer has gone respawns it on the next emit,
+        // which needs a runtime; a task dropped outside one (a runtime
+        // already torn down) still closes its span row.
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.log = None;
+        }
+        self.close(state, Some(detail), None);
+        self.tracker
+            .fail_unless_finished(&self.run_id, detail.to_string());
+    }
+}
+
 /// Maximum nesting depth for subagent spawning.
 /// Prevents indirect recursion (e.g., A spawns B spawns C spawns A...).
 /// Depth 0 = top-level lead agent, depth 1 = its direct subagents, etc.
@@ -95,6 +215,15 @@ pub struct SpawnSubagentTool {
     /// Child tokens are created for each subagent so they auto-cancel
     /// when the parent task is cancelled.
     cancel_token: Option<CancellationToken>,
+    /// N-LEAD-1: the parent of every subagent's token — a child of the run's
+    /// token, so a cancel of the run still reaches each subagent — which
+    /// [`stop_subagents`](Self::stop_subagents) cancels alone when the lead's
+    /// run ends. Always present: a run with no token of its own (tests) still
+    /// stops its subagents.
+    subagents_token: CancellationToken,
+    /// N-LEAD-1: every subagent task this run spawned. A dropped run future
+    /// drops the set, which aborts them (M40's reason for a `JoinSet`).
+    runs: std::sync::Mutex<tokio::task::JoinSet<()>>,
     /// Shared tracker for background subagent status.
     tracker: Arc<SubagentTracker>,
     /// Current recursion depth (0 = top-level lead agent).
@@ -169,6 +298,10 @@ impl SpawnSubagentTool {
             lead_template_id,
             daemon_config,
             spawn_count: AtomicUsize::new(0),
+            subagents_token: cancel_token
+                .as_ref()
+                .map_or_else(CancellationToken::new, CancellationToken::child_token),
+            runs: std::sync::Mutex::new(tokio::task::JoinSet::new()),
             cancel_token,
             tracker,
             depth,
@@ -187,6 +320,50 @@ impl SpawnSubagentTool {
     pub fn spawn_count(&self) -> usize {
         self.spawn_count.load(Ordering::SeqCst)
     }
+
+    /// N-LEAD-1: stop every subagent this run left queued or running, once
+    /// the lead's loop has returned, and return their run ids.
+    ///
+    /// The subagents' token is cancelled first, because R45's kill of a
+    /// running command's process group rides on it. Then a bounded wait lets
+    /// each subagent close its own lane as cancelled — "the run ended before
+    /// this subagent finished" — and whatever is still running when it runs
+    /// out is aborted, its lane closed by [`SubagentLane`]'s `Drop`. Either
+    /// way every lane is closed before this returns, so the run's report,
+    /// written after, reads them — but for a task still not dropped when the
+    /// abort's own grace runs out (one stuck in a synchronous call), whose
+    /// lane closes as soon as the runtime drops it, possibly after the report
+    /// was read.
+    pub(super) async fn stop_subagents(&self) -> Vec<String> {
+        let unfinished = self.tracker.unfinished();
+        self.subagents_token.cancel();
+        let mut runs = std::mem::take(&mut *self.runs.lock().unwrap_or_else(|p| p.into_inner()));
+        if !unfinished.is_empty() {
+            tracing::info!(
+                task_id = %self.task_id,
+                subagents = ?unfinished,
+                "The lead's run ended with subagents still running; stopping them"
+            );
+        }
+        if tokio::time::timeout(SUBAGENT_STOP_GRACE, join_every_run(&mut runs))
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                task_id = %self.task_id,
+                grace_secs = SUBAGENT_STOP_GRACE.as_secs(),
+                "Subagents still running after the stop's grace; aborting them"
+            );
+            runs.abort_all();
+            let _ = tokio::time::timeout(SUBAGENT_ABORT_GRACE, join_every_run(&mut runs)).await;
+        }
+        unfinished
+    }
+}
+
+/// Wait for every task in `runs` to end.
+async fn join_every_run(runs: &mut tokio::task::JoinSet<()>) {
+    while runs.join_next().await.is_some() {}
 }
 
 #[async_trait]
@@ -648,7 +825,10 @@ impl BuiltInTool for SpawnSubagentTool {
         );
         self.tracker.register(&run_id);
 
-        let child_token = self.cancel_token.as_ref().map(|t| t.child_token());
+        // N-LEAD-1: a child of the run's subagents token, which the run's end
+        // cancels — and through it of the run's own token, which `/cancel`
+        // cancels.
+        let child_token = self.subagents_token.child_token();
         let tracker = self.tracker.clone();
         let run_id_clone = run_id.clone();
         let router = self.router.clone();
@@ -657,16 +837,26 @@ impl BuiltInTool for SpawnSubagentTool {
         let db = self.db.clone();
         let agent_id_owned = agent_id.to_string();
         let objective_preview: String = objective.chars().take(50).collect();
-        let span_log = session_log.clone();
-        tokio::task::spawn(async move {
+        let mut lane = SubagentLane {
+            db: self.db.clone(),
+            bus: self.bus.clone(),
+            log: session_log.clone(),
+            task_id: self.task_id.clone(),
+            node_id: node_id.clone(),
+            instance_id: instance_id.clone(),
+            run_id: run_id.clone(),
+            tracker: self.tracker.clone(),
+            run_token: self.cancel_token.clone(),
+            subagents_token: self.subagents_token.clone(),
+            closed: false,
+        };
+        let subagent = async move {
             // Hold the concurrency permit for the lifetime of this subagent.
             // It is automatically released when this async block completes.
             let _permit = permit;
 
             // Check for cancellation before starting.
-            if let Some(ref token) = child_token
-                && token.is_cancelled()
-            {
+            if child_token.is_cancelled() {
                 tracker.fail(
                     &run_id_clone,
                     "Cancelled before starting (parent task was cancelled)".to_string(),
@@ -674,23 +864,8 @@ impl BuiltInTool for SpawnSubagentTool {
                 // The lane opened when the spawn was announced, so it has to
                 // close here too — otherwise a cancelled batch leaves lanes
                 // running until the next daemon boot sweeps them.
-                crate::runner::span::close_span(
-                    db.as_ref(),
-                    &bus,
-                    &node_id,
-                    openalpaca_storage::SpanState::Cancelled,
-                    Some("cancelled before starting"),
-                    None,
-                );
-                emit_subagent_close(
-                    span_log.as_ref(),
-                    &task_id,
-                    &node_id,
-                    &instance_id,
-                    openalpaca_storage::SpanState::Cancelled,
-                    Some("cancelled before starting"),
-                    None,
-                );
+                let detail = lane.cancel_detail("cancelled before starting");
+                lane.close(openalpaca_storage::SpanState::Cancelled, Some(detail), None);
                 busy_guard.restore();
                 return;
             }
@@ -745,7 +920,7 @@ impl BuiltInTool for SpawnSubagentTool {
                                     &sandbox,
                                     &sandbox_policy,
                                     &subagent_tool_ctx,
-                                    child_token.as_ref(),
+                                    Some(&child_token),
                                     Some(&scope),
                                 ),
                             )
@@ -769,37 +944,21 @@ impl BuiltInTool for SpawnSubagentTool {
                 // cancel token is what separates a cancelled lane from a
                 // failed one, keeping this path's vocabulary identical to the
                 // LLM path's below.
-                let cancelled = child_token.as_ref().is_some_and(|t| t.is_cancelled());
+                let cancelled = child_token.is_cancelled();
                 let span_state = crate::runner::span::plugin_span_state(
                     outcome.success(),
                     cancelled,
                 );
                 let span_detail = match &outcome {
                     PluginLoopOutcome::Completed { .. } => None,
-                    _ if cancelled => Some("cancelled".to_string()),
+                    _ if cancelled => Some(lane.cancel_detail("cancelled").to_string()),
                     PluginLoopOutcome::Failed { error, .. } => Some(error.clone()),
                 };
                 let plugin_output = match &outcome {
                     PluginLoopOutcome::Completed { content, .. } => Some(content.as_str()),
                     _ => None,
                 };
-                crate::runner::span::close_span(
-                    db.as_ref(),
-                    &bus,
-                    &node_id,
-                    span_state,
-                    span_detail.as_deref(),
-                    plugin_output,
-                );
-                emit_subagent_close(
-                    span_log.as_ref(),
-                    &task_id,
-                    &node_id,
-                    &instance_id,
-                    span_state,
-                    span_detail.as_deref(),
-                    plugin_output,
-                );
+                lane.close(span_state, span_detail.as_deref(), plugin_output);
 
                 // No LLM usage to record — the plugin runs its own model
                 // calls out-of-process. Agent history still counts the run.
@@ -857,7 +1016,7 @@ impl BuiltInTool for SpawnSubagentTool {
                 Some(&sandbox_policy),
                 Some(&task_id),
                 Some(&context_budget),
-                child_token,
+                Some(child_token),
                 Some(&subagent_tool_ctx),
                 None,
             )
@@ -880,20 +1039,13 @@ impl BuiltInTool for SpawnSubagentTool {
             // maps `Cancelled` explicitly, because "cancelled" and "failed"
             // read differently and the UI has separate copy for each.
             let span_state = crate::runner::span::span_state_for(&result.finish_reason);
-            let span_detail = crate::runner::span::span_detail_for(&result.finish_reason);
-            crate::runner::span::close_span(
-                db.as_ref(),
-                &bus,
-                &node_id,
-                span_state,
-                span_detail.as_deref(),
-                Some(result.final_content.as_str()),
-            );
-            emit_subagent_close(
-                span_log.as_ref(),
-                &task_id,
-                &node_id,
-                &instance_id,
+            let span_detail = match result.finish_reason {
+                crate::runner::LoopFinishReason::Cancelled => {
+                    Some(lane.cancel_detail("cancelled").to_string())
+                }
+                ref finish => crate::runner::span::span_detail_for(finish),
+            };
+            lane.close(
                 span_state,
                 span_detail.as_deref(),
                 Some(result.final_content.as_str()),
@@ -958,7 +1110,14 @@ impl BuiltInTool for SpawnSubagentTool {
                     result.final_content,
                 );
             }
-        });
+        };
+        {
+            let mut runs = self.runs.lock().unwrap_or_else(|p| p.into_inner());
+            // Reap the subagents that have finished, so a long run does not
+            // keep one entry per spawn.
+            while runs.try_join_next().is_some() {}
+            runs.spawn(subagent);
+        }
 
         // Return immediately — the subagent is queued/running in the background
         Ok(format!(

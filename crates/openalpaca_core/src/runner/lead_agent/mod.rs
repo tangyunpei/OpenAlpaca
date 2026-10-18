@@ -21,6 +21,7 @@ pub use tools::{
     CheckSubagentStatusTool, PostUpdateTool, QueueFollowupTool, SpawnSubagentTool,
     SpawnSubagentsBatchTool, WaitForSubagentsTool,
 };
+pub use tools::{SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL};
 pub use tracker::{SubagentStatus, SubagentTracker};
 
 use crate::agent::subagent::SubAgent;
@@ -737,6 +738,15 @@ pub async fn run_lead_agent(
     )
     .await;
 
+    // N-LEAD-1: nothing outlives the run. A lead that stopped on its round
+    // or cost cap, or past the wait's 600 s cap, may leave subagents queued
+    // or running — calling the model outside every cap, writing the
+    // project's files and raising cards nobody can reach with `/cancel` once
+    // the dispatcher has released the run's token. They are stopped here,
+    // before this returns, and each lane is closed as cancelled — "the run
+    // ended before this subagent finished" — which the run's report lists.
+    let stopped = spawn_tool.stop_subagents().await;
+
     let success = matches!(
         &result.finish_reason,
         crate::runner::LoopFinishReason::Complete
@@ -747,12 +757,13 @@ pub async fn run_lead_agent(
     let subagents_spawned = spawn_tool.spawn_count();
 
     tracing::info!(
-        "Lead agent '{}' finished task '{}': success={}, rounds={}, subagents_spawned={}, tokens={}/{}",
+        "Lead agent '{}' finished task '{}': success={}, rounds={}, subagents_spawned={}, subagents_stopped={}, tokens={}/{}",
         lead_agent.id,
         task_id,
         success,
         result.rounds_used,
         subagents_spawned,
+        stopped.len(),
         result.total_input_tokens,
         result.total_output_tokens,
     );

@@ -174,6 +174,40 @@ impl SubagentTracker {
         done
     }
 
+    /// The run ids still queued or running, sorted — what a lead's run end
+    /// has left to stop (N-LEAD-1).
+    pub fn unfinished(&self) -> Vec<String> {
+        let map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
+        let mut ids: Vec<String> = map
+            .iter()
+            .filter(|(_, s)| matches!(s, SubagentStatus::Queued | SubagentStatus::Running))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Record `error` for `run_id` unless it already finished — a lane
+    /// closed by its guard after its task was aborted (N-LEAD-1).
+    pub fn fail_unless_finished(&self, run_id: &str, error: String) {
+        let mut map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
+        if matches!(
+            map.get(run_id),
+            Some(SubagentStatus::Completed { .. } | SubagentStatus::Failed { .. })
+        ) {
+            return;
+        }
+        map.insert(
+            run_id.to_string(),
+            SubagentStatus::Failed {
+                error,
+                output: String::new(),
+            },
+        );
+        drop(map);
+        self.notify.notify_waiters();
+    }
+
     pub fn status_counts(&self) -> (usize, usize, usize, usize) {
         let map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
         let (mut queued, mut running, mut completed, mut failed) = (0, 0, 0, 0);

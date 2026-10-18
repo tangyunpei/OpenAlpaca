@@ -1063,8 +1063,11 @@ impl TaskDispatcher {
             // carries this run's result, so the next `start` on it is refused
             // by R43's guard rather than racing this tail. Nothing between
             // `run_lead_agent` returning and here reads the token — the only
-            // other readers are `cancel_task` (a cancel during the tail already
-            // had nothing left to stop) and `claim_run_slot` itself.
+            // other readers are `cancel_task` and `claim_run_slot` itself —
+            // and a cancel during the tail has nothing left to stop:
+            // `run_lead_agent` stopped every subagent the run left running
+            // before it returned (N-LEAD-1), so removing the token without
+            // cancelling it strands nothing.
             ctx.remove_cancellation_token(&task_id);
 
             // Routing V2: auto-start the next queued follow-up for this lane.

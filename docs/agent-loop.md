@@ -138,6 +138,26 @@ tool calls proxied through the same `SandboxManager::execute_tool` path
 subagents. Depth, concurrency-permit, and cancellation semantics are
 unchanged; the cancel token is checked between steps.
 
+**No subagent outlives its run** (N-LEAD-1). Each subagent's cancel token
+is a child of the run's *subagents token*, itself a child of the run's own
+token, and each subagent's task is held in the run's `JoinSet`
+(`runner/lead_agent/tools.rs`, `SpawnSubagentTool::stop_subagents`). When
+the lead's loop returns — an answer, its round or cost cap, an error, a
+cancel — `run_lead_agent` cancels the subagents token first (R45's kill of
+a running command's process group rides on it), waits up to 5 s for each
+subagent to close its lane as cancelled with the detail *"the run ended
+before this subagent finished"*, aborts whatever is still running (a
+plugin agent's RPC is not raced against the token), whose lane guard
+closes the lane the same way, and only then returns — so the dispatcher's
+`remove_cancellation_token` strands nothing, and the run's report lists
+the stopped lanes ([The Completion Report](#the-completion-report)). A
+person's `/cancel` reaches the subagents through the run's token, and their
+lanes keep the detail "cancelled". Dropping the run future — the daemon's
+runtime stopping under an in-flight run — drops the set, which aborts the
+subagents; their lanes close as *"interrupted by the daemon's stop"*. The
+lead is given no extra round to wait for or abandon its running subagents
+(owner decision B-15, taken as (1): no completion guard).
+
 The loop also runs outside the multi-agent topology: the main-loop
 front door (below) IS a direct loop invocation per user turn
 (`orchestrator/query_handler/simple_query_handler.rs`); skill invocation
@@ -355,9 +375,15 @@ refused: …"* (`outcome.rs::unapprovable_note`). The tool names are read
 from the run's audit rows, which the lead's and every subagent's sandbox
 write, so a refusal inside a subagent is reported too.
 
+When the run's end stopped subagents that had not finished (N-LEAD-1),
+the runtime's last line names their lanes, as the run's timeline names
+them: *"Stopped when the run ended — these subagents had not finished, so
+they were cancelled: …"* (`outcome.rs::stopped_subagents_note`), read from
+the lanes' span rows, which the lead's run closes before it returns.
+
 The task's `result_summary` and the `TaskCompleted` event carry the
 report cut to 2 000 characters (`MAX_SUMMARY_LENGTH`); the cut keeps the
-runtime's "Not run" line whole. The full report lives in lane history
+runtime's lines whole. The full report lives in lane history
 and the task outcome record.
 
 ## The Follow-up Runner
