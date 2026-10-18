@@ -385,6 +385,25 @@ pub async fn open_file_handler(
     }
 }
 
+/// The boot sweep of Open's copies (N-STORE-1): every upload `POST
+/// /v1/files/{id}/open` staged under `state/cache/open/` in an earlier life
+/// of the daemon is removed. Called once at start, before any route serves,
+/// so no copy this daemon stages can be taken. Returns how many went; a
+/// failure is logged, never fatal.
+pub(crate) fn sweep_open_copies() -> usize {
+    match openalpaca_storage::store::sweep_open_copies() {
+        Ok(0) => 0,
+        Ok(swept) => {
+            tracing::info!("Swept {swept} copies Open staged in an earlier run");
+            swept
+        }
+        Err(e) => {
+            tracing::warn!("Could not sweep Open's copies: {e:#}");
+            0
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,7 +655,7 @@ mod tests {
         );
     }
 
-    // --- Phase 3 item 6: which rows still go through `$TMPDIR` staging ---
+    // --- Phase 3 item 6: which rows still go through `state/cache/open/` staging ---
 
     /// A **produced** artifact already lives at a real path with a real
     /// extension (§4.2's grammar), so `/open` hands the system opener that path
@@ -803,6 +822,11 @@ mod tests {
 
     #[test]
     fn test_prepare_open_target_path_keeps_original_extension() {
+        // The copy is staged under the home store: the guard keeps it in a
+        // temp one.
+        let home = tempfile::tempdir().expect("home root");
+        let _guard =
+            crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().expect("canonical"));
         let dir = tempfile::tempdir().expect("create tempdir");
         let source = dir.path().join("source.bin");
         std::fs::write(&source, b"hello").expect("write source");
@@ -816,6 +840,144 @@ mod tests {
         let copied = std::fs::read(&target).expect("read copied");
         assert_eq!(copied, b"hello");
         let _ = std::fs::remove_file(&target);
+    }
+
+    /// An uploaded name that is only dots once its spaces are trimmed — `" ."`,
+    /// `".. "` — names no file: it opens as `attachment`, as an empty one does.
+    /// Cleaned to `.` or `..`, it was refused by the store's one-plain-name
+    /// rule, so Open failed on a file the upload route had accepted.
+    #[test]
+    fn an_upload_named_only_dots_and_spaces_opens_as_attachment() {
+        let home = tempfile::tempdir().expect("home root");
+        let _guard =
+            crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().expect("canonical"));
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, b"dots").expect("write source");
+
+        for raw in [" .", ". ", ".. ", " ..", " .. "] {
+            assert_eq!(sanitize_open_filename(raw), "attachment", "{raw:?}");
+            let target =
+                prepare_open_target_path(source.to_str().expect("source path"), "file-dots", raw)
+                    .unwrap_or_else(|e| panic!("Open of an upload named {raw:?} failed: {e}"));
+            assert_eq!(
+                target.file_name().and_then(|n| n.to_str()),
+                Some("attachment"),
+                "{raw:?}"
+            );
+            assert_eq!(std::fs::read(&target).expect("the copy"), b"dots");
+        }
+    }
+
+    // --- N-STORE-1 (Z8-03): Open's copies live under `state/`, not $TMPDIR ---
+
+    /// Reports the copy `prepare_open_target_path` staged — the path
+    /// `open_with_system_default` would hand the opener — back through the
+    /// result, so a test reads what Open would open without opening it.
+    fn stage_and_report(
+        path: &str,
+        file_id: &str,
+        filename: &str,
+        stage: bool,
+    ) -> Result<(), String> {
+        if !stage {
+            return Err("not staged".to_string());
+        }
+        let target = prepare_open_target_path(path, file_id, filename)?;
+        Err(format!("staged:{}", target.display()))
+    }
+
+    /// An Open of an upload stages its copy under the home store, as
+    /// `state/cache/open/<file id>/<the name it was uploaded with>` — both
+    /// folders 0700 — and never in `$TMPDIR`, where nothing removed a copy and
+    /// neither a project's delete nor the factory reset could reach it. The
+    /// copy for this file id is looked for in the old place by name, not by
+    /// redirecting `TMPDIR`: every parallel test's `tempdir()` reads it.
+    #[tokio::test]
+    async fn an_open_of_an_upload_stages_its_copy_under_the_store_not_in_tmpdir() {
+        let home = tempfile::tempdir().expect("home root");
+        let home_root = home.path().canonicalize().expect("canonical");
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+        let (dir, db) = test_db();
+        let source = dir.path().join("03-quarterly-report.pdf");
+        std::fs::write(&source, b"%PDF-1.7 report").expect("write the stored upload");
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut asset = sample_asset(&id, "user1");
+        asset.filename = "Quarterly Report.pdf".to_string();
+        asset.storage_path = source.to_string_lossy().into_owned();
+        FileAssetRepository::new(&db)
+            .insert(&asset)
+            .expect("insert asset");
+
+        let err = open_asset_for_user(&db, &id, "user1", stage_and_report)
+            .await
+            .expect_err("the recorder reports the staged copy");
+
+        let copy = home_root
+            .join("state")
+            .join("cache")
+            .join("open")
+            .join(&id)
+            .join("Quarterly Report.pdf");
+        assert_eq!(
+            err,
+            OpenFileApiError::OpenFailed(format!("staged:{}", copy.display()))
+        );
+        assert_eq!(
+            std::fs::read(&copy).expect("the copy is there"),
+            b"%PDF-1.7 report"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file_dir = copy.parent().expect("the file's folder");
+            for folder in [file_dir, file_dir.parent().expect("open/")] {
+                let mode = std::fs::metadata(folder)
+                    .expect("stat the folder")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o700, "{}", folder.display());
+            }
+        }
+        let leaked = std::fs::read_dir(std::env::temp_dir().join("openalpaca-open"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&id));
+        assert!(
+            !leaked,
+            "a copy of {id} was staged in $TMPDIR/openalpaca-open"
+        );
+    }
+
+    /// The boot sweep removes every copy an earlier daemon staged — at a start
+    /// none can still be in use by an Open of this daemon's — and nothing else
+    /// under `state/cache/`.
+    #[test]
+    fn a_boot_sweep_removes_the_open_copies_an_earlier_daemon_left() {
+        let home = tempfile::tempdir().expect("home root");
+        let home_root = home.path().canonicalize().expect("canonical");
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+        let cache = home_root.join("state").join("cache");
+        let open = cache.join("open");
+        for (id, name) in [("f-stale-1", "Report.pdf"), ("f-stale-2", "Notes.txt")] {
+            std::fs::create_dir_all(open.join(id)).expect("a stale copy's folder");
+            std::fs::write(open.join(id).join(name), b"old").expect("a stale copy");
+        }
+        std::fs::write(cache.join("memory-index-v1.sqlite"), b"index").expect("the index");
+
+        assert_eq!(sweep_open_copies(), 2, "two stale copies swept");
+        let left: Vec<_> = std::fs::read_dir(&open)
+            .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "left behind: {left:?}");
+        assert!(
+            cache.join("memory-index-v1.sqlite").exists(),
+            "the sweep touches nothing but Open's copies"
+        );
+
+        // A store with no copies at all: nothing to do.
+        assert_eq!(sweep_open_copies(), 0);
     }
 
     // --- Stage 2: result files (ST-18, R37) ---

@@ -277,6 +277,9 @@ fn change_body(path: &Path) -> Result<()> {
 /// revision back; the temp file is gone afterwards.
 #[tokio::test]
 async fn edit_posts_the_patch_with_the_fetched_revision_as_if_match() {
+    // The editor buffer is made under the store's `state/` (N-STORE-1).
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
     let (addr, server) = serve(vec![
         read_wire(),
         json_answer(
@@ -349,6 +352,9 @@ async fn edit_posts_the_patch_with_the_fetched_revision_as_if_match() {
 /// in a named temp file, and both revisions are reported.
 #[tokio::test]
 async fn a_409_keeps_the_edited_text_in_a_named_temp_file() {
+    // The editor buffer is made under the store's `state/` (N-STORE-1).
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
     let conflict = serde_json::json!({
         "error": {
             "code": "MEMORY_REVISION_CONFLICT",
@@ -390,6 +396,12 @@ async fn a_409_keeps_the_edited_text_in_a_named_temp_file() {
         "{}",
         kept_at.display()
     );
+    let editor_folder = store::home_root().unwrap().join("state").join("editor");
+    assert_eq!(
+        kept_at.parent(),
+        Some(editor_folder.as_path()),
+        "the text is kept in the store's state/editor/"
+    );
     std::fs::remove_file(&kept_at).ok();
     server.join().expect("the server finishes");
 }
@@ -398,6 +410,9 @@ async fn a_409_keeps_the_edited_text_in_a_named_temp_file() {
 /// text; an editor that changes nothing sends nothing.
 #[tokio::test]
 async fn a_refused_edit_and_an_unchanged_one_send_nothing() {
+    // The editor buffer is made under the store's `state/` (N-STORE-1).
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
     let (addr, server) = serve(vec![read_wire()]);
     let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
     let editor = |p: &Path| {
@@ -434,6 +449,9 @@ async fn a_refused_edit_and_an_unchanged_one_send_nothing() {
 /// 32 KiB.
 #[tokio::test]
 async fn a_note_cut_at_32_kib_is_refused_before_the_editor_opens() {
+    // The editor buffer is made under the store's `state/` (N-STORE-1).
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
     let path = read_answer()["path"].as_str().unwrap().to_string();
     for (with_path, expected) in [(true, path.as_str()), (false, ID)] {
         let mut answer = read_answer();
@@ -474,6 +492,48 @@ async fn a_note_cut_at_32_kib_is_refused_before_the_editor_opens() {
         too_long_to_edit(&path),
         "This note is longer than 32 KiB, so `openalpaca memory edit` would save only its first 32 KiB. Edit the file itself: notes/55e811b6-3220-4758-a47b-034bd1023f38--build-and-test-commands-for-this-workspace.md"
     );
+}
+
+/// N-STORE-1 (Z8-03): the file `memory edit` hands the editor — the one a
+/// refused or conflicting edit keeps — is made in the store's
+/// `state/editor/`, a 0700 folder, never in `$TMPDIR`, where a kept text was
+/// out of reach of every cleanup the store has.
+#[tokio::test]
+async fn the_edit_buffer_is_made_in_the_stores_state_editor_folder_at_0700() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let (addr, server) = serve(vec![read_wire()]);
+    let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+    let opened = std::sync::Mutex::new(None);
+    let editor = |p: &Path| {
+        *opened.lock().unwrap() = Some(p.to_path_buf());
+        Ok(())
+    };
+
+    let outcome = edit_note(&api, NoteId::parse(ID).unwrap(), &editor)
+        .await
+        .unwrap();
+    assert_eq!(outcome, EditOutcome::Unchanged);
+
+    let buffer = opened
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the editor was opened");
+    let folder = store::home_root().unwrap().join("state").join("editor");
+    assert_eq!(
+        buffer.parent(),
+        Some(folder.as_path()),
+        "{}",
+        buffer.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&folder).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{}", folder.display());
+    }
+    server.join().unwrap();
 }
 
 // ── The local verbs ──────────────────────────────────────────────

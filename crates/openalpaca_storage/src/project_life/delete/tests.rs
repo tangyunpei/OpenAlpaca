@@ -1175,3 +1175,42 @@ fn deleting_a_projects_data_leaves_its_real_files() {
         "the project's own folder is untouched"
     );
 }
+
+/// N-STORE-1 (Z8-03): Open's copy of an upload the delete takes goes with
+/// its row — removed from `state/cache/open/<file id>/` — while the copies
+/// of a kept upload (its row lives on, re-addressed) and of another
+/// project's upload stay. Before, the copy sat in `$TMPDIR`, where no delete
+/// could reach it.
+#[test]
+fn deleting_a_projects_data_removes_opens_copies_of_the_uploads_it_takes() {
+    let w = World::new();
+    let s = seed(&w);
+    let open = w.home.join("state").join("cache").join("open");
+    let staged = |id: &str, name: &str| {
+        let dir = open.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), name.as_bytes()).unwrap();
+        dir
+    };
+    let gone = [staged(&s.u_alone, "alone.txt"), staged(&s.u_leg, "leg.txt")];
+    let kept = staged(&s.u_shared, "shared.txt");
+    let bystander = staged(&s.u_q, "theirs.txt");
+
+    delete_project_data(&w.db, &s.p).unwrap();
+
+    for dir in &gone {
+        assert!(
+            !dir.exists(),
+            "Open's copy of a deleted upload stayed at {}",
+            dir.display()
+        );
+    }
+    assert!(
+        kept.join("shared.txt").exists(),
+        "a kept upload's copy stays: its row lives on"
+    );
+    assert!(
+        bystander.join("theirs.txt").exists(),
+        "another project's copy stays"
+    );
+}

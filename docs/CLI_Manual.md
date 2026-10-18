@@ -179,7 +179,7 @@ Which file is edited: the one in `OPENALPACA_CONFIG_DIR` when that names a direc
 - It **refuses while a daemon is running.** Stop it with `openalpaca daemon stop` first. Deleting a file the daemon has open would leave it writing into an unlinked inode while the next start created a second database beside it. The check is the daemon's own singleton lock, taken before the prompt and held until the files are gone, so a daemon that is still booting also refuses it, and a daemon started while the prompt is open — the app, or `daemon start` in another terminal — exits on the lock instead of opening the database. When the lock is held but no running daemon can be found — one still booting, or a lock file you cannot write (a daemon once run under `sudo` leaves `state/openalpacad.lock` owned by root) — it refuses with a message naming that file instead of telling you to stop a daemon that `openalpaca daemon stop` will not find.
 - It prints the absolute store root it is about to wipe — `OPENALPACA_HOME_STORE` may point anywhere — and the absolute paths of the `llm.toml` and `daemon.toml` it will clear, found the way `config set` finds them (above), so a run from a repository checkout names the checkout's own `./config/` files when that is where they resolve; a file that does not exist is named as none. It then requires you to type `factory-reset`. `y` is not enough, there is no `--yes` flag, and the prompt cannot be answered by a pipe: run it at a terminal.
 - **No backup is taken and there is no undo.**
-- **Not touched:** `state/memory-control/` (each memory partition's control snapshot — revisions, origins and the tombstones of forgotten notes), `state/cache/` (the memory search index, `memory-index-v1.sqlite`, which the next start opens as it is — a disposable cache, rebuilt in the background when it is missing, damaged, of another version or grown past twice its size after its last rebuild), `state/.master_key`, `state/logs/`, `state/backups/`, `config/mcp.toml`, `config/agents/`, `config/skills/`, `config/orchestrator/` (so `USER.md` stays as it is), and `~/.openalpaca/plugins/`.
+- **Not touched:** `state/memory-control/` (each memory partition's control snapshot — revisions, origins and the tombstones of forgotten notes), `state/cache/` (the memory search index, `memory-index-v1.sqlite`, which the next start opens as it is — a disposable cache, rebuilt in the background when it is missing, damaged, of another version or grown past twice its size after its last rebuild; and Open's copies under `open/`, which the next start sweeps), `state/editor/` (the files `memory add`, `memory edit` and `persona edit user` hand your editor, a refused or conflicting edit's text among them), `state/.master_key`, `state/logs/`, `state/backups/`, `config/mcp.toml`, `config/agents/`, `config/skills/`, `config/orchestrator/` (so `USER.md` stays as it is), and `~/.openalpaca/plugins/`.
 - **Left on disk, orphaned until adopted:** your memory notes under `memory/` and in each project's folder under `projects/`. The next start mints a new owner id, so `openalpaca memory doctor` lists the old partitions as orphaned; nothing reassigns them for you — `openalpaca memory adopt <owner-key>` re-binds them, finding each project's by the project's id.
 - **Left on disk, now unreferenced:** everything under `artifacts/`, `uploads/`, `sessions/`, `scratch/`, and each project's `projects/<name>/artifacts/` and `projects/<name>/uploads/`. The rows that indexed those files are gone; the bytes are not. Delete those directories yourself if you want the space back.
 - **A project's folder under `projects/` is not unreferenced.** Its `project.json` — the project's id and path — still registers it, so `store list` lists it and the next turn in that project uses the same folder, and its `memory/` holds the project's notes, which `openalpaca memory adopt` re-binds (above). Deleting the folder drops those notes.
@@ -808,7 +808,8 @@ Notes:
   is kept. The save carries the revision that was fetched: if the note changed
   while the editor was open — the app, a chat turn, the extractor — the daemon
   answers `409`, the command prints both revisions and **keeps your text in a
-  named temp file** (`openalpaca-memory-<id8>-….md`); run `show`, merge, and edit
+  named temp file** (`openalpaca-memory-<id8>-….md` in `~/.openalpaca/state/editor/`,
+  where every file the editor opens is made); run `show`, merge, and edit
   again. An editor session that changes nothing sends nothing. An edit through
   this verb re-records the note as yours (`user`), whatever wrote it before.
   A note file holds at most 32 KiB, frontmatter included, so a read always
@@ -952,8 +953,8 @@ Notes:
   with the revision it fetched. If the file changed while the editor was open —
   the onboarding conversation's `update_persona`, or the app's Settings →
   Persona — the daemon answers `409 PERSONA_REVISION_CONFLICT`, the command
-  prints both revisions and **keeps your text in a named temp file**; merge and
-  edit again. An editor session that changes nothing sends nothing. A document
+  prints both revisions and **keeps your text in a named temp file** in
+  `~/.openalpaca/state/editor/`; merge and edit again. An editor session that changes nothing sends nothing. A document
   `update_persona` would refuse is `400 PERSONA_INVALID`.
 - `user` is the only document with an editor; `soul` and `identity` are refused
   by the argument parser.

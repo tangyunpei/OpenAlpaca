@@ -232,6 +232,9 @@ async fn async_main(
     // finished here — after the database opens and before anything resolves
     // a project (the routes and every ingress start later).
     bootstrap::recover_repoints(&db);
+    // N-STORE-1: Open's copies an earlier run staged under
+    // `state/cache/open/` have had their use; none of this run's exist yet.
+    routes::files::sweep_open_copies();
     // §5.6b: recover the undelivered interjections of every run the previous
     // generation left in flight, then mark those runs `interrupted`. MUST stay
     // here — after the DB opens and before any ingress starts
