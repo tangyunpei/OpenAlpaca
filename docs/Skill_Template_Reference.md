@@ -469,7 +469,7 @@ The skill's markdown body (instructions) is rendered as an XML-tagged block:
 </skill_context>
 ```
 
-The body is truncated to `context.budget_tokens * 4` characters — **16,000 characters (~4,000 tokens) by default**. An empty body produces no block at all.
+The body is truncated to `context.budget_tokens * 4` characters — **16,000 characters (~4,000 tokens) by default**. A truncated body ends with one line saying so, `[instructions cut at N of M characters]` (for example `[instructions cut at 16000 of 20000 characters]`), so the model knows it has only part of the instructions. An empty body produces no block at all.
 
 ### Injected Context Sources
 
