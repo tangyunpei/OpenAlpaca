@@ -8,7 +8,11 @@
 //! start, and liveness is `kill -0` on those pids.
 //!
 //! The server is a POSIX `sh` script rather than a Node or Python one so the
-//! suite has no dependency the workspace does not already have.
+//! suite needs nothing a developer's or CI's machine does not already have.
+//! Its one program beyond `sh` and its utilities is `perl` — in macOS's base
+//! system, and essential on Debian and Ubuntu — for the `setpgrp` that `sh`
+//! cannot do: each server leads its own process group, so a stub's teardown
+//! ends everything it started (`impl Drop for Stub`).
 
 #![cfg(unix)]
 
@@ -41,7 +45,8 @@ struct StubOpts {
     /// Sleep this many seconds before answering `initialize`, so a test can
     /// hold a handshake open across a `disable`.
     slow_start_secs: u64,
-    /// Never answer `tools/call`, which is how a call enters `reconnect()`.
+    /// Hold `tools/call` in [`HANG_SECS`] of sleep — past every request
+    /// timeout here — which is how a call enters `reconnect()`.
     hang_call: bool,
     /// Run the background notifier that turns a trigger file into
     /// `notifications/tools/list_changed`.
@@ -51,9 +56,11 @@ struct StubOpts {
 struct Stub {
     script: PathBuf,
     pid_log: PathBuf,
+    /// The pid of every sleep a hang started, oldest first.
+    sleep_log: PathBuf,
     tools_file: PathBuf,
     notify: PathBuf,
-    /// While this exists, `tools/list` never answers — the caller's
+    /// While this exists, `tools/list` hangs for [`HANG_SECS`] — the caller's
     /// `request_timeout` is what ends the fetch.
     hang_list: PathBuf,
     /// While this exists, `tools/list` answers a JSON-RPC error.
@@ -72,6 +79,16 @@ impl Stub {
 
     fn spawn_count(&self) -> usize {
         self.pids().len()
+    }
+
+    /// The pids of the sleeps this server's hangs started, oldest first —
+    /// children of the server's shell, so a kill of the shell orphans them.
+    fn sleeps(&self) -> Vec<i32> {
+        std::fs::read_to_string(&self.sleep_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse::<i32>().ok())
+            .collect()
     }
 
     fn any_alive(&self) -> bool {
@@ -106,10 +123,49 @@ impl Stub {
     }
 }
 
+/// How long a hang sleeps: longer than any test here waits on one, short
+/// enough that a sleep a crashed run leaves behind does not outlive it by much.
+const HANG_SECS: u64 = 30;
+
+/// Every test's teardown, a failing one's too (locals drop on unwind): each
+/// incarnation leads its own process group (the script's first lines), so one
+/// SIGKILL per recorded pid ends the shell, a hang's sleep, the notifier and
+/// anything else in flight — whether or not the supervisor killed the shell
+/// first. A group outlives its leader while any member lives, and an empty one
+/// answers ESRCH.
+impl Drop for Stub {
+    fn drop(&mut self) {
+        for pgid in self.pids() {
+            // Never 0 or 1: `kill(0)` is this test's own group, `kill(-1)`
+            // every process this user owns.
+            if pgid > 1 {
+                // SAFETY: `kill` only sends a signal, to the group whose
+                // leader's pid the stub's own shell wrote down.
+                unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            }
+        }
+    }
+}
+
 fn alive(pid: i32) -> bool {
     // SAFETY: `kill(pid, 0)` performs no signal delivery; it only reports
     // whether the pid exists and is signallable.
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// A process a stub started, sent SIGKILL when this guard drops — so a test
+/// that fails before the code under test (or the stub's own teardown) killed
+/// it leaves no orphan behind. The shape of core's `test_util::KillOnFail`.
+struct KillOnFail(i32);
+
+impl Drop for KillOnFail {
+    fn drop(&mut self) {
+        if self.0 > 1 {
+            // SAFETY: `kill` only sends a signal, to a pid the stub this test
+            // owns wrote down; one already gone answers ESRCH.
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+        }
+    }
 }
 
 fn tools_json(names: &[&str]) -> String {
@@ -131,6 +187,7 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
 
     let script = dir.join(format!("{tag}-server.sh"));
     let pid_log = dir.join(format!("{tag}-pids.log"));
+    let sleep_log = dir.join(format!("{tag}-sleeps.log"));
     let tools_file = dir.join(format!("{tag}-tools.json"));
     let notify = dir.join(format!("{tag}-notify"));
     let hang_list = dir.join(format!("{tag}-hang-list"));
@@ -144,7 +201,7 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     } else {
         String::new()
     };
-    let hang_call = if opts.hang_call { "sleep 3600\n" } else { "" };
+    let hang_call = if opts.hang_call { "hang\n" } else { "" };
     // The notifier is a child of this shell, and a SIGKILL of the shell will
     // not reach it — so it polls its parent and exits with it. Without that a
     // torn-down server would leave a stray process behind.
@@ -169,7 +226,18 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
 
     let body = format!(
         r#"#!/bin/sh
+# Lead a process group of its own: the supervisor's spawn gives the server
+# none, and only a group reaches what the shell starts once the shell is
+# killed. Both execs keep the pid, so `$$` below is also the group's id.
+if [ "$1" != --grouped ]; then
+  exec perl -e 'setpgrp(0, 0) or die "setpgrp: $!\n"; exec @ARGV or die "exec: $!\n"' -- /bin/sh "$0" --grouped
+fi
 echo "$$" >> '{pid_log}'
+hang() {{
+  sleep {HANG_SECS} &
+  echo "$!" >> '{sleep_log}'
+  wait "$!"
+}}
 {slow_start}{notifier}while IFS= read -r line; do
   id=`printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'`
   case "$line" in
@@ -178,7 +246,7 @@ echo "$$" >> '{pid_log}'
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"%s","capabilities":{{"tools":{{"listChanged":true}}}},"serverInfo":{{"name":"stub","version":"0.0.1"}}}}}}\n' "$id" "$pv"
       ;;
     *'"method":"tools/list"'*)
-      if [ -f '{hang_list}' ]; then sleep 3600; fi
+      if [ -f '{hang_list}' ]; then hang; fi
       if [ -f '{break_list}' ]; then
         printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32603,"message":"stub refuses to list"}}}}\n' "$id"
       else
@@ -195,6 +263,7 @@ echo "$$" >> '{pid_log}'
 done
 "#,
         pid_log = pid_log.display(),
+        sleep_log = sleep_log.display(),
         tools_file = tools_file.display(),
         hang_list = hang_list.display(),
         break_list = break_list.display(),
@@ -207,6 +276,7 @@ done
     Stub {
         script,
         pid_log,
+        sleep_log,
         tools_file,
         notify,
         hang_list,
@@ -1665,6 +1735,43 @@ async fn a_server_hanging_on_tools_list_does_not_hold_up_a_disable() {
     let row = disable.await.expect("task").expect("disable");
     assert_eq!(row.state, ExtensionState::Disabled, "and T1–T5 complete normally");
     assert!(eventually(Duration::from_secs(10), || !stub.any_alive()).await);
+}
+
+/// **The suite's own hygiene, not a supervisor guarantee.** A hang is a sleep
+/// in a child of the server's shell, and a disable kills only that shell
+/// (rmcp 0.16 signals its direct child; reaching the descendants is P19's
+/// process group, plan-rev3 §5.3), so the sleep is reparented to init and keeps
+/// the test binary's stderr open until it wakes — a piped `cargo test` waits on
+/// it. Whatever the supervisor leaves, a stub's teardown must reach.
+#[tokio::test]
+async fn a_hung_stubs_sleep_is_gone_once_the_stub_is_torn_down() {
+    let (h, stub) = notifying_harness("orphan").await;
+
+    stub.hang_next_list();
+    stub.notify();
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.sleeps().is_empty()).await,
+        "the refresh should have reached the hanging `tools/list`"
+    );
+    let sleeper = stub.sleeps()[0];
+    let _orphan = KillOnFail(sleeper);
+    assert!(alive(sleeper), "the hang is under way");
+    // SAFETY: `getpgid` only reads the process group of a pid.
+    let group = unsafe { libc::getpgid(sleeper) };
+    assert_eq!(
+        group,
+        stub.pids()[0],
+        "the sleep is in the group its server's shell leads"
+    );
+
+    h.supervisor.disable(&mcp("srv")).await.expect("disable");
+    drop(stub);
+    drop(h);
+
+    assert!(
+        eventually(Duration::from_secs(5), || !alive(sleeper)).await,
+        "the stub's sleep {sleeper} outlived the stub's teardown"
+    );
 }
 
 /// **(7) Remove, then re-add across two notifications.** The step-4 diff base
