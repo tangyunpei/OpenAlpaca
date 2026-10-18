@@ -629,12 +629,14 @@ One threshold decides what happens to a large tool result:
 | Result | Loop has a session log | Loop has none |
 |---|---|---|
 | At or under the threshold | Inline, unchanged. | Inline, unchanged. |
-| Over it, succeeded | **Spilled**: the whole result is written to the session's `results/` directory, and the model receives a stub — the size, the first 2 KB, and `result_ref=file:results/…` with the instruction to page it with `read_result`. | Cut inline at the threshold, at a sentence, line or word boundary, with a marker naming how much is shown. |
+| Over it, succeeded | **Spilled**: the whole result is written to the session's `results/` directory, and the model receives a stub — the size, the first 2 KB, and `result_ref=file:results/…` with the instruction to page it with `read_result`. A **command**'s stub (`shell_execute`, a `Command`-backend tool) shows the output's head **and** tail instead, half the threshold each — the `Err` budget — so a long build's summary is in front of the model (`session_log::command_spill_stub`). | Cut inline at the threshold, at a sentence, line or word boundary, with a marker naming how much is shown. |
 | Over it, failed | The model's copy keeps the **head and tail** (half the threshold each), because a compiler or test failure sits at the end. The full bytes are still spilled to the log. | Head and tail, same cut. |
 
 If the spill record could not be handed to the log writer, the model gets
 the inline cut instead of a stub — a stub must never promise a file that
-will not exist.
+will not exist. A resumed run's replay restores the stub the model was
+shown: a command's record names its form and budget (`stub`), so its head
+and tail are rebuilt from the `results/` file.
 
 A failed call is the call's own `Err`, never a reading of its text: the
 loop marks the text `[tool_error]` and flags the message (`is_error`). The

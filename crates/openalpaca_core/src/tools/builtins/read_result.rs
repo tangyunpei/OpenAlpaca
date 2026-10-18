@@ -210,8 +210,8 @@ async fn not_there(session_dir: &std::path::Path, name: &str) -> String {
     match failure {
         Some(error) => format!(
             "read_result: the spill for 'file:{rel}' was not written — the session log \
-             record's spill_error says: {error}. The first 2 KB are in the transcript; \
-             the rest of that result is gone."
+             record's spill_error says: {error}. Only what the transcript already shows \
+             of that result survives; the rest is gone."
         ),
         None => missing(name),
     }

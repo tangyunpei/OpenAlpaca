@@ -24,7 +24,9 @@ use chrono::Utc;
 use crate::runner::steering::SteeringMsg;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
-use crate::session_log::{Record, RecordType, spill_preview, spill_stub};
+use crate::session_log::{
+    Record, RecordType, command_spill_stub, command_stub_marker, spill_preview, spill_stub,
+};
 use crate::tools::registry::ToolContext;
 use serde_json::{Value, json};
 use openalpaca_llm::{
@@ -278,11 +280,15 @@ fn log_spill_event(
 /// `spill_error` plus the reference it could not honour — and `read_result`
 /// reads that record so the model is told the spill was never written rather
 /// than that the reference does not exist.
+///
+/// `command` is whether the call ran a command (`ToolRegistry::is_command_tool`):
+/// a command's stub previews its output's head **and** tail (N-TOOL-7).
 fn model_visible_result(
     config: &LoopConfig,
     result_text: &str,
     ok: bool,
     spill_ref: Option<&str>,
+    command: bool,
 ) -> String {
     // An `Err`'s head **and** tail, because a compiler or test failure is at
     // the tail — §5.4: an error "stays inline but switches to head+tail". That
@@ -292,6 +298,12 @@ fn model_visible_result(
         return head_tail(result_text, config.tool_result_inline_bytes);
     }
     match spill_ref {
+        // N-TOOL-7 (Z1-16): a long build that succeeded keeps its summary at
+        // the tail too — the same budget the `Err` above gets, beside the
+        // reference.
+        Some(rel) if command => {
+            command_spill_stub(result_text, config.tool_result_inline_bytes, rel)
+        }
         Some(rel) => spill_stub(result_text.len(), &spill_preview(result_text), rel),
         None => truncate_tool_result_to(result_text.to_string(), config.tool_result_inline_bytes),
     }
@@ -1223,6 +1235,9 @@ async fn run_agentic_loop_core(
                         // name two lines below and the bytes belong to the
                         // record, which is about to take ownership of them.
                         let spill_ref = spill.as_ref().map(|(rel, _)| rel.clone());
+                        // N-TOOL-7: a command's stub previews head and tail.
+                        let command =
+                            sandbox.is_some_and(|s| s.registry().is_command_tool(&tc.name));
                         let mut record = json!({
                             "tool_use_id": tc.id,
                             "name": tc.name,
@@ -1256,6 +1271,16 @@ async fn run_agentic_loop_core(
                                     Value::from(spill_preview(result_text)),
                                 );
                             }
+                            // N-TOOL-7: the model is about to be shown this
+                            // command's head and tail, which the preview the
+                            // writer keeps cannot rebuild; naming the form and
+                            // its budget lets a replay rebuild it from the file.
+                            if ok && command {
+                                map.insert(
+                                    "stub".into(),
+                                    command_stub_marker(config.tool_result_inline_bytes),
+                                );
+                            }
                         }
                         let emitted = log_spill_event(config, task_id, agent_id, record, spill);
                         // What the model is handed. The spill's stub above the
@@ -1267,6 +1292,7 @@ async fn run_agentic_loop_core(
                             result_text,
                             ok,
                             spill_ref.as_deref().filter(|_| emitted),
+                            command,
                         );
                         persist_span.in_scope(|| {
                             tracing::debug!(

@@ -2612,15 +2612,42 @@ fn a_replay_rebuilds_the_rounds_and_their_results() {
     assert!(flagged(&m[3]), "a failure replays flagged: {:?}", m[3]);
 }
 
+/// §5.4's two stubs, pinned whole (`tasks/api-fix-plan.md` §5.4, rev 3.31):
+/// the head-only one every tool but a command gets, unchanged, and a
+/// command's (N-TOOL-7, Z1-16), whose preview is its output's head and tail
+/// at the budget the loop gives an `Err`.
+#[test]
+fn the_two_spill_stubs_read_as_the_plan_specifies() {
+    let rel = "results/000004-shell_execute-tu-1.txt";
+    assert_eq!(
+        spill_stub(204_812, "running 5 tests", rel),
+        "[result too large: 204812 bytes; first 2 KB follow]\nrunning 5 tests\n\
+         [full result: result_ref=file:results/000004-shell_execute-tu-1.txt — use read_result \
+         to page]"
+    );
+
+    let output = format!("HEAD{}TAIL", "x".repeat(92));
+    assert_eq!(
+        command_spill_stub(&output, 20, rel),
+        "[result too large: 100 bytes; its head and tail follow]\nHEADxxxxxx\n\n\
+         [... 80 of 100 bytes elided; the tail follows ...]\n\nxxxxxxTAIL\n\
+         [full result: result_ref=file:results/000004-shell_execute-tu-1.txt — use read_result \
+         to page]"
+    );
+}
+
 /// A spilled result is replayed as the **stub the model actually saw** — the
-/// bytes never went into the context the first time and must not now. When
-/// the `results/` file is still there the stub's `read_result` promise still
-/// holds; when the sweep has taken it, the replay says so instead.
+/// bytes never went into the context the first time and must not now. A
+/// record that names no stub form — every tool's but a command's, and any
+/// record written before N-TOOL-7 — was shown §5.4's head-only stub, and that
+/// is what comes back. When the `results/` file is still there the stub's
+/// `read_result` promise still holds; when the sweep has taken it, the replay
+/// says so instead.
 #[test]
 fn a_spilled_result_is_replayed_as_the_stub_the_model_saw() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let rel = "results/000004-shell_execute-tu-1.txt";
+    let rel = "results/000004-web_fetch-tu-1.txt";
     seed_records(
         root,
         "s1",
@@ -2628,9 +2655,21 @@ fn a_spilled_result_is_replayed_as_the_stub_the_model_saw() {
             (
                 "round",
                 "t1",
-                round_record(1, "", &[("tu-1", "shell_execute", serde_json::json!({"cmd": "cargo test"}))]),
+                round_record(
+                    1,
+                    "",
+                    &[(
+                        "tu-1",
+                        "web_fetch",
+                        serde_json::json!({"url": "https://example.test"}),
+                    )],
+                ),
             ),
-            ("tool_result", "t1", spilled_result_record("tu-1", "shell_execute", rel, 204_812, "test result: FAILED")),
+            (
+                "tool_result",
+                "t1",
+                spilled_result_record("tu-1", "web_fetch", rel, 204_812, "<!doctype html>"),
+            ),
         ],
     );
     let session = root.join("s1");
@@ -2643,7 +2682,7 @@ fn a_spilled_result_is_replayed_as_the_stub_the_model_saw() {
     let replayed = &plan.messages[1].content;
     assert_eq!(
         replayed,
-        &spill_stub(204_812, "test result: FAILED", rel),
+        &spill_stub(204_812, "<!doctype html>", rel),
         "byte-for-byte the stub the loop handed the model"
     );
 
@@ -2652,8 +2691,126 @@ fn a_spilled_result_is_replayed_as_the_stub_the_model_saw() {
     let plan = replay::rebuild(&session, "t1", 4).unwrap();
     assert_eq!(plan.missing_spills, 1);
     let replayed = &plan.messages[1].content;
-    assert!(replayed.contains("test result: FAILED"), "the preview survives: {replayed}");
-    assert!(!replayed.contains("read_result"), "but nothing to page: {replayed}");
+    assert!(
+        replayed.contains("<!doctype html>"),
+        "the preview survives: {replayed}"
+    );
+    assert!(
+        !replayed.contains("read_result"),
+        "but nothing to page: {replayed}"
+    );
+}
+
+/// Lowercase hex SHA-256, as the writer records a spill's.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// N-TOOL-7: a command's spilled result was shown its head **and** tail
+/// (`command_spill_stub`), and its record says so — `stub: {form:
+/// "head_tail", budget}` beside the spill's `bytes` and `sha256` — so the
+/// replay rebuilds that stub from the file's own bytes, the same text the
+/// loop handed the model (the cache prefix holds and a long build's summary
+/// comes back). A file that is not those bytes any more falls back to the
+/// head-only stub the record can still vouch for; a file that is gone, to
+/// the sweep's form; and a record without the marker — a command's from
+/// before N-TOOL-7, which was shown the head-only stub — stays head-only.
+#[test]
+fn a_spilled_command_result_is_replayed_as_its_head_and_tail_stub() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let rel = "results/000004-shell_execute-tu-1.txt";
+    let output = format!(
+        "Compiling openalpaca_core\n{}test result: FAILED. 1 failed (see above)",
+        "x".repeat(400)
+    );
+    let preview = "Compiling openalpaca_core";
+    let budget = 120;
+    let command_record = |marked: bool| {
+        let mut record = spilled_result_record("tu-1", "shell_execute", rel, output.len(), preview);
+        record["result"]["spill"]["sha256"] = serde_json::json!(sha256_hex(output.as_bytes()));
+        if marked {
+            record["stub"] = serde_json::json!({"form": "head_tail", "budget": budget});
+        }
+        record
+    };
+    let replay_of = |record: serde_json::Value| {
+        seed_records(
+            root,
+            "s1",
+            &[
+                (
+                    "round",
+                    "t1",
+                    round_record(
+                        1,
+                        "",
+                        &[(
+                            "tu-1",
+                            "shell_execute",
+                            serde_json::json!({"command": "cargo test"}),
+                        )],
+                    ),
+                ),
+                ("tool_result", "t1", record),
+            ],
+        );
+        replay::rebuild(&root.join("s1"), "t1", 4).unwrap()
+    };
+    let session = root.join("s1");
+    fs::create_dir_all(session.join(RESULTS_DIR)).unwrap();
+    fs::write(session.join(rel), &output).unwrap();
+
+    let plan = replay_of(command_record(true));
+    assert_eq!((plan.spills_referenced, plan.missing_spills), (1, 0));
+    let replayed = &plan.messages[1].content;
+    assert_eq!(
+        replayed,
+        &command_spill_stub(&output, budget, rel),
+        "byte-for-byte the head-and-tail stub the loop handed the model"
+    );
+    assert!(replayed.contains("test result: FAILED"), "{replayed}");
+
+    // An older record — no marker — was shown the head-only stub.
+    let plan = replay_of(command_record(false));
+    assert_eq!(
+        plan.messages[1].content,
+        spill_stub(output.len(), preview, rel)
+    );
+
+    // A file that is no longer the recorded bytes is not trusted for a tail.
+    fs::write(session.join(rel), output.replace("FAILED", "ok....")).unwrap();
+    let plan = replay_of(command_record(true));
+    assert_eq!(
+        plan.messages[1].content,
+        spill_stub(output.len(), preview, rel),
+        "the same length but other bytes: head-only"
+    );
+    fs::write(session.join(rel), "short").unwrap();
+    let plan = replay_of(command_record(true));
+    assert_eq!(
+        plan.messages[1].content,
+        spill_stub(output.len(), preview, rel),
+        "another length: head-only"
+    );
+
+    // The sweep took the file: nothing to page, and nothing to take a tail from.
+    fs::remove_file(session.join(rel)).unwrap();
+    let plan = replay_of(command_record(true));
+    assert_eq!(plan.missing_spills, 1);
+    let replayed = &plan.messages[1].content;
+    assert!(
+        replayed.contains(preview),
+        "the preview survives: {replayed}"
+    );
+    assert!(
+        !replayed.contains("read_result"),
+        "but nothing to page: {replayed}"
+    );
 }
 
 /// §5.6c: "stop at the last *complete* round (all its results present — the

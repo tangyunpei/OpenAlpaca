@@ -708,8 +708,9 @@ fn write_spill_file(dir: &Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
-/// The spill's content hash, as §5.4's stub carries it.
-fn sha256_hex(bytes: &[u8]) -> String {
+/// The spill's content hash, as §5.4's stub carries it — and as a replay
+/// checks a command's spill file against before rebuilding its stub.
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);

@@ -3351,6 +3351,21 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
     );
     assert!(seen[0].contains("use read_result to page"));
 
+    // §5.6c: a resumed run is re-primed with the stub the model first saw,
+    // byte for byte.
+    let replay = crate::session_log::replay::rebuild(&session_dir, "task-big", 4).unwrap();
+    let replayed: Vec<&str> = replay
+        .messages
+        .iter()
+        .filter(|m| m.tool_call_id.as_deref() == Some("tc_big"))
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        replayed,
+        [seen[0].as_str()],
+        "the replay hands back the same stub"
+    );
+
     // The index row points at the same file and previews the same bytes.
     let (preview, result_ref): (String, String) = db
         .with_connection(|conn| {
@@ -3594,8 +3609,13 @@ async fn a_dropped_spill_record_leaves_the_model_an_inline_head_not_a_reference(
     let emitted = log_spill_event(&config, None, "a1", serde_json::json!({}), Some(spill));
     assert!(!emitted, "a full channel drops the record instead of writing it");
 
-    let model_text =
-        model_visible_result(&config, &result_text, true, emitted.then_some(rel.as_str()));
+    let model_text = model_visible_result(
+        &config,
+        &result_text,
+        true,
+        emitted.then_some(rel.as_str()),
+        false,
+    );
     assert!(
         !model_text.contains("result_ref"),
         "no reference to a file that will never exist: {model_text}"
@@ -4772,4 +4792,178 @@ mod tool_error_flag {
         assert_eq!(message.content, "[tool_error] boom");
         assert_eq!(result.last_tool_error.as_deref(), Some("[tool_error] boom"));
     }
+}
+
+/// N-TOOL-7 (Z1-16): a **command**'s spilled output is previewed head and
+/// tail, within the Err path's budget, so the end of a long build — the
+/// summary, the last warning — is in front of the model with the reference
+/// beside it. (A tool that is not a command keeps the head-only stub:
+/// `a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub`.)
+#[tokio::test]
+async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    /// 40 KB of build log: over the inline threshold, under the envelope.
+    const LOG_BYTES: usize = 40 * 1024;
+    const LAST_LINE: &str = "Finished release in 41s — 3 warnings (see above)";
+
+    struct LongBuild;
+    #[async_trait]
+    impl BuiltInTool for LongBuild {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok(format!(
+                "{}\n{LAST_LINE}",
+                "compiling crate\n".repeat(LOG_BYTES / 16)
+            ))
+        }
+    }
+
+    // Stands in for the builtin under its name: the sanitizer's shell set,
+    // which is what makes a tool a command.
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "shell_execute".to_string(),
+                description: "Run".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(LongBuild)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "code_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+        unattended: false,
+    };
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Building.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_build".to_string(),
+                name: "shell_execute".to_string(),
+                arguments: serde_json::json!({"command": "cargo build --release"}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "Built.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-long-build");
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("build it")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "code_agent::a1",
+        Some(&policy),
+        Some("task-build"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-long-build")).unwrap();
+    let logged = records
+        .iter()
+        .find(|r| r.kind == "tool_result")
+        .expect("the result is narrated");
+    let rel = logged.data["result"]["spill"]["rel"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the long output spills: {logged:?}"));
+
+    let seen = provider.tool_results_seen();
+    assert_eq!(seen.len(), 1, "one tool result reached the backend");
+    let stub = &seen[0];
+    assert!(
+        stub.contains(LAST_LINE),
+        "the build's last line is in front of the model: …{}",
+        &stub[stub.len().saturating_sub(300)..]
+    );
+    assert!(stub.starts_with("[result too large: "), "{}", &stub[..120]);
+    assert!(
+        stub.ends_with(&format!(
+            "[full result: result_ref=file:{rel} — use read_result to page]"
+        )),
+        "the reference is beside it"
+    );
+    assert!(
+        stub.len() <= MAX_TOOL_RESULT_SIZE + 512,
+        "within the Err path's budget: {} bytes",
+        stub.len()
+    );
+
+    // §5.6c: a resumed run is re-primed with the stub the model first saw,
+    // head and tail, byte for byte — rebuilt from the file the record names,
+    // so the build's last line comes back too and the prompt's prefix holds.
+    let replay =
+        crate::session_log::replay::rebuild(&dir.path().join("sess-long-build"), "task-build", 4)
+            .unwrap();
+    let replayed: Vec<&str> = replay
+        .messages
+        .iter()
+        .filter(|m| m.tool_call_id.as_deref() == Some("tc_build"))
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        replayed,
+        [stub.as_str()],
+        "the replay hands back the same stub"
+    );
 }

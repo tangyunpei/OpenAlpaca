@@ -37,8 +37,9 @@
 //!   saying what happened.
 
 use super::reader::{LoggedRecord, read_records_after_torn};
-use super::record::RESULTS_DIR;
-use super::spill_stub;
+use super::record::{RESULTS_DIR, command_stub_budget};
+use super::writer::sha256_hex;
+use super::{command_spill_stub, spill_stub};
 use crate::orchestrator::working_state::WorkingState;
 use chrono::{DateTime, Utc};
 use openalpaca_llm::{ChatMessage, ToolCall};
@@ -606,11 +607,21 @@ fn tool_calls_of(data: &Value) -> Vec<ToolCall> {
 /// What the model is handed for one recorded result.
 ///
 /// A result that sat inline comes back as itself. A **spilled** one comes back
-/// as [`spill_stub`] — byte-for-byte the text the loop handed the model when
-/// the call first ran, because the payload never entered the context the first
-/// time and re-priming must not put it there now. When the sweep has since
+/// as the stub the loop handed the model when the call first ran, byte for
+/// byte, because the payload never entered the context the first time and
+/// re-priming must not put it there now: [`spill_stub`] from the record's
+/// preview, or — for a command, whose record carries
+/// [`command_stub_marker`](super::command_stub_marker) (N-TOOL-7) —
+/// [`command_spill_stub`] at the recorded budget, from the `results/` file's
+/// own bytes, checked against the record's `bytes` and `sha256`. A file that is
+/// no longer those bytes is not trusted for a tail, and the head-only stub the
+/// record can still vouch for is replayed instead. When the sweep has since
 /// taken the `results/` file the stub would promise a page that no longer
 /// exists, so the preview is replayed with that promise removed instead.
+///
+/// One case is not the model's text: an `Err` over the threshold was shown
+/// its head and tail inline, with no reference (`model_visible_result`), and
+/// replays as the head-only stub with one.
 fn result_text(session_dir: &Path, record: &LoggedRecord, plan: &mut ReplayPlan) -> String {
     match record.data.get("result") {
         Some(Value::String(inline)) => inline.clone(),
@@ -636,6 +647,17 @@ fn result_text(session_dir: &Path, record: &LoggedRecord, plan: &mut ReplayPlan)
                      [the full result was removed by the session-log sweep and cannot be paged]"
                 );
             }
+            if let Some(budget) = command_stub_budget(&record.data) {
+                let sha256 = spill.and_then(|s| s.get("sha256")).and_then(Value::as_str);
+                match spilled_bytes(session_dir, rel, bytes, sha256) {
+                    Some(content) => return command_spill_stub(&content, budget, rel),
+                    None => tracing::warn!(
+                        rel,
+                        "A command's spill file is not the bytes its record names; \
+                         replaying its head-only stub"
+                    ),
+                }
+            }
             spill_stub(bytes, preview, rel)
         }
         // No `result` key at all: a record from a build that did not write one,
@@ -643,6 +665,25 @@ fn result_text(session_dir: &Path, record: &LoggedRecord, plan: &mut ReplayPlan)
         // and the model must be told so rather than shown a hole.
         _ => "[tool result unavailable — the session log did not record it]".to_string(),
     }
+}
+
+/// The spill file `rel` names, when it is exactly the result its record
+/// describes: `bytes` long — checked before anything is read — UTF-8, as every
+/// spilled result is, and hashing to `sha256`. `rel` has passed
+/// [`spill_file_present`].
+fn spilled_bytes(
+    session_dir: &Path,
+    rel: &str,
+    bytes: usize,
+    sha256: Option<&str>,
+) -> Option<String> {
+    let path = session_dir.join(rel);
+    if std::fs::metadata(&path).ok()?.len() != bytes as u64 {
+        return None;
+    }
+    let content = std::fs::read_to_string(&path).ok()?;
+    (content.len() == bytes && Some(sha256_hex(content.as_bytes()).as_str()) == sha256)
+        .then_some(content)
 }
 
 /// Whether `rel` (`results/<name>`) still exists under this session.

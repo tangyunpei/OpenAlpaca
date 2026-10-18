@@ -1549,6 +1549,21 @@ The stub, from `spill_stub()`:
 [full result: result_ref=file:results/<file> — use read_result to page]
 ```
 
+A command's — `shell_execute` or a `Command`-backend tool
+(`ToolRegistry::is_command_tool`) — from `command_spill_stub()`, its head
+and tail at the budget an error result gets (N-TOOL-7):
+
+```text
+[result too large: <N> bytes; its head and tail follow]
+<head_tail(result, tool_result_inline_bytes)>
+[full result: result_ref=file:results/<file> — use read_result to page]
+```
+
+Its `tool_result` record carries `stub: {"form": "head_tail", "budget": <bytes>}`
+(`command_stub_marker()`), since the record keeps only the head's preview: a
+resumed run's replay (`session_log::replay`) rebuilds the same stub from the
+`results/` file, checked against the record's `bytes` and `sha256`.
+
 `read_result(result_ref, offset?, limit?)` pages the file back in.  It is a
 **grant, not ambient**: the chat loop offers it when the daemon has a
 session log and a database; the lead and subagents get it when their

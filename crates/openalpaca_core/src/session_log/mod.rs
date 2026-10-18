@@ -45,7 +45,7 @@ pub use reader::{
 };
 pub use record::{
     ENVELOPE_DATA_CAP_BYTES, ENVELOPE_VERSION, PREVIEW_CHARS, RESULTS_DIR, Record, RecordType,
-    SNAPSHOTS_DIR, Spill, spill_preview, spill_stub,
+    SNAPSHOTS_DIR, Spill, command_spill_stub, command_stub_marker, spill_preview, spill_stub,
 };
 pub use writer::SessionLogLimits;
 
