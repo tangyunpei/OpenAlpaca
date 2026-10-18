@@ -454,7 +454,16 @@ in-place replace is never allowed), the incumbent tree is moved to
 `plugins/.trash/`, the replacement is renamed into place, and the load path
 runs again. Consent survives an update whose declared capabilities are
 unchanged; if they changed, consent goes back to pending and the command says
-what the new version also asks for.
+what the new version also asks for. If the rename into place fails, the
+incumbent is moved back before the command reports the error, and the plugin
+comes back on its old tree under the consent it had (a decision the new
+version's capability change had dropped is put back with it); if the daemon
+dies between the two moves, its next start puts the old tree back (a one-line
+marker, `plugins/.staging/<id>.swap`, records where it went) and sweeps the
+staging copies the dead process left — a decision dropped before the crash
+stays dropped there, and `ext approve <id>` restores it. Either way the plugin
+is never left absent, and `ext remove` or `ext uninstall` of the plugin drops
+its marker, so nothing it ended is put back later.
 
 `uninstall <kind> <id>` is the real removal, and it **deletes nothing**: the
 plugin is unloaded, its `.permissions.toml` entry removed, and its directory

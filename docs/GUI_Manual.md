@@ -1360,7 +1360,11 @@ and it answers for the plugin by the id the daemon listed.
 
 `Update` replaces an installed plugin's tree: the incumbent goes to
 `plugins/.trash/`, the replacement is renamed into place, and the load path
-runs. Consent survives an update whose declared capabilities are unchanged;
+runs. A rename into place that fails moves the incumbent back before the
+error is shown, under the consent it had, and a daemon that dies between the
+two moves puts it back at its next start (where a consent the replacement had
+dropped stays dropped, and `Approve` restores it), so an update never leaves
+the plugin absent. Consent survives an update whose declared capabilities are unchanged;
 otherwise it is reset and the response names what the replacement additionally
 asks for.
 

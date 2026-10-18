@@ -265,6 +265,11 @@ pub struct PluginManager {
     /// event so the `NotificationDispatcher` knows where to write the cron
     /// notice (design §7.3 step 1). Empty until `with_notice_lane`.
     notice_lane: String,
+    /// Test seam (N-PLUG-4): when set, the next update's commit step fails
+    /// as a rename into place would, so the rollback can be shown. Compiled
+    /// out of every build but this crate's tests — no production flag.
+    #[cfg(test)]
+    pub(crate) fail_swap_commit: std::sync::atomic::AtomicBool,
 }
 
 impl PluginManager {
@@ -298,6 +303,8 @@ impl PluginManager {
             locks: StdMutex::new(HashMap::new()),
             reaper_rx: StdMutex::new(Some(rx)),
             notice_lane: String::new(),
+            #[cfg(test)]
+            fail_swap_commit: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -390,6 +397,12 @@ impl PluginManager {
     pub async fn start(&self) -> Result<(), PluginError> {
         info!(dir = %self.plugin_dir.display(), "scanning plugin directory");
 
+        // Before the scan reads a single directory: an update a crash cut off
+        // between its trash move and its commit is put back, so the plugin is
+        // found under its own name, and an earlier process's staging copies
+        // are swept (N-PLUG-4).
+        self.recover_interrupted_swaps().await;
+
         let dirs = self.plugin_directories().await?;
         let table = self.permission_gate.load_table();
         for dir in &dirs {
@@ -410,6 +423,55 @@ impl PluginManager {
         let plugins = self.plugins.read().await;
         info!(count = plugins.len(), "plugin scan complete");
         Ok(())
+    }
+
+    /// The boot half of N-PLUG-4: finish every swap a `.staging/<id>.swap`
+    /// marker records ([`install::recover_swap`]), then sweep the staging
+    /// copies an earlier process left ([`install::sweep_stale_staging`]).
+    ///
+    /// Each marker is handled under its plugin's mutex, which an update holds
+    /// across its whole swap, so a marker this process is still using is
+    /// never mistaken for a crash's. Nothing here deletes a tree the owner
+    /// dropped in: the incumbent only moves back, and a marker that does not
+    /// name a directory inside `.trash/` is left for a person to read.
+    async fn recover_interrupted_swaps(&self) {
+        for id in install::swap_markers(&self.plugin_dir) {
+            if !valid_plugin_id(&id) {
+                warn!(marker = %id, "ignoring a swap marker whose name is not a plugin id");
+                continue;
+            }
+            let _lock = self.lock_for(&id).await;
+            if !install::swap_marker(&self.plugin_dir, &id).is_file() {
+                continue;
+            }
+            match install::recover_swap(&self.plugin_dir, &id) {
+                Ok(install::SwapRecovery::Restored { from }) => warn!(
+                    plugin = %id,
+                    from = %from.display(),
+                    "an update was cut off before its commit; the previous tree is back in place"
+                ),
+                Ok(install::SwapRecovery::Settled) => {
+                    debug!(plugin = %id, "a swap marker outlived its commit; dropped")
+                }
+                Ok(install::SwapRecovery::Missing { recorded }) => warn!(
+                    plugin = %id,
+                    recorded = %recorded.display(),
+                    "a swap marker names a tree that is not there; nothing to put back"
+                ),
+                Ok(install::SwapRecovery::Unreadable { reason }) => {
+                    warn!(plugin = %id, %reason, "a swap marker could not be read; left in place")
+                }
+                Err(e) => error!(
+                    plugin = %id,
+                    error = %e,
+                    "an interrupted update could not be finished; the marker stays for the next start"
+                ),
+            }
+        }
+        let swept = install::sweep_stale_staging(&self.plugin_dir);
+        if swept > 0 {
+            info!(swept, "swept staging copies an earlier process left");
+        }
     }
 
     /// Every subdirectory of the plugins root that carries a `plugin.toml`.
@@ -1940,6 +2002,10 @@ impl PluginManager {
         self.permission_gate
             .remove_entry(name)
             .map_err(store_error)?;
+        // An update whose rename back failed left the row orphaned and its
+        // marker in place for the next start; removing the row ends that
+        // plugin, so nothing may put its tree back (N-PLUG-4).
+        install::drop_swap_marker(&self.plugin_dir, name);
         self.ledger.drop_record(&ext);
         self.plugins.write().await.remove(name);
         info!(plugin = name, "orphaned plugin entry removed");
@@ -2056,6 +2122,15 @@ impl PluginManager {
     /// **before** the swap, exactly as it is on install, so no window exists in
     /// which a tree asking for unapproved capabilities sits under an `approved
     /// = true` entry.
+    ///
+    /// The swap itself is [`install::replace`]'s (N-PLUG-4): a marker in
+    /// `.staging/` records where the incumbent went, a failed rename into
+    /// place puts the incumbent back before the error returns — with the
+    /// consent decision a capability change had dropped, and the row is then
+    /// read again from it — and a crash between the two is put back by the
+    /// next [`Self::start`]. The crash path puts back the tree only: a
+    /// decision dropped before the crash stays dropped, and the owner
+    /// approves the old tree again.
     pub async fn update_from_path(
         &self,
         id: &str,
@@ -2066,7 +2141,6 @@ impl PluginManager {
         self.known(&ext).await?;
         self.guard_orphan(&ext)?;
 
-        let dest = self.plugin_dir.join(id);
         let (added, consent_reset, warnings) = {
             let _lock = self.lock_for(id).await;
             self.guard_settled(&ext)?;
@@ -2083,6 +2157,11 @@ impl PluginManager {
                 manifest.capabilities.iter().collect();
             let approved: std::collections::BTreeSet<&String> = recorded.iter().collect();
             let consent_reset = table.approved(id).is_some() && declared != approved;
+            // The decision as it stands, to put back if the swap fails and
+            // the incumbent — the tree it was given for — is in place again.
+            let consent_before = table
+                .entry(id)
+                .and_then(|e| e.approved.map(|a| (a, e.approved_at.clone())));
 
             let staged = install::stage(source, &self.plugin_dir, id).await?;
 
@@ -2110,12 +2189,40 @@ impl PluginManager {
                 self.permission_gate.reset_consent(id).map_err(store_error)?;
             }
 
-            if dest.exists() {
-                install::trash(&self.plugin_dir, &dest, id)?;
+            // The swap (N-PLUG-4): the incumbent to the trash and the staged
+            // tree into its name, recorded in `.staging/<id>.swap` between the
+            // two. A commit that fails puts the incumbent back before the
+            // error returns; a crash in between is put back at the next start.
+            let swapped = install::replace_with(&self.plugin_dir, id, staged, |staged, dest| {
+                self.commit_step(staged, dest)
+            });
+            match swapped {
+                Ok(()) => (added, consent_reset, self.record_provenance(id, source)),
+                Err(failed) => {
+                    // The incumbent is in place again, so the decision the
+                    // reset dropped is the one this tree ran under: put it
+                    // back, word for word, before the row is read. Not when
+                    // the incumbent stays in the trash — whatever holds the
+                    // name then is not the tree the owner decided on.
+                    if consent_reset
+                        && failed.incumbent_in_place
+                        && let Some((approved, at)) = &consent_before
+                        && let Err(e) =
+                            self.permission_gate
+                                .put_back_consent(id, *approved, at.as_deref())
+                    {
+                        warn!(plugin = id, error = %e, "could not put back the consent a failed update had dropped");
+                    }
+                    // The teardown above left the row `disabled` over the
+                    // tree that is back: read it again from the disk — under
+                    // its own hold — before saying the update failed.
+                    drop(_lock);
+                    if let Err(e) = self.reconcile(&ext).await {
+                        warn!(plugin = id, error = %e, "could not reconcile after a failed update");
+                    }
+                    return Err(failed.error);
+                }
             }
-            staged.commit(&dest)?;
-
-            (added, consent_reset, self.record_provenance(id, source))
         };
 
         let mut record = self.reconcile(&ext).await?;
@@ -2175,6 +2282,9 @@ impl PluginManager {
         } else {
             None
         };
+        // A marker an interrupted update left would put an older tree back
+        // over the freed name at the next start (N-PLUG-4).
+        install::drop_swap_marker(&self.plugin_dir, name);
         let data = install::data_dir(&self.plugin_dir, name);
         let data_trashed = match (keep_data, data.is_dir()) {
             (false, true) => Some(install::trash(
@@ -2203,6 +2313,24 @@ impl PluginManager {
             kept_data: keep_data,
             data_trashed,
         })
+    }
+
+    /// An update's commit step: rename the staged tree into place. In this
+    /// crate's tests [`Self::fail_swap_commit`] can make it fail as the rename
+    /// would, dropping the staged copy exactly as a failed commit does.
+    fn commit_step(&self, staged: install::Staged, dest: &Path) -> Result<(), InstallError> {
+        #[cfg(test)]
+        if self
+            .fail_swap_commit
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            drop(staged);
+            return Err(InstallError::Io(format!(
+                "cannot move into place {}: failed by the test seam",
+                dest.display()
+            )));
+        }
+        staged.commit(dest)
     }
 
     /// Record where an installed tree came from, as a warning rather than a

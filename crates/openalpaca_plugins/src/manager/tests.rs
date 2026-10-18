@@ -3174,6 +3174,335 @@ mod install_tests {
         );
     }
 
+    // ── N-PLUG-4: a failed swap is rolled back, a crashed one recovered ──
+
+    /// A second supervisor over the same plugins root, as a daemon restart is:
+    /// fresh in-memory state, the same files on disk. `h` keeps the home-store
+    /// guard, so none is taken here.
+    fn restarted(h: &Harness) -> Arc<PluginManager> {
+        let tools = Arc::new(ToolRegistry::with_event_bus(EventBus::new(256)).unwrap());
+        Arc::new(
+            PluginManager::new(
+                h.root.clone(),
+                tools,
+                Some(Arc::new(SkillCatalog::new())),
+                Some(Arc::new(AgentRegistry::new())),
+            )
+            .with_notice_lane("owner:gui"),
+        )
+    }
+
+    fn staging_entries(h: &Harness) -> Vec<String> {
+        std::fs::read_dir(h.root.join(crate::install::STAGING_DIR))
+            .map(|dir| {
+                dir.flatten()
+                    .filter_map(|e| e.file_name().to_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **The commit step fails: the old tree goes back before the error
+    /// returns** (N-PLUG-4, Z2-09). `update_from_path` trashed the incumbent
+    /// and then committed the staged copy with nothing between the two, and a
+    /// failed commit's `Staged` drop swept the copy too — the plugin was then
+    /// absent, its last good tree only in `.trash/`. Now the trashed tree is
+    /// renamed back, the swap marker is gone, the error still returns, and the
+    /// row is read again from the tree that is back in place.
+    #[tokio::test]
+    async fn an_update_whose_commit_fails_puts_the_old_tree_back_and_returns_the_error() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "[types]\ntools = true\n");
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Enabled);
+
+        let next = h.source("echo-test", "0.2.0", "[types]\ntools = true\n");
+        std::fs::write(next.join("NEW"), "second version\n").unwrap();
+        h.manager
+            .fail_swap_commit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let error = h
+            .manager
+            .update_from_path("echo-test", &next)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.code(),
+            "copy_failed",
+            "the commit's error returns: {error}"
+        );
+        let incumbent = std::fs::read_to_string(h.root.join("echo-test/plugin.toml"))
+            .expect("the old tree is back in place");
+        assert!(incumbent.contains("0.1.0"), "{incumbent}");
+        assert!(!h.root.join("echo-test/NEW").exists());
+        assert!(
+            h.trashed().is_empty(),
+            "the old tree was moved back, not left in the trash: {:?}",
+            h.trashed()
+        );
+        assert!(
+            staging_entries(&h).is_empty(),
+            "no swap marker and no staging copy is left: {:?}",
+            staging_entries(&h)
+        );
+        let row = h.row("echo-test").await;
+        assert_eq!(
+            row.state,
+            ExtensionState::Enabled,
+            "it runs on its old tree again"
+        );
+        assert_eq!(row.version.as_deref(), Some("0.1.0"));
+    }
+
+    /// **The consent the old tree ran under comes back with it.** A
+    /// replacement declaring a different set of capabilities drops the
+    /// decision before the swap (the ordering D7 pins); if the commit then
+    /// fails, the tree that is back is the one the owner approved, so the
+    /// decision is put back too — word for word, its `approved_at` included.
+    /// Before, the old tree returned `unapproved` / `never_seen` and stopped,
+    /// and the owner had to approve again a tree they had already approved.
+    #[tokio::test]
+    async fn a_failed_swap_puts_back_the_consent_its_old_tree_ran_under() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"a\"]\n",
+        );
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Enabled);
+        let before = h
+            .manager
+            .permission_gate
+            .load_table()
+            .unwrap()
+            .entry("echo-test")
+            .cloned()
+            .expect("the approved entry");
+
+        // One capability more: `consent_reset` is true, so the decision is
+        // dropped before the tree moves.
+        let next = h.source(
+            "echo-test",
+            "0.2.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"a\", \"b\"]\n",
+        );
+        h.manager
+            .fail_swap_commit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let error = h
+            .manager
+            .update_from_path("echo-test", &next)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "copy_failed", "{error}");
+        let incumbent = std::fs::read_to_string(h.root.join("echo-test/plugin.toml"))
+            .expect("the old tree is back in place");
+        assert!(incumbent.contains("0.1.0"), "{incumbent}");
+        let after = h
+            .manager
+            .permission_gate
+            .load_table()
+            .unwrap()
+            .entry("echo-test")
+            .cloned()
+            .expect("the entry");
+        assert_eq!(after.approved, Some(true), "the decision is back");
+        assert_eq!(
+            after.approved_at, before.approved_at,
+            "as it was, not a new approval"
+        );
+        assert_eq!(after.capabilities, before.capabilities);
+        let row = h.row("echo-test").await;
+        assert_eq!(
+            row.state,
+            ExtensionState::Enabled,
+            "it runs on its old tree, under its old consent"
+        );
+        assert_eq!(row.consent, Some(Consent::Approved));
+        assert!(h.holds_process("echo-test").await);
+    }
+
+    /// The disk as an update whose rename back failed leaves it: the incumbent
+    /// in the trash, its marker kept for the next start, the name free — and
+    /// the row, read again, `orphaned`.
+    async fn orphaned_by_a_failed_rename_back(h: &Harness) -> PathBuf {
+        let source = h.source("echo-test", "0.1.0", "[types]\ntools = true\n");
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        h.manager.shutdown_all().await;
+        let trashed = h.root.join(".trash/echo-test-20261017T000000.000000000Z");
+        std::fs::create_dir_all(h.root.join(".trash")).unwrap();
+        std::fs::rename(h.root.join("echo-test"), &trashed).unwrap();
+        std::fs::create_dir_all(h.root.join(".staging")).unwrap();
+        std::fs::write(
+            h.root.join(".staging/echo-test.swap"),
+            ".trash/echo-test-20261017T000000.000000000Z\n",
+        )
+        .unwrap();
+        let ext = ExtensionId::plugin("echo-test".to_string());
+        h.manager.reconcile(&ext).await.expect("reconcile");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Orphaned);
+        trashed
+    }
+
+    /// **Removing the orphan row ends the plugin, marker included.** Kept, the
+    /// marker restored the trashed tree at the next start, and the plugin the
+    /// owner had just removed was listed again.
+    #[tokio::test]
+    async fn an_orphan_removed_after_a_failed_swap_stays_removed_across_a_restart() {
+        let h = Harness::new();
+        let trashed = orphaned_by_a_failed_rename_back(&h).await;
+
+        h.manager.remove_orphan("echo-test").await.expect("remove");
+
+        let manager = restarted(&h);
+        manager.start().await.unwrap();
+        assert!(
+            !h.root.join("echo-test").exists(),
+            "the removed plugin's tree is not put back"
+        );
+        assert!(trashed.is_dir(), "it stays in the trash, never deleted");
+        assert!(
+            manager
+                .row(&ExtensionId::plugin("echo-test".to_string()))
+                .await
+                .is_err(),
+            "and no row comes back"
+        );
+    }
+
+    /// The uninstall of that orphan drops the marker the same way.
+    #[tokio::test]
+    async fn an_orphan_uninstalled_after_a_failed_swap_stays_gone_across_a_restart() {
+        let h = Harness::new();
+        let trashed = orphaned_by_a_failed_rename_back(&h).await;
+
+        h.manager
+            .uninstall("echo-test", true)
+            .await
+            .expect("uninstall");
+
+        let manager = restarted(&h);
+        manager.start().await.unwrap();
+        assert!(
+            !h.root.join("echo-test").exists(),
+            "the uninstalled plugin's tree is not put back"
+        );
+        assert!(trashed.is_dir());
+    }
+
+    /// A denial the replacement had dropped comes back the same way: the old
+    /// tree is still the one the owner refused.
+    #[tokio::test]
+    async fn a_failed_swap_puts_back_a_denial_too() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"a\"]\n",
+        );
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager.deny_plugin("echo-test").await.expect("deny");
+
+        let next = h.source(
+            "echo-test",
+            "0.2.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"a\", \"b\"]\n",
+        );
+        h.manager
+            .fail_swap_commit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        h.manager
+            .update_from_path("echo-test", &next)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            h.manager
+                .permission_gate
+                .load_table()
+                .unwrap()
+                .approved("echo-test"),
+            Some(false),
+            "the old tree is still the one the owner refused"
+        );
+        assert_eq!(h.row("echo-test").await.consent, Some(Consent::Denied));
+        assert!(!h.holds_process("echo-test").await);
+    }
+
+    /// **A crash between the trash move and the commit is put back at the
+    /// next start.** The marker `.staging/<id>.swap` names where the old tree
+    /// went; the boot pass finds it, renames the tree back, removes the
+    /// marker, and sweeps the staging copies an earlier process left — while
+    /// the plugin then loads from its own tree as before.
+    #[tokio::test]
+    async fn a_swap_interrupted_by_a_crash_is_put_back_at_the_next_start() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "[types]\ntools = true\n");
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        h.manager.shutdown_all().await;
+
+        // The crash, as the disk records it: the incumbent in the trash, the
+        // marker naming it, nothing committed — and the dead process's
+        // staging copy (pid 1 was never this process) beside it.
+        let trashed = h.root.join(".trash/echo-test-20261017T000000.000000000Z");
+        std::fs::create_dir_all(h.root.join(".trash")).unwrap();
+        std::fs::rename(h.root.join("echo-test"), &trashed).unwrap();
+        std::fs::create_dir_all(h.root.join(".staging")).unwrap();
+        std::fs::write(
+            h.root.join(".staging/echo-test.swap"),
+            ".trash/echo-test-20261017T000000.000000000Z\n",
+        )
+        .unwrap();
+        let stale = h
+            .root
+            .join(".staging/echo-test.1.20261017T000000.000000000Z");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("plugin.toml"), "partial").unwrap();
+
+        let manager = restarted(&h);
+        manager.start().await.unwrap();
+
+        let back = std::fs::read_to_string(h.root.join("echo-test/plugin.toml"))
+            .expect("the old tree is back under its name");
+        assert!(back.contains("0.1.0"), "{back}");
+        assert!(!trashed.exists(), "moved back, not copied");
+        assert!(
+            !h.root.join(".staging/echo-test.swap").exists(),
+            "the marker is gone once recovered"
+        );
+        assert!(
+            !stale.exists(),
+            "an earlier process's staging copy is swept"
+        );
+        let row = manager
+            .row(&ExtensionId::plugin("echo-test".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(row.state, ExtensionState::Enabled, "and it loads as before");
+        manager.shutdown_all().await;
+    }
+
     // ── uninstall ────────────────────────────────────────────────────
 
     /// The full sequence: T0–T5, the permissions entry through the same atomic

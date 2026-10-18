@@ -302,6 +302,35 @@ impl PermissionGate {
         Ok(())
     }
 
+    /// Put back exactly what [`Self::reset_consent`] took — `approved` and
+    /// `approved_at` as they were, no new timestamp — when the tree the
+    /// decision was for is the one on disk again: an update whose swap failed
+    /// and moved the incumbent back (N-PLUG-4).
+    ///
+    /// `enabled` and `capabilities` are not in the edit: the reset left both,
+    /// so the entry reads as it did before the update began.
+    pub fn put_back_consent(
+        &self,
+        plugin_name: &str,
+        approved: bool,
+        approved_at: Option<&str>,
+    ) -> Result<(), PluginError> {
+        let approved_at = approved_at.map(String::from);
+        self.edit(plugin_name, move |entry| {
+            entry["approved"] = toml_edit::value(approved);
+            match approved_at {
+                Some(at) => entry["approved_at"] = toml_edit::value(at),
+                None => {
+                    if let Some(table) = entry.as_table_mut() {
+                        table.remove("approved_at");
+                    }
+                }
+            }
+        })?;
+        debug!(plugin = plugin_name, approved, "plugin consent put back");
+        Ok(())
+    }
+
     /// Remove a plugin's entry entirely — the **only** path that ever deletes
     /// one (design §5.1, §8's `DELETE /v1/extensions/plugin/{id}`).
     ///
