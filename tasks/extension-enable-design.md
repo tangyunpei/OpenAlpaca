@@ -1,6 +1,6 @@
 # Extension Enable — the two-axis design (N5)
 
-**Status:** design of record, **rev 17 — implemented: C1–C8 landed; rev 17 brings §9.2's denied row up to the copy that ships** (see the revision log). Rev 16: **implemented: C1–C8 landed** (`e92d76e..eff30cb` on `feat/ui-rework`; C8 is the `global_tool_deny` purge + the documentation sweep). Rev 16 changes no mechanism: it records the corrections and residue observed while building C1–C8 (see the revision log) and leaves §13 Q5–Q14 pending and unapplied. Rev 15 was the verified design implemented from: **rev 15 — verified.** Directive fidelity (S1–S4), source claims and plan/KB consistency passed on earlier revisions; the consistency lens confirmed every remaining check on rev 13 and its two follow-ups found only step-order wording, the last a single word in E-PRE's closing sentence (rev 14 → 15), fixed and grep-verified — no live sentence pairs E-PRE with "then E0". Implement from this revision. (rev 14: one residual — five sites still read "E-PRE, then E0"; all now say E0 CAS → E-PRE → E1–E5. Every other check confirmed: §3.3.1 derived cell by cell, the four crash races under the table, E-FAIL, C1, §3.7, one predicate, §12, §13, ~60 anchors; round-11 — the §3.3.1 table is regenerated row by row from §4.1 and the prose, E-PRE runs after E0's CAS so a redundant `enable` can never tear down a live handle; round-10 — handle ownership is now a derived state × verb table, §3.3.1, and every exit from a pre-reaper `Failed{Crashed}` tears the residue down; round-9 — a Retry that beats the crash reaper now tears down load N before building load N+1 (E-PRE); round-8 — a bring-up failure after a successful connect/spawn now tears down the just-built handle before `Failed` is committed; round-6: three internal-consistency blockers on rev 7 repaired — §6.2 #8 deny is write-first like every other statement of W-deny; §3.7 step 4 diffs against the live subset so a server-re-added tool is reachable; one skill-refusal predicate, `CapabilityOracle::is_satisfiable`, at every consumer), accepted mechanism. **Residue for the next pass:** none blocking in this file; the owner-gated items are enumerated in §13 (Q5–Q14) and are **not applied anywhere** in this document — §13's arrows are recommendations, and silence enacts none of them. **Cross-file follow-ups still owed (not this file):** the cost-lockout fix now has its slot (api-fix-plan Phase 0 **A5** with its *Verify* clause) and the roadmap's Known-broken row reads confirmed + scheduled (both 2026-09-02); plan Phase 0 **A1** now orders deny write-first, matching §6.2 #8; the GUI `GapId` union (`unavailable.ts:37`/`:233` still read `GAP-19`, C7 work); and the small plan/KB wording items listed in the rev-7 log entry. The plan-side N5/Phase 8/ADR-030 items rev 6 listed as owed **landed** with plan rev 3 and ADR-030 (`94a8f42`). Supersedes ADR-029 (flat per-tool disable list) entirely.
+**Status:** design of record, **rev 18 — implemented: C1–C8 landed; rev 18 records the owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z): §13 Q5–Q14 taken as their recommendations (Q8's ledger sub-choice left pending, no recommendation; Q13 with nothing to build), Q4's default confirmed by the audit's B-06, the audit's B-05, B-17 and B-26 taken where they amend this design, and the lessons' T2, T5 and T6(b) recorded taken as this design applied them — none is built, and the design text each one would change stays what ships until a commit builds it** (see the revision log). Rev 17 brings §9.2's denied row up to the copy that ships. Rev 16: **implemented: C1–C8 landed** (`e92d76e..eff30cb` on `feat/ui-rework`; C8 is the `global_tool_deny` purge + the documentation sweep). Rev 16 changes no mechanism: it records the corrections and residue observed while building C1–C8 (see the revision log) and leaves §13 Q5–Q14 pending and unapplied. Rev 15 was the verified design implemented from: **rev 15 — verified.** Directive fidelity (S1–S4), source claims and plan/KB consistency passed on earlier revisions; the consistency lens confirmed every remaining check on rev 13 and its two follow-ups found only step-order wording, the last a single word in E-PRE's closing sentence (rev 14 → 15), fixed and grep-verified — no live sentence pairs E-PRE with "then E0". Implement from this revision. (rev 14: one residual — five sites still read "E-PRE, then E0"; all now say E0 CAS → E-PRE → E1–E5. Every other check confirmed: §3.3.1 derived cell by cell, the four crash races under the table, E-FAIL, C1, §3.7, one predicate, §12, §13, ~60 anchors; round-11 — the §3.3.1 table is regenerated row by row from §4.1 and the prose, E-PRE runs after E0's CAS so a redundant `enable` can never tear down a live handle; round-10 — handle ownership is now a derived state × verb table, §3.3.1, and every exit from a pre-reaper `Failed{Crashed}` tears the residue down; round-9 — a Retry that beats the crash reaper now tears down load N before building load N+1 (E-PRE); round-8 — a bring-up failure after a successful connect/spawn now tears down the just-built handle before `Failed` is committed; round-6: three internal-consistency blockers on rev 7 repaired — §6.2 #8 deny is write-first like every other statement of W-deny; §3.7 step 4 diffs against the live subset so a server-re-added tool is reachable; one skill-refusal predicate, `CapabilityOracle::is_satisfiable`, at every consumer), accepted mechanism. **Residue for the next pass:** none blocking in this file; the owner-gated items are enumerated in §13 (Q5–Q14) and are **not applied anywhere** in this document — §13's arrows are recommendations, and silence enacts none of them. **Cross-file follow-ups still owed (not this file):** the cost-lockout fix now has its slot (api-fix-plan Phase 0 **A5** with its *Verify* clause) and the roadmap's Known-broken row reads confirmed + scheduled (both 2026-09-02); plan Phase 0 **A1** now orders deny write-first, matching §6.2 #8; the GUI `GapId` union (`unavailable.ts:37`/`:233` still read `GAP-19`, C7 work); and the small plan/KB wording items listed in the rev-7 log entry. The plan-side N5/Phase 8/ADR-030 items rev 6 listed as owed **landed** with plan rev 3 and ADR-030 (`94a8f42`). Supersedes ADR-029 (flat per-tool disable list) entirely.
 **Rev 8 in one line:** three rev-7 self-contradictions closed, nothing else moved — §6.2 #8 now reads as
 §3.2 W-deny / §4.1 / C3 / ADR-030 (a) already did (write the denial, then T0–T4, `Unapproved{Denied}` at T5);
 §3.7 step 4 diffs the fetched list against `retained \ server_withdrawn` so a name the server drops and later
@@ -1042,7 +1042,7 @@ with no cause special case. E2 re-resolves `bearer_env`/`api_key_env`, so a
 rotated credential takes effect here — §3.3 E2's "a re-enable is also how a rotated credential takes effect"
 stays true and stops being the *only* way. Exposed as `POST /v1/extensions/{kind}/{id}/reload` (§8) and
 `openalpaca ext reload` (C6). **Whether the `mcp.toml` watcher also calls it for an `Enabled` server whose
-fingerprint changed** is **§13 Q9 (T6(c))** — until decided, the watcher applies the bit alone and a changed
+fingerprint changed** is **§13 Q9 (T6(c))** — taken *yes* on 2026-10-17, not built; until it is built, the watcher applies the bit alone and a changed
 block on a live server takes effect at the next `reload`/`enable` (edge case 15 says so).
 
 ### 3.5 Daemon shutdown
@@ -1091,7 +1091,7 @@ already in hand, plus a non-blocking `try_wait` sweep on read — no poller.**
    respawned three times before anyone learns it crashed. *Whether to flip to Claude Code's split* (stdio
    `TransportClosed`/exit → `mark_failed(Crashed)` on the **first** failure, no respawn; bounded reconnect and
    `ReconnectExhausted` for streamable-HTTP only) is **§13 Q8 (T6(a))** — it reverses this item, §10 case 7(d)
-   and C2's crash test, so it is not applied here.
+   and C2's crash test, so it is not applied here. *(Taken 2026-10-17: no flip — automatic recovery is kept in the form of the audit's fix N-MCP-1, plan-rev3 §5.4: reconnect once before a call is sent, never resend a call that may have reached the server, one deadline over both; when the ledger learns `Failed` stays the owner's, §13 Q8.)*
 
    *Call-time classification (X-7).* `ReconnectExhausted` is not the only terminal error a call can surface.
    An HTTP MCP server whose token expired mid-session answers **401/403**, and today that would burn the four
@@ -1107,7 +1107,7 @@ already in hand, plus a non-blocking `try_wait` sweep on read — no poller.**
    `Failed{Crashed}` after `ReconnectExhausted`, exactly as today. Stdio stays `Unreachable`/`Crashed`
    (indistinguishable, §4.2). The single env-credential **re-resolve + one retry** before classifying — Claude
    Code's `headersHelper` budget-of-one, the non-OAuth precedent closest to `bearer_env`/`api_key_env` — is
-   **§13 Q10 (T7)**; classification lands either way. The `detail` for every MCP failure is rendered from
+   **§13 Q10 (T7)** — taken 2026-10-17 as one re-resolve and one retry for a 401 on a request that carried the env credential, not built; classification lands either way. The `detail` for every MCP failure is rendered from
    `McpClient::connection_state()` (§3.2 T4b, X-5 c) — *"reconnect exhausted after 3 attempts"* — not
    inferred from the last error string.
 2. **Plugins — the proxies in `openalpaca_plugins`.** The registry's `Plugin` arm sees only a `String`
@@ -1313,7 +1313,7 @@ the receiver created at E2 and tags every message with the incarnation's generat
    not bumped** — it is the same incarnation, the same client, and every snapshot's handle to a *kept* tool
    stays valid; bumping would refuse every in-flight run's surviving tools as `Stale` for nothing. Emit
    `ExtensionStateChanged { state: "enabled", tools_changed: true }` (§3.2 T5's flag) so the GUI row re-renders
-   (§9.5). If §13 Q7 (T4) is ever accepted, this is the second place — beside T5/E5/`mark_failed` — that the
+   (§9.5). If §13 Q7 (T4) — taken on 2026-10-17, not built — is built, this is the second place — beside T5/E5/`mark_failed` — that the
    status block's change counter would tick.
 8. **Surfaces.** Nothing rebuilds mid-run (§6.2 #2 — surfaces are built once per request, and that is what
    turns a mid-turn list change into a *next-request* event rather than a mid-round one). A run in flight sees
@@ -1607,7 +1607,7 @@ GUI route writes the file. New behaviour: log at `error`, register **one** pseud
 `{kind: mcp, id: "config/mcp.toml", state: Failed{ConfigInvalid}, detail: <parse error>}` so the Extensions
 list shows exactly what is wrong, and boot normally. That is the **boot** rule, where there is no last-good
 declaration set to keep; under the watcher an unparseable rewrite registers the same pseudo-record and
-**skips the diff**, so nothing running is torn down (§10 case 15).
+**skips the diff**, so nothing running is torn down (§10 case 15). *(B-17, taken 2026-10-17 and not built, narrows this to the bad block: an invalid block becomes its own `Failed{ConfigInvalid}` and the other servers load — §13.)*
 
 **`seed_default_configs` must seed `mcp.toml`.** It writes only `llm.toml` and `daemon.toml` today
 (`bootstrap/config.rs:73-94`), and every `watch_paths` push in `main.rs:259-292` is guarded by
@@ -2098,7 +2098,7 @@ because in context the failure mode is the model *forgetting*, not the log filli
 | auto-routed skill | no — it is dropped from candidacy before it can fire, on both resolution branches (§6.2 #12) | nothing was attempted |
 | cron skill (either branch, §6.2 #13) | no per fire; **one notice on the owner's default lane per transition** (§7.3), written to the conversation store and fanned out cross-channel — not pushed through the connector-only progress path | nobody is watching |
 | subagent template's declared capability (`resolve_agent_tools`) | no — log + event, plus an `unsatisfied_capabilities` chip on the template's GUI row | the user did not name this subagent; interrupting a running workflow to report a template's declaration is noise |
-| main loop / lead agent losing default-surface extension tools | **no** — log + WS only (**pending §13 Q7 / T4**, which would split this row by disposition: `Disabled` never; `Failed{*}`/`Unapproved{*}`/`ConfigInvalid` — things the owner left *on* — as a per-turn status block) | the model was never promised them, and if it reaches for one anyway §7.1 hands it a relayable error. **The cache argument, stated in two layers (X-14):** a block in the **Layer-2 system prompt** would rewrite the cached fixed zone (system + tool definitions) on every status change — that objection holds, and rev 4 was right about it. A block in the **per-turn message slot** (`<active_workflows>`, `simple_query_handler.rs:559-560`) protects the fixed zone — OpenAlpaca's Anthropic breakpoints sit on `system[0]`, the last tool and the last message (`providers/anthropic/request.rs:236-315`) — but because it is built per request, not persisted, and re-inserted before each new user turn, it **moves**: the prefix that ended at the previous user turn no longer matches, and the conversation layer is re-read uncached on every turn a block is present (zero cost when nothing is degraded, the common case). `<active_workflows>` already pays exactly this during workflows, unstated; the `workflow_context.rs` header (lines 1-9) argues only about the internal Tier-1/Tier-2 compose caches, not the provider cache. Claude Code's appended notice avoids the cost only because it is a *persisted* transcript attachment that stays in history, so later turns append rather than move — that persisted shape (a `context_block` history record) is the cache-stable alternative if T4 is accepted and the cost matters. `routing/router/fallback.rs:32-34` drops `ephemeral_system_notice` on the CLI-backend fallback, so the message slot is the only placement that survives every provider path. A round-boundary delta on the lead surface (X-17) is gated on the same decision. |
+| main loop / lead agent losing default-surface extension tools | **no** — log + WS only (**§13 Q7 / T4, taken 2026-10-17 in the moving-slot shape and not built — until a commit builds it, this row is what ships**; built, it splits this row by disposition: `Disabled` never; `Failed{*}`/`Unapproved{*}`/`ConfigInvalid` — things the owner left *on* — as a per-turn status block) | the model was never promised them, and if it reaches for one anyway §7.1 hands it a relayable error. **The cache argument, stated in two layers (X-14):** a block in the **Layer-2 system prompt** would rewrite the cached fixed zone (system + tool definitions) on every status change — that objection holds, and rev 4 was right about it. A block in the **per-turn message slot** (`<active_workflows>`, `simple_query_handler.rs:559-560`) protects the fixed zone — OpenAlpaca's Anthropic breakpoints sit on `system[0]`, the last tool and the last message (`providers/anthropic/request.rs:236-315`) — but because it is built per request, not persisted, and re-inserted before each new user turn, it **moves**: the prefix that ended at the previous user turn no longer matches, and the conversation layer is re-read uncached on every turn a block is present (zero cost when nothing is degraded, the common case). `<active_workflows>` already pays exactly this during workflows, unstated; the `workflow_context.rs` header (lines 1-9) argues only about the internal Tier-1/Tier-2 compose caches, not the provider cache. Claude Code's appended notice avoids the cost only because it is a *persisted* transcript attachment that stays in history, so later turns append rather than move — that persisted shape (a `context_block` history record) is the cache-stable alternative if T4 is accepted and the cost matters. `routing/router/fallback.rs:32-34` drops `ephemeral_system_notice` on the CLI-backend fallback, so the message slot is the only placement that survives every provider path. A round-boundary delta on the lead surface (X-17) is gated on the same decision. |
 | an extension simply being off, with nothing trying to use it | **never** | S4 is about *withdrawn capabilities*, not announcing inventory |
 
 ---
@@ -2456,9 +2456,9 @@ deleted in C7 with the `/v1/plugins*` routes (§8).
 | 10 | **Corrupt `.permissions.toml`** | Stop failing open. `load_permissions_table` (`permission_gate.rs:140-153`) returns `Err`; every plugin parks at `Failed{ConfigInvalid, "permissions store unreadable"}`; nothing loads; **the file is never overwritten**, so the user can repair it. Writes go through the same lock + temp + re-parse + rename path, so a crash mid-write can no longer truncate the approval store. |
 | 11 | **Enable on an already-Enabled extension** | CAS at E0 fails; 200 with the current row; nothing happens. Fixes the permanent capability-provider leak at `manager.rs:262-278` (§3.3 E0). |
 | 12 | **Plugin capabilities grew between disable and re-enable** | E1 drift check reads back the list recorded at `permission_gate.rs:66`. Growth → `Unapproved{CapabilitiesGrew{added}}`, requiring a fresh Approve that shows **only the new capabilities**. Falls straight out of splitting `approved` from `enabled`. |
-| 13 | **Two extensions register the same tool name** | Pre-existing and not solved here, but not made worse. `register` overwrites on duplicate and returns `Ok` (`registry/mod.rs:262`). The rule, stated once so §8's `skipped_tools` and this cell agree: **a name is blocked only by a live incumbent.** At E4 the newcomer asks `owner_of(name)`; if it returns a *different* extension whose state is `Enabled` **and** whose `server_withdrawn` set does not hold the name — only then is the tool live in the registry — the newcomer skips the name with `warn!(ext, tool, incumbent, "tool name collision — skipping")` and records it in its row's `skipped_tools`. If the incumbent is **not live** — not `Enabled` (a retained attribution from a disabled, failed or unapproved extension), **or** `Enabled` but holding the name in `server_withdrawn` (the server itself dropped it, §3.7; near-unreachable under `<server>__`/`<plugin>::` namespacing and X-3, but the rule must not be wrong) — the newcomer **takes the name**: `record_tools` writes `tool_names[name] = newcomer` and removes the name from the incumbent's retained set and from its `server_withdrawn` flag, so a later miss attributes to the extension that actually served it last, and the incumbent's own T1 (on its eventual disable) will not touch a name it no longer owns. `tool_names` stays a single `name → ExtensionId` map — two claimants are never recorded at once; the loser is either skipped (live incumbent) or displaced (dead incumbent). At T1 an extension removes only names the ledger currently attributes to it. Without this, disabling A could delete a tool B had overwritten it with, or a re-enabled A could be refused its own tool because a long-disabled B once had the name. **The same rule governs a name a server adds mid-session** (§3.7 step 6): the newcomer is the added tool, the check is identical, and the loser is skipped into `skipped_tools` — never silently shadowed. A real namespace fix is separate work. |
+| 13 | **Two extensions register the same tool name** | Pre-existing and not solved here, but not made worse. `register` overwrites on duplicate and returns `Ok` (`registry/mod.rs:262`). The rule, stated once so §8's `skipped_tools` and this cell agree: **a name is blocked only by a live incumbent.** At E4 the newcomer asks `owner_of(name)`; if it returns a *different* extension whose state is `Enabled` **and** whose `server_withdrawn` set does not hold the name — only then is the tool live in the registry — the newcomer skips the name with `warn!(ext, tool, incumbent, "tool name collision — skipping")` and records it in its row's `skipped_tools`. If the incumbent is **not live** — not `Enabled` (a retained attribution from a disabled, failed or unapproved extension), **or** `Enabled` but holding the name in `server_withdrawn` (the server itself dropped it, §3.7; near-unreachable under `<server>__`/`<plugin>::` namespacing and X-3, but the rule must not be wrong) — the newcomer **takes the name**: `record_tools` writes `tool_names[name] = newcomer` and removes the name from the incumbent's retained set and from its `server_withdrawn` flag, so a later miss attributes to the extension that actually served it last, and the incumbent's own T1 (on its eventual disable) will not touch a name it no longer owns. `tool_names` stays a single `name → ExtensionId` map — two claimants are never recorded at once; the loser is either skipped (live incumbent) or displaced (dead incumbent). At T1 an extension removes only names the ledger currently attributes to it. Without this, disabling A could delete a tool B had overwritten it with, or a re-enabled A could be refused its own tool because a long-disabled B once had the name. **The same rule governs a name a server adds mid-session** (§3.7 step 6): the newcomer is the added tool, the check is identical, and the loser is skipped into `skipped_tools` — never silently shadowed. A real namespace fix is separate work. *(B-05, taken 2026-10-17 and not built, extends this rule to a plugin's skill ids, slashes, aliases and agent ids — §13.)* |
 | 14 | **`config/mcp.toml` does not exist** | After the seeding change (§5.1) it always does, fully commented. Toggling a server not present in the file is **404**: this API never *creates* servers, only toggles declared ones. Server creation is GAP-24. The shipped file has every server commented out, so the empty case is the common one and the section gets an explicit empty state naming where to declare a server and where to drop a plugin. |
-| 15 | **Hand edit to `mcp.toml` the daemon did not write** | The file **is** the store, so a hand edit is authoritative and there is no precedence rule to surprise anyone. `mcp.toml` joins `watch_paths` (`main.rs:259-292`) with a `mcp_hashes` dedup ring on `FileWatcherContext` (`hot_reload.rs:23-53`); the reload arm calls `reconcile_all()`, which diffs desired against actual and loads/unloads only what changed. **The diff key is presence + `enabled` bit + `config_fingerprint`** (§3.3 E2, X-11): a block that appeared → E0–E5 if bit-true, else a `Disabled` record; a block that vanished → T5-gone; a bit that flipped → the matching verb; a fingerprint that changed on a **`Failed`** record → E0–E5 (§3.4 trigger 2 — this is how "edit the declaration to retry" works without retrying every failed server on any edit); a fingerprint that changed on an **`Enabled`** record → **nothing until §13 Q9 (T6(c)) is decided** — the live server keeps its old connection and the edit takes effect at the next `reload`/`enable`, and the log says so at `info!(server, "declaration changed; reload to apply")`. A hand edit that changes an enabled server's `command`/`args`/`env`/`url` without touching `enabled` is therefore not silently ignored, merely not auto-applied. Losing the event is tolerable — filesystem events are `try_send` with drop-on-full (`wake/watcher/filesystem/mod.rs:114-120`) — because the **route** path never depends on the watcher: `set_enabled` writes the file (step W) **and then** reconciles in-process. The watcher **does** observe the daemon's own write — a route-driven toggle produces the same filesystem event a hand edit does — and the `mcp_hashes` ring is what swallows it: unlike the existing `llm_hashes` ring, which nothing ever pushes into (making the "skipping reload" branch unreachable), the writer here pushes the post-write content hash **before** the rename, so the reload arm finds the hash already present and skips; the in-process `reconcile(name)` is the only reconcile a route-driven toggle runs. **An unparseable file under the watcher keeps the last-good desired set.** If the reload arm's `McpConfig::load` fails — an editor's intermediate save, a half-typed block — the arm registers (or refreshes the `detail` of) the `config/mcp.toml` pseudo-record of §5.1 at `error!` and **skips the diff**: nothing is torn down, nothing is loaded, every running server keeps running against the last declaration set that parsed. Composing "a block that vanished → T5-gone" with §5.1's boot rule would otherwise tear down every running server on a typo (cron notices, drains) and reload them all with new generations when it is fixed — the opposite of §2.1's X-27 rationale. The pseudo-record is dropped by the next reload whose parse succeeds, and that reload's diff runs against the last-good set, so an edit made in the same sitting as the typo still lands. Fail-closed on corruption (§5.1) is therefore a **boot-time** rule: at boot there is no last-good set to keep. |
+| 15 | **Hand edit to `mcp.toml` the daemon did not write** | The file **is** the store, so a hand edit is authoritative and there is no precedence rule to surprise anyone. `mcp.toml` joins `watch_paths` (`main.rs:259-292`) with a `mcp_hashes` dedup ring on `FileWatcherContext` (`hot_reload.rs:23-53`); the reload arm calls `reconcile_all()`, which diffs desired against actual and loads/unloads only what changed. **The diff key is presence + `enabled` bit + `config_fingerprint`** (§3.3 E2, X-11): a block that appeared → E0–E5 if bit-true, else a `Disabled` record; a block that vanished → T5-gone; a bit that flipped → the matching verb; a fingerprint that changed on a **`Failed`** record → E0–E5 (§3.4 trigger 2 — this is how "edit the declaration to retry" works without retrying every failed server on any edit); a fingerprint that changed on an **`Enabled`** record → **nothing until §13 Q9 (T6(c)) is built** (taken *yes* on 2026-10-17; then it runs §3.4.1) — the live server keeps its old connection and the edit takes effect at the next `reload`/`enable`, and the log says so at `info!(server, "declaration changed; reload to apply")`. A hand edit that changes an enabled server's `command`/`args`/`env`/`url` without touching `enabled` is therefore not silently ignored, merely not auto-applied. Losing the event is tolerable — filesystem events are `try_send` with drop-on-full (`wake/watcher/filesystem/mod.rs:114-120`) — because the **route** path never depends on the watcher: `set_enabled` writes the file (step W) **and then** reconciles in-process. The watcher **does** observe the daemon's own write — a route-driven toggle produces the same filesystem event a hand edit does — and the `mcp_hashes` ring is what swallows it: unlike the existing `llm_hashes` ring, which nothing ever pushes into (making the "skipping reload" branch unreachable), the writer here pushes the post-write content hash **before** the rename, so the reload arm finds the hash already present and skips; the in-process `reconcile(name)` is the only reconcile a route-driven toggle runs. **An unparseable file under the watcher keeps the last-good desired set.** If the reload arm's `McpConfig::load` fails — an editor's intermediate save, a half-typed block — the arm registers (or refreshes the `detail` of) the `config/mcp.toml` pseudo-record of §5.1 at `error!` and **skips the diff**: nothing is torn down, nothing is loaded, every running server keeps running against the last declaration set that parsed. Composing "a block that vanished → T5-gone" with §5.1's boot rule would otherwise tear down every running server on a typo (cron notices, drains) and reload them all with new generations when it is fixed — the opposite of §2.1's X-27 rationale. The pseudo-record is dropped by the next reload whose parse succeeds, and that reload's diff runs against the last-good set, so an edit made in the same sitting as the typo still lands. Fail-closed on corruption (§5.1) is therefore a **boot-time** rule: at boot there is no last-good set to keep. |
 | 16 | **Plugin directory vanishes / returns** | `Orphaned`, entry preserved (§5.1). |
 | 17 | **Disable → re-enable while a run holds a snapshot** (§3.0 Fact 3) | The lead agent's snapshot keeps the **previous** load's `RegisteredTool`: an `Arc<McpClient>` that T4 disconnected and T4b sealed, or a `PluginToolProxy` over a channel whose process is dead. After E5 the ledger reads `Enabled`, so a state-only gate would pass the call to the dead handle — a raw `transport closed` string for the rest of the run (MCP), or, for plugins, a `ChannelClosed` that rev 3's proxy would have turned into `mark_failed` **against the healthy new process**. Resolution: every load has a `generation` (bumped at E0, stamped into the `ToolBackend::Mcp` literal at `bridge.rs:46` and into the proxies at `manager.rs:831`/`:419`/`:452`); the hit arm compares `entry.incarnation()` to the record and refuses a mismatch as `Stale` with the §7.1 wording, `warn!` + `ExtensionCapabilityWithheld`; `mark_failed` is a no-op for a non-current generation. The run loses the tool until its next request — which is exactly when a fresh snapshot is taken. Pinned by C1's `stale_snapshot_after_reenable_refuses_and_live_stays_enabled` and C3's `stale_proxy_channel_closed_after_reenable_does_not_flip_row`. |
 | 18 | **A connected MCP server changes its tool set mid-session** (`notifications/tools/list_changed`) | §3.7 in full. rmcp delivers the notification (`handler/client.rs:59`); OpenAlpaca's unit handler dropped it (`client.rs:436-437`). Under the per-extension mutex and only while `Enabled` at the notifying incarnation's generation: refetch `list_tools` (keep the old set on failure); diff against the **live subset** (`retained \ server_withdrawn`, §3.7 step 4), so a name the server dropped and later re-adds lands in `added`; removed names → T1 per name (tombstone + `remove()`), kept in `tool_names` and flagged `server_withdrawn`, refused on **both** gate arms with the *"withdrawn by the server"* wording, dependent scan + cron notice with `WithdrawalCause::ServerListChange`; added names → E4 with the case-13 collision rule and the current generation, per-capability `restore_caps`, and a re-added name unflagged; `record_tools` with the union; **no generation bump**; `ExtensionStateChanged { tools_changed: true }`. A notification from a `Disabled`/`Failed`/`Disabling` server does nothing — its client is sealed, its receiver is gone, and a straggler fails the state re-check. Surfaces pick the change up at the next request (§6.2 #2). Plugins have no such notification; their set is fixed per incarnation and `reload` is the way to change it. |
@@ -2538,7 +2538,8 @@ not mean the user wanted the server off; guessing would silently disable working
 ### 11.2 Is any per-TOOL reach still needed under S1? **No.**
 
 S1 puts the toggle on the install unit; `global_tool_deny` is per-tool, i.e. strictly finer. So the honest
-question is whether anything real is lost. Three findings settle it, and the last one is decisive.
+question is whether anything real is lost. Three findings settle it, and the last one is decisive; a fourth, written
+with the owner's answer to §13 Q5 (T1) on 2026-10-17, closes the policy-rule question beside it.
 
 **(1) It was never a registry-wide gate, and it is unreachable by subagents — so it cannot be the fine-grained
 half of an enable mechanism.** Precisely (X-24 — rev 5 overstated this as "never a gate"): on the **five
@@ -2575,6 +2576,13 @@ from purge into migrate, and nothing here presumes it.
 **(3) It is the rejected shape.** A flat per-tool name list on `SkillDefaults` is exactly what ADR-029
 generalised and the owner rejected. Leaving a vestigial instance in `daemon.toml` would keep that framing alive
 in the config file the owner reads.
+
+**(4) A policy-layer per-tool deny RULE set is not wanted either** (§13 Q5 (T1), answered *no* by the owner's blanket
+answer of 2026-10-17 (PDT; 2026-10-18T01:56Z)). A single-operator daemon has no policy author distinct from the
+operator, and the per-agent ALLOW axis already names individual tools on the correct axis, so a rule set enforced in the
+§6.2 #1 gate would add a second owner-authored list answering a question nobody else asks. §11.1 stays a purge, not a
+migrate. Should it ever be reopened, the ZCode audit's caution applies: deny is evaluated before every allow path and
+every mode shortcut (ZCode's yolo mode allows before its deny list is read, `tasks/pending-decisions.md` §1.1 T1).
 
 **What is actually lost, and where it goes.** One real use dies: trimming a chatty 40-tool MCP server down to
 three tools on the main-loop prompt. That is **prompt-budget management, not access control**, and it has two
@@ -2712,6 +2720,18 @@ written** — api-fix-plan §0 states the same rule for its pending table (*"the
 a decision"*, plan rev 3 line 58), and several recommendations below (Q7, Q9, Q10, Q11, Q13) are the *opposite*
 of the design as written, which is exactly why they cannot be defaults. Nothing here is settled by S1–S4.
 
+**The owner's blanket answer, 2026-10-17 (PDT; 2026-10-18T01:56Z)** — *"for the decisions all use recommend by Zcode or
+Recommend options"*: every pending question is taken as its current recommendation, the ZCode audit's where it gave or
+changed one (`tasks/research/zcode-audit-2026-10-17.md`; `tasks/pending-decisions.md` rev 5's *ZCode* sentences), else
+the one written here; a question with no recommendation stays pending. Here that takes **Q5–Q12 and Q14**, each as the
+line under it says; Q8's sub-choice (when the ledger learns `Failed`) has no recommendation and stays pending; **Q13**
+is taken as its recommendation, whose condition held, with nothing left to build; Q1–Q3 keep the defaults they shipped
+with; and **Q4**'s default is confirmed by the audit's B-06, taken the same day. Taking a question implements nothing:
+the arrow above each answer and the design text it would change stay what ships until a commit builds it, and each one
+taken here is **taken; not built; needs a plan entry** unless its line names the place a plan gives it. Four of the
+audit's decisions on this design's rows, and the three lessons rows this design applied without a recorded answer (T2,
+T5, T6(b)), were taken the same day and are recorded after Q14.
+
 **Q1. Does a disabled extension's row show the tools it *used to* provide?**
 Today nothing caches a disabled server's tool names, so after a restart a disabled row lists zero tools and its
 capabilities warn as *"unknown"* rather than *"withheld by github"*. Caching them across boots would make the
@@ -2749,6 +2769,13 @@ plugin you update often, that is a recurring prompt with no escape hatch.
 → **Default: no escape hatch in v1.** The prompt shows only the delta ("Now also asks for: X, Y"), which is
 short and cheap to accept. A blanket-trust flag can be added later if the prompting proves annoying; it cannot
 be removed once people rely on it.
+**Confirmed 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer, by taking the audit's B-06 as (2):** no
+escape hatch, the prompt showing only the delta — and consent is bound to a `consent_digest` taken at approve time over
+`entry`, `args`, `env` keys and values, `types` and the capabilities (virtual ones included); a mismatch at E1 is treated
+like capability growth, with a new reason such as `DeclarationChanged` and a preview of the delta, so an update that
+swaps `entry` or adds `types.agent = true` no longer runs under the old approval. Hashing the entry file's bytes, B-06's
+option (3), is not taken. A new enforcement point — taken; not built; its place is plan-rev3 §5.4's B-06 row, after
+P38.
 
 **Q5 (T1). Do you want an owner-authored per-tool deny RULE set — distinct from the toggle?** E.g.
 `[security.permissions] deny = ["github__delete_repo", "notion__*"]` in `daemon.toml`; names and `<server>__*`
@@ -2760,6 +2787,10 @@ distinct from the operator, and the per-agent ALLOW axis already names individua
 *If yes:* §11.1 becomes *migrate* (`global_tool_deny` entries into the rule set), the display-filter sites
 retire in favour of the gate, `/v1/tools` gains read-only `denied_by`, §9.3 gains a read-only "denied by rule"
 chip, and a load-time `warn!` fires for a rule naming no registered tool.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer: no** — option (1), no per-tool deny rule set;
+the per-agent ALLOW axis stays the only way to narrow tools, C8's purge stands, and the rejection is recorded as §11.2's
+finding (4), written with this revision. The audit confirms it (`tasks/pending-decisions.md` §1.1 T1): if it is ever
+reopened, deny is evaluated before every allow path. Nothing to build.
 
 **Q6 (T3). Should the design define a third, orthogonal LOADED axis — deferred tool schemas — beside ALLOW and
 ENABLE?** The numbers are in §11.2. Claude Code defers MCP schemas by default (names only, loaded on demand;
@@ -2770,6 +2801,14 @@ counter is observed non-zero on the owner's real configuration (today it reads 0
 "surface loading" subsection lands here; §6.2 #2's "never rebuild during the run" gains a bounded round-boundary
 exception; any override is per install unit (`[servers.x] always_load = true`), never per tool; the names block
 applies the same `Enabled` filter and the loader runs through the gate.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer: record the rule, build nothing yet** — option
+(2), confirmed by the audit (ZCode defers no schemas). The rule, recorded: every enabled extension's tool schemas load
+upfront while their estimate, measured from real bytes, stays within 10 % of the request's window; the loader is built
+only once that threshold is seen crossed on the owner's real configuration; any always-load override is per install
+unit, never per tool. No loader is built. The byte-based estimate it measures with exists — every surface builder's
+`register_section("tools", …)` takes `estimate_tools_tokens` (`crates/openalpaca_core/src/runner/agentic_loop/context.rs:32`,
+the lessons' C-1, which §11.2's flat-200 numbers predate) — but the once-per-lane log of a request crossing 10 % does not
+(no such check under `crates/` or `apps/` at `476f1f81`); that log is taken; not built; needs a plan entry.
 
 **Q7 (T4). May a per-turn `<extension_status>` block on the main-loop and lead surfaces satisfy S4's chat leg
 for degraded-but-wanted extensions — and if so, in which shape?** §7.5's row says log + WS only. The proposal
@@ -2785,6 +2824,10 @@ tests), X-17 (a round-boundary delta on the **lead** surface only, at the steeri
 `runner/agentic_loop/mod.rs:445-449`, driven by a ledger-wide change counter that is **distinct from the
 per-record `generation`**), X-20 (no dedup for the block) and P-18 land in C4. *If no:* §7.5 records that the
 model-facing preamble pattern was considered and rejected; the tool result stays the only model-facing channel.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer: yes, in the moving-slot shape** — option (2);
+the answer is the ratification the reversal of §7.5's row asked for. The *If yes* list above (X-13, X-15, X-16, X-17,
+X-20, P-18) was written to land in C4, which shipped without it, so it is taken; not built; needs a plan entry. Until it
+is built, §7.5's row and §7.1's tool result are what ships.
 
 **Q8 (T6(a)). Stdio MCP servers: keep transparent respawn (§3.6 item 1, §10 case 7(d)) or adopt Claude Code's
 "never auto-reconnect a local process" — `mark_failed(Crashed)` on the first failure, bounded reconnect for
@@ -2792,6 +2835,15 @@ streamable-HTTP only?** Both are defensible; the design documents respawn as a d
 → **Recommendation: keep respawn** (a respawn is cheaper than a human retry on an unattended daemon). *If flipped:*
 §3.6 item 1 and case 7(d) are rewritten around the transport split, `Crashed` becomes reachable on the first
 failure, and C2's crash test is rewritten to first-failure semantics.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer: keep automatic recovery, in the form the audit
+gives it** — option (1), the ZCode audit's changed mechanism (`tasks/pending-decisions.md` §1.1 T6(a), audit Z5-02):
+no flip to Claude Code's split; a disconnected stdio server is reconnected once **before** a call is sent, a call that
+may have reached the server is never sent again, and one deadline covers both — which keeps §3.6 item 1's transparent
+respawn and ends the unbounded ladder. That work is the audit's fix **N-MCP-1**, already scheduled (plan-rev3 §5.4:
+after G-base's run of record and P18, before P19, at Phase G's head). **Left pending, no recommendation:** the
+sub-choice of when the ledger learns `Failed` — (s1) after the respawns, as N-MCP-1 is written, or (s2) at the next call
+(it touches §3.6 item 1). N-MCP-1 is written as (s1); the decision sheet places this answer before N-MCP-1
+(`tasks/decision-sheet-2026-10-17.md` §2).
 
 **Q9 (T6(c)). Should the `mcp.toml` watcher `reload` an `Enabled` server whose declaration block changed
 (fingerprint changed, bit untouched)?** Today's rule (§10 case 15): the edit is logged and applied at the next
@@ -2801,6 +2853,10 @@ so a yes goes beyond the reference design.
 `reload` exists to remove, and the fingerprint is value-masked so no credential value ever drives a teardown.
 *If yes:* case 15's diff key applies the fingerprint to `Enabled` records too, running §3.4.1 with the
 "reloading" wording and no cron notice. *If no:* case 15 stands as written.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer: yes** — option (2), confirmed by the audit,
+keeping the value-masked fingerprint, which is stricter than ZCode's whole-configuration key. The *If yes* above (case
+15's diff key applied to `Enabled` records, §3.4.1 with the "reloading" wording, no cron notice) is taken; not built;
+needs a plan entry. Until then case 15 and §3.4.1's watcher sentence are what ships.
 
 **Q10 (T7). On a mid-session 401/403 from an HTTP MCP server, should the daemon re-resolve the env-sourced
 credential once, reconnect and retry the call once before classifying `Failed{NeedsAuthorization}`?** This is
@@ -2808,23 +2864,46 @@ Claude Code's `headersHelper` budget-of-one (re-run the credential source, retry
 either way (§3.6 item 1).
 → **Recommendation: yes** — one re-resolve, one retry, never a ladder, never a poller. *If no:* a rotated env value is
 picked up only by `reload`/`enable`.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer: yes, narrowed as the audit gives it** — option
+(3): one re-resolve and one retry for a **401** on a request that carried the env credential only; a 403 is
+`Failed{NeedsAuthorization}` at once (`crates/openalpaca_mcp/src/error.rs` already tells the two apart); never a ladder,
+never a poller. Taken; not built; needs a plan entry. Until then a mid-session 401/403 is `McpError::Unauthorized` at
+once, as shipped.
 
 **Q11 (T8). If a project-scope MCP declaration is ever read (api-fix-plan §1.2's reserved `config/`), may it
 enter through `Unapproved{NeverSeen}` — extending an S3 reason that §4.1 today makes plugin-only to MCP?** The
 precondition that makes the current fold correct is written in §3.3 E1; this is only about the entry state.
 → **Recommendation: yes** — a reason on an existing state, consent bit in the home store, never in the committed file.
 No `resync` verb, no shadow table.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer: yes, refined as the audit gives it** — option
+(3): a project-scope declaration, if one is ever read, enters `Unapproved{NeverSeen}` with its consent kept in the home
+store **and bound to a digest of the declaration** (B-06's shape, Q4 above), and the gate is written **before** any
+project-scope read lands; project skills, if ever read, the same plus no scripts and no confirmation list. Nothing reads
+a project-scope declaration today (its premise, api-fix-plan §1.2's `<project>/.openalpaca/config/`, is superseded by
+the storage design's ST-1 and ST-9), so nothing is built now; the gate is the first commit of any change that adds such
+a read.
 
 **Q12 (T9). Plugin config values marked `sensitive` (§8): default store `secret_encrypted` (in-root, under
 `state/.master_key`) or `secret_ref` (OS keychain)?** The mechanism is fixed; only the default is open.
 → **Recommendation: `secret_encrypted`** — D1-pure, and Claude Code itself falls back to an in-root secrets file when
 the Keychain rejects a write. *If `secret_ref`:* api-fix-plan's keychain-scoping pre-check (its T10) becomes
 mandatory rather than advisory.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer: `secret_encrypted`** — option (2), decided with
+T19 (taken by the same answer: `[web_search] api_key` under the providers' secret resolution order; its row is
+api-fix-plan §0's), and
+confirmed by the audit, whose note stands: ZCode's fallback key derivation is not to be copied. Today the caller must
+choose, `set_plugin_secret` has no production caller and a sensitive key written through the config route is refused
+(`tasks/pending-decisions.md` §1.2 T9), so making `secret_encrypted` the default is taken; not built; needs a plan entry.
 
 **Q13 (T14). api-fix-plan Phase 0's GAP-22 stamps `ts`/`instance_id` on the six `plugin_*` WS events that C7
 deletes together with their GUI mappings. Keep it or drop it?**
 → **Recommendation: drop it if this design lands before Phase 8** — the `Extension*` family carries both fields from
 birth (§7.3); otherwise keep it only as interim GUI ordering, knowing C7 deletes it again.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer, as recommended: drop it** — its condition held: C1–C8 landed
+between api-fix-plan's Phases 1 and 2, before Phase 8. Moot in fact, with nothing to build: GAP-22 was never started and
+C7 deleted the six `plugin_*` variants. `tasks/pending-decisions.md` §1 lists the row under *Closed without a decision*
+and api-fix-plan §0's twelfth *Owner decisions taken* subsection records it taken as recommended, moot, outside its
+count; the outcome is the same one: GAP-22 dropped, nothing built.
 
 **Q14 (T15). Is a named, fixed *ambient* allow set — today `{workspace_read, workspace_write}`, appended to
 every subagent allowlist by the policy constructor with no template listing it (§6.1) — acceptable against
@@ -2834,6 +2913,33 @@ never extended without a design revision; existing practice made explicit, not a
 today's two-name set regardless. *If no:* strict per-agent allow — `read_result` is listed per template/skill,
 the spill stub omits its paging hint on surfaces that lack it, and `workspace_read/write` remain the one
 grandfathered exception or move into templates too.
+**Taken 2026-10-17 (PDT; 2026-10-18T01:56Z), the owner's blanket answer: yes** — option (2), confirmed by the audit:
+the ambient set is `{workspace_read, workspace_write, read_result}`, fixed and named in §6.1 and api-fix-plan A0, beaten
+by `denied_capabilities`, never widened without a design revision. Adding `read_result` to the constructor's set is
+taken; not built; needs a plan entry. Until then the set is the two names and `read_result` is a template grant, as all
+nine shipped templates name it.
+
+*Taken the same day from the ZCode audit, where they amend this design's rows* (the owner's blanket answer of 2026-10-17
+(PDT; 2026-10-18T01:56Z); `tasks/pending-decisions.md` §1.12; each taken and not built, its place the one plan-rev3
+§5.4's table of the audit's owner decisions gives it):
+- **B-06 → Q4** (above): the `consent_digest`, no escape hatch — after P38.
+- **B-05 → §10 case 13:** the skip rule at E4 on both insert paths (`register_plugin_skill`, `load_entry`) — a plugin's
+  skill id, slash, alias or agent id that a live incumbent holds (a file skill or template, or another enabled plugin) is
+  skipped and recorded on the row beside `skipped_tools`, the stricter of the audit's two readings of case 13; canonical
+  `<plugin>:<id>` naming, the further option, is not taken. Its apply half — honour `register_template`'s answer, remove
+  only what the plugin owns — is the audit's fix N-PLUG-6 (plan-rev3 §5.4), and the skip rule sits after it.
+- **B-17 → §2.1, §5.1:** `mcp.toml` parsed block by block, an invalid block `Failed{ConfigInvalid}` naming the field and
+  the other servers loaded, the watcher keeping a running instance whose block turns invalid, the atomic writer's
+  re-parse still strict — with the per-block unknown-key warning first, which adds no refusal and can land alone. It
+  amends §2.1's and §5.1's fail-closed whole-file shape once built; until then they are what ships — after P19.
+- **B-26 → §3.6:** a user-requested liveness check, `openalpaca ext info --check` — one `ping` bounded at 5 s, a JSON-RPC
+  error counted as alive — at low priority; no poller, so §3.6 stands — after P19.
+
+*Recorded taken the same day as this design applied them* (the lessons' T2, T5 and T6(b), `tasks/research/claude-code-design-lessons.md` §6,
+which no row had recorded as answered; `tasks/pending-decisions.md` §1, *Closed without a decision*): **T2** — a bundled
+sub-unit of a plugin is a contribution, never its own row (§2.3, X-4); **T5** — a disable tears down live and costs one
+prefix miss per lane (§6.2 #2, X-32); **T6(b)** — no automatic retry ladder for a failed server (§3.4). Nothing changes:
+each is the shipped design.
 
 *Plan-shaped decisions the lessons also raise but which do not touch this design* — subagent spend charged to
 the lead's $5 cap (T13; N4 is relabel-only, so it is a decision, not a default), `log_retention_days` 0 vs 90
@@ -3238,3 +3344,33 @@ lanes (T11) — live in `tasks/api-fix-plan.md` and are listed here only so nobo
   a never-seen row's. Why: a denied plugin stays denied whatever its manifest declares since (the drift check runs
   only for approved plugins), and `Approve` grants what it declares now, so the row names it (the hidden-characters
   spec's A21; DESIGN_SPEC §5.4 rev 13). No mechanism changes.
+- **rev 18** (2026-10-17, branch `chore/toolchain-and-deps`) — the owner's blanket answer of 2026-10-17 (PDT;
+  2026-10-18T01:56Z): every pending decision taken as its recommendation — 17 rows here; 1 left pending, no
+  recommendation. *"for the decisions all use recommend by Zcode or Recommend options"*: each question is taken as its
+  current recommendation, the ZCode audit's where it gave or changed one. **Taken** (each a dated line under its
+  question in §13): Q5 (T1) no, with §11.2's finding (4) written now; Q6 (T3) record the rule, build nothing; Q7 (T4)
+  yes, moving slot; Q8 (T6(a)) keep automatic recovery as the audit's N-MCP-1 carries it out; Q9 (T6(c)) yes; Q10 (T7)
+  narrowed to a 401 on a request that carried the env credential; Q11 (T8) yes, with consent bound to a declaration
+  digest and the gate before any project-scope read; Q12 (T9) `secret_encrypted`, with T19; Q14 (T15)
+  `{workspace_read, workspace_write, read_result}`; and from the audit, B-06 (Q4's default confirmed, a
+  `consent_digest`), B-05 (§10 case 13's skip rule for skill ids, slashes, aliases and agent ids), B-17 (`mcp.toml`
+  parsed block by block, the unknown-key warning first) and B-26 (`ext info --check`) — each placed where plan-rev3
+  §5.4's table of the audit's owner decisions puts it; Q13 (T14) as recommended, drop it — its condition held, moot in
+  fact, nothing to build (`tasks/pending-decisions.md` §1 lists it *Closed without a decision* and api-fix-plan §0 records
+  it taken as recommended, moot — the same outcome); and T2, T5 and T6(b), recorded taken as this design applied them.
+  **Left pending:** Q8's sub-choice, when the ledger
+  learns `Failed` (no recommendation). Inline notes where the body said "pending" or "until decided": §3.4.1, §3.6
+  item 1 (Q8, Q10), §3.7's second place (Q7), §7.5's main-loop row, §10 case 15; pointers to §13 at §5.1's `mcp.toml`
+  rule (B-17) and §10 case 13 (B-05). Nothing is built: Q5, Q13, T2, T5 and T6(b) need nothing; Q8 is N-MCP-1 and the
+  audit's four rows have plan-rev3 §5.4's places; every other taken row is taken; not built; needs a plan entry; and
+  the design text each would change is what ships until then. The settled rules the audit's §6 rows touch here are
+  kept, each option not taken (2026-10-17): §6-03 and §6-04 (the two-axis rule, C8's purge), §6-11 (ADR-030: install
+  never enables), §6-12 (no hooks), §6-13 (T9's `secret_encrypted`), §6-15 (§12.1's uninstall moves the directory to
+  `plugins/.trash/`, never deletes — `tasks/pending-decisions.md` §6 cited it as "ext design §1.3 rule 3", which this
+  file does not have, and cites §12.1 since rev 7's final consistency pass; api-fix-plan §1.3 rule 3 is the store's
+  "never deletes what it did not create"), §6-16 (T8's unapproved entry) and §6-17 (MCP resources a non-goal).
+  *Final consistency pass (same revision):* Q13's line and this entry say that `tasks/pending-decisions.md` lists T14
+  *Closed without a decision* while api-fix-plan §0 records it taken as recommended — the same outcome — where the
+  first wording had both files listing it under that heading. Q6's recommendation names a once-per-lane log of a
+  request crossing 10 %, taken; not built; needs a plan entry — `tasks/pending-decisions.md` T3, api-fix-plan §0's T3
+  row now says so too.
