@@ -27,5 +27,10 @@ rmcp = { version = "0.16", features = ["client", "transport-child-process", "tra
 
 [dev-dependencies]
 tempfile.workspace = true
-# `io-util` powers the in-process duplex stub server used by the seal tests.
-tokio = { workspace = true, features = ["test-util", "io-util"] }
+# `io-util` powers the in-process duplex stub server used by the seal tests;
+# `net` the loopback listener the streamable-HTTP stubs bind.
+tokio = { workspace = true, features = ["test-util", "io-util", "net"] }
+# The streamable-HTTP stubs (`src/transport/http_tests.rs`); `futures-util`
+# builds their SSE bodies.
+axum.workspace = true
+futures-util.workspace = true

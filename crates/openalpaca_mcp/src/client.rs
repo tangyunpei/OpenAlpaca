@@ -245,18 +245,18 @@ impl McpClient {
         };
 
         let running = serve_with_conn(conn, handler).await.map_err(|e| {
-            // A handshake against a streamable-HTTP server that rejected our
-            // credentials is the one bring-up failure that carries a status
-            // (design §4.2); everything else stays a handshake failure.
-            match &e {
+            // A streamable-HTTP server that rejected our credentials (design
+            // §4.2) or redirected where the client will not follow (N-MCP-2)
+            // fails the handshake with a typed error; everything else stays a
+            // handshake failure.
+            let typed = match &e {
                 rmcp::service::ClientInitializeError::TransportError { error, .. } => {
-                    match crate::error::unauthorized_status(error.error.as_ref()) {
-                        Some(status) => McpError::Unauthorized(status),
-                        None => McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}")),
-                    }
+                    crate::error::typed_http_failure(error.error.as_ref())
                 }
-                _ => McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}")),
-            }
+                _ => None,
+            };
+            typed
+                .unwrap_or_else(|| McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}")))
         })?;
 
         // Record server identity (first-time only; immutable across reconnects).
@@ -639,7 +639,11 @@ fn build_transport(cfg: &McpClientConfig) -> Result<Box<dyn Transport>, McpError
             auth,
             extra_headers,
         } => {
-            let mut t = StreamableHttpTransport::new(&cfg.server_name, url.clone());
+            // No total deadline on the client: the request's own is the
+            // `request_timeout` this client applies around every call, and the
+            // transport only keeps a silent body open at least that long.
+            let mut t = StreamableHttpTransport::new(&cfg.server_name, url.clone())
+                .with_request_timeout(cfg.request_timeout);
             match auth {
                 Some(crate::transport::HttpAuth::Bearer(token)) => t = t.with_bearer(token),
                 Some(crate::transport::HttpAuth::ApiKey { header, value }) => {

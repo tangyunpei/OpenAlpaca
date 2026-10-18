@@ -3650,6 +3650,8 @@ name = "openalpaca_mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
+ "futures-util",
  "reqwest 0.13.4",
  "rmcp",
  "serde_json",

@@ -2977,3 +2977,133 @@ async fn an_ordinary_url_is_still_written() {
         other => panic!("expected an http block, got {other:?}"),
     }
 }
+
+// ============================================================================
+// A streamable-HTTP server whose URL relies on a redirect (N-MCP-2)
+// ============================================================================
+
+/// The requests a loopback HTTP stub received: method, path and headers.
+type SeenRequests = Arc<StdMutex<Vec<(String, String, axum::http::HeaderMap)>>>;
+
+/// A loopback HTTP stub that records every request. With `redirect_to` it
+/// answers each one `307` to that URL; without, it is a minimal
+/// streamable-HTTP MCP server (JSON answers, no server-initiated stream).
+async fn http_stub(redirect_to: Option<String>) -> (String, SeenRequests) {
+    use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, header};
+    use axum::response::IntoResponse;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let origin = format!("http://{}", listener.local_addr().expect("local addr"));
+    let seen: SeenRequests = Arc::default();
+    let log = Arc::clone(&seen);
+    let app = axum::Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes| {
+            let log = Arc::clone(&log);
+            let redirect_to = redirect_to.clone();
+            async move {
+                log.lock()
+                    .unwrap()
+                    .push((method.to_string(), uri.path().to_string(), headers));
+                if let Some(to) = redirect_to {
+                    return (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, to)])
+                        .into_response();
+                }
+                if method != Method::POST {
+                    return StatusCode::METHOD_NOT_ALLOWED.into_response();
+                }
+                let message: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let result = match message.get("method").and_then(|m| m.as_str()) {
+                    Some("initialize") => serde_json::json!({
+                        "protocolVersion": message.pointer("/params/protocolVersion"),
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "stub", "version": "0.0.1" },
+                    }),
+                    Some("tools/list") => serde_json::json!({ "tools": [] }),
+                    _ => return StatusCode::ACCEPTED.into_response(),
+                };
+                let id = message.get("id").cloned().unwrap_or_default();
+                let body = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                (
+                    [
+                        (header::CONTENT_TYPE, "application/json"),
+                        (HeaderName::from_static("mcp-session-id"), "stub-session"),
+                    ],
+                    body.to_string(),
+                )
+                    .into_response()
+            }
+        },
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    (origin, seen)
+}
+
+/// **The row names the origin and the fix.** A server whose `url` redirects
+/// to a second port reads `Failed{ConfigInvalid}` with the target origin and
+/// the remedy in its detail; the first port saw one request (no reconnect
+/// ladder ran), and the second origin received nothing — neither the bearer
+/// token nor the extra header the declaration carries.
+#[tokio::test]
+async fn a_server_whose_url_redirects_to_another_origin_reads_config_invalid_naming_it() {
+    let h = Harness::new(1);
+    let (second, second_seen) = http_stub(None).await;
+    let (first, first_seen) = http_stub(Some(format!("{second}/mcp"))).await;
+    h.write_config(&format!(
+        r#"[defaults]
+connect_timeout_secs = 10
+request_timeout_secs = 3
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.remote]
+transport = "http"
+url = "{first}/mcp"
+auth = {{ bearer = "t-secret" }}
+extra_headers = {{ X-Tenant = "t-1" }}
+enabled = true
+"#
+    ));
+
+    h.supervisor.reconcile_all().await;
+
+    let carried: Vec<String> = second_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|(method, path, headers)| {
+            ["authorization", "x-tenant"]
+                .into_iter()
+                .filter(|name| headers.contains_key(*name))
+                .map(move |name| format!("{method} {path} carried {name}"))
+        })
+        .collect();
+    assert_eq!(
+        carried,
+        Vec::<String>::new(),
+        "the second origin received a credential"
+    );
+    assert!(
+        second_seen.lock().unwrap().is_empty(),
+        "the refused hop was never made"
+    );
+    match h.state("remote") {
+        Some(ExtensionState::Failed {
+            reason: FailureReason::ConfigInvalid,
+            detail,
+            ..
+        }) => assert!(
+            detail.contains(&format!(
+                "server redirected to {second}; set `url` to the canonical endpoint"
+            )),
+            "the detail names the origin and the fix: {detail}"
+        ),
+        other => panic!("expected Failed{{ConfigInvalid}}, got {other:?}"),
+    }
+    assert_eq!(
+        first_seen.lock().unwrap().len(),
+        1,
+        "one initialize, never retried"
+    );
+}

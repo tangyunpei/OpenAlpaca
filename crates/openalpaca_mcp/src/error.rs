@@ -28,6 +28,20 @@ pub enum McpError {
     #[error("server rejected the daemon's credentials (HTTP {0})")]
     Unauthorized(u16),
 
+    /// The streamable-HTTP server answered with a redirect the client refuses
+    /// to follow (`transport/http.rs`, the redirect rule): a hop to another
+    /// origin, any hop for a server given credentials or extra headers, or a
+    /// chain past ten hops. `origin` is the target's scheme, host and port —
+    /// never its path or query.
+    ///
+    /// Terminal *by type*, like [`Self::Unauthorized`]: following the server
+    /// again cannot help until the owner sets `url` to the endpoint it
+    /// redirected to, so it is not in [`McpError::is_retriable`]'s set and a
+    /// call never enters the reconnect ladder. At bring-up the row reads
+    /// `Failed{ConfigInvalid}` with this text as its detail.
+    #[error("server redirected to {origin}; set `url` to the canonical endpoint")]
+    RedirectRefused { origin: String },
+
     #[error("transport I/O error: {0}")]
     Transport(#[from] std::io::Error),
 
@@ -78,8 +92,8 @@ impl McpError {
     ///
     /// [`Self::Closed`] is intentionally absent: a sealed client must never be
     /// retried, or the retry loop would respawn the child the owner just
-    /// disabled. So is [`Self::Unauthorized`]: a retry cannot succeed until the
-    /// owner fixes the credential.
+    /// disabled. So are [`Self::Unauthorized`] and [`Self::RedirectRefused`]: a
+    /// retry cannot succeed until the owner fixes the credential or the `url`.
     pub fn is_retriable(&self) -> bool {
         matches!(
             self,
@@ -104,6 +118,8 @@ impl McpError {
             | Self::ReconnectExhausted(_) => ErrorCategory::Transport,
             // The server answered — it answered "no".
             Self::Unauthorized(_) => ErrorCategory::Server,
+            // The server answered — it answered "go elsewhere".
+            Self::RedirectRefused { .. } => ErrorCategory::Server,
             Self::HandshakeFailed(_) | Self::VersionMismatch { .. } => ErrorCategory::Handshake,
             Self::JsonRpc { .. } | Self::ToolNotFound(_) | Self::InvalidArguments(_) => {
                 ErrorCategory::Protocol
@@ -151,6 +167,67 @@ pub(crate) fn unauthorized_status(
     }
 }
 
+/// What the streamable-HTTP client's redirect rule hands reqwest for a hop it
+/// refuses (`transport/http.rs`). reqwest keeps it as the source of the
+/// redirect error it returns, which is how [`typed_http_failure`] finds it.
+#[derive(Debug)]
+pub(crate) struct RefusedRedirect {
+    /// The target's origin — scheme, host and port, never a path or query.
+    pub(crate) origin: String,
+}
+
+impl std::fmt::Display for RefusedRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "redirect to {} refused", self.origin)
+    }
+}
+
+impl std::error::Error for RefusedRedirect {}
+
+/// The typed failure a streamable-HTTP transport error carries, if any: a
+/// credential the server rejected ([`McpError::Unauthorized`]) or a redirect
+/// the client refused ([`McpError::RedirectRefused`]). `None` for anything
+/// else, which the caller keeps as its own untyped failure.
+///
+/// One function for the handshake (`McpClient::do_handshake`) and for a call
+/// (`From<ServiceError>` below), so the two cannot classify the same error
+/// differently.
+pub(crate) fn typed_http_failure(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> Option<McpError> {
+    if let Some(status) = unauthorized_status(error) {
+        return Some(McpError::Unauthorized(status));
+    }
+    refused_redirect(error).map(|refused| McpError::RedirectRefused {
+        origin: refused.origin.clone(),
+    })
+}
+
+/// The refusal inside a streamable-HTTP client error: rmcp wraps the reqwest
+/// error as [`StreamableHttpError::Client`] (a variant with no `source`, so
+/// it is unwrapped by type), and reqwest keeps what the redirect policy
+/// returned as its error's source.
+///
+/// [`StreamableHttpError::Client`]: rmcp::transport::streamable_http_client::StreamableHttpError::Client
+fn refused_redirect<'e>(
+    error: &'e (dyn std::error::Error + Send + Sync + 'static),
+) -> Option<&'e RefusedRedirect> {
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+    let StreamableHttpError::Client(client) =
+        error.downcast_ref::<StreamableHttpError<reqwest::Error>>()?
+    else {
+        return None;
+    };
+    let mut source = std::error::Error::source(client);
+    while let Some(error) = source {
+        if let Some(refused) = error.downcast_ref::<RefusedRedirect>() {
+            return Some(refused);
+        }
+        source = error.source();
+    }
+    None
+}
+
 impl From<rmcp::service::ServiceError> for McpError {
     fn from(e: rmcp::service::ServiceError) -> Self {
         use rmcp::service::ServiceError as S;
@@ -161,13 +238,14 @@ impl From<rmcp::service::ServiceError> for McpError {
             },
             S::TransportSend(err) => {
                 // The streamable-HTTP client is the one transport that can
-                // report an authorization failure as a *typed* error, and it is
-                // the only place a status code survives anywhere in this crate.
-                // Recover it here rather than flattening a 401 into a retriable
-                // `TransportClosed` (design §3.6 item 1, X-7).
-                if let Some(status) = unauthorized_status(err.error.as_ref()) {
-                    tracing::debug!(error = %err, status, "MCP server rejected our credentials");
-                    return Self::Unauthorized(status);
+                // report a failure as a *typed* error — a credential the server
+                // rejected, the only place a status code survives anywhere in
+                // this crate, or a redirect the client refused. Recover it here
+                // rather than flattening either into a retriable
+                // `TransportClosed` (design §3.6 item 1, X-7; N-MCP-2).
+                if let Some(typed) = typed_http_failure(err.error.as_ref()) {
+                    tracing::debug!(error = %err, typed = %typed, "MCP transport failure");
+                    return typed;
                 }
                 tracing::debug!(error = %err, "rmcp transport send error");
                 Self::TransportClosed
@@ -199,6 +277,13 @@ mod tests {
             // Nor may an authorization failure enter the reconnect ladder.
             (McpError::Unauthorized(401), false),
             (McpError::Unauthorized(403), false),
+            // Nor may a redirect the client refused (N-MCP-2).
+            (
+                McpError::RedirectRefused {
+                    origin: "https://other.example".into(),
+                },
+                false,
+            ),
             (
                 McpError::Transport(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
                 true,
@@ -279,6 +364,13 @@ mod tests {
             ErrorCategory::Protocol
         );
         assert_eq!(
+            McpError::RedirectRefused {
+                origin: "https://other.example".into()
+            }
+            .category(),
+            ErrorCategory::Server
+        );
+        assert_eq!(
             McpError::ServerInternal("x".into()).category(),
             ErrorCategory::Server
         );
@@ -303,6 +395,14 @@ mod tests {
         assert_eq!(
             McpError::ReconnectExhausted(5).to_string(),
             "reconnect attempts exhausted (tried 5)"
+        );
+        // The row's detail at bring-up: the origin and the remedy.
+        assert_eq!(
+            McpError::RedirectRefused {
+                origin: "https://other.example:8443".into()
+            }
+            .to_string(),
+            "server redirected to https://other.example:8443; set `url` to the canonical endpoint"
         );
     }
 }

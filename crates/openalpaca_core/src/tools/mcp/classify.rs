@@ -11,7 +11,8 @@
 //! expired token is **indistinguishable** from one that crashed, so it
 //! classifies as `Unreachable`/`Crashed`. Only streamable-HTTP carries a
 //! status, and only through the two variants rmcp preserves
-//! ([`McpError::Unauthorized`]).
+//! ([`McpError::Unauthorized`]); its one other typed failure is a redirect the
+//! client refused to follow ([`McpError::RedirectRefused`], a bad `url`).
 //!
 //! A misclassification costs a wrong button label, never a wrong lifecycle.
 
@@ -28,6 +29,10 @@ use crate::tools::extensions::FailureReason;
 pub fn classify_bringup_failure(error: &McpError) -> FailureReason {
     match error {
         McpError::Unauthorized(_) => FailureReason::NeedsAuthorization,
+        // The declared `url` leads to a redirect the client refuses; the
+        // error's text names the origin and says to set `url` to the
+        // canonical endpoint (N-MCP-2).
+        McpError::RedirectRefused { .. } => FailureReason::ConfigInvalid,
         // Everything else — a command that will not spawn, a handshake that
         // fails, a timeout, a protocol mismatch — is "could not be reached or
         // started". `Crashed` is reserved for a server that *was* running.
@@ -91,6 +96,18 @@ mod tests {
         }
     }
 
+    /// A server whose URL relies on a redirect the client refuses is a bad
+    /// declaration: the owner sets `url` to the canonical endpoint (N-MCP-2).
+    #[test]
+    fn bringup_maps_a_refused_redirect_to_config_invalid() {
+        assert_eq!(
+            classify_bringup_failure(&McpError::RedirectRefused {
+                origin: "https://other.example".into(),
+            }),
+            FailureReason::ConfigInvalid
+        );
+    }
+
     #[test]
     fn only_the_two_terminal_classes_flip_a_live_row() {
         assert_eq!(
@@ -110,6 +127,11 @@ mod tests {
             McpError::Cancelled,
             // The seal is the *result* of a disable, never a crash.
             McpError::Closed,
+            // A call refused a redirect goes back to the model with the
+            // remedy named; it never retries, and the row stays as it is.
+            McpError::RedirectRefused {
+                origin: "https://other.example".into(),
+            },
         ] {
             assert_eq!(classify_call_failure(&error), None, "{error:?}");
         }
