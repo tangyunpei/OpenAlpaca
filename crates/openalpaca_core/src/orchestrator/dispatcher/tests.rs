@@ -1515,6 +1515,149 @@ async fn test_lead_agent_lane_attachment_independent_of_steering_flag() {
     }
 }
 
+// ── N-DAEMON-1 (Z4-03): no follow-up autostart during shutdown ───────
+
+/// Records the follow-ups the dispatcher hands it, and runs none.
+#[derive(Default)]
+struct RecordingFollowupRunner {
+    started: std::sync::Mutex<Vec<i64>>,
+}
+
+impl crate::orchestrator::FollowupRunner for RecordingFollowupRunner {
+    fn spawn_followup(&self, item: crate::orchestrator::FollowupItem) {
+        self.started.lock().unwrap().push(item.id);
+    }
+}
+
+/// A lead on `user1:cli` that answers at once, one follow-up queued on that
+/// lane, and the recorder wired as the daemon wires its runner.
+fn a_lane_with_a_queued_followup(
+    db: &Database,
+) -> (TaskDispatcher, Arc<RecordingFollowupRunner>, i64) {
+    let dispatcher = dispatcher_with_an_answering_lead(db);
+    let runner = Arc::new(RecordingFollowupRunner::default());
+    dispatcher.set_followup_runner(runner.clone());
+    let principal = serde_json::to_string(&crate::security::policy::Principal::User {
+        global_id: "user1".to_string(),
+    })
+    .unwrap();
+    let id = openalpaca_storage::repository::FollowupRepository::new(db)
+        .queue(
+            "user1:cli",
+            "followup",
+            "then tidy the tests",
+            &principal,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+    (dispatcher, runner, id)
+}
+
+/// Starts a run on `user1:cli` and returns its id.
+fn start_a_run(dispatcher: &TaskDispatcher) -> String {
+    dispatcher
+        .dispatch_lead_agent(
+            "Tidy the notes",
+            "Tidy".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap()
+        .task_id
+}
+
+fn followup_status(db: &Database, id: i64) -> String {
+    openalpaca_storage::repository::FollowupRepository::new(db)
+        .get(id)
+        .unwrap()
+        .expect("the follow-up row is kept")
+        .status
+}
+
+/// The control for the test below: with no shutdown under way, the run's end
+/// claims the queued follow-up — the row reads `running` — and hands it to
+/// the runner. Without it, the test below could pass on a harness that never
+/// reached the autostart at all.
+#[tokio::test]
+async fn a_run_that_ends_outside_a_shutdown_starts_the_lanes_queued_followup() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let (dispatcher, runner, id) = a_lane_with_a_queued_followup(&db);
+    dispatcher.set_shutdown_token(tokio_util::sync::CancellationToken::new());
+
+    start_a_run(&dispatcher);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while runner.started.lock().unwrap().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the run's end never started the queued follow-up"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(*runner.started.lock().unwrap(), vec![id]);
+    assert_eq!(followup_status(&db, id), "running");
+}
+
+/// Z4-03's apply half: a run that ends once the daemon's cancel token is set
+/// starts no follow-up. The claim would flip the row to `running`, and the
+/// turn that marks it done would not outlive the process — nothing ever
+/// settled such a row. Left `queued`, it is still the lane's.
+///
+/// On one thread on purpose: the run's tail has no `.await` from releasing
+/// its slot (`remove_cancellation_token`) through the autostart's decision
+/// and `claim_next`, so by the time this task sees the slot free the decision
+/// has been made — the assertions cannot run before a late claim.
+#[tokio::test(flavor = "current_thread")]
+async fn a_run_that_ends_after_the_shutdown_began_starts_no_followup() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let (dispatcher, runner, id) = a_lane_with_a_queued_followup(&db);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    dispatcher.set_shutdown_token(shutdown.clone());
+    shutdown.cancel();
+
+    let task_id = start_a_run(&dispatcher);
+
+    // The run's slot is released only once its row is terminal, just before
+    // the autostart; `claim_run_slot` answers `Some` from then on, and on
+    // this one thread the autostart has already decided. The moment after is
+    // a belt only.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while dispatcher.shared_context.claim_run_slot(&task_id).is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the run never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    dispatcher
+        .shared_context
+        .remove_cancellation_token(&task_id);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert!(
+        runner.started.lock().unwrap().is_empty(),
+        "a follow-up was started during the shutdown: {:?}",
+        runner.started.lock().unwrap()
+    );
+    assert_eq!(
+        followup_status(&db, id),
+        "queued",
+        "the follow-up stays queued, not claimed for a turn that cannot run"
+    );
+}
+
 // ── Routing V2 §2b: model-authored completion report ─────────────────
 
 /// Poll the lane's conversation until an assistant message lands (the spawned

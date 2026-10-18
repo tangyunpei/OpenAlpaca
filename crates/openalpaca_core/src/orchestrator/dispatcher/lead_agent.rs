@@ -515,6 +515,7 @@ impl TaskDispatcher {
         let connector_block = self.connector_guidance_block();
         let broker = self.confirmation_broker.read().ok().and_then(|g| g.clone());
         let followup_runner = self.followup_runner.read().ok().and_then(|g| g.clone());
+        let daemon_shutdown = self.shutdown.get().cloned();
         let skill_catalog = self.skill_catalog.clone();
         let context_manager = self.context_manager.clone();
         let compose_engine = self.compose_engine.clone();
@@ -1073,7 +1074,22 @@ impl TaskDispatcher {
             // Routing V2: auto-start the next queued follow-up for this lane.
             // Inert unless a runner is wired AND a `followup` row is queued
             // (only the steering-gated `queue_followup` tool writes those).
-            if daemon_config.load().orchestrator.routing.followup_autostart
+            //
+            // Never once the daemon is shutting down (Z4-03): `claim_next`
+            // flips the row to `running`, and only the turn it starts marks it
+            // done — a turn that would not outlive the process, leaving a row
+            // nothing ever settles. Unclaimed, it stays `queued`, the lane's.
+            let shutting_down = daemon_shutdown
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
+            if shutting_down {
+                tracing::info!(
+                    lane_key = %lane_key,
+                    "The daemon is shutting down: follow-up autostart skipped; a queued follow-up stays queued"
+                );
+            }
+            if !shutting_down
+                && daemon_config.load().orchestrator.routing.followup_autostart
                 && let (Some(runner), Some(db)) = (followup_runner, db.as_ref())
             {
                 let repo = openalpaca_storage::repository::FollowupRepository::new(db);

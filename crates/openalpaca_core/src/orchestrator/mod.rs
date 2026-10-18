@@ -542,6 +542,12 @@ impl Orchestrator {
         self.task_dispatcher.set_followup_runner(runner);
     }
 
+    /// Hand the TaskDispatcher the daemon's shutdown token: once it is
+    /// cancelled, a workflow that finalizes starts no queued follow-up (Z4-03).
+    pub fn set_shutdown_token(&self, token: tokio_util::sync::CancellationToken) {
+        self.task_dispatcher.set_shutdown_token(token);
+    }
+
     /// Set the path to USER.md the onboarding check reads.
     pub fn set_user_path(&self, path: std::path::PathBuf) {
         if let Ok(mut guard) = self.user_path.write() {

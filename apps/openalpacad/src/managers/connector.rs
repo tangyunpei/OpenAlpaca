@@ -250,13 +250,14 @@ impl ConnectorManager {
         Ok(())
     }
 
-    /// Stop all running connectors (used during daemon shutdown)
-    pub async fn shutdown_all(&self) {
+    /// Stop all running connectors (used during daemon shutdown), each within
+    /// what is left of the shutdown window: a connector whose stop does not
+    /// return by `deadline` is left behind with a warning, and every handle
+    /// after it is still told to stop (`crate::shutdown::within` polls each
+    /// once, so a cancel token is cancelled even past the deadline).
+    pub async fn shutdown_all(&self, deadline: std::time::Instant) {
         let mut guard = self.handles.lock().await;
-        for (name, handle) in guard.drain() {
-            handle.shutdown().await;
-            info!("Stopped connector: {}", name);
-        }
+        stop_each_within(guard.drain(), deadline, |_, handle| handle.shutdown()).await;
     }
 
     /// Stop a running connector
@@ -313,5 +314,160 @@ impl ConnectorManager {
         };
         // Fire and forget
         self.bus.publish(event);
+    }
+}
+
+/// Stops each connector in turn through `stop` — [`ConnectorHandle::shutdown`]
+/// in the daemon — each until `deadline` and no longer
+/// ([`crate::shutdown::within`]): a stop that has not returned by then is left
+/// behind with a warning, and every handle after it is still polled once, so
+/// a cancel token is cancelled even past the deadline. `stop` is a parameter
+/// so a test can hand it a stop that never returns, which no
+/// `ConnectorHandle` can be made to do without a live Telegram dispatcher.
+async fn stop_each_within<F>(
+    handles: impl IntoIterator<Item = (String, ConnectorHandle)>,
+    deadline: std::time::Instant,
+    stop: impl Fn(&str, ConnectorHandle) -> F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    for (name, handle) in handles {
+        let stage = format!("Connector {name}'s shutdown");
+        if crate::shutdown::within(&stage, deadline, stop(&name, handle))
+            .await
+            .is_some()
+        {
+            info!("Stopped connector: {}", name);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use openalpaca_core::context::SharedContext;
+    use openalpaca_core::gateway::{HandleRequest, HandleResult, MessageHandler};
+    use openalpaca_core::lane::LaneManager;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+
+    /// Far below the daemon's window, so a stop that ignores it fails the
+    /// test instead of slowing it down.
+    const WINDOW: Duration = Duration::from_millis(200);
+
+    /// Every wait is bounded, so a regression fails instead of hanging.
+    const MUST_RETURN_WITHIN: Duration = Duration::from_secs(2);
+
+    /// A plugin connector's handle — its stop is a cancel token — and the
+    /// token, to see whether it was told to stop.
+    fn plugin_handle() -> (ConnectorHandle, CancellationToken) {
+        let token = CancellationToken::new();
+        let handle = ConnectorHandle::Plugin(token.clone(), Arc::new(AtomicBool::new(true)));
+        (handle, token)
+    }
+
+    /// N-DAEMON-1: a connector whose stop never returns — Telegram's waits
+    /// for its dispatcher to drain, and nothing bounded that wait — holds the
+    /// loop only until the deadline, and the handle after it is still told to
+    /// stop. The loop awaiting each stop unbounded, as it did, hangs here.
+    #[tokio::test]
+    async fn a_connector_whose_stop_never_returns_holds_the_rest_only_until_the_deadline() {
+        let (telegram, _) = plugin_handle();
+        let (discord, discord_stopped) = plugin_handle();
+        let started = Instant::now();
+        let handles = vec![
+            ("telegram".to_string(), telegram),
+            ("discord".to_string(), discord),
+        ];
+        let stop =
+            |name: &str, handle: ConnectorHandle| -> Pin<Box<dyn Future<Output = ()> + Send>> {
+                if name == "telegram" {
+                    Box::pin(std::future::pending())
+                } else {
+                    Box::pin(handle.shutdown())
+                }
+            };
+        tokio::time::timeout(
+            MUST_RETURN_WITHIN,
+            stop_each_within(handles, started + WINDOW, stop),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "a connector whose stop never returns held the shutdown past its {WINDOW:?} \
+                 deadline — the daemon would sit out its watchdog"
+            )
+        });
+        assert!(
+            discord_stopped.is_cancelled(),
+            "the connector after the hung one was never told to stop"
+        );
+        assert!(
+            started.elapsed() >= WINDOW / 2,
+            "the hung stop was given its window, not cut at once: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Answers every turn; nothing here sends one.
+    struct AckHandler;
+
+    #[async_trait]
+    impl MessageHandler for AckHandler {
+        async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
+            Ok(HandleResult::text("ack".to_string()))
+        }
+    }
+
+    /// The daemon's own path: `shutdown_all` drains every handle the manager
+    /// holds and stops each, even when the stages before it spent the whole
+    /// window — each stop is still polled once, so a plugin connector's token
+    /// is cancelled — and leaves no handle registered.
+    #[tokio::test]
+    async fn shutdown_all_stops_every_handle_even_once_the_window_is_spent() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open the database");
+        let gateway = Arc::new(Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(AckHandler),
+            EventBus::default(),
+            Some(db.clone()),
+        ));
+        let manager = ConnectorManager::new(
+            db,
+            EventBus::default(),
+            gateway,
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        );
+        let (first, first_stopped) = plugin_handle();
+        let (second, second_stopped) = plugin_handle();
+        manager.handles.lock().await.extend([
+            ("plugin-a".to_string(), first),
+            ("plugin-b".to_string(), second),
+        ]);
+
+        let spent = Instant::now();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::timeout(MUST_RETURN_WITHIN, manager.shutdown_all(spent))
+            .await
+            .expect("shutdown_all returned");
+
+        assert!(
+            first_stopped.is_cancelled(),
+            "plugin-a was not told to stop"
+        );
+        assert!(
+            second_stopped.is_cancelled(),
+            "plugin-b was not told to stop"
+        );
+        assert!(
+            manager.handles.lock().await.is_empty(),
+            "a stopped connector is still registered"
+        );
     }
 }

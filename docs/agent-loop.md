@@ -464,7 +464,11 @@ with the originating principal and the turn's resolved project root
 (`ToolContext.request_workspace_root`, F4) as `workspace_path` — the
 lead's context carries the run's project, so a follow-up a workflow
 promised re-enters in that project; the main loop's carries the turn's. When a
-workflow finalizes and `followup_autostart = true` (default), the spawn
+workflow finalizes and `followup_autostart = true` (default) — and the
+daemon is not shutting down: once its cancel token is set (the dispatcher
+holds it, `TaskDispatcher::set_shutdown_token`) nothing is claimed and the
+row stays queued, since the turn that would mark it done could not outlive
+the process (Z4-03) — the spawn
 claims the lane's next `followup` row (`FollowupRepository::claim_next`
 — which never claims `unprocessed_steering`; those rows are surfaced by
 the lazy context-block injection described under Steering above) and

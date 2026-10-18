@@ -65,7 +65,8 @@ use uuid::Uuid;
 /// It is the only bound the whole shutdown sequence has, which is why
 /// [`Extensions::shutdown_all`](crate::managers::extensions::Extensions::shutdown_all)
 /// derives its sweep budget from what is left of it rather than from a literal
-/// of its own.
+/// of its own, and the connector and wake stages end
+/// [`shutdown::TAIL_RESERVE`] before it does ([`shutdown::stage_deadline`]).
 ///
 /// `pub(crate)` so `routes/events.rs` can tell a departing WebSocket client how
 /// long the process has left. One literal, not two.
@@ -635,6 +636,10 @@ async fn async_main(
         gateway.clone(),
         db.clone(),
     )));
+    // …and sealed once the daemon is shutting down: a run that ends during the
+    // shutdown claims nothing, so no row is left `running` with no turn behind
+    // it (Z4-03).
+    orchestrator.set_shutdown_token(cancel_token.clone());
 
     let notif_bus = bus.clone();
     let chat_bus = bus.clone();
@@ -795,22 +800,16 @@ async fn async_main(
     });
 
     // Force-exit watchdog: if graceful shutdown takes too long, exit the
-    // process. The instant it starts counting is published so the extension
-    // sweep can bound itself by what is *left* of the window rather than by a
-    // literal of its own.
-    let force_exit_at: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
-    let watchdog_cancel = cancel_token.clone();
-    let watchdog_deadline = force_exit_at.clone();
-    tokio::spawn(async move {
-        watchdog_cancel.cancelled().await;
-        let _ = watchdog_deadline.set(Instant::now() + FORCE_EXIT_GRACE);
-        tokio::time::sleep(FORCE_EXIT_GRACE).await;
-        warn!(
-            "Graceful shutdown timed out after {}s, forcing exit",
-            FORCE_EXIT_GRACE.as_secs()
-        );
-        std::process::exit(1);
-    });
+    // process. The instant it starts counting is published so every stage of
+    // the tail can bound itself by what is *left* of the window rather than by
+    // a literal of its own. Before the exit it removes the discovery file the
+    // boot wrote — the tail's own removal is the step a forced exit skips.
+    let force_exit_at: Arc<OnceLock<Instant>> = shutdown::spawn_force_exit_watchdog(
+        cancel_token.clone(),
+        discovery_path.clone(),
+        FORCE_EXIT_GRACE,
+        |code| std::process::exit(code),
+    );
 
     if let Err(e) = server.await {
         error!("Server error: {e}");
@@ -894,12 +893,22 @@ async fn async_main(
         .unwrap_or(FORCE_EXIT_GRACE);
     extensions_for_shutdown.shutdown_all(window).await;
 
-    // Shutdown connectors
+    // The connectors, then the WakeManager (watchers + scheduler), each until
+    // `shutdown::TAIL_RESERVE` before the force-exit instant and no longer: a
+    // stop that never returns is left behind with a warning, and what follows
+    // it — the discovery file's removal below among it — runs before the
+    // watchdog fires, not in a race with it.
     info!("Shutting down connectors...");
-    connector_manager.shutdown_all().await;
-
-    // Shutdown WakeManager (stops watchers + scheduler)
-    if let Err(e) = wake_manager.shutdown().await {
+    connector_manager
+        .shutdown_all(shutdown::stage_deadline(&force_exit_at))
+        .await;
+    if let Some(Err(e)) = shutdown::within(
+        "The WakeManager's shutdown",
+        shutdown::stage_deadline(&force_exit_at),
+        wake_manager.shutdown(),
+    )
+    .await
+    {
         warn!("Failed to shut down WakeManager: {e}");
     }
 

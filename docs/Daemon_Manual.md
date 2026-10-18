@@ -137,11 +137,15 @@ file watchers; remove `discovery.json`.
 
 A watchdog bounds all of it at **10 seconds** from the cancellation. The
 session-log flush and the extension sweep each take only what is left of that
-window. If the window runs out, the process exits with code 1 and skips
-whatever of the tail had not run — possibly unflushed spend, dropped
-session-log records, orphaned MCP and plugin children, connectors that never
-deregistered, and a stale `discovery.json` (the next boot overwrites it, and the
-CLI checks that the pid it names is a live daemon before trusting it).
+window, and each connector's stop and the wake scheduler's what is left of it
+less one second: a stop that does not return in time is logged and left
+behind, and the steps after it still run within that last second, so
+`discovery.json` is removed even when a connector hangs. If the window runs
+out all the same, the watchdog removes `discovery.json` and the process exits
+with code 1, skipping whatever else of the tail had not run — possibly
+unflushed spend, dropped session-log records, orphaned MCP and plugin children
+and connectors that never deregistered. A workflow that finishes once the shutdown has begun
+starts no queued follow-up: the follow-up stays queued on its lane.
 
 Open connections no longer run that window out. An open
 `GET /v1/chat/stream/{id}` body used to hold the wait for in-flight responses
