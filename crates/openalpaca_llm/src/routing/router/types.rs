@@ -83,6 +83,20 @@ pub enum LlmRouterError {
     #[error("Max retries exceeded")]
     MaxRetriesExceeded,
 
+    /// The provider refused the credentials on every attempt the call made —
+    /// an HTTP 401 or 403, or its own authentication failure — on each key
+    /// the pool offered, and nothing else went wrong. Not transient: the same
+    /// keys are refused again until one is fixed, so a caller does not retry
+    /// it (N-LEAD-5). Before it existed the rotation ended as
+    /// [`Self::MaxRetriesExceeded`], then the fallback ladder's
+    /// [`Self::AllFallbacksFailed`], which read as a passing failure.
+    #[error(
+        "The provider refused the API key on every attempt (authentication failed). Fix or \
+         replace the key — Settings → Models & keys in the GUI, or `openalpaca llm keys add` \
+         — then try again."
+    )]
+    AllKeysRefused,
+
     #[error("All fallback models failed")]
     AllFallbacksFailed,
 

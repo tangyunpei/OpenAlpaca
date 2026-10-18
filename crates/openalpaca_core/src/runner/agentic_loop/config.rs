@@ -335,6 +335,13 @@ pub struct LoopResult {
     pub elapsed: Duration,
     /// Accumulated cost for this loop invocation (from CostTracker for Router, local estimate for Direct).
     pub estimated_cost: f64,
+    /// What this loop's cost cap was last checked against: the spend
+    /// accumulated since the loop began (everything a shared accumulator
+    /// holds, where one was passed) — the figure a `CostExceeded` exit went
+    /// past. `estimated_cost` reads the agent's whole total in the cost
+    /// tracker, which for a singleton template's reused instance id includes
+    /// its earlier runs (N-LEAD-5).
+    pub cap_spend: f64,
     /// The last tool result that came back an error, verbatim (V3).
     ///
     /// A turn that ends with no answer usually ends that way because a tool
@@ -370,21 +377,13 @@ impl LoopResult {
         let reason = match &self.finish_reason {
             LoopFinishReason::Cancelled => return None,
             LoopFinishReason::MaxRounds => format!(
-                "I stopped after {} tool {} without reaching an answer.",
-                self.rounds_used,
-                if self.rounds_used == 1 {
-                    "round"
-                } else {
-                    "rounds"
-                }
+                "I stopped {} without reaching an answer.",
+                rounds_spent(self.rounds_used)
             ),
             LoopFinishReason::CostExceeded => {
-                "I stopped before reaching an answer: this turn hit its cost limit.".to_string()
+                format!("I {STOPPED_SHORT}: this turn {HIT_COST_LIMIT}.")
             }
-            LoopFinishReason::Truncated => {
-                "I stopped before reaching an answer: the reply hit the model's output limit."
-                    .to_string()
-            }
+            LoopFinishReason::Truncated => format!("I {STOPPED_SHORT}: {HIT_OUTPUT_LIMIT}."),
             LoopFinishReason::Error(e) => {
                 format!("I could not finish this turn: {e}")
             }
@@ -392,11 +391,143 @@ impl LoopResult {
                 "I finished this turn without writing an answer.".to_string()
             }
         };
-        Some(match self.last_tool_error {
+        Some(self.with_last_tool_error(reason))
+    }
+
+    /// How a subagent that did not succeed is reported to its lead
+    /// (N-LEAD-5): the cause in the words [`Self::no_answer_line`] uses, an
+    /// error as written — never its `Debug` form — and the cost cap with its
+    /// amount. Where a retry cannot change the outcome — the cost cap,
+    /// credentials the provider refused, no model the agent can use, a model
+    /// it may not use — it says so, because the lead's prompt tells it to
+    /// retry a failed subagent. The last tool error follows, as there.
+    ///
+    /// `max_cost` is the subagent's own cap (its template's
+    /// `max_cost_per_task`, else `[execution.agent_defaults] max_cost`); the
+    /// spend beside it is [`Self::cap_spend`], what the cap was checked
+    /// against, not the agent's lifetime total.
+    pub fn subagent_failure(&self, agent: &str, max_cost: f64) -> String {
+        let reason = match &self.finish_reason {
+            LoopFinishReason::MaxRounds => format!(
+                "Agent '{agent}' stopped {} without reaching an answer.",
+                rounds_spent(self.rounds_used)
+            ),
+            LoopFinishReason::CostExceeded => format!(
+                "Agent '{agent}' {STOPPED_SHORT}: it {HIT_COST_LIMIT} of {} (it spent {}). A \
+                 retry will not help: every attempt has the same limit — give the work a \
+                 narrower objective, or do this part yourself.",
+                usd(max_cost),
+                usd(self.cap_spend)
+            ),
+            LoopFinishReason::Truncated => {
+                format!("Agent '{agent}' {STOPPED_SHORT}: {HIT_OUTPUT_LIMIT}.")
+            }
+            LoopFinishReason::Cancelled => {
+                format!("Agent '{agent}' was cancelled before it finished.")
+            }
+            LoopFinishReason::Error(e) => {
+                let e = e.trim_end();
+                match retry_cannot_help(e) {
+                    Some(why) => {
+                        let stop = if e.ends_with(['.', '!', '?']) {
+                            ""
+                        } else {
+                            "."
+                        };
+                        format!(
+                            "Agent '{agent}' could not finish: {e}{stop} A retry will not \
+                             help: {why}."
+                        )
+                    }
+                    None => format!("Agent '{agent}' could not finish: {e}"),
+                }
+            }
+            LoopFinishReason::Complete => {
+                format!("Agent '{agent}' finished without writing an answer.")
+            }
+        };
+        self.with_last_tool_error(reason)
+    }
+
+    /// `reason`, then the last tool error when there was one (V3, W2).
+    fn with_last_tool_error(&self, reason: String) -> String {
+        match self.last_tool_error {
             Some(ref err) => format!("{reason} The last tool error was: {}", user_facing(err)),
             None => reason,
-        })
+        }
     }
+}
+
+// The words a loop's stop is told in, shared by its two readers: the person
+// a chat turn answers (`no_answer_line`, V3) and the lead a subagent reports
+// to (`subagent_failure`, N-LEAD-5).
+const STOPPED_SHORT: &str = "stopped before reaching an answer";
+const HIT_COST_LIMIT: &str = "hit its cost limit";
+const HIT_OUTPUT_LIMIT: &str = "the reply hit the model's output limit";
+
+fn rounds_spent(rounds: usize) -> String {
+    format!(
+        "after {rounds} tool {}",
+        if rounds == 1 { "round" } else { "rounds" }
+    )
+}
+
+/// A dollar amount as a cap or a spend reads: cents, or four places below a
+/// cent so a small cap is never shown as `$0.00`.
+fn usd(amount: f64) -> String {
+    if amount.abs() >= 0.01 || amount == 0.0 {
+        format!("${amount:.2}")
+    } else {
+        format!("${amount:.4}")
+    }
+}
+
+/// Why an `Error` exit is one a retry cannot change, or `None` when a retry
+/// may help (N-LEAD-5).
+///
+/// `LoopFinishReason::Error` keeps the router's message, not its type, so the
+/// message is matched against the router's own `Display` of each permanent
+/// error — built here from the types themselves, so a rewording there moves
+/// both sides at once — plus the loop's own model-access refusal.
+///
+/// Credentials refused reach a routed loop as `AllKeysRefused` (the router
+/// rotates past a refused key and names the end when every attempt was
+/// refused) or `NoApiCompatibleKeys`, each kept past the fallback ladder; the
+/// provider's own `AuthenticationFailed` and an HTTP 401 or 403 arrive
+/// unflattened only on the direct, unrouted backend.
+fn retry_cannot_help(error: &str) -> Option<&'static str> {
+    use openalpaca_llm::{LlmError, LlmRouterError};
+    let is = |e: LlmRouterError| error == e.to_string();
+    let starts = |e: LlmRouterError| error.starts_with(&e.to_string());
+    let llm = |e: LlmError| LlmRouterError::Llm(e);
+
+    if is(LlmRouterError::NoRoutableModel)
+        || starts(LlmRouterError::UnknownModel(String::new()))
+        || starts(LlmRouterError::ProviderNotConfigured(String::new()))
+        || is(llm(LlmError::NotConfigured))
+    {
+        return Some(
+            "no model this agent can use is available — a provider must be turned on, or the \
+             agent's model changed, first",
+        );
+    }
+    if is(LlmRouterError::AllKeysRefused)
+        || is(LlmRouterError::NoApiCompatibleKeys)
+        || starts(llm(LlmError::AuthenticationFailed(String::new())))
+        || starts(llm(LlmError::TokenRefresh(String::new())))
+        || [401, 403].into_iter().any(|status| {
+            starts(llm(LlmError::Api {
+                status,
+                message: String::new(),
+            }))
+        })
+    {
+        return Some("the provider refused the credentials — the key must be fixed first");
+    }
+    if error.starts_with("Model access denied:") {
+        return Some("this agent may not use the model that answered");
+    }
+    None
 }
 
 /// A tool error as the person reading the turn should see it (W2).

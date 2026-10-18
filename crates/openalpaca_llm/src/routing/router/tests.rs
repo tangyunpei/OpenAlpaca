@@ -1488,3 +1488,104 @@ async fn rate_headroom_reports_the_tightest_key_without_consuming() {
 
     assert!(router.rate_headroom("not-a-model").await.is_none());
 }
+
+// ── N-LEAD-5: credentials refused on every key ───────────────────────
+
+/// A router over one OpenAI provider with two keys, each answer taken in turn
+/// from `responses` (the last repeating).
+fn two_key_router(
+    responses: Vec<Result<ChatResponse, LlmError>>,
+) -> (LlmRouter, Arc<MockProvider>) {
+    let provider = Arc::new(MockProvider::new("openai", responses));
+    let key_pool = KeyPool::new(
+        vec![
+            ApiKey::new("k1".to_string(), ProviderType::OpenAI, "sk-1".to_string()),
+            ApiKey::new("k2".to_string(), ProviderType::OpenAI, "sk-2".to_string()),
+        ],
+        SelectionStrategy::RoundRobin,
+    );
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider: provider.clone(),
+            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
+        },
+    );
+    let router = LlmRouter::new(
+        providers,
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "gpt-5.2".to_string(),
+    );
+    (router, provider)
+}
+
+/// **N-LEAD-5.** A provider that refuses every key — a revoked key, the
+/// wrong account — ends as `AllKeysRefused`, on both paths, past the
+/// fallback ladder: before, the rotation ended as "Max retries exceeded" and
+/// the ladder's "All fallback models failed", which the agentic loop retried
+/// as transient and a lead was told to retry again.
+#[tokio::test]
+async fn every_key_refused_is_named_on_both_paths() {
+    let refused = || {
+        Err(LlmError::Api {
+            status: 401,
+            message: "invalid x-api-key".to_string(),
+        })
+    };
+
+    let (router, _) = two_key_router(vec![refused()]);
+    let result = router.complete(make_request(Some("gpt-5.2"))).await;
+    assert!(
+        matches!(result, Err(LlmRouterError::AllKeysRefused)),
+        "non-streaming: {:?}",
+        result.err()
+    );
+
+    let (router, _) = two_key_router(vec![Err(LlmError::AuthenticationFailed(
+        "bad key".to_string(),
+    ))]);
+    let result = router
+        .complete_streaming(make_request(Some("gpt-5.2")))
+        .await;
+    assert!(
+        matches!(result, Err(LlmRouterError::AllKeysRefused)),
+        "streaming: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+}
+
+/// The rule is "every attempt was refused": one key refused and the other
+/// answering is an answer, and a refusal beside a transient failure is not
+/// called a refusal of every key.
+#[tokio::test(start_paused = true)]
+async fn a_refused_key_beside_an_answer_or_a_transient_failure_is_not_all_keys_refused() {
+    let (router, _) = two_key_router(vec![
+        Err(LlmError::Api {
+            status: 403,
+            message: "forbidden".to_string(),
+        }),
+        Ok(MockProvider::ok_response("gpt-5.2")),
+    ]);
+    let result = router.complete(make_request(Some("gpt-5.2"))).await;
+    assert!(result.is_ok(), "the second key answers: {:?}", result.err());
+
+    let (router, _) = two_key_router(vec![
+        Err(LlmError::Api {
+            status: 401,
+            message: "invalid x-api-key".to_string(),
+        }),
+        Err(LlmError::Api {
+            status: 500,
+            message: "internal".to_string(),
+        }),
+    ]);
+    let result = router.complete(make_request(Some("gpt-5.2"))).await;
+    assert!(
+        !matches!(result, Err(LlmRouterError::AllKeysRefused)),
+        "a 500 is not a refusal: {:?}",
+        result.err()
+    );
+}

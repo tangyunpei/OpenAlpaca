@@ -1121,12 +1121,12 @@ impl BuiltInTool for SpawnSubagentTool {
                 // F2: the error says why; the answer travels whole beside it,
                 // as a completed one does, so the lead can read it with
                 // `check_subagent_status` and the summary can show its tail.
+                // N-LEAD-5: why, in words the lead can act on — the cap and
+                // its amount, the error as written, and whether a retry can
+                // help — never the finish reason's `Debug` form.
                 tracker.fail_with_output(
                     &run_id_clone,
-                    format!(
-                        "Agent '{}' failed: {:?}.",
-                        agent_id_owned, result.finish_reason
-                    ),
+                    result.subagent_failure(&agent_id_owned, loop_config.max_cost),
                     result.final_content,
                 );
             }

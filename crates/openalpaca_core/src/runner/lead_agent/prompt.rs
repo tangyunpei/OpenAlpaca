@@ -133,7 +133,8 @@ pub fn build_lead_agent_prompt_from_templates(
          Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
          queued ones), or check_subagent_status for individual progress.\n\
          Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
-         retry with an adjusted objective or a different agent.\n\
+         retry with an adjusted objective or a different agent — unless its failure says a \
+         retry will not help.\n\
          Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
          that directly addresses the user's original request.\n\
          </workflow>";

@@ -5777,3 +5777,281 @@ async fn a_resumed_run_rebuilds_its_subagents_from_the_session_log() {
         "the lead's round is replayed, not the worker's"
     );
 }
+
+// ── N-LEAD-5: a subagent's failure names its cause ──────────────────────
+
+/// A provider whose every call fails with `error`.
+struct FailingProvider {
+    error: fn() -> openalpaca_llm::LlmError,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for FailingProvider {
+    fn name(&self) -> &str {
+        "failing"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        _request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        Err((self.error)())
+    }
+}
+
+/// Spawn one `worker` through the production path, wait for it, and hand
+/// back what `check_subagent_status` then says about it.
+async fn worker_status_after(
+    router: Arc<LlmRouter>,
+    worker: crate::agent::subagent::SubAgent,
+) -> Result<String, String> {
+    let shared = Arc::new(SharedContext::new());
+    assert!(
+        shared
+            .agent_registry
+            .register_template(crate::test_util::template_from_agent(&worker))
+    );
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = spawn_tool_bounded(router, shared, tracker.clone(), 6);
+    spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "count the alpacas"}))
+        .await
+        .unwrap();
+    eventually("the worker finished", || tracker.all_done()).await;
+    let run_id = tracker
+        .statuses
+        .lock()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    CheckSubagentStatusTool { tracker }
+        .execute(&serde_json::json!({"subagent_run_id": run_id}))
+        .await
+}
+
+/// **N-LEAD-5.** A subagent stopped by its cost cap: the lead is told the
+/// cap and its amount, and that a retry will not help — the prompt tells
+/// the lead to retry a failure, and every attempt has the same cap. Before
+/// the fix the line was `Agent 'worker' failed: CostExceeded.`
+#[tokio::test]
+async fn a_subagent_stopped_by_its_cost_cap_names_the_cap_and_says_a_retry_will_not_help() {
+    // One round costing $0.60 against a $0.50 cap: the next round's check
+    // stops the loop.
+    let mut expensive = scripted_response(
+        "",
+        vec![openalpaca_llm::ToolCall {
+            id: "call-1".to_string(),
+            name: "no_such_tool".to_string(),
+            arguments: serde_json::json!({}),
+        }],
+    );
+    expensive.usage.input_tokens = 200_000;
+    let mut worker = crate::test_util::make_agent("worker", vec![]);
+    worker.constraints.max_cost_per_task = Some(0.5);
+
+    let failure = worker_status_after(
+        scripted_router(ScriptedProvider::new(vec![expensive])),
+        worker,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(failure.contains("cost limit of $0.50"), "{failure}");
+    assert!(failure.contains("(it spent $0.60)"), "{failure}");
+    assert!(failure.contains("A retry will not help"), "{failure}");
+    assert!(!failure.contains("CostExceeded"), "{failure}");
+}
+
+/// **N-LEAD-5.** A subagent whose model call failed: the lead is told the
+/// error as written, not its `Debug` form. Before the fix the line was
+/// `Agent 'worker' failed: Error("LLM error: … \"qwen3:8b\" …").`
+#[tokio::test]
+async fn a_subagent_error_is_named_without_debug_escaping() {
+    let failure = worker_status_after(
+        Arc::new(LlmRouter::single_provider(
+            Arc::new(FailingProvider {
+                error: || {
+                    openalpaca_llm::LlmError::Config(
+                        "model \"qwen3:8b\" is not installed".to_string(),
+                    )
+                },
+            }),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        )),
+        crate::test_util::make_agent("worker", vec![]),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        failure.contains("model \"qwen3:8b\" is not installed"),
+        "{failure}"
+    );
+    assert!(!failure.contains("\\\""), "no escaped quotes: {failure}");
+    assert!(!failure.contains("Error(\""), "no Debug form: {failure}");
+}
+
+/// **N-LEAD-5 (review).** A subagent whose provider refuses its key on
+/// every call — a revoked key — is reported as credentials refused, and the
+/// lead is told a retry will not help. Before, the router flattened the
+/// refusals into "Max retries exceeded" and the ladder's "All fallback models
+/// failed", the loop retried that three times as transient, and the lead read
+/// a failure its prompt tells it to retry.
+#[tokio::test(start_paused = true)]
+async fn a_subagent_whose_key_is_refused_is_told_a_retry_will_not_help() {
+    let started = tokio::time::Instant::now();
+    let failure = worker_status_after(
+        Arc::new(LlmRouter::single_provider(
+            Arc::new(FailingProvider {
+                error: || openalpaca_llm::LlmError::Api {
+                    status: 401,
+                    message: "invalid x-api-key".to_string(),
+                },
+            }),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        )),
+        crate::test_util::make_agent("worker", vec![]),
+    )
+    .await
+    .unwrap_err();
+
+    // Not retried as transient: the loop's backoff (2 s, 4 s, 8 s on the
+    // paused clock) never ran.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the refusal was retried: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        failure.contains(&openalpaca_llm::LlmRouterError::AllKeysRefused.to_string()),
+        "the refusal as the router names it: {failure}"
+    );
+    assert!(
+        failure.contains("A retry will not help: the provider refused the credentials"),
+        "{failure}"
+    );
+}
+
+fn loop_result(finish_reason: crate::runner::LoopFinishReason) -> LoopResult {
+    LoopResult {
+        final_content: String::new(),
+        rounds_used: 8,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        tool_calls_made: 3,
+        finish_reason,
+        model_used: None,
+        elapsed: std::time::Duration::from_secs(1),
+        // The agent's whole total and this attempt's spend differ — a
+        // singleton's reused instance id keeps its earlier runs' — so the
+        // pinned line proves which one the lead is told.
+        estimated_cost: 2.59,
+        cap_spend: 1.04,
+        last_tool_error: None,
+        working_state: None,
+    }
+}
+
+/// N-LEAD-5: the lead's line and the person's share their words — the
+/// person's lines are byte-for-byte what V3 wrote — and the cost line is
+/// pinned whole.
+#[test]
+fn the_subagent_failure_line_shares_the_no_answer_lines_words() {
+    use crate::runner::LoopFinishReason;
+
+    assert_eq!(
+        loop_result(LoopFinishReason::MaxRounds)
+            .no_answer_line()
+            .unwrap(),
+        "I stopped after 8 tool rounds without reaching an answer."
+    );
+    assert_eq!(
+        loop_result(LoopFinishReason::CostExceeded)
+            .no_answer_line()
+            .unwrap(),
+        "I stopped before reaching an answer: this turn hit its cost limit."
+    );
+    assert_eq!(
+        loop_result(LoopFinishReason::Truncated)
+            .no_answer_line()
+            .unwrap(),
+        "I stopped before reaching an answer: the reply hit the model's output limit."
+    );
+    assert_eq!(
+        loop_result(LoopFinishReason::CostExceeded).subagent_failure("researcher", 1.0),
+        "Agent 'researcher' stopped before reaching an answer: it hit its cost limit of $1.00 \
+         (it spent $1.04). A retry will not help: every attempt has the same limit — give the \
+         work a narrower objective, or do this part yourself."
+    );
+    assert_eq!(
+        loop_result(LoopFinishReason::Truncated).subagent_failure("researcher", 1.0),
+        "Agent 'researcher' stopped before reaching an answer: the reply hit the model's \
+         output limit."
+    );
+    let mut tool_failed = loop_result(LoopFinishReason::MaxRounds);
+    tool_failed.last_tool_error = Some("[tool_error] web_search: quota exhausted".to_string());
+    assert_eq!(
+        tool_failed.subagent_failure("researcher", 1.0),
+        "Agent 'researcher' stopped after 8 tool rounds without reaching an answer. The last \
+         tool error was: web_search: quota exhausted"
+    );
+}
+
+/// N-LEAD-5: whether a retry can help is read against the router's own
+/// messages for the errors a retry cannot change — no model to route to,
+/// credentials refused — and a transient failure is never told it cannot.
+#[test]
+fn a_subagent_failure_says_a_retry_will_not_help_only_where_it_cannot() {
+    use crate::runner::LoopFinishReason;
+    use openalpaca_llm::{LlmError, LlmRouterError};
+
+    let line = |error: String| {
+        loop_result(LoopFinishReason::Error(error)).subagent_failure("researcher", 1.0)
+    };
+    for permanent in [
+        LlmRouterError::NoRoutableModel.to_string(),
+        LlmRouterError::UnknownModel("gpt-9".to_string()).to_string(),
+        LlmRouterError::NoApiCompatibleKeys.to_string(),
+        LlmRouterError::AllKeysRefused.to_string(),
+        LlmRouterError::Llm(LlmError::AuthenticationFailed("invalid key".to_string())).to_string(),
+        LlmRouterError::Llm(LlmError::Api {
+            status: 401,
+            message: "invalid x-api-key".to_string(),
+        })
+        .to_string(),
+        LlmRouterError::Llm(LlmError::Api {
+            status: 403,
+            message: "forbidden".to_string(),
+        })
+        .to_string(),
+        "Model access denied: claude-opus is not allowed for this agent".to_string(),
+    ] {
+        let failure = line(permanent.clone());
+        assert!(
+            failure.starts_with(&format!("Agent 'researcher' could not finish: {permanent}")),
+            "the error as written: {failure}"
+        );
+        assert!(failure.contains("A retry will not help"), "{failure}");
+    }
+    for transient in [
+        LlmRouterError::MaxRetriesExceeded.to_string(),
+        LlmRouterError::Llm(LlmError::Http("connection reset".to_string())).to_string(),
+        LlmRouterError::Llm(LlmError::Api {
+            status: 529,
+            message: "overloaded".to_string(),
+        })
+        .to_string(),
+    ] {
+        let failure = line(transient.clone());
+        assert_eq!(
+            failure,
+            format!("Agent 'researcher' could not finish: {transient}")
+        );
+    }
+}

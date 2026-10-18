@@ -63,6 +63,8 @@ struct LoopState {
     last_model: Option<String>,
     max_tokens_retries: usize,
     last_cost: f64,
+    /// The spend the cost cap was last checked against (`LoopResult::cap_spend`).
+    cap_spend: f64,
     /// V3: the last tool result that was an error, so a turn that ends with
     /// nothing can say what it last tripped over.
     last_tool_error: Option<String>,
@@ -83,6 +85,7 @@ impl LoopState {
             last_model: None,
             max_tokens_retries: 0,
             last_cost: 0.0,
+            cap_spend: 0.0,
             last_tool_error: None,
             working_state: None,
         }
@@ -100,6 +103,7 @@ impl LoopState {
             model_used: self.last_model.clone(),
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
+            cap_spend: self.cap_spend,
             last_tool_error: self.last_tool_error.clone(),
             working_state: self.working_state.clone(),
         }
@@ -121,6 +125,7 @@ impl LoopState {
             model_used: self.last_model.clone(),
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
+            cap_spend: self.cap_spend,
             last_tool_error: self.last_tool_error.clone(),
             working_state: self.working_state.clone(),
         }
@@ -561,6 +566,7 @@ async fn run_agentic_loop_core(
         }
         state.last_cost = round_cost;
         let accumulated_cost = cost_acc.total_usd();
+        state.cap_spend = accumulated_cost;
         let cost_ratio = accumulated_cost / config.max_cost;
         {
             let _span = tracing::info_span!(
