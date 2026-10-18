@@ -254,7 +254,7 @@ Notes:
 `resume` is one word over two verbs:
 
 - On a **paused** run it is the plain transition back to running.
-- On an **interrupted** run it is *replay resume* — **experimental, and off by default**. The daemon rebuilds the run's loop history from its session log (its rounds and their tool results) and continues it under the same id, telling the model not to repeat side-effecting calls it already made. Nothing recorded is re-executed.
+- On an **interrupted** run it is *replay resume* — **experimental, and off by default**. The daemon rebuilds the run's loop history from its session log (the lead's rounds and their tool results) and continues it under the same id, telling the model not to repeat side-effecting calls it already made. The run's subagents come back too: one that finished is known again with its whole answer, kept beside the log, and one the stop interrupted is reported as interrupted, so the lead can collect the first and spawn the second again. Nothing recorded is re-executed.
 - Turn replay resume on with `resume_enabled = true` under `[orchestrator.routing]` in `daemon.toml`. Until then an interrupted run answers `RESUME_DISABLED`.
 - The other way to redo an interrupted run is a re-run: the GUI's `Re-run` button, or `POST /v1/tasks/{id}/rerun` directly. The CLI has no `rerun` verb yet.
 - A resume that finds no usable transcript (the sweep took the log) answers `RESUME_LOG_MISSING` and leaves the row exactly as it was.

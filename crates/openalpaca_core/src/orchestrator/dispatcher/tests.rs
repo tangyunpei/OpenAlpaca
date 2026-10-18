@@ -1427,6 +1427,7 @@ async fn a_daemon_authored_leftover_is_dropped_not_filed_as_a_user_followup() {
     // about the exit.
     let mut note = lifecycle_steering_msg(&crate::session_log::replay::resume_interjection(
         Utc::now(),
+        &[],
     ));
     note.origin = crate::runner::steering::SteeringOrigin::Daemon;
     note.principal = crate::security::policy::Principal::System;

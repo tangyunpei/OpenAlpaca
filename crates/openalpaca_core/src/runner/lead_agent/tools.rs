@@ -40,30 +40,46 @@ use uuid::Uuid;
 /// three different places — cancelled before it started, a plugin loop's
 /// outcome, and an LLM loop's finish reason — and all three must say the same
 /// words the span row says.
+///
+/// N-LEAD-4: the record names the lane's `run_id`, and a non-empty answer is
+/// spilled whole to the session's `results/` beside it (the writer's §5.4
+/// spill: the file, then `result_ref` and a preview on the record), so a
+/// resumed run reads it back whole — the span row keeps 200 characters.
+#[allow(clippy::too_many_arguments)]
 fn emit_subagent_close(
     log: Option<&crate::session_log::SessionLogHandle>,
     task_id: &str,
     span_id: &str,
     instance_id: &str,
+    run_id: &str,
     state: openalpaca_storage::SpanState,
     detail: Option<&str>,
     output: Option<&str>,
 ) {
     let Some(log) = log else { return };
-    log.emit(
-        crate::session_log::Record::new(crate::session_log::RecordType::SubagentClose)
-            .task(Some(task_id))
-            .span(Some(span_id))
-            .agent(Some(instance_id))
-            .with_data(serde_json::json!({
-                "span_id": span_id,
-                "role": "subagent",
-                "state": state.as_str(),
-                "detail": detail,
-                "output_preview": output.map(|o| o.chars().take(200).collect::<String>()),
-            })),
-    );
+    let mut record = crate::session_log::Record::new(crate::session_log::RecordType::SubagentClose)
+        .task(Some(task_id))
+        .span(Some(span_id))
+        .agent(Some(instance_id))
+        .with_data(serde_json::json!({
+            "span_id": span_id,
+            "role": "subagent",
+            "run_id": run_id,
+            "state": state.as_str(),
+            "detail": detail,
+            "output_preview": output.map(|o| o.chars().take(200).collect::<String>()),
+        }));
+    if let Some(answer) = output.filter(|o| !o.is_empty()) {
+        record = record.with_spill(
+            log.reserve_spill(SUBAGENT_ANSWER_SPILL, span_id),
+            answer.to_string(),
+        );
+    }
+    log.emit(record);
 }
+
+/// The name a subagent's spilled answer carries in `results/` (N-LEAD-4).
+const SUBAGENT_ANSWER_SPILL: &str = "subagent_answer";
 
 /// The detail a subagent's lane closes with when its lead's run ended before
 /// it finished (N-LEAD-1). The run's report lists the lanes that carry it
@@ -131,6 +147,7 @@ impl SubagentLane {
             &self.task_id,
             &self.node_id,
             &self.instance_id,
+            &self.run_id,
             state,
             detail,
             output,
@@ -434,6 +451,14 @@ impl BuiltInTool for SpawnSubagentTool {
                 }
             })?;
         let instance_id = agent.id.clone();
+        // The id the lead knows this subagent by — returned below, and named
+        // on the lane's open and close records so a resumed run can rebuild
+        // its tracker from them (N-LEAD-4).
+        let run_id = format!(
+            "{}::{}",
+            agent_id,
+            &instance_id.split("::").last().unwrap_or(&instance_id)
+        );
         self.bus.publish(SystemEvent::AgentStatusChanged {
             agent_id: instance_id.clone(),
             instance_id: instance_id.clone(),
@@ -485,6 +510,7 @@ impl BuiltInTool for SpawnSubagentTool {
                         "template": agent_id,
                         "label": span_label,
                         "role": "subagent",
+                        "run_id": run_id,
                         "objective": objective.chars().take(500).collect::<String>(),
                         // P-17: a plugin-backed template says so, so a reader
                         // never has to guess which extension ran the lane.
@@ -803,11 +829,6 @@ impl BuiltInTool for SpawnSubagentTool {
 
         // 9. Spawn subagent as a background task (non-blocking).
         //    This allows the lead agent to spawn multiple subagents in parallel.
-        let run_id = format!(
-            "{}::{}",
-            agent_id,
-            &instance_id.split("::").last().unwrap_or(&instance_id)
-        );
         // N-LEAD-2: whether this one waits for a slot — this run's subagents
         // already queued or running fill the bound — which the reply says.
         let (queued, running, _, _) = self.tracker.status_counts();

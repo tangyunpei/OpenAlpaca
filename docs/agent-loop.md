@@ -161,6 +161,25 @@ a stub the run's log lets the lead page — is not repeated by a later wait
 (`SubagentTracker::report`); a long one that a run with no log cut after
 its first part still is, as its head and its tail.
 
+**A resumed run knows its subagents again** (N-LEAD-4). Each subagent's
+whole final answer is spilled to the session's `results/` beside its
+lane's `subagent_close` record, and both of its lane records name its run
+id. A replay resume (`session_log/replay.rs::rebuild`) rebuilds the run's
+subagents from those records (`ReplayPlan::subagents`): a lane that closed
+`done` comes back Completed with its kept answer, one that failed or was
+cancelled Failed with its lane's detail and answer, and one still open —
+the daemon stopped under it — Failed, *"interrupted by the daemon's
+stop"*; `run_lead_agent` seeds the tracker with them, none reported yet,
+and the resume note names each and how it ended. The note is a
+`<system_note>`, so it is the daemon's words only: each run id escaped
+(`<` and `>` as `<U+003C>` and `<U+003E>`, every hidden character as
+`<U+XXXX>`), one word for how its lane ended, at most twenty named — never
+a failure's own text, which `check_subagent_status` returns as a tool
+result. A subagent's own rounds, results and compactions are left out of
+the lead's replayed history: they carry the run's task id too, told apart
+by their span — any span but the lead's own `lead::<task id>`, so a lane
+whose open a trimmed head took is still not read as the lead's.
+
 **No subagent outlives its run** (N-LEAD-1). Each subagent's cancel token
 is a child of the run's *subagents token*, itself a child of the run's own
 token, and each subagent's task is held in the run's `JoinSet`

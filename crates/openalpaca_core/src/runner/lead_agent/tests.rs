@@ -2754,6 +2754,7 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
         chrono::DateTime::parse_from_rfc3339("2026-09-06T10:00:01Z")
             .unwrap()
             .with_timezone(&chrono::Utc),
+        &[],
     );
     inbox
         .push(crate::runner::steering::SteeringMsg {
@@ -2846,7 +2847,7 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
 async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
     let provider = ScriptedProvider::new(vec![scripted_response("carrying on", vec![])]);
     let config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-    let note = crate::session_log::replay::resume_interjection(chrono::Utc::now());
+    let note = crate::session_log::replay::resume_interjection(chrono::Utc::now(), &[]);
 
     let tmp = tempfile::tempdir().unwrap();
     run_lead_agent(
@@ -5581,4 +5582,198 @@ async fn a_queued_subagent_stopped_by_the_runs_end_never_starts() {
             "{span:?}"
         );
     }
+}
+
+// ── N-LEAD-4: a resumed run rebuilds its subagents from the session log ──
+
+/// **N-LEAD-4.** A run with one finished subagent and one still running is
+/// stopped — the daemon died under it, so the running lane never closed —
+/// and resumed. The finished subagent's whole answer was spilled beside its
+/// lane's close, so `check_subagent_status` returns it whole; the running
+/// one is Failed, interrupted by the daemon's stop; `wait_for_subagents`
+/// reports both; and the resume note names them. Before the fix the resumed
+/// run's tracker was built fresh: "Unknown subagent_run_id" for both, and
+/// the log kept 200 characters of the answer.
+#[tokio::test]
+async fn a_resumed_run_rebuilds_its_subagents_from_the_session_log() {
+    use crate::session_log::{Record, RecordType, SessionLogLimits, SessionLogService};
+
+    let logs = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        logs.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-resume");
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    shared.register_task_session_log("task-1", handle.clone());
+
+    // The interrupted run: the lead's one complete round…
+    handle.emit(
+        Record::new(RecordType::Round)
+            .task(Some("task-1"))
+            .span(Some("lead::task-1"))
+            .with_data(serde_json::json!({
+                "round": 1,
+                "text": "",
+                "tool_use": [{"id": "call-1", "name": "spawn_subagent", "input": {"agent_id": "worker"}}],
+            })),
+    );
+    handle.emit(
+        Record::new(RecordType::ToolResult)
+            .task(Some("task-1"))
+            .span(Some("lead::task-1"))
+            .with_data(serde_json::json!({
+                "tool_use_id": "call-1",
+                "name": "spawn_subagent",
+                "ok": true,
+                "result": "spawned",
+            })),
+    );
+    // …a subagent that finished, through the real spawn path…
+    let answer = format!("FINDINGS-HEAD {} FINDINGS-TAIL", "alpaca ".repeat(800));
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = spawn_tool_bounded(
+        scripted_router(ScriptedProvider::new(vec![scripted_response(
+            &answer,
+            vec![],
+        )])),
+        shared.clone(),
+        tracker.clone(),
+        6,
+    );
+    spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "count the alpacas"}))
+        .await
+        .unwrap();
+    eventually("the worker finished", || tracker.all_done()).await;
+    // …and one whose lane opened and never closed.
+    handle.emit(
+        Record::new(RecordType::SubagentOpen)
+            .task(Some("task-1"))
+            .span(Some("span-b"))
+            .agent(Some("worker::bbbbbbbb"))
+            .with_data(serde_json::json!({
+                "span_id": "span-b",
+                "template": "worker",
+                "role": "subagent",
+                "objective": "weigh the alpacas",
+                "run_id": "worker::bbbbbbbb",
+            })),
+    );
+    assert!(handle.flush().await);
+
+    // The run id `spawn_subagent` handed the lead.
+    let finished = tracker
+        .statuses
+        .lock()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let plan =
+        crate::session_log::replay::rebuild(&service.session_dir("sess-resume"), "task-1", 4)
+            .unwrap();
+    let lead_rounds = plan.rounds;
+    let note = crate::session_log::replay::resume_interjection(chrono::Utc::now(), &plan.subagents);
+
+    let check = |id: &str, run_id: &str| {
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: id.to_string(),
+                name: "check_subagent_status".to_string(),
+                arguments: serde_json::json!({"subagent_run_id": run_id}),
+            }],
+        )
+    };
+    let provider = ScriptedProvider::new(vec![
+        check("call-a", &finished),
+        check("call-b", "worker::bbbbbbbb"),
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-wait".to_string(),
+                name: "wait_for_subagents".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+        ),
+        scripted_response("done", vec![]),
+    ]);
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "count and weigh the alpacas",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        Some(crate::session_log::replay::ResumeHistory {
+            plan,
+            inline_note: Some(note.clone()),
+        }),
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+
+    let first_request = provider.seen_messages.lock().unwrap()[0].clone();
+    assert!(
+        first_request.iter().any(|m| m.content.contains(&note)),
+        "the resumed run is told about its subagents"
+    );
+    let finished_result = tool_results_seen(&provider, 1).pop().unwrap();
+    assert!(
+        finished_result.contains(&answer),
+        "check_subagent_status returns the finished answer whole: {}",
+        crate::utils::text::byte_prefix(&finished_result, 300)
+    );
+    let interrupted = tool_results_seen(&provider, 2).pop().unwrap();
+    assert!(
+        interrupted.contains("failed") && interrupted.contains("interrupted by the daemon's stop"),
+        "{interrupted}"
+    );
+    let waited = tool_results_seen(&provider, 3).pop().unwrap();
+    assert!(
+        waited.contains(&finished) && waited.contains("worker::bbbbbbbb"),
+        "wait_for_subagents reports both: {}",
+        crate::utils::text::byte_prefix(&waited, 600)
+    );
+    assert!(
+        note.contains(&finished),
+        "the note names the finished one: {note}"
+    );
+    assert!(
+        note.contains("worker::bbbbbbbb"),
+        "and the interrupted one: {note}"
+    );
+    assert_eq!(
+        lead_rounds, 1,
+        "the lead's round is replayed, not the worker's"
+    );
 }

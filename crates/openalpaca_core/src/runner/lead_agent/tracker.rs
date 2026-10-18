@@ -201,6 +201,41 @@ impl SubagentTracker {
         done
     }
 
+    /// Rebuild a resumed run's entries from its session log (N-LEAD-4): a
+    /// lane that closed `done` is Completed with its kept answer, one that
+    /// failed or was cancelled is Failed with its lane's detail and answer,
+    /// and one still open — the daemon stopped under it — is Failed,
+    /// interrupted by the daemon's stop. None is reported yet, so the next
+    /// `wait_for_subagents` reports them all.
+    pub fn restore(&self, subagents: &[crate::session_log::replay::ReplayedSubagent]) {
+        let mut map = self.statuses.lock().unwrap_or_else(|p| p.into_inner());
+        for subagent in subagents {
+            let status = match &subagent.close {
+                None => SubagentStatus::Failed {
+                    error: super::tools::SUBAGENT_DAEMON_STOP_DETAIL.to_string(),
+                    output: String::new(),
+                },
+                Some(close) if close.state == openalpaca_storage::SpanState::Done.as_str() => {
+                    SubagentStatus::Completed {
+                        content: if close.answer.is_empty() {
+                            "The subagent finished but produced no text output.".to_string()
+                        } else {
+                            close.answer.clone()
+                        },
+                        success: true,
+                    }
+                }
+                Some(close) => SubagentStatus::Failed {
+                    error: close.detail.clone().unwrap_or_else(|| close.state.clone()),
+                    output: close.answer.clone(),
+                },
+            };
+            map.insert(subagent.run_id.clone(), status);
+        }
+        drop(map);
+        self.notify.notify_waiters();
+    }
+
     /// The run ids still queued or running, sorted — what a lead's run end
     /// has left to stop (N-LEAD-1).
     pub fn unfinished(&self) -> Vec<String> {

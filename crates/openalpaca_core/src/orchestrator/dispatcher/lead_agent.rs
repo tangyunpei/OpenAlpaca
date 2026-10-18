@@ -561,7 +561,7 @@ impl TaskDispatcher {
         // text is carried inline by the rebuilt history instead.
         let resume = resume.map(|seed| {
             let plan = seed.replay;
-            let note = resume_interjection(plan.last_ts.unwrap_or_else(Utc::now));
+            let note = resume_interjection(plan.last_ts.unwrap_or_else(Utc::now), &plan.subagents);
             let delivered = steering_inbox.as_ref().is_some_and(|inbox| {
                 inbox
                     .push(SteeringMsg {
@@ -624,7 +624,7 @@ impl TaskDispatcher {
             // one lead lane per run, so the id stays reconstructible from the
             // task alone. Opened after the status flip, so a reader that sees
             // a running task always sees a lane for it.
-            let lead_span_id = format!("lead::{task_id}");
+            let lead_span_id = crate::runner::span::lead_span_id(&task_id);
             let lead_label = crate::runner::span::open_span(
                 db.as_ref(),
                 &bus,

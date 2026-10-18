@@ -97,6 +97,34 @@ pub struct ReplayPlan {
     /// The timestamp of the run's last record — when the run stopped, as far
     /// as anything on disk knows.
     pub last_ts: Option<DateTime<Utc>>,
+    /// The run's subagents, in the order they were spawned, as their
+    /// `subagent_open` and `subagent_close` records left them (N-LEAD-4) —
+    /// what the resumed run's tracker is rebuilt from.
+    pub subagents: Vec<ReplayedSubagent>,
+}
+
+/// One subagent of the run, as the log left it (N-LEAD-4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayedSubagent {
+    /// The id the lead knows it by — `<template>::<instance suffix>`, what
+    /// `spawn_subagent` returned and `check_subagent_status` takes.
+    pub run_id: String,
+    /// How its lane closed; `None` for a lane still open when the run
+    /// stopped — the daemon stopped under it.
+    pub close: Option<ReplayedClose>,
+}
+
+/// A subagent lane's close, as its `subagent_close` record kept it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayedClose {
+    /// The lane's closing state: `done`, `failed` or `cancelled`.
+    pub state: String,
+    /// Why, for a lane that did not finish normally.
+    pub detail: Option<String>,
+    /// Its whole final answer, read back from `results/` — or, when that
+    /// file is gone or the record predates the spill, the preview the record
+    /// kept, which says it is one.
+    pub answer: String,
 }
 
 impl ReplayPlan {
@@ -146,15 +174,106 @@ pub struct ResumeHistory {
 /// One sentence of fact and one instruction, and the instruction is the
 /// important half: side effects between the last durable record and the crash
 /// are unknowable, so the model is told to treat the recorded calls as done
-/// rather than being left to guess. It goes in through the steering rail, so
-/// the loop sees it as a `<user_interjection>` — the channel the model's
-/// prompt already teaches it to obey mid-run.
-pub fn resume_interjection(interrupted_at: DateTime<Utc>) -> String {
-    format!(
+/// rather than being left to guess. It goes in through the steering rail with
+/// the daemon's origin, so the loop sees it as a `<system_note>` — a channel
+/// the model's prompt teaches it to follow mid-run.
+///
+/// N-LEAD-4: when the run had spawned subagents, the note names each by its
+/// run id and says in one word of the daemon's own how its lane ended —
+/// finished, failed, cancelled, or interrupted by the daemon's stop — because
+/// the resumed run's tracker holds them again and the model must know to ask.
+///
+/// The note is the daemon's (a `<system_note>`), so nothing in it is text a
+/// plugin or a provider wrote: a lane's `detail` — a plugin agent's own
+/// "failed" output, a router error carrying a provider's body — is left to
+/// `check_subagent_status`, which hands it to the lead as a tool result; the
+/// lane's state is read into a fixed word, never echoed; and each run id,
+/// whose template id a plugin may have chosen, is shown escaped
+/// ([`note_run_id`]). At most [`RESUME_NOTE_SUBAGENTS_SHOWN`] are named, the
+/// rest counted.
+pub fn resume_interjection(
+    interrupted_at: DateTime<Utc>,
+    subagents: &[ReplayedSubagent],
+) -> String {
+    let mut note = format!(
         "This run was interrupted at {}; continue from the last completed step. \
          Do not repeat side-effecting tool calls already recorded.",
         interrupted_at.to_rfc3339()
-    )
+    );
+    if !subagents.is_empty() {
+        let mut lanes: Vec<String> = subagents
+            .iter()
+            .take(RESUME_NOTE_SUBAGENTS_SHOWN)
+            .map(|subagent| {
+                format!(
+                    "{} {}",
+                    note_run_id(&subagent.run_id),
+                    how_it_ended(subagent)
+                )
+            })
+            .collect();
+        let more = subagents.len().saturating_sub(RESUME_NOTE_SUBAGENTS_SHOWN);
+        if more > 0 {
+            lanes.push(format!("and {more} more"));
+        }
+        note.push_str(&format!(
+            " Its subagents: {}. Read any of their answers with check_subagent_status — a \
+             failed one's says why — or collect them with wait_for_subagents; one that did \
+             not finish may need to be spawned again.",
+            lanes.join("; ")
+        ));
+    }
+    note
+}
+
+/// How many subagents [`resume_interjection`] names before it counts the
+/// rest: nothing else bounds how many one run spawns.
+const RESUME_NOTE_SUBAGENTS_SHOWN: usize = 20;
+
+/// How many characters of one run id [`resume_interjection`] shows.
+const RESUME_NOTE_RUN_ID_CHARS: usize = 120;
+
+/// How a subagent's lane ended, in the daemon's own words — never the
+/// state string the record holds, nor its detail.
+fn how_it_ended(subagent: &ReplayedSubagent) -> &'static str {
+    const INTERRUPTED: &str = "was interrupted by the daemon's stop";
+    let Some(close) = &subagent.close else {
+        return INTERRUPTED;
+    };
+    match close.state.as_str() {
+        "done" => "finished",
+        "failed" => "failed",
+        "cancelled"
+            if close.detail.as_deref()
+                == Some(crate::runner::lead_agent::SUBAGENT_DAEMON_STOP_DETAIL) =>
+        {
+            INTERRUPTED
+        }
+        "cancelled" => "was cancelled",
+        _ => "ended",
+    }
+}
+
+/// A run id as the resume note shows it: `<` and `>` written as the escape
+/// writes a hidden character, `<U+003C>` and `<U+003E>`, so a run id cannot
+/// open or close the note's wrapper, and every hidden character — a line
+/// break among them — escaped too (`utils::text::escape_hidden_line`); at
+/// most [`RESUME_NOTE_RUN_ID_CHARS`] characters of it, then `…`.
+fn note_run_id(run_id: &str) -> String {
+    use crate::utils::text::escape_hidden_line;
+
+    let mut shown = String::new();
+    for (i, c) in run_id.chars().enumerate() {
+        if i == RESUME_NOTE_RUN_ID_CHARS {
+            shown.push('…');
+            break;
+        }
+        match c {
+            '<' | '>' => shown.push_str(&format!("<U+{:04X}>", u32::from(c))),
+            c => shown.push_str(&escape_hidden_line(c.encode_utf8(&mut [0; 4])).text),
+        }
+    }
+    shown
 }
 
 /// One round as the log recorded it, with the results that answered it.
@@ -183,6 +302,11 @@ impl Round {
 /// A missing directory, a torn tail and a log holding nothing for this run are
 /// all the same answer: an empty plan. None of them is an error; the caller
 /// decides what an empty plan means.
+///
+/// The history is the **lead's**: a subagent's records carry the run's task id
+/// too, and its lane's span is what keeps its rounds, results and compactions
+/// out. The subagents themselves come back in [`ReplayPlan::subagents`], from
+/// their lanes' open and close records (N-LEAD-4).
 pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Result<ReplayPlan> {
     let mut plan = ReplayPlan::default();
 
@@ -201,6 +325,11 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
     let mut trimmed_range: Option<(u64, u64)> = None;
     let mut orphan_results = 0usize;
     let mut torn_record = false;
+    // N-LEAD-4: the run's subagent lanes, span id → index in
+    // `plan.subagents`. A subagent's own records carry the run's task id
+    // too; its span is what tells them from the lead's.
+    let mut subagent_lanes: HashMap<String, usize> = HashMap::new();
+    let lead_span = crate::runner::span::lead_span_id(task_id);
 
     let mut cursor: Option<u64> = None;
     loop {
@@ -233,7 +362,62 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
                 continue;
             }
             plan.last_ts = Some(record.ts);
+            // Any span but the lead's own is a subagent lane's — its open
+            // read or not, since a trimmed head can take the open and keep
+            // the lane's later rounds. A record with no span (a log written
+            // before spans) stays the lead's.
+            let in_subagent_lane = record
+                .span_id
+                .as_deref()
+                .is_some_and(|span| !span.is_empty() && span != lead_span);
             match record.kind.as_str() {
+                "subagent_open" if is_subagent_lane(record) => {
+                    if let (Some(span), Some(run_id)) = (&record.span_id, subagent_run_id(record)) {
+                        subagent_lanes.insert(span.clone(), plan.subagents.len());
+                        plan.subagents.push(ReplayedSubagent {
+                            run_id,
+                            close: None,
+                        });
+                    }
+                }
+                "subagent_close" if is_subagent_lane(record) => {
+                    let close = ReplayedClose {
+                        state: record
+                            .data
+                            .get("state")
+                            .and_then(Value::as_str)
+                            .unwrap_or("cancelled")
+                            .to_string(),
+                        detail: record
+                            .data
+                            .get("detail")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        answer: subagent_answer(session_dir, record),
+                    };
+                    let lane = record
+                        .span_id
+                        .as_ref()
+                        .and_then(|span| subagent_lanes.get(span).copied());
+                    match lane {
+                        Some(index) => plan.subagents[index].close = Some(close),
+                        // Its open went with a rotated segment: the close
+                        // names the run id too.
+                        None => {
+                            if let Some(run_id) = subagent_run_id(record) {
+                                plan.subagents.push(ReplayedSubagent {
+                                    run_id,
+                                    close: Some(close),
+                                });
+                            }
+                        }
+                    }
+                }
+                // A subagent's own rounds, results and compactions are its
+                // own: replaying them as the lead's would hand the lead calls
+                // it never made, and let a subagent's compaction set the
+                // lead's boundary. Its outcome comes back through its close.
+                _ if in_subagent_lane => {}
                 "round" => {
                     let calls = tool_calls_of(&record.data);
                     let index = rounds.len();
@@ -471,6 +655,77 @@ fn spill_file_present(session_dir: &Path, rel: &str) -> bool {
         return false;
     }
     session_dir.join(RESULTS_DIR).join(name).is_file()
+}
+
+/// A `subagent_open` or `subagent_close` record of a subagent's lane — not
+/// the lead's own, which the dispatcher writes with `role: "lead"`.
+fn is_subagent_lane(record: &LoggedRecord) -> bool {
+    record.data.get("role").and_then(Value::as_str) == Some("subagent")
+}
+
+/// The run id a lane's record names — or, on a record written before
+/// N-LEAD-4 named it, the one the spawn path built: the template, `::`, and
+/// the instance id's last part.
+fn subagent_run_id(record: &LoggedRecord) -> Option<String> {
+    if let Some(run_id) = record.data.get("run_id").and_then(Value::as_str) {
+        return Some(run_id.to_string());
+    }
+    let template = record.data.get("template").and_then(Value::as_str)?;
+    let instance = record.agent.as_deref()?;
+    Some(format!(
+        "{template}::{}",
+        instance.split("::").last().unwrap_or(instance)
+    ))
+}
+
+/// A subagent's final answer, as its lane's close kept it (N-LEAD-4): read
+/// back whole from `results/`, where the spawn path spilled it. When that
+/// file is gone (the sweep took it) or could not be written, the preview the
+/// record kept stands in, and says it is one; a record with no spill — an
+/// empty answer, or one written before the spill — keeps its 200-character
+/// preview, which says so when it may have been cut.
+fn subagent_answer(session_dir: &Path, record: &LoggedRecord) -> String {
+    match record.data.get("result") {
+        Some(Value::Object(spilled)) => {
+            let rel = spilled
+                .get("spill")
+                .and_then(|s| s.get("rel"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !rel.is_empty()
+                && spill_file_present(session_dir, rel)
+                && let Ok(whole) = std::fs::read_to_string(session_dir.join(rel))
+            {
+                return whole;
+            }
+            let preview = spilled
+                .get("preview")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            format!(
+                "{preview}\n[the whole answer is no longer kept — the session log's sweep took \
+                 it; this is its first 2 KB]"
+            )
+        }
+        Some(Value::String(preview)) => format!(
+            "{preview}\n[the whole answer could not be kept beside the log; this is its first 2 KB]"
+        ),
+        _ => {
+            let preview = record
+                .data
+                .get("output_preview")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if preview.chars().count() < 200 {
+                preview.to_string()
+            } else {
+                format!(
+                    "{preview}\n[the whole answer is no longer kept; this is its first 200 \
+                     characters]"
+                )
+            }
+        }
+    }
 }
 
 /// What the log says — and what the rebuild noticed — about its own gaps.

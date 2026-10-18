@@ -273,6 +273,12 @@ pub async fn run_lead_agent(
         )
         .with_log(session_log.is_some()),
     );
+    // N-LEAD-4: a resumed run knows its subagents again — rebuilt from their
+    // lanes' records in the session log — so `check_subagent_status` and
+    // `wait_for_subagents` answer for them instead of "Unknown".
+    if let Some(history) = resume.as_ref() {
+        tracker.restore(&history.plan.subagents);
+    }
 
     // Resolve parent context bundle once, shared across all subagent spawns.
     // TODO: In future, resolve via context_manager.resolve() with LeadAgent path
