@@ -83,6 +83,13 @@ pub(super) fn workflow_contract_suffix(steering_attached: bool) -> String {
 /// carried right after `lead_persona` as a raw block, whose content Layer 2
 /// hashes: a changed `USER.md` is a new prompt, not a cache hit. Absent or
 /// empty, nothing is emitted and the prompt is what it always was.
+///
+/// `skills_catalog` is the catalog's `<available_skills>` block
+/// (`SkillCatalog::available_skills_block`, N-SKILL-1) — the lead holds
+/// `invoke_skill` and `extension_tools_suffix` tells it to use catalog
+/// skills. `SubagentMinimal` renders raw blocks only, so it is carried as
+/// the last raw block, `skills_catalog`, the nearest to that suffix. Absent
+/// or empty, nothing is emitted.
 pub fn build_lead_agent_prompt_from_templates(
     compose_engine: &ComposeEngine,
     base_persona: &str,
@@ -90,6 +97,7 @@ pub fn build_lead_agent_prompt_from_templates(
     model_window: usize,
     user_document: Option<&UserDocument>,
     user_budget: Option<usize>,
+    skills_catalog: Option<&str>,
 ) -> String {
 
     // Available agents catalog (High — important for delegation decisions).
@@ -182,7 +190,7 @@ pub fn build_lead_agent_prompt_from_templates(
          Do not simply list raw subagent outputs — integrate, summarize, and resolve any conflicts.\n\
          </output>";
 
-    let mut raw_blocks: Vec<SystemBlock> = Vec::with_capacity(9);
+    let mut raw_blocks: Vec<SystemBlock> = Vec::with_capacity(10);
     raw_blocks.push(SystemBlock {
         name: "lead_persona",
         content: Arc::<str>::from(base_persona.to_string()),
@@ -230,6 +238,13 @@ pub fn build_lead_agent_prompt_from_templates(
             priority: SectionPriority::Normal,
         },
     ]);
+    if let Some(catalog) = skills_catalog.filter(|c| !c.is_empty()) {
+        raw_blocks.push(SystemBlock {
+            name: "skills_catalog",
+            content: Arc::<str>::from(catalog),
+            priority: SectionPriority::Normal,
+        });
+    }
 
     let persona_input = PersonaInput {
         system_persona: Arc::new(SystemPersona::default()),

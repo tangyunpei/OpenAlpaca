@@ -123,7 +123,9 @@ extension set as the main loop — every installed MCP-bridged
 (`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool whose
 extension is enabled — and a per-request `invoke_skill` instance, so the
 lead can run catalog skills and connected integrations itself or
-delegate them. The lead's `SandboxPolicy` allowlist is extended from the
+delegate them; its system prompt carries the same `<available_skills>`
+block as the main loop, as its last raw block, less the main loop's
+sentence that the user can type a skill's `/slash` command. The lead's `SandboxPolicy` allowlist is extended from the
 final tool definitions at run time (template denials still win);
 subagents stay template-scoped — they get only the capabilities their
 own template declares, never the lead's blanket grant.
@@ -319,7 +321,14 @@ server or plugin contributes nothing on either surface), and
 `invoke_skill` (catalog-skill invocation through the nested-skill
 executor; present when an LLM router is configured). So installed
 MCP/plugin tools and `invoke_skill` are on the DEFAULT surface, not just
-under `"full"`. When the lane has active workflows AND steering is
+under `"full"`. The static prompt's `<available_skills>` block names the
+skills `invoke_skill` can run: every available skill (the
+availability-filtered `catalog_summary`) by its id, which is what
+`invoke_skill` resolves, with its `/slash` and its description cut at
+100 characters, within `[orchestrator.prompt_budgets]
+skills_catalog_budget` (500 characters of skill lines); over the budget
+every skill is listed by its id alone, and none is dropped
+(`orchestrator/skill/catalog/prompt.rs`). When the lane has active workflows AND steering is
 enabled, `steer_workflow` + `queue_followup` join the surface.
 Per-request instances go into a per-request registry clone, never the
 global registry. Budgets come from `main_loop_max_rounds` /

@@ -731,6 +731,36 @@ fn carry_over_turns_defaults_to_three_and_zero_turns_it_off() {
     assert_eq!(high.orchestrator.memory.carry_over_turns, 20);
 }
 
+/// N-SKILL-1: `[orchestrator.prompt_budgets] skills_catalog_budget` is the
+/// 500 characters `<available_skills>` always had, unless the file says
+/// otherwise; the shipped file names 500; a value outside 100..=20000 is
+/// clamped.
+#[test]
+fn skills_catalog_budget_defaults_to_five_hundred() {
+    for config in [
+        DaemonConfig::default(),
+        toml::from_str("").unwrap(),
+        toml::from_str("[orchestrator.prompt_budgets]\nidentity_budget = 400\n").unwrap(),
+        toml::from_str(include_str!("../../../../config/daemon.toml")).unwrap(),
+    ] {
+        assert_eq!(
+            config.orchestrator.prompt_budgets.skills_catalog_budget,
+            500
+        );
+    }
+    for (written, kept) in [(0, 100), (2_000, 2_000), (1_000_000, 20_000)] {
+        let mut config: DaemonConfig = toml::from_str(&format!(
+            "[orchestrator.prompt_budgets]\nskills_catalog_budget = {written}\n"
+        ))
+        .unwrap();
+        config.validate();
+        assert_eq!(
+            config.orchestrator.prompt_budgets.skills_catalog_budget,
+            kept
+        );
+    }
+}
+
 /// The shipped `config/daemon.toml` names the key with its default, and the
 /// whole file still parses.
 #[test]

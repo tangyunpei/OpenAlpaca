@@ -866,8 +866,15 @@ fn wait_for_subagents_description_says_it_shows_each_answers_head_and_tail() {
 #[test]
 fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
     let engine = crate::compose::ComposeEngine::new(16);
-    let prompt =
-        build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000, None, None);
+    let prompt = build_lead_agent_prompt_from_templates(
+        &engine,
+        "Test persona",
+        &[],
+        200_000,
+        None,
+        None,
+        None,
+    );
     assert!(
         prompt.contains(
             "check_subagent_status: Poll a single subagent by run_id. Shows whether the subagent is \
@@ -1230,8 +1237,15 @@ fn test_lead_agent_registry_exposes_command_backend_tools() {
 #[test]
 fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
     let engine = crate::compose::ComposeEngine::new(16);
-    let prompt =
-        build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000, None, None);
+    let prompt = build_lead_agent_prompt_from_templates(
+        &engine,
+        "Test persona",
+        &[],
+        200_000,
+        None,
+        None,
+        None,
+    );
     assert!(
         prompt.contains("spawn_subagents_batch"),
         "Lead agent prompt should mention spawn_subagents_batch tool"
@@ -2240,6 +2254,57 @@ async fn test_lead_loop_request_carries_extension_defs_and_invoke_skill() {
         "lead system prompt missing extension guidance"
     );
     assert!(system.content.contains("invoke_skill"));
+}
+
+/// N-SKILL-1 (audit Z3-02): the lead holds `invoke_skill` and is told to use
+/// catalog skills, so its system prompt carries the same `<available_skills>`
+/// block the main loop gets — before, it passed no catalog at all.
+#[tokio::test]
+async fn the_lead_prompt_carries_the_skill_catalog() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("code-review");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: \"Code Review\"\ndescription: \"Review code\"\n\
+         invoke:\n  slash: \"/review\"\n---\n\n## Instructions\n\nReview.\n",
+    )
+    .unwrap();
+    let catalog = crate::orchestrator::skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let result = run_lead_for_test(
+        provider.clone(),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(catalog),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    let messages = provider.seen_messages.lock().unwrap();
+    let system = &messages[0][0].content;
+    assert!(
+        system.contains("<available_skills>\n"),
+        "the lead's prompt has no skill catalog:\n{system}"
+    );
+    assert!(
+        system.contains("- code-review (/review): Review code\n"),
+        "{system}"
+    );
+    // The lead runs no turn a person types into: its block says how to run a
+    // skill and nothing about the user typing a /slash command.
+    assert!(
+        system.contains("Run one of these skills with the invoke_skill tool"),
+        "{system}"
+    );
+    assert!(!system.contains("The user can also type"), "{system}");
 }
 
 /// R42 and §15: the lead's hand-built surface carries `file_read`,
@@ -4069,6 +4134,7 @@ fn the_lead_prompt_carries_the_user_document_exactly_once() {
         200_000,
         Some(&doc),
         Some(1000),
+        None,
     );
     assert_eq!(prompt.matches("### USER PROFILE ###").count(), 1, "{prompt}");
     assert!(prompt.contains("Name: Alex"), "{prompt}");
@@ -4077,8 +4143,15 @@ fn the_lead_prompt_carries_the_user_document_exactly_once() {
     let role_at = prompt.find("<role>").unwrap();
     assert!(persona_at < profile_at && profile_at < role_at, "{prompt}");
 
-    let without =
-        build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000, None, None);
+    let without = build_lead_agent_prompt_from_templates(
+        &engine,
+        "Test persona",
+        &[],
+        200_000,
+        None,
+        None,
+        None,
+    );
     assert_eq!(without.matches("### USER PROFILE ###").count(), 0);
 }
 

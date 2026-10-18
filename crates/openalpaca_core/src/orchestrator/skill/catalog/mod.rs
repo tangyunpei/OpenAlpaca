@@ -58,20 +58,24 @@ pub struct SkillEntry {
     pub source: SkillSource,
 }
 
-/// Cached catalog summary row. The skill **id** rides along so the
-/// availability filter (design §6.2 #12) can re-test each row against the
-/// oracle on every read: the cache is invalidated by catalog mutations, and an
-/// extension toggle is not one.
-#[derive(Clone)]
-struct CatalogSummaryRow {
-    id: String,
-    name: String,
-    description: String,
-    command: Option<String>,
+/// One row of [`SkillCatalog::catalog_summary`]. The skill **id** rides along
+/// so the availability filter (design §6.2 #12) can re-test each row against
+/// the oracle on every read — the cache is invalidated by catalog mutations,
+/// and an extension toggle is not one — and so `<available_skills>` can list
+/// a skill by the name `invoke_skill` resolves (N-SKILL-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSummary {
+    /// The catalog id (directory name, lowercase).
+    pub id: String,
+    /// The frontmatter's display name.
+    pub name: String,
+    pub description: String,
+    /// The slash command without its leading `/`.
+    pub command: Option<String>,
 }
 
 /// Cached catalog summary.
-type CatalogSummaryCache = RwLock<Option<Vec<CatalogSummaryRow>>>;
+type CatalogSummaryCache = RwLock<Option<Vec<SkillSummary>>>;
 
 /// What a plugin used to contribute, kept after T2 withdrew it so `/slash` and
 /// `invoke_skill` can answer *"skill 'x' is provided by plugin 'notion', which
@@ -564,7 +568,9 @@ impl SkillCatalog {
         }
     }
 
-    /// List all skills with their (name, description, command) for prompt catalog.
+    /// List every skill's id, name, description and slash command, sorted by
+    /// name (then id), for the prompt catalog (`<available_skills>`, rendered
+    /// by [`SkillCatalog::available_skills_block`]).
     /// Returns a cached copy when available; rebuilt on catalog mutations.
     ///
     /// **Availability-filtered** (design §6.2 #12): a skill any of whose
@@ -573,7 +579,7 @@ impl SkillCatalog {
     /// would refuse. The filter runs on **read**, not into the cache — the
     /// cache is invalidated by catalog mutations, and an extension toggle is
     /// not one.
-    pub fn catalog_summary(&self) -> Vec<(String, String, Option<String>)> {
+    pub fn catalog_summary(&self) -> Vec<SkillSummary> {
         // Fast path: return cached summary
         let cached = {
             let guard = self.cached_summary.read().ok();
@@ -585,16 +591,16 @@ impl SkillCatalog {
                 // Slow path: build summary and cache it
                 let rows = match self.entries.read() {
                     Ok(guard) => {
-                        let mut rows: Vec<CatalogSummaryRow> = guard
+                        let mut rows: Vec<SkillSummary> = guard
                             .iter()
-                            .map(|(id, e)| CatalogSummaryRow {
+                            .map(|(id, e)| SkillSummary {
                                 id: id.clone(),
                                 name: e.frontmatter.name.clone(),
                                 description: e.frontmatter.description.clone(),
                                 command: e.frontmatter.effective_slash_command(),
                             })
                             .collect();
-                        rows.sort_by(|a, b| a.name.cmp(&b.name));
+                        rows.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
                         rows
                     }
                     Err(_) => Vec::new(),
@@ -606,9 +612,8 @@ impl SkillCatalog {
             }
         };
 
-        let to_tuple = |row: CatalogSummaryRow| (row.name, row.description, row.command);
         if !self.has_availability_oracle() {
-            return rows.into_iter().map(to_tuple).collect();
+            return rows;
         }
 
         let unavailable: std::collections::HashSet<String> = match self.entries.read() {
@@ -622,7 +627,6 @@ impl SkillCatalog {
 
         rows.into_iter()
             .filter(|row| !unavailable.contains(&row.id))
-            .map(to_tuple)
             .collect()
     }
 
@@ -993,6 +997,10 @@ impl SkillCatalog {
 
 #[cfg(test)]
 mod tests;
+
+/// `<available_skills>`: the one renderer of the catalog for a prompt.
+mod prompt;
+pub use prompt::{AVAILABLE_SKILLS_DESCRIPTION_CHARS, SkillsAudience, render_available_skills};
 
 /// Design 09 §12.3: the slash names a skill claims — its slash command, its
 /// aliases and its id (the `/{skill_id}` fallback of

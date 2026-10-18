@@ -247,6 +247,16 @@ pub async fn run_lead_agent(
         lead_agent,
     )
     .max_cost;
+    // The same `<available_skills>` block the main loop gets (N-SKILL-1),
+    // read before the catalog moves into the tool.
+    let skills_catalog_block = skill_catalog.available_skills_block(
+        daemon_config
+            .load()
+            .orchestrator
+            .prompt_budgets
+            .skills_catalog_budget,
+        crate::orchestrator::skill_catalog::SkillsAudience::Lead,
+    );
     let invoke_skill_tool = Arc::new(crate::tools::builtins::InvokeSkillTool::new(
         skill_catalog,
         tool_registry.clone(),
@@ -464,6 +474,7 @@ pub async fn run_lead_agent(
                 .prompt_budgets
                 .user_profile_budget,
         ),
+        Some(&skills_catalog_block),
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {

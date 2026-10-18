@@ -2682,7 +2682,8 @@ fn test_golden_dag_node_byte_identical() {
 /// string; `run_lead_agent` then concatenates `format_tool_guidance` + the
 /// connector, extension and workflow-contract suffixes inline before building
 /// the message vec — none of them is part of this fixture. No user document
-/// is passed, so no profile block is carried.
+/// is passed, so no profile block is carried. A skill catalog is (N-SKILL-1),
+/// and it is carried as the last raw block.
 #[test]
 fn test_golden_lead_agent_byte_identical() {
     use crate::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
@@ -2763,6 +2764,18 @@ fn test_golden_lead_agent_byte_identical() {
         ));
     }
     agents_block.push_str("</agents>");
+
+    // N-SKILL-1: the skill catalog the lead is given, carried last.
+    let skills_catalog = crate::orchestrator::skill_catalog::render_available_skills(
+        &[crate::orchestrator::skill_catalog::SkillSummary {
+            id: "code-review".to_string(),
+            name: "Code Review".to_string(),
+            description: "Review code for bugs".to_string(),
+            command: Some("review".to_string()),
+        }],
+        500,
+        crate::orchestrator::skill_catalog::SkillsAudience::Lead,
+    );
 
     // The other raw blocks, as the builder in runner/lead_agent/prompt.rs
     // writes them — the reference the real builder is held to below.
@@ -2845,6 +2858,7 @@ fn test_golden_lead_agent_byte_identical() {
             output_expectations_text,
             SectionPriority::Normal,
         )
+        .raw_system_block("skills_catalog", &skills_catalog, SectionPriority::Normal)
         .build();
     let expected_system = built.system_message.clone();
 
@@ -2857,6 +2871,7 @@ fn test_golden_lead_agent_byte_identical() {
         model_window,
         None,
         None,
+        Some(&skills_catalog),
     );
 
     // ── Byte-identical assertion on system message content. ─────────────

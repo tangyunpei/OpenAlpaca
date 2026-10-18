@@ -105,8 +105,9 @@ fn test_daemon_keys_in_category() {
     // index-first recall's `recall_mode` (design 09 §13.2) — the
     // conversation summaries' `learning.episode_max_per_day` (§13.3) came
     // and went: a summary is projected with no call (design 11 §8, CQ-2) —
-    // plus the carry-over's `carry_over_turns` (design 11 §8, CQ-5).
-    assert_eq!(keys.len(), 49);
+    // plus the carry-over's `carry_over_turns` (design 11 §8, CQ-5), plus
+    // the skill catalog's `skills_catalog_budget` (N-SKILL-1).
+    assert_eq!(keys.len(), 50);
     for gone in [
         "daemon.orchestrator.extract_every_n_turns",
         "daemon.orchestrator.learning.episode_max_per_day",

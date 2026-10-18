@@ -4319,17 +4319,18 @@ async fn available_skills_omits_a_skill_whose_requirement_is_wholly_withheld() {
     let (_tmp, catalog) = c5_catalog(registry.clone());
     let orch = c5_orchestrator(&bus, registry, catalog.clone());
 
+    // Each skill is listed by its id (N-SKILL-1).
     let block = orch.build_skills_catalog_block();
     assert!(
-        !block.contains("Triage"),
+        !block.contains("- triage"),
         "the refused skill is gone: {block}"
     );
-    assert!(!block.contains("Filer"), "so is the legacy one: {block}");
+    assert!(!block.contains("- filer"), "so is the legacy one: {block}");
     assert!(
-        block.contains("Finder"),
+        block.contains("- finder (/finder)"),
         "partial loss stays listed: {block}"
     );
-    assert!(block.contains("Mixed"), "{block}");
+    assert!(block.contains("- mixed (/mixed)"), "{block}");
 
     let listed = catalog.available_names();
     assert!(!listed.contains(&"triage".to_string()));

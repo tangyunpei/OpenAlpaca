@@ -116,6 +116,12 @@ impl DaemonConfig {
             10000,
             "user_profile_budget",
         );
+        clamp_val(
+            &mut self.orchestrator.prompt_budgets.skills_catalog_budget,
+            100,
+            20000,
+            "skills_catalog_budget",
+        );
         // ── Orchestrator > Routing ──
         clamp_val(
             &mut self.orchestrator.routing.steering_inbox_cap,

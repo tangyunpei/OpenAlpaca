@@ -644,3 +644,195 @@ mod main_loop_tool_timeout {
         );
     }
 }
+
+// --- N-SKILL-1: `<available_skills>` (audit Z3-02) ---
+
+use super::Orchestrator;
+use crate::daemon_config::DaemonConfig;
+use crate::orchestrator::skill_catalog::SkillCatalog;
+use std::sync::Arc;
+
+/// An orchestrator over `catalog`, with nothing else wired: the catalog block
+/// reads the catalog and the daemon config and nothing more.
+fn orchestrator_over(catalog: Arc<SkillCatalog>, daemon_config: DaemonConfig) -> Orchestrator {
+    use crate::bus::EventBus;
+    use crate::security::gate::SecurityGate;
+    use crate::security::sandbox::SandboxManager;
+    use crate::tools::ToolRegistry;
+
+    let bus = EventBus::default();
+    let registry = Arc::new(ToolRegistry::default());
+    let gate = Arc::new(SecurityGate::new(Arc::new(SandboxManager::with_defaults(
+        registry.clone(),
+        bus.clone(),
+    ))));
+    Orchestrator::new(
+        Arc::new(crate::context::SharedContext::new()),
+        Arc::new(crate::lane::LaneManager::new()),
+        bus,
+        crate::middleware::prompt::SystemPersona::default(),
+        None,
+        crate::runner::LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        catalog,
+        Arc::new(crate::orchestrator::skill_router::SkillRouter::new(
+            0.65, 0.45,
+        )),
+        Arc::new(arc_swap::ArcSwap::from_pointee(daemon_config)),
+    )
+}
+
+/// A catalog scanned from a temporary directory holding one SKILL.md per
+/// `(directory, frontmatter lines)`.
+fn scanned_catalog(skills: &[(String, String)]) -> (tempfile::TempDir, Arc<SkillCatalog>) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    for (dir, frontmatter) in skills {
+        let skill_dir = tmp.path().join(dir);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\n{frontmatter}---\n\n## Instructions\n\nDo it.\n"),
+        )
+        .unwrap();
+    }
+    let catalog = SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    (tmp, Arc::new(catalog))
+}
+
+/// The skill each line of the block names: the text between `- ` and the
+/// first space or colon.
+fn listed_names(block: &str) -> Vec<String> {
+    block
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .map(|rest| {
+            rest.split([' ', ':'])
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Twenty skills with their slash commands, named as their directories.
+fn twenty_skills() -> Vec<(String, String)> {
+    (1..=20)
+        .map(|n| {
+            let id = format!("skill-{n:02}");
+            let frontmatter = format!(
+                "name: \"{id}\"\n\
+                 description: \"Does the {id} job for the person who asks for it\"\n\
+                 invoke:\n  slash: \"/{id}\"\n"
+            );
+            (id, frontmatter)
+        })
+        .collect()
+}
+
+/// Twenty skills overflow the default budget, and every one of them is still
+/// listed — past the budget by its name alone. The parent `break`s at the
+/// first line that does not fit and drops the rest without a word.
+#[test]
+fn available_skills_lists_every_skill_names_only_past_the_budget() {
+    let skills = twenty_skills();
+    let (_tmp, catalog) = scanned_catalog(&skills);
+    let orch = orchestrator_over(catalog, DaemonConfig::default());
+
+    let block = orch.build_skills_catalog_block();
+    let listed = listed_names(&block);
+    let missing: Vec<&str> = skills
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .filter(|id| !listed.iter().any(|l| l == id))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "skills dropped from the block: {missing:?}\n{block}"
+    );
+    assert_eq!(listed.len(), 20, "{block}");
+    assert!(
+        !block.contains("job for the person"),
+        "over the budget every line is a name only: {block}"
+    );
+    assert!(block.contains("- skill-07 (/skill-07)\n"), "{block}");
+}
+
+/// The budget is `[orchestrator.prompt_budgets] skills_catalog_budget`: one
+/// large enough carries every description.
+#[test]
+fn the_catalog_budget_is_read_from_the_daemon_config() {
+    let skills = twenty_skills();
+    let (_tmp, catalog) = scanned_catalog(&skills);
+    let mut config = DaemonConfig::default();
+    assert_eq!(
+        config.orchestrator.prompt_budgets.skills_catalog_budget,
+        500
+    );
+    config.orchestrator.prompt_budgets.skills_catalog_budget = 20_000;
+    let orch = orchestrator_over(catalog, config);
+
+    let block = orch.build_skills_catalog_block();
+    assert_eq!(listed_names(&block).len(), 20, "{block}");
+    assert!(
+        block.contains(
+            "- skill-20 (/skill-20): Does the skill-20 job for the person who asks for it\n"
+        ),
+        "{block}"
+    );
+}
+
+/// A skill with no slash command is listed by its id, which is what
+/// `invoke_skill` resolves; the parent listed its display name, which
+/// resolves to nothing.
+#[test]
+fn a_skill_without_a_slash_is_listed_by_an_id_invoke_skill_resolves() {
+    let (_tmp, catalog) = scanned_catalog(&[(
+        "explain-code".to_string(),
+        "name: \"Explain Code\"\ndescription: \"Explain what code does\"\n".to_string(),
+    )]);
+    let orch = orchestrator_over(catalog.clone(), DaemonConfig::default());
+
+    let block = orch.build_skills_catalog_block();
+    let listed = listed_names(&block);
+    assert_eq!(listed.len(), 1, "{block}");
+    for name in &listed {
+        assert!(
+            catalog.get_by_command(name).is_some(),
+            "`{name}` is listed but invoke_skill cannot resolve it:\n{block}"
+        );
+    }
+    assert!(
+        block.contains("- explain-code: Explain what code does\n"),
+        "{block}"
+    );
+}
+
+/// The block tells the model how to run a skill — the main loop holds
+/// `invoke_skill` — rather than saying only the user can.
+#[test]
+fn available_skills_names_invoke_skill() {
+    let (_tmp, catalog) = scanned_catalog(&[(
+        "code-review".to_string(),
+        "name: \"Code Review\"\ndescription: \"Review code\"\ninvoke:\n  slash: \"/review\"\n"
+            .to_string(),
+    )]);
+    let orch = orchestrator_over(catalog, DaemonConfig::default());
+
+    let block = orch.build_skills_catalog_block();
+    assert!(block.starts_with("<available_skills>\n"), "{block}");
+    assert!(block.contains("invoke_skill"), "{block}");
+    // The main loop's user can type a skill's slash command; the lead's
+    // block leaves this sentence out.
+    assert!(
+        block.contains("The user can also type a skill's /slash command."),
+        "{block}"
+    );
+    assert!(
+        block.contains("- code-review (/review): Review code\n"),
+        "{block}"
+    );
+    assert!(block.ends_with("</available_skills>"), "{block}");
+}
