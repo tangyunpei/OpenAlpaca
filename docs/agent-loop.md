@@ -671,6 +671,16 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   round**, and retries stop once `max_rounds` is used up. The counter
   resets to zero on any success. Anything else ends the loop with
   `Error`.
+- **Per-call time limit** — the sandbox cuts a tool call (all but the few
+  exempt ones) at its policy's `max_tool_runtime_secs`, and a command it
+  cuts is killed with every process it started. A chat turn's limit is
+  `[execution.agent_defaults] max_tool_runtime_secs` (60 s), read per
+  turn; a lead's and a subagent's is their template's `timeout_seconds`,
+  60 s when it sets none (`SandboxPolicy::from_constraints`). The loop
+  writes its policy's figure into `shell_execute`'s definition before the
+  first request — or the shell's own 300 s, where that comes first — so
+  the model is told the limit it really runs under; the registered
+  definition names none.
 - **Approval prompts live in the sandbox, not the loop.** A tool on the
   confirm list blocks inside `SandboxManager::execute_tool` until it is
   approved, denied, times out or is withdrawn; the loop only sees the

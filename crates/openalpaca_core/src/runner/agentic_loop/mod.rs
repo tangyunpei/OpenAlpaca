@@ -453,6 +453,14 @@ async fn run_agentic_loop_core(
     state.last_cost = backend.agent_cost(0, 0).await;
     let cost_acc = cost_accumulator.unwrap_or_default();
     let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
+    // N-TOOL-1 (Z1-05): a definition that states a time limit states this
+    // loop's — the cut its sandbox enforces — so the model is never told
+    // 300 s by a tool its sandbox stops at 60. With no policy nothing runs
+    // (every call answers "sandbox not configured"), and no figure is added.
+    let mut tools = tools;
+    if let Some(policy) = sandbox_policy {
+        crate::tools::builtins::state_enforced_timeout(&mut tools, policy.max_tool_runtime_secs);
+    }
     let tools_arc = Arc::new(tools);
     let mut consecutive_llm_errors: usize = 0;
     const MAX_LLM_RETRIES: usize = 3;

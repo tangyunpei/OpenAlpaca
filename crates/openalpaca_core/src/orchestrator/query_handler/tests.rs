@@ -437,3 +437,210 @@ fn apply_keepalive_cross_channel_injects_send() {
     assert!(tool_names.contains(&"send".to_string()));
     assert_eq!(tool_names.len(), 2); // web_fetch + send
 }
+
+/// N-TOOL-1 (Z1-05), through the front door: the main loop's sandbox cuts a
+/// tool at `[execution.agent_defaults] max_tool_runtime_secs`, and the
+/// `shell_execute` definition the model is handed states that same figure —
+/// 60 s by default, and whatever the key is set to.
+#[cfg(unix)]
+mod main_loop_tool_timeout {
+    use crate::bus::EventBus;
+    use crate::context::SharedContext;
+    use crate::daemon_config::DaemonConfig;
+    use crate::gateway::HandleRequest;
+    use crate::lane::LaneManager;
+    use crate::middleware::prompt::SystemPersona;
+    use crate::orchestrator::{Orchestrator, skill_catalog, skill_router};
+    use crate::runner::LoopConfig;
+    use crate::security::gate::SecurityGate;
+    use crate::security::policy::{Principal, Scope};
+    use crate::security::sandbox::SandboxManager;
+    use crate::test_util::{
+        GONE_WITHIN, GuardedProject, KillOnFail, pid_from_file, wait_until_gone,
+    };
+    use crate::tools::ToolRegistry;
+    use arc_swap::ArcSwap;
+    use async_trait::async_trait;
+    use openalpaca_llm::{
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType,
+        Role, ToolCall, Usage,
+    };
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    /// Calls `shell_execute` once with `command` (when given), then answers;
+    /// keeps every request it was handed.
+    struct CallsTheShell {
+        command: Option<String>,
+        seen: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CallsTheShell {
+        fn name(&self) -> &str {
+            "calls-the-shell"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let first = {
+                let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+                seen.push(request);
+                seen.len() == 1
+            };
+            let (tool_calls, finish_reason, content) = match (&self.command, first) {
+                (Some(command), true) => (
+                    vec![ToolCall {
+                        id: "tc_shell".to_string(),
+                        name: "shell_execute".to_string(),
+                        arguments: serde_json::json!({ "command": command }),
+                    }],
+                    FinishReason::ToolUse,
+                    String::new(),
+                ),
+                _ => (vec![], FinishReason::Stop, "done".to_string()),
+            };
+            Ok(ChatResponse {
+                content,
+                tool_calls,
+                model: "mock-model".to_string(),
+                usage: Usage::default(),
+                finish_reason,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// The main loop's surface is the whole registry ("full"), and a
+    /// destructive call is answered by the policy (no person in a test).
+    fn config(max_tool_runtime_secs: Option<u64>) -> DaemonConfig {
+        let mut config = DaemonConfig::default();
+        config.orchestrator.routing.tool_selection = "full".to_string();
+        config.security.auto_approve_confirmations = true;
+        if let Some(secs) = max_tool_runtime_secs {
+            config.execution.agent_defaults.max_tool_runtime_secs = secs;
+        }
+        config
+    }
+
+    /// One main-loop turn in `project`, with the registered `shell_execute`
+    /// on its surface; every request the model was handed.
+    async fn turn(
+        config: DaemonConfig,
+        project: &GuardedProject,
+        command: Option<String>,
+    ) -> Vec<ChatRequest> {
+        let registry = ToolRegistry::default();
+        for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+            if tool.definition.name == "shell_execute" {
+                registry.register(tool).unwrap();
+            }
+        }
+        let registry = Arc::new(registry);
+        let bus = EventBus::default();
+        let gate = Arc::new(SecurityGate::new(Arc::new(SandboxManager::with_defaults(
+            registry.clone(),
+            bus.clone(),
+        ))));
+        let provider = Arc::new(CallsTheShell {
+            command,
+            seen: Mutex::new(Vec::new()),
+        });
+        let router = LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        let orch = Orchestrator::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            bus,
+            SystemPersona::default(),
+            Some(Arc::new(router)),
+            LoopConfig::default(),
+            gate,
+            registry,
+            None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+            Arc::new(ArcSwap::from_pointee(config)),
+        );
+        orch.handle_message(HandleRequest {
+            request_id: Uuid::new_v4(),
+            source: "cli".to_string(),
+            content: "run the build".to_string(),
+            principal: Principal::System,
+            scope: Scope::Global,
+            lane_key: "owner-test:cli".to_string(),
+            workspace_path: Some(project.root.to_string_lossy().into_owned()),
+            stream_id: None,
+            model_override: None,
+            unattended: false,
+            turn_sink: None,
+            session_id: None,
+        })
+        .await
+        .expect("the turn answers");
+        let seen = provider.seen.lock().unwrap_or_else(|p| p.into_inner());
+        seen.clone()
+    }
+
+    fn shell_description(request: &ChatRequest) -> String {
+        request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "shell_execute")
+            .expect("the main loop's surface carries shell_execute")
+            .description
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn the_main_loops_shell_definition_states_the_default_cut() {
+        let project = GuardedProject::new();
+        let seen = turn(config(None), &project, None).await;
+        let description = shell_description(&seen[0]);
+        assert!(
+            description.contains("still running after 60 seconds is stopped"),
+            "{description}"
+        );
+        assert!(!description.contains("300"), "{description}");
+    }
+
+    /// The key moves both: the sandbox cuts the command at 1 s (killing what
+    /// it started, R45), and the definition says 1 second.
+    #[tokio::test]
+    async fn a_changed_max_tool_runtime_secs_moves_the_cut_and_the_stated_figure() {
+        let project = GuardedProject::new();
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let command = format!(
+            "cd '{}'; sleep 5 & echo $! > '{}'; wait",
+            dir.path().display(),
+            pidfile.display()
+        );
+        let seen = turn(config(Some(1)), &project, Some(command)).await;
+        let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
+        let _kill = KillOnFail(pid);
+
+        let result = seen
+            .get(1)
+            .and_then(|request| request.messages.iter().find(|m| m.role == Role::Tool))
+            .expect("the command's result reached the model")
+            .content
+            .clone();
+        assert!(result.contains("timed out after 1s"), "{result:?}");
+        let description = shell_description(&seen[0]);
+        assert!(
+            description.contains("still running after 1 second is stopped"),
+            "{description}"
+        );
+        assert!(
+            wait_until_gone(pid, GONE_WITHIN).await,
+            "the background sleep {pid} outlived the main loop's cut"
+        );
+    }
+}

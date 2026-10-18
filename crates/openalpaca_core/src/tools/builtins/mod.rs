@@ -56,6 +56,7 @@ use self::artifact_read::artifact_read_tool;
 use self::file_ops::{file_edit_tool, file_list_tool, file_read_tool, file_write_tool};
 use self::read_result::read_result_tool;
 use self::shell_execute::shell_execute_tool;
+pub(crate) use self::shell_execute::state_enforced_timeout;
 use self::update_persona::update_persona_tool;
 use self::web_fetch::web_fetch_tool;
 use self::web_search::web_search_tool;

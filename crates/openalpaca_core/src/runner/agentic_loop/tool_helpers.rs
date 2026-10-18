@@ -80,8 +80,14 @@ fn tool_recovery_hint(tool_name: &str, error: &str) -> Option<&'static str> {
     if tool_name == "web_fetch" && error.contains("timeout") {
         return Some("Hint: the URL may be unreachable. Try a different source.");
     }
+    // N-TOOL-1 (Z1-05): the message this follows names the limit the call
+    // was cut at — the sandbox's ("timed out after 60s") or the tool's own —
+    // and no tool takes a parameter that raises it.
     if tool_name == "shell_execute" && error.contains("timed out") {
-        return Some("Hint: break the command into smaller steps or increase timeout.");
+        return Some(
+            "Hint: that is the most a command may run here; split the work into smaller \
+             commands that each finish sooner.",
+        );
     }
     if tool_name == "shell_execute" && error.contains("not found") {
         return Some("Hint: check if the command is installed or use the full path.");

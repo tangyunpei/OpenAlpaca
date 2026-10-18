@@ -4410,3 +4410,212 @@ async fn a_loop_without_a_guard_ships_whatever_the_model_said() {
     assert_eq!(result.final_content, "a false claim");
     assert_eq!(result.rounds_used, 1);
 }
+
+/// N-TOOL-1 (Z1-05): what a loop tells the model about a tool's time limit is
+/// the limit its sandbox enforces — `shell_execute`'s definition states the
+/// figure, and a call cut at it is told what to do instead of to raise a
+/// `timeout` parameter that does not exist.
+mod stated_tool_timeout {
+    use super::*;
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use std::sync::Mutex;
+
+    /// Answers from a script and keeps every request it was handed.
+    struct Scripted {
+        replies: Vec<ChatResponse>,
+        seen: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for Scripted {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+            seen.push(request);
+            let index = (seen.len() - 1).min(self.replies.len() - 1);
+            Ok(self.replies[index].clone())
+        }
+    }
+
+    fn reply(tool_calls: Vec<openalpaca_llm::ToolCall>) -> ChatResponse {
+        let finish_reason = if tool_calls.is_empty() {
+            FinishReason::Stop
+        } else {
+            FinishReason::ToolUse
+        };
+        ChatResponse {
+            content: if tool_calls.is_empty() {
+                "done".to_string()
+            } else {
+                String::new()
+            },
+            tool_calls,
+            model: "mock-model".to_string(),
+            usage: Usage::default(),
+            finish_reason,
+            thinking: None,
+            parts: None,
+        }
+    }
+
+    fn policy(max_tool_runtime_secs: u64) -> SandboxPolicy {
+        SandboxPolicy {
+            agent_id: "test".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        }
+    }
+
+    /// The registered `shell_execute`, as every loop's surface carries it.
+    fn shell() -> RegisteredTool {
+        crate::tools::builtins::builtin_tools(None, None, None)
+            .into_iter()
+            .find(|tool| tool.definition.name == "shell_execute")
+            .expect("shell_execute is a builtin")
+    }
+
+    /// Run one loop whose sandbox cuts a tool at `secs`, with `tool` on its
+    /// surface, and return every request the model was handed.
+    async fn requests(
+        secs: u64,
+        tool: RegisteredTool,
+        replies: Vec<ChatResponse>,
+    ) -> Vec<ChatRequest> {
+        let definition = tool.definition.clone();
+        let registry = ToolRegistry::default();
+        registry.register(tool).unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let provider = Scripted {
+            replies,
+            seen: Mutex::new(Vec::new()),
+        };
+        let config = LoopConfig {
+            enable_caching: false,
+            ..Default::default()
+        };
+        let result = run_agentic_loop(
+            &provider,
+            vec![ChatMessage::user("build it")],
+            vec![definition],
+            &config,
+            Some(&sandbox),
+            "test",
+            Some(&policy(secs)),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        provider
+            .seen
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn shell_description(request: &ChatRequest) -> String {
+        request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "shell_execute")
+            .expect("the request carries shell_execute")
+            .description
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn the_shell_definition_states_the_timeout_the_loops_sandbox_enforces() {
+        let seen = requests(45, shell(), vec![reply(vec![])]).await;
+        let description = shell_description(&seen[0]);
+        assert!(
+            description.contains("still running after 45 seconds is stopped"),
+            "{description}"
+        );
+        assert!(!description.contains("300"), "{description}");
+    }
+
+    /// A sandbox that allows longer than the tool's own bound does not move
+    /// it: the command is still stopped at 300 s, and that is what is stated.
+    #[tokio::test]
+    async fn a_sandbox_longer_than_the_shells_own_bound_states_the_shells() {
+        let seen = requests(900, shell(), vec![reply(vec![])]).await;
+        let description = shell_description(&seen[0]);
+        assert!(
+            description.contains("still running after 300 seconds is stopped"),
+            "{description}"
+        );
+        assert!(!description.contains("900"), "{description}");
+    }
+
+    /// The registered definition, which reaches a model only through a loop,
+    /// names no time limit of its own: no surface can state a wrong one.
+    #[test]
+    fn the_registered_shell_definition_names_no_time_limit() {
+        let description = shell().definition.description;
+        let words: Vec<&str> = description.split_whitespace().collect();
+        let stated = words.windows(2).any(|pair| {
+            pair[0].chars().all(|c| c.is_ascii_digit()) && pair[1].starts_with("second")
+        });
+        assert!(!stated, "{description}");
+    }
+
+    /// Stands in for a command that runs past the sandbox's cut.
+    struct Hangs;
+
+    #[async_trait]
+    impl BuiltInTool for Hangs {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok("never".to_string())
+        }
+    }
+
+    /// A call cut at the sandbox's limit is told the limit and what to do —
+    /// never to raise a `timeout` parameter, which no tool here takes.
+    #[tokio::test]
+    async fn a_timed_out_command_is_told_its_limit_and_no_timeout_parameter() {
+        let hangs = RegisteredTool {
+            backend: ToolBackend::BuiltIn(Arc::new(Hangs)),
+            annotations: None,
+            ..shell()
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tc_slow".to_string(),
+            name: "shell_execute".to_string(),
+            arguments: serde_json::json!({"command": "make"}),
+        };
+        let seen = requests(1, hangs, vec![reply(vec![call]), reply(vec![])]).await;
+        let result = seen[1]
+            .messages
+            .iter()
+            .find(|m| m.role == openalpaca_llm::Role::Tool)
+            .expect("the cut call's result reached the model")
+            .content
+            .clone();
+        assert!(result.contains("timed out after 1s"), "{result}");
+        assert!(
+            result.contains("Hint:"),
+            "a cut command is told what to do: {result}"
+        );
+        assert!(
+            !result.to_lowercase().contains("timeout"),
+            "no `timeout` parameter exists to raise: {result}"
+        );
+    }
+}
