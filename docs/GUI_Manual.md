@@ -1293,6 +1293,15 @@ from `GET /v1/skills`. A health row for a skill the catalog no longer holds (a
 deleted directory, a disabled plugin's withdrawn contribution) keeps showing the
 id the log has rather than a placeholder name.
 
+Under it, when the daemon's last scan of the skills directory found a problem,
+one line counts them from `GET /v1/skills/diagnostics` — "3 problems in the
+skill files — 2 not loaded, 1 warning" — and points at
+`openalpaca skills list`, which names each file and what is wrong with it. A
+skill whose file was not loaded after an edit stays listed, but it does not
+run until the file is fixed: invoking it answers with that error. The line is
+read again when a skill's file changes, whether or not the change loads.
+Nothing is drawn when the scan found nothing.
+
 ### Extensions
 
 One list over both kinds — MCP servers and out-of-process plugins — each row

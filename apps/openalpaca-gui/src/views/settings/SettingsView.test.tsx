@@ -251,6 +251,7 @@ vi.mock("@/hooks/useSkills", async (importOriginal) => ({
         author: "file:project",
       },
     ]),
+  useSkillDiagnostics: () => query([]),
 }));
 
 vi.mock("@/hooks/useExtensions", async (importOriginal) => ({

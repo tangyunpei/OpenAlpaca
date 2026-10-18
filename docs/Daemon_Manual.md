@@ -1168,6 +1168,7 @@ user` and the app's Settings → Persona are the clients.
 | `DELETE /v1/extensions/{kind}/{id}` | Remove an orphaned row; `?uninstall=true` is the real removal. |
 | `GET /v1/tools` | Read-only tool catalog. No per-tool toggle. |
 | `GET /v1/skills` | Read-only skill catalog. |
+| `GET /v1/skills/diagnostics` | What the catalog's last scan found: every `SKILL.md` it did not load (`severity: "error"`; after a hot edit the skill stays listed but does not run until the file is fixed — an invocation answers with the error) or read in spite of a problem (`"warning"`), as `{code, severity, path, skill_id, message}`. A bare array; `openalpaca skills list` prints it. |
 | `GET /v1/skills/health` | Skill health. |
 
 See [Extensions](#extensions-mcp-servers--plugins) for what the verbs do.

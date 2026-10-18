@@ -557,9 +557,9 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
         && let Some(skill_folder) = relative.components().next()
     {
         let skill_dir = ctx.skills_dir.join(skill_folder);
-        match ctx.skill_catalog.reload_skill(&skill_dir) {
+        let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
+        let action = match ctx.skill_catalog.reload_skill(&skill_dir) {
             Ok(()) => {
-                let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
                 info!("Skill hot-reloaded: {}", skill_dir.display());
                 // Re-sync the skill's cron job (catalog keys are lowercased
                 // directory names). Handles add/change/removal of invoke.cron
@@ -571,17 +571,22 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
                     scheduled_skills_enabled(ctx),
                 )
                 .await;
-                ctx.bus
-                    .publish(openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
-                        skill_name,
-                        action: "reloaded".to_string(),
-                        timestamp: chrono::Utc::now(),
-                    });
+                "reloaded"
             }
             Err(e) => {
-                warn!("Skill reload failed for {}: {}", skill_dir.display(), e)
+                warn!("Skill reload failed for {}: {}", skill_dir.display(), e);
+                // The catalog noted the file's error (N-SKILL-2) and kept any
+                // entry still listed, which fails to run until the file is
+                // fixed; the event tells a client to read the diagnostics again.
+                "reload_failed"
             }
-        }
+        };
+        ctx.bus
+            .publish(openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
+                skill_name,
+                action: action.to_string(),
+                timestamp: chrono::Utc::now(),
+            });
     }
 }
 

@@ -2,15 +2,20 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { SkillCatalogEntry } from "@/lib/api/types";
+import type { SkillCatalogEntry, SkillDiagnostic } from "@/lib/api/types";
 import { useUiStore } from "@/stores/ui";
 
-import { ToolsSection, skillsByLogKey } from "./ToolsSection";
+import {
+  ToolsSection,
+  skillProblemsLine,
+  skillsByLogKey,
+} from "./ToolsSection";
 
 const state = vi.hoisted(() => ({
   tools: [] as unknown[],
   skills: [] as unknown[],
   catalog: [] as unknown[],
+  diagnostics: undefined as unknown[] | undefined,
 }));
 
 vi.mock("@/hooks/useSkills", () => ({
@@ -18,6 +23,11 @@ vi.mock("@/hooks/useSkills", () => ({
   useSkillHealth: () => ({ data: state.skills, isPending: false, error: null }),
   useSkillCatalog: () => ({
     data: state.catalog,
+    isPending: false,
+    error: null,
+  }),
+  useSkillDiagnostics: () => ({
+    data: state.diagnostics,
     isPending: false,
     error: null,
   }),
@@ -69,11 +79,73 @@ const catalogued = {
   author: "file:project",
 };
 
+/**
+ * What the daemon serves for a skills directory holding a malformed
+ * SKILL.md, a FIFO named SKILL.md and two skills claiming one slash command.
+ */
+const diagnostics: SkillDiagnostic[] = [
+  {
+    code: "invalid_yaml",
+    severity: "error",
+    path: "/cfg/skills/broken/SKILL.md",
+    skill_id: "broken",
+    message: "Invalid YAML: did not find expected node content",
+  },
+  {
+    code: "read_failed",
+    severity: "error",
+    path: "/cfg/skills/piped/SKILL.md",
+    skill_id: "piped",
+    message: "Could not read SKILL.md: not a regular file",
+  },
+  {
+    code: "slash_conflict",
+    severity: "warning",
+    path: "/cfg/skills/second-review/SKILL.md",
+    skill_id: "second-review",
+    message:
+      "Slash command '/review' is also claimed by skill 'code-review'; this skill now answers it",
+  },
+];
+
 beforeEach(() => {
   state.tools = [builtin, fromMcp];
   state.skills = [];
   state.catalog = [];
+  state.diagnostics = [];
   useUiStore.setState({ settingsSectionId: "tools", toast: null });
+});
+
+describe("the skill scan's problems (N-SKILL-2)", () => {
+  it("counts what the last scan found and points at the CLI that names it", () => {
+    state.diagnostics = diagnostics;
+    render(<ToolsSection />);
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(
+      "3 problems in the skill files — 2 not loaded, 1 warning. `openalpaca skills list` names each one.",
+    );
+    expect(status).toHaveTextContent(/^3/);
+  });
+
+  it("draws no count when the scan found nothing, or the read has not answered", () => {
+    render(<ToolsSection />);
+    expect(screen.queryByRole("status")).toBeNull();
+
+    state.diagnostics = undefined;
+    render(<ToolsSection />);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("words one problem in the singular", () => {
+    expect(skillProblemsLine([])).toBeNull();
+    expect(skillProblemsLine(diagnostics.slice(2))).toBe(
+      "1 problem in the skill files — 0 not loaded, 1 warning. `openalpaca skills list` names each one.",
+    );
+    expect(skillProblemsLine(diagnostics.slice(0, 2))).toBe(
+      "2 problems in the skill files — 2 not loaded, 0 warnings. `openalpaca skills list` names each one.",
+    );
+  });
 });
 
 describe("ToolsSection (ADR-030 §9.3)", () => {

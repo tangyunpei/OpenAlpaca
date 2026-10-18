@@ -108,6 +108,7 @@ openalpaca llm status                        # shows which model will answer
 | [`store`](#store) | Projects: list them, re-point a moved one, delete one's data |
 | [`memory`](#memory) | Memory notes: list, search, add, edit, confirm, undo, forget, sync, doctor, adopt |
 | [`persona`](#persona) | `USER.md`: show it, edit it |
+| [`skills`](#skills) | The skill catalog and the problems its last scan found |
 | [`chat`](#chat) | Talk to the orchestrator |
 
 ### `daemon`
@@ -936,6 +937,39 @@ Notes:
   `update_persona` would refuse is `400 PERSONA_INVALID`.
 - `user` is the only document with an editor; `soul` and `identity` are refused
   by the argument parser.
+
+### `skills`
+
+The skills the daemon loaded from `config/skills/`, and every problem its last
+scan of that directory found, through `GET /v1/skills` and
+`GET /v1/skills/diagnostics`. Both are reads: a skill has no on/off switch.
+
+```bash
+openalpaca skills list                 # the catalog, then the problems
+openalpaca skills list --format json   # {"skills": [...], "diagnostics": [...]}
+openalpaca skills info review          # one skill, by id or slash command
+openalpaca skills info /review
+```
+
+Notes:
+- A problem is `error` when the daemon did not load the SKILL.md — at start-up
+  the skill is then missing; after an edit while the daemon runs, the skill
+  stays listed but does not run until the file is fixed (invoking it answers
+  with the error), and `info` says so — and `warning` when it read the file in
+  spite of the problem. The count line reads "3 problems in the
+  skill files (2 not loaded, 1 warning)". The codes: `read_failed` (unreadable, or not a
+  regular file — a FIFO or a directory named `SKILL.md`; a link you made to a
+  file is followed), `too_large` (over 256 KiB), `missing_frontmatter`,
+  `invalid_yaml` and `missing_field` (not loaded), and `unknown_key` (a top-level
+  key the daemon does not read — `require_capabilities` for
+  `requires_capabilities` leaves the skill with no tools), `deprecated_field`,
+  `id_mismatch` (the frontmatter's `id` is not the directory's name, which is
+  the id) and `slash_conflict` (two skills claim one slash command; the one
+  named answers it), warnings. Each line gives the file and the daemon's message.
+- `info` on a skill the daemon skipped says it is not loaded and shows why; a
+  name that is neither a loaded skill nor in the problems is an error.
+- The scan runs when the daemon starts, and a skill's problems are re-read when
+  its directory changes.
 
 ### `chat`
 

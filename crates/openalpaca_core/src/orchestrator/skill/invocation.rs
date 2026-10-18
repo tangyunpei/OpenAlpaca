@@ -71,7 +71,8 @@ impl Orchestrator {
             .ok_or_else(|| format!("Skill '{}' not found in catalog", skill_name))?;
         let skill_doc = self
             .skill_catalog
-            .load_full(skill_name)
+            .load_full_off_runtime(skill_name)
+            .await
             .map_err(|e| format!("Failed to load skill '{}': {}", skill_name, e))?;
 
         // Permissions preflight: reject early if sandbox config is inconsistent

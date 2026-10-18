@@ -13,7 +13,8 @@
 use crate::bus::EventBus;
 use crate::events::SystemEvent;
 use crate::middleware::skill::{
-    SkillDocument, SkillFrontmatter, SkillScope, parse_skill_frontmatter, parse_skill_markdown,
+    SkillDocument, SkillFrontmatter, SkillParseError, SkillScope, parse_skill_frontmatter,
+    parse_skill_markdown,
 };
 use crate::orchestrator::intent::is_reserved_slash_name;
 use chrono::Utc;
@@ -101,7 +102,9 @@ pub struct SkillCatalog {
     command_index: RwLock<HashMap<String, String>>,
     /// Alias index: maps alias command → skill ID.
     alias_index: RwLock<HashMap<String, String>>,
-    /// Diagnostic messages accumulated during scanning.
+    /// What the last scan of each skills directory found (N-SKILL-2): the
+    /// files it skipped and the problems of the ones it loaded.
+    diagnostics: RwLock<Vec<SkillDiagnostic>>,
     /// Optional event bus for emitting lifecycle events.
     bus: Option<EventBus>,
     /// Cached catalog summary — invalidated on mutation (Opt-8a).
@@ -131,6 +134,7 @@ impl SkillCatalog {
             entries: RwLock::new(HashMap::new()),
             command_index: RwLock::new(HashMap::new()),
             alias_index: RwLock::new(HashMap::new()),
+            diagnostics: RwLock::new(Vec::new()),
             bus: None,
             cached_summary: RwLock::new(None),
             availability_oracle: RwLock::new(None),
@@ -144,6 +148,7 @@ impl SkillCatalog {
             entries: RwLock::new(HashMap::new()),
             command_index: RwLock::new(HashMap::new()),
             alias_index: RwLock::new(HashMap::new()),
+            diagnostics: RwLock::new(Vec::new()),
             bus: Some(bus),
             cached_summary: RwLock::new(None),
             availability_oracle: RwLock::new(None),
@@ -270,9 +275,14 @@ impl SkillCatalog {
     /// Scan a directory for skill folders containing SKILL.md.
     ///
     /// Each direct child directory that contains a `SKILL.md` file is treated
-    /// as a skill. Only the YAML frontmatter is parsed (Level 1).
+    /// as a skill. Only the YAML frontmatter is parsed (Level 1), from a
+    /// regular file of at most [`MAX_SKILL_MD_BYTES`].
     /// Returns the count of skills successfully loaded.
+    ///
+    /// What the scan finds replaces what the last scan of `dir` found
+    /// ([`SkillCatalog::diagnostics`], N-SKILL-2).
     pub fn scan_directory(&self, dir: &Path, scope: SkillScope) -> usize {
+        self.forget_diagnostics_under(dir);
         let read_dir = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
             Err(e) => {
@@ -281,6 +291,7 @@ impl SkillCatalog {
                     dir.display(),
                     e
                 );
+                self.note_diagnostic(&SkillParseError::ReadFailed(e.to_string()), dir, None);
                 return 0;
             }
         };
@@ -305,6 +316,7 @@ impl SkillCatalog {
             }
         }
 
+        self.note_slash_conflicts();
         count
     }
 
@@ -339,29 +351,40 @@ impl SkillCatalog {
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| "invalid directory name".to_string())?;
+        let key = dir_name.to_lowercase();
+        // Every problem is kept as a diagnostic (N-SKILL-2) as well as
+        // logged; the message is the error's own words.
+        let noted = |problem: SkillParseError| -> String {
+            self.note_diagnostic(&problem, skill_md, Some(&key));
+            problem.to_string()
+        };
+        let warn = |problem: SkillParseError| {
+            tracing::warn!("SkillCatalog: skill '{}': {}", key, problem);
+            noted(problem);
+        };
 
-        let content =
-            std::fs::read_to_string(skill_md).map_err(|e| format!("read error: {}", e))?;
+        let content = read_skill_md(skill_md).map_err(|e| format!("read error: {}", noted(e)))?;
 
         let frontmatter =
-            parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", e))?;
+            parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", noted(e)))?;
+
+        // A key the parse ignored, which a typo leaves silently unread.
+        for unknown in frontmatter.unknown_keys.names() {
+            warn(SkillParseError::UnknownKey(unknown.clone()));
+        }
 
         // Deprecation warnings for parsed-but-dead fields
         if frontmatter.context.summarize.enabled {
-            let msg = format!(
-                "Skill '{}': 'context.summarize.enabled' is deprecated and has no effect. \
-                 Use 'context.budget_tokens' for context size control.",
-                frontmatter.name
-            );
-            tracing::warn!("SkillCatalog: {}", msg);
+            warn(SkillParseError::DeprecatedField {
+                field: "context.summarize.enabled",
+                note: "Use 'context.budget_tokens' for context size control.",
+            });
         }
         if !frontmatter.tools.defaults.is_empty() {
-            let msg = format!(
-                "Skill '{}': 'tools.defaults' is deprecated and has no effect. \
-                 Tool default arguments are not injected at runtime.",
-                frontmatter.name
-            );
-            tracing::warn!("SkillCatalog: {}", msg);
+            warn(SkillParseError::DeprecatedField {
+                field: "tools.defaults",
+                note: "Tool default arguments are not injected at runtime.",
+            });
         }
 
         // Validation: invoke.mode == "disabled" => skip
@@ -377,14 +400,12 @@ impl SkillCatalog {
         if let Some(ref declared_id) = frontmatter.id
             && declared_id != dir_name
         {
-            let msg = format!(
-                "Skill '{}': frontmatter id '{}' does not match directory name '{}'",
-                frontmatter.name, declared_id, dir_name
-            );
-            tracing::warn!("SkillCatalog: {}", msg);
+            warn(SkillParseError::IdMismatch {
+                declared: declared_id.clone(),
+                directory: dir_name.to_string(),
+            });
         }
 
-        let key = dir_name.to_lowercase();
         let skill_name_for_event = frontmatter.name.clone();
         warn_reserved_slash_claims(&key, &frontmatter);
 
@@ -647,8 +668,14 @@ impl SkillCatalog {
 
     /// Load full skill content (Level 2) from disk.
     ///
-    /// Re-reads and fully parses the SKILL.md file. Does not cache the result —
-    /// the caller decides how long to keep it.
+    /// Re-reads and fully parses the SKILL.md file, through the scan's guarded
+    /// read (a regular file — the owner's own link still followed — of at most
+    /// [`MAX_SKILL_MD_BYTES`]), so a file swapped for a FIFO or grown past the
+    /// cap is refused at once instead of blocking or being read whole. Does not
+    /// cache the result — the caller decides how long to keep it — so a skill
+    /// whose hot edit could not be loaded stays listed but fails here, with the
+    /// edited file's error, until the file is fixed (N-SKILL-2). An async
+    /// caller uses [`load_full_off_runtime`](Self::load_full_off_runtime).
     pub fn load_full(&self, name: &str) -> Result<SkillDocument, String> {
         let entry = self
             .get(name)
@@ -665,11 +692,25 @@ impl SkillCatalog {
         let path = entry.skill_md_path.as_ref()
             .expect("file-based skill must have skill_md_path");
 
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        let content =
+            read_skill_md(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
         parse_skill_markdown(&content)
             .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
+    }
+
+    /// [`load_full`](Self::load_full) on the blocking pool, for an async
+    /// caller (a skill invocation, `invoke_skill`): the read touches the disk,
+    /// and the runtime's worker is not the place to wait on it.
+    pub async fn load_full_off_runtime(
+        self: &Arc<Self>,
+        name: &str,
+    ) -> Result<SkillDocument, String> {
+        let catalog = Arc::clone(self);
+        let wanted = name.to_string();
+        tokio::task::spawn_blocking(move || catalog.load_full(&wanted))
+            .await
+            .map_err(|e| format!("Loading skill '{name}' stopped: {e}"))?
     }
 
     /// Remove a skill from the catalog by ID or name.
@@ -789,10 +830,42 @@ impl SkillCatalog {
     /// Hot-reload a single skill directory.
     ///
     /// Removes the old entry (if any) and re-scans the directory.
-    /// Preserves the original scope if the skill already existed.
+    /// Preserves the original scope if the skill already existed. What it
+    /// finds replaces the directory's diagnostics. A file it cannot read or
+    /// parse is not loaded and is noted; if an earlier version of the skill
+    /// is in the catalog, its entry — the level-1 frontmatter only — stays
+    /// listed with its warnings, but the skill does not run: every invocation
+    /// reads the file again ([`load_full`](Self::load_full)) and fails with
+    /// the file's error until the file is fixed.
     pub fn reload_skill(&self, skill_dir: &Path) -> Result<(), String> {
         let skill_md = skill_dir.join("SKILL.md");
+        let earlier = self.take_diagnostics_under(skill_dir);
+        let result = self.reload_skill_in(skill_dir, &skill_md);
+        if result.is_err() && self.loads_from(skill_dir) {
+            // What was found in the entry still listed still describes it;
+            // slash conflicts are recomputed below.
+            let kept = earlier.into_iter().filter(|d| {
+                d.severity == SkillDiagnosticSeverity::Warning
+                    && d.code != SkillDiagnosticCode::SlashConflict
+            });
+            if let Ok(mut found) = self.diagnostics.write() {
+                found.extend(kept);
+            }
+        }
+        self.note_slash_conflicts();
+        result
+    }
 
+    /// Whether a skill loaded from `skill_dir` is in the catalog.
+    fn loads_from(&self, skill_dir: &Path) -> bool {
+        self.entries.read().is_ok_and(|entries| {
+            entries
+                .values()
+                .any(|entry| entry.skill_dir.as_deref() == Some(skill_dir))
+        })
+    }
+
+    fn reload_skill_in(&self, skill_dir: &Path, skill_md: &Path) -> Result<(), String> {
         // Determine the scope of the existing entry (default to Project)
         let existing_scope = skill_dir
             .file_name()
@@ -826,10 +899,19 @@ impl SkillCatalog {
             return Ok(());
         }
 
-        // Read frontmatter to get the name for logging
-        let content =
-            std::fs::read_to_string(&skill_md).map_err(|e| format!("read error: {}", e))?;
-        let fm = parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", e))?;
+        // Read frontmatter to get the name for logging — through the scan's
+        // guarded read, so a FIFO or an oversized file is noted, not waited on.
+        let skill_id = skill_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_lowercase);
+        let noted = |problem: SkillParseError| -> String {
+            self.note_diagnostic(&problem, skill_md, skill_id.as_deref());
+            problem.to_string()
+        };
+        let content = read_skill_md(skill_md).map_err(|e| format!("read error: {}", noted(e)))?;
+        let fm =
+            parse_skill_frontmatter(&content).map_err(|e| format!("parse error: {}", noted(e)))?;
 
         // Remove old entries for this directory (handles renames)
         let skill_dir_buf = skill_dir.to_path_buf();
@@ -846,9 +928,93 @@ impl SkillCatalog {
         }
 
         // Re-load with preserved scope
-        self.load_entry(&skill_md, skill_dir, existing_scope)?;
+        self.load_entry(skill_md, skill_dir, existing_scope)?;
         tracing::info!("SkillCatalog: reloaded skill '{}'", fm.name);
         Ok(())
+    }
+
+    // ── Scan diagnostics (N-SKILL-2) ─────────────────────────────────────
+
+    /// Keep one thing a scan found.
+    fn note_diagnostic(&self, problem: &SkillParseError, path: &Path, skill_id: Option<&str>) {
+        let diagnostic = SkillDiagnostic::new(problem, path, skill_id);
+        if let Ok(mut found) = self.diagnostics.write() {
+            found.push(diagnostic);
+        }
+    }
+
+    /// Drop what an earlier scan found under `dir`, which is being scanned
+    /// again.
+    fn forget_diagnostics_under(&self, dir: &Path) {
+        self.take_diagnostics_under(dir);
+    }
+
+    /// Remove what an earlier scan found under `dir`, and return it.
+    fn take_diagnostics_under(&self, dir: &Path) -> Vec<SkillDiagnostic> {
+        let Ok(mut found) = self.diagnostics.write() else {
+            return Vec::new();
+        };
+        let (under, kept): (Vec<_>, Vec<_>) = found
+            .drain(..)
+            .partition(|d| Path::new(&d.path).starts_with(dir));
+        *found = kept;
+        under
+    }
+
+    /// Note every slash command two file skills claim, on the skill that
+    /// answers it, once per other claimant — recomputed from the entries
+    /// after every scan and reload, so a rescan neither loses nor doubles a
+    /// conflict. (Loading keeps the index in load order: the skill loaded
+    /// last answers.) A plugin skill's claim is not compared here.
+    fn note_slash_conflicts(&self) {
+        let mut claims: std::collections::BTreeMap<String, Vec<(String, PathBuf)>> =
+            std::collections::BTreeMap::new();
+        if let Ok(entries) = self.entries.read() {
+            for (id, entry) in entries.iter() {
+                if let (Some(command), Some(path)) = (
+                    entry.frontmatter.effective_slash_command(),
+                    entry.skill_md_path.as_ref(),
+                ) {
+                    claims
+                        .entry(command.to_lowercase())
+                        .or_default()
+                        .push((id.clone(), path.clone()));
+                }
+            }
+        }
+        let answering: HashMap<String, String> = match self.command_index.read() {
+            Ok(index) => claims
+                .keys()
+                .filter_map(|command| Some((command.clone(), index.get(command)?.clone())))
+                .collect(),
+            Err(_) => HashMap::new(),
+        };
+
+        let mut conflicts = Vec::new();
+        for (command, mut claimants) in claims {
+            if claimants.len() < 2 {
+                continue;
+            }
+            claimants.sort();
+            let Some((winner, path)) = answering
+                .get(&command)
+                .and_then(|winner| claimants.iter().find(|(id, _)| id == winner))
+            else {
+                continue;
+            };
+            for (other, _) in claimants.iter().filter(|(id, _)| id != winner) {
+                let problem = SkillParseError::SlashConflict {
+                    command: command.clone(),
+                    other: other.clone(),
+                };
+                conflicts.push(SkillDiagnostic::new(&problem, path, Some(winner)));
+            }
+        }
+
+        if let Ok(mut found) = self.diagnostics.write() {
+            found.retain(|d| d.code != SkillDiagnosticCode::SlashConflict);
+            found.extend(conflicts);
+        }
     }
 
     /// Number of registered skills.
@@ -862,6 +1028,24 @@ impl SkillCatalog {
     /// Check if the catalog is empty.
     pub fn is_empty(&self) -> bool {
         self.count() == 0
+    }
+
+    /// What the last scan of each skills directory found — and each reload
+    /// since — sorted by path, then code (N-SKILL-2).
+    pub fn diagnostics(&self) -> Vec<SkillDiagnostic> {
+        let mut found = self
+            .diagnostics
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        found.sort_by(|a, b| {
+            (a.path.as_str(), a.code, a.message.as_str()).cmp(&(
+                b.path.as_str(),
+                b.code,
+                b.message.as_str(),
+            ))
+        });
+        found
     }
 
     /// Return a snapshot of all entries for external iteration (e.g. by SkillRouter).
@@ -998,9 +1182,19 @@ impl SkillCatalog {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod diagnostics_tests;
+
 /// `<available_skills>`: the one renderer of the catalog for a prompt.
 mod prompt;
 pub use prompt::{AVAILABLE_SKILLS_DESCRIPTION_CHARS, SkillsAudience, render_available_skills};
+
+/// What a scan found in the skills directory (N-SKILL-2).
+mod diagnostics;
+use diagnostics::read_skill_md;
+pub use diagnostics::{
+    MAX_SKILL_MD_BYTES, SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity,
+};
 
 /// Design 09 §12.3: the slash names a skill claims — its slash command, its
 /// aliases and its id (the `/{skill_id}` fallback of

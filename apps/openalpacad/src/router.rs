@@ -385,6 +385,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Skill catalog (GAP-18's second half) — read-only, like `/v1/tools`;
         // there is no per-skill enable state to write.
         .route("/v1/skills", get(crate::routes::list_skills_handler))
+        // What the catalog's last scan found (N-SKILL-2) — read-only, apart
+        // from the catalog so `/v1/skills` stays a bare array of skills.
+        .route(
+            "/v1/skills/diagnostics",
+            get(crate::routes::skill_diagnostics_handler),
+        )
         // Skill health routes (Phase 4a)
         .route(
             "/v1/skills/health",

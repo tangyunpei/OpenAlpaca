@@ -205,7 +205,7 @@ pub enum ServerEvent {
     /// The skill catalog was updated (skill added, removed, or reloaded)
     SkillCatalogUpdated {
         skill_name: String,
-        /// "added" | "removed" | "reloaded"
+        /// "added" | "removed" | "reloaded" | "reload_failed"
         action: String,
         ts: DateTime<Utc>,
         instance_id: String,

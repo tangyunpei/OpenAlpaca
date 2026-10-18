@@ -12,14 +12,27 @@
 
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 
-import { getSkillHealth, listSkills } from "@/lib/api/skills";
+import {
+  getSkillDiagnostics,
+  getSkillHealth,
+  listSkills,
+} from "@/lib/api/skills";
 import { listTools } from "@/lib/api/tools";
 import type {
   SkillCatalogEntry,
+  SkillDiagnostic,
   SkillHealthMetrics,
   ToolCatalogEntry,
 } from "@/lib/api/types";
 import { qk } from "@/lib/query-keys";
+
+/** What the skill catalog's last scan found (N-SKILL-2). */
+export function useSkillDiagnostics(): UseQueryResult<SkillDiagnostic[]> {
+  return useQuery({
+    queryKey: qk.skills.diagnostics(),
+    queryFn: ({ signal }) => getSkillDiagnostics(signal),
+  });
+}
 
 export function useSkillHealth(): UseQueryResult<SkillHealthMetrics[]> {
   return useQuery({

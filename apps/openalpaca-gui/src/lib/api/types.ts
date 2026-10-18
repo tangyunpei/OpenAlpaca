@@ -1042,6 +1042,29 @@ export interface SkillCatalogEntry {
 }
 
 /**
+ * One thing the skill catalog's last scan found (`GET /v1/skills/diagnostics`,
+ * N-SKILL-2): a SKILL.md it skipped (`error`) or loaded with a problem
+ * (`warning`). `message` is the daemon's own sentence.
+ */
+export interface SkillDiagnostic {
+  code:
+    | "read_failed"
+    | "missing_frontmatter"
+    | "invalid_yaml"
+    | "missing_field"
+    | "id_mismatch"
+    | "deprecated_field"
+    | "slash_conflict"
+    | "unknown_key"
+    | "too_large";
+  severity: "error" | "warning";
+  path: string;
+  /** The directory's name, lowercased — `null` for the skills directory itself. */
+  skill_id: string | null;
+  message: string;
+}
+
+/**
  * Health metrics keyed by `skill_id` — lifetime totals, with no name and no
  * description of their own. `GET /v1/skills` supplies those.
  */

@@ -141,7 +141,8 @@ impl SkillInvocationToolExecutor {
             .ok_or_else(|| format!("Skill '{}' not found in catalog", skill_id))?;
         let skill_doc = self
             .catalog
-            .load_full(skill_id)
+            .load_full_off_runtime(skill_id)
+            .await
             .map_err(|e| format!("Failed to load skill '{}': {}", skill_id, e))?;
 
         // Resolve tools for nested skill.
@@ -878,5 +879,121 @@ Work on the file.
                 "artifact_read"
             ]
         );
+    }
+
+    /// A top-level `invoke_skill` over `catalog` — no parent skill, no tool
+    /// context — whose model is `provider`.
+    fn top_level_executor(
+        catalog: Arc<SkillCatalog>,
+        provider: Arc<crate::test_util::RecordingProvider>,
+    ) -> SkillInvocationToolExecutor {
+        let router = Arc::new(LlmRouter::single_provider(
+            provider,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        ));
+        SkillInvocationToolExecutor::new(
+            catalog,
+            Arc::new(ToolRegistry::new().unwrap()),
+            router,
+            EventBus::new(16),
+            Vec::new(),
+            3,
+            None,
+            None,
+            None,
+            1.0,
+            false,
+            crate::daemon_config::CircuitBreakerConfig::default(),
+            300,
+        )
+    }
+
+    const REVIEW_SKILL: &str = "---\nname: \"Review\"\ndescription: \"Reviews code\"\n---\nReview the change line by line.\n";
+
+    /// N-SKILL-2: a hot edit that breaks a loaded skill's SKILL.md leaves the
+    /// skill listed — and its file named in an `invalid_yaml` diagnostic — but
+    /// `invoke_skill` on it answers with that error, and no model is asked to
+    /// follow the instructions the file held before the edit.
+    #[tokio::test]
+    async fn invoke_skill_after_a_broken_hot_edit_answers_the_load_error() {
+        let tmp = TempDir::new().unwrap();
+        write_skill(tmp.path(), "review", REVIEW_SKILL);
+        let catalog = Arc::new(SkillCatalog::new());
+        catalog.scan_directory(tmp.path(), SkillScope::Project);
+        let skill_dir = tmp.path().join("review");
+        let path = skill_dir.join("SKILL.md");
+
+        std::fs::write(&path, "---\nname: [oops\n---\n").unwrap();
+        assert!(catalog.reload_skill(&skill_dir).is_err());
+        assert!(catalog.get("review").is_some(), "the skill stays listed");
+        let error = catalog
+            .diagnostics()
+            .into_iter()
+            .find(|d| {
+                d.code == crate::orchestrator::skill::catalog::SkillDiagnosticCode::InvalidYaml
+            })
+            .expect("an invalid_yaml diagnostic");
+        assert_eq!(error.path, path.display().to_string());
+
+        let provider = crate::test_util::RecordingProvider::new("the old instructions ran");
+        let refused = top_level_executor(catalog, provider.clone())
+            .execute(
+                "invoke_skill:review",
+                &serde_json::json!({"query": "check this"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            refused.starts_with("Failed to load skill 'review': "),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(&error.path) && refused.contains(&error.message),
+            "{refused} / {error:?}"
+        );
+        assert_eq!(provider.request_count(), 0, "no model call");
+    }
+
+    /// The `invoke_skill` read is the scan's guarded one, off the async
+    /// runtime: a SKILL.md swapped for a FIFO after the scan is refused at
+    /// once instead of blocking the turn. Driven on a thread of its own, so a
+    /// read that waits on the FIFO fails the test rather than hanging it.
+    #[cfg(unix)]
+    #[test]
+    fn invoke_skill_on_a_skill_md_swapped_for_a_fifo_refuses_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = TempDir::new().unwrap();
+        write_skill(tmp.path(), "review", REVIEW_SKILL);
+        let catalog = Arc::new(SkillCatalog::new());
+        catalog.scan_directory(tmp.path(), SkillScope::Project);
+        let path = tmp.path().join("review").join("SKILL.md");
+        std::fs::remove_file(&path).unwrap();
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path; mkfifo only creates the node.
+        let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+
+        let provider = crate::test_util::RecordingProvider::new("ran");
+        let executor = top_level_executor(catalog, provider.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let outcome = runtime.block_on(executor.execute(
+                "invoke_skill:review",
+                &serde_json::json!({"query": "check this"}),
+            ));
+            let _ = tx.send(outcome);
+        });
+        let refused = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("invoke_skill did not return within 10 s")
+            .unwrap_err();
+        assert!(refused.contains(&path.display().to_string()), "{refused}");
+        assert!(refused.contains("not a regular file"), "{refused}");
+        assert_eq!(provider.request_count(), 0, "no model call");
     }
 }

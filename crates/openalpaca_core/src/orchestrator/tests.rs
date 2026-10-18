@@ -8537,6 +8537,60 @@ async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
     );
 }
 
+/// N-SKILL-2, the case the review named: `/file` after a hot edit left its
+/// SKILL.md unparsable. The skill stays listed — the catalog keeps its
+/// level-1 entry and names the file in an `invalid_yaml` diagnostic — but the
+/// turn answers with the load error, and no model is asked to follow the
+/// instructions the file held before the edit.
+#[tokio::test]
+async fn a_slash_skill_whose_hot_edit_broke_its_file_answers_the_load_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests, skills) = filer_skill_orchestrator(db, "filed");
+    let skill_dir = skills.path().join("filer");
+    let path = skill_dir.join("SKILL.md");
+
+    std::fs::write(&path, "---\nname: [oops\n---\n").unwrap();
+    assert!(orch.skill_catalog.reload_skill(&skill_dir).is_err());
+    assert!(
+        orch.skill_catalog.get_by_command("file").is_some(),
+        "the skill stays listed"
+    );
+    let error = orch
+        .skill_catalog
+        .diagnostics()
+        .into_iter()
+        .find(|d| d.code == skill_catalog::SkillDiagnosticCode::InvalidYaml)
+        .expect("an invalid_yaml diagnostic");
+    assert_eq!(error.path, path.display().to_string());
+
+    let refused = orch
+        .handle_message(HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "/file this bug",
+            Principal::User {
+                global_id: "user1".to_string(),
+            },
+            Scope::Global,
+            "user1:cli",
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.starts_with("Failed to load skill 'Filer': "),
+        "{refused}"
+    );
+    assert!(
+        refused.contains(&error.path) && refused.contains(&error.message),
+        "{refused} / {error:?}"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "no model was asked to run the skill"
+    );
+}
+
 // ── Learning reads the message as typed (plan 3.4, MD-2; Learning v2) ────
 //
 // `handle_message` persists nothing and learns nothing: learning reads the

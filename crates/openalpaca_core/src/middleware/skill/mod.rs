@@ -24,6 +24,26 @@ pub enum SkillParseError {
     UnterminatedFrontmatter,
     MissingField(&'static str),
     InvalidYaml(String),
+    // What the catalog's scan meets beside a parse (its diagnostics,
+    // N-SKILL-2): the first two skip the skill, the last four load it anyway.
+    ReadFailed(String),
+    TooLarge {
+        bytes: u64,
+        limit: u64,
+    },
+    IdMismatch {
+        declared: String,
+        directory: String,
+    },
+    DeprecatedField {
+        field: &'static str,
+        note: &'static str,
+    },
+    SlashConflict {
+        command: String,
+        other: String,
+    },
+    UnknownKey(String),
 }
 
 impl fmt::Display for SkillParseError {
@@ -35,6 +55,25 @@ impl fmt::Display for SkillParseError {
                 write!(f, "Missing required frontmatter field '{}'", field)
             }
             Self::InvalidYaml(msg) => write!(f, "Invalid YAML: {}", msg),
+            Self::ReadFailed(why) => write!(f, "Could not read SKILL.md: {why}"),
+            Self::TooLarge { bytes, limit } => {
+                write!(f, "SKILL.md is {bytes} bytes, over the {limit}-byte limit")
+            }
+            Self::IdMismatch {
+                declared,
+                directory,
+            } => write!(
+                f,
+                "Frontmatter id '{declared}' does not match directory name '{directory}'"
+            ),
+            Self::DeprecatedField { field, note } => {
+                write!(f, "'{field}' is deprecated and has no effect. {note}")
+            }
+            Self::SlashConflict { command, other } => write!(
+                f,
+                "Slash command '/{command}' is also claimed by skill '{other}'; this skill now answers it"
+            ),
+            Self::UnknownKey(key) => write!(f, "Unknown frontmatter key '{key}' is ignored"),
         }
     }
 }
