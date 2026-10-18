@@ -149,6 +149,18 @@ the spawn, so a queued subagent's lane reads `running` in the timeline
 (a span has no queued state). A queued subagent that the run's end or a
 `/cancel` reaches never starts.
 
+**Each result reaches the lead once** (N-LEAD-3). `wait_for_subagents`
+returns the subagents it has not reported yet — a finished one's answer as
+its head and its tail, the byte budget shared among those entries alone
+(so a second batch of eight gets the 3,200 bytes an answer the first did,
+Stage 0's F2 sizing), a queued or running one listed again next time —
+and one line naming the run ids reported earlier, so a lead whose context
+was compacted knows to ask for them. `check_subagent_status` re-reads any
+answer whole, as often as asked, and an answer it delivered — whole, or as
+a stub the run's log lets the lead page — is not repeated by a later wait
+(`SubagentTracker::report`); a long one that a run with no log cut after
+its first part still is, as its head and its tail.
+
 **No subagent outlives its run** (N-LEAD-1). Each subagent's cancel token
 is a child of the run's *subagents token*, itself a child of the run's own
 token, and each subagent's task is held in the run's `JoinSet`

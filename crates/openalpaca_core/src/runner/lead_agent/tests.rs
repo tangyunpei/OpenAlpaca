@@ -441,6 +441,170 @@ async fn wait_for_subagents_keeps_eight_twenty_kilobyte_answers_under_the_inline
     assert_eq!(result.matches("the tail follows").count(), 8);
 }
 
+/// **N-LEAD-3.** Each subagent's result reaches the lead once. After a first
+/// wait has delivered batch 1, a second wait over batch 2 returns batch 2's
+/// answers only — each at the eight-entry budget F2 sized, not the sixteen-
+/// entry one — and one line naming batch 1's run ids, so a lead whose
+/// context was compacted knows to ask `check_subagent_status`; which still
+/// returns a batch-1 answer whole. Before the fix every wait re-listed every
+/// subagent the run had spawned, and each answer's share shrank with them.
+#[tokio::test]
+async fn a_second_wait_reports_only_the_new_answers_at_the_eight_entry_budget() {
+    let tracker = Arc::new(SubagentTracker::new());
+    let answer = |batch: usize, i: usize| {
+        format!(
+            "HEAD-{batch}-{i} {} TAIL-{batch}-{i}",
+            "x".repeat(20 * 1024)
+        )
+    };
+    let wait = WaitForSubagentsTool {
+        tracker: tracker.clone(),
+        steering: None,
+    };
+    for i in 1..=8 {
+        let run_id = format!("first-{i}");
+        tracker.register(&run_id);
+        tracker.complete(&run_id, answer(1, i), true);
+    }
+    let first = wait.execute(&serde_json::json!({})).await.unwrap();
+    for i in 1..=8 {
+        assert!(first.contains(&format!("HEAD-1-{i} ")), "{first}");
+    }
+
+    for i in 1..=8 {
+        let run_id = format!("second-{i}");
+        tracker.register(&run_id);
+        tracker.complete(&run_id, answer(2, i), true);
+    }
+    let second = wait.execute(&serde_json::json!({})).await.unwrap();
+
+    let budget = super::tracker::answer_budget(32 * 1024, 8);
+    for i in 1..=8 {
+        assert!(
+            second.contains(&crate::utils::text::head_tail(&answer(2, i), budget)),
+            "batch 2's answer {i} at the eight-entry budget: {}",
+            crate::utils::text::byte_prefix(&second, 600)
+        );
+        assert!(
+            !second.contains(&format!("HEAD-1-{i} ")),
+            "batch 1's answer {i} was delivered again"
+        );
+    }
+    let naming_batch_one = second
+        .lines()
+        .filter(|line| (1..=8).all(|i| line.contains(&format!("first-{i}"))))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        naming_batch_one.len(),
+        1,
+        "one line names batch 1's run ids: {}",
+        crate::utils::text::byte_prefix(&second, 600)
+    );
+    assert!(
+        naming_batch_one[0].contains("check_subagent_status"),
+        "{}",
+        naming_batch_one[0]
+    );
+    assert!(second.len() <= 32 * 1024, "{} bytes", second.len());
+
+    // `check_subagent_status` still re-reads a batch-1 answer whole.
+    let check = CheckSubagentStatusTool {
+        tracker: tracker.clone(),
+    };
+    let whole = check
+        .execute(&serde_json::json!({"subagent_run_id": "first-3"}))
+        .await
+        .unwrap();
+    assert!(whole.contains(&answer(1, 3)), "the whole answer");
+}
+
+/// N-LEAD-3: a running entry is listed again until it finishes; a finished
+/// one is reported once, whether a wait showed it or `check_subagent_status`
+/// read it whole; a report with nothing new says so and names the rest.
+#[tokio::test]
+async fn a_result_is_reported_once_and_a_running_entry_until_it_finishes() {
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.register("alpha");
+    tracker.set_status("alpha", SubagentStatus::Running);
+    tracker.register("beta");
+    tracker.complete("beta", "BETA ANSWER".to_string(), true);
+
+    let first = tracker.report();
+    assert!(first.contains("**alpha**: still running"), "{first}");
+    assert!(first.contains("BETA ANSWER"), "{first}");
+    assert!(!first.contains("Reported earlier"), "{first}");
+
+    tracker.complete("alpha", "ALPHA ANSWER".to_string(), true);
+    let second = tracker.report();
+    assert!(second.contains("ALPHA ANSWER"), "{second}");
+    assert!(!second.contains("BETA ANSWER"), "{second}");
+    assert!(
+        second.ends_with(
+            "Reported earlier, not repeated here: beta. Read any of them again in full \
+             with check_subagent_status."
+        ),
+        "{second}"
+    );
+
+    tracker.register("gamma");
+    tracker.complete("gamma", "GAMMA ANSWER".to_string(), true);
+    let check = CheckSubagentStatusTool {
+        tracker: tracker.clone(),
+    };
+    let whole = check
+        .execute(&serde_json::json!({"subagent_run_id": "gamma"}))
+        .await
+        .unwrap();
+    assert!(whole.contains("GAMMA ANSWER"), "{whole}");
+    assert_eq!(
+        tracker.report(),
+        "No new results since the last report.\n\
+         Reported earlier, not repeated here: alpha, beta, gamma. Read any of them again \
+         in full with check_subagent_status."
+    );
+}
+
+/// **N-LEAD-3 (review).** `check_subagent_status` marks an answer reported
+/// only when the whole of it can reach the lead: in a run with a
+/// conversation log a long answer is a stub the lead pages with
+/// `read_result`, and a short one arrives whole; in a run with no log a long
+/// answer is cut after its first part, so a later wait still reports it —
+/// its head and its tail — rather than naming it as delivered.
+#[tokio::test]
+async fn a_check_that_showed_only_the_head_does_not_mark_the_answer_reported() {
+    let long = format!("HEAD {} CONCLUSION", "x".repeat(8 * 1024));
+    let check_then_report = |tracker: Arc<SubagentTracker>| {
+        let long = long.clone();
+        async move {
+            tracker.register("long");
+            tracker.complete("long", long, true);
+            let check = CheckSubagentStatusTool {
+                tracker: tracker.clone(),
+            };
+            check
+                .execute(&serde_json::json!({"subagent_run_id": "long"}))
+                .await
+                .unwrap();
+            tracker.report()
+        }
+    };
+
+    let no_log = check_then_report(Arc::new(SubagentTracker::with_inline_bytes(4 * 1024))).await;
+    assert!(
+        no_log.contains("CONCLUSION") && !no_log.contains("Reported earlier"),
+        "no log: the wait still reports the answer, its tail with it: {no_log}"
+    );
+
+    let with_log = check_then_report(Arc::new(
+        SubagentTracker::with_inline_bytes(4 * 1024).with_log(true),
+    ))
+    .await;
+    assert!(
+        !with_log.contains("CONCLUSION") && with_log.contains("Reported earlier"),
+        "a log: the check's stub reached the lead whole: {with_log}"
+    );
+}
+
 /// A CJK answer is cut on character boundaries: with one entry the budget
 /// is the 8,192-byte cap, half is 4,096, not a multiple of 3, so the head
 /// rounds down to 4,095 bytes (1,365 characters) and the tail rounds up to
@@ -677,21 +841,25 @@ fn check_subagent_status_description_says_it_returns_the_whole_answer() {
          naming a result_ref; page it with read_result. A run that keeps no conversation \
          log has no stub to give: there a long answer is cut after its first part, and \
          the cut says how much it shows. Failed: returns the error and the subagent's \
-         whole last output, as its head and tail when long. wait_for_subagents shows only \
-         the head and the tail of each answer; call this for the one you need in full."
+         whole last output, as its head and tail when long. wait_for_subagents shows \
+         each answer once, as its head and its tail; call this for the one you need in \
+         full, as often as you need it."
     );
 }
 
+/// N-LEAD-3: the description says each result comes once, and where the
+/// earlier ones are named.
 #[test]
 fn wait_for_subagents_description_says_it_shows_each_answers_head_and_tail() {
     assert_eq!(
         wait_for_subagents_tool_definition().description,
         "Wait for ALL previously spawned subagents to complete, including any that are \
-         queued for execution. Returns a summary of all results: each subagent's answer as \
-         its head and its tail, with a notice naming the bytes between them, sized so that \
-         a batch of eight fits one tool result. Read one answer in full with \
-         check_subagent_status. Use this after spawning all subagents to collect all \
-         outputs before synthesizing a response."
+         queued for execution. Returns each result once: the answer of every subagent not \
+         reported before, as its head and its tail with a notice naming the bytes between \
+         them, sized so that a batch of eight fits one tool result, and one line naming \
+         the run ids reported earlier. Read any answer in full, again or for the first \
+         time, with check_subagent_status. Use this after spawning all subagents to \
+         collect their outputs before synthesizing a response."
     );
 }
 
@@ -713,8 +881,9 @@ fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
     assert!(
         prompt.contains(
             "wait_for_subagents: Block until ALL spawned subagents finish, including any that are \
-             queued for execution. Returns a summary of all results: each answer's head and tail, \
-             with a notice of what lies between — read one in full with check_subagent_status. \
+             queued for execution. Returns each result once: every answer not reported before, as \
+             its head and tail with a notice of what lies between, and a line naming the run ids \
+             reported earlier — read any of them in full with check_subagent_status. \
              Call this after spawning all subagents."
         ),
         "{prompt}"

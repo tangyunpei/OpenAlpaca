@@ -1285,6 +1285,28 @@ impl BuiltInTool for CheckSubagentStatusTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: subagent_run_id".to_string())?;
 
+        let answer = self.status_answer(run_id);
+        // N-LEAD-3: a finished answer that reached the lead here has been
+        // delivered, so a later `wait_for_subagents` names it rather than
+        // repeating it — a completed one only when it arrives whole (under
+        // the inline bound, or as a stub the run's log lets the lead page);
+        // a long one a run with no log cuts after its first part is left for
+        // the wait's head and tail. A failure arrives as its head and its
+        // tail at the inline bound, no less than a wait would show.
+        let delivered = match &answer {
+            Ok(text) => self.tracker.reaches_lead_whole(text.len()),
+            Err(_) => true,
+        };
+        if delivered {
+            self.tracker.mark_reported(run_id);
+        }
+        answer
+    }
+}
+
+impl CheckSubagentStatusTool {
+    /// What `check_subagent_status` answers for `run_id`, marking nothing.
+    fn status_answer(&self, run_id: &str) -> Result<String, String> {
         match self.tracker.get(run_id) {
             Some(SubagentStatus::Queued) => Ok(format!(
                 "Subagent '{}' is queued, waiting for an execution slot. Check again later or use `wait_for_subagents`.",
@@ -1334,8 +1356,9 @@ pub fn check_subagent_status_tool_definition() -> ToolDefinition {
                       naming a result_ref; page it with read_result. A run that keeps no conversation \
                       log has no stub to give: there a long answer is cut after its first part, and \
                       the cut says how much it shows. Failed: returns the error and the subagent's \
-                      whole last output, as its head and tail when long. wait_for_subagents shows only \
-                      the head and the tail of each answer; call this for the one you need in full."
+                      whole last output, as its head and tail when long. wait_for_subagents shows \
+                      each answer once, as its head and its tail; call this for the one you need in \
+                      full, as often as you need it."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -1354,8 +1377,8 @@ pub fn check_subagent_status_tool_definition() -> ToolDefinition {
 
 // ── WaitForSubagentsTool ─────────────────────────────────────────────
 
-/// Tool that blocks until all spawned subagents have completed,
-/// then returns a summary of all results.
+/// Tool that blocks until all spawned subagents have completed, then
+/// reports each result once ([`SubagentTracker::report`], N-LEAD-3).
 ///
 /// When a steering inbox is attached (Routing V2), a queued user
 /// interjection interrupts the wait so the loop can drain it at the next
@@ -1389,7 +1412,7 @@ impl BuiltInTool for WaitForSubagentsTool {
                     failed,
                     queued,
                     running,
-                    self.tracker.summary()
+                    self.tracker.report()
                 ));
             }
             // Listen for a status change BEFORE checking `all_done()`: the
@@ -1413,7 +1436,7 @@ impl BuiltInTool for WaitForSubagentsTool {
                     failed,
                     queued,
                     running,
-                    self.tracker.summary()
+                    self.tracker.report()
                 ));
             }
             // Wait for a subagent status change, a steering push, or timeout.
@@ -1446,7 +1469,7 @@ impl BuiltInTool for WaitForSubagentsTool {
         } else {
             header
         };
-        Ok(format!("{}{}", header, self.tracker.summary()))
+        Ok(format!("{}{}", header, self.tracker.report()))
     }
 }
 
@@ -1455,11 +1478,12 @@ pub fn wait_for_subagents_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "wait_for_subagents".to_string(),
         description: "Wait for ALL previously spawned subagents to complete, including any that are \
-                      queued for execution. Returns a summary of all results: each subagent's answer as \
-                      its head and its tail, with a notice naming the bytes between them, sized so that \
-                      a batch of eight fits one tool result. Read one answer in full with \
-                      check_subagent_status. Use this after spawning all subagents to collect all \
-                      outputs before synthesizing a response."
+                      queued for execution. Returns each result once: the answer of every subagent not \
+                      reported before, as its head and its tail with a notice naming the bytes between \
+                      them, sized so that a batch of eight fits one tool result, and one line naming \
+                      the run ids reported earlier. Read any answer in full, again or for the first \
+                      time, with check_subagent_status. Use this after spawning all subagents to \
+                      collect their outputs before synthesizing a response."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",

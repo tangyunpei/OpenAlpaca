@@ -2810,8 +2810,9 @@ fn test_golden_lead_agent_byte_identical() {
          cut after its first part with a note of how much it shows. Failed: returns the error and \
          the last output, as head and tail when long.\n\
          wait_for_subagents: Block until ALL spawned subagents finish, including any that are \
-         queued for execution. Returns a summary of all results: each answer's head and tail, \
-         with a notice of what lies between — read one in full with check_subagent_status. \
+         queued for execution. Returns each result once: every answer not reported before, as \
+         its head and tail with a notice of what lies between, and a line naming the run ids \
+         reported earlier — read any of them in full with check_subagent_status. \
          Call this after spawning all subagents.\n\
          workspace_read / workspace_write: Share context between subagents. Write setup data before spawning; \
          read results after completion.\n\

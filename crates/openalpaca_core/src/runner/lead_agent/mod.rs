@@ -260,14 +260,19 @@ pub async fn run_lead_agent(
 
     // 4. Build coordination tools with shared SubagentTracker, sized to the
     //    inline bound the lead's own loop applies to every tool result, so a
-    //    batch of eight answers reaches the lead as one in-bound summary (F2).
-    let tracker = Arc::new(SubagentTracker::with_inline_bytes(
-        daemon_config
-            .load()
-            .orchestrator
-            .sessions
-            .tool_result_inline_bytes,
-    ));
+    //    batch of eight answers reaches the lead as one in-bound summary (F2),
+    //    and told whether the run keeps a log a long answer spills to
+    //    (N-LEAD-3).
+    let tracker = Arc::new(
+        SubagentTracker::with_inline_bytes(
+            daemon_config
+                .load()
+                .orchestrator
+                .sessions
+                .tool_result_inline_bytes,
+        )
+        .with_log(session_log.is_some()),
+    );
 
     // Resolve parent context bundle once, shared across all subagent spawns.
     // TODO: In future, resolve via context_manager.resolve() with LeadAgent path
