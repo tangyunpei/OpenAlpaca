@@ -751,6 +751,11 @@ never builds or runs the binaries there, and the CLI's daemon start/stop code
 is written against Unix signals. Expect `package-windows.ps1` to fail at the
 build step until that is ported.
 
+Windows 7 is not supported: the desktop app is built on Tauri 2.12, whose
+Windows libraries (`windows` 0.62, `webview2-com` 0.39) dropped it, so a
+Windows 7 machine cannot run the GUI at all. Like the rest of this section,
+that is a note, not a verified platform — releases are verified on macOS.
+
 The scripts, all PowerShell 5.1 or later, in `scripts/release/`:
 
 | Script | Usage |
