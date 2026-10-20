@@ -47,7 +47,7 @@ bun run format             # prettier --write .
 bun run format:check       # prettier --check .
 ```
 
-The Rust shell is checked from `src-tauri/` with `cargo check` (its `.cargo/config.toml` builds into `target/gui`), or from the workspace root with `CARGO_TARGET_DIR=target/gui cargo check -p openalpaca_gui` — without that variable the check builds in the workspace's `target/`, where tauri-build's copy of the staged sidecar replaces the daemon cargo built.
+The Rust shell is checked from `src-tauri/` with `cargo check` (its `.cargo/config.toml` puts both its target dir and its build-dir in `target/gui`), or from the workspace root with `CARGO_TARGET_DIR=target/gui CARGO_BUILD_BUILD_DIR=target/gui cargo check -p openalpaca_gui` — both variables, the same path. Without them the shell builds into the workspace's build-dir under `~/.cargo/build/` (the root `.cargo/config.toml`), tauri-build's copy of the staged sidecar with it; with `CARGO_TARGET_DIR` alone its final files go to `target/gui` and the rest still to that build-dir.
 
 Two things to know before the first run:
 

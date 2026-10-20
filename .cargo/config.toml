@@ -1,0 +1,17 @@
+# build.build-dir (DU-M5 (b), M63): cargo's intermediate files — deps/,
+# build/, .fingerprint/, incremental/ and the test executables — go to one
+# folder per checkout under cargo's cache home, ~/.cargo/build/<a hash of the
+# workspace path>/, and target/<profile>/ keeps only the final artifacts
+# (openalpacad, openalpaca and the other binaries). Nothing prunes the
+# build-dir by itself; `cargo clean` removes it together with target/.
+#
+# Every build that sets CARGO_TARGET_DIR sets CARGO_BUILD_BUILD_DIR beside it
+# (MF-5): the same path or a sibling under the same scratch root, and for the
+# Tauri shell always the same path, target/gui. A scratch export or worktree
+# built with CARGO_TARGET_DIR alone leaves its intermediates in
+# ~/.cargo/build/<the hash of its own path>/, where deleting the scratch tree
+# never reaches them. The shell's own config,
+# apps/openalpaca-gui/src-tauri/.cargo/config.toml, overrides this table for
+# `tauri dev` and `tauri build`.
+[build]
+build-dir = "{cargo-cache-home}/build/{workspace-path-hash}"

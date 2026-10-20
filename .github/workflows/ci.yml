@@ -34,7 +34,13 @@ jobs:
         run: |
           rustup toolchain install
           rustup show active-toolchain
+      # Cargo's intermediates live in the build-dir, outside target/
+      # (.cargo/config.toml, M63: ~/.cargo/build/<workspace path hash>/), and
+      # rust-cache saves the workspace's target/ by itself, so the build-dir's
+      # root is named as an extra directory to save and restore.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-directories: ~/.cargo/build
       # The Tauri GUI backend needs system webkit libs and a staged daemon
       # sidecar binary, so it is excluded here (validated by the gui job's
       # type check and by local builds on macOS).

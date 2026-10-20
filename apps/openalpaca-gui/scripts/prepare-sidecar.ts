@@ -85,15 +85,23 @@
  * refused.
  *
  * Target directories. The daemon builds into whatever cargo resolves at the
- * workspace root — `target/` unless CARGO_TARGET_DIR says otherwise; the
- * script sets none. The Tauri shell builds into `target/gui`:
- * src-tauri/.cargo/config.toml says so for `tauri dev` and `tauri build`,
- * which run cargo from src-tauri/, and a `cargo check -p openalpaca_gui` from
- * the root must be run with `CARGO_TARGET_DIR=target/gui` by hand (CLAUDE.md,
- * build hygiene; nothing sets it there). tauri-build copies the staged sidecar
- * to `<shell target dir>/<profile>/openalpacad` — in target/gui never the
- * daemon cargo built; in a shared target dir, cargo's own dev daemon (measured:
- * a root check with the release copy staged put the release bytes there).
+ * workspace root — its final artifact in `target/` unless CARGO_TARGET_DIR
+ * says otherwise, its intermediates in the build-dir the root
+ * .cargo/config.toml names (`~/.cargo/build/<hash>/`, M63) unless
+ * CARGO_BUILD_BUILD_DIR does; the script sets neither, and cargo's
+ * compiler-artifact message names the final artifact wherever it is. The
+ * Tauri shell builds into `target/gui`, its target dir and its build-dir
+ * alike: src-tauri/.cargo/config.toml says so for `tauri dev` and
+ * `tauri build`, which run cargo from src-tauri/, and a
+ * `cargo check -p openalpaca_gui` from the root must be run with
+ * `CARGO_TARGET_DIR=target/gui CARGO_BUILD_BUILD_DIR=target/gui` by hand
+ * (MF-5; nothing sets them there). tauri-build copies the staged sidecar to
+ * `<shell target dir>/<profile>/openalpacad`, finding that dir from OUT_DIR,
+ * which is in the build-dir — in target/gui never the daemon cargo built.
+ * Before M63, a root check in the shared target dir put it over cargo's own
+ * dev daemon (measured: a root check with the release copy staged put the
+ * release bytes there); since M63, a root check without the two variables
+ * puts it in the workspace's build-dir instead.
  * tauri-build re-copies only when the staged file is newer than its last run
  * (`cargo:rerun-if-changed`), so the stage is stamped with the time it was
  * made: a copy can carry cargo's older artifact time and go unseen.
