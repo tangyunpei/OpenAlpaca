@@ -10,6 +10,20 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
+# Dies unless `bun --version` prints the version the root package.json pins
+# ("packageManager": "bun@<version>"), naming both (G-06). The pin is read with
+# sed, not bun, so the bun on PATH runs once here, as `bun --version`.
+require_pinned_bun() {
+  local manifest="$REPO_ROOT/package.json" pinned actual
+  require_cmd bun
+  pinned="$(sed -n 's/^[[:space:]]*"packageManager"[[:space:]]*:[[:space:]]*"bun@\([^"]*\)".*$/\1/p' "$manifest")" \
+    || die "Cannot read $manifest."
+  [[ -n "$pinned" ]] || die "No \"packageManager\": \"bun@<version>\" in $manifest."
+  actual="$(bun --version)" || die "bun --version failed."
+  [[ "$actual" == "$pinned" ]] \
+    || die "bun $actual is first on PATH, but $manifest pins bun@$pinned (packageManager); install Bun $pinned or put it first on PATH."
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DIST_DIR="$REPO_ROOT/dist"
@@ -18,7 +32,7 @@ DIST_DIR="$REPO_ROOT/dist"
 
 require_cmd cargo
 require_cmd rustc
-require_cmd bun
+require_pinned_bun
 require_cmd bunx
 require_cmd tar
 require_cmd sha256sum

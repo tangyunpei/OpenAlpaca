@@ -13,7 +13,8 @@
     defines its own copy of the store-root helpers; the first two Describe
     blocks below dot-source one script apiece and assert the copies agree. The
     third dot-sources package-windows.ps1 for the two digest helpers that hold
-    the packaged daemon to the staged sidecar's sha256; the packaging itself
+    the packaged daemon to the staged sidecar's sha256 and the two that hold
+    the bun on PATH to the root package.json's pin; the packaging itself
     (cargo, bun, tauri, msiexec) runs nowhere in CI.
 #>
 
@@ -220,6 +221,36 @@ Describe 'package-windows.ps1' {
             Compute-SHA256 $file | Should -Be 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
         }
     }
+
+    Context 'the Bun it requires: the version the root package.json pins' {
+
+        It 'reads the pinned version from a packageManager field' {
+            $file = Join-Path $script:TempRoot 'package.json'
+            Set-Content -Path $file -Value '{ "name": "x", "packageManager": "bun@1.4.3" }'
+            Read-PinnedBunVersion $file | Should -Be '1.4.3'
+        }
+
+        It 'reads a version from the repository root package.json' {
+            $root = Join-Path (Split-Path -Parent (Split-Path -Parent $script:ReleaseDir)) 'package.json'
+            Read-PinnedBunVersion $root | Should -Match '^\d+\.\d+\.\d+$'
+        }
+
+        It 'refuses a package.json that pins no bun' {
+            $ErrorActionPreference = 'Stop'
+            $file = Join-Path $script:TempRoot 'no-pin.json'
+            Set-Content -Path $file -Value '{ "name": "x" }'
+            { Read-PinnedBunVersion $file } | Should -Throw
+        }
+
+        It 'accepts the pinned version' {
+            { Assert-BunVersion '1.4.3' '1.4.3' } | Should -Not -Throw
+        }
+
+        It 'refuses any other version, naming both' {
+            $ErrorActionPreference = 'Stop'
+            { Assert-BunVersion '1.4.2' '1.4.3' } | Should -Throw -ExpectedMessage '*bun 1.4.2*bun@1.4.3*'
+        }
+    }
 }
 
 Describe 'the scripts, as text' {
@@ -230,6 +261,12 @@ Describe 'the scripts, as text' {
         $text | Should -Match 'bun install --frozen-lockfile'
         $text | Should -Match 'cargo build --release --locked -p openalpaca'
         $text | Should -Not -Match '-p openalpaca -p openalpacad'
+    }
+
+    It 'package-windows.ps1 holds the bun on PATH to the root package.json pin' {
+        $text = Get-Content $script:PackageScript -Raw
+        $text | Should -Match 'Assert-BunVersion \(\(bun --version \| Out-String\)\.Trim\(\)\)'
+        $text | Should -Match 'Read-PinnedBunVersion \(Join-Path \$RepoRoot ''package\.json''\)'
     }
 
     It 'install-windows.ps1 names the real store root and no legacy data root' {

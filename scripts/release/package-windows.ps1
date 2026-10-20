@@ -45,6 +45,24 @@ function Read-Sha256File($path) {
     return $digest
 }
 
+# The Bun version the root package.json pins: its
+# "packageManager": "bun@<version>". Read as text, not with bun.
+function Read-PinnedBunVersion($path) {
+    $text = Get-Content $path -Raw
+    if ($text -notmatch '"packageManager"\s*:\s*"bun@([^"]+)"') {
+        Die "No `"packageManager`": `"bun@<version>`" in $path"
+    }
+    return $Matches[1]
+}
+
+# Stops unless $actual, what `bun --version` printed, is the pinned version,
+# naming both (G-06).
+function Assert-BunVersion($actual, $pinned) {
+    if ($actual -ne $pinned) {
+        Die "bun $actual is first on PATH, but the root package.json pins bun@$pinned (packageManager); install Bun $pinned or put it first on PATH."
+    }
+}
+
 # ── Dot-source guard ─────────────────────────────────────────
 # `. .\package-windows.ps1 -DotSourceOnly` defines the functions above in the
 # caller's scope and builds nothing (scripts/release/tests).
@@ -62,6 +80,7 @@ $DistDir   = Join-Path $RepoRoot 'dist'
 Require-Cmd 'cargo'
 Require-Cmd 'rustc'
 Require-Cmd 'bun'
+Assert-BunVersion ((bun --version | Out-String).Trim()) (Read-PinnedBunVersion (Join-Path $RepoRoot 'package.json'))
 Require-Cmd 'git'
 
 $hostTarget = (rustc -vV | Select-String '^host:').ToString() -replace '^host:\s*', ''

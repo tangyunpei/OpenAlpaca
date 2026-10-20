@@ -33,11 +33,12 @@ Linux and Windows have equivalent scripts (`scripts/release/package-linux.sh`,
 On the machine that builds release artifacts, install:
 
 - `cargo` / `rustc`
-- `bun` / `bunx`
+- `bun` / `bunx` — Bun 1.4.3, the version the root `package.json`'s `packageManager` field pins
 - `tar`, `shasum`, `git`
 - Standard Unix tools: `awk`, `sed`, `date` (present on any macOS machine)
 
-The script checks for each of these and stops with the missing command's name.
+The script checks for each of these and stops with the missing command's name,
+and stops when `bun --version` is not the pinned version, naming both.
 
 ## Build Release Artifact
 
@@ -754,7 +755,7 @@ The scripts, all PowerShell 5.1 or later, in `scripts/release/`:
 
 | Script | Usage |
 |---|---|
-| `package-windows.ps1` | No arguments. Needs `cargo`, `rustc`, `bun`, `git`. Writes `dist\openalpaca-windows-<target>-v<version>.zip` plus `.sha256`, with the GUI as an MSI. |
+| `package-windows.ps1` | No arguments. Needs `cargo`, `rustc`, `bun` (the version the root `package.json` pins; any other stops it, naming both), `git`. Writes `dist\openalpaca-windows-<target>-v<version>.zip` plus `.sha256`, with the GUI as an MSI. |
 | `install-windows.ps1` | `-File <archive.zip>` or `-Url <https://…/archive.zip>`, plus `-Prefix <dir>` (default `%LOCALAPPDATA%\OpenAlpaca`) and `-Yes`. |
 | `uninstall-windows.ps1` | `-Prefix <dir>` and `-Yes`. |
 
