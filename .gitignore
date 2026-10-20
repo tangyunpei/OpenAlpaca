@@ -98,6 +98,7 @@ apps/openalpaca-gui/src-tauri/gen/
 *.md
 !README.md
 !CLAUDE.md
+!IMPLEMENTATION_PROGRESS.md
 # The memory invariant fixtures' format description (tasks/memory-redesign, slice 1).
 !crates/openalpaca_storage/tests/fixtures/memory/README.md
 !docs/CLI_Manual.md

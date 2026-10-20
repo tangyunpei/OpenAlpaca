@@ -1,0 +1,162 @@
+# OpenAlpaca — implementation progress: the toolchain, dependency and modernization programme
+
+As of `42d3d50b` (committed 2026-10-20T12:29Z), branch `chore/toolchain-and-deps` — local, never pushed; recorded 2026-10-20T12:30Z.
+
+This file shows, for every task of the programme, the part it belongs to, what has been implemented (with a link to the requirement it answers), its status, the evidence for that status, and what remains open before the task or its part can close. It summarises `tasks/deps-upgrade/programme-plan.md` (rev 1.2, the plan of record) and never overrides it: every requirement link points there, and where the two differ the plan wins and this file is corrected.
+
+The parts are the plan's own. **Part I** is the toolchain and dependency wave: the commits that moved no version (§3.1), the twenty pre-cut fixes, Phases A–L of §3.2 through P38, the FRESHNESS-SWEEP and the end-to-end gates E1–E8 (§4.5). **Part II** is the flexible apps, the Q entries of §3.3. **Part III** is the modernization, the M entries of §3.3. Within Part I the rows follow the plan's phases; within Parts II and III they follow §3.3's merged-order steps, and a step that carries both parts appears in each part's table with that part's ids alone. The ids of Parts II and III that the plan landed or placed inside Part I — Q00–Q03, Q15–Q17, M01–M03 and M44 in §3.1, Q11 and M63 in Phase A–B, M04 + M07 inside P36 — are counted in Part I's rows, so Parts II and III here are the after-P38 work alone.
+
+The status words: **Complete** — every entry in the row has landed (a measurement: been taken) and its gate is recorded; **In progress** — some of it has landed, or a run of record is under way; **Not started** — nothing in the row has landed.
+
+## The parts
+
+| Part | Scope | Status | Closes when | Open items |
+|---|---|---|---|---|
+| **Part I** — the toolchain and dependency wave | §3.1's no-version commits and Phase 0; the twenty pre-cut fixes; Phases A–L of §3.2 through P38; the FRESHNESS-SWEEP; E1–E8 (§4.5) | In progress | At the merge after P38, with the sweep landed and E1–E8 green; the beta is cut from `main` after it | G-base's run of record (the rerun on `42d3d50b`); §5 items 3 (the consent point), 4 (the backup), 5 (the freshness checks at the start), 9 (push and draft PR), 10 (the prep rewrites), 12 (test-bot tokens), 13 (pinned tools), 14 (the pdf-extract issue), 15 (the rmcp issue) |
+| **Part II** — the flexible apps | The Q entries of §3.3 (steps 4, 5, 11, 13, 18), with B-22's notices (step 2a), B-25 and N-DAEMON-2 | Not started | Every entry of its steps landed (Q19 once Q10's figures exist; G4–G6 only as Q10's profiles justify) | Part I's merge, then the beta (B-22's notices alone precede it); §5 item 11 (Q00's owed GUI rows, after Q14); §5 item 16 (the LICENSE, before the beta) |
+| **Part III** — the modernization | The M entries of §3.3 (steps 3–20), with plan-rev3 §5.4's and §5.5's after-P38 entries, SA-1…SA-4 and the B rows the merged order does not yet place | Not started | Every entry landed but M53, which is Optional; Part III's phase gates V1–V8 green (§4.7); M54 written | Part I's merge, then the beta; the subagent brief design (`tasks/subagent-brief-design.md` does not exist); a merged-order place for the unplaced B rows and Migration 005; B-09 waits on MD-4 (pending) |
+
+## Next, in order (§0.4)
+
+1. G-base's run of record, rerun on `42d3d50b` with `--start-before-instant`; its result recorded by its own commit and its logs archived.
+2. The owner's consent point (§5 item 3: the DU-10 count and E6) and the push with a draft PR (§5 item 9), both before P42.
+3. P42, P03 and the first `cargo clean`; P03b, which may land right after P03, with the second clean after it.
+4. P31a, Q11 and M63, then P04 once the consent point is run and the pinned tools are installed (§5 items 3 and 13).
+5. Phases C–L in §3.2's order, the prep commits rewritten onto the tip as they come; the FRESHNESS-SWEEP; E1–E8; the merge.
+6. B-22's notices, the beta with B1–B3, then Parts II and III in §3.3's merged order.
+
+## Owner actions still open (§5)
+
+Each is the owner's own step: an agent never reads `~/.openalpaca`, never pushes, files nothing upstream and commits no licence. Items 1, 2, 6, 6a, 7 and 8 are done, superseded or exist (§5); item 6b is G-base's run of record, in Phase A–B.
+
+| # | Action | By when (§5) | Status | Gates |
+|---|---|---|---|---|
+| 3 | The DU-10 count and E6's no-print checks on the real store | At the consent point, before P04, P12, P29 and P30 | Not started | P04, P12, P29, P30 |
+| 4 | A backup of the real store, with a rehearsed restore | Immediately before the first start of a bumped build on the real store | Not started | That first start (Chunk 25's backup item sits after E8) |
+| 5 | The freshness rule applied at the start: the yank scans and the freshness gate re-run on the day | The start, 2026-10-20; the sweep before the merge | Not started | G-base's run of record; the FRESHNESS-SWEEP |
+| 9 | Push the branch and open a draft PR against `main`; CI read again after P12, P13 and P08 | Before P42 and P03; the second read before P15 | Not started | P42's and P03's CI half; P15 |
+| 10 | Land the prep commits by rewriting them onto the tip | At the cut, each at its P commit's place | Not started | P10, P12, P15–P18, P17a, P19, P19b, P41, P36, M08 |
+| 11 | Q00's owed GUI rows on the rebuilt `a91f4b23` build | After Q14 lands | Not started | G4 and G6 (Part II, step 18) |
+| 12 | A Telegram and a Discord test bot (D10 (a)) | Before P28 and P41 | Not started | P28, P41 |
+| 13 | cargo-audit, cargo-deny, zizmor and shellcheck at pinned versions in a scratch root | Before the cut | Not started | P04, P34, E2 |
+| 14 | The pdf-extract issue filed upstream | Before P15 | Not started | P15's ignore reason |
+| 15 | The rmcp issue filed upstream | Before P19, if it can be | Not started | P19's body |
+| 16 | The MIT LICENSE committed | Before any beta distribution | Not started | The beta |
+
+## Part I — the toolchain and dependency wave
+
+### Landed: Phase 0 and the other no-version commits (§3.1)
+
+No commit here moved a `(name, version)` in either lock.
+
+| Task | Requirement | Implemented | Status | Evidence | Open before close |
+|---|---|---|---|---|---|
+| M01, M02, M03 — build hygiene | [§3.1 M01, M02, M03](tasks/deps-upgrade/programme-plan.md) | `default-members` without the shell; CLAUDE.md's build-hygiene paragraph; `CARGO_INCREMENTAL=0` for agent sessions | Complete | `db7fc1c9` (the owner's CLAUDE.md change), `f54dfac1` (M01 + M02), `a3d3d5ae` (M03) | — |
+| Phase 0: P01, P02, the G-base driver, the E6 tools, P05, P14, P24, Q01, Q02, Q03, M44 | [§3.1 Phase 0](tasks/deps-upgrade/programme-plan.md) | CI pinned by SHA with `--locked` and Bun 1.4.2; the unread shell lock removed; the format, wire, upload and CORS pins; the sidecar built through cargo with its `.sha256`, the shell in `target/gui`; `bunfig.toml`'s seven-day minimum release age | Complete | `3bf78e54..1641ced0` (2026-10-11), each commit reviewed, and `f1107db1` (the sidecar-mtime defect its gates found); gate at `1379b184`: 5,095 / 0 / 17, clippy 78, bun 1,551 tests in 121 files, `package-macos.sh` exit 0 | — |
+| P01b, Q00 | [§3.1 P01b, Q00](tasks/deps-upgrade/programme-plan.md) | CI's `runs-on` pinned to ubuntu-24.04 for the wave; the B0 baselines taken | Complete | `d59cf1fd`; Q00 at `a91f4b23` (`tasks/deps-upgrade/baselines/2026-10-12/README.md`) | Q00's owed GUI rows are §5 item 11 (Part II, step 4) |
+| Q15, Q16, Q17 — the re-plan's no-version items | [§3.1 Q15, Q16, Q17](tasks/deps-upgrade/programme-plan.md) | The sidecar hook reads Tauri's triple and profile; `package-macos.sh` reads cargo's effective target dirs; the shell's library a plain rlib | Complete | `fe9ea06f`, `6df75ce2`, `624de4da` (rev 3.10, beside `95c2aea1`) | — |
+| CRED-HOST | [§3.1 CRED-HOST](tasks/deps-upgrade/programme-plan.md) | Credential discovery takes a `DiscoveryHost`; `system()` panics in `openalpaca_llm`'s unit tests | Complete | `9ec986ec` | — |
+| G-base driver | [§3.1 G-base driver; §4.3](tasks/deps-upgrade/programme-plan.md) | The eight-step re-cut without the hold; the freshness gate, `--not-before` and the suite verdict; step 8 on serde-saphyr 2.0; `--start-before-instant` with the final install under the max date's release age; step 2's named blocker hold of zip at 2.4.2, lifted at step 5 by P16 | Complete | `507f9e8a`, `95c2aea1`, `74b86219`, `f7207917`, `e4cfd37c`, `dd677009`, `833bade4`, `96de1139`, `dd2f9593` (self-test 43 / 43), `42d3d50b` (self-test 44 / 44; `--dry-run` 23 anchors, 3 patches, exit 0); `tasks/deps-upgrade/tools/gbase/README.md` revision log, the three 2026-10-20 rows | — (its run of record is the first row of Phase A–B) |
+| E6 tools | [§3.1 E6 tools; §4.5 E6](tasks/deps-upgrade/programme-plan.md) | The read-only comparators, index-and-bit output; `yamlcmp` on serde-saphyr `=2.0.0` (D4 (a), C1), `tomlcmp` on toml `=1.1.8` | Complete | `df477c67`, `7d33b59c`, `2c913f99`; `tasks/deps-upgrade/tools/e6/README.md` revision log, the 2026-10-20 row | — (the owner's run is the consent point, Phase A–B) |
+| Decisions and plans | [§0, §2](tasks/deps-upgrade/programme-plan.md) | DU-1…DU-33, D1–D13 and the blanket answer of 2026-10-17; the 2026-10-19 answer (fourteen rows, SA-1…SA-4); the owner's rulings of 2026-10-19 and 2026-10-20; the cut-day compatibility report; this plan, rev 1.0 to rev 1.2 | Complete | `6d3e47fc` (the compatibility report), `8b6ea6a7`, `c3949ad4`, `2e02f684`, `5aa0f260`, `7fc775bc` (rev 1.0), `1683c73b` (rev 1.1), `c1fb4558` (rev 1.2; api-fix-plan rev 3.35, pending-decisions rev 12) | CLAUDE.md's *Current Work* still says "no version moves before the cut instant" and "rev 1.0": superseded, left to the owner's uncommitted shrink commit and to P38 |
+
+### Landed: the pre-cut fixes (§3.1; plan-rev3 §5.4)
+
+| Task | Requirement | Implemented | Status | Evidence | Open before close |
+|---|---|---|---|---|---|
+| The owner's `c7aebb98` and the nineteen: N-MCP-2; N-LEAD-1, -2, -3, -4, -5; N-TOOL-1, -4, -7, -2, -5; N-SKILL-1, -4, -2; N-PLUG-2, -4, -6; N-DAEMON-1; N-STORE-1 | [§3.1 c7aebb98 to N-STORE-1](tasks/deps-upgrade/programme-plan.md) | MCP test stubs leave no orphaned `sleep`; a streamed MCP body bounded by idleness; a lead's subagents cancelled, queued, delivered once, rebuilt on resume, their failures named; the shell's timeout wording, `is_error`, spill previews, the gate before the card, malformed arguments reported; the skill catalog, cuts and diagnostics; plugin manifest warnings, update rollback, unload by ownership; shutdown within its window; Open copies under `state/` | Complete | `c7aebb98^..38649f7e` (20 commits, 2026-10-18 04:17–05:22Z), each test-first with its gate test shown red, two reviewers per lane and an integration review; gate at `38649f7e`: 5,283 / 0 / 17, clippy 79, fmt 1,579 hunks, `gen_api_docs.py --check` clean, bun 1,557 tests in 121 files (Bun 1.4.3), `cargo check -p openalpaca_gui` and the live-eval compile clean, G-base dry run 23 anchors / 3 patches, cut-day compile probe 0 errors; `tasks/deps-upgrade/evidence-2026-10-18-precut.tar.gz` | — (the residue with no plan entry yet is Part III's last row) |
+
+### The opening entries and Phase A–B: Bun, the toolchain, the Tauri pair and the refresh (§3.2)
+
+The order of record (§0.4): G-base's run of record, the consent point, P42, P03, the first clean, P31a, Q11, M63, P04; P03b may land right after P03, with the second clean after it.
+
+| Task | Requirement | Implemented | Status | Evidence | Open before close |
+|---|---|---|---|---|---|
+| G-base's run of record | [§3.2 G-base; §4.3; §5 item 6b](tasks/deps-upgrade/programme-plan.md) | Started under the owner's ruling of 2026-10-20T12:04Z, before the instant on the set measured for it (max date 2026-10-14T19:53:00Z kept). The first attempt, 2026-10-20T12:16:49Z on `dd2f9593` with `--start-before-instant`, exited 1 at step 2's `cargo check`: the refresh took zip 2.4.2 → 2.6.1 (eligible by date; an un-yank since the 2026-10-10 reference, inferred) and calamine 0.26.1 does not compile against zip ≥ 2.5. The lead's named blocker hold is built (`42d3d50b`) | In progress | `tasks/deps-upgrade/evidence-2026-10-20-gbase.tar.gz` (the failed attempt's logs, 12:21Z); the suite floor measured at 5,276 (5,283 − 7 pins); `42d3d50b` | The rerun on `42d3d50b` exiting 0, its result recorded by its own commit and its evidence archived; §5 item 5's checks on the day (the yank scans and the freshness gate re-run) |
+| The consent point: the DU-10 count and E6's no-print checks | [§5 item 3; §4.5 E6](tasks/deps-upgrade/programme-plan.md) | The comparators are ready (`2c913f99`); the run is the owner's — no agent reads `~/.openalpaca` | Not started | — | The owner's run, after G-base's run of record and before P42 (§0.4); the plan's bound: before P04, P12, P29 and P30 |
+| P42 — Bun 1.4.3 | [§3.2 P42](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | G-base's run of record; §5 item 9 (push and draft PR, before P42 and P03: CI's half of their gates) |
+| P03 — Rust 1.99.0 | [§3.2 P03](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | P42; §5 item 9 |
+| The first `cargo clean` | [§0.4 the first clean (DU-M4 (a))](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Right after P03 |
+| P03b — Rust 1.99.1 | [§3.2 P03b](tasks/deps-upgrade/programme-plan.md) | — (1.99.1 is installed on this machine) | Not started | — | P03's gates; may land right after P03 — the owner's ruling of 2026-10-20 waives its 2026-10-23T04:47:44Z date |
+| The second `cargo clean` | [§0.4 the second clean](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Right after P03b; every gate after it runs 1.99.1 |
+| P31a — the Tauri 2.12 pair | [§3.2 P31a](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | After the first clean in §0.4's order |
+| Q11 — the command layer under `tauri::test` (a Part II id) | [§3.2 Q11](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | After P31a |
+| M63 — `build.build-dir` out of `target/` (a Part III id) | [§3.2 M63](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | After Q11 |
+| P04 — `Cargo.lock` refreshed within semver | [§3.2 P04](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | §5 item 3 (the consent point); §5 item 13 (pinned tools: none of cargo-audit, cargo-deny, zizmor, shellcheck is installed; §5 says by the cut, and P04, P34 and E2 run them) |
+| Prep rewrite — the procedure | [§3.2 Prep rewrite; §5 item 10](tasks/deps-upgrade/programme-plan.md) | The prep commits pre-written at `refs/prep/deps-wave-2026-10-12` (base `6992a402`, tip `7e702582`; never pushed) | Not started | — | Each rewritten onto the tip at its entry's place, never rebased: P10, P12, P15, P16, P17, P17a, P18, P19, P19b, P41, P36 and M08 |
+
+### Phases C–L (§3.2)
+
+| Task | Requirement | Implemented | Status | Evidence | Open before close |
+|---|---|---|---|---|---|
+| Phase C — format pins: P05 | [§3.2 Phase C](tasks/deps-upgrade/programme-plan.md) | The on-disk secret and hash formats pinned | Complete | `afb1da60` (with Phase 0) | — (its gate's re-runs after P10 and P11 are Phase E's) |
+| Phase D — storage: P06, P07, P08 | [§3.2 Phase D](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | CI read after P08 (§5 item 9's second read, before P15) |
+| Phase E — secrets and hashing: P09, P10 (prep), P11, P12 (prep), P13 | [§3.2 Phase E](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | §5 item 3 before P12 (its keychain waiver needs 0 on both counts); P05's gate re-run after P10 and P11; CI read a second time after P12, P13 and P08, before P15 |
+| Phase F — documents and upload sniffing: P15 (prep), P16 (prep), P17 (prep), P17a (prep), P18 (prep) | [§3.2 Phase F](tasks/deps-upgrade/programme-plan.md) | P14's characterisation pins landed with Phase 0 (`05541f1b`) | Not started | — | §5 item 14 (the pdf-extract issue) before P15; P16 lifts G-base's zip hold |
+| Phase G — MCP client: N-MCP-1, N-MCP-3, N-MCP-4, P19 (prep), P19b (prep) | [§3.2 Phase G](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | §5 item 15 (the rmcp issue) before P19, if it can be |
+| Phase H — web and CLI: P25, P26, P27, P27a, P28, P41 (prep) | [§3.2 Phase H](tasks/deps-upgrade/programme-plan.md) | P24's CORS pins landed with Phase 0 (`41bd92b9`) | Not started | — | §5 item 12 (the Telegram and Discord test bots) before P28 and P41 |
+| Phase I — configuration formats: P29, P30 | [§3.2 Phase I](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | §5 item 3 (E6 over every real TOML file and skill directory) before P29 and P30 |
+| Phase J — GUI JavaScript: P31, P32, P33 | [§3.2 Phase J](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | — |
+| Phase K — advisories and maintenance: P34, B-23, P35 | [§3.2 Phase K](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | §5 item 13 (P34's tools) |
+| Phase L — close-out: P36 (M04 + M07; prep `ac6db26c`), P37, P38 | [§3.2 Phase L](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | P38 needs every Part I commit before it, P03b and P37 included, and rewrites CLAUDE.md's *Current Work* |
+
+### The sweep and the end-to-end gates
+
+| Task | Requirement | Implemented | Status | Evidence | Open before close |
+|---|---|---|---|---|---|
+| FRESHNESS-SWEEP — one commit per release eligible after the cut instant | [§3.2 FRESHNESS-SWEEP; §5 item 5](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Each release the instant refused (react-query 5.104.3, jsdom 30.1.3, vitest 5.0.5 and DU-23's transitive rest), each gated on its own instant minus 7 days; before the merge and before E1–E8 |
+| E1–E8, with E8-PROBE | [§4.5 E1–E8; §3.3 step 19](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | E6 at the consent point (§5 item 3); E5's one Export click in step 12 (Part III, before M76); §5 item 4 (the backup, immediately before the first start of a bumped build on the real store); the plan runs them at merged-order step 19, after steps 2a–18 (§4.1), and they are listed here because they close Part I's merge |
+
+Not counted, with the plan's own word: P39 dropped; P01a, P40 and E5b deferred (DU-33, macOS first); P20, P21 and P22 superseded by P19; P23 optional, not among the commits that land; DU13-FALLBACK conditional, after the merge on its trigger.
+
+## The beta, between Part I and Parts II–III
+
+| Task | Requirement | Implemented | Status | Evidence | Open before close |
+|---|---|---|---|---|---|
+| The beta, with B1–B3 | [§0.4; §2 The beta's scope](tasks/deps-upgrade/programme-plan.md); [storage design §21](tasks/storage-design/design.md) | — | Not started | — | Part I merged; B-22's notices (Part II, step 2a); §5 item 16 (the MIT LICENSE, the owner's alone); B1–B3 |
+
+## Part II — the flexible apps (§3.3)
+
+Part II's landed ids (Q00–Q03, Q15–Q17) are Part I's §3.1 rows and Q11 is in Phase A–B; of Part II's 23 commits six have landed and 17 remain (§3.3's count). N-DAEMON-2 belongs to neither part and sits here with step 4, *Part II's shell work*.
+
+| Task | Requirement | Implemented | Status | Evidence | Open before close |
+|---|---|---|---|---|---|
+| Step 2a: B-22 (notices) | [§3.3 step 2a, B-22 (notices)](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Right after P38, after P34, before the beta |
+| Step 4: Q12, Q13, Q14, Q21, N-DAEMON-2, Q04 | [§3.3 step 4](tasks/deps-upgrade/programme-plan.md) | — (N-DAEMON-2 taken 2026-10-19; not built) | Not started | — | §5 item 11 (Q00's owed GUI rows, after Q14 on the rebuilt `a91f4b23` build); DISCOVERY-TIMING-C conditional, not scheduled |
+| Step 5: Q05, Q06, the shell baseline recaptured, B-25 | [§3.3 step 5](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | After M18 (Part III, step 5) |
+| Step 11: Q07 | [§3.3 step 11](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Before Part III's GUI commits of step 11 |
+| Step 13: Q20, Q08, Q09, Q18a, Q18b | [§3.3 step 13](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Q08 and Q09 as their macOS jobs alone (DU-33) |
+| Step 18: Q10, Q19, G4–G6 (measure-first) | [§3.3 step 18](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Q19 once Q10's figures exist; G4–G6 only as Q10's profiles justify |
+
+## Part III — the modernization (§3.3)
+
+Part III's landed ids (M01–M03, M44) are Part I's §3.1 rows; M63 is in Phase A–B, M04 + M07 land as P36 in Phase L, and M08 is pre-written on the prep ref. plan-rev3 §5.4's and §5.5's after-P38 entries and SA-1…SA-4 belong to neither part and sit here with the steps that carry them. Steps 3a and 3b name no part; they follow step 3, *the first Part III source commit*, so they are listed here.
+
+| Task | Requirement | Implemented | Status | Evidence | Open before close |
+|---|---|---|---|---|---|
+| Step 3: M57 | [§3.3 step 3, M57](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Right after step 2a |
+| Step 3a: N-TOOL-3, N-TOOL-6, N-SKILL-3 | [§3.3 step 3a](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | N-TOOL-3 lands unless the owner declines it |
+| Step 3b: N-ROUTE-1, N-TOOL-1b, N-TOOL-8, N-LEAD-6, N-LLM-1, SA-2, N-SKILL-5, N-EVENT-1; SA-DESIGN; SA-1, SA-3 | [§3.3 step 3b](tasks/deps-upgrade/programme-plan.md) | — (taken 2026-10-19; not built) | Not started | — | SA-DESIGN: `tasks/subagent-brief-design.md` does not exist yet; SA-1 and SA-3 need it |
+| Step 5: M18 | [§3.3 step 5, M18](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | — |
+| Step 6: M05, M06, M08 (prep `7e702582`), M60, M61, M62, M12 | [§3.3 step 6](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | — |
+| Step 6b: N-PLUG-1, N-PLUG-3, N-PLUG-5 | [§3.3 step 6b](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Before step 7's plugin traits move |
+| Step 7: M86, M13, M55a–d, M58a–j, M59 | [§3.3 step 7](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | — |
+| Step 8: M14, M85, M82, SA-4, N-MCP-5, M15, M16, M17 | [§3.3 step 8](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | SA-4 needs the subagent brief design; M17's Windows leg waits with DU-33 |
+| Step 9: M19–M38 | [§3.3 step 9](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Each with a golden test of its `Display` text before the derive |
+| Step 10: M39, M40, M41 | [§3.3 step 10](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | — |
+| Step 11: N-GUI-1, N-GUI-2, N-GUI-3; M09, M10, M11, M68, M42, M43, M80, M81, M56, M66, M67, M69, M70 | [§3.3 step 11](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | After Q07 (Part II); M66, M67 and M69 on their own freshness clock (instant minus 7 days) |
+| Step 12: M72, M73, M71, M74, M75, M79, M76, M77, M78 | [§3.3 step 12](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | E5's one Export click before M76; Q11 before M74; Q13 before M76 |
+| Step 14: M83, M84 | [§3.3 step 14](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | — |
+| Step 15: M64 | [§3.3 step 15](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | — |
+| Step 16: M45–M52; M53a–g (Optional) | [§3.3 step 16](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | Each crate's sites re-derived on M64's tree |
+| Step 17: M65 | [§3.3 step 17](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | — |
+| Step 20: M54 | [§3.3 step 20, M54](tasks/deps-upgrade/programme-plan.md) | — | Not started | — | After E1–E8 (step 19) |
+| Not placed: B-01…B-10, B-12…B-19 (B-15's (2) only), B-24, B-26; Migration 005 (B-20, B-21, the `agent.config` drop); five items needing a plan entry | [§3.3 Not placed by the merged order; Needs a plan entry](tasks/deps-upgrade/programme-plan.md) | — (taken; not built) | Not started | — | A place in the merged order for each; B-09 conditional on MD-4 (pending); B-15 (2) conditional; the five: ConfigInvalid's sentence for a refused redirect, the plugin connector bridge deleted, `ManifestPreview` escaped, the installer's prompt, T21 (2)'s token rotation |
+
+## How this file is kept
+
+- Every landing updates its row in the same commit: the status, the evidence with the commit hash and the figures its `Verified:` line names, and the open items it closes or opens. A run of record is updated by the commit that records its result.
+- The lead keeps this file. The plan of record stays `tasks/deps-upgrade/programme-plan.md`; where the two differ, the plan wins and this file is corrected in the next commit.
+- A row is Complete only when every entry in it has landed and its open items are done. A part's row in *The parts* closes only when every row of that part is Complete and its own open items are done.
+- A phase whose test pin landed with Phase 0 (F's P14, H's P24) stays Not started until its first remaining entry lands; Phase C, whose one entry is P05, is Complete. An entry the plan drops, defers or supersedes takes no status word: it is named, with the plan's word, in the line under Part I's tables.
+- Dates and times are UTC, each beside the commit hash that carries it.
