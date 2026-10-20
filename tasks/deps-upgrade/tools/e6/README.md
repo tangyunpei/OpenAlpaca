@@ -1,5 +1,7 @@
 # E6 — the read-only comparators for the owner's real config and skill files
 
+The plan of record is now [`../../programme-plan.md`](../../programme-plan.md) (rev 1.0); the plan-rev3 sections cited below are frozen history and still resolve.
+
 **Status: written 2026-10-11 (`df477c67`, plan-rev3 §6 E6); amended 2026-10-17 for the plan review (`tasks/deps-upgrade/reports/2026-10-17-plan-review.md`: F-13, SF-14, A2-16, MF-5 and F-08) and the ZCode audit (`tasks/research/zcode-audit-2026-10-17.md`: Z3-05, A-07) — *Revision log*, below. It moves no version and touches no product code; it is run by the owner, at plan-rev3 §5.1 item 3's consent point.**
 
 The dependency wave moves the three crates that read the owner's configuration:
