@@ -25,3 +25,11 @@ openalpaca_storage = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[dev-dependencies]
+# Q11: `tauri::test` (mock_builder, mock_context, get_ipc_response) for the
+# command-layer tests; the feature adds no crate.
+tauri = { workspace = true, features = ["test"] }
+# test-home-guard: store::projects::register refuses an unguarded home store in
+# this crate's test builds (storage design, Stage 1).
+openalpaca_storage = { workspace = true, features = ["test-home-guard"] }
