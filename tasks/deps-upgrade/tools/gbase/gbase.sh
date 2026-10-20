@@ -120,9 +120,9 @@ usage: gbase.sh --base <commit> --bun <path> --min-passed <N> [--not-before <UTC
 
 Exit status: 0 — every step and gate passed (lock differences, if any, were printed, and under
 --strict there were none); 1 — the first failed command, anchor, patch, comparison or gate (the
-message names it and the log), a young entry the gate admits no step-back for, or one without
---apply-step-backs; 2 — a usage error, --with-stepbacks, a missing prerequisite, or a run started
-before --not-before without --start-before-instant.
+message names it and the log), a blocker hold cargo refused, a young entry the gate admits no
+step-back for, or one without --apply-step-backs; 2 — a usage error, --with-stepbacks, a missing
+prerequisite, or a run started before --not-before without --start-before-instant.
 EOF
 }
 
@@ -200,6 +200,10 @@ MAX_DATE=""       # NOT_BEFORE minus 7 days: the newest publication time a step 
 STEPBACKS_FILE="" # $T/logs/step-backs.txt: every --precise the freshness gate applied
 STEPBACKS_STEP=0
 STEPBACKS_TOTAL=0
+BLOCKERS_FILE=""  # $T/logs/blockers.txt: every named blocker hold (hold_blocker), one a line
+BLOCKERS_TOTAL=0
+BLOCKERS_LIST=""  # "zip 2.4.2, step 5 (P16)" for the RESULT line
+HELD_NOW=0        # the holds the last hold_blocker call applied
 ARCHIVE=0         # a real run writes the evidence archive at exit
 RUN_DATE=""
 
@@ -260,6 +264,7 @@ make_root() {
   mkdir -p "$T/logs" "$T/locks"
   : > "$T/.started"
   STEPBACKS_FILE="$T/logs/step-backs.txt"
+  BLOCKERS_FILE="$T/logs/blockers.txt"
   RUN_DATE=$(date -u +%Y-%m-%d)
   say "scratch root: $T  ($(now))"
 }
@@ -658,6 +663,36 @@ freshness() {
   fi
 }
 
+# hold_blocker NAME TARGET REASON LIFTED — a named blocker (the no-compromise rule: "a real blocker
+# is named with its way out"; the lead's ruling of 2026-10-20): when the lock holds NAME in TARGET's
+# major line at another version, one `cargo update -p NAME@<it> --precise TARGET`, recorded in
+# logs/blockers.txt with REASON and where it is LIFTED. Not a freshness step-back: the gate admits
+# the version; the tree does not compile with it. HELD_NOW counts what this call held.
+hold_blocker() {
+  local name=$1 target=$2 reason=$3 lifted=$4 v log
+  HELD_NOW=0
+  [ "$MODE" = check ] && return 0
+  if ! live; then
+    plan "    blocker hold: $name in the ${target%%.*}.x line at a version other than $target -> cargo update -p $name@<it> --precise $target ($reason; lifted at $lifted)   > logs/blockers.txt"
+    return 0
+  fi
+  for v in $(lock_versions "$name"); do
+    case $v in "${target%%.*}".*) ;; *) continue ;; esac
+    [ "$v" != "$target" ] || continue
+    log="hold-$(slug "${CURRENT_STEP#step-}")-$name"
+    run_logged_rc "$log" "${CARGO[@]}" update -p "$name@$v" --precise "$target"
+    if [ "$LAST_RC" -ne 0 ]; then
+      tail -n 20 "$T/logs/$log.log" >&2 || true
+      die "${CURRENT_STEP}: cargo refused the blocker hold $name@$v -> $target (rc=$LAST_RC; logs/$log.log)"
+    fi
+    printf '%s: %s %s -> %s   %s; lifted at %s   (cargo update -p %s@%s --precise %s; logs/%s.log)\n' \
+      "$CURRENT_STEP" "$name" "$v" "$target" "$reason" "$lifted" "$name" "$v" "$target" "$log" >> "$BLOCKERS_FILE"
+    say "    blocker hold: $name $v -> $target  ($reason; lifted at $lifted; $BLOCKERS_FILE)"
+    HELD_NOW=$((HELD_NOW + 1)); BLOCKERS_TOTAL=$((BLOCKERS_TOTAL + 1))
+    BLOCKERS_LIST="${BLOCKERS_LIST:+$BLOCKERS_LIST; }$name $target, $lifted"
+  done
+}
+
 # expect_tauri_set WHERE — MF-1 item 2: every crate of the pair's sub-graph held once, at exactly
 # its expected version, and each published at or before the max date (or a recorded waiver).
 expect_tauri_set() {
@@ -735,6 +770,11 @@ step_2() {
   # `tauri = "~2.12"` and `tauri-build = "~2.7"` are tilde requirements: the refresh may take a newer
   # patch, never a new minor; the gate admits only an eligible one, and the set must stay step 1b's.
   freshness 2 "$(prev_lock 2)"
+  # The named blocker (the lead's ruling of 2026-10-20): calamine 0.26.1, which the tree keeps until
+  # step 5, does not compile against zip >= 2.5, which the max date admits (the 2026-10-10 reference
+  # and the 2026-10-12 rehearsal held 2.4.2: an un-yank since, inferred). P16 at step 5 lifts it.
+  hold_blocker zip 2.4.2 "calamine 0.26.1 (kept until step 5) does not compile against zip >= 2.5 (ZipFile<'a, R: Read>)" "step 5 (P16: calamine 0.36, zip 8.6)"
+  if ! live || [ "$HELD_NOW" -gt 0 ]; then freshness 2-held "$(prev_lock 2)"; fi
   live && say "    Tauri sub-graph after the refresh (P04's body records it): $(tauri_subgraph)"
   expect_tauri_set "step 2"
   pair_check "step 2" "$JS_API" "$DIALOG"
@@ -1135,7 +1175,7 @@ summary() {
     sed 's/^/    /' "$T/logs/lock-dates.txt"
   fi
   say ""
-  say "RESULT ($(now)): cut $NOT_BEFORE, freshness max date $MAX_DATE, $STEPBACKS_TOTAL step-back(s)$( [ "$STEPBACKS_TOTAL" -eq 0 ] || printf ' (%s)' "$STEPBACKS_FILE"); lock differences: $LOCK_LINE; cargo test: $TEST_LINE; vitest: $VITEST_LINE; G-GUI: $GUI_LINE; logs: $T/logs; evidence: $T/evidence-$RUN_DATE-gbase.tar.gz (at exit)"
+  say "RESULT ($(now)): cut $NOT_BEFORE, freshness max date $MAX_DATE, $STEPBACKS_TOTAL step-back(s)$( [ "$STEPBACKS_TOTAL" -eq 0 ] || printf ' (%s)' "$STEPBACKS_FILE"), $BLOCKERS_TOTAL blocker hold(s)$( [ "$BLOCKERS_TOTAL" -eq 0 ] || printf ' (%s; %s)' "$BLOCKERS_LIST" "$BLOCKERS_FILE"); lock differences: $LOCK_LINE; cargo test: $TEST_LINE; vitest: $VITEST_LINE; G-GUI: $GUI_LINE; logs: $T/logs; evidence: $T/evidence-$RUN_DATE-gbase.tar.gz (at exit)"
 }
 
 # ---------------------------------------------------------------------------- pre-flight
@@ -1574,6 +1614,29 @@ json.dump(d, open(sys.argv[2], "w"))' "$fr/dates.json" "$fr/dates-beta-none.json
     verdict x-npm 0 "the npm pins: an eligible pin passes; a cli whose own time is eligible but one platform binary is not is refused (rc=$rc, $rc2)"
   else
     verdict x-npm 1 "rc=$rc, $rc2; see logs/selftest-10f-npm-old.log, logs/selftest-10g-npm-binary.log"
+  fi
+
+  # (x) the named blocker hold (the lead's ruling of 2026-10-20): a lock holding zip 2.6.1 is held at
+  # 2.4.2 by exactly one `update -p zip@2.6.1 --precise 2.4.2` and one blockers line; at 2.4.2, nothing
+  printf 'version = 4\n\n[[package]]\nname = "zip"\nversion = "2.6.1"\n%s\n' "$reg" > "$fr/zip-young.lock"
+  sed 's/^version = "2.6.1"$/version = "2.4.2"/' "$fr/zip-young.lock" > "$fr/zip-held.lock"
+  hold_env() { # run in a subshell: hold_blocker in $fr on LOCK with the fake cargo, blockers to FILE
+    cd "$fr" && cp "$1" Cargo.lock && CARGO=("$fr/fake-cargo") && CURRENT_STEP="$2"
+    BLOCKERS_FILE="$T/logs/selftest-10-blockers-$2.txt"; : > "$BLOCKERS_FILE"
+    hold_blocker zip 2.4.2 "a reason (self-test)" "step 5 (P16)"
+    lock_versions zip > "$T/logs/selftest-10-blockers-$2-lock.txt"
+  }
+  rc=0; ( hold_env "$fr/zip-young.lock" hold-a ) > "$T/logs/selftest-10h-hold-young.log" 2>&1 || rc=$?
+  rc2=0; ( hold_env "$fr/zip-held.lock" hold-b ) > "$T/logs/selftest-10i-hold-held.log" 2>&1 || rc2=$?
+  if [ "$rc" -eq 0 ] && [ "$rc2" -eq 0 ] && [ "$(cat "$T/logs/selftest-10-blockers-hold-a-lock.txt")" = 2.4.2 ] \
+     && [ "$(head -n 1 "$T/logs/hold-hold-a-zip.log")" = '$ '"$fr/fake-cargo update -p zip@2.6.1 --precise 2.4.2" ] \
+     && [ "$(grep -c . "$T/logs/selftest-10-blockers-hold-a.txt")" -eq 1 ] \
+     && grep -qF 'hold-a: zip 2.6.1 -> 2.4.2   a reason (self-test); lifted at step 5 (P16)' "$T/logs/selftest-10-blockers-hold-a.txt" \
+     && [ ! -e "$T/logs/hold-hold-b-zip.log" ] && [ ! -s "$T/logs/selftest-10-blockers-hold-b.txt" ] \
+     && [ "$(cat "$T/logs/selftest-10-blockers-hold-b-lock.txt")" = 2.4.2 ]; then
+    verdict x-hold 0 "a named blocker: zip 2.6.1 held at 2.4.2 by one --precise and one blockers line; a lock already at 2.4.2 runs no command and records nothing (rc=$rc, $rc2)"
+  else
+    verdict x-hold 1 "rc=$rc, $rc2; see logs/selftest-10h-hold-young.log, logs/selftest-10i-hold-held.log, logs/selftest-10-blockers-hold-*.txt"
   fi
 
   # (xi) --not-before (MF-1 item 3): a run refuses to start before the instant (exit 2, no scratch
