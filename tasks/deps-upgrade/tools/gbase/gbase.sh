@@ -45,6 +45,10 @@ JOBS=${CARGO_BUILD_JOBS:-8}   # every cargo call's CARGO_BUILD_JOBS: the caller'
 # (12:53 PDT), when the whole 2026-10-14 Tauri train is 7 days old; the max date is
 # 2026-10-14T19:53:00Z. A later instant is passed with --not-before.
 NOT_BEFORE="2026-10-21T19:53Z"
+# The owner's ruling of 2026-10-20 (2026-10-20T12:04Z: "no need to always keep the 7day new package
+# rule"), read minimally: with --start-before-instant a run may start before the instant, on the
+# instant's set — the max date stays NOT_BEFORE minus 7 days; only the refusal is skipped.
+START_BEFORE_INSTANT=0
 WAIVERS=""
 MIN_PASSED=""
 ARCHIVE_TO=""
@@ -62,7 +66,8 @@ DATE_SOURCE=""             # the self-test's stand-in for the registries (lockda
 
 usage() {
   cat <<'EOF'
-usage: gbase.sh --base <commit> --bun <path> --min-passed <N> [--not-before <UTC>] [--apply-step-backs]
+usage: gbase.sh --base <commit> --bun <path> --min-passed <N> [--not-before <UTC>] [--start-before-instant]
+                [--apply-step-backs]
                 [--waivers <file>] [--toolchain <ver>] [--steps <N|all>] [--strict] [--dates]
                 [--archive-to <dir>] [--repo <path>] [the Tauri and JS pins below]
        gbase.sh --base <commit> ... --dry-run       print the plan after the pre-flight checks; exit 0
@@ -71,10 +76,15 @@ usage: gbase.sh --base <commit> --bun <path> --min-passed <N> [--not-before <UTC
 
   --base <commit>      the branch point to export (`git archive`); required unless --self-test
   --not-before <UTC>   the cut instant, written with its zone (`2026-10-21T19:53Z`, or `…:00Z`): a run
-                       refuses to start before it (exit 2), and every version a step adds or moves must
-                       be published at or before it minus 7 days (DU-23). Default 2026-10-21T19:53Z
-                       (12:53 PDT), the owner's D1 (a) — max date 2026-10-14T19:53:00Z. --dry-run and
-                       --edits-only check its form only.
+                       refuses to start before it (exit 2, unless --start-before-instant), and every
+                       version a step adds or moves must be published at or before it minus 7 days
+                       (DU-23). Default 2026-10-21T19:53Z (12:53 PDT), the owner's D1 (a) — max date
+                       2026-10-14T19:53:00Z. --dry-run and --edits-only check its form only.
+  --start-before-instant  the run may start before --not-before's instant: the owner's ruling of
+                       2026-10-20 ("no need to always keep the 7day new package rule"), read
+                       minimally — the max date is unchanged (the instant minus 7 days still defines
+                       the set), only the refusal is skipped; without it a run before the instant
+                       still exits 2
   --apply-step-backs   take the freshness gate's step-backs: each `cargo update -p name@locked --precise
                        <target>` the gate names, one at a time, dependents first, the gate run again
                        after each (P04's rule, DU-23); a first entry with nothing eligible to step
@@ -112,7 +122,7 @@ Exit status: 0 — every step and gate passed (lock differences, if any, were pr
 --strict there were none); 1 — the first failed command, anchor, patch, comparison or gate (the
 message names it and the log), a young entry the gate admits no step-back for, or one without
 --apply-step-backs; 2 — a usage error, --with-stepbacks, a missing prerequisite, or a run started
-before --not-before.
+before --not-before without --start-before-instant.
 EOF
 }
 
@@ -129,6 +139,7 @@ while [ $# -gt 0 ]; do
     --with-stepbacks) WITH_STEPBACKS=1; shift ;;
     --apply-step-backs) APPLY_STEPBACKS=1; shift ;;
     --not-before) NOT_BEFORE=${2:?--not-before needs a UTC instant}; shift 2 ;;
+    --start-before-instant) START_BEFORE_INSTANT=1; shift ;;
     --waivers) WAIVERS=${2:?--waivers needs a file}; shift 2 ;;
     --min-passed) MIN_PASSED=${2:?--min-passed needs a count}; shift 2 ;;
     --archive-to) ARCHIVE_TO=${2:?--archive-to needs a directory}; shift 2 ;;
@@ -494,7 +505,7 @@ check_args() {
   NOT_BEFORE_EPOCH=$(instant_epoch "$NOT_BEFORE") \
     || usage_fail "--not-before takes the cut instant with its zone, YYYY-MM-DDTHH:MM[:SS]Z (UTC), not '$NOT_BEFORE': a date alone admits releases early in one zone or the other (plan review 2026-10-17, MF-1)"
   MAX_DATE=$(iso_of $(( NOT_BEFORE_EPOCH - 7 * 86400 )))
-  [ "$REAL" -eq 0 ] || refuse_before "$NOT_BEFORE_EPOCH"
+  [ "$REAL" -eq 0 ] || [ "$START_BEFORE_INSTANT" -eq 1 ] || refuse_before "$NOT_BEFORE_EPOCH"
   return 0
 }
 
@@ -1043,7 +1054,15 @@ final_js() {
   else
     plan "    rm bun.lock   (the root lock, re-resolved from scratch)"
   fi
-  run_logged 92-bun-install "${BUNENV[@]}" "$BUN" install
+  # The install itself under the max date (programme-plan §1.2, "The JS gate": an install may run
+  # under a minimumReleaseAge of the install time less the max date): the flag overrides bunfig.toml's
+  # 604800, which counts from the install — before the instant it would refuse the 2026-10-14 family,
+  # after it admit what is younger than the max date. bun_lock_dates below stays the proof (C5).
+  local age
+  age=$(( $(date -u +%s) - $(instant_epoch "$MAX_DATE") ))
+  [ "$age" -ge 0 ] || age=0
+  live && say "    minimum release age: ${age}s (the install, $(now), less the max date $MAX_DATE)"
+  run_logged 92-bun-install "${BUNENV[@]}" "$BUN" install "--minimum-release-age=$age"
   live && say "    bun.lock: $(sed -n 's/^ *"lockfileVersion": *\([0-9]*\),*$/lockfileVersion \1/p' bun.lock | head -n 1)"
   bun_lock_dates
   cd apps/openalpaca-gui
@@ -1584,6 +1603,19 @@ json.dump(d, open(sys.argv[2], "w"))' "$fr/dates.json" "$fr/dates-beta-none.json
   else
     verdict xi-zone 1 "rc=$rc, $rc2; see logs/selftest-11c-not-before-date.log, logs/selftest-11d-not-before-nozone.log"
   fi
+  # --start-before-instant (the owner's ruling of 2026-10-20): xi-future's run plus the flag is not
+  # refused, keeps the instant's max date, and fails later for its own reason (no repository)
+  mkdir -p "$T/xi-tmp3"
+  rc=0
+  TMPDIR="$T/xi-tmp3" bash "$HERE/gbase.sh" --base HEAD --steps 1 --repo "$T/not-a-repo" --not-before 2099-01-01T00:00Z \
+    --start-before-instant > "$T/logs/selftest-11e-start-before-instant.log" 2>&1 || rc=$?
+  if [ "$rc" -eq 1 ] && ! grep -q 'refusing to start before the cut instant' "$T/logs/selftest-11e-start-before-instant.log" \
+     && grep -q 'freshness max date: 2098-12-25T00:00:00Z  start before the instant: allowed' "$T/logs/selftest-11e-start-before-instant.log" \
+     && grep -q 'pre-flight: cannot resolve --base HEAD' "$T/logs/selftest-11e-start-before-instant.log"; then
+    verdict xi-early 0 "the same run with --start-before-instant is not refused, keeps the max date 2098-12-25T00:00:00Z, and fails at the pre-flight for its own reason (rc=$rc)"
+  else
+    verdict xi-early 1 "rc=$rc; see logs/selftest-11e-start-before-instant.log"
+  fi
 
   # (xii) the Tauri set (MF-1 item 2): every crate held at exactly its expected version and each
   # published at or before the max date; one internal a patch off, or one too young, stops the driver
@@ -1783,7 +1815,7 @@ main() {
   fi
   if [ "$REAL" -eq 1 ]; then ARCHIVE=1; trap archive_evidence EXIT; fi
   say "repository: $REPO  base: $BASE  toolchain: $TOOLCHAIN  steps: $STEPS  strict: $STRICT  dry-run: $DRY  edits-only: $EDITS_ONLY"
-  say "cut (--not-before): $NOT_BEFORE  freshness max date: $MAX_DATE  step-backs: $( [ "$APPLY_STEPBACKS" -eq 1 ] && echo applied || echo 'a young entry stops the run')  waivers: ${WAIVERS:-none}"
+  say "cut (--not-before): $NOT_BEFORE  freshness max date: $MAX_DATE  start before the instant: $( [ "$START_BEFORE_INSTANT" -eq 1 ] && echo 'allowed (--start-before-instant)' || echo 'not allowed')  step-backs: $( [ "$APPLY_STEPBACKS" -eq 1 ] && echo applied || echo 'a young entry stops the run')  waivers: ${WAIVERS:-none}"
   say "the pins: tauri $TAURI_PRECISE, tauri-plugin-dialog =$DIALOG, @tauri-apps/api $JS_API, @tauri-apps/cli $JS_CLI; the Tauri set: $(printf '%s\n' "$TAURI_SET" | awk '{ printf "%s%s %s", s, $1, $2; s = ", " }')"
   cargo_cmd "$T/target"; CARGO=("${CARGO_CMD[@]}")
   cargo_cmd "$T/target-gui"; CARGO_GUI=("${CARGO_CMD[@]}")
