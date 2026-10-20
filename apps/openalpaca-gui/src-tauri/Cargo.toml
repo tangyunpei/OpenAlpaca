@@ -9,7 +9,7 @@ description = "A Tauri App"
 authors = ["you"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build.workspace = true
 
 [dependencies]
 serde.workspace = true
@@ -20,7 +20,7 @@ tracing.workspace = true
 directories.workspace = true
 tauri-plugin-dialog.workspace = true
 
-tauri = { version = "2", features = [] }
+tauri.workspace = true
 openalpaca_storage = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
