@@ -12,6 +12,8 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The library the tree reads SKILL.md frontmatter with today, and the one P30
-# replaces it with (the newest 1.x on 2026-10-11), side by side in one binary.
+# replaces it with, side by side in one binary: serde-saphyr 2.0.0, the major
+# owner decision D4 (a) takes and the only 2.x eligible at the cut (published
+# 2026-10-13; re-pinned from 1.3.0 on 2026-10-20).
 serde_yaml = "=0.9.34"
-serde-saphyr = "=1.3.0"
+serde-saphyr = "=2.0.0"

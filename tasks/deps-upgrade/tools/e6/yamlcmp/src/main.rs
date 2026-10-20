@@ -1,6 +1,6 @@
 //! yamlcmp — the E6 comparator for SKILL.md frontmatter: serde_yaml 0.9.34
-//! (what the tree reads with today) against serde-saphyr 1.3.0 with the options
-//! P30 gives it, both in this one binary.
+//! (what the tree reads with today) against serde-saphyr 2.0.0 (owner decision
+//! D4 (a)) with the options P30 gives it, both in this one binary.
 //!
 //! `yamlcmp [--facet typed|value] <file>...` prints one line per input,
 //! `<index>\t<word>`, and exits 0; `--summary` prints counts only. Nothing else
@@ -34,17 +34,29 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use types::SkillFrontmatter;
 
 /// The options P30 gives serde-saphyr so it reads a file the way serde_yaml
-/// 0.9 did (`yaml_options()` in the September `config.diff:326-335`): a YAML
-/// 1.1 spelling like `yes` stays a string, a merge key is an ordinary key, the
-/// last duplicate key wins, `.inf`/`.nan` are accepted, `!!binary` is ignored
-/// for a string target, and an error carries no excerpt of the file.
+/// 0.9 did (`yaml_options()` in the September `config.diff:326-335`, on 2.0.0
+/// under D4 (a)): a YAML 1.1 spelling like `yes` stays a string, a merge key is
+/// an ordinary key, the last duplicate key wins, `!!binary` is ignored for a
+/// string target, and an error carries no excerpt of the file.
+///
+/// A non-finite float is accepted. A string field keeps the text as written;
+/// in a `serde_json::Value` position (`tools.defaults`, a script's
+/// `parameters`) it becomes its canonical spelling as a string — `.inf`,
+/// `-.inf` or `.nan`, so `+.Inf` reads `.inf`, `.NaN` `.nan` and `1e999`
+/// `.inf` — where serde_yaml gave null and kept `1e999` as that text (the
+/// cut-compatibility report's C10), so such a file reads `different`.
+///
+/// A run of comments is read the way serde_yaml read it: with comment events
+/// off, 33 or more comment lines between a key and its block value are no
+/// longer refused (C1).
 fn yaml_options() -> serde_saphyr::Options {
     serde_saphyr::options! {
         strict_booleans: true,
         merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
         duplicate_keys: serde_saphyr::DuplicateKeyPolicy::LastWins,
-        reject_non_finite_typeless_float: false,
+        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::AsString,
         ignore_binary_tag_for_string: true,
+        emit_comments: false,
         with_snippet: false,
     }
 }

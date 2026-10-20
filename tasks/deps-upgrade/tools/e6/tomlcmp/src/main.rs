@@ -1,5 +1,5 @@
 //! tomlcmp — the E6 comparator for the `toml` crate: 0.9.12 (what the tree
-//! holds today) against 1.1.6 (what P29 moves to), both in this one binary.
+//! holds today) against 1.1.8 (what P29 moves to), both in this one binary.
 //!
 //! `tomlcmp <file>...` prints one line per input, `<index>\t<word>`, and exits
 //! 0. The index is the input's 1-based position on the command line; the word

@@ -2,12 +2,12 @@
 
 The plan of record is now [`../../programme-plan.md`](../../programme-plan.md) (rev 1.0); the plan-rev3 sections cited below are frozen history and still resolve.
 
-**Status: written 2026-10-11 (`df477c67`, plan-rev3 §6 E6); amended 2026-10-17 for the plan review (`tasks/deps-upgrade/reports/2026-10-17-plan-review.md`: F-13, SF-14, A2-16, MF-5 and F-08) and the ZCode audit (`tasks/research/zcode-audit-2026-10-17.md`: Z3-05, A-07) — *Revision log*, below. It moves no version and touches no product code; it is run by the owner, at plan-rev3 §5.1 item 3's consent point.**
+**Status: written 2026-10-11 (`df477c67`, plan-rev3 §6 E6); amended 2026-10-17 for the plan review (`tasks/deps-upgrade/reports/2026-10-17-plan-review.md`: F-13, SF-14, A2-16, MF-5 and F-08) and the ZCode audit (`tasks/research/zcode-audit-2026-10-17.md`: Z3-05, A-07); re-pinned 2026-10-20 to the cut's versions before the consent point (`tomlcmp` on toml 1.1.8, `yamlcmp` on serde-saphyr 2.0.0 under owner decision D4 (a), with C1's `emit_comments: false`) — *Revision log*, below. It moves no version and touches no product code; it is run by the owner, at plan-rev3 §5.1 item 3's consent point.**
 
 The dependency wave moves the three crates that read the owner's configuration:
-`toml` 0.9.12 → 1.1 (P29; 1.1.8 at the cut — *Re-pin* below), `toml_edit` 0.25.13 → 0.25.17 (P04's lock
-refresh) and `serde_yaml` 0.9.34 → `serde-saphyr` 1.3.0 with serde_yaml-compatible
-options (P30). Plan-rev3 §6 E6 asks, **before P04, P12, P29 and P30**, whether
+`toml` 0.9.12 → 1.1.8 (P29; *Re-pin* below), `toml_edit` 0.25.13 → 0.25.17 (P04's lock
+refresh) and `serde_yaml` 0.9.34 → `serde-saphyr` 2.0.0 (owner decision D4 (a)) with
+serde_yaml-compatible options (P30). Plan-rev3 §6 E6 asks, **before P04, P12, P29 and P30**, whether
 the owner's real files read the same under both versions — with tools that print
 only an index and an equality bit, never a value, a key or a path, and that
 cannot write. It runs at plan-rev3 §5.1 item 3's consent point, with the DU-10
@@ -23,9 +23,9 @@ tedit/old/Cargo.toml tedit/new/Cargo.toml`).
 
 | Tool | Compares | Loader it mirrors |
 |---|---|---|
-| `tomlcmp` | toml 0.9.12 vs 1.1.6 as committed (1.1.8 for the run — *Re-pin* below), in one binary | `toml::from_str::<Value>`, `to_string`, `to_string_pretty` (`render_config`), the leaf `Display` (`config_codec::toml_to_json`) |
+| `tomlcmp` | toml 0.9.12 vs 1.1.8, the toml P29 takes at the cut (*Re-pin* below), in one binary | `toml::from_str::<Value>`, `to_string`, `to_string_pretty` (`render_config`), the leaf `Display` (`config_codec::toml_to_json`) |
 | `tedit` (`old/`, `new/`) | toml_edit 0.25.13 vs 0.25.17, two binaries | `render_config_preserving`'s `apply_delta` (copied verbatim from `crates/openalpaca_llm/src/config/llm_config/edit.rs:74-184`), with the September mutation set (six seeds, `s * 7919 + 17`) |
-| `yamlcmp` | serde_yaml 0.9.34 vs serde-saphyr 1.3.0 + P30's options, in one binary | `parse_skill_frontmatter` (`middleware/skill/mod.rs:51-56`): the frontmatter into `SkillFrontmatter` (a copy of `middleware/skill/types.rs`), validated |
+| `yamlcmp` | serde_yaml 0.9.34 vs serde-saphyr 2.0.0 (D4 (a)) + P30's options, `emit_comments: false` among them (C1), in one binary | `parse_skill_frontmatter` (`middleware/skill/mod.rs:51-56`): the frontmatter into `SkillFrontmatter` (a copy of `middleware/skill/types.rs`), validated |
 | `typedprobe` | nothing — it runs the loaders of the tree it is built against, by path; built twice, from the branch point and from the prep tree (review F-08) | `load_daemon_config`, the M3 `llm.toml` edit, `McpConfig::load`, `AgentConfigFile`, `PluginManifest::from_dir_for_load`, `parse_skill_markdown`, `parse_agent_markdown`, the four persona parsers |
 | `keycount` | nothing — it counts, per file, the keys named `secret_ref` at any depth and the `use_keychain` keys set to `true` (DU-10) | `toml::from_str::<toml::Table>` with toml 0.9.12, the version the daemon reads `llm.toml` and the plugin files with until P29 (its `Cargo.lock` is the checkout's, trimmed, so the parser is the daemon's to the byte) |
 
@@ -101,20 +101,27 @@ not hold, so it needs the registry (or a cache that has them). `tc` assumes the
 under two toolchains is fine in a scratch directory; the one-toolchain rule is
 about the repository's `target/`.
 
-**Re-pin `tomlcmp` before the owner-side run.** The pins are the 7-day rule's
-answers on 2026-10-11: `toml11 = "=1.1.6"` (`tomlcmp/Cargo.toml`), `toml_edit =
-"=0.25.17"` (`tedit/new/Cargo.toml`), `serde-saphyr = "=1.3.0"`
-(`yamlcmp/Cargo.toml`). The cut's lock (the instant pending D1, DU-23 (a))
-holds, by the prep tip's lock `7e702582`, **toml 1.1.8** (eligible from
-2026-10-16; the measured final lock, `../gbase/locks/recut-lock-99-final.lock`,
-holds `1.1.8+spec-1.1.0`), while its toml_edit 0.25.17 and serde-saphyr 1.3.0
-are these pins. So before the run,
-change `tomlcmp/Cargo.toml`'s `toml11` line to `=1.1.8`, rebuild tomlcmp once
-without `--locked` (its `Cargo.lock` follows) and run that build: the comparison
-must be against the version the daemon will be built with, and a run on 1.1.6
-answers nothing about the wave. If the G-base run on the day prints another
-version for any of the three, the same rule: that one line takes what the lock
-holds (and `yamlcmp` follows the serde-saphyr major owner decision D4 settles).
+**Re-pin: the pins are the cut's answers.** The comparators were first pinned
+to the 7-day rule's answers on 2026-10-11 (`toml11 = "=1.1.6"`, `toml_edit =
+"=0.25.17"`, `serde-saphyr = "=1.3.0"`). On 2026-10-20, before the consent
+point, they were re-pinned to what the cut (D1's instant, 2026-10-21T19:53Z)
+takes, so that each comparison is against the version the daemon will be built
+with: `toml11 = "=1.1.8"` (`tomlcmp/Cargo.toml`), the toml P29 takes, eligible
+from 2026-10-16, which the prep tip's lock `7e702582` and the measured final
+lock `../gbase/locks/recut-lock-99-final.lock` hold as `1.1.8+spec-1.1.0`;
+`toml_edit = "=0.25.17"` (`tedit/new/Cargo.toml`), unchanged, already the
+toml_edit P04 takes; and `serde-saphyr = "=2.0.0"` (`yamlcmp/Cargo.toml`), the
+major owner decision D4 (a) takes, with `non_finite_float_policy: AsString` in
+place of the deprecated `reject_non_finite_typeless_float` and `emit_comments:
+false` in `yaml_options()` (C1 of `../../reports/2026-10-17-cut-compatibility.md`).
+Each `Cargo.lock` followed its pin in one build without `--locked` — tomlcmp's
+moved toml 1.1.6 → 1.1.8 and nothing else, yamlcmp's serde-saphyr and
+granit-parser 1.3.0 → 2.0.0 and nothing else — so the Build block's `--locked`
+builds are the ones to run. If the G-base run on the day prints another version
+for any of the three, the same rule holds: that one line takes what the lock
+holds, the tool is rebuilt once without `--locked` so its `Cargo.lock` follows,
+and that build is the one run; a run on any other version answers nothing about
+the wave.
 
 ## The owner-side run (plan-rev3 §5.1 item 3, §6 E6)
 
@@ -222,9 +229,10 @@ a real file:
 - A `SKILL.md` whose last frontmatter key is a block scalar with clip or keep
   chomping (`>`, `|`, `>+`, `|+`) reads `different` on both of yamlcmp's facets:
   the `---` cut leaves that scalar with no final line break, serde_yaml 0.9.34
-  then yields no trailing `\n` and serde-saphyr 1.3.0 with P30's options yields
-  one. Strip chomping (`>-`, `|-`), and a block scalar followed by another key
-  or a blank line, read `equal`. Both typedprobe builds read all of them `ok`.
+  then yields no trailing `\n` and serde-saphyr with P30's options yields one
+  (1.3.0 on 2026-10-17; 2.0.0 the same on 2026-10-20). Strip chomping (`>-`,
+  `|-`), and a block scalar followed by another key or a blank line, read
+  `equal`. Both typedprobe builds read all of them `ok`.
 - A `SKILL.md` that starts with a byte-order mark reads `no-frontmatter` in
   yamlcmp and `err` under both typedprobe builds: the loader's `trim_start` does
   not remove U+FEFF (`crates/openalpaca_core/src/middleware/skill/parser.rs:6`).
@@ -239,6 +247,29 @@ a real file:
   copies, closes the block there (`parser.rs:17` takes the first `\n---`) and
   both readers accept what it leaves; typedprobe's `ok` is the real loader
   doing the same, as Z3-05 read.
+
+Measured on synthetic files on 2026-10-20, the 2.0.0 build beside the 1.3.0
+one, for C1 and C10 (programme-plan §4.5 E6's gate):
+- 33 or 40 consecutive comment lines between a key and its block value read
+  `equal` on both facets; they read `parse-error-new` on the 1.3.0 build and on
+  a 2.0.0 build without `emit_comments: false` (32 lines read `equal` on all
+  three). With the option, then, the run shows that such a skill reads as
+  serde_yaml read it — P30 carries the same option (D4 (a)) — and not whether
+  one exists; that would take a build without the option.
+- A non-finite float in a `serde_json::Value` position (`tools.defaults`, a
+  script's `parameters`) — `.inf`, `-.inf`, `.nan`, `+.Inf`, `.NaN`, `1e999` —
+  reads `different` on both facets, on both builds: serde_yaml read it as null
+  (`1e999` as that text), serde-saphyr reads its canonical spelling as a string
+  (C10). In a string field the same spellings read `equal` on the typed facet
+  and `different` on `--facet value`, where every position is a Value.
+- A top-level key written twice reads `parse-error-old` on the typed facet and
+  `equal` on `--facet value`, on both builds: serde_yaml hands both entries to
+  `SkillFrontmatter`, which refuses a duplicate field, while P30's
+  `DuplicateKeyPolicy::LastWins` keeps the last before the struct sees it — a
+  file the tree refuses today and P30 would load. YAML 1.1 spellings (`yes`,
+  `no`, `on`, `off`, `y`, `n`), a `<<` key with an alias, a key written twice
+  inside `tools.defaults`, a `!!binary` string and a minimal skill read `equal`
+  on both facets.
 
 Report such a result as what it is. A `different`, a `parse-error-*` or a
 `panic-*` on a real file is what the run exists to find: report its index and
@@ -337,4 +368,5 @@ grep -c -v -F 'a panic; its message is withheld' $X/p.err   # 0
 | Date | Commit | Change |
 |---|---|---|
 | 2026-10-11 | `df477c67` | The four comparators rebuilt from the September tools (R13): one source per pair, index-and-word output, nothing walked or written. |
-| 2026-10-17 | (this revision) | The 2026-10-17 plan review's leftovers for the tools (`../../reports/2026-10-17-plan-review.md`; plan-rev3 §5.1 item 3 and §6 E6 at rev 3.13). **F-13:** `tomlcmp`, `tedit`, `typedprobe` — and `keycount` — catch a panic per input and print one fixed stderr line in place of its message, a panic reported as `panic-old`/`panic-new`/`panic-both` (typedprobe and keycount `panic`) and counted as a panic only; `yamlcmp` likewise, where a panic's per-input word had been the parse-error word (its `--summary` already counted panics apart) under a silent hook; `tedit`'s record file is `v2` (a `panic` status) and refuses a v1 record; the `E6_SELFTEST_PANIC` knob and *Proving the panic path*; the nothing-written proof hashes `plugins/` beside `config/`. **SF-14:** `keycount`, a TOML-parser count of `secret_ref` keys at any depth and of `use_keychain = true`, over `llm.toml`, `plugins/.config/*.toml` and `plugins/.permissions.toml`, counts only, in place of the grep loop; P12's waiver rule. **A2-16:** the toolchain read from each tree's `rust-toolchain.toml` (`tc`), never `+1.93.0`. **MF-5:** `CARGO_BUILD_BUILD_DIR` beside `CARGO_TARGET_DIR` in `c()`. **F-08:** typedprobe built from the branch point and from the prep tree, its `toml` line taken from the tree, and run under both. `tomlcmp`'s `=1.1.6` pin unchanged (its re-pin to 1.1.8 is a cut-day step). Verified in a scratch directory over synthetic fixtures only: every tool built with `c()` (1.93.0; typedprobe-wave 1.99.0 against the pinned prep tree, toml 1.1.8), 51 checks — output shape, a marker in a fixture's path and text absent from every stream, each tool's panic word on each side, tedit's v1 and wrong-length refusals, keycount's counts in every spelling (3 in a plugin config where the old grep saw 1), the snapshot of `config/` and `plugins/` unchanged, nothing under `$CARGO_HOME/build`. **Second revise — the ZCode audit (`../../../research/zcode-audit-2026-10-17.md`: Z3-05, A-07) and its verifier's findings:** the DU-10 count, `typedprobe llm-edit` and the comparators' TOML list take the checkout's ignored `config/llm.toml` when one is present — a daemon started from the checkout seeds it there through the config walk-up, not `OPENALPACA_CONFIG_DIR` — so P12's waiver counts every copy, as plan-rev3 §5.1 item 3's "both copies" asks (`LLM` is set once, at the top of the run); the re-pin paragraph framed by the cut instant, pending D1, its 1.1.8 read from the prep tip's lock; *What to expect* records the frontmatter edge cases measured on synthetic files (block scalars by chomping and position, BOM, CRLF, a quoted `: `, a nested map, an unknown key, an empty body, a `----` or `---x` closing line), and says E6's corpus is P30's and not committed (A-07; a `!path` line in `.gitignore` for its `.md` files). No tool source changed in this pass. Verified in a scratch directory, synthetic files only and never the checkout's `config/llm.toml`: the Build block as written (1.93.0; typedprobe-wave 1.99.0 against prep tip `7e702582`, toml 1.1.8; `comm` printed only `typedprobe 0.1.0` twice); the 51 checks again, 51 passed; the panic proof's documented ten lines under bash and zsh; the run, DU-10 and snapshot blocks under bash and `zsh -f` against a synthetic store and two fake checkouts, with and without a seeded `config/llm.toml` (the `llm.toml` list 2 and 1 inputs, the planted keychain reference counted, `llm-edit` `ok` on each, base and wave agreeing, the store and both checkouts unchanged; with `LLM` empty, as in a fresh shell, keycount prints its usage line and exits 2); 19 edge-case fixtures under yamlcmp's two facets and both typedprobe builds, stderr empty; rustfmt on the five sources and clippy `-D warnings` on tomlcmp, yamlcmp, keycount and tedit's two manifests clean; the e6 tree, the root lock, `target/` and `$CARGO_HOME/build` untouched. |
+| 2026-10-17 | `7d33b59c` | The 2026-10-17 plan review's leftovers for the tools (`../../reports/2026-10-17-plan-review.md`; plan-rev3 §5.1 item 3 and §6 E6 at rev 3.13). **F-13:** `tomlcmp`, `tedit`, `typedprobe` — and `keycount` — catch a panic per input and print one fixed stderr line in place of its message, a panic reported as `panic-old`/`panic-new`/`panic-both` (typedprobe and keycount `panic`) and counted as a panic only; `yamlcmp` likewise, where a panic's per-input word had been the parse-error word (its `--summary` already counted panics apart) under a silent hook; `tedit`'s record file is `v2` (a `panic` status) and refuses a v1 record; the `E6_SELFTEST_PANIC` knob and *Proving the panic path*; the nothing-written proof hashes `plugins/` beside `config/`. **SF-14:** `keycount`, a TOML-parser count of `secret_ref` keys at any depth and of `use_keychain = true`, over `llm.toml`, `plugins/.config/*.toml` and `plugins/.permissions.toml`, counts only, in place of the grep loop; P12's waiver rule. **A2-16:** the toolchain read from each tree's `rust-toolchain.toml` (`tc`), never `+1.93.0`. **MF-5:** `CARGO_BUILD_BUILD_DIR` beside `CARGO_TARGET_DIR` in `c()`. **F-08:** typedprobe built from the branch point and from the prep tree, its `toml` line taken from the tree, and run under both. `tomlcmp`'s `=1.1.6` pin unchanged (its re-pin to 1.1.8 is a cut-day step). Verified in a scratch directory over synthetic fixtures only: every tool built with `c()` (1.93.0; typedprobe-wave 1.99.0 against the pinned prep tree, toml 1.1.8), 51 checks — output shape, a marker in a fixture's path and text absent from every stream, each tool's panic word on each side, tedit's v1 and wrong-length refusals, keycount's counts in every spelling (3 in a plugin config where the old grep saw 1), the snapshot of `config/` and `plugins/` unchanged, nothing under `$CARGO_HOME/build`. **Second revise — the ZCode audit (`../../../research/zcode-audit-2026-10-17.md`: Z3-05, A-07) and its verifier's findings:** the DU-10 count, `typedprobe llm-edit` and the comparators' TOML list take the checkout's ignored `config/llm.toml` when one is present — a daemon started from the checkout seeds it there through the config walk-up, not `OPENALPACA_CONFIG_DIR` — so P12's waiver counts every copy, as plan-rev3 §5.1 item 3's "both copies" asks (`LLM` is set once, at the top of the run); the re-pin paragraph framed by the cut instant, pending D1, its 1.1.8 read from the prep tip's lock; *What to expect* records the frontmatter edge cases measured on synthetic files (block scalars by chomping and position, BOM, CRLF, a quoted `: `, a nested map, an unknown key, an empty body, a `----` or `---x` closing line), and says E6's corpus is P30's and not committed (A-07; a `!path` line in `.gitignore` for its `.md` files). No tool source changed in this pass. Verified in a scratch directory, synthetic files only and never the checkout's `config/llm.toml`: the Build block as written (1.93.0; typedprobe-wave 1.99.0 against prep tip `7e702582`, toml 1.1.8; `comm` printed only `typedprobe 0.1.0` twice); the 51 checks again, 51 passed; the panic proof's documented ten lines under bash and zsh; the run, DU-10 and snapshot blocks under bash and `zsh -f` against a synthetic store and two fake checkouts, with and without a seeded `config/llm.toml` (the `llm.toml` list 2 and 1 inputs, the planted keychain reference counted, `llm-edit` `ok` on each, base and wave agreeing, the store and both checkouts unchanged; with `LLM` empty, as in a fresh shell, keycount prints its usage line and exits 2); 19 edge-case fixtures under yamlcmp's two facets and both typedprobe builds, stderr empty; rustfmt on the five sources and clippy `-D warnings` on tomlcmp, yamlcmp, keycount and tedit's two manifests clean; the e6 tree, the root lock, `target/` and `$CARGO_HOME/build` untouched. |
+| 2026-10-20 | (this revision) | The pre-cut tool amendments (programme-plan §4.5 E6 and §6.8; `tasks/todo.md` Chunk 25). **D4 (a):** `yamlcmp` on `serde-saphyr = "=2.0.0"`, with `non_finite_float_policy: AsString` in place of the deprecated `reject_non_finite_typeless_float` (the same reading: 2.0.0 maps the old `false` to `AsString`), the module doc and `yaml_options()`'s doc comment rewritten (in a `serde_json::Value` position a non-finite float becomes its canonical spelling as a string, C10); its `Cargo.lock` moved serde-saphyr and granit-parser 1.3.0 → 2.0.0 and nothing else. **C1:** `emit_comments: false` in `yaml_options()`. **P29:** `tomlcmp`'s `toml11` at `=1.1.8`; its `Cargo.lock` moved toml 1.1.6 → 1.1.8 and nothing else (its toml_parser 1.1.5, toml_writer 1.1.3, toml_datetime 1.1.2, serde_spanned 1.1.2 and winnow 1.0.4 are already the measured final lock's). The re-pin paragraph is now a record; the intro, the two table rows and the block-scalar bullet name the new versions; *What to expect* records the C1, C10 and duplicate-key measurements; the 2026-10-17 row's commit is filled in (`7d33b59c`). Verified in a scratch directory, on the checkout's shipped files and synthetic files only: both tools built with `c()` on 1.93.0, once without `--locked` and again `--locked` from an empty target dir, 0 warnings (a 2.0.0 build keeping the old field warns `use of deprecated field`); clippy `-D warnings` and rustfmt clean; the four repository skills `equal` on both facets; tomlcmp `equal` on seven checkout files (`config/daemon.toml`, `config/mcp.toml`, `config/tools/example.toml`, the three seeds under `scripts/release/templates/config/`, `tests/fixtures/echo-plugin/plugin.toml`), every facet and cross-read count 0, as on the 1.1.6 build; 22 synthetic frontmatters under the 2.0.0 and 1.3.0 builds and 16 of them under a 2.0.0 build without `emit_comments: false` (the words in *What to expect*); stderr empty on every run; nothing under `config/`, `scripts/` or `tests/` newer than a stamp taken before the runs, and `git status` changed by these files alone. |
