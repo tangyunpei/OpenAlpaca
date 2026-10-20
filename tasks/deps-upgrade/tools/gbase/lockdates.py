@@ -16,8 +16,10 @@ that is not on the left, and for every unexpected `+ name ver` line, prints
   name version YYYY-MM-DD   https://crates.io/crates/name/version
 
 The date is the crates.io `created_at` of that version (UTC). A line lockdiff.py
-labels (gbase.sh passes one label, `[DU-25(v4)]`: rmcp's 3.5.0 -> 3.5.1) is an
-expected difference and is not looked up, and neither is the informational
+labels is an expected difference and is not looked up: the code skips any line
+ending in a `[…]` label, whatever the label (gbase.sh passes two, `[DU-25(v4)]`,
+rmcp's 3.5.0 -> 3.5.1 at steps 6-8, and `[D4(a)]`, serde-saphyr's and
+granit-parser's 1.3.0 -> 2.0.0 at step 8); neither is the informational
 `== base-vs-measured-head` block. A lookup that fails prints
 `(date unavailable: <reason>)` on its line; the exit status is 0 regardless — this
 mode annotates a report and decides nothing.

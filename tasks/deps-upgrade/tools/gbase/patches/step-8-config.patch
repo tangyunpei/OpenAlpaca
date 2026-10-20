@@ -1,7 +1,7 @@
 diff --git a/crates/openalpaca_core/src/middleware/skill/mod.rs b/crates/openalpaca_core/src/middleware/skill/mod.rs
 --- a/crates/openalpaca_core/src/middleware/skill/mod.rs
 +++ b/crates/openalpaca_core/src/middleware/skill/mod.rs
-@@ -45,13 +45,34 @@ impl std::error::Error for SkillParseError {}
+@@ -84,13 +84,41 @@ impl std::error::Error for SkillParseError {}
  // Public API
  // ---------------------------------------------------------------------------
  
@@ -9,16 +9,23 @@ diff --git a/crates/openalpaca_core/src/middleware/skill/mod.rs b/crates/openalp
 +/// serde_yaml 0.9 it replaced read a file as its options go. `yes`/`no`/`on`/
 +/// `off`/`y`/`n` stay strings (a `parameters` schema goes to the model
 +/// verbatim), a `<<` key is an ordinary key rather than a merge, a repeated key
-+/// keeps its last value, a `.inf` or a `!!binary` value stays the text it was
-+/// written as, and an error is one line with no excerpt of the file.
++/// keeps its last value, a run of comments is read the way serde_yaml read it
++/// (serde-saphyr's default refuses 33 or more comment lines between a key and
++/// its block value), a `!!binary` value or a `.inf` in a string field stays the
++/// text it was written as, and an error is one line with no excerpt of the
++/// file. Where it differs: in a `serde_json::Value` position (`tools.defaults`,
++/// a `parameters` schema, a context source) a non-finite float becomes its
++/// canonical spelling as a string (`.inf`, `-.inf`, `.nan`; `1e999` reads
++/// `.inf`), where serde_yaml gave null (and kept `1e999` as written).
 +fn yaml_options() -> serde_saphyr::Options {
 +    serde_saphyr::options! {
 +        strict_booleans: true,
 +        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
 +        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::LastWins,
-+        reject_non_finite_typeless_float: false,
++        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::AsString,
 +        ignore_binary_tag_for_string: true,
 +        with_snippet: false,
++        emit_comments: false,
 +    }
 +}
 +
@@ -38,7 +45,7 @@ diff --git a/crates/openalpaca_core/src/middleware/skill/mod.rs b/crates/openalp
      fm.validate()?;
      Ok(fm)
  }
-@@ -59,8 +80,7 @@ pub fn parse_skill_frontmatter(input: &str) -> Result<SkillFrontmatter, SkillPar
+@@ -98,8 +126,7 @@ pub fn parse_skill_frontmatter(input: &str) -> Result<SkillFrontmatter, SkillPar
  /// Parse the full SKILL.md file including body sections (Level 2).
  pub fn parse_skill_markdown(input: &str) -> Result<SkillDocument, SkillParseError> {
      let (yaml_str, body_lines) = parser::extract_frontmatter_str(input)?;

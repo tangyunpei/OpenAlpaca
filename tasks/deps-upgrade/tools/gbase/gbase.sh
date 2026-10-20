@@ -4,7 +4,8 @@
 # plan-rev3.md §5.1 items 6, 6a and 6b (rev 3.9), §5.2's named gate G-base; amended for the plan
 # review of 2026-10-17 (MF-1, MF-2, MF-5, MF-6, A1-17), then for the owner's D1 (a) and the
 # cut-day compatibility report of 2026-10-17 (the defaults at the 2026-10-21T19:53Z instant, step
-# 1b's reference re-derived, C5's bun.lock check). From one canonical scratch root it exports
+# 1b's reference re-derived, C5's bun.lock check), then for the owner's D4 (a) of 2026-10-19 (step
+# 8 takes serde-saphyr 2.0, with the report's C1 and C10). From one canonical scratch root it exports
 # the base commit and runs the re-cut in order — the toolchain step, the Tauri pair's Rust half
 # (step 1b, P31a: the pair first, no hold), then the re-cut's steps 2-8 — each step its anchored
 # manifest edits, its source hunks, its cargo commands, DU-23's freshness gate on what the step
@@ -89,7 +90,8 @@ usage: gbase.sh --base <commit> --bun <path> --min-passed <N> [--not-before <UTC
   --steps <N|all>      run the steps up to N (1, 1b, 2..8; 1b is the Tauri pair, after 1) and stop
                        before the final phase (default: all)
   --strict             a lock difference that is not rmcp's 3.5.0 -> 3.5.1 (DU-25 (v4), steps 6-8)
-                       is a failure, not a line for a human
+                       or, at step 8, serde-saphyr's and granit-parser's 1.3.0 -> 2.0.0 (D4 (a)) is
+                       a failure, not a line for a human
   --with-stepbacks     refused (exit 2): DU-23 (b)'s fixed six-crate list, gone (README.md, "Exit status")
   --dates              after the run, look up on crates.io (User-Agent openalpaca-deps-check) when
                        each version a lock difference introduced was published; off by default
@@ -670,7 +672,8 @@ expect_tauri_set() {
 }
 
 # ---------------------------------------------------------------------------- the steps
-# Every manifest version below is the measured re-cut's (plan-rev3 §5.3, DU-23 (a)); the shipped
+# Every manifest version below is the measured re-cut's (plan-rev3 §5.3, DU-23 (a)) but step 8's
+# serde-saphyr, D4 (a)'s 2.0 (the owner's ruling of 2026-10-19; the re-cut took 1.3); the shipped
 # locks under locks/ describe this sequence at 7295f91b — the re-cut's un-held snapshots — and for
 # step 1b the 2026-10-14 family over HEAD's lock, derived for D1 (a) on 2026-10-17 (README.md,
 # "The pair step's reference").
@@ -678,6 +681,11 @@ expect_tauri_set() {
 # DU-25 (v4), rev 3.9: rmcp is taken at the newest 3.5.x — no --precise — so from step 6 on the
 # lock differs from the measured snapshots (cut with `--precise 3.5.0`) by exactly this move.
 RMCP_EXPECT="DU-25(v4)=rmcp:3.5.0->3.5.1,rmcp-macros:3.5.0->3.5.1"
+
+# D4 (a), the owner's ruling of 2026-10-19: step 8 takes serde-saphyr 2.0 (P30) where the re-cut took
+# 1.3, so step 8's lock differs from the final snapshot by exactly these two moves as well (the
+# cut-day compatibility report of 2026-10-17, §5: 2.0.0 moves serde-saphyr and granit-parser only).
+SAPHYR_EXPECT="D4(a)=serde-saphyr:1.3.0->2.0.0,granit-parser:1.3.0->2.0.0"
 
 step_1() {
   begin_step 1 "toolchain pin and rust-version (P03)"
@@ -801,17 +809,18 @@ step_7() {
 }
 
 step_8() {
-  begin_step 8 "configuration formats: toml 1.1, serde_yaml -> serde-saphyr 1.3  (P29, P30)"
+  begin_step 8 "configuration formats: toml 1.1, serde_yaml -> serde-saphyr 2.0  (P29, P30)"
   edit Cargo.toml 'toml = "0.9"' 'toml = "1.1"'
-  edit Cargo.toml 'serde_yaml = "0.9"' $'# SKILL.md frontmatter. Replaces the archived serde_yaml 0.9: maintained, pure\n# Rust, and set as close to serde_yaml\'s reading as its options go\n# (`yaml_options` in openalpaca_core::middleware::skill).\nserde-saphyr = "1.3"'
+  edit Cargo.toml 'serde_yaml = "0.9"' $'# SKILL.md frontmatter. Replaces the archived serde_yaml 0.9: maintained, pure\n# Rust, and set as close to serde_yaml\'s reading as its options go\n# (`yaml_options` in openalpaca_core::middleware::skill).\nserde-saphyr = "2.0"'
   edit crates/openalpaca_core/Cargo.toml 'serde_yaml.workspace = true' 'serde-saphyr.workspace = true'
   apply_patch step-8-config
   run_logged 08-check "${CARGO[@]}" check --workspace --all-targets --exclude openalpaca_gui
   live && say "    $(count_diag "$T/logs/08-check.log")"
   freshness 8 "$(prev_lock 8)" 08-check
   # The step-8 snapshot IS the wave's final lock: compared with the re-cut's final snapshot
-  # (recut-lock-99-final.lock, byte-identical to its recut-lock-08-config.lock).
-  snapshot_compare 8 recut-lock-99-final.lock --expected "$RMCP_EXPECT"
+  # (recut-lock-99-final.lock, byte-identical to its recut-lock-08-config.lock), which holds
+  # serde-saphyr and granit-parser 1.3.0 — cut on 2026-10-10, before D4 (a) — hence SAPHYR_EXPECT.
+  snapshot_compare 8 recut-lock-99-final.lock --expected "$RMCP_EXPECT" --expected "$SAPHYR_EXPECT"
 }
 
 STEP_ORDER="1 1b 2 3 4 5 6 7 8"   # 1b, the Tauri pair (P31a), lands right after the toolchain (P03)
@@ -1100,7 +1109,7 @@ archive_evidence() {
 summary() {
   local total=$(( LOCK_UNEXPECTED + LOCK_EXPECTED ))
   if [ "$total" -eq 0 ]; then LOCK_LINE="every compared lock equal to its shipped snapshot"
-  else LOCK_LINE="$LOCK_UNEXPECTED unexpected, $LOCK_EXPECTED expected (rmcp 3.5.1, DU-25 (v4)) — $T/logs/lock-differences.txt"; fi
+  else LOCK_LINE="$LOCK_UNEXPECTED unexpected, $LOCK_EXPECTED expected (rmcp 3.5.1, DU-25 (v4); serde-saphyr 2.0.0, D4 (a)) — $T/logs/lock-differences.txt"; fi
   if [ "$DATES" -eq 1 ] && [ "$total" -gt 0 ]; then
     say ""; say "== release dates of the versions the differences introduced (crates.io; User-Agent openalpaca-deps-check)"
     python3 -I "$HERE/lockdates.py" < "$T/logs/lock-differences.txt" > "$T/logs/lock-dates.txt" 2>&1 || true
