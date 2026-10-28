@@ -7,7 +7,7 @@ fn test_encryptor() -> KeyEncryptor {
         *b = i as u8;
     }
     KeyEncryptor {
-        key: Key::<Aes256Gcm>::from_slice(&key_bytes).clone(),
+        key: Key::<Aes256Gcm>::from(key_bytes),
     }
 }
 

@@ -2,7 +2,7 @@
 
 use aes_gcm::{
     Aes256Gcm, Key, Nonce,
-    aead::{Aead, KeyInit, OsRng, rand_core::RngCore},
+    aead::{Aead, Generate, KeyInit},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::path::Path;
@@ -146,9 +146,9 @@ impl KeyEncryptor {
                 bytes.len()
             ));
         }
-        Ok(Self {
-            key: *Key::<Aes256Gcm>::from_slice(&bytes),
-        })
+        let key = Key::<Aes256Gcm>::try_from(bytes.as_slice())
+            .map_err(|e| format!("Invalid {source}: {e}"))?;
+        Ok(Self { key })
     }
 
     /// Race-safe master key generation at a specific directory.
@@ -186,8 +186,7 @@ impl KeyEncryptor {
         }
 
         // 2. Generate + atomic write
-        let mut key_bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut key_bytes);
+        let key_bytes: [u8; 32] = Generate::generate();
         let hex_key = hex::encode(&key_bytes);
 
         if let Some(parent) = key_path.parent() {
@@ -243,12 +242,11 @@ impl KeyEncryptor {
     pub fn encrypt(&self, plaintext: &str) -> Result<String, String> {
         let cipher = Aes256Gcm::new(&self.key);
 
-        let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce_bytes: [u8; 12] = Generate::generate();
+        let nonce = Nonce::from(nonce_bytes);
 
         let ciphertext = cipher
-            .encrypt(nonce, plaintext.as_bytes())
+            .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|e| format!("Encryption failed: {e}"))?;
 
         // Concatenate nonce + ciphertext
@@ -274,11 +272,11 @@ impl KeyEncryptor {
         }
 
         let (nonce_bytes, ciphertext) = combined.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes).map_err(|e| format!("Invalid nonce: {e}"))?;
 
         let cipher = Aes256Gcm::new(&self.key);
         let plaintext = cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|e| format!("Decryption failed: {e}"))?;
 
         String::from_utf8(plaintext).map_err(|e| format!("Invalid UTF-8: {e}"))

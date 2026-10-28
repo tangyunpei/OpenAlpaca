@@ -146,7 +146,7 @@ openalpaca_llm = { path = "crates/openalpaca_llm" }
 openalpaca_plugins = { path = "crates/openalpaca_plugins" }
 arc-swap = "1"
 signal-hook = "0.4.3"
-aes-gcm = "0.10"
+aes-gcm = "0.11.1"
 bytes = "1"
 sha2 = "0.11.1"
 blake3 = "1.5"
