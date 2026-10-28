@@ -3634,7 +3634,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "chrono",
  "dashmap",
@@ -3692,7 +3692,7 @@ dependencies = [
  "aes-gcm",
  "arc-swap",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "dashmap",
  "file-lock",
@@ -3759,7 +3759,7 @@ name = "openalpaca_storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "directories",
  "file-lock",
