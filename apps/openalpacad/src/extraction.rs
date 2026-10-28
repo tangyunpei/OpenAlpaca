@@ -486,10 +486,10 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // Characterisation of today's extraction on generated fixtures (deps plan
-    // P14; owner decisions DU-7, DU-8, DU-9). Each test pins what pdf-extract
-    // 0.8.2, calamine 0.26.1 and zip 2.4.2 produce on this tree; the commits
-    // that move those crates (P15, P16) change the expectations named below,
+    // Characterisation of extraction on generated fixtures (deps plan P14;
+    // owner decisions DU-7, DU-8, DU-9). Each test pins what pdf-extract 0.12
+    // (P15), calamine 0.26.1 and zip 2.4.2 produce on this tree; the commit
+    // that moves calamine and zip (P16) changes the expectations named below,
     // and nothing else may.
     // ------------------------------------------------------------------------
 
@@ -728,12 +728,14 @@ mod tests {
         );
     }
 
-    /// `e01_p01_encrypted_v4.pdf` (1,380 bytes): a one-line PDF encrypted with
-    /// the standard security handler, V4 / AES-128 (`/StdCF`, `AESV2`), an
-    /// empty user password and `0123456789abcdef` as its file identifier. Made
-    /// once with lopdf 0.42's `Document::encrypt` by the dependency research's
-    /// comparison tool (`cmp/src/main.rs`, `run_encrypt(…, "v4")`) and embedded
-    /// here because lopdf 0.34, which this tree holds, has no encryption API.
+    /// `e01_p01_encrypted_v4.pdf` (1,380 bytes): `make_fixtures.py`'s two-page
+    /// `p01_simple.pdf` encrypted with the standard security handler, V4 /
+    /// AES-128 (`/StdCF`, `AESV2`), an empty user password and
+    /// `0123456789abcdef` as its file identifier. Made once with lopdf 0.42's
+    /// `Document::encrypt` by the dependency research's comparison tool
+    /// (`cmp/src/main.rs`, `run_encrypt(…, "v4")`) and embedded here because
+    /// lopdf is no dependency of the daemon's own, and the 0.34 the tree held
+    /// when this was written had no encryption API.
     const E01_AES128_PDF: &[u8] = &[
         0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x34, 0x0A, 0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A,
         0x31, 0x20, 0x30, 0x20, 0x6F, 0x62, 0x6A, 0x0A, 0x3C, 0x3C, 0x2F, 0x54, 0x79, 0x70, 0x65,
@@ -829,24 +831,28 @@ mod tests {
         0x78, 0x72, 0x65, 0x66, 0x0A, 0x31, 0x30, 0x35, 0x33, 0x0A, 0x25, 0x25, 0x45, 0x4F, 0x46,
     ];
 
-    /// Today pdf-extract 0.8.2 cannot read an AES-128 PDF: `extract_text`
-    /// answers `(None, Some(_))` with lopdf 0.34's own sentence, which the
-    /// worker in `background.rs` stores as an `Error` row tagged `[attempt:N]`
-    /// and retries up to `extraction_retry_count` times. P15 (pdf-extract 0.12,
-    /// lopdf 0.42) reads the text — that commit moves the expectation.
+    /// pdf-extract 0.12 (lopdf 0.42) reads an AES-128 PDF with an empty user
+    /// password. 0.8.2 (lopdf 0.34) could not: `extract_text` answered
+    /// `(None, Some(_))` with "the document uses an encryption scheme that is
+    /// not supported", which the worker in `background.rs` stored as an `Error`
+    /// row tagged `[attempt:N]` and retried up to `extraction_retry_count`
+    /// times — so such a row still within its retries is read on its next one.
     #[test]
-    fn an_aes_128_pdf_is_a_retryable_error_today() {
+    fn an_aes_128_pdf_is_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("encrypted.pdf");
         std::fs::write(&path, E01_AES128_PDF).unwrap();
         let (text, error) = extract_text(path.to_str().unwrap(), "application/pdf", 10000);
-        assert_eq!(text, None);
+        assert_eq!(error, None);
         assert_eq!(
-            error.as_deref(),
-            Some(
-                "PDF extraction failed: PDF error: the document uses an encryption scheme \
-                 that is not supported"
-            )
+            text.as_deref(),
+            Some(concat!(
+                "\n\nQuarterly report: revenue rose 12% to EUR 4.2m.\n",
+                "Kerned wordshere\n",
+                "Café naïve résumé ± 5\n",
+                "\nPage two, first line.\n",
+                "Second line on page two.",
+            ))
         );
     }
 
@@ -877,22 +883,23 @@ mod tests {
         out
     }
 
-    fn pdf_stream(data: &[u8]) -> Vec<u8> {
-        let mut out = format!("<< /Length {} >>\nstream\n", data.len()).into_bytes();
+    /// A stream object; `entries` are added to its dictionary after `/Length`
+    /// (`make_fixtures.py`'s `stream(data, extra)`).
+    fn pdf_stream(entries: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut out = format!("<< /Length {} ", data.len()).into_bytes();
+        out.extend_from_slice(entries);
+        out.extend_from_slice(b">>\nstream\n");
         out.extend_from_slice(data);
         out.extend_from_slice(b"\nendstream");
         out
     }
 
     /// RUSTSEC-2026-0187: an unreferenced object holding 10,000 nested arrays.
-    /// On this tree (pdf-extract 0.8.2, lopdf 0.34) parsing it overflows the
-    /// stack and aborts the whole test binary — the September differential's
-    /// measurement, which is why the test is ignored rather than run. P15
-    /// (pdf-extract 0.12, lopdf 0.42) fixes the advisory and un-ignores it; the
-    /// expectation written here is that commit's.
+    /// pdf-extract 0.8.2's lopdf 0.34 parsed it with no depth bound, overflowed
+    /// the stack and aborted the process — the daemon itself, since the worker
+    /// extracts in `spawn_blocking` — so this test could not run before P15.
+    /// lopdf 0.42 stops at `MAX_NESTING_DEPTH` (100) and the page is read.
     #[test]
-    #[ignore = "pdf-extract 0.8.2 / lopdf 0.34 overflow the stack on 10,000 nested arrays \
-                (RUSTSEC-2026-0187) and abort the test binary; P15 un-ignores this"]
     fn a_pdf_with_ten_thousand_nested_arrays_is_read() {
         let depth = 10_000;
         let mut nested = vec![b'['; depth];
@@ -902,7 +909,10 @@ mod tests {
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>".to_vec(),
             b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
                 .to_vec(),
-            pdf_stream(b"BT /F1 12 Tf 72 700 Td (Nested arrays live in object 6) Tj ET"),
+            pdf_stream(
+                b"",
+                b"BT /F1 12 Tf 72 700 Td (Nested arrays live in object 6) Tj ET",
+            ),
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
                 .to_vec(),
             nested,
@@ -916,6 +926,71 @@ mod tests {
             text.as_deref()
                 .is_some_and(|t| t.contains("Nested arrays live in object 6")),
             "the page text was not read: {text:?}"
+        );
+    }
+
+    /// A Form XObject whose own `/Resources` bind `/F1` to another font than
+    /// the page's `/F1` — legal, a resource name is scoped to its dictionary
+    /// (`make_fixtures.py`'s p02, the page's text first, and p03, `/X1 Do`
+    /// first). The page's `/F1` is Helvetica, so `(ABC page text)` reads as
+    /// written; the form's is a Times-Roman whose `/Differences [65 /Z /Y /X]`
+    /// make its `(ABC form text)` read `ZYX form text`. pdf-extract 0.8.2 read
+    /// both right. 0.12 keeps one font cache per page keyed by resource name
+    /// alone and `Do` recurses into the same processor, so whichever `/F1` is
+    /// met first decodes both texts: `ABC form text` in p02, `ZYX page text`
+    /// in p03 (`reports/documents.md` §3.3; DU-8 (a): accepted for the
+    /// RUSTSEC-2026-0187 fix, no release has one without the other). The
+    /// expectation is the correct text; the test runs when a release fixes it.
+    #[test]
+    #[ignore = "pdf-extract 0.12 regression (DU-8): a Form XObject's own /F1 is decoded with \
+                the page's font (0.12.1's per-page cache reset, #152, leaves the within-page \
+                case); no upstream issue: filing it with these two fixtures is the owner's \
+                (programme-plan §5 item 14, pending)"]
+    fn a_form_xobject_reads_its_text_with_its_own_fonts() {
+        const TIMES_ZYX: &[u8] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman \
+            /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding \
+            /Differences [65 /Z /Y /X] >> >>";
+        let cases: [(&str, &[u8]); 2] = [
+            (
+                "p02, page text first",
+                b"BT /F1 12 Tf 72 700 Td (ABC page text) Tj ET\n/X1 Do",
+            ),
+            (
+                "p03, form first",
+                b"/X1 Do\nBT /F1 12 Tf 72 700 Td (ABC page text) Tj ET",
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let mut misread = Vec::new();
+        for (case, content) in cases {
+            let pdf = build_pdf(&[
+                b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>".to_vec(),
+                b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> \
+                  /XObject << /X1 7 0 R >> >> /Contents 4 0 R >>"
+                    .to_vec(),
+                pdf_stream(b"", content),
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+                    .to_vec(),
+                TIMES_ZYX.to_vec(),
+                pdf_stream(
+                    b"/Type /XObject /Subtype /Form /BBox [0 0 612 792] \
+                      /Resources << /Font << /F1 6 0 R >> >> ",
+                    b"BT /F1 12 Tf 72 600 Td (ABC form text) Tj ET",
+                ),
+            ]);
+            let path = dir.path().join("form.pdf");
+            std::fs::write(&path, pdf).unwrap();
+            let (text, error) = extract_text(path.to_str().unwrap(), "application/pdf", 10000);
+            assert_eq!(error, None, "{case}");
+            let text = text.unwrap_or_default();
+            if !(text.contains("ABC page text") && text.contains("ZYX form text")) {
+                misread.push(format!("{case}: {text:?}"));
+            }
+        }
+        assert!(
+            misread.is_empty(),
+            "a text was not read with its own /F1: {misread:#?}"
         );
     }
 }
