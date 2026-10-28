@@ -140,6 +140,8 @@ tasks/storage-design/plan-drafts/
 tasks/deps-upgrade/*.tar.gz
 !tasks/deps-upgrade-audit-*.md
 !tasks/pending-decisions.md
+# CLAUDE.md as it stood before the 2026-10-19 shrink (the narrative record of every wave through then).
+!tasks/claude-md-2026-10-19-pre-shrink.md
 !config/agents/*.md
 !config/orchestrator/templates/
 !config/orchestrator/templates/*.md
