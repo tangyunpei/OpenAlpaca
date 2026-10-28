@@ -12,6 +12,7 @@
 use crate::bus::EventBus;
 use crate::events::SystemEvent;
 use crate::middleware::user::{UserDocument, parse_user_markdown};
+use openalpaca_storage::hash::sha256_hex;
 use std::path::PathBuf;
 
 use super::common;
@@ -55,14 +56,14 @@ impl UserDocumentWriter {
 
     /// The SHA-256 the route uses for `ETag` and `If-Match`.
     pub fn sha256(content: &str) -> String {
-        common::sha256(content)
+        sha256_hex(content.as_bytes())
     }
 
     /// The file's current bytes and their hash.
     pub fn read(&self) -> std::io::Result<UserDocumentRead> {
         let content = std::fs::read_to_string(&self.user_path)?;
         Ok(UserDocumentRead {
-            content_sha256: common::sha256(&content),
+            content_sha256: sha256_hex(content.as_bytes()),
             content,
         })
     }
@@ -71,7 +72,7 @@ impl UserDocumentWriter {
     /// atomically and publishes `UserProfileUpdated` as `actor`.
     pub async fn replace(&self, content: &str, actor: &str) -> Result<UserDocumentWritten, String> {
         let document = Self::validate(content)?;
-        let content_sha256 = common::sha256(content);
+        let content_sha256 = sha256_hex(content.as_bytes());
         let backup_path =
             common::backup_if_exists(&self.user_path, &self.backup_dir, "USER").await?;
         common::prune_backups(&self.backup_dir, self.max_backups, "USER").await;

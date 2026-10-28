@@ -51,6 +51,7 @@ use openalpaca_mcp::{
     ConnectionSnapshot, Implementation, McpClient, McpClientConfig, McpError, ServerChange,
     TransportKind,
 };
+use openalpaca_storage::hash::sha256_hex;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 /// The id of the whole-file pseudo-record §5.1 registers when
@@ -680,7 +681,7 @@ impl McpSupervisor {
     /// swallows it, so a route-driven toggle runs only its in-process
     /// transition (§10 case 15).
     pub fn swallow_own_write(&self, contents: &str) -> bool {
-        let hash = content_hash(contents);
+        let hash = sha256_hex(contents.as_bytes());
         let mut ring = self.own_writes.lock_or_recover();
         match ring.iter().position(|h| *h == hash) {
             Some(pos) => {
@@ -693,7 +694,7 @@ impl McpSupervisor {
 
     fn remember_own_write(&self, contents: &str) {
         let mut ring = self.own_writes.lock_or_recover();
-        ring.push_back(content_hash(contents));
+        ring.push_back(sha256_hex(contents.as_bytes()));
         while ring.len() > OWN_WRITE_RING {
             ring.pop_front();
         }
@@ -2428,11 +2429,6 @@ fn resolve_http_auth(
             }),
         },
     }
-}
-
-fn content_hash(contents: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(contents.as_bytes()))
 }
 
 /// `lock().unwrap_or_else(|p| p.into_inner())` without repeating it fifteen

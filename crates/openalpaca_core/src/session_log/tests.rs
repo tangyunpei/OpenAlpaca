@@ -2,6 +2,7 @@
 
 use super::*;
 use openalpaca_storage::Database;
+use openalpaca_storage::hash::sha256_hex;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -2699,15 +2700,6 @@ fn a_spilled_result_is_replayed_as_the_stub_the_model_saw() {
         !replayed.contains("read_result"),
         "but nothing to page: {replayed}"
     );
-}
-
-/// Lowercase hex SHA-256, as the writer records a spill's.
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// N-TOOL-7: a command's spilled result was shown its head **and** tail

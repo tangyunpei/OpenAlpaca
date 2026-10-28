@@ -11,6 +11,7 @@ mod content_io;
 pub mod daemon_lifecycle;
 pub mod database;
 pub mod discovery;
+pub mod hash;
 pub mod memory_files;
 pub mod memory_index;
 pub mod migrations;

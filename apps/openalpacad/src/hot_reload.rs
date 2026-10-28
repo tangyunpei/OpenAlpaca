@@ -5,6 +5,7 @@ use openalpaca_core::{
     bus::EventBus, daemon_config::load_daemon_config, orchestrator::Orchestrator,
     tools::extensions::ExtensionSupervisor,
 };
+use openalpaca_storage::hash::sha256_hex;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,11 +39,6 @@ pub fn new_config_hashes() -> ConfigHashes {
     )))
 }
 
-fn content_hash(contents: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(contents.as_bytes()))
-}
-
 fn lock_ring(ring: &ConfigHashes) -> std::sync::MutexGuard<'_, VecDeque<String>> {
     ring.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -55,7 +51,7 @@ fn lock_ring(ring: &ConfigHashes) -> std::sync::MutexGuard<'_, VecDeque<String>>
 /// ring.
 pub fn record_own_config_write(ring: &ConfigHashes, contents: &str) {
     let mut ring = lock_ring(ring);
-    ring.push_back(content_hash(contents));
+    ring.push_back(sha256_hex(contents.as_bytes()));
     while ring.len() > OWN_WRITE_RING {
         ring.pop_front();
     }
@@ -64,7 +60,7 @@ pub fn record_own_config_write(ring: &ConfigHashes, contents: &str) {
 /// Did the daemon write these bytes? Consumes the match, so one recorded write
 /// swallows exactly one event.
 fn swallow_own_config_write(ring: &ConfigHashes, contents: &str) -> bool {
-    let hash = content_hash(contents);
+    let hash = sha256_hex(contents.as_bytes());
     let mut ring = lock_ring(ring);
     match ring.iter().position(|h| *h == hash) {
         Some(pos) => {
@@ -240,8 +236,7 @@ fn scheduled_skills_enabled(ctx: &FileWatcherContext) -> bool {
 
 async fn handle_soul_change(ctx: &FileWatcherContext) {
     let should_skip = if let Ok(content) = std::fs::read(&ctx.soul_path) {
-        use sha2::{Digest, Sha256};
-        let file_hash = format!("{:x}", Sha256::digest(&content));
+        let file_hash = sha256_hex(&content);
         let mut ring = ctx.soul_hashes.lock().await;
         if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
             ring.remove(pos);
@@ -275,8 +270,7 @@ async fn handle_soul_change(ctx: &FileWatcherContext) {
 
 async fn handle_user_change(ctx: &FileWatcherContext) {
     let should_skip = if let Ok(content) = std::fs::read(&ctx.user_path) {
-        use sha2::{Digest, Sha256};
-        let file_hash = format!("{:x}", Sha256::digest(&content));
+        let file_hash = sha256_hex(&content);
         let mut ring = ctx.user_hashes.lock().await;
         if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
             ring.remove(pos);
@@ -313,8 +307,7 @@ async fn handle_user_change(ctx: &FileWatcherContext) {
 
 async fn handle_identity_change(ctx: &FileWatcherContext) {
     let should_skip = if let Ok(content) = std::fs::read(&ctx.identity_path) {
-        use sha2::{Digest, Sha256};
-        let file_hash = format!("{:x}", Sha256::digest(&content));
+        let file_hash = sha256_hex(&content);
         let mut ring = ctx.identity_hashes.lock().await;
         if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
             ring.remove(pos);

@@ -41,7 +41,6 @@ teloxide = { workspace = true }
 twilight-http = { workspace = true }
 twilight-model = { workspace = true }
 tokio-util.workspace = true
-sha2.workspace = true
 infer.workspace = true
 pdf-extract.workspace = true
 zip.workspace = true

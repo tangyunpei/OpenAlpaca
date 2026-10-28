@@ -28,7 +28,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
+use crate::hash::sha256_hex;
 use tempfile::TempDir;
 
 use super::*;
@@ -201,10 +201,6 @@ fn cjk_body(rng: &mut Rng, title: &str, target: usize) -> String {
     body
 }
 
-fn hex(digest: impl AsRef<[u8]>) -> String {
-    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// The note sizes a corpus is drawn from (design 09 §6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mix {
@@ -332,7 +328,7 @@ fn build_corpus(
         }
         records.push(IndexRecord {
             id: id.clone(),
-            revision: hex(Sha256::digest(file.as_bytes())),
+            revision: sha256_hex(file.as_bytes()),
             partition_key: if rng.below(4) == 0 {
                 "proj-bench-0000000000000000".to_string()
             } else {
@@ -495,7 +491,7 @@ fn run_bench(name: &str, n: usize, mix: Mix) {
         let searched = t.elapsed();
         for hit in &results.hits {
             let bytes = std::fs::read(root.join(&hit.relative_path)).unwrap();
-            let revision = hex(Sha256::digest(&bytes));
+            let revision = sha256_hex(&bytes);
             assert_eq!(
                 revision, hit.revision,
                 "{query:?}: {} did not verify",
@@ -627,7 +623,7 @@ fn the_bench_corpus_mixes_have_their_shapes() {
         assert_eq!(records.len(), 400);
         for record in &records {
             let file = std::fs::read(root.join(&record.relative_path)).unwrap();
-            assert_eq!(hex(Sha256::digest(&file)), record.revision);
+            assert_eq!(sha256_hex(&file), record.revision);
         }
         let small = records.iter().filter(|r| r.body.len() <= 400).count();
         (small, records[0].id.clone(), records[0].body.len())

@@ -176,7 +176,8 @@ use rusqlite::Connection;
 use similar::{ChangeTag, TextDiff, TextDiffConfig};
 
 use crate::Database;
-use crate::content_io::{fsync_dir, remove_best_effort, sha256_hex};
+use crate::content_io::{fsync_dir, remove_best_effort};
+use crate::hash::sha256_hex;
 use crate::models::file_asset::FileAssetStatus;
 use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::sql::escape_like;

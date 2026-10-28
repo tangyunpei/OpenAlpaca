@@ -6,7 +6,6 @@
 use super::*;
 use crate::session_log::{RecordType, SNAPSHOTS_DIR, SessionLogLimits, SessionLogService};
 use crate::test_util::GuardedProject;
-use sha2::{Digest, Sha256};
 use std::fs;
 
 const SESSION: &str = "sess-edit";
@@ -423,7 +422,7 @@ async fn a_second_edit_updates_the_same_pointer_row() {
     assert!(second[0].in_project);
     assert_eq!(second[0].rel_path.as_deref(), Some("src/lib.rs"));
     assert_eq!(second[0].size_bytes, after.len() as i64);
-    assert_eq!(second[0].sha256, format!("{:x}", Sha256::digest(&after)));
+    assert_eq!(second[0].sha256, sha256_hex(&after));
     assert_ne!(
         second[0].sha256, first[0].sha256,
         "the row follows the file"

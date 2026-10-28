@@ -38,11 +38,11 @@
 
 use super::reader::{LoggedRecord, read_records_after_torn};
 use super::record::{RESULTS_DIR, command_stub_budget};
-use super::writer::sha256_hex;
 use super::{command_spill_stub, spill_stub};
 use crate::orchestrator::working_state::WorkingState;
 use chrono::{DateTime, Utc};
 use openalpaca_llm::{ChatMessage, ToolCall};
+use openalpaca_storage::hash::sha256_hex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io;

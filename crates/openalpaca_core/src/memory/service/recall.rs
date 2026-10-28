@@ -9,6 +9,7 @@ use super::{
     SearchOutput, SearchResultItem, Timing, UsedReason, approx_tokens, scope_of,
 };
 use chrono::{DateTime, Utc};
+use openalpaca_storage::hash::sha256_hex;
 use openalpaca_storage::memory_files::{
     self as files, Note, NoteId, NoteStatus, Partition, PartitionHealth,
 };
@@ -130,7 +131,7 @@ pub(super) fn verify(
     let Ok(raw) = std::fs::read(&path) else {
         return Verified::Gone;
     };
-    let revision = files::sha256_hex(&raw);
+    let revision = sha256_hex(&raw);
     let Ok(note) = Note::parse(&raw) else {
         return Verified::Gone;
     };

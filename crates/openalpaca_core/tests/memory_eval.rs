@@ -47,6 +47,7 @@ use openalpaca_core::memory::service::{
     Attribution, Capabilities, MemoryService, RecallBudget, StoreInput, Surface, UsedReason,
     WorkspaceHint,
 };
+use openalpaca_storage::hash::sha256_hex;
 use openalpaca_storage::memory_files::{Dedup, NoteId, NoteKind, NoteScope};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -107,7 +108,7 @@ mod eval;
 use eval::{
     Category, ChangePair, ContinuityKind, ContinuitySet, Corpus, CorpusSession, CorpusTurn,
     GoldNote, Language, Question, TurnMode, change_pairs, eval_dir, is_uuid, load_json,
-    parse_instant, read_bytes, relied_on, repo_root, sha256_hex,
+    parse_instant, read_bytes, relied_on, repo_root,
 };
 
 // ─── Seeding through the service ────────────────────────────────────────────

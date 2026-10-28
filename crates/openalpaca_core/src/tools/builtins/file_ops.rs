@@ -4,11 +4,11 @@ use crate::tools::working_folder::{WorkingFolder, WorkingFolderRefusal, working_
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
+use openalpaca_storage::hash::sha256_hex;
 use openalpaca_storage::store::{
     ContentKind, FILE_NAME_SLUG_BYTES, StoreScope, kind_for_file_name, slugify, store_root,
 };
 use openalpaca_storage::{ArtifactKind, Database};
-use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -680,10 +680,7 @@ fn artifact_name(path: &str) -> String {
         return path.to_string();
     }
     let extension = &path[title.len()..];
-    let hash: String = Sha256::digest(path.as_bytes())[..4]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let hash = &sha256_hex(path.as_bytes())[..8];
     let slug = slugify(title, FILE_NAME_SLUG_BYTES - hash.len() - 1);
     format!("{slug}-{hash}{extension}")
 }
@@ -3137,6 +3134,11 @@ mod tests {
         assert_ne!(artifact_name("文档.md"), artifact_name("笔记.md"));
         assert!(artifact_name("文档.md").starts_with("artifact-"));
         assert!(artifact_name("报告/plan.md").starts_with("plan-"));
+        // The hash is the first eight hex digits of the path's SHA-256, as
+        // literals (Python's `hashlib`): a by-product's name is its address,
+        // and the same path must reach the same artifact on every build.
+        assert_eq!(artifact_name("文档.md"), "artifact-b4b2f65b.md");
+        assert_eq!(artifact_name("报告/plan.md"), "plan-e6e5d5bc.md");
         // The store drops both extensions (`.bin`), so only the titles can
         // keep these two apart: the hash covers the extension too.
         assert_ne!(

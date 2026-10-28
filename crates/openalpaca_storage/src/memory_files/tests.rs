@@ -8,6 +8,7 @@
 //! `OPENALPACA_HOME_STORE` for the duration of the test.
 
 use super::*;
+use crate::hash::sha256_hex;
 use chrono::{TimeZone, Utc};
 
 // ============================================================================
