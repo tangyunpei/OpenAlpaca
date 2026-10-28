@@ -98,7 +98,7 @@ shell-escape = "0.1.5"
 dialoguer = "0.12.0"
 console = "0.16.2"
 nix = { version = "0.31.1", features = ["signal"] }
-sysinfo = "0.38.1"
+sysinfo = "0.39.6"
 
 # storage
 rusqlite = { version = "0.40.2", features = ["bundled"] }
