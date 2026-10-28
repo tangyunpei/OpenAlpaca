@@ -27,7 +27,7 @@ These steps build from source and end with a first reply. To package and install
 - **Rust** through [rustup](https://rustup.rs). The repo pins 1.99.1 in `rust-toolchain.toml`; rustup fetches it on the first build.
 - **A model:** [Ollama](https://ollama.com) running locally, or an Anthropic or OpenAI API key.
 - **[Bun](https://bun.sh)** 1.4.3 (the version the root `package.json` pins), only for the desktop app (step 6).
-- Linux only: `sudo apt-get install -y libdbus-1-dev pkg-config`. The desktop app also needs [Tauri's system libraries](https://tauri.app/start/prerequisites/).
+- Linux only: `sudo apt-get install -y libssl-dev pkg-config`. The desktop app also needs `libdbus-1-dev` and [Tauri's system libraries](https://tauri.app/start/prerequisites/).
 
 ### 2. Build
 

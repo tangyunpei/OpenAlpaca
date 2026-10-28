@@ -24,9 +24,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # keyring's secret-service backend links the system dbus-1 library.
+      # pkg-config, for the build scripts that look a system library up
+      # through it: openssl-sys's (teloxide's native-tls) finds OpenSSL,
+      # whose headers the runner image provides. The OS keychain no longer
+      # links dbus-1: keyring-core's Secret Service store speaks D-Bus over
+      # zbus.
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y pkg-config
       # The toolchain, its profile and its components come from rust-toolchain.toml:
       # `rustup toolchain install` with no argument installs the file's toolchain
       # (rustup 1.28+), so the version is pinned in one place.
