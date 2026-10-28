@@ -2,7 +2,7 @@
 
 The plan of record is now [`../../programme-plan.md`](../../programme-plan.md) (since 2026-10-20); the plan-rev3 sections cited below are frozen history and still resolve.
 
-**Status: written 2026-10-11 (`df477c67`, plan-rev3 §6 E6); amended 2026-10-17 for the plan review (`tasks/deps-upgrade/reports/2026-10-17-plan-review.md`: F-13, SF-14, A2-16, MF-5 and F-08) and the ZCode audit (`tasks/research/zcode-audit-2026-10-17.md`: Z3-05, A-07); re-pinned 2026-10-20 to the cut's versions before the consent point (`tomlcmp` on toml 1.1.8, `yamlcmp` on serde-saphyr 2.0.0 under owner decision D4 (a), with C1's `emit_comments: false`) — *Revision log*, below. It moves no version and touches no product code; it is run by the owner, at plan-rev3 §5.1 item 3's consent point.**
+**Status: written 2026-10-11 (`df477c67`, plan-rev3 §6 E6); amended 2026-10-17 for the plan review (`tasks/deps-upgrade/reports/2026-10-17-plan-review.md`: F-13, SF-14, A2-16, MF-5 and F-08) and the ZCode audit (`tasks/research/zcode-audit-2026-10-17.md`: Z3-05, A-07); re-pinned 2026-10-20 to the cut's versions before the consent point (`tomlcmp` on toml 1.1.8, `yamlcmp` on serde-saphyr 2.0.0 under owner decision D4 (a), with C1's `emit_comments: false`); on 2026-10-27, `consent-point.sh` and its test — the consent point as one owner-run command, the owner's option (a) — *One command* and *Revision log*, below. It moves no version and touches no product code; it is run by the owner, at plan-rev3 §5.1 item 3's consent point.**
 
 The dependency wave moves the three crates that read the owner's configuration:
 `toml` 0.9.12 → 1.1.8 (P29; *Re-pin* below), `toml_edit` 0.25.13 → 0.25.17 (P04's lock
@@ -25,7 +25,7 @@ tedit/old/Cargo.toml tedit/new/Cargo.toml`).
 |---|---|---|
 | `tomlcmp` | toml 0.9.12 vs 1.1.8, the toml P29 takes at the cut (*Re-pin* below), in one binary | `toml::from_str::<Value>`, `to_string`, `to_string_pretty` (`render_config`), the leaf `Display` (`config_codec::toml_to_json`) |
 | `tedit` (`old/`, `new/`) | toml_edit 0.25.13 vs 0.25.17, two binaries | `render_config_preserving`'s `apply_delta` (copied verbatim from `crates/openalpaca_llm/src/config/llm_config/edit.rs:74-184`), with the September mutation set (six seeds, `s * 7919 + 17`) |
-| `yamlcmp` | serde_yaml 0.9.34 vs serde-saphyr 2.0.0 (D4 (a)) + P30's options, `emit_comments: false` among them (C1), in one binary | `parse_skill_frontmatter` (`middleware/skill/mod.rs:51-56`): the frontmatter into `SkillFrontmatter` (a copy of `middleware/skill/types.rs`), validated |
+| `yamlcmp` | serde_yaml 0.9.34 vs serde-saphyr 2.0.0 (D4 (a)) + P30's options, `emit_comments: false` among them (C1), in one binary | `parse_skill_frontmatter` (`middleware/skill/mod.rs:51-56`): the frontmatter into `SkillFrontmatter` (a copy of `middleware/skill/types.rs`; `consent-point.sh` derives it from `--base` instead, *One command*), validated |
 | `typedprobe` | nothing — it runs the loaders of the tree it is built against, by path; built twice, from the branch point and from the prep tree (review F-08) | `load_daemon_config`, the M3 `llm.toml` edit, `McpConfig::load`, `AgentConfigFile`, `PluginManifest::from_dir_for_load`, `parse_skill_markdown`, `parse_agent_markdown`, the four persona parsers |
 | `keycount` | nothing — it counts, per file, the keys named `secret_ref` at any depth and the `use_keychain` keys set to `true` (DU-10) | `toml::from_str::<toml::Table>` with toml 0.9.12, the version the daemon reads `llm.toml` and the plugin files with until P29 (its `Cargo.lock` is the checkout's, trimmed, so the parser is the daemon's to the byte) |
 
@@ -122,6 +122,55 @@ for any of the three, the same rule holds: that one line takes what the lock
 holds, the tool is rebuilt once without `--locked` so its `Cargo.lock` follows,
 and that build is the one run; a run on any other version answers nothing about
 the wave.
+
+## One command (the consent point, option (a))
+
+The owner chose on 2026-10-27 to run the consent point now (option (a); programme-plan §5 item 3). `consent-point.sh` is the Build block, the owner-side run, the DU-10 count and the nothing-written proof below as one command. Quit the app and the daemon, then, from the checkout's root:
+
+```sh
+/bin/bash tasks/deps-upgrade/tools/e6/consent-point.sh --home ~/.openalpaca --include-checkout-config
+```
+
+It builds every tool from `git archive` exports of `--base` (default `HEAD`, never the working tree) and `--wave` (default `refs/prep/deps-wave-2026-10-12`) into a fresh `mktemp -d` directory under `$TMPDIR`. It builds the input lists the way the daemon loads its files: a skill is `skills/<child>/SKILL.md`, one level, as `scan_directory` reads it. This recipe's `find` takes any depth; a SKILL.md the scan never loads, and one under a plugin directory, is counted and not fed. It builds yamlcmp on the base's own `SkillFrontmatter` — `middleware/skill/types.rs` of the `--base` export with the committed copy's two documented changes, each anchor matched exactly once — not on the committed copy `yamlcmp/src/types.rs`, which is taken by hand and can fall behind (it lacks N-SKILL-2's `#[serde(flatten)] unknown_keys`, `8c63804f`, and the by-hand Build block above still builds it). Then it runs every comparator and probe and the DU-10 count, with a limit on each tool run (`--tool-time-limit`, default 300 s). With a warm cargo cache this takes a minute or two. The toolchain check runs `rustup toolchain list` from `/` with `RUSTUP_AUTO_INSTALL=0` and no `RUSTUP_TOOLCHAIN`: rustup 1.29 installs the active toolchain on that command when it is missing, and the checkout's working tree may pin one that is. `--include-checkout-config` also reads the checkout's ignored `config/llm.toml` and every other file of a loaded kind in `config/` whose bytes the export does not hold. Without the flag those files are counted and never opened, and P12's waiver cannot hold while that `llm.toml` exists. The script's header lists every option and step.
+
+**What the block holds.** Paste everything between `=== PASTE FROM HERE ===` and `=== TO HERE ===`. The block holds:
+- the two commits and their toolchains, and each build's crate versions;
+- `base-matches-old-pins`: a base past P04 fails the run as `base-past-old-pins`;
+- `old-side-stack-matches-base <tool> ...` for tomlcmp, tedit-old and keycount (informational): whether the TOML crates under the old sides (toml_parser, toml_writer, toml_datetime, serde_spanned, indexmap, winnow) are the base's. keycount's are; tomlcmp's and tedit-old's are the cut's toml_parser 1.1.5, toml_writer 1.1.3, toml_datetime 1.1.2, serde_spanned 1.1.2 and indexmap 2.14.2 against today's 1.1.3, 1.1.2, 1.1.1, 1.1.1 and 2.14.1. Their sources were compared on 2026-10-27 and differ in no behaviour: toml_parser's lexer sizes its token buffer differently and drops a call to the no-op `decode_whitespace`; toml_writer, toml_datetime and serde_spanned have identical sources; indexmap changes only its macros, which toml_edit does not use;
+- `yamlcmp-struct source=base committed-copy-matches-base yes|no`: yamlcmp read with the base's struct; `no` says only that the committed copy is stale (informational);
+- `wave-loader-behind-base files=<n> skill=... persona=... agent=... daemon-config=... mcp-config=... llm-config=... plugin-manifest=...`: which probed loaders `--base` changed since it and `--wave` parted (a file under the loader's paths, tests aside, changed between their merge base and `--base`), or `unknown`;
+- per list, the number of inputs by source, `missing` and `skipped`;
+- each tool's `--summary` counts, and every row whose word is not the all-clear, as `<tool> <index> <word>`;
+- every index where the two typedprobe builds disagree, as `tp-<kind> <index> base=<word> wave=<word>`;
+- keycount's rows and summaries and the line `P12-keychain-waiver holds|does-not-hold (<reason>)`;
+- `store-unchanged` (every entry under `config/` and `plugins/`, with its type, mode, mtime, ctime, flags, inode and hash, taken before the exports and after the runs, so the builds' window is in it) and `inputs-unchanged` (every file fed to a tool, read through links, wherever it lives, the same fields and its size, taken once the lists exist, before the builds, and after the runs). Every change to a file's bytes or metadata moves its ctime — an extended attribute such as a Finder tag, a flag, an ACL — and reading it never does;
+- any `step-failed <step>`, a status and the exit code.
+
+It never holds a file name, a path, a key, a value or a byte of a file. A last filter drops any line with a byte outside `[A-Za-z0-9 ._:=(),+-]`, under `LC_ALL=C`.
+
+**Reading a typedprobe disagreement.** The default `--wave` (`7e702582`) is the merge base `d7c6bbc6` plus the prep commits, 68 commits behind `HEAD` on 2026-10-27, so typedprobe-wave runs the wave's crates *and* the wave's older copy of every loader `--base` has changed since: `wave-loader-behind-base` names those kinds. A `tp-<kind> <i> base=<word> wave=<word>` row is the crate bump's alone only for a kind that line marks `no`; for a kind marked `yes` it can be the loader's own change.
+
+**The YAML axis.** No ref carries both of the cut's YAML and TOML crates: the default `--wave` has the cut's toml 1.1.8 and toml_edit 0.25.17 but serde-saphyr 1.3.0, not 2.0.0. The block shows this as `wave-matches-new-pins ... serde-saphyr=no`. On that axis yamlcmp's typed row is the word of record: the base's struct on serde_yaml 0.9.34 (today's loader) against the same struct on serde-saphyr 2.0.0 with P30's options and C1 (P30's loader). Read every `tp-skill <i>` row against yamlcmp's row for `<i>`. `base=err wave=ok` beside a yamlcmp `parse-error-both` (a duplicated top-level key) is the wave's pre-N-SKILL-2 struct, not the bump: P30 refuses that file too. Beside a `parse-error-old` (a custom tag on an unknown key), today's loader refuses the file and P30 would load it. `base=ok wave=err` beside a yamlcmp `equal` is the 1.3.0 build's (for example 33 or more comment lines before a block value; *What to expect*).
+
+**Where the index lists stay.** Stdout holds the block and nothing else, so `| pbcopy` or `> block.txt` takes exactly what is to be pasted. The one line after it is on stderr: it names the scratch directory and is not for pasting. Its `lists/<list>.list` maps each index to `<source>\t<path>`. It also holds the tools' outputs, the logs, and snapshots with every file path and the SHA-256 of every file the run read. The build tree (about 3.5 GB) is removed when the run ends unless `--keep` is given. Remove the rest when done. Exit 0 means the run completed, and a difference is a result. Exit 1 means a step could not run, 2 is a usage error, and 130, 143 and 129 mean Ctrl-C, TERM and hangup; in each of those cases the block is still printed.
+
+**The test.** `TMPDIR=<a scratch dir> /bin/bash tasks/deps-upgrade/tools/e6/consent-point-test.sh` runs the script on synthetic stores only, with sentinels planted in keys, values and names; it takes a few minutes. Four runs that build the tools check the following:
+- a fixture home under a UTF-8 locale, with `CDPATH` and a relative `--home`; its two struct-dependent skills read `parse-error-both` and `parse-error-old` on yamlcmp, which shows the base's struct is the one in use;
+- an empty home, with every child that could reach the terminal shimmed, plus a rustc wrapper and `MAKEFLAGS`;
+- pathological inputs under a 10 s limit; during the builds an extended attribute is set on a store file and on a fed file outside the store, a change to metadata only, and both lines must read `no`;
+- Ctrl-C during the builds.
+
+Runs that stop at the pre-flight or build nothing cover the rest:
+- the usage refusals;
+- a closed stdout or stderr, and a scratch root mktemp cannot write;
+- a scratch root inside `--home`'s `config` or `plugins` through a link, and `--home /`;
+- an inherited xtrace;
+- a missing toolchain;
+- a working tree pinning a toolchain that is not installed: a rustup shim runs the real rustup only for a call from `/` with `RUSTUP_AUTO_INSTALL=0`, so the test cannot install anything;
+- the alphabet filter under `en_US.UTF-8`;
+- the opt-in sources in a throwaway checkout.
+
+Every check requires that no sentinel and no fixture path reach either stream, that stdout end at `=== TO HERE ===`, and that stderr hold only the scratch-dir line.
 
 ## The owner-side run (plan-rev3 §5.1 item 3, §6 E6)
 
@@ -239,9 +288,9 @@ a real file:
 - CRLF line ends, a quoted value containing `: `, a nested map, an unknown key
   (`require_capabilities`) and an empty body, with or without a final line
   break, read `equal` on both facets and `ok` under both typedprobe builds.
-  yamlcmp cannot flag an unknown key — the typed facet drops it and the value
-  facet keeps it on both sides — so that check is N-SKILL-2's diagnostic, not
-  E6's.
+  yamlcmp cannot flag an unknown key — both facets keep it on both sides (the
+  typed one by name, in `unknown_keys`, since N-SKILL-2) — so that check is
+  N-SKILL-2's diagnostic, not E6's.
 - A `----` or a `---x` line where the closing `---` belongs, with no other
   `---` line after it, reads `equal` and `ok`: the loader's cut, which yamlcmp
   copies, closes the block there (`parser.rs:17` takes the first `\n---`) and
@@ -262,14 +311,38 @@ one, for C1 and C10 (programme-plan §4.5 E6's gate):
   (`1e999` as that text), serde-saphyr reads its canonical spelling as a string
   (C10). In a string field the same spellings read `equal` on the typed facet
   and `different` on `--facet value`, where every position is a Value.
-- A top-level key written twice reads `parse-error-old` on the typed facet and
-  `equal` on `--facet value`, on both builds: serde_yaml hands both entries to
-  `SkillFrontmatter`, which refuses a duplicate field, while P30's
-  `DuplicateKeyPolicy::LastWins` keeps the last before the struct sees it — a
-  file the tree refuses today and P30 would load. YAML 1.1 spellings (`yes`,
-  `no`, `on`, `off`, `y`, `n`), a `<<` key with an alias, a key written twice
-  inside `tools.defaults`, a `!!binary` string and a minimal skill read `equal`
-  on both facets.
+- A top-level key written twice read `parse-error-old` on the typed facet and
+  `equal` on `--facet value`, on both builds, with that day's copy of the
+  struct: serde_yaml hands both entries to `SkillFrontmatter`, which refuses a
+  duplicate field, while P30's `DuplicateKeyPolicy::LastWins` kept the last
+  before the struct saw it. *Superseded on 2026-10-27, below.* YAML 1.1
+  spellings (`yes`, `no`, `on`, `off`, `y`, `n`), a `<<` key with an alias, a
+  key written twice inside `tools.defaults`, a `!!binary` string and a minimal
+  skill read `equal` on both facets.
+
+Measured on synthetic files on 2026-10-27 with yamlcmp on today's struct —
+`HEAD`'s `SkillFrontmatter`, which since N-SKILL-2 (`8c63804f`) has
+`#[serde(flatten)] unknown_keys`, so serde reads the frontmatter as a map and
+buffers every unknown key's value — the struct `consent-point.sh` builds
+yamlcmp on (*One command*); the committed copy predates it and gives the
+2026-10-20 words:
+- A top-level key written twice (`description`, `name`) reads
+  `parse-error-both` on the typed facet and `equal` on `--facet value`:
+  serde-saphyr 2.0.0 refuses it too through the flatten, so it is a file the
+  tree refuses today and P30 refuses as well. typedprobe-base reads it `err`;
+  typedprobe-wave, the prep tree's struct from before the flatten on 1.3.0,
+  reads it `ok` — a `tp-skill <i> base=err wave=ok` that is the wave's older
+  struct, not the bump.
+- An unknown key whose value is a custom tag (`!custom v`, `!local {a: 1}`,
+  `!t [1, 2]`), `!!null ""` or an integer beyond 64 bits reads
+  `parse-error-old` on both facets, `err` under typedprobe-base and `ok` under
+  typedprobe-wave: serde_yaml refuses such a value wherever it must read it
+  with no type to read it into (the flatten's buffer, a `serde_json::Value`)
+  and serde-saphyr reads it, so today's loader refuses the file and P30 would
+  load it. `!!bool yes` reads `parse-error-both` and `err` on both builds. A
+  plain, nested, null, float, i64 or u64 value on an unknown key, and
+  `require_capabilities: [a]`, read `equal` on both facets and `ok` on both
+  builds.
 
 Report such a result as what it is. A `different`, a `parse-error-*` or a
 `panic-*` on a real file is what the run exists to find: report its index and
@@ -370,3 +443,4 @@ grep -c -v -F 'a panic; its message is withheld' $X/p.err   # 0
 | 2026-10-11 | `df477c67` | The four comparators rebuilt from the September tools (R13): one source per pair, index-and-word output, nothing walked or written. |
 | 2026-10-17 | `7d33b59c` | The 2026-10-17 plan review's leftovers for the tools (`../../reports/2026-10-17-plan-review.md`; plan-rev3 §5.1 item 3 and §6 E6 at rev 3.13). **F-13:** `tomlcmp`, `tedit`, `typedprobe` — and `keycount` — catch a panic per input and print one fixed stderr line in place of its message, a panic reported as `panic-old`/`panic-new`/`panic-both` (typedprobe and keycount `panic`) and counted as a panic only; `yamlcmp` likewise, where a panic's per-input word had been the parse-error word (its `--summary` already counted panics apart) under a silent hook; `tedit`'s record file is `v2` (a `panic` status) and refuses a v1 record; the `E6_SELFTEST_PANIC` knob and *Proving the panic path*; the nothing-written proof hashes `plugins/` beside `config/`. **SF-14:** `keycount`, a TOML-parser count of `secret_ref` keys at any depth and of `use_keychain = true`, over `llm.toml`, `plugins/.config/*.toml` and `plugins/.permissions.toml`, counts only, in place of the grep loop; P12's waiver rule. **A2-16:** the toolchain read from each tree's `rust-toolchain.toml` (`tc`), never `+1.93.0`. **MF-5:** `CARGO_BUILD_BUILD_DIR` beside `CARGO_TARGET_DIR` in `c()`. **F-08:** typedprobe built from the branch point and from the prep tree, its `toml` line taken from the tree, and run under both. `tomlcmp`'s `=1.1.6` pin unchanged (its re-pin to 1.1.8 is a cut-day step). Verified in a scratch directory over synthetic fixtures only: every tool built with `c()` (1.93.0; typedprobe-wave 1.99.0 against the pinned prep tree, toml 1.1.8), 51 checks — output shape, a marker in a fixture's path and text absent from every stream, each tool's panic word on each side, tedit's v1 and wrong-length refusals, keycount's counts in every spelling (3 in a plugin config where the old grep saw 1), the snapshot of `config/` and `plugins/` unchanged, nothing under `$CARGO_HOME/build`. **Second revise — the ZCode audit (`../../../research/zcode-audit-2026-10-17.md`: Z3-05, A-07) and its verifier's findings:** the DU-10 count, `typedprobe llm-edit` and the comparators' TOML list take the checkout's ignored `config/llm.toml` when one is present — a daemon started from the checkout seeds it there through the config walk-up, not `OPENALPACA_CONFIG_DIR` — so P12's waiver counts every copy, as plan-rev3 §5.1 item 3's "both copies" asks (`LLM` is set once, at the top of the run); the re-pin paragraph framed by the cut instant, pending D1, its 1.1.8 read from the prep tip's lock; *What to expect* records the frontmatter edge cases measured on synthetic files (block scalars by chomping and position, BOM, CRLF, a quoted `: `, a nested map, an unknown key, an empty body, a `----` or `---x` closing line), and says E6's corpus is P30's and not committed (A-07; a `!path` line in `.gitignore` for its `.md` files). No tool source changed in this pass. Verified in a scratch directory, synthetic files only and never the checkout's `config/llm.toml`: the Build block as written (1.93.0; typedprobe-wave 1.99.0 against prep tip `7e702582`, toml 1.1.8; `comm` printed only `typedprobe 0.1.0` twice); the 51 checks again, 51 passed; the panic proof's documented ten lines under bash and zsh; the run, DU-10 and snapshot blocks under bash and `zsh -f` against a synthetic store and two fake checkouts, with and without a seeded `config/llm.toml` (the `llm.toml` list 2 and 1 inputs, the planted keychain reference counted, `llm-edit` `ok` on each, base and wave agreeing, the store and both checkouts unchanged; with `LLM` empty, as in a fresh shell, keycount prints its usage line and exits 2); 19 edge-case fixtures under yamlcmp's two facets and both typedprobe builds, stderr empty; rustfmt on the five sources and clippy `-D warnings` on tomlcmp, yamlcmp, keycount and tedit's two manifests clean; the e6 tree, the root lock, `target/` and `$CARGO_HOME/build` untouched. |
 | 2026-10-20 | `2c913f99` | The pre-cut tool amendments (programme-plan §4.5 E6 and §6.8; `tasks/todo.md` Chunk 25). **D4 (a):** `yamlcmp` on `serde-saphyr = "=2.0.0"`, with `non_finite_float_policy: AsString` in place of the deprecated `reject_non_finite_typeless_float` (the same reading: 2.0.0 maps the old `false` to `AsString`), the module doc and `yaml_options()`'s doc comment rewritten (in a `serde_json::Value` position a non-finite float becomes its canonical spelling as a string, C10); its `Cargo.lock` moved serde-saphyr and granit-parser 1.3.0 → 2.0.0 and nothing else. **C1:** `emit_comments: false` in `yaml_options()`. **P29:** `tomlcmp`'s `toml11` at `=1.1.8`; its `Cargo.lock` moved toml 1.1.6 → 1.1.8 and nothing else (its toml_parser 1.1.5, toml_writer 1.1.3, toml_datetime 1.1.2, serde_spanned 1.1.2 and winnow 1.0.4 are already the measured final lock's). The re-pin paragraph is now a record; the intro, the two table rows and the block-scalar bullet name the new versions; *What to expect* records the C1, C10 and duplicate-key measurements; the 2026-10-17 row's commit is filled in (`7d33b59c`). Verified in a scratch directory, on the checkout's shipped files and synthetic files only: both tools built with `c()` on 1.93.0, once without `--locked` and again `--locked` from an empty target dir, 0 warnings (a 2.0.0 build keeping the old field warns `use of deprecated field`); clippy `-D warnings` and rustfmt clean; the four repository skills `equal` on both facets; tomlcmp `equal` on seven checkout files (`config/daemon.toml`, `config/mcp.toml`, `config/tools/example.toml`, the three seeds under `scripts/release/templates/config/`, `tests/fixtures/echo-plugin/plugin.toml`), every facet and cross-read count 0, as on the 1.1.6 build; 22 synthetic frontmatters under the 2.0.0 and 1.3.0 builds and 16 of them under a 2.0.0 build without `emit_comments: false` (the words in *What to expect*); stderr empty on every run; nothing under `config/`, `scripts/` or `tests/` newer than a stamp taken before the runs, and `git status` changed by these files alone. |
+| 2026-10-27 | (to fill) | **`consent-point.sh` and `consent-point-test.sh`** — the consent point as one owner-run command, after the owner's choice (a) of 2026-10-27 (PDT; 2026-10-28T04:21Z) to run it now (programme-plan §5 item 3); the section *One command*. The script builds the Build block's tools from `git archive` exports of `--base` and `--wave`. It builds the input lists the way the daemon loads its files and runs the run block and the DU-10 count. It prints a paste block of commits, versions, counts, indexes and fixed words, and nothing taken from a file. Hardened after its first review: `LC_ALL=C` globally and in the block's filter (under a UTF-8 locale a bracket range let letters such as ü through); a per-tool time limit (`--tool-time-limit`, SIGALRM through perl, `<step>-timeout`); fds 3 and 4 closed for every child that runs outside code; an inherited xtrace, verbose, DEBUG trap, `CDPATH`, `GIT_DIR` and `GIT_TRACE` neutralised; an empty `RUSTC_WRAPPER` / `RUSTC_WORKSPACE_WRAPPER` and no `MAKEFLAGS` for cargo; the build tree removed on every exit, Ctrl-C included (130, TERM 143, hangup 129); a directory the run cannot enter or list counted `skipped`; `inputs-unchanged` over every fed file read through links, and modes and mtimes in `store-unchanged`; the waiver's `skipped-input`; the checkout's working-tree files that differ from the export counted (`checkout-config-local`) and fed under the flag; `same-as-checkout`; `skill-md-not-loaded-by-scan`; `base-matches-old-pins` (a base past P04 fails as `base-past-old-pins`); and serde-saphyr and granit-parser on each typedprobe lock line, with `wave-matches-new-pins`, because the default wave holds serde-saphyr 1.3.0. After its second review: yamlcmp built on the base's own `SkillFrontmatter`, derived from the `--base` export with the copy's two documented changes (`yamlcmp-struct`; the committed copy lacks N-SKILL-2's `#[serde(flatten)] unknown_keys`, `8c63804f`, and its refresh is a tool amendment of its own, still to do); the duplicate-key bullet of *What to expect* re-measured on that struct; `wave-loader-behind-base`, so that a typedprobe disagreement is laid to the bump only where the base's loader did not change; `old-side-stack-matches-base` (informational; the cut's toml_parser, toml_writer, toml_datetime, serde_spanned and indexmap compared with today's at the source, no behaviour changed); the toolchain check run from `/` with `RUSTUP_AUTO_INSTALL=0` and no `RUSTUP_TOOLCHAIN` (rustup 1.29 installs the active toolchain on `rustup toolchain list`); the store's snapshot taken before the exports and the fed files' before the builds (the lists now come first), both with ctime, flags and inode, so a write during the builds or a change to metadata alone reads `no`; the scratch-dir line on stderr, so stdout is the block alone; a closed stdout or stderr and a failed mktemp stopped with the fixed text and no scratch dir left; a scratch root inside `--home`'s `config` or `plugins` through a link refused, and `--home /`; the build tree's removal retried after Ctrl-C. Verified in a scratch directory on synthetic stores only, under /bin/bash 3.2.57: the test, 146 passed and 0 failed — on every run no sentinel and no fixture path on either stream, stdout the block alone and stderr the one scratch-dir line; `store-unchanged yes` and `inputs-unchanged yes` on the clean runs, with the fixture unchanged by an independent hash-and-stat check; an extended attribute set during the builds on a store file and on a fed file outside the store, bytes, mode and mtime unchanged, read `no` on both lines; the duplicated-key and tagged-key skills read `parse-error-both` and `parse-error-old`; a working-tree pin that is not installed passed the pre-flight, every rustup call from `/` under `RUSTUP_AUTO_INSTALL=0`; the Ctrl-C run's build tree removed on the second attempt; the closed streams, the unwritable scratch root, the links into the store and `--home /` refused with the fixed text and no scratch dir left. The derivation applied to the merge base's `types.rs` gives the committed copy byte for byte; 15 synthetic frontmatters under the derived yamlcmp and both typedprobe builds give the words in *What to expect*, stderr empty; the derived yamlcmp builds `--locked` with no warning; shellcheck is clean on both scripts. |
