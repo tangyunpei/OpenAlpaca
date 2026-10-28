@@ -6665,7 +6665,6 @@ dependencies = [
  "twilight-gateway-queue",
  "twilight-http",
  "twilight-model",
- "zstd-safe",
 ]
 
 [[package]]

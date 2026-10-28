@@ -135,7 +135,10 @@ teloxide = { version = "0.17.0", features = ["macros"] }
 async-trait = "0.1.89"
 
 # discord (twilight ecosystem)
-twilight-gateway = "0.17"
+# twilight-gateway without its default `zstd` transport compression: its
+# zstd-safe 7.x carries RUSTSEC-2026-0398 and -0403, fixed only in zstd-safe 8.2,
+# which no twilight release requires; the gateway then receives plain JSON text.
+twilight-gateway = { version = "0.17", default-features = false, features = ["rustls-platform-verifier", "twilight-http"] }
 twilight-http = "0.17"
 twilight-model = "0.17"
 
