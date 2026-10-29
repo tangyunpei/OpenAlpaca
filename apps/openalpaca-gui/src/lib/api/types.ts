@@ -838,7 +838,8 @@ export type ExtensionReason =
   | "needs_config"
   | "config_invalid"
   | "unreachable"
-  | "crashed";
+  | "crashed"
+  | "protocol_negotiation_failed";
 
 export type ExtensionConsent = "approved" | "pending" | "denied";
 
@@ -870,6 +871,15 @@ export interface ExtensionRow {
   version: string | null;
   /** MCP only — `stdio` | `streamable-http`. */
   transport: string | null;
+  /**
+   * MCP only, while a connection is live — the protocol version it
+   * negotiated (`2026-07-28`, or a legacy server's `initialize` answer) and
+   * how long its connect and first `tools/list` took, in milliseconds
+   * (DU-25 (m-g)). `null` otherwise; absent from a daemon built before them.
+   */
+  protocol_version?: string | null;
+  connect_ms?: number | null;
+  list_ms?: number | null;
   /**
    * The **persisted disposition** — the toggle binds here, never to the state
    * word. `null` on the two rows whose bit nobody can read (§4, §8): a plugin

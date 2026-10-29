@@ -48,6 +48,21 @@ pub enum McpError {
     #[error("MCP handshake failed: {0}")]
     HandshakeFailed(String),
 
+    /// The connection's lifecycle could not be negotiated (DU-25 (m-b)): the
+    /// server supports no version the client offers, answered the probe or the
+    /// handshake with something else, closed the transport while the probe
+    /// waited, was found legacy and then failed the `initialize` that
+    /// followed, or — under the `2026-07-28` pin — refused the probe as a
+    /// legacy server does (not with a `2026-07-28` refusal). The text carries
+    /// rmcp's error and what to set (`protocol = "legacy"`, or the pin's
+    /// alternative); at bring-up the row reads `Failed{ProtocolNegotiationFailed}`
+    /// with it as its detail, where before it read `Unreachable`.
+    ///
+    /// Not in [`McpError::is_retriable`]'s set: the same lifecycle meets the
+    /// same answer until the owner changes `protocol`.
+    #[error("MCP protocol negotiation failed: {0}")]
+    ProtocolNegotiationFailed(String),
+
     #[error("protocol version mismatch: server={server}, client={client}")]
     VersionMismatch { server: String, client: String },
 
@@ -120,7 +135,9 @@ impl McpError {
             Self::Unauthorized(_) => ErrorCategory::Server,
             // The server answered — it answered "go elsewhere".
             Self::RedirectRefused { .. } => ErrorCategory::Server,
-            Self::HandshakeFailed(_) | Self::VersionMismatch { .. } => ErrorCategory::Handshake,
+            Self::HandshakeFailed(_)
+            | Self::ProtocolNegotiationFailed(_)
+            | Self::VersionMismatch { .. } => ErrorCategory::Handshake,
             Self::JsonRpc { .. } | Self::ToolNotFound(_) | Self::InvalidArguments(_) => {
                 ErrorCategory::Protocol
             }
@@ -133,13 +150,17 @@ impl McpError {
 
 // rmcp::service::ServiceError → McpError translation.
 //
-// rmcp 0.16 `ServiceError` variants (see rmcp/src/service.rs):
+// rmcp 3.5 `ServiceError` variants (see rmcp/src/service.rs):
 //   - McpError(ErrorData)           : JSON-RPC error from the peer.
 //   - TransportSend(DynamicTransportError) : local transport send failure.
 //   - TransportClosed               : the transport reports EOF / closure.
 //   - UnexpectedResponse            : protocol-level mismatch.
+//   - SubscriptionLagged { capacity } : a `subscriptions/listen` consumer fell
+//                                     behind (we open no subscription).
 //   - Cancelled { reason }          : the operation was cancelled.
 //   - Timeout { timeout }           : the operation timed out.
+//   - InputRequiredRoundsExceeded { max_rounds } : an MRTR `input_required`
+//                                     loop did not finish (we answer no input).
 //
 // Best-effort classification; unknown (`#[non_exhaustive]`) variants fall
 // through to `Sdk(...)` with a warn log so we notice rmcp additions.
@@ -148,8 +169,9 @@ impl McpError {
 /// rmcp's reqwest-backed streamable-HTTP client maps a `401` carrying a
 /// `www-authenticate` header to [`StreamableHttpError::AuthRequired`] and a
 /// `403` carrying one to [`StreamableHttpError::InsufficientScope`]
-/// (`rmcp-0.16.0/src/transport/common/reqwest/streamable_http_client.rs:130`,
-/// `:145`); every other status is folded into an untyped response error before
+/// (`rmcp-3.5.1/src/transport/common/reqwest/streamable_http_client.rs:108`,
+/// `:121` on the GET stream, `:223`, `:236` on a POST); every other status
+/// is folded into an untyped response error before
 /// it reaches us. So this recovers exactly the two the design classifies
 /// (§4.2) and nothing else — no string matching, no guessing.
 ///
@@ -291,6 +313,8 @@ mod tests {
             (McpError::Timeout(Duration::from_secs(1)), true),
             (McpError::ServerInternal("x".into()), true),
             (McpError::HandshakeFailed("x".into()), false),
+            // The same lifecycle meets the same answer (DU-25 (m-b)).
+            (McpError::ProtocolNegotiationFailed("x".into()), false),
             (McpError::ToolNotFound("x".into()), false),
             (McpError::InvalidArguments("x".into()), false),
             (McpError::Cancelled, false),
@@ -337,6 +361,10 @@ mod tests {
         );
         assert_eq!(
             McpError::HandshakeFailed("x".into()).category(),
+            ErrorCategory::Handshake
+        );
+        assert_eq!(
+            McpError::ProtocolNegotiationFailed("x".into()).category(),
             ErrorCategory::Handshake
         );
         assert_eq!(

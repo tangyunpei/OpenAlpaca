@@ -129,13 +129,13 @@ mod tests {
         idempotent: Option<bool>,
         open_world: Option<bool>,
     ) -> openalpaca_mcp::ToolAnnotations {
-        openalpaca_mcp::ToolAnnotations {
-            destructive_hint: destructive,
-            read_only_hint: readonly,
-            idempotent_hint: idempotent,
-            open_world_hint: open_world,
-            ..Default::default()
-        }
+        openalpaca_mcp::ToolAnnotations::from_raw(
+            None,        // title
+            readonly,    // read_only_hint
+            destructive, // destructive_hint
+            idempotent,  // idempotent_hint
+            open_world,  // open_world_hint
+        )
     }
 
     #[test]

@@ -202,6 +202,10 @@ async fn handle(
                 .cloned()
                 .unwrap_or(Value::Null);
             match rpc.as_deref() {
+                // A legacy server (before `2026-07-28`): the `server/discover`
+                // probe is an unknown method, so the client's `Auto` lifecycle
+                // falls back to `initialize` on the same connection (P19).
+                Some("server/discover") => rpc_error(id, -32601, "Method not found"),
                 Some("initialize") => {
                     let version = message
                         .as_ref()
@@ -275,6 +279,15 @@ fn redirect(to: &str) -> Response {
     (
         StatusCode::TEMPORARY_REDIRECT,
         [(header::LOCATION, to.to_string())],
+    )
+        .into_response()
+}
+
+fn rpc_error(id: Value, code: i64, message: &str) -> Response {
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+            .to_string(),
     )
         .into_response()
 }
@@ -564,7 +577,7 @@ async fn a_redirect_to_another_origin_is_refused_and_carries_no_credential() {
     assert_eq!(
         first.count(Method::POST),
         1,
-        "one initialize, never retried"
+        "one probe (`server/discover`), never retried"
     );
 }
 

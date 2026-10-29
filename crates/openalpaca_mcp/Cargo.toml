@@ -21,9 +21,14 @@ tokio-util.workspace = true
 reqwest.workspace = true
 url.workspace = true
 
-# MCP SDK. Confirm the exact feature flag names after running `cargo add rmcp`.
-# Expected features: "client", "transport-child-process", "transport-streamable-http-client-reqwest".
-rmcp = { version = "0.16", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+# MCP SDK: the client, the stdio child-process transport and the
+# streamable-HTTP client over reqwest. The floor is the version taken.
+rmcp = { version = "3.5.1", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+# The stdio child is spawned through rmcp's `CommandWrap` (rmcp does not
+# re-export the crate), as the leader of its own process group, so a teardown
+# reaches the server's descendants too. Kept on rmcp's major so the two
+# `CommandWrap`s are one type.
+process-wrap = { version = "10.0.1", features = ["tokio1"] }
 
 [dev-dependencies]
 tempfile.workspace = true

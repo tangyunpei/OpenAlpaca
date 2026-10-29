@@ -45,6 +45,41 @@ impl From<&ConnectionState> for ConnectionSnapshot {
     }
 }
 
+/// Which lifecycle a connection opens with — `[servers.<name>] protocol` in
+/// `config/mcp.toml` (DU-25 (m-a)).
+///
+/// It decides the **first** handshake of a client only: once a load has
+/// negotiated, every in-session respawn reopens in the era that load found
+/// (DU-25 (m-c); `client.rs`, `lifecycle`), and a fresh `connect` — an enable
+/// or a reload — negotiates again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProtocolMode {
+    /// `"auto"`, the default: probe with `server/discover` at `2026-07-28`,
+    /// and fall back to `initialize` at `2025-11-25` for a server the probe
+    /// finds legacy (rmcp's `Auto`).
+    #[default]
+    Auto,
+    /// `"legacy"`: `initialize` at `2025-11-25` and never the probe (rmcp's
+    /// `Initialize`) — for a server that ignores an unknown method, which
+    /// `Auto` reaches only after rmcp's 10 s discover timeout.
+    Legacy,
+    /// `"2026-07-28"`: `server/discover` only, never downgraded (rmcp's
+    /// `Discover`) — a server that does not serve `2026-07-28` fails to
+    /// connect rather than fall back.
+    Modern,
+}
+
+impl ProtocolMode {
+    /// The value `config/mcp.toml` spells it with.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Legacy => "legacy",
+            Self::Modern => "2026-07-28",
+        }
+    }
+}
+
 /// Compute the backoff duration for a given attempt number.
 ///
 /// Exponential: `base * 2^(attempt-1)`, capped at `max`.

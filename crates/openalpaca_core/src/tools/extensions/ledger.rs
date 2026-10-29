@@ -164,6 +164,19 @@ pub struct ExtensionRecord {
     /// MCP only — `"stdio"` or `"streamable-http"`, read from the declaration
     /// (design §8). `None` for plugins and for the pseudo-record.
     pub transport: Option<String>,
+    /// MCP only — the protocol version this incarnation's handshake negotiated:
+    /// `2026-07-28` after `server/discover`, or the version a legacy server
+    /// answered `initialize` with. Like `version`, a fact about the live
+    /// connection: `None` when none is (P19, DU-25 (m-g)).
+    pub protocol_version: Option<String>,
+    /// MCP only — how long this incarnation's connect took, in milliseconds:
+    /// the spawn or the HTTP connect and the lifecycle handshake, so about
+    /// 10 000 for a server that ignored `server/discover`. `None` when no
+    /// connection is live (DU-25 (m-g)).
+    pub connect_ms: Option<u64>,
+    /// MCP only — how long this incarnation's first `tools/list` (E3) took, in
+    /// milliseconds. `None` when no connection is live (DU-25 (m-g)).
+    pub list_ms: Option<u64>,
     /// E4 name collisions: names this load did **not** publish because another
     /// *enabled* extension currently serves them (design §8, §10 case 13).
     pub skipped_tools: Vec<String>,
@@ -266,6 +279,9 @@ impl LedgerEntry {
             disposition_readable: true,
             version: None,
             transport: None,
+            protocol_version: None,
+            connect_ms: None,
+            list_ms: None,
             skipped_tools: Vec::new(),
             consent: None,
             declared: None,

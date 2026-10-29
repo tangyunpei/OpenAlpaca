@@ -33,9 +33,13 @@ pub fn classify_bringup_failure(error: &McpError) -> FailureReason {
         // error's text names the origin and says to set `url` to the
         // canonical endpoint (N-MCP-2).
         McpError::RedirectRefused { .. } => FailureReason::ConfigInvalid,
+        // The lifecycle could not be negotiated; the error's text names the
+        // `protocol` value to set (DU-25 (m-b)). Before P19 this read
+        // `Unreachable`, "not actionable — retry".
+        McpError::ProtocolNegotiationFailed(_) => FailureReason::ProtocolNegotiationFailed,
         // Everything else — a command that will not spawn, a handshake that
-        // fails, a timeout, a protocol mismatch — is "could not be reached or
-        // started". `Crashed` is reserved for a server that *was* running.
+        // fails, a timeout — is "could not be reached or started". `Crashed`
+        // is reserved for a server that *was* running.
         _ => FailureReason::Unreachable,
     }
 }
@@ -110,6 +114,18 @@ mod tests {
         );
     }
 
+    /// A failed negotiation is the owner's to fix with `protocol`, not a
+    /// retry (DU-25 (m-b)).
+    #[test]
+    fn bringup_maps_a_failed_negotiation_to_protocol_negotiation_failed() {
+        let reason = classify_bringup_failure(&McpError::ProtocolNegotiationFailed(
+            r#"ExpectedInitResult(None); set `protocol = "legacy"`"#.into(),
+        ));
+        assert_eq!(reason, FailureReason::ProtocolNegotiationFailed);
+        assert!(reason.actionable());
+        assert_eq!(reason.word(), "protocol_negotiation_failed");
+    }
+
     #[test]
     fn only_the_two_terminal_classes_flip_a_live_row() {
         assert_eq!(
@@ -130,6 +146,9 @@ mod tests {
             McpError::Cancelled,
             // The seal is the *result* of a disable, never a crash.
             McpError::Closed,
+            // A respawn that cannot renegotiate goes back to the model with
+            // the remedy named; only the next load reads it on the row.
+            McpError::ProtocolNegotiationFailed("x".into()),
             // A call refused a redirect goes back to the model with the
             // remedy named; it never retries, and the row stays as it is.
             McpError::RedirectRefused {

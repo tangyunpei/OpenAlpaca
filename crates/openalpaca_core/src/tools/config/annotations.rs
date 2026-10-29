@@ -18,13 +18,13 @@ pub struct ToolAnnotationsConfig {
 
 impl ToolAnnotationsConfig {
     pub fn into_mcp_annotations(self) -> openalpaca_mcp::ToolAnnotations {
-        openalpaca_mcp::ToolAnnotations {
-            destructive_hint: self.destructive_hint,
-            read_only_hint: self.read_only_hint,
-            idempotent_hint: self.idempotent_hint,
-            open_world_hint: self.open_world_hint,
-            ..Default::default()
-        }
+        openalpaca_mcp::ToolAnnotations::from_raw(
+            None,                  // title
+            self.read_only_hint,   // read_only_hint
+            self.destructive_hint, // destructive_hint
+            self.idempotent_hint,  // idempotent_hint
+            self.open_world_hint,  // open_world_hint
+        )
     }
 }
 

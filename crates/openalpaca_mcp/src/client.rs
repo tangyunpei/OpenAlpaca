@@ -5,14 +5,19 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::time::Duration;
 
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{ClientRequest, Implementation, PingRequest, ProtocolVersion};
-use rmcp::service::{NotificationContext, Peer, RoleClient, RunningService, ServiceExt};
+use rmcp::model::{
+    ClientCapabilities, ClientConfig, ClientRequest, Implementation, PingRequest, ProtocolVersion,
+};
+use rmcp::service::{
+    ClientInitializeError, ClientLifecycleMode, ClientServiceExt, NotificationContext, Peer,
+    RoleClient, RunningService,
+};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::error::McpError;
-use crate::lifecycle::{ConnectionSnapshot, ConnectionState};
-use crate::transport::{Transport, TransportConnection, TransportInner, TransportKind};
+use crate::lifecycle::{ConnectionSnapshot, ConnectionState, ProtocolMode};
+use crate::transport::{Transport, TransportInner, TransportKind};
 
 /// Something the *server* changed about itself mid-session, announced over one
 /// of MCP's `notifications/*_list_changed` methods.
@@ -47,6 +52,9 @@ pub enum ServerChange {
 pub struct NotifyingHandler {
     server_name: String,
     tx: Option<UnboundedSender<ServerChange>>,
+    /// `McpClientConfig::client_info`, which [`ClientHandler::get_info`]
+    /// sends — rmcp's own name and version went out before (DU-25 (m-f)).
+    client_info: Implementation,
 }
 
 impl NotifyingHandler {
@@ -66,6 +74,23 @@ impl NotifyingHandler {
 }
 
 impl ClientHandler for NotifyingHandler {
+    /// What every lifecycle tells the server about this client (DU-25 (m-f)):
+    /// our `client_info` and an explicit capability set, empty — no roots,
+    /// sampling or elicitation is served (M84 adds the first). rmcp sends both
+    /// in the legacy `initialize` and in each `2026-07-28` request's `_meta`.
+    ///
+    /// The version is rmcp's to choose under `Auto` and `Discover` (the
+    /// fallback overwrites it with `legacy_version`, the probe offers its
+    /// preferred versions; rmcp-3.5.1 `src/service/client.rs:777-845`), but
+    /// `Initialize` — `protocol = "legacy"`, and a respawn pinned to a legacy
+    /// era — sends this one as it stands, and rmcp's default is `LATEST`
+    /// (`2026-07-28`), a version with no `initialize` at all. So it is the
+    /// newest that has one, the version `Auto`'s fallback offers too.
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::new(ClientCapabilities::default(), self.client_info.clone())
+            .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
+    }
+
     fn on_tool_list_changed(
         &self,
         _context: NotificationContext<RoleClient>,
@@ -110,7 +135,11 @@ const ABANDONED_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct McpClientConfig {
     pub server_name: String,
     pub transport: TransportKind,
+    /// The identity every handshake sends (see `NotifyingHandler::get_info`).
     pub client_info: Implementation,
+    /// The lifecycle the first handshake opens with (`protocol` in
+    /// `config/mcp.toml`; DU-25 (m-a)).
+    pub protocol: ProtocolMode,
     pub request_timeout: Duration,
     pub max_reconnect_attempts: u32,
     pub reconnect_backoff_ms: u64,
@@ -126,11 +155,8 @@ impl Default for McpClientConfig {
                 env: std::collections::HashMap::new(),
                 cwd: None,
             },
-            client_info: Implementation {
-                name: "openalpaca-mcp".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                ..Default::default()
-            },
+            client_info: Implementation::new("openalpaca-mcp", env!("CARGO_PKG_VERSION")),
+            protocol: ProtocolMode::Auto,
             request_timeout: Duration::from_secs(30),
             max_reconnect_attempts: 3,
             reconnect_backoff_ms: 100,
@@ -222,7 +248,8 @@ impl McpClient {
         }
     }
 
-    /// Connect to the configured MCP server. Performs initialize handshake.
+    /// Connect to the configured MCP server and open its lifecycle
+    /// (`server/discover`, or the legacy `initialize`; see `lifecycle` below).
     pub async fn connect(config: McpClientConfig) -> Result<Self, McpError> {
         // A fresh inner is never sealed, so re-enabling a previously
         // disconnected server through a new `connect` is unaffected.
@@ -233,7 +260,8 @@ impl McpClient {
         Ok(client)
     }
 
-    /// Build a Transport from the configured TransportKind, connect, then run rmcp's serve().
+    /// Build a Transport from the configured TransportKind, connect, then open
+    /// the connection's lifecycle through [`serve`].
     pub(crate) async fn do_handshake(&self) -> Result<(), McpError> {
         let transport = build_transport(&self.inner.config)?;
         let conn = transport.connect().await?;
@@ -245,37 +273,42 @@ impl McpClient {
         );
 
         // Clone — never create — the sender: a per-handshake channel would be
-        // severed by the first in-session reconnect (design §3.7).
+        // severed by the first in-session reconnect (design §3.7). The handler
+        // forwards the server's list-changed notifications.
         let handler = NotifyingHandler {
             server_name: self.inner.config.server_name.clone(),
             tx: self.inner.changes_tx.lock().await.clone(),
+            client_info: self.inner.config.client_info.clone(),
         };
 
-        let running = serve_with_conn(conn, handler).await.map_err(|e| {
-            // A streamable-HTTP server that rejected our credentials (design
-            // §4.2) or redirected where the client will not follow (N-MCP-2)
-            // fails the handshake with a typed error; everything else stays a
-            // handshake failure.
-            let typed = match &e {
-                rmcp::service::ClientInitializeError::TransportError { error, .. } => {
-                    crate::error::typed_http_failure(error.error.as_ref())
-                }
-                _ => None,
-            };
-            typed
-                .unwrap_or_else(|| McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}")))
-        })?;
+        // The first handshake follows `protocol`; a respawn reopens in the era
+        // the first negotiated (DU-25 (m-c)).
+        let negotiated = self.inner.protocol_version.get();
+        let lifecycle = lifecycle(self.inner.config.protocol, negotiated);
+        let served = match conn.inner {
+            TransportInner::Stdio(child) => serve(handler, child, lifecycle.clone()).await,
+            TransportInner::Http(http) => serve(handler, http, lifecycle.clone()).await,
+        };
+        let running = served.map_err(|e| handshake_error(&e, &lifecycle, negotiated.is_some()))?;
 
         // Record server identity (first-time only; immutable across reconnects).
         if let Some(peer_info) = running.peer_info() {
-            let _ = self.inner.server_info.set(peer_info.server_info.clone());
+            // `server_info` is `Option` since rmcp 3: an `initialize` answer
+            // always carries it, a `server/discover` answer only in its `_meta`
+            // (`io.modelcontextprotocol/serverInfo`), and may leave it out.
+            if let Some(server_info) = &peer_info.server_info {
+                let _ = self.inner.server_info.set(server_info.clone());
+            }
             let _ = self
                 .inner
                 .protocol_version
                 .set(peer_info.protocol_version.clone());
             tracing::info!(
                 server_name = %self.inner.config.server_name,
-                server_version = %peer_info.server_info.version,
+                server_version = peer_info
+                    .server_info
+                    .as_ref()
+                    .map_or("unknown", |i| i.version.as_str()),
                 protocol_version = ?peer_info.protocol_version,
                 "MCP handshake complete"
             );
@@ -423,7 +456,7 @@ impl McpClient {
     /// Health check — sends an MCP `ping`.
     pub async fn ping(&self) -> Result<(), McpError> {
         let peer = self.current_peer().await?;
-        // rmcp 0.16 does not expose a typed `ping()` helper on `Peer<RoleClient>`;
+        // rmcp (still at 3.5) does not expose a typed `ping()` helper on `Peer<RoleClient>`;
         // construct a PingRequest manually and discard the (empty) server response.
         let req: ClientRequest = PingRequest::default().into();
         peer.send_request(req)
@@ -582,19 +615,15 @@ impl McpClient {
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
         use std::sync::atomic::Ordering;
-        let params = rmcp::model::CallToolRequestParams {
-            meta: None,
-            name: name.to_string().into(),
-            arguments: match arguments {
-                serde_json::Value::Object(map) => Some(map),
-                serde_json::Value::Null => None,
-                other => {
-                    return Err(McpError::InvalidArguments(format!(
-                        "call_tool arguments must be an object or null, got: {other}"
-                    )));
-                }
-            },
-            task: None,
+        let params = rmcp::model::CallToolRequestParams::new(name.to_string());
+        let params = match arguments {
+            serde_json::Value::Object(map) => params.with_arguments(map),
+            serde_json::Value::Null => params,
+            other => {
+                return Err(McpError::InvalidArguments(format!(
+                    "call_tool arguments must be an object or null, got: {other}"
+                )));
+            }
         };
 
         // One deadline spans the pre-send reconnect and the call. Once the
@@ -751,16 +780,163 @@ fn build_transport(cfg: &McpClientConfig) -> Result<Box<dyn Transport>, McpError
     }
 }
 
-/// Internal: hand a TransportConnection to rmcp's serve(), with the handler
-/// that forwards the server's list-changed notifications (design §3.7).
-async fn serve_with_conn(
-    conn: TransportConnection,
-    handler: NotifyingHandler,
-) -> Result<RunningService<RoleClient, NotifyingHandler>, rmcp::service::ClientInitializeError> {
-    match conn.inner {
-        TransportInner::Stdio(child) => handler.serve(child).await,
-        TransportInner::Http(http) => handler.serve(http).await,
+/// The typed error a failed handshake becomes.
+///
+/// A streamable-HTTP server that rejected our credentials (design §4.2) or
+/// redirected where the client will not follow (N-MCP-2) fails the handshake
+/// with a typed error, in either phase: on the `server/discover` probe, where
+/// it ends the connect with no fallback, or on the legacy `initialize` after
+/// the probe found the server legacy, where rmcp reports both phases in
+/// `LegacyFallbackFailed` — and there the fallback is the handshake that
+/// failed, so its error decides. That check comes first.
+///
+/// Then a failure to negotiate the lifecycle is
+/// [`McpError::ProtocolNegotiationFailed`] (DU-25 (m-b)), whose text names
+/// what to set: rmcp's `NoCompatibleProtocolVersion`, `ExpectedInitResult`
+/// and `LegacyFallbackFailed`; a transport that closed while the probe waited
+/// for its answer; and, under the `2026-07-28` pin, the probe refused by a
+/// JSON-RPC error — rmcp's own evidence of a legacy server, which `Discover`
+/// returns as it stands — unless its code is one of the two refusals a
+/// `2026-07-28` server itself sends (`MISSING_REQUIRED_CLIENT_CAPABILITY`,
+/// `HEADER_MISMATCH`; rmcp's `is_modern_rejection_code`, rmcp-3.5.1
+/// `src/service/client.rs:861-867`), which rmcp returns raw in every
+/// lifecycle and which stay a handshake failure here as under `Auto`.
+/// Everything else stays a handshake failure.
+///
+/// rmcp types no phase on `ConnectionClosed`: its text is the response the
+/// handshake was waiting for (`expect_next_message`'s context,
+/// rmcp-3.5.1 `src/service/client.rs:148-159`), and `"discover response"` is
+/// the probe's. A rename upstream would turn a close during the probe back
+/// into `Unreachable`; the daemon's test of that case pins it. The close is
+/// any close: a stdio server that exits while the probe waits — a crash at
+/// start, a package `npx` cannot find — reads as a failed negotiation too,
+/// and one already gone when the probe is written fails the send instead
+/// (`TransportError`, a handshake failure), a race recorded as P19's residue.
+fn handshake_error(
+    e: &ClientInitializeError,
+    lifecycle: &ClientLifecycleMode,
+    respawn: bool,
+) -> McpError {
+    let failed = match e {
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => fallback.as_ref(),
+        other => other,
+    };
+    if let ClientInitializeError::TransportError { error, .. } = failed
+        && let Some(typed) = crate::error::typed_http_failure(error.error.as_ref())
+    {
+        return typed;
     }
+    let negotiation = match e {
+        ClientInitializeError::NoCompatibleProtocolVersion { .. }
+        | ClientInitializeError::ExpectedInitResult(_)
+        | ClientInitializeError::LegacyFallbackFailed { .. } => true,
+        ClientInitializeError::ConnectionClosed(awaited) => awaited == "discover response",
+        ClientInitializeError::JsonRpcError(data) => {
+            matches!(lifecycle, ClientLifecycleMode::Discover { .. })
+                && !matches!(
+                    data.code,
+                    rmcp::model::ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY
+                        | rmcp::model::ErrorCode::HEADER_MISMATCH
+                )
+        }
+        _ => false,
+    };
+    if negotiation {
+        return McpError::ProtocolNegotiationFailed(format!(
+            "{e:?}; {}",
+            negotiation_advice(lifecycle, respawn)
+        ));
+    }
+    McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}"))
+}
+
+/// What a failed negotiation tells the owner to set — every form names
+/// `protocol = "legacy"`, the key that reaches a server older than
+/// `2026-07-28` without the probe (DU-25 (m-b)).
+fn negotiation_advice(lifecycle: &ClientLifecycleMode, respawn: bool) -> &'static str {
+    if respawn {
+        return "a respawn reopens in the era this load negotiated; reload the server to \
+                negotiate again, or set `protocol = \"legacy\"` in its config/mcp.toml block \
+                if it predates MCP 2026-07-28";
+    }
+    match lifecycle {
+        ClientLifecycleMode::Initialize => {
+            "the block sets `protocol = \"legacy\"`; if the server serves MCP 2026-07-28, set \
+             `protocol = \"auto\"` in its config/mcp.toml block"
+        }
+        ClientLifecycleMode::Discover { .. } => {
+            "the block pins `protocol = \"2026-07-28\"`; if the server predates that version, set \
+             `protocol = \"legacy\"` (or `\"auto\"`) in its config/mcp.toml block"
+        }
+        _ => {
+            "if the server predates MCP 2026-07-28, set `protocol = \"legacy\"` in its \
+             config/mcp.toml block"
+        }
+    }
+}
+
+/// The lifecycle a handshake opens with.
+///
+/// **The first handshake of a client follows `protocol`** (DU-25 (m-a)):
+///
+/// * `Auto`, the default — rmcp's `Auto` (DU-25 (p4)). It probes with
+///   `server/discover` at [`ProtocolVersion::LATEST`] (`2026-07-28`); a server
+///   that answers it is served in the modern lifecycle, with no `initialize`
+///   at all. A server that answers the probe with a correlated JSON-RPC error
+///   — or, over streamable HTTP, with a pre-session 4xx other than 401/403,
+///   which rmcp turns into one
+///   (`rmcp-3.5.1/src/transport/streamable_http_client.rs:375-406`) — is
+///   legacy, and the same connection then runs the `initialize` handshake
+///   offering [`ProtocolVersion::LATEST_WITH_INITIALIZE`] (`2025-11-25`).
+/// * `Legacy` — rmcp's `Initialize`: that handshake at once, never the probe.
+/// * `Modern` — rmcp's `Discover` at `2026-07-28`: never downgraded, so a
+///   legacy server fails the connect.
+///
+/// The costs of `Auto` are rmcp's, named here so nobody rediscovers them: a
+/// server that ignores an unknown method is found legacy only when rmcp's
+/// 10 s discover timeout runs out — a private constant no entry point lets us
+/// set (`DEFAULT_AUTO_DISCOVER_TIMEOUT`, `rmcp-3.5.1/src/service/client.rs:657`)
+/// — so a `connect_timeout_secs` at or under 10 s fails it (the supervisor
+/// warns), and a 401/403, a 5xx, a transport failure or a malformed 2xx
+/// answer to the probe fails the connect with no fallback (`:1044-1057`).
+///
+/// **A respawn reopens in the era the first negotiated** (DU-25 (m-c)) — the
+/// pre-send reconnect of N-MCP-1 included: `Initialize` for a version that has
+/// an `initialize` handshake, `Discover` pinned to the negotiated version for
+/// one that does not. It neither probes a legacy server again (which `Auto`
+/// would, on every respawn) nor lets a modern one fall back. A fresh
+/// `connect` (an enable, a reload) builds a new client and negotiates again.
+fn lifecycle(mode: ProtocolMode, negotiated: Option<&ProtocolVersion>) -> ClientLifecycleMode {
+    match negotiated {
+        Some(version) if version.has_initialize() => ClientLifecycleMode::Initialize,
+        Some(version) => ClientLifecycleMode::Discover {
+            preferred_versions: vec![version.clone()],
+        },
+        None => match mode {
+            ProtocolMode::Auto => ClientLifecycleMode::Auto {
+                preferred_versions: vec![ProtocolVersion::LATEST],
+                legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
+            },
+            ProtocolMode::Legacy => ClientLifecycleMode::Initialize,
+            ProtocolMode::Modern => ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::LATEST],
+            },
+        },
+    }
+}
+
+/// Serve `handler` over `transport` in `lifecycle` — the one entry every
+/// connection, and every test that stands one up, goes through.
+async fn serve<T, E, A>(
+    handler: NotifyingHandler,
+    transport: T,
+    lifecycle: ClientLifecycleMode,
+) -> Result<RunningService<RoleClient, NotifyingHandler>, ClientInitializeError>
+where
+    T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    handler.serve_with_lifecycle(transport, lifecycle).await
 }
 
 #[cfg(test)]
@@ -815,10 +991,13 @@ mod tests {
         }
     }
 
-    /// Minimal in-process MCP server over one half of a duplex pipe: answers the
-    /// client's `initialize` request with a valid `InitializeResult`, then reads
-    /// until EOF. Resolves to `true` once the client end has gone away — which is
-    /// how a test observes that a `RunningService` was really closed.
+    /// Minimal in-process legacy MCP server over one half of a duplex pipe:
+    /// rejects the `server/discover` probe as an unknown method, as a server
+    /// that predates `2026-07-28` does, so [`serve`]'s lifecycle falls back to
+    /// `initialize`, which it answers with a valid `InitializeResult` at the
+    /// version offered; then reads until EOF. Resolves to `true` once the client
+    /// end has gone away — which is how a test observes that a `RunningService`
+    /// was really closed.
     async fn stub_initialize_server(stream: tokio::io::DuplexStream) -> bool {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -828,23 +1007,31 @@ mod tests {
             let Ok(msg) = serde_json::from_str::<rmcp::model::ClientJsonRpcMessage>(&line) else {
                 continue;
             };
-            let Some((_request, id)) = msg.into_request() else {
+            let Some((request, id)) = msg.into_request() else {
                 continue; // the `initialized` notification carries no id
             };
-            let result =
-                rmcp::model::ServerResult::InitializeResult(rmcp::model::InitializeResult {
-                    protocol_version: ProtocolVersion::default(),
-                    capabilities: Default::default(),
-                    server_info: Implementation {
-                        name: "stub".into(),
-                        version: "0.0.1".into(),
-                        ..Default::default()
-                    },
-                    instructions: None,
-                });
-            let mut out =
-                serde_json::to_string(&rmcp::model::ServerJsonRpcMessage::response(result, id))
-                    .expect("serialize initialize result");
+            let reply = match request {
+                ClientRequest::DiscoverRequest(_) => rmcp::model::ServerJsonRpcMessage::error(
+                    rmcp::model::ErrorData::new(
+                        rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                        "Method not found",
+                        None,
+                    ),
+                    Some(id),
+                ),
+                ClientRequest::InitializeRequest(init) => {
+                    rmcp::model::ServerJsonRpcMessage::response(
+                        rmcp::model::ServerResult::InitializeResult(
+                            rmcp::model::InitializeResult::new(Default::default())
+                                .with_protocol_version(init.params.protocol_version)
+                                .with_server_info(Implementation::new("stub", "0.0.1")),
+                        ),
+                        id,
+                    )
+                }
+                _ => continue,
+            };
+            let mut out = serde_json::to_string(&reply).expect("serialize the stub's reply");
             out.push('\n');
             if write_half.write_all(out.as_bytes()).await.is_err() {
                 return false;
@@ -947,8 +1134,11 @@ mod tests {
         let handler = NotifyingHandler {
             server_name: "stub".into(),
             tx,
+            client_info: McpClientConfig::default().client_info,
         };
-        let running = handler.serve(transport).await.expect("stub handshake");
+        let running = serve(handler, transport, lifecycle(ProtocolMode::Auto, None))
+            .await
+            .expect("stub handshake");
         assert!(
             running.peer_info().is_some(),
             "handshake should have peer info"
@@ -1265,6 +1455,7 @@ mod tests {
         let handler = NotifyingHandler {
             server_name: "notifier".into(),
             tx: client.inner.changes_tx.lock().await.clone(),
+            client_info: McpClientConfig::default().client_info,
         };
         handler.send(ServerChange::ToolList);
         handler.send(ServerChange::ResourceList);
@@ -1285,6 +1476,7 @@ mod tests {
             let handler = NotifyingHandler {
                 server_name: "notifier".into(),
                 tx: client.inner.changes_tx.lock().await.clone(),
+                client_info: McpClientConfig::default().client_info,
             };
             handler.send(ServerChange::ToolList);
             assert_eq!(rx.recv().await, Some(ServerChange::ToolList));
@@ -1342,11 +1534,8 @@ mod tests {
                 env: Default::default(),
                 cwd: None,
             },
-            client_info: Implementation {
-                name: "openalpaca-mcp-test".into(),
-                version: "0.1.0".into(),
-                ..Default::default()
-            },
+            client_info: Implementation::new("openalpaca-mcp-test", "0.1.0"),
+            protocol: ProtocolMode::Auto,
             request_timeout: Duration::from_secs(1),
             max_reconnect_attempts: 0,
             reconnect_backoff_ms: 100,
@@ -1437,11 +1626,8 @@ mod tests {
                 env: Default::default(),
                 cwd: None,
             },
-            client_info: Implementation {
-                name: "openalpaca-mcp-test".into(),
-                version: "0.1.0".into(),
-                ..Default::default()
-            },
+            client_info: Implementation::new("openalpaca-mcp-test", "0.1.0"),
+            protocol: ProtocolMode::Auto,
             request_timeout: Duration::from_secs(1),
             max_reconnect_attempts: 2,
             reconnect_backoff_ms: 10, // fast test
@@ -1465,6 +1651,143 @@ mod tests {
         // State should be Failed.
         let state = client.inner.state.read().await;
         assert!(matches!(&*state, ConnectionState::Failed { .. }), "expected Failed state");
+    }
+
+    /// DU-25 (m-a), (m-c): a client's first handshake follows `protocol`;
+    /// once a load has negotiated, every respawn reopens in that era,
+    /// whatever `protocol` says.
+    #[test]
+    fn the_first_lifecycle_follows_the_key_and_a_respawn_keeps_the_negotiated_era() {
+        assert_eq!(
+            lifecycle(ProtocolMode::Auto, None),
+            ClientLifecycleMode::Auto {
+                preferred_versions: vec![ProtocolVersion::LATEST],
+                legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
+            }
+        );
+        assert_eq!(
+            lifecycle(ProtocolMode::Legacy, None),
+            ClientLifecycleMode::Initialize
+        );
+        assert_eq!(
+            lifecycle(ProtocolMode::Modern, None),
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::LATEST],
+            }
+        );
+        for mode in [
+            ProtocolMode::Auto,
+            ProtocolMode::Legacy,
+            ProtocolMode::Modern,
+        ] {
+            for legacy in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2025_06_18] {
+                assert_eq!(
+                    lifecycle(mode, Some(&legacy)),
+                    ClientLifecycleMode::Initialize,
+                    "{mode:?} after {legacy}"
+                );
+            }
+            assert_eq!(
+                lifecycle(mode, Some(&ProtocolVersion::V_2026_07_28)),
+                ClientLifecycleMode::Discover {
+                    preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+                },
+                "{mode:?} after 2026-07-28"
+            );
+        }
+    }
+
+    /// DU-25 (m-b): which handshake failures are a failed negotiation —
+    /// each naming `protocol = "legacy"` — and which stay a handshake
+    /// failure.
+    #[test]
+    fn a_failed_negotiation_names_protocol_legacy_and_other_failures_do_not_become_one() {
+        let auto = lifecycle(ProtocolMode::Auto, None);
+        let pinned = lifecycle(ProtocolMode::Modern, None);
+        let legacy = lifecycle(ProtocolMode::Legacy, None);
+        let rejected = || {
+            ClientInitializeError::JsonRpcError(rmcp::model::ErrorData::new(
+                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                "Method not found",
+                None,
+            ))
+        };
+        let negotiation = [
+            (
+                ClientInitializeError::NoCompatibleProtocolVersion {
+                    client_supported: vec![ProtocolVersion::LATEST],
+                    server_supported: vec![],
+                },
+                &auto,
+            ),
+            (ClientInitializeError::ExpectedInitResult(None), &auto),
+            (
+                ClientInitializeError::LegacyFallbackFailed {
+                    discover: Box::new(rejected()),
+                    fallback: Box::new(rejected()),
+                },
+                &auto,
+            ),
+            (
+                ClientInitializeError::ConnectionClosed("discover response".into()),
+                &auto,
+            ),
+            (rejected(), &pinned),
+            (ClientInitializeError::ExpectedInitResult(None), &legacy),
+        ];
+        for (error, lifecycle) in &negotiation {
+            match handshake_error(error, lifecycle, false) {
+                McpError::ProtocolNegotiationFailed(text) => assert!(
+                    text.contains(r#"protocol = "legacy""#),
+                    "{error:?} under {lifecycle:?}: {text}"
+                ),
+                other => panic!("{error:?} under {lifecycle:?}: {other:?}"),
+            }
+        }
+
+        // A 2026-07-28 server's own refusals, which rmcp returns from the
+        // probe as they stand in every lifecycle: not legacy evidence.
+        let modern_rejection = |code| {
+            ClientInitializeError::JsonRpcError(rmcp::model::ErrorData::new(code, "refused", None))
+        };
+        let other = [
+            (
+                ClientInitializeError::ConnectionClosed("initialize response".into()),
+                &auto,
+            ),
+            (rejected(), &auto),
+            (rejected(), &legacy),
+            (ClientInitializeError::Cancelled, &auto),
+            (
+                modern_rejection(rmcp::model::ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY),
+                &pinned,
+            ),
+            (
+                modern_rejection(rmcp::model::ErrorCode::HEADER_MISMATCH),
+                &pinned,
+            ),
+        ];
+        for (error, lifecycle) in &other {
+            assert!(
+                matches!(
+                    handshake_error(error, lifecycle, false),
+                    McpError::HandshakeFailed(_)
+                ),
+                "{error:?} under {lifecycle:?}"
+            );
+        }
+
+        let McpError::ProtocolNegotiationFailed(text) = handshake_error(
+            &ClientInitializeError::ExpectedInitResult(None),
+            &ClientLifecycleMode::Initialize,
+            true,
+        ) else {
+            panic!("a respawn's failed negotiation is still one");
+        };
+        assert!(
+            text.contains("reload the server") && text.contains(r#"protocol = "legacy""#),
+            "{text}"
+        );
     }
 }
 

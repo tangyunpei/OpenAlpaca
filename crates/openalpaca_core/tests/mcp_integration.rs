@@ -12,7 +12,7 @@ use openalpaca_core::tools::{
     mcp::bridge,
     registry::{ToolContext, ToolRegistry},
 };
-use openalpaca_mcp::{Implementation, McpClient, McpClientConfig, TransportKind};
+use openalpaca_mcp::{Implementation, McpClient, McpClientConfig, ProtocolMode, TransportKind};
 
 fn mk_config(tmp_canonical: &std::path::Path) -> McpClientConfig {
     McpClientConfig {
@@ -27,11 +27,8 @@ fn mk_config(tmp_canonical: &std::path::Path) -> McpClientConfig {
             env: HashMap::new(),
             cwd: None,
         },
-        client_info: Implementation {
-            name: "openalpaca-mcp-p2-test".into(),
-            version: "0.1.0".into(),
-            ..Default::default()
-        },
+        client_info: Implementation::new("openalpaca-mcp-p2-test", "0.1.0"),
+        protocol: ProtocolMode::Auto,
         request_timeout: Duration::from_secs(30),
         max_reconnect_attempts: 1,
         reconnect_backoff_ms: 100,

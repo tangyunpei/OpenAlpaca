@@ -44,12 +44,12 @@ use openalpaca_core::tools::extensions::{
     WithdrawnSet,
 };
 use openalpaca_core::tools::mcp::{
-    HttpAuthConfig, LoadError, McpConfig, McpDefaults, McpServerConfig, bridge,
+    HttpAuthConfig, LoadError, McpConfig, McpDefaults, McpProtocol, McpServerConfig, bridge,
     classify_bringup_failure, classify_call_failure, config_fingerprint,
 };
 use openalpaca_mcp::{
-    ConnectionSnapshot, Implementation, McpClient, McpClientConfig, McpError, ServerChange,
-    TransportKind,
+    ConnectionSnapshot, Implementation, McpClient, McpClientConfig, McpError, ProtocolMode,
+    ServerChange, TransportKind,
 };
 use openalpaca_storage::hash::sha256_hex;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -89,6 +89,12 @@ struct ServerHandle {
     /// E4's name collisions for this load — the API row's `skipped_tools`
     /// (§8, §10 case 13).
     skipped_tools: Vec<String>,
+    /// The protocol version this incarnation negotiated, and how long its
+    /// connect and its E3 `tools/list` took — the row's `protocol_version`,
+    /// `connect_ms` and `list_ms` (DU-25 (m-g)).
+    protocol_version: Option<String>,
+    connect_ms: u64,
+    list_ms: u64,
 }
 
 /// The last **declaration set that parsed** (§10 case 15). An unparseable
@@ -753,6 +759,9 @@ impl McpSupervisor {
         if let Some(handle) = self.handles.lock_or_recover().get(&ext.name) {
             record.version = handle.version.clone();
             record.skipped_tools = handle.skipped_tools.clone();
+            record.protocol_version = handle.protocol_version.clone();
+            record.connect_ms = Some(handle.connect_ms);
+            record.list_ms = Some(handle.list_ms);
         }
         Ok(record)
     }
@@ -1129,6 +1138,21 @@ impl McpSupervisor {
             cfg.connect_timeout_secs()
                 .unwrap_or(defaults.connect_timeout_secs),
         );
+        // DU-25 (m-d): a warning, never a refusal. Under `auto` a server that
+        // ignores `server/discover` is found legacy only when rmcp's private
+        // 10 s discover timeout runs out, so a connect timeout at or under it
+        // ends the connect first; a server that answers the probe is unharmed.
+        if cfg.protocol().is_auto() && connect_timeout <= AUTO_DISCOVER_TIMEOUT {
+            tracing::warn!(
+                extension = %ext,
+                connect_timeout_secs = connect_timeout.as_secs(),
+                "connect_timeout_secs is 10 or less under protocol = \"auto\": a server that \
+                 ignores server/discover is reached only after rmcp's 10 s discover timeout, so \
+                 it cannot connect; raise connect_timeout_secs, or set protocol = \"legacy\" \
+                 for such a server"
+            );
+        }
+        let connect_started = std::time::Instant::now();
         let client = match tokio::time::timeout(connect_timeout, McpClient::connect(client_config))
             .await
         {
@@ -1156,6 +1180,9 @@ impl McpSupervisor {
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
+        let connect_ms = elapsed_ms(connect_started);
+        let protocol_version = client.protocol_version().map(ToString::to_string);
+
         // E2 — take the change receiver with the client, once, and start the
         // reader. Its first message is *applied* only after E5: step 3 takes
         // the mutex this load still holds and then re-checks for `Enabled`, so
@@ -1165,6 +1192,7 @@ impl McpSupervisor {
         // E3 — the one-shot fetch. A client that has just handshaken has no
         // reconnect to make, so bring-up stays bounded by `connect_timeout` +
         // one `request_timeout`, not four reconnect cycles under the mutex.
+        let list_started = std::time::Instant::now();
         let tools = match client.list_tools_once().await {
             Ok(tools) => tools,
             Err(e) => {
@@ -1174,6 +1202,8 @@ impl McpSupervisor {
                 return self.fail(&ext, reason, format!("list_tools: {e}"));
             }
         };
+
+        let list_ms = elapsed_ms(list_started);
 
         // E4 — publish, remove-before-register, with the case-13 collision rule.
         // Names are mapped into the providers' alphabet first, and two of this
@@ -1225,6 +1255,9 @@ impl McpSupervisor {
                 request_timeout,
                 version: client_version,
                 skipped_tools: skipped.clone(),
+                protocol_version,
+                connect_ms,
+                list_ms,
             },
         );
         self.ledger.restore(&ext);
@@ -2276,6 +2309,16 @@ impl McpSupervisor {
 // Client config
 // ============================================================================
 
+/// rmcp's `DEFAULT_AUTO_DISCOVER_TIMEOUT` — private in rmcp, so restated here
+/// for the one comparison that needs it (DU-25 (m-d);
+/// `rmcp-3.5.1/src/service/client.rs:657`).
+const AUTO_DISCOVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Milliseconds since `started`, for the row's durations (DU-25 (m-g)).
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 fn build_client_config(
     server_name: &str,
     server_cfg: &McpServerConfig,
@@ -2321,10 +2364,11 @@ fn build_client_config(
     Ok(McpClientConfig {
         server_name: server_name.to_string(),
         transport,
-        client_info: Implementation {
-            name: "openalpaca-mcp".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            ..Default::default()
+        client_info: Implementation::new("openalpaca-mcp", env!("CARGO_PKG_VERSION")),
+        protocol: match server_cfg.protocol() {
+            McpProtocol::Auto => ProtocolMode::Auto,
+            McpProtocol::Legacy => ProtocolMode::Legacy,
+            McpProtocol::Modern => ProtocolMode::Modern,
         },
         request_timeout,
         max_reconnect_attempts: defaults.max_reconnect_attempts,

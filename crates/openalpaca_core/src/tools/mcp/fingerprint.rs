@@ -392,6 +392,49 @@ mod tests {
         );
     }
 
+    const HTTP: &str = r#"
+        [servers.x]
+        transport = "http"
+        url = "https://example.com/mcp"
+        auth = { bearer_env = "TOKEN" }
+    "#;
+
+    /// `block(text)` with `protocol = <value>` added to the server block.
+    fn with_protocol(text: &str, value: &str) -> McpServerConfig {
+        block(&text.replace(
+            "[servers.x]",
+            &format!("[servers.x]\n        protocol = \"{value}\""),
+        ))
+    }
+
+    /// DU-25 (m-a): `protocol` reaches the preimage only when it is not
+    /// `auto`, so a block without the key — every block written before the key
+    /// existed — keeps its fingerprint (the two digests are the parent's, read
+    /// at `1cd9dc26`), an explicit `"auto"` is the same declaration, and a pin
+    /// is a change the watcher reloads.
+    #[test]
+    fn a_block_without_protocol_keeps_its_fingerprint_and_a_pin_changes_it() {
+        assert_eq!(
+            config_fingerprint(&block(STDIO)),
+            "06d6143a49dbb7a11753722f06504218809fb2f47da1b3bcdd97251024a92421"
+        );
+        assert_eq!(
+            config_fingerprint(&block(HTTP)),
+            "1467b1890711ac3b358ab83afeb422838c225e1fd4596e0c0040638d136c1185"
+        );
+        for text in [STDIO, HTTP] {
+            let unset = config_fingerprint(&block(text));
+            assert_eq!(config_fingerprint(&with_protocol(text, "auto")), unset);
+            for pin in ["legacy", "2026-07-28"] {
+                assert_ne!(
+                    config_fingerprint(&with_protocol(text, pin)),
+                    unset,
+                    "protocol = {pin:?} is a change to what the server is"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_fingerprint_is_stable_across_calls() {
         let one = block(STDIO);

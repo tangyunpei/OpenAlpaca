@@ -1,7 +1,8 @@
 //! N-MCP-1: a call that may have reached the server is never sent again.
 //!
-//! Every server here is a POSIX `sh` loop over stdio that answers
-//! `initialize`, records each `tools/call` it receives, and then does what the
+//! Every server here is a POSIX `sh` loop over stdio that rejects the
+//! `server/discover` probe as a legacy server does, answers `initialize`,
+//! records each `tools/call` it receives, and then does what the
 //! test asks of it — answer, stay silent, or exit. Each incarnation leads its
 //! own process group (`perl`'s `setpgrp`, as the daemon's stubs do), so the
 //! stub's teardown ends whatever the shell started, a slow start's `sleep`
@@ -123,6 +124,9 @@ echo "$$" >> '{spawns}'
 {slow}while IFS= read -r line; do
   id=`printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'`
   case "$line" in
+    *'"method":"server/discover"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32601,"message":"Method not found"}}}}\n' "$id"
+      ;;
     *'"method":"initialize"'*)
       pv=`printf '%s' "$line" | sed -n 's/.*"protocolVersion":"\([^"]*\)".*/\1/p'`
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"%s","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"stub","version":"0.0.1"}}}}}}\n' "$id" "$pv"

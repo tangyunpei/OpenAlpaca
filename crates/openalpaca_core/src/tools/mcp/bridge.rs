@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use openalpaca_mcp::{CallToolResult, McpClient, RawContent, Tool};
+use openalpaca_mcp::{CallToolResult, ContentBlock, McpClient, Tool};
 
 use crate::tools::registry::{RegisteredTool, ToolBackend};
 
@@ -189,9 +189,9 @@ pub fn serialize_call_result(result: CallToolResult) -> Result<String, String> {
         if !buf.is_empty() {
             buf.push('\n');
         }
-        match &content.raw {
-            RawContent::Text(t) => buf.push_str(&t.text),
-            RawContent::Image(_) => {
+        match content {
+            ContentBlock::Text(t) => buf.push_str(&t.text),
+            ContentBlock::Image(_) => {
                 buf.push_str(
                     "[image content omitted — P2 does not yet surface non-text MCP content]",
                 );
@@ -208,23 +208,26 @@ pub fn serialize_call_result(result: CallToolResult) -> Result<String, String> {
     Ok(buf)
 }
 
-fn content_kind_name(c: &RawContent) -> &'static str {
+fn content_kind_name(c: &ContentBlock) -> &'static str {
     match c {
-        RawContent::Text(_) => "text",
-        RawContent::Image(_) => "image",
-        RawContent::Audio(_) => "audio",
-        RawContent::Resource(_) => "resource",
-        RawContent::ResourceLink(_) => "resource_link",
+        ContentBlock::Text(_) => "text",
+        ContentBlock::Image(_) => "image",
+        ContentBlock::Audio(_) => "audio",
+        ContentBlock::Resource(_) => "resource",
+        ContentBlock::ResourceLink(_) => "resource_link",
+        // `ContentBlock` is `#[non_exhaustive]` since rmcp 3; a block kind a
+        // later rmcp adds still reaches the model as a placeholder.
+        _ => "unknown",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openalpaca_mcp::Content;
+    use openalpaca_mcp::ContentBlock;
 
-    fn text_content(s: &str) -> Content {
-        Content::text(s.to_string())
+    fn text_content(s: &str) -> ContentBlock {
+        ContentBlock::text(s.to_string())
     }
 
     #[test]

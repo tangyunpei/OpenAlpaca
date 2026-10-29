@@ -455,6 +455,32 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
     ).toBe(false);
   });
 
+  it("failed/protocol_negotiation_failed — asks, the detail quoted, and the server's block named", () => {
+    const view = extensionRowView(
+      extensionRow({
+        kind: "mcp",
+        id: "old",
+        state: "failed",
+        reason: "protocol_negotiation_failed",
+        actionable: true,
+        detail:
+          'connect: MCP protocol negotiation failed: …; set `protocol = "legacy"`',
+        enabled: true,
+      }),
+    );
+
+    expect(view).toMatchObject({
+      tag: "protocol-mismatch",
+      tone: "asks",
+      toggleChecked: true,
+    });
+    expect(view.description).toBe(
+      '"connect: MCP protocol negotiation failed: …; set `protocol = "legacy"`"',
+    );
+    expect(view.secondary).toBe("config/mcp.toml → [servers.old]");
+    expect(view.actions).not.toContain("retry");
+  });
+
   it("failed/crashed — warn, Retry, and the switch stays ON", () => {
     const view = extensionRowView(
       extensionRow({

@@ -8,8 +8,9 @@ use super::*;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// Answer `initialize` at once and every `tools/call` after `hold`, each in its
-/// own task, so concurrent calls are answered concurrently.
+/// Reject the `server/discover` probe as a legacy server does, answer
+/// `initialize` at once and every `tools/call` after `hold`, each in its own
+/// task, so concurrent calls are answered concurrently.
 async fn concurrent_server(stream: tokio::io::DuplexStream, hold: Duration) {
     let (read_half, write_half) = tokio::io::split(stream);
     let writer = Arc::new(Mutex::new(write_half));
@@ -21,33 +22,45 @@ async fn concurrent_server(stream: tokio::io::DuplexStream, hold: Duration) {
         let Some((request, id)) = msg.into_request() else {
             continue; // the `initialized` notification carries no id
         };
-        let (result, delay) = match request {
-            rmcp::model::ClientRequest::InitializeRequest(_) => (
-                rmcp::model::ServerResult::InitializeResult(rmcp::model::InitializeResult {
-                    protocol_version: ProtocolVersion::default(),
-                    capabilities: Default::default(),
-                    server_info: Implementation {
-                        name: "stub".into(),
-                        version: "0.0.1".into(),
-                        ..Default::default()
-                    },
-                    instructions: None,
-                }),
+        let (reply, delay) = match request {
+            ClientRequest::DiscoverRequest(_) => (
+                rmcp::model::ServerJsonRpcMessage::error(
+                    rmcp::model::ErrorData::new(
+                        rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                        "Method not found",
+                        None,
+                    ),
+                    Some(id),
+                ),
+                Duration::ZERO,
+            ),
+            ClientRequest::InitializeRequest(init) => (
+                rmcp::model::ServerJsonRpcMessage::response(
+                    rmcp::model::ServerResult::InitializeResult(
+                        rmcp::model::InitializeResult::new(Default::default())
+                            .with_protocol_version(init.params.protocol_version)
+                            .with_server_info(Implementation::new("stub", "0.0.1")),
+                    ),
+                    id,
+                ),
                 Duration::ZERO,
             ),
             _ => (
-                rmcp::model::ServerResult::CallToolResult(rmcp::model::CallToolResult::success(
-                    vec![rmcp::model::Content::text("ok")],
-                )),
+                rmcp::model::ServerJsonRpcMessage::response(
+                    rmcp::model::ServerResult::CallToolResult(
+                        rmcp::model::CallToolResult::success(vec![
+                            rmcp::model::ContentBlock::text("ok"),
+                        ]),
+                    ),
+                    id,
+                ),
                 hold,
             ),
         };
         let writer = Arc::clone(&writer);
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let mut out =
-                serde_json::to_string(&rmcp::model::ServerJsonRpcMessage::response(result, id))
-                    .expect("serialize response");
+            let mut out = serde_json::to_string(&reply).expect("serialize the stub's reply");
             out.push('\n');
             let _ = writer.lock().await.write_all(out.as_bytes()).await;
         });
@@ -61,8 +74,11 @@ async fn client_over(hold: Duration) -> McpClient {
     let handler = NotifyingHandler {
         server_name: "concurrent".into(),
         tx: None,
+        client_info: McpClientConfig::default().client_info,
     };
-    let running = handler.serve(client_end).await.expect("stub handshake");
+    let running = serve(handler, client_end, lifecycle(ProtocolMode::Auto, None))
+        .await
+        .expect("stub handshake");
     let client = McpClient {
         inner: Arc::new(ClientInner::new(
             McpClientConfig {

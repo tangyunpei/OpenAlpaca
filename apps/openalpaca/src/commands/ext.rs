@@ -219,6 +219,15 @@ pub struct ExtensionRow {
     pub version: Option<String>,
     #[serde(default)]
     pub transport: Option<String>,
+    /// MCP only, while a connection is live: the protocol version it
+    /// negotiated and how long its connect and first `tools/list` took
+    /// (DU-25 (m-g)). Absent from a daemon built before them.
+    #[serde(default)]
+    pub protocol_version: Option<String>,
+    #[serde(default)]
+    pub connect_ms: Option<u64>,
+    #[serde(default)]
+    pub list_ms: Option<u64>,
     /// `null` when the disposition store cannot be read (design §4).
     #[serde(default)]
     pub enabled: Option<bool>,
@@ -382,6 +391,7 @@ pub(crate) fn print_row(row: &ExtensionRow) {
     if let Some(transport) = &row.transport {
         println!("{} {}", "Transport:".dimmed(), transport);
     }
+    print!("{}", connection_text(row));
     println!("{} {}", "Enabled:".dimmed(), row.toggle());
     if let Some(consent) = &row.consent {
         println!("{} {}", "Consent:".dimmed(), consent);
@@ -412,6 +422,28 @@ pub(crate) fn print_row(row: &ExtensionRow) {
     if let Some(since) = &row.since {
         println!("{} {}", "Since:".dimmed(), since);
     }
+}
+
+/// What the live connection negotiated and how long it took (DU-25 (m-g)):
+/// the protocol version, then the connect and the first `tools/list`, one
+/// line each, and nothing for a row that carries none — a plugin, an MCP
+/// server that is not connected, or an older daemon. A connect of about
+/// 10 000 ms is a server that ignored `server/discover`.
+fn connection_text(row: &ExtensionRow) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    // Writing into a `String` cannot fail.
+    if let Some(version) = &row.protocol_version {
+        let _ = writeln!(out, "{} {}", "Protocol:".dimmed(), version);
+    }
+    if let Some(ms) = row.connect_ms {
+        let _ = writeln!(out, "{} {ms} ms", "Connected in:".dimmed());
+    }
+    if let Some(ms) = row.list_ms {
+        let _ = writeln!(out, "{} {ms} ms", "Tools listed in:".dimmed());
+    }
+    out
 }
 
 /// The manifest's standing warnings (N-PLUG-2) under `ext info`, which is
@@ -1325,6 +1357,38 @@ mod tests {
              Note: this request contains 2 hidden characters, shown as <U+…>.\n"
         );
         assert_eq!(declared_warnings_text(&row(serde_json::json!([]))), "");
+    }
+
+    /// DU-25 (m-g): `ext info` on a connected MCP server says the protocol
+    /// version it negotiated and how long the connect and the first
+    /// `tools/list` took; a row without them — a disabled server, a plugin,
+    /// an older daemon — says nothing of them.
+    #[test]
+    fn info_says_the_negotiated_protocol_and_the_connect_and_list_durations() {
+        colored::control::set_override(false);
+        let connected: ExtensionRow = serde_json::from_value(serde_json::json!({
+            "kind": "mcp",
+            "id": "fs",
+            "state": "enabled",
+            "protocol_version": "2025-11-25",
+            "connect_ms": 10023,
+            "list_ms": 4,
+        }))
+        .unwrap();
+        assert_eq!(
+            connection_text(&connected),
+            "Protocol: 2025-11-25\nConnected in: 10023 ms\nTools listed in: 4 ms\n"
+        );
+        let disabled: ExtensionRow = serde_json::from_value(serde_json::json!({
+            "kind": "mcp",
+            "id": "fs",
+            "state": "disabled",
+            "protocol_version": null,
+            "connect_ms": null,
+            "list_ms": null,
+        }))
+        .unwrap();
+        assert_eq!(connection_text(&disabled), "");
     }
 
     /// A plugin id holding `ESC [ 9 A`, `ESC [ J` (cursor up nine lines,

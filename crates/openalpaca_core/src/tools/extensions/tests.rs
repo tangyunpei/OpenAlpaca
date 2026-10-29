@@ -367,6 +367,11 @@ fn every_state() -> Vec<ExtensionState> {
             detail: "d".into(),
             since,
         },
+        ExtensionState::Failed {
+            reason: FailureReason::ProtocolNegotiationFailed,
+            detail: "d".into(),
+            since,
+        },
     ]
 }
 

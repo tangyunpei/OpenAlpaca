@@ -371,6 +371,25 @@ impl ExtensionState {
                 Some("Retry (reload)".to_string()),
                 false,
             ),
+            Self::Failed {
+                reason: FailureReason::ProtocolNegotiationFailed,
+                detail,
+                ..
+            } => (
+                format!(
+                    "{kind} '{id}' is enabled but could not agree an MCP protocol version with \
+                     the daemon: {}",
+                    wrap_detail(detail)
+                ),
+                Some(
+                    "tell the user the server's protocol setting needs changing — the detail \
+                     names the `protocol` value to set in config/mcp.toml — and that it \
+                     connects once it is reloaded",
+                ),
+                Some("do not retry; a retry meets the same answer until the setting changes"),
+                Some("Set `protocol` → reload".to_string()),
+                true,
+            ),
             Self::Orphaned => (
                 format!("plugin '{id}'s directory was not found; only its record remains"),
                 Some("tell the user the record can be removed"),

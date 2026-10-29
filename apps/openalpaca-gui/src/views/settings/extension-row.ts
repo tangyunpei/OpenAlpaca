@@ -393,6 +393,16 @@ function failed(row: ExtensionRow, base: Base): ExtensionRowView {
         secondary: configLocation(row),
       };
 
+    case "protocol_negotiation_failed":
+      return {
+        ...shared,
+        tag: "protocol-mismatch",
+        // The daemon's words: rmcp's error and the `protocol` value to set
+        // in the server's block — quoted, never interpreted.
+        description: quoted(row.detail) ?? "No MCP protocol version in common",
+        secondary: configLocation(row),
+      };
+
     default:
       // `unreachable` | `crashed`, and anything a newer daemon adds: not
       // actionable, so `warn` and a Retry.

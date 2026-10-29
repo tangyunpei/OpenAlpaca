@@ -224,6 +224,12 @@ pub enum FailureReason {
     Unreachable,
     /// not actionable — retry
     Crashed,
+    /// actionable (the `protocol` key) — the server and the client found no
+    /// common lifecycle: no version in common, an unexpected answer to the
+    /// probe or the handshake, a close during the probe, a failed legacy
+    /// fallback, or a legacy server under the `2026-07-28` pin (P19, DU-25
+    /// (m-b)). ZCode's word for the same failure (its `failureKind`).
+    ProtocolNegotiationFailed,
 }
 
 impl FailureReason {
@@ -232,7 +238,10 @@ impl FailureReason {
     pub fn actionable(&self) -> bool {
         matches!(
             self,
-            Self::NeedsAuthorization | Self::NeedsConfig { .. } | Self::ConfigInvalid
+            Self::NeedsAuthorization
+                | Self::NeedsConfig { .. }
+                | Self::ConfigInvalid
+                | Self::ProtocolNegotiationFailed
         )
     }
 
@@ -244,6 +253,7 @@ impl FailureReason {
             Self::ConfigInvalid => "config_invalid",
             Self::Unreachable => "unreachable",
             Self::Crashed => "crashed",
+            Self::ProtocolNegotiationFailed => "protocol_negotiation_failed",
         }
     }
 }

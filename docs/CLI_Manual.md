@@ -388,11 +388,19 @@ openalpaca ext mcp remove <name>
 Notes:
 - `enable` writes the toggle and then loads; `disable` writes it, drains
   in-flight calls (`[extensions] drain_timeout_secs`, default 10 s) and unloads
-  — the plugin child is killed, the MCP connection dropped, no reconnect.
+  — the plugin child is killed, the MCP connection dropped (a stdio server's
+  whole process group with it), no reconnect.
 - `enable` on a plugin that has not been approved records the bit and leaves it
   `unapproved`: consent pre-empts the switch. `approve` records consent and
   does **not** turn the plugin on; `deny` refuses it and unloads it.
 - `reload` re-applies an edited declaration or a rotated credential.
+- `info` on a connected MCP server also prints `Protocol:` (the MCP version
+  its connection negotiated), `Connected in:` and `Tools listed in:` (how long
+  the connect and the first tool listing took); a connect of about 10 000 ms
+  is a server that ignored the `server/discover` probe, which
+  `protocol = "legacy"` in its `config/mcp.toml` block avoids. A row that
+  failed with reason `protocol_negotiation_failed` names in its detail the
+  `protocol` value to set.
 - `remove` drops the permissions entry of an *orphaned* plugin — one whose
   directory is gone. `list --include-orphaned` is how you see those.
 - `list` rows report `kind`, `id`, `enabled`, `state` (`enabled`, `disabled`,

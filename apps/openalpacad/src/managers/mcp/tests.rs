@@ -56,6 +56,39 @@ struct StubOpts {
     /// Run the background notifier that turns a trigger file into
     /// `notifications/tools/list_changed`.
     notifier: bool,
+    /// Before serving, start a background child (`sleep 3600 &`), a
+    /// grandchild handed to init at once (`( sleep 3600 & )`) and a grandchild
+    /// that leaves the group (`setsid`), record their pids, and leave all three
+    /// running: none polices itself, so only a teardown that reaches the
+    /// server's process group ends the first two, and nothing short of a
+    /// descendant walk ends the third (P19, the walk (i): none). The server
+    /// does **not** lead a group of its own here — the group it is in is the
+    /// one the client's spawn made.
+    forks: bool,
+    /// How the server answers the `server/discover` probe (P19, DU-25 (m)).
+    probe: Probe,
+    /// Answer `initialize` with a JSON-RPC error: with the default probe, the
+    /// legacy fallback fails too (rmcp's `LegacyFallbackFailed`).
+    reject_initialize: bool,
+}
+
+/// How a stub answers the `server/discover` probe.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// A JSON-RPC `-32601 Method not found`, as a server that predates
+    /// `2026-07-28` answers it: rmcp falls back to `initialize` at once.
+    #[default]
+    RejectAsUnknown,
+    /// A `DiscoverResult` supporting `2026-07-28`: a modern server.
+    Answer,
+    /// A `DiscoverResult` supporting only `2099-01-01`, a version the client
+    /// does not know (rmcp's `NoCompatibleProtocolVersion`).
+    AnswerUnsupported,
+    /// A `tools/list` result where the discover result belongs (rmcp's
+    /// `ExpectedInitResult`).
+    AnswerOther,
+    /// Exit on reading the probe, closing the transport under it.
+    Close,
 }
 
 struct Stub {
@@ -70,6 +103,13 @@ struct Stub {
     hang_list: PathBuf,
     /// While this exists, `tools/list` answers a JSON-RPC error.
     break_list: PathBuf,
+    /// The pids `StubOpts::forks` started that stay in the group, two per
+    /// incarnation.
+    descendant_log: PathBuf,
+    /// The pid of each incarnation's `setsid` grandchild.
+    escapee_log: PathBuf,
+    /// Every line each incarnation read, as `<pid> <message>`.
+    sent_log: PathBuf,
 }
 
 impl Stub {
@@ -98,6 +138,56 @@ impl Stub {
 
     fn any_alive(&self) -> bool {
         self.pids().iter().any(|pid| alive(*pid))
+    }
+
+    /// The pids `StubOpts::forks` started in the group, oldest first.
+    fn descendants(&self) -> Vec<i32> {
+        std::fs::read_to_string(&self.descendant_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse::<i32>().ok())
+            .collect()
+    }
+
+    /// The pids of the `setsid` grandchildren, oldest first.
+    fn escapees(&self) -> Vec<i32> {
+        std::fs::read_to_string(&self.escapee_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse::<i32>().ok())
+            .collect()
+    }
+
+    /// Every message an incarnation read, in order, with the pid it ran as.
+    fn sent(&self) -> Vec<(i32, serde_json::Value)> {
+        std::fs::read_to_string(&self.sent_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let (pid, message) = l.split_once(' ')?;
+                Some((pid.parse().ok()?, serde_json::from_str(message).ok()?))
+            })
+            .collect()
+    }
+
+    /// The messages the `n`th incarnation (0-based, in spawn order) read.
+    fn sent_by(&self, n: usize) -> Vec<serde_json::Value> {
+        let Some(pid) = self.pids().get(n).copied() else {
+            return Vec::new();
+        };
+        self.sent()
+            .into_iter()
+            .filter(|(p, _)| *p == pid)
+            .map(|(_, message)| message)
+            .collect()
+    }
+
+    /// The methods the `n`th incarnation read, in order.
+    fn methods_of(&self, n: usize) -> Vec<String> {
+        self.sent_by(n)
+            .iter()
+            .filter_map(|m| m["method"].as_str().map(str::to_string))
+            .collect()
     }
 
     /// Replace the tool set the next `tools/list` will answer with.
@@ -185,8 +275,11 @@ fn tools_json(names: &[&str]) -> String {
     format!("[{}]", entries.join(","))
 }
 
-/// Write a stdio MCP server: a `sh` loop that answers `initialize`,
-/// `tools/list`, `tools/call` and `ping`, and records every spawn.
+/// Write a stdio MCP server: a `sh` loop that rejects the `server/discover`
+/// probe as an unknown method, as a server that predates `2026-07-28` does —
+/// so the client falls back to `initialize` at once rather than after rmcp's
+/// 10 s discover timeout — answers `initialize`, `tools/list`, `tools/call` and
+/// `ping`, and records every spawn.
 fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     use std::os::unix::fs::PermissionsExt;
 
@@ -197,6 +290,9 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     let notify = dir.join(format!("{tag}-notify"));
     let hang_list = dir.join(format!("{tag}-hang-list"));
     let break_list = dir.join(format!("{tag}-break-list"));
+    let descendant_log = dir.join(format!("{tag}-descendants.log"));
+    let escapee_log = dir.join(format!("{tag}-escapees.log"));
+    let sent_log = dir.join(format!("{tag}-sent.log"));
 
     std::fs::write(&pid_log, "").expect("create pid log");
     std::fs::write(&tools_file, tools_json(&["echo"])).expect("create tools file");
@@ -240,26 +336,80 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
         String::new()
     };
 
-    let body = format!(
-        r#"#!/bin/sh
-# Lead a process group of its own: the supervisor's spawn gives the server
-# none, and only a group reaches what the shell starts once the shell is
-# killed. Both execs keep the pid, so `$$` below is also the group's id.
-if [ "$1" != --grouped ]; then
+    let forks = if opts.forks {
+        format!(
+            r#"sleep 3600 &
+echo "$!" >> '{log}'
+( sleep 3600 & echo "$!" >> '{log}' )
+perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!\n"; exec "sleep", "3600" or die "exec: $!\n"' &
+echo "$!" >> '{escapees}'
+"#,
+            log = descendant_log.display(),
+            escapees = escapee_log.display(),
+        )
+    } else {
+        String::new()
+    };
+    // Every other stub leads a process group of its own, so its teardown
+    // (`impl Drop for Stub`) reaches what the shell starts whatever the client
+    // did; the forking fixture does not, so the group its descendants share is
+    // the one the client's spawn made (`transport/stdio.rs`).
+    let grouped = if opts.forks {
+        ""
+    } else {
+        r#"if [ "$1" != --grouped ]; then
   exec perl -e 'setpgrp(0, 0) or die "setpgrp: $!\n"; exec @ARGV or die "exec: $!\n"' -- /bin/sh "$0" --grouped
 fi
-echo "$$" >> '{pid_log}'
+"#
+    };
+
+    // The discover result a modern server answers with, as rmcp 3.5.1
+    // serializes `DiscoverResult::new(..).with_server_info(..)`.
+    let discover_result = |versions: &str| {
+        format!(
+            r#"{{"resultType":"complete","supportedVersions":[{versions}],"capabilities":{{"tools":{{"listChanged":true}}}},"ttlMs":0,"cacheScope":"private","_meta":{{"io.modelcontextprotocol/serverInfo":{{"name":"stub","version":"0.0.1"}}}}}}"#
+        )
+    };
+    let discover = match opts.probe {
+        Probe::RejectAsUnknown => r#"printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"Method not found"}}\n' "$id""#.to_string(),
+        Probe::Answer => format!(
+            r#"printf '{{"jsonrpc":"2.0","id":%s,"result":%s}}\n' "$id" '{}'"#,
+            discover_result(r#""2026-07-28""#)
+        ),
+        Probe::AnswerUnsupported => format!(
+            r#"printf '{{"jsonrpc":"2.0","id":%s,"result":%s}}\n' "$id" '{}'"#,
+            discover_result(r#""2099-01-01""#)
+        ),
+        Probe::AnswerOther => r#"printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id""#.to_string(),
+        Probe::Close => "exit 0".to_string(),
+    };
+    let initialize = if opts.reject_initialize {
+        r#"printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32600,"message":"stub refuses initialize"}}\n' "$id""#.to_string()
+    } else {
+        r#"pv=`printf '%s' "$line" | sed -n 's/.*"protocolVersion":"\([^"]*\)".*/\1/p'`
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"%s","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"stub","version":"0.0.1"}}}\n' "$id" "$pv""#.to_string()
+    };
+
+    let body = format!(
+        r#"#!/bin/sh
+# Lead a process group of its own (unless forking): only a group reaches what
+# the shell starts once the shell is killed. Both execs keep the pid, so `$$`
+# below is also the group's id.
+{grouped}echo "$$" >> '{pid_log}'
 hang() {{
   sleep {HANG_SECS} &
   echo "$!" >> '{sleep_log}'
   wait "$!"
 }}
-{slow_start}{notifier}while IFS= read -r line; do
+{slow_start}{notifier}{forks}while IFS= read -r line; do
+  printf '%s %s\n' "$$" "$line" >> '{sent_log}'
   id=`printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'`
   case "$line" in
+    *'"method":"server/discover"'*)
+      {discover}
+      ;;
     *'"method":"initialize"'*)
-      pv=`printf '%s' "$line" | sed -n 's/.*"protocolVersion":"\([^"]*\)".*/\1/p'`
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"%s","capabilities":{{"tools":{{"listChanged":true}}}},"serverInfo":{{"name":"stub","version":"0.0.1"}}}}}}\n' "$id" "$pv"
+      {initialize}
       ;;
     *'"method":"tools/list"'*)
       if [ -f '{hang_list}' ]; then hang; fi
@@ -284,6 +434,7 @@ done
         tools_file = tools_file.display(),
         hang_list = hang_list.display(),
         break_list = break_list.display(),
+        sent_log = sent_log.display(),
     );
 
     std::fs::write(&script, body).expect("write stub server");
@@ -298,6 +449,9 @@ done
         notify,
         hang_list,
         break_list,
+        descendant_log,
+        escapee_log,
+        sent_log,
     }
 }
 
@@ -598,6 +752,127 @@ async fn a_disable_kills_the_child_refuses_both_arms_and_a_re_enable_restores_cl
         .await
         .expect("the new load serves");
     assert_eq!(served, "ok");
+
+    h.supervisor.shutdown_all().await;
+}
+
+// ============================================================================
+// Disabled means the child is gone, descendants included (ADR-030)
+// ============================================================================
+
+/// Kills every pid it is given when dropped, so a failed assertion leaves no
+/// `sleep 3600` behind.
+struct KillOnDrop(Vec<i32>);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            // SAFETY: a plain SIGKILL to a pid this test started.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+}
+
+/// `ps -o pid,ppid,pgid,command` for `pids`, for the log.
+fn ps_tree(pids: &[i32]) -> String {
+    let list = pids
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let out = std::process::Command::new("ps")
+        .args(["-o", "pid,ppid,pgid,command", "-p", &list])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// **The forking server through the disable / re-enable path.** A stdio
+/// server that leaves a background child and a grandchild running — neither
+/// policing itself — loses both when it is disabled, and again after a
+/// re-enable and a second disable: the server leads its own process group and
+/// the group ends with the connection. The trees are printed before and after
+/// each disable for the gate's log (`--nocapture`).
+///
+/// A third descendant calls `setsid` and so leaves the group: no group signal
+/// reaches it, and the taken descendant walk is (i), none — so it survives,
+/// and the check names it in a warning (one of R45's recorded edges) while a
+/// guard kills it. Every pid that stayed in the group must be gone.
+///
+/// The stub exits on the EOF of its stdin, so this is rmcp's graceful close,
+/// in which it signals nothing; without `EndGroupWithLeader` the leader goes
+/// and both descendants survive it.
+#[tokio::test]
+async fn a_disable_ends_every_process_the_server_started_again_after_a_re_enable() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "forks",
+        StubOpts {
+            forks: true,
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    for round in 1..=2usize {
+        let recorded = || stub.descendants().len() == 2 * round;
+        assert!(
+            eventually(Duration::from_secs(5), recorded).await,
+            "round {round}: the server records its two descendants"
+        );
+        let leader = stub.pids()[round - 1];
+        let descendants = stub.descendants()[2 * (round - 1)..].to_vec();
+        let mut tree = descendants.clone();
+        tree.insert(0, leader);
+        let _reap = KillOnDrop(tree.clone());
+        let recorded_escapee = || stub.escapees().len() == round;
+        assert!(
+            eventually(Duration::from_secs(5), recorded_escapee).await,
+            "round {round}: the server records its setsid grandchild"
+        );
+        let escapee = stub.escapees()[round - 1];
+        let _escapee = KillOnDrop(vec![escapee]);
+
+        eprintln!("round {round}, before the disable:\n{}", ps_tree(&tree));
+        for pid in &tree {
+            assert!(alive(*pid), "round {round}: {pid} runs before the disable");
+            // SAFETY: `getpgid` only reads the process table.
+            let pgid = unsafe { libc::getpgid(*pid) };
+            assert_eq!(
+                pgid, leader,
+                "round {round}: {pid} is in the server's own group"
+            );
+        }
+
+        h.supervisor.disable(&mcp("srv")).await.expect("disable");
+        assert_eq!(h.state("srv"), Some(ExtensionState::Disabled));
+        let gone = eventually(Duration::from_secs(5), || tree.iter().all(|p| !alive(*p))).await;
+        eprintln!("round {round}, after the disable:\n{}", ps_tree(&tree));
+        assert!(
+            gone,
+            "round {round}: no process of the server's tree survives the disable"
+        );
+        if alive(escapee) {
+            eprintln!(
+                "warning: round {round}: pid {escapee} left the server's process group (setsid) \
+                 and survives the disable; no descendant walk is taken (P19, (i)):\n{}",
+                ps_tree(&[escapee])
+            );
+        }
+
+        if round == 1 {
+            h.supervisor.enable(&mcp("srv")).await.expect("enable");
+            assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+            assert_eq!(
+                stub.spawn_count(),
+                2,
+                "the re-enable starts exactly one new server"
+            );
+        }
+    }
 
     h.supervisor.shutdown_all().await;
 }
@@ -3373,6 +3648,349 @@ enabled = true
     assert_eq!(
         first_seen.lock().unwrap().len(),
         1,
-        "one initialize, never retried"
+        "one request (the `server/discover` probe), never retried"
     );
+}
+
+// ============================================================================
+// P19 — the lifecycle key, the negotiation failure, the era pin, the row
+// (DU-25 (m) (b))
+// ============================================================================
+
+/// `protocol` in the server block, the harness's defaults around it, and a
+/// connect timeout of `connect_secs`.
+fn lifecycle_declaration(stub: &Stub, protocol: Option<&str>, connect_secs: u64) -> String {
+    let protocol = protocol.map_or(String::new(), |p| format!("protocol = \"{p}\"\n"));
+    format!(
+        r#"[defaults]
+connect_timeout_secs = {connect_secs}
+request_timeout_secs = 3
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.srv]
+transport = "stdio"
+command = "{command}"
+{protocol}"#,
+        command = stub.script.display(),
+    )
+}
+
+/// The `initialize` an incarnation read, if it read one.
+fn initialize_of(stub: &Stub, n: usize) -> Option<serde_json::Value> {
+    stub.sent_by(n)
+        .into_iter()
+        .find(|m| m["method"] == "initialize")
+}
+
+/// The row `GET /v1/extensions` serves for `srv`.
+async fn srv_row(h: &Harness) -> serde_json::Value {
+    let record = h
+        .supervisor
+        .list()
+        .await
+        .into_iter()
+        .find(|r| r.id.name == "srv")
+        .expect("the srv row");
+    crate::routes::extensions::row_json(&record)
+}
+
+/// `protocol = "legacy"` (m-a): a modern server is sent the `initialize`
+/// handshake at `2025-11-25`, and never the probe.
+#[tokio::test]
+async fn protocol_legacy_sends_a_modern_server_initialize_at_2025_11_25_and_never_the_probe() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "pin-legacy",
+        StubOpts {
+            probe: Probe::Answer,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&lifecycle_declaration(&stub, Some("legacy"), 10));
+
+    h.supervisor.reconcile_all().await;
+
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let methods = stub.methods_of(0);
+    assert_eq!(
+        methods.first().map(String::as_str),
+        Some("initialize"),
+        "the legacy pin opens with initialize; the server saw {methods:?}"
+    );
+    assert!(
+        !methods.iter().any(|m| m == "server/discover"),
+        "the legacy pin never probes; the server saw {methods:?}"
+    );
+    let initialize = initialize_of(&stub, 0).expect("one initialize");
+    assert_eq!(initialize["params"]["protocolVersion"], "2025-11-25");
+}
+
+/// `protocol = "2026-07-28"` (m-a, the pin never downgrading): a legacy server
+/// fails with the new word, not `unreachable`, and is never sent `initialize`.
+#[tokio::test]
+async fn protocol_2026_07_28_fails_a_legacy_server_with_protocol_negotiation_failed() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "pin-modern", StubOpts::default());
+    h.write_config(&lifecycle_declaration(&stub, Some("2026-07-28"), 10));
+
+    h.supervisor.reconcile_all().await;
+
+    let row = srv_row(&h).await;
+    assert_eq!(row["state"], "failed", "row: {row}");
+    assert_eq!(row["reason"], "protocol_negotiation_failed", "row: {row}");
+    assert_eq!(row["actionable"], true, "the owner can act on it: {row}");
+    let detail = row["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(r#"protocol = "legacy""#),
+        "the detail names the fix: {detail}"
+    );
+    let methods = stub.methods_of(0);
+    assert!(
+        !methods.iter().any(|m| m == "initialize"),
+        "the 2026-07-28 pin never falls back; the server saw {methods:?}"
+    );
+}
+
+/// Bring a stub answering as `opts` says up under `auto`, and return its row.
+async fn negotiation_row(tag: &str, opts: StubOpts) -> serde_json::Value {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), tag, opts);
+    h.write_config(&lifecycle_declaration(&stub, None, 10));
+    h.supervisor.reconcile_all().await;
+    srv_row(&h).await
+}
+
+/// The new word, actionable, its detail naming `protocol = "legacy"` (m-b).
+fn assert_negotiation_failure(row: &serde_json::Value) {
+    assert_eq!(row["state"], "failed", "row: {row}");
+    assert_eq!(row["reason"], "protocol_negotiation_failed", "row: {row}");
+    assert_eq!(row["actionable"], true, "row: {row}");
+    let detail = row["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(r#"protocol = "legacy""#),
+        "the detail names the fix: {detail}"
+    );
+}
+
+/// rmcp's `NoCompatibleProtocolVersion`: the server supports no version the
+/// client offers.
+#[tokio::test]
+async fn no_compatible_protocol_version_reads_protocol_negotiation_failed() {
+    let row = negotiation_row(
+        "no-compatible",
+        StubOpts {
+            probe: Probe::AnswerUnsupported,
+            ..StubOpts::default()
+        },
+    )
+    .await;
+    assert_negotiation_failure(&row);
+}
+
+/// rmcp's `ExpectedInitResult`: the probe is answered with a result of
+/// another kind.
+#[tokio::test]
+async fn expected_init_result_reads_protocol_negotiation_failed() {
+    let row = negotiation_row(
+        "expected-init",
+        StubOpts {
+            probe: Probe::AnswerOther,
+            ..StubOpts::default()
+        },
+    )
+    .await;
+    assert_negotiation_failure(&row);
+}
+
+/// rmcp's `LegacyFallbackFailed`: the probe finds the server legacy and the
+/// `initialize` that follows fails.
+#[tokio::test]
+async fn legacy_fallback_failed_reads_protocol_negotiation_failed() {
+    let row = negotiation_row(
+        "fallback-failed",
+        StubOpts {
+            reject_initialize: true,
+            ..StubOpts::default()
+        },
+    )
+    .await;
+    assert_negotiation_failure(&row);
+}
+
+/// A transport that closes while the probe waits for its answer.
+#[tokio::test]
+async fn a_close_during_the_probe_reads_protocol_negotiation_failed() {
+    let row = negotiation_row(
+        "probe-close",
+        StubOpts {
+            probe: Probe::Close,
+            ..StubOpts::default()
+        },
+    )
+    .await;
+    assert_negotiation_failure(&row);
+}
+
+/// The era pin (m-c): a legacy server whose child is killed mid-session is
+/// respawned straight into `initialize`, the era its load negotiated — the
+/// pre-send reconnect does not probe it again (N-MCP-1's one reconnect).
+#[tokio::test]
+async fn a_server_killed_mid_session_is_respawned_into_the_era_its_load_negotiated() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "era-pin", StubOpts::default());
+    h.write_config(&lifecycle_declaration(&stub, None, 10));
+
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let load = stub.methods_of(0);
+    assert_eq!(
+        load.iter().take(2).map(String::as_str).collect::<Vec<_>>(),
+        ["server/discover", "initialize"],
+        "the load probed, found the server legacy and fell back"
+    );
+
+    let client = h.client_of("srv__echo").expect("the entry holds a client");
+    stub.kill_child();
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client must see the child's exit"
+    );
+    let ok = h
+        .registry
+        .execute("srv__echo", &serde_json::json!({}))
+        .await
+        .expect("the pre-send reconnect respawns the child");
+    assert_eq!(ok, "ok");
+    assert_eq!(stub.spawn_count(), 2, "one respawn");
+
+    let respawn = stub.methods_of(1);
+    assert_eq!(
+        respawn.first().map(String::as_str),
+        Some("initialize"),
+        "the respawn opens in the load's era; the server saw {respawn:?}"
+    );
+    assert!(
+        !respawn.iter().any(|m| m == "server/discover"),
+        "the respawn is not probed again; the server saw {respawn:?}"
+    );
+    let initialize = initialize_of(&stub, 1).expect("the respawn's initialize");
+    assert_eq!(initialize["params"]["protocolVersion"], "2025-11-25");
+}
+
+/// Everything this thread logs at WARN and above, for a test that asserts a
+/// warning: `#[tokio::test]` runs every task on the test's own thread, so a
+/// thread-local subscriber sees the supervisor's.
+///
+/// Install it only once the harness holds the home-store lock. While it is
+/// the one scoped dispatcher, tracing computes the interest of a callsite
+/// first hit afterwards from the hitting thread's default
+/// (tracing-core-0.1.36 `src/callsite.rs`, `Rebuilder::JustOne`), so another
+/// test's load, running on its own thread with no subscriber, would cache the
+/// warning's callsite as never interesting; under the lock no other test
+/// here reaches `load`, and installing it recomputes every callsite already
+/// hit from the dispatcher list, which holds it.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl LogBuf {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+    }
+}
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBuf;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Run `connect_secs` under `auto` against a modern stub and return the row
+/// and what was logged.
+async fn connect_under_auto(tag: &str, connect_secs: u64) -> (serde_json::Value, String) {
+    let h = Harness::new(1);
+    let logs = LogBuf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+
+    let stub = stub_server(
+        h.path(),
+        tag,
+        StubOpts {
+            probe: Probe::Answer,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&lifecycle_declaration(&stub, None, connect_secs));
+    h.supervisor.reconcile_all().await;
+    (srv_row(&h).await, logs.text())
+}
+
+/// (m-d): a connect timeout of 10 s or less under `auto` is warned about —
+/// never refused — and a modern server still connects; 11 s is not warned.
+#[tokio::test]
+async fn a_ten_second_connect_timeout_under_auto_warns_and_still_connects_a_modern_server() {
+    let (row, logs) = connect_under_auto("warn-ten", 10).await;
+    assert!(
+        logs.contains("connect_timeout_secs is 10 or less under protocol = \"auto\""),
+        "the warning is logged: {logs}"
+    );
+    assert_eq!(row["state"], "enabled", "a warning, never a refusal: {row}");
+    assert_eq!(row["protocol_version"], "2026-07-28", "row: {row}");
+
+    let (row, logs) = connect_under_auto("warn-eleven", 11).await;
+    assert_eq!(row["state"], "enabled", "row: {row}");
+    assert!(
+        !logs.contains("connect_timeout_secs is 10 or less"),
+        "11 s is not warned about: {logs}"
+    );
+}
+
+/// (m-g): the row carries the negotiated version and how long the connect and
+/// the first `tools/list` took, while the server is enabled — and `null` once
+/// it is not.
+#[tokio::test]
+async fn the_row_shows_the_negotiated_version_and_the_connect_and_list_durations() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "row-fields", StubOpts::default());
+    h.write_config(&lifecycle_declaration(&stub, None, 10));
+
+    h.supervisor.reconcile_all().await;
+
+    let row = srv_row(&h).await;
+    assert_eq!(row["state"], "enabled", "row: {row}");
+    assert_eq!(row["protocol_version"], "2025-11-25", "row: {row}");
+    assert!(
+        row["connect_ms"].is_u64(),
+        "connect_ms is a duration: {row}"
+    );
+    assert!(row["list_ms"].is_u64(), "list_ms is a duration: {row}");
+
+    h.supervisor.disable(&mcp("srv")).await.expect("disable");
+    let row = srv_row(&h).await;
+    assert_eq!(row["state"], "disabled", "row: {row}");
+    for field in ["protocol_version", "connect_ms", "list_ms"] {
+        assert!(
+            row.get(field).is_some_and(serde_json::Value::is_null),
+            "{field} is null when no connection is live: {row}"
+        );
+    }
 }

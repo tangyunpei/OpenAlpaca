@@ -31,8 +31,10 @@ use crate::test_util::HomeStoreGuard;
 // Harness
 // ============================================================================
 
-/// A minimal stdio MCP server: `initialize`, `tools/list`, `ping`. Enough to
-/// reach `Enabled`; everything richer is C2's stub, in `managers/mcp/tests.rs`.
+/// A minimal stdio MCP server: `initialize`, `tools/list`, `ping`, and the
+/// `server/discover` probe rejected as an unknown method, as a legacy server
+/// does, so the handshake falls back at once. Enough to reach `Enabled`;
+/// everything richer is C2's stub, in `managers/mcp/tests.rs`.
 ///
 /// `slow_start_secs` holds the handshake open, which is how the R18 test gets a
 /// verb that is still running when its request is dropped.
@@ -50,6 +52,9 @@ fn stub_server(dir: &Path, tag: &str, slow_start_secs: u64) -> std::path::PathBu
 {slow}while IFS= read -r line; do
   id=`printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'`
   case "$line" in
+    *'"method":"server/discover"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32601,"message":"Method not found"}}}}\n' "$id"
+      ;;
     *'"method":"initialize"'*)
       pv=`printf '%s' "$line" | sed -n 's/.*"protocolVersion":"\([^"]*\)".*/\1/p'`
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"%s","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"stub","version":"9.9.9"}}}}}}\n' "$id" "$pv"

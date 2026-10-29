@@ -185,6 +185,11 @@ pub(crate) fn row_json(record: &ExtensionRecord) -> serde_json::Value {
         "id": record.id.name,
         "version": record.version,
         "transport": record.transport,
+        // MCP only, while a connection is live: the negotiated protocol
+        // version and the connect and first-list durations (DU-25 (m-g)).
+        "protocol_version": record.protocol_version,
+        "connect_ms": record.connect_ms,
+        "list_ms": record.list_ms,
         // PERSISTED DISPOSITION — `null` on the two rows whose bit nobody can
         // read (design §4, §8).
         "enabled": record.disposition_readable.then_some(record.disposition.0),

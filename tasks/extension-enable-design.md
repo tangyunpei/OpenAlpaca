@@ -1,6 +1,6 @@
 # Extension Enable — the two-axis design (N5)
 
-**Status:** design of record, **rev 21 — implemented: C1–C8 landed; rev 21 records N-MCP-3 as built: a call, a list and a ping run on a `Peer` cloned out of the service lock, so §3.2 T4 and §8's disable no longer wait for an MCP call in flight, only for the close** (see the revision log). **Rev 20 records N-MCP-1's client half as built: §3.6 item 1 and §10 case 7(d) now say a call reconnects once before it is sent, never after, under one deadline, and that only a successful call resets the attempt count; Q8's ledger half stays not built, now N-MCP-1b, right after P19** (see the revision log). **Rev 19 records the owner's answer of 2026-10-19 (PDT; 2026-10-20T00:26Z) on the one question rev 18 left pending, Q8's ledger sub-choice: taken as a third option, the ledger learning `Failed` at a stdio child's exit — not built; N-MCP-1's amended entry carries it** (see the revision log). **Rev 18 records the owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z): §13 Q5–Q14 taken as their recommendations (Q8's ledger sub-choice left pending, no recommendation; Q13 with nothing to build), Q4's default confirmed by the audit's B-06, the audit's B-05, B-17 and B-26 taken where they amend this design, and the lessons' T2, T5 and T6(b) recorded taken as this design applied them — none is built, and the design text each one would change stays what ships until a commit builds it** (see the revision log). Rev 17 brings §9.2's denied row up to the copy that ships. Rev 16: **implemented: C1–C8 landed** (`e92d76e..eff30cb` on `feat/ui-rework`; C8 is the `global_tool_deny` purge + the documentation sweep). Rev 16 changes no mechanism: it records the corrections and residue observed while building C1–C8 (see the revision log) and leaves §13 Q5–Q14 pending and unapplied. Rev 15 was the verified design implemented from: **rev 15 — verified.** Directive fidelity (S1–S4), source claims and plan/KB consistency passed on earlier revisions; the consistency lens confirmed every remaining check on rev 13 and its two follow-ups found only step-order wording, the last a single word in E-PRE's closing sentence (rev 14 → 15), fixed and grep-verified — no live sentence pairs E-PRE with "then E0". Implement from this revision. (rev 14: one residual — five sites still read "E-PRE, then E0"; all now say E0 CAS → E-PRE → E1–E5. Every other check confirmed: §3.3.1 derived cell by cell, the four crash races under the table, E-FAIL, C1, §3.7, one predicate, §12, §13, ~60 anchors; round-11 — the §3.3.1 table is regenerated row by row from §4.1 and the prose, E-PRE runs after E0's CAS so a redundant `enable` can never tear down a live handle; round-10 — handle ownership is now a derived state × verb table, §3.3.1, and every exit from a pre-reaper `Failed{Crashed}` tears the residue down; round-9 — a Retry that beats the crash reaper now tears down load N before building load N+1 (E-PRE); round-8 — a bring-up failure after a successful connect/spawn now tears down the just-built handle before `Failed` is committed; round-6: three internal-consistency blockers on rev 7 repaired — §6.2 #8 deny is write-first like every other statement of W-deny; §3.7 step 4 diffs against the live subset so a server-re-added tool is reachable; one skill-refusal predicate, `CapabilityOracle::is_satisfiable`, at every consumer), accepted mechanism. **Residue for the next pass:** none blocking in this file; the owner-gated items are enumerated in §13 (Q5–Q14) and are **not applied anywhere** in this document — §13's arrows are recommendations, and silence enacts none of them. **Cross-file follow-ups still owed (not this file):** the cost-lockout fix now has its slot (api-fix-plan Phase 0 **A5** with its *Verify* clause) and the roadmap's Known-broken row reads confirmed + scheduled (both 2026-09-02); plan Phase 0 **A1** now orders deny write-first, matching §6.2 #8; the GUI `GapId` union (`unavailable.ts:37`/`:233` still read `GAP-19`, C7 work); and the small plan/KB wording items listed in the rev-7 log entry. The plan-side N5/Phase 8/ADR-030 items rev 6 listed as owed **landed** with plan rev 3 and ADR-030 (`94a8f42`). Supersedes ADR-029 (flat per-tool disable list) entirely.
+**Status:** design of record, **rev 22 — implemented: C1–C8 landed; rev 22 records P19's DU-25 (m) (b) as built: a per-server `protocol` key, a sixth `FailureReason`, `ProtocolNegotiationFailed` (actionable; §4, §4.2, §9.2), a respawn reopened in the era its load negotiated (§3.6 item 1), and three MCP row fields, `protocol_version`, `connect_ms` and `list_ms` (§8)** (see the revision log). **Rev 21 records N-MCP-3 as built: a call, a list and a ping run on a `Peer` cloned out of the service lock, so §3.2 T4 and §8's disable no longer wait for an MCP call in flight, only for the close** (see the revision log). **Rev 20 records N-MCP-1's client half as built: §3.6 item 1 and §10 case 7(d) now say a call reconnects once before it is sent, never after, under one deadline, and that only a successful call resets the attempt count; Q8's ledger half stays not built, now N-MCP-1b, right after P19** (see the revision log). **Rev 19 records the owner's answer of 2026-10-19 (PDT; 2026-10-20T00:26Z) on the one question rev 18 left pending, Q8's ledger sub-choice: taken as a third option, the ledger learning `Failed` at a stdio child's exit — not built; N-MCP-1's amended entry carries it** (see the revision log). **Rev 18 records the owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z): §13 Q5–Q14 taken as their recommendations (Q8's ledger sub-choice left pending, no recommendation; Q13 with nothing to build), Q4's default confirmed by the audit's B-06, the audit's B-05, B-17 and B-26 taken where they amend this design, and the lessons' T2, T5 and T6(b) recorded taken as this design applied them — none is built, and the design text each one would change stays what ships until a commit builds it** (see the revision log). Rev 17 brings §9.2's denied row up to the copy that ships. Rev 16: **implemented: C1–C8 landed** (`e92d76e..eff30cb` on `feat/ui-rework`; C8 is the `global_tool_deny` purge + the documentation sweep). Rev 16 changes no mechanism: it records the corrections and residue observed while building C1–C8 (see the revision log) and leaves §13 Q5–Q14 pending and unapplied. Rev 15 was the verified design implemented from: **rev 15 — verified.** Directive fidelity (S1–S4), source claims and plan/KB consistency passed on earlier revisions; the consistency lens confirmed every remaining check on rev 13 and its two follow-ups found only step-order wording, the last a single word in E-PRE's closing sentence (rev 14 → 15), fixed and grep-verified — no live sentence pairs E-PRE with "then E0". Implement from this revision. (rev 14: one residual — five sites still read "E-PRE, then E0"; all now say E0 CAS → E-PRE → E1–E5. Every other check confirmed: §3.3.1 derived cell by cell, the four crash races under the table, E-FAIL, C1, §3.7, one predicate, §12, §13, ~60 anchors; round-11 — the §3.3.1 table is regenerated row by row from §4.1 and the prose, E-PRE runs after E0's CAS so a redundant `enable` can never tear down a live handle; round-10 — handle ownership is now a derived state × verb table, §3.3.1, and every exit from a pre-reaper `Failed{Crashed}` tears the residue down; round-9 — a Retry that beats the crash reaper now tears down load N before building load N+1 (E-PRE); round-8 — a bring-up failure after a successful connect/spawn now tears down the just-built handle before `Failed` is committed; round-6: three internal-consistency blockers on rev 7 repaired — §6.2 #8 deny is write-first like every other statement of W-deny; §3.7 step 4 diffs against the live subset so a server-re-added tool is reachable; one skill-refusal predicate, `CapabilityOracle::is_satisfiable`, at every consumer), accepted mechanism. **Residue for the next pass:** none blocking in this file; the owner-gated items are enumerated in §13 (Q5–Q14) and are **not applied anywhere** in this document — §13's arrows are recommendations, and silence enacts none of them. **Cross-file follow-ups still owed (not this file):** the cost-lockout fix now has its slot (api-fix-plan Phase 0 **A5** with its *Verify* clause) and the roadmap's Known-broken row reads confirmed + scheduled (both 2026-09-02); plan Phase 0 **A1** now orders deny write-first, matching §6.2 #8; the GUI `GapId` union (`unavailable.ts:37`/`:233` still read `GAP-19`, C7 work); and the small plan/KB wording items listed in the rev-7 log entry. The plan-side N5/Phase 8/ADR-030 items rev 6 listed as owed **landed** with plan rev 3 and ADR-030 (`94a8f42`). Supersedes ADR-029 (flat per-tool disable list) entirely.
 **Rev 8 in one line:** three rev-7 self-contradictions closed, nothing else moved — §6.2 #8 now reads as
 §3.2 W-deny / §4.1 / C3 / ADR-030 (a) already did (write the denial, then T0–T4, `Unapproved{Denied}` at T5);
 §3.7 step 4 diffs the fetched list against `retained \ server_withdrawn` so a name the server drops and later
@@ -1091,7 +1091,10 @@ already in hand, plus a non-blocking `try_wait` sweep on read — no poller.**
 
    *What `reconnect` really does for a stdio server, so nobody expects more.* Each `reconnect()` entry
    increments `attempt_counter`, drops the old service, sleeps one backoff and runs **one** `do_handshake()`
-   — which for a stdio transport **spawns the child again**. `call_tool` enters it only before a send (N-MCP-1,
+   — which for a stdio transport **spawns the child again**, in the era the load negotiated (rev 22, P19,
+   DU-25 (m-c): `initialize` for a legacy server, `server/discover` pinned to the negotiated version for a
+   modern one — a respawn neither probes a legacy server again nor lets a modern one fall back; a reload
+   negotiates afresh). `call_tool` enters it only before a send (N-MCP-1,
    rev 20): when the pre-send check finds the service absent or its transport closed, the call reconnects once —
    serialised by `ClientInner::reconnect_lock`, so two calls that find one dead child respawn it once — and one
    deadline, the call's `request_timeout`, spans that reconnect and the call. Once the request may have left it
@@ -1408,12 +1411,17 @@ pub enum FailureReason {
     ConfigInvalid,                         // actionable (bad declaration)
     Unreachable,                           // not actionable — retry
     Crashed,                               // not actionable — retry
+    ProtocolNegotiationFailed,             // actionable (the `protocol` key) — rev 22, P19, DU-25 (m-b)
 }
 
 impl FailureReason {
     /// Drives the GUI's tag tone and CTA. The owner's own distinction, made first-class.
     pub fn actionable(&self) -> bool {
-        matches!(self, Self::NeedsAuthorization | Self::NeedsConfig { .. } | Self::ConfigInvalid)
+        matches!(
+            self,
+            Self::NeedsAuthorization | Self::NeedsConfig { .. } | Self::ConfigInvalid
+                | Self::ProtocolNegotiationFailed
+        )
     }
 }
 ```
@@ -1509,8 +1517,8 @@ live hole in the approval gate; routing `deny` through the same teardown as `dis
 **Decision: `FailureReason::NeedsAuthorization` inside `Failed`, with a derived `actionable: bool` on the API
 row.** The owner grouped it with the crash family; that grouping is right about the *lifecycle* and needs to be
 refined only about the *affordance*. (S3's literal *Crashed* — the plan's N5 row keeps the owner's wording,
-ADR-030 says *Failed with a reason* — is realised as `Failed{Crashed}`, one `FailureReason` among five; nobody
-should look for a state named `Crashed`.)
+ADR-030 says *Failed with a reason* — is realised as `Failed{Crashed}`, one `FailureReason` among five — six
+since rev 22; nobody should look for a state named `Crashed`.)
 
 **Why inside `Failed`:** it occupies the identical lifecycle position as any other bring-up failure — disposition
 is on, nothing is running, nothing is registered, and every edge into and out of it is the same. Promoting it
@@ -1543,9 +1551,30 @@ extensible one — it already exists as `PluginStatus::NeedsConfig` (`manager.rs
   response error before it reaches this crate (`openalpaca_mcp/src/error.rs::unauthorized_status`). A bare 401
   without the header therefore classifies `Unreachable`, and stdio can never classify here at all. No string
   matching was added to widen this — the design prefers a missed CTA to a guessed one.
+- **MCP lifecycle negotiation (rev 22, P19, DU-25 (m) (b)).** A connection opens with the lifecycle its block's
+  `protocol` key names (`"auto"`, the default: rmcp's `Auto`, `server/discover` at `2026-07-28` and the legacy
+  `initialize` at `2025-11-25` for a server the probe finds legacy; `"legacy"`: `initialize` only; `"2026-07-28"`: the
+  probe only, never downgraded). A bring-up that cannot agree a lifecycle is `Failed{ProtocolNegotiationFailed}`,
+  **actionable** — the owner sets `protocol` — where it read `Unreachable` before: rmcp's
+  `NoCompatibleProtocolVersion`, `ExpectedInitResult` and `LegacyFallbackFailed`, a transport that closes while the
+  probe waits for its answer, and, under `"2026-07-28"`, a probe a JSON-RPC error refuses — but for a `2026-07-28`
+  server's own two refusals (`MISSING_REQUIRED_CLIENT_CAPABILITY`, `HEADER_MISMATCH`), which rmcp returns raw in every
+  lifecycle and which stay `Unreachable`, as under `"auto"`. The mapping is `openalpaca_mcp`'s `handshake_error` →
+  `McpError::ProtocolNegotiationFailed`, whose text names `protocol = "legacy"`. A typed HTTP failure inside the
+  fallback still wins (`NeedsAuthorization`, `ConfigInvalid`). The one string match: rmcp types no phase on
+  `ConnectionClosed`, so "during the probe" is its text `"discover response"`, pinned by a daemon test. The close is
+  any close: a stdio server that exits while the probe waits — a crash at start, a package `npx` cannot find — reads
+  `ProtocolNegotiationFailed`, with no Retry, though its `protocol` is not at fault, and one already gone when the
+  probe is written fails the send and reads `Unreachable` (a race); the daemon's `Probe::Close` stub cannot be told
+  from such a crash. The plan maps every close during the probe; presented to the owner as reversible — accept it, or
+  narrow the close case (to HTTP, or to a stdio child still running when the close is read). The word is ZCode's
+  (`protocol_negotiation_failed`, ZCode:docs/mcp-dual-era-version-negotiation.md:99-103). A server that ignores the
+  probe and is cut by a `connect_timeout_secs` of 10 or less still reads `Unreachable` ("connect timed out"); `load`
+  warns about that timeout under `"auto"` instead (DU-25 (m-d)).
 
 Classification lives in one table with two entry points — `classify_bringup_failure(&McpError) ->
-FailureReason` at E2, defaulting to `Unreachable` when unsure, and `classify_call_failure(&McpError) ->
+FailureReason` at E2, defaulting to `Unreachable` when unsure (`ProtocolNegotiationFailed` for a failed
+negotiation, rev 22), and `classify_call_failure(&McpError) ->
 Option<FailureReason>` in the registry's `Mcp` arms (§3.6 item 1, X-7), returning `Some` only for the two
 terminal classes (`ReconnectExhausted` → `Crashed`; a 401/403 → `NeedsAuthorization`, once
 `McpError::Unauthorized` exists). Claude Code's rule is literally "401 or 403 → Needs authentication", it fires
@@ -2157,11 +2186,15 @@ Bare array, both kinds. `?include_orphaned=true` (default `false`).
   "id": "github",
   "version": "1.4.0" | null,
   "transport": "stdio" | "streamable-http" | null,   // mcp only
+  "protocol_version": "2026-07-28" | "2025-11-25" | null, // mcp — negotiated by the live connection (rev 22, DU-25 (m-g))
+  "connect_ms": 10023 | null,   // mcp — the live connection's connect (spawn or HTTP connect + lifecycle handshake)
+  "list_ms": 4 | null,          // mcp — its first tools/list (E3); all three null when no connection is live
   "enabled": true,                                    // PERSISTED DISPOSITION — the toggle binds here
   "consent": "approved" | "pending" | "denied" | null,// plugins; null for mcp
   "state": "enabled"|"disabled"|"unapproved"|"failed"|"orphaned"|"enabling"|"disabling",
   "reason": "never_seen"|"denied"|"capabilities_grew"
-          | "needs_authorization"|"needs_config"|"config_invalid"|"unreachable"|"crashed"|null,
+          | "needs_authorization"|"needs_config"|"config_invalid"|"unreachable"|"crashed"
+          | "protocol_negotiation_failed"|null,
   "actionable": false,          // derived from FailureReason::actionable(); drives the GUI CTA + tone
   "detail": "HTTP 401 from https://…" | null,
   "hint": "https://…/authorize" | null,
@@ -2407,6 +2440,7 @@ text *and* gets the right colour. `toTagTone`'s literal table (`Badge.tsx:51-64`
 | `failed` / `needs_authorization` | Toggle **ON**, live | `needs-auth` | **`asks`** | **Authorize** (opens `hint`) | `detail` |
 | `failed` / `needs_config` | Toggle **ON**, live | `needs-config` | **`asks`** | **Configure** | the missing keys |
 | `failed` / `config_invalid` | Toggle bound to `record.enabled` — ON, except a plugin parked at scan with a pre-set `enabled = false` entry (the X-3 exception, §4) — live | `config-invalid` | **`asks`** | Open config | the parse error |
+| `failed` / `protocol_negotiation_failed` (rev 22) | Toggle **ON**, live | `protocol-mismatch` | **`asks`** | Open config | the detail: rmcp's error and the `protocol` value to set, quoted, never interpreted |
 | `failed` / `unreachable` \| `crashed` | Toggle **ON**, live | `crashed` | **`warn`** | Retry (= `reload`, §3.4.1 — as `enable` from `Failed`: E0 CAS → E-PRE on any held handle → E1–E5) | the transport error (rendered from `connection_state()`, X-5) + `since`; `detail` shown as a quoted diagnostic, never interpreted |
 | `orphaned` | Toggle `disabled` | `orphaned` | `warn` | Remove (= `DELETE /v1/extensions/plugin/{id}`, §8 — backed, not a GapNote) | "declaration not found at <path>" |
 
@@ -3479,3 +3513,14 @@ lanes (T11) — live in `tasks/api-fix-plan.md` and are listed here only so nobo
   sentence says the refresh fetch takes the service lock only for the clone, so E-FAIL's `disconnect` waits for the
   close; §3.2 T4b gains a rev 21 note and its rev 20 note reads "amended in rev 21". The status line leads with
   rev 21. Nothing else moves.
+
+- **rev 22** (2026-10-29, branch `chore/toolchain-and-deps`) — P19's DU-25 (m) (b) built (`chore(deps): rmcp 0.16 →
+  3.5.x — …`, Phase G's fourth commit; the ZCode audit's A-02, A-03, A-27; Z5-01, Z5-13). §4's enum gains a sixth
+  reason, `ProtocolNegotiationFailed` (word `protocol_negotiation_failed`, ZCode's; actionable): the reason-code rule
+  of §4.2 holds — the next action differs (set `protocol`, not Retry) — and §4.2's detection list gains the bullet
+  that says which handshake failures it covers, and what its close case also catches (a stdio server exiting during
+  the probe). §3.6 item 1: a respawn reopens in the era its load negotiated (DU-25 (m-c)). §8's row gains
+  `protocol_version`, `connect_ms` and `list_ms`, MCP-only and `null` unless a connection is live, and the new reason
+  word; §9.2's table its row (`protocol-mismatch`, `asks`, the server's block named). The `protocol` key itself is
+  `config/mcp.toml`'s (`McpServerConfig`, `skip_serializing_if`, so every existing `config_fingerprint` is unchanged,
+  and a pin changes it, so the watcher reloads). The status line leads with rev 22. Nothing else moves.

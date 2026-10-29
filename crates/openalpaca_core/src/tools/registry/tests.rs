@@ -1241,30 +1241,23 @@ async fn test_enum_validation_invalid_value() {
 
 #[test]
 fn permission_tier_destructive_returns_admin() {
-    let ann = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        ..Default::default()
-    };
+    let ann = openalpaca_mcp::ToolAnnotations::new().destructive(true);
     assert_eq!(permission_tier(Some(&ann)), PermissionTier::Admin);
 }
 
 #[test]
 fn permission_tier_readonly_returns_readonly() {
-    let ann = openalpaca_mcp::ToolAnnotations {
-        read_only_hint: Some(true),
-        destructive_hint: Some(false),
-        ..Default::default()
-    };
+    let ann = openalpaca_mcp::ToolAnnotations::new()
+        .read_only(true)
+        .destructive(false);
     assert_eq!(permission_tier(Some(&ann)), PermissionTier::ReadOnly);
 }
 
 #[test]
 fn permission_tier_neither_returns_readwrite() {
-    let ann = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(false),
-        read_only_hint: Some(false),
-        ..Default::default()
-    };
+    let ann = openalpaca_mcp::ToolAnnotations::new()
+        .destructive(false)
+        .read_only(false);
     assert_eq!(permission_tier(Some(&ann)), PermissionTier::ReadWrite);
 }
 
@@ -1275,11 +1268,9 @@ fn permission_tier_none_annotations_returns_readwrite() {
 
 #[test]
 fn permission_tier_destructive_takes_precedence_over_readonly() {
-    let ann = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        read_only_hint: Some(true),
-        ..Default::default()
-    };
+    let ann = openalpaca_mcp::ToolAnnotations::new()
+        .destructive(true)
+        .read_only(true);
     assert_eq!(permission_tier(Some(&ann)), PermissionTier::Admin);
 }
 
@@ -1287,10 +1278,7 @@ fn permission_tier_destructive_takes_precedence_over_readonly() {
 fn iter_registered_tools_snapshots_state() {
     let registry = ToolRegistry::new().unwrap();
     let mut destructive = make_tool_with_caps("tool_a", vec![]);
-    destructive.annotations = Some(openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        ..Default::default()
-    });
+    destructive.annotations = Some(openalpaca_mcp::ToolAnnotations::new().destructive(true));
     let plain = make_tool_with_caps("tool_b", vec![]);
 
     registry.register(destructive).unwrap();
@@ -1393,23 +1381,19 @@ fn make_tool_with_annotations(
 }
 
 fn readonly_annotations() -> openalpaca_mcp::ToolAnnotations {
-    openalpaca_mcp::ToolAnnotations {
-        read_only_hint: Some(true),
-        destructive_hint: Some(false),
-        idempotent_hint: Some(true),
-        open_world_hint: Some(false),
-        ..Default::default()
-    }
+    openalpaca_mcp::ToolAnnotations::new()
+        .read_only(true)
+        .destructive(false)
+        .idempotent(true)
+        .open_world(false)
 }
 
 fn destructive_annotations() -> openalpaca_mcp::ToolAnnotations {
-    openalpaca_mcp::ToolAnnotations {
-        read_only_hint: Some(false),
-        destructive_hint: Some(true),
-        idempotent_hint: Some(false),
-        open_world_hint: Some(true),
-        ..Default::default()
-    }
+    openalpaca_mcp::ToolAnnotations::new()
+        .read_only(false)
+        .destructive(true)
+        .idempotent(false)
+        .open_world(true)
 }
 
 #[test]
@@ -1497,14 +1481,8 @@ fn deny_annotation_cap_excludes_string_matched_tool() {
 #[test]
 fn non_destructive_inverse_matches_only_explicit_false() {
     let registry = ToolRegistry::new().unwrap();
-    let ann_true = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        ..Default::default()
-    };
-    let ann_false = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(false),
-        ..Default::default()
-    };
+    let ann_true = openalpaca_mcp::ToolAnnotations::new().destructive(true);
+    let ann_false = openalpaca_mcp::ToolAnnotations::new().destructive(false);
     registry.register(make_tool_with_annotations("tool_a", vec![], Some(ann_false))).unwrap();
     registry.register(make_tool_with_annotations("tool_b", vec![], None)).unwrap();
     registry.register(make_tool_with_annotations("tool_c", vec![], Some(ann_true))).unwrap();
