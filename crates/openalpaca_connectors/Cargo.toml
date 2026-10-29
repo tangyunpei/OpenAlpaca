@@ -21,6 +21,10 @@ openalpaca_storage = { workspace = true, features = ["test-home-guard"] }
 # workspace already locks.
 axum.workspace = true
 tokio = { workspace = true, features = ["net"] }
+# The crypto provider is the host's to install (openalpacad's `tls.rs`); this
+# crate installs none. Its Discord test installs the same aws-lc-rs before it
+# builds a twilight client, as the daemon does at start.
+rustls.workspace = true
 
 [features]
 default = []
@@ -29,7 +33,7 @@ telegram = ["dep:teloxide"]
 # Enable iMessage connector (macOS only)
 imessage = ["dep:rusqlite"]
 # Enable Discord connector
-discord = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "dep:reqwest", "dep:rustls"]
+discord = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "dep:reqwest"]
 # Future: WeChat connector
 # wechat = []
 
@@ -68,4 +72,3 @@ twilight-gateway = { workspace = true, optional = true }
 twilight-http = { workspace = true, optional = true }
 twilight-model = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }

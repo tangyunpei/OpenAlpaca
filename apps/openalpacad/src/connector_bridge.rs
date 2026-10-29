@@ -592,4 +592,40 @@ mod tests {
             "the default is the owner's"
         );
     }
+
+    /// A stored Discord token puts Discord among the channels a turn may send
+    /// to whether or not the connector runs (`discord.enabled` defaults to
+    /// false): `discord_http` builds a twilight client on the spot, and the
+    /// social fast path asks `sendable_channels` on every "ok" or "thanks".
+    /// That client's rustls config takes the process's crypto provider, which
+    /// until P41 only the Discord connector's loop installed (ring, when it
+    /// started), so this panicked on a daemon whose connector had not started.
+    /// The test installs the provider itself, as `main` does: it pins the
+    /// bridge's client construction under the installed provider, not `main`'s
+    /// call, which only a daemon boot or the live Discord gate shows. (Async
+    /// only because the client's rate limiter starts a task; nothing is sent.)
+    #[tokio::test]
+    async fn a_stored_discord_token_offers_discord_before_the_connector_runs() {
+        // What `main` does before anything builds a TLS client.
+        crate::tls::install_crypto_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("t.db")).unwrap();
+        openalpaca_storage::ConfigRepository::new(&db)
+            .set("discord.token", "test", "string")
+            .unwrap();
+        let bridge = ConnectorSendBridge::new(db, "owner".to_string());
+
+        assert!(
+            bridge.sendable_channels().contains(&"discord".to_string()),
+            "{:?}",
+            bridge.sendable_channels()
+        );
+        assert!(
+            bridge
+                .file_capable_channels()
+                .contains(&"discord".to_string()),
+            "{:?}",
+            bridge.file_capable_channels()
+        );
+    }
 }

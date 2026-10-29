@@ -30,6 +30,7 @@ mod shutdown;
 mod state;
 #[cfg(test)]
 mod test_util;
+mod tls;
 
 pub use state::AppState;
 
@@ -101,6 +102,10 @@ fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+
+    // P41: aws-lc-rs becomes the process's one rustls crypto provider before
+    // anything builds a TLS client — a connector, a reqwest client (`tls.rs`).
+    tls::install_crypto_provider();
 
     // Best-effort guardrail: surface terminal state that can make Ctrl+C appear
     // "broken" even when SIGINT handling is correct.

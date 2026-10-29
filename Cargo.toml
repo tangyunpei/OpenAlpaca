@@ -145,6 +145,11 @@ twilight-gateway = { version = "0.17", default-features = false, features = ["ru
 twilight-http = "0.17"
 twilight-model = "0.17"
 
+# TLS: one rustls crypto provider in the process, aws-lc-rs — the one reqwest
+# 0.13's `rustls` feature brings. The daemon installs it as the process default
+# at start (apps/openalpacad/src/tls.rs); no manifest of ours names `ring`.
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs"] }
+
 openalpaca_llm = { path = "crates/openalpaca_llm" }
 openalpaca_plugins = { path = "crates/openalpaca_plugins" }
 arc-swap = "1"

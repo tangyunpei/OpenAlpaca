@@ -47,6 +47,9 @@ zip.workspace = true
 calamine.workspace = true
 signal-hook.workspace = true
 opener.workspace = true
+# The process's one rustls crypto provider, aws-lc-rs, installed at start
+# (`src/tls.rs`).
+rustls.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

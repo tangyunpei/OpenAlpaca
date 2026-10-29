@@ -4037,6 +4037,7 @@ dependencies = [
  "opener",
  "pdf-extract",
  "rand 0.10.3",
+ "rustls",
  "serde",
  "serde_json",
  "signal-hook",
