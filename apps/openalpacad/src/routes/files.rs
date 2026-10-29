@@ -135,8 +135,9 @@ pub async fn upload_file_handler(
     }
 
     // Magic bytes validation via `infer` crate.
-    // Strict mode: when a type is detected, it must exactly match the declared MIME.
-    // Text/* is only exempt when detection fails entirely.
+    // Strict mode: a detected type must match the declared MIME up to the
+    // container, audio-alias and text-signature rules in `InputSanitizer`;
+    // text/* is otherwise exempt only when detection fails entirely.
     match validate_magic_mime(&content_type, &data) {
         Ok(()) => {}
         Err(MimeMagicValidationError::Mismatch { detected }) => {
@@ -534,10 +535,12 @@ mod tests {
     }
 
     // --- Declared text whose body carries another format's signature (deps
-    //     plan P14; DU-6). Today's verdicts on infer 0.16, which reads `%PDF`
-    //     at offset 0 only and has no DWG matcher; infer 0.22 (P18) would
-    //     report `application/pdf` and `image/vnd.dwg`, and P17 (DU-6 b)
-    //     keeps a declared text file accepted when it lands. ---
+    //     plan P14, P17; DU-6 (b)). infer 0.16 reads `%PDF` at offset 0 only
+    //     and has no DWG matcher; infer 0.22 (P18) reports `application/pdf`
+    //     for a `%PDF` anywhere in the first KiB and `image/vnd.dwg` for
+    //     `AC1015`, which `InputSanitizer::is_text_mime_compatible` does not
+    //     hold against a declared text file. A body that starts with `%PDF`
+    //     is a PDF under both. ---
 
     #[test]
     fn a_declared_text_file_naming_a_pdf_header_past_offset_0_is_accepted() {
@@ -552,6 +555,17 @@ mod tests {
         // `AC1015` is AutoCAD 2000's file signature; here it is a part number.
         let csv = b"AC1015,Widget,3\nAC1018,Gadget,5\n";
         assert_eq!(validate_magic_mime("text/csv", csv), Ok(()));
+    }
+
+    #[test]
+    fn a_declared_text_file_starting_with_a_pdf_header_is_a_mismatch() {
+        let pdf = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+        assert_eq!(
+            validate_magic_mime("text/plain", pdf),
+            Err(MimeMagicValidationError::Mismatch {
+                detected: "application/pdf".to_string()
+            })
+        );
     }
 
     fn open_ok(_path: &str, _file_id: &str, _filename: &str, _stage: bool) -> Result<(), String> {

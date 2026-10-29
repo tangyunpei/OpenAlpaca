@@ -503,18 +503,64 @@ fn upload_passes(filename: &str, data: &[u8], declared_mime: &str) -> bool {
 }
 
 /// A text body whose first KiB names a PDF header, and a CSV whose first cell
-/// is AutoCAD 2000's `AC1015` signature: infer 0.16 reads `%PDF` at offset 0
-/// only and has no DWG matcher, so both are undetectable and a declared
-/// `text/*` upload passes. infer 0.22 (P18) would report `application/pdf`
-/// and `image/vnd.dwg`; P17 (DU-6 b) keeps a declared text file accepted.
+/// is AutoCAD 2000's `AC1015` signature, pass as declared `text/*`: infer 0.16
+/// reads `%PDF` at offset 0 only and has no DWG matcher, so it classifies
+/// neither; infer 0.22 (P18) reports `application/pdf` and `image/vnd.dwg`,
+/// which `is_text_mime_compatible` (P17, DU-6 (b)) does not hold against a
+/// declared text file.
 #[test]
-fn a_declared_text_upload_with_a_pdf_or_dwg_signature_inside_passes_today() {
+fn a_declared_text_upload_with_a_pdf_or_dwg_signature_inside_passes() {
     let notes = b"Notes on file formats.\nA PDF starts with %PDF-1.7 then a comment.\n";
     assert!(upload_passes("notes.txt", notes, "text/plain"));
     let html = b"<!DOCTYPE html><html><body><p>Header is %PDF-1.4</p></body></html>";
     assert!(upload_passes("page.html", html, "text/html"));
     let csv = b"AC1015,Widget,3\nAC1018,Gadget,5\n";
     assert!(upload_passes("parts.csv", csv, "text/csv"));
+}
+
+/// A body that starts with `%PDF` is a PDF under infer 0.16 and 0.22 alike, and
+/// declared `text/plain` it is refused: the text rule is for a signature
+/// inside the text only.
+#[test]
+fn a_declared_text_upload_that_is_a_pdf_is_refused() {
+    let pdf = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+    let err = InputSanitizer::validate_upload_with_image_limit(
+        "notes.txt",
+        pdf,
+        "text/plain",
+        1 << 20,
+        8192,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Input blocked: MIME type mismatch: declared 'text/plain' but content detected as \
+         'application/pdf'"
+    );
+}
+
+#[test]
+fn text_mime_compatibility_covers_an_incidental_pdf_or_dwg_signature_only() {
+    let note = b"A PDF starts with %PDF-1.7";
+    let pdf = b"%PDF-1.7\n";
+    let dwg = b"AC1015,Widget,3\n";
+    let cases: [(&str, &str, &[u8], bool); 8] = [
+        ("text/plain", "application/pdf", note, true),
+        ("text/html", "application/pdf", note, true),
+        ("text/csv", "image/vnd.dwg", dwg, true),
+        ("text/plain", "application/pdf", pdf, false),
+        ("application/pdf", "application/pdf", note, false),
+        ("application/octet-stream", "image/vnd.dwg", dwg, false),
+        ("text/plain", "image/png", note, false),
+        ("text/plain", "application/zip", dwg, false),
+    ];
+    for (declared, detected, data, expected) in cases {
+        assert_eq!(
+            InputSanitizer::is_text_mime_compatible(declared, detected, data),
+            expected,
+            "{declared} detected as {detected}"
+        );
+    }
 }
 
 /// The two connector media cases (DU-6 m): an `audio/mp3` clip whose first

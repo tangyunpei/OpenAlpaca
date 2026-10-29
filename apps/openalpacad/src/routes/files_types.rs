@@ -29,6 +29,12 @@ pub(super) fn validate_magic_mime(
             if InputSanitizer::is_audio_mime_compatible(declared_mime, detected_type) {
                 return Ok(());
             }
+            // A declared text file whose only signature is one written inside
+            // the text (a `%PDF` past offset 0, an `AC10xx` DWG header) passes
+            // like text infer cannot classify (DU-6 (b))
+            if InputSanitizer::is_text_mime_compatible(declared_mime, detected_type, data) {
+                return Ok(());
+            }
             Err(MimeMagicValidationError::Mismatch {
                 detected: detected_type.to_string(),
             })
