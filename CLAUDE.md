@@ -84,7 +84,7 @@ bun run prepare:sidecar          # stage the daemon as the Tauri sidecar: Tauri'
 - **`CARGO_INCREMENTAL=0`** comes from `.claude/settings.json` (tracked) for every agent session; export `CARGO_INCREMENTAL=1` in a session that iterates on one crate.
 
 Toolchain: Rust 1.99.1 (edition 2024, resolver v3), pinned in `rust-toolchain.toml`; the workspace `rust-version` is 1.99.
-Frontend: TypeScript 7.0.2, React 19.2, Tailwind 4.3, Vite 7, Vitest 4, Bun 1.4.3 (pinned by the root `package.json`'s `packageManager` field; the package scripts refuse another Bun). The shell is Tauri 2.12 (`tauri = "~2.12"`, `tauri-build = "~2.7"`, `tauri-plugin-dialog` exact, each paired with its `@tauri-apps/*` package).
+Frontend: TypeScript 7.0.2, React 19.3, Tailwind 4.3, Vite 7, Vitest 4, Bun 1.4.3 (pinned by the root `package.json`'s `packageManager` field; the package scripts refuse another Bun). The shell is Tauri 2.12 (`tauri = "~2.12"`, `tauri-build = "~2.7"`, `tauri-plugin-dialog` exact, each paired with its `@tauri-apps/*` package).
 
 CI (`.github/workflows/ci.yml`): the toolchain from `rust-toolchain.toml`; `cargo build|test --locked --workspace --exclude openalpaca_gui` and `cargo clippy --locked --workspace --exclude openalpaca_gui --all-targets`; the four `bun run` gates under the pinned Bun; and a `windows-latest` job running only `Invoke-Pester -Path scripts/release/tests` on Pester 6.2.0 exactly (no Rust, no bun). Every action is pinned by full commit SHA, with `persist-credentials: false` and `permissions: contents: read`. **CI compiles nothing under `src-tauri`**: `cargo check -p openalpaca_gui` by hand is the only gate for that crate.
 
