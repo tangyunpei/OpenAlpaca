@@ -219,3 +219,81 @@ fn an_approval_message_asks_telegram_for_no_link_preview() {
         "{sent}"
     );
 }
+
+// ── teloxide against a loopback stub of the Bot API (A-09 (2)) ──────────
+//
+// The live round trip with the owner's test bot is P28's gate of record: only
+// it reaches api.telegram.org over rustls with the OS roots. This stub, a
+// supplement, pins what a stub can: the bot's API URL is honoured, and
+// `getMe` and `sendMessage` go out as the Bot API expects and come back
+// parsed. Plain HTTP on 127.0.0.1, so no TLS is exercised here.
+
+/// The stub's record of one request: the method's path and its JSON body.
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+
+/// A loopback Bot API: answers `getMe` and `sendMessage` as Telegram does and
+/// records every request. Returns its base URL (`http://127.0.0.1:<port>`)
+/// and the record.
+async fn bot_api_stub() -> (String, Seen) {
+    use axum::extract::{Path, State};
+    use axum::{Json, Router, routing::post};
+    let seen: Seen = Default::default();
+    async fn method(
+        State(seen): State<Seen>,
+        Path((bot, method)): Path<(String, String)>,
+        body: axum::body::Bytes,
+    ) -> Json<serde_json::Value> {
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        seen.lock()
+            .unwrap()
+            .push((format!("{bot}/{method}"), body.clone()));
+        // Bot API method names are case-insensitive; teloxide sends `GetMe`.
+        Json(match method.to_ascii_lowercase().as_str() {
+            "getme" => serde_json::json!({"ok": true, "result": {
+                "id": 7, "is_bot": true, "first_name": "Stub", "username": "stub_bot",
+                "can_join_groups": true, "can_read_all_group_messages": false,
+                "supports_inline_queries": false, "has_main_web_app": false
+            }}),
+            "sendmessage" => serde_json::json!({"ok": true, "result": {
+                "message_id": 1, "date": 1_761_609_600,
+                "from": {"id": 7, "is_bot": true, "first_name": "Stub"},
+                "chat": {"id": body["chat_id"], "type": "private", "first_name": "Owner"},
+                "text": body["text"]
+            }}),
+            _ => serde_json::json!({"ok": false, "error_code": 404, "description": "Not Found"}),
+        })
+    }
+    let app = Router::new()
+        .route("/{bot}/{method}", post(method))
+        .with_state(seen.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), seen)
+}
+
+/// teloxide sends `getMe` and `sendMessage` to the URL it is given, with the
+/// token in the path and the chat and text in the body, and parses both
+/// answers.
+#[tokio::test]
+async fn teloxide_round_trips_get_me_and_send_message_against_a_loopback_bot_api() {
+    use teloxide::prelude::*;
+    let (url, seen) = bot_api_stub().await;
+    // `set_api_url` takes teloxide's own reqwest 0.12 `Url`; `parse` names it.
+    let bot = Bot::new("0:stub").set_api_url(url.parse().unwrap());
+
+    let me = bot.get_me().await.expect("getMe");
+    assert_eq!(me.user.username.as_deref(), Some("stub_bot"));
+    let sent = bot
+        .send_message(ChatId(42), "round trip")
+        .await
+        .expect("sendMessage");
+    assert_eq!(sent.chat.id, ChatId(42));
+    assert_eq!(sent.text(), Some("round trip"));
+
+    let seen = seen.lock().unwrap().clone();
+    let paths: Vec<String> = seen.iter().map(|(p, _)| p.to_ascii_lowercase()).collect();
+    assert_eq!(paths, ["bot0:stub/getme", "bot0:stub/sendmessage"]);
+    assert_eq!(seen[1].1["chat_id"], 42);
+    assert_eq!(seen[1].1["text"], "round trip");
+}

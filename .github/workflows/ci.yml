@@ -25,10 +25,10 @@ jobs:
         with:
           persist-credentials: false
       # pkg-config, for the build scripts that look a system library up
-      # through it: openssl-sys's (teloxide's native-tls) finds OpenSSL,
-      # whose headers the runner image provides. The OS keychain no longer
-      # links dbus-1: keyring-core's Secret Service store speaks D-Bus over
-      # zbus.
+      # through it: aws-lc-sys's probes for a system AWS-LC before it
+      # builds its own. Nothing links OpenSSL (teloxide is on rustls), and
+      # the OS keychain no longer links dbus-1: keyring-core's Secret
+      # Service store speaks D-Bus over zbus.
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config
       # The toolchain, its profile and its components come from rust-toolchain.toml:

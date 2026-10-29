@@ -17,6 +17,10 @@ tracing-subscriber.workspace = true
 # test-home-guard: store::projects::register refuses an unguarded home store in
 # this crate's test builds (storage design, Stage 1).
 openalpaca_storage = { workspace = true, features = ["test-home-guard"] }
+# A loopback stub of the Bot API for teloxide (A-09 (2)): crates the
+# workspace already locks.
+axum.workspace = true
+tokio = { workspace = true, features = ["net"] }
 
 [features]
 default = []
