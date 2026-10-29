@@ -50,6 +50,9 @@ struct StubOpts {
     hang_call: bool,
     /// Answer `tools/call` after this many seconds (N-MCP-3's drain test).
     call_secs: u64,
+    /// Answer `tools/call` with the tool name the call carried instead of
+    /// `ok`, so a test can see which remote name reached the server (N-MCP-4).
+    echo_name: bool,
     /// Run the background notifier that turns a trigger file into
     /// `notifications/tools/list_changed`.
     notifier: bool,
@@ -203,6 +206,11 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     } else {
         String::new()
     };
+    let echo_name = if opts.echo_name {
+        "text=`printf '%s' \"$line\" | sed -n 's/.*\"name\":\"\\([^\"]*\\)\".*/\\1/p'`\n"
+    } else {
+        ""
+    };
     let hang_call = if opts.hang_call {
         "hang\n".to_string()
     } else if opts.call_secs > 0 {
@@ -262,7 +270,8 @@ hang() {{
       fi
       ;;
     *'"method":"tools/call"'*)
-      {hang_call}printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"ok"}}],"isError":false}}}}\n' "$id"
+      text=ok
+      {echo_name}{hang_call}printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"%s"}}],"isError":false}}}}\n' "$id" "$text"
       ;;
     *'"method":"ping"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
@@ -819,6 +828,95 @@ command = "{}"
         eventually(Duration::from_secs(5), || !stub.any_alive()).await,
         "the child is gone"
     );
+}
+
+// ============================================================================
+// N-MCP-4 — remote tool names in the providers' alphabet
+// ============================================================================
+
+/// A server listing `read.file` and then `read_file`: both map to
+/// `srv__read_file`; the first is kept — registered under the mapped name and
+/// called with its own raw name — and the second is not registered over it.
+#[tokio::test]
+async fn read_dot_file_beside_read_file_keeps_the_first_under_the_mapped_name_and_calls_it_raw() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "names",
+        StubOpts {
+            echo_name: true,
+            ..StubOpts::default()
+        },
+    );
+    stub.set_tools(&["read.file", "read_file"]);
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    assert!(
+        h.registry.get("srv__read.file").is_none(),
+        "no name outside [A-Za-z0-9_-] reaches the registry"
+    );
+    let answer = h
+        .registry
+        .execute("srv__read_file", &serde_json::json!({}))
+        .await
+        .expect("the mapped name serves");
+    assert_eq!(
+        answer, "read.file",
+        "the first listed tool, called by its raw name"
+    );
+    assert_eq!(
+        h.ledger().tool_names(&mcp("srv")),
+        vec!["srv__read_file".to_string()],
+        "one tool recorded for the two that collided"
+    );
+    h.supervisor.shutdown_all().await;
+}
+
+/// The same mapping on the §3.7 refresh: a server that adds `read.file` and
+/// `read_file` in one change gets one tool under the mapped name — the first
+/// listed, called by its raw name — and the ledger records exactly the names
+/// the registry holds.
+#[tokio::test]
+async fn a_refresh_maps_the_added_names_and_keeps_the_first_of_two_that_collide() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "refresh-names",
+        StubOpts {
+            notifier: true,
+            echo_name: true,
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    stub.set_tools(&["echo", "read.file", "read_file"]);
+    stub.notify();
+    assert!(
+        wait_for_tools(&h, &["echo", "read_file"]).await,
+        "the refresh registers the mapped name once and no raw one"
+    );
+    let answer = h
+        .registry
+        .execute("srv__read_file", &serde_json::json!({}))
+        .await
+        .expect("the mapped name serves");
+    assert_eq!(
+        answer, "read.file",
+        "the first listed tool, called by its raw name"
+    );
+    let mut recorded = h.ledger().tool_names(&mcp("srv"));
+    recorded.sort();
+    assert_eq!(
+        recorded,
+        vec!["srv__echo".to_string(), "srv__read_file".to_string()],
+        "the ledger records the registry's names"
+    );
+    h.supervisor.shutdown_all().await;
 }
 
 // ============================================================================

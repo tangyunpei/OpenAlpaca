@@ -1083,7 +1083,13 @@ depends on the registry dropping the last reference.
 
 - Registered name is **namespaced**: `<server_name>__<remote_name>`
   (e.g. `fs__read_file`) so MCP tools cannot collide with built-ins or
-  other servers.
+  other servers, mapped by `mcp_tool_name()` into the providers' alphabet
+  `[A-Za-z0-9_-]` (any other character becomes `_`) and capped at 64
+  characters in all (past that the remote part ends in `_` and 8 hex
+  digits of its SHA-256); the backend keeps the raw remote name for the
+  call. `map_tool_list()` maps one server's list before registration: of
+  two tools that map to one name the first listed is kept, with a warning
+  naming both.
 - `author = "mcp:<server>"`; `version` comes from the server's reported
   version; `annotations` are taken from the server's tool metadata;
   `exempt_from_timeout` is always `false`; `provides_capabilities` is the

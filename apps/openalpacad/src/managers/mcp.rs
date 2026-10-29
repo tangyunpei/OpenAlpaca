@@ -1176,9 +1176,12 @@ impl McpSupervisor {
         };
 
         // E4 — publish, remove-before-register, with the case-13 collision rule.
+        // Names are mapped into the providers' alphabet first, and two of this
+        // server's own tools that map to one name keep the first listed
+        // (N-MCP-4; `map_tool_list` warns naming both).
         let mut registered: Vec<String> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
-        for tool in tools {
+        for (_, tool) in bridge::map_tool_list(name, tools).tools {
             let registered_tool = bridge::rmcp_tool_to_registered(
                 name,
                 &server_version,
@@ -1433,10 +1436,12 @@ impl McpSupervisor {
             .server_info()
             .map(|i| i.version.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let mut incoming: BTreeMap<String, openalpaca_mcp::Tool> = BTreeMap::new();
-        for tool in fetched {
-            incoming.insert(format!("{}__{}", ext.name, tool.name), tool);
-        }
+        // The same mapping and within-server collision rule as E4 (N-MCP-4).
+        let incoming: BTreeMap<String, openalpaca_mcp::Tool> =
+            bridge::map_tool_list(&ext.name, fetched)
+                .tools
+                .into_iter()
+                .collect();
 
         let removed: Vec<String> = live_before
             .iter()

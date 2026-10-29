@@ -560,10 +560,11 @@ impl ToolRegistry {
         }
         if name.len() > 256 {
             // The limit is bytes, and so is the preview: a name is
-            // `<server>__<tool>` from a remote MCP server, so it can be any
-            // UTF-8 at all. `&name[..32]` turned this handled refusal into a
-            // panic on the MCP load path whenever byte 32 of an over-long
-            // non-ASCII name fell inside a character.
+            // `<plugin>::<tool>` from a plugin process, so it can be any
+            // UTF-8 at all (an MCP tool's is mapped to ASCII first,
+            // `bridge::mcp_tool_name`). `&name[..32]` turned this handled
+            // refusal into a panic on the MCP load path whenever byte 32 of
+            // an over-long non-ASCII name fell inside a character.
             return Err(format!(
                 "Tool name '{}...' exceeds 256 byte limit",
                 crate::utils::text::byte_prefix(name, 32)

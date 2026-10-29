@@ -1023,11 +1023,11 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 The chat-only tools (`start_workflow`, `task_status`, `memory_store`, `memory_update`, `memory_forget`, `steer_workflow`, `queue_followup`, the general `invoke_skill`) and the lead agent's coordination tools are created per request and are **not** in the shared registry, so a skill cannot list them.
 
 **Beyond built-ins**, the registry can also contain:
-- **MCP tools** from `config/mcp.toml`, named `<server>__<tool>`;
+- **MCP tools** from `config/mcp.toml`, named `<server>__<tool>` — the tool's part mapped into `A–Z`, `a–z`, `0–9`, `_` and `-` and the whole capped at 64 characters, so a server's `read.file` is `<server>__read_file` (the Daemon Manual, *MCP Servers*);
 - **Plugin tools**, named `<plugin>::<tool>`;
 - **Custom declarative tools** from `config/tools/*.toml` (HTTP- or command-backed).
 
-All three are addressable in `tools.allow` by their registered names. With `requires_capabilities`, list an MCP tool's own name, a plugin manifest's capability, or a custom tool's `provides_capabilities` entry.
+All three are addressable in `tools.allow` by their registered names. With `requires_capabilities`, list an MCP tool's registered name, a plugin manifest's capability, or a custom tool's `provides_capabilities` entry.
 
 ### Script Tools (`skill_script:*`)
 
