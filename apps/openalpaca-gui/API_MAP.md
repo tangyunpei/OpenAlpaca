@@ -1335,7 +1335,7 @@ the two are no longer one piece of work.
 > an invocation answers with the error) or read in spite of a problem (`"warning"`),
 > with the codes `read_failed`,
 > `missing_frontmatter`, `invalid_yaml`, `missing_field`, `id_mismatch`,
-> `deprecated_field`, `slash_conflict`, `unknown_key` and `too_large`, and the
+> `deprecated_field`, `slash_conflict`, `unknown_key`, `too_large` and `no_tools`, and the
 > parser's own sentence as `message`. A route of its own, so `/v1/skills` stays a
 > bare array of skills; Settings → Tools draws a count of it under Skill health,
 > and `openalpaca skills list` names each one.

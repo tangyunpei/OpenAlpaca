@@ -64,7 +64,7 @@ fn a_malformed_skill_md_yields_invalid_yaml_and_is_skipped() {
     write_skill(
         tmp.path(),
         "fine",
-        &skill_md("name: Fine\ndescription: Loads\n"),
+        &skill_md("name: Fine\ndescription: Loads\nrequires_capabilities: [file_read]\n"),
     );
 
     let catalog = SkillCatalog::new();
@@ -364,6 +364,49 @@ fn an_unknown_key_is_named_and_the_skill_still_loads() {
     assert!(catalog.get("typo").is_some());
 }
 
+/// A skill that declares no tools at all is named once, as a warning, and
+/// still loads; one tool from any of the four places is enough to stay quiet.
+#[test]
+fn a_skill_with_no_tools_is_named_and_still_loads() {
+    let tmp = TempDir::new().unwrap();
+    write_skill(
+        tmp.path(),
+        "bare",
+        &skill_md("name: Bare\ndescription: Nothing to use\n"),
+    );
+    write_skill(
+        tmp.path(),
+        "capable",
+        &skill_md("name: Capable\ndescription: D\nrequires_capabilities: [file_read]\n"),
+    );
+    write_skill(
+        tmp.path(),
+        "allowed",
+        &skill_md("name: Allowed\ndescription: D\ntools:\n  allow: [file_read]\n"),
+    );
+    write_skill(
+        tmp.path(),
+        "scripted",
+        &skill_md(
+            "name: Scripted\ndescription: D\nscripts:\n  - file: a.sh\n    name: a\n    description: d\n",
+        ),
+    );
+    write_skill(
+        tmp.path(),
+        "composer",
+        &skill_md("name: Composer\ndescription: D\ndepends_on: [capable]\n"),
+    );
+
+    let catalog = SkillCatalog::new();
+    assert_eq!(catalog.scan_directory(tmp.path(), SkillScope::Project), 5);
+
+    let d = the_one(&catalog, SkillDiagnosticCode::NoTools);
+    assert_eq!(d.severity, SkillDiagnosticSeverity::Warning);
+    assert_eq!(d.skill_id.as_deref(), Some("bare"));
+    assert_eq!(d.message, SkillParseError::NoTools.to_string());
+    assert!(catalog.get("bare").is_some());
+}
+
 /// The capture refuses no frontmatter the parse accepted without it: a
 /// numeric key, a value that is a map with a numeric key and a list holding
 /// one are each named, and the skill loads. (A map of JSON values would
@@ -454,7 +497,11 @@ fn a_rescan_replaces_what_the_last_scan_found() {
     catalog.scan_directory(tmp.path(), SkillScope::Project);
     assert_eq!(catalog.diagnostics().len(), 1);
 
-    std::fs::write(&path, skill_md("name: Later\ndescription: Fixed\n")).unwrap();
+    std::fs::write(
+        &path,
+        skill_md("name: Later\ndescription: Fixed\nrequires_capabilities: [file_read]\n"),
+    )
+    .unwrap();
     assert_eq!(catalog.scan_directory(tmp.path(), SkillScope::Project), 1);
     assert!(
         catalog.diagnostics().is_empty(),
@@ -475,7 +522,7 @@ fn a_failed_reload_keeps_the_skill_listed_and_its_warnings_but_it_does_not_run()
     let path = write_skill(
         tmp.path(),
         "kept",
-        &skill_md("name: Kept\ndescription: First\nzeta: 1\n"),
+        &skill_md("name: Kept\ndescription: First\nzeta: 1\nrequires_capabilities: [file_read]\n"),
     );
     let skill_dir = path.parent().unwrap().to_path_buf();
 
@@ -531,7 +578,11 @@ fn a_failed_reload_keeps_the_skill_listed_and_its_warnings_but_it_does_not_run()
         catalog.diagnostics()
     );
 
-    std::fs::write(&path, skill_md("name: Kept\ndescription: Second\n")).unwrap();
+    std::fs::write(
+        &path,
+        skill_md("name: Kept\ndescription: Second\nrequires_capabilities: [file_read]\n"),
+    )
+    .unwrap();
     assert!(catalog.reload_skill(&skill_dir).is_ok());
     assert_eq!(
         catalog.get("kept").unwrap().frontmatter.description,
@@ -581,7 +632,11 @@ fn a_linked_skill_md_is_followed() {
     let tmp = TempDir::new().unwrap();
     let elsewhere = TempDir::new().unwrap();
     let target = elsewhere.path().join("SKILL.md");
-    std::fs::write(&target, skill_md("name: Linked\ndescription: Via a link\n")).unwrap();
+    std::fs::write(
+        &target,
+        skill_md("name: Linked\ndescription: Via a link\nrequires_capabilities: [file_read]\n"),
+    )
+    .unwrap();
     let skill_dir = tmp.path().join("linked");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::os::unix::fs::symlink(&target, skill_dir.join("SKILL.md")).unwrap();

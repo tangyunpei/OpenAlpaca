@@ -452,6 +452,17 @@ impl SkillCatalog {
             return Ok(());
         }
 
+        // A skill with no tools at all — often a misspelt
+        // `requires_capabilities` — whose body may still tell the model to
+        // use one (audit Z3-04).
+        if frontmatter.requires_capabilities.is_empty()
+            && frontmatter.tools.allow.is_empty()
+            && frontmatter.scripts.is_empty()
+            && frontmatter.depends_on.is_empty()
+        {
+            warn(SkillParseError::NoTools);
+        }
+
         // Validation: if frontmatter.id is set, warn if it doesn't match directory name
         if let Some(ref declared_id) = frontmatter.id
             && declared_id != dir_name

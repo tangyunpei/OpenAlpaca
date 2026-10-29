@@ -346,12 +346,10 @@ pub struct SkillFrontmatter {
 ///
 /// Only the names are kept; each value is skipped unread, whatever its shape,
 /// so the capture refuses no frontmatter the parse accepted without it. It is
-/// read through serde alone and holds no YAML crate's types, so the
-/// frontmatter builds the same under serde_yaml and under the serde-saphyr
-/// P30 moves to (G-base step 8 swaps the crate and patches only
-/// `middleware/skill/{mod,renderer,tests}.rs`). It serializes as nothing: a
-/// rendered frontmatter carries only the keys this build reads, as before the
-/// capture existed.
+/// read through serde alone and holds no YAML crate's types, so it reads the
+/// same under serde-saphyr as under the serde_yaml 0.9 it replaced (P30). It
+/// serializes as nothing: a rendered frontmatter carries only the keys this
+/// build reads, as before the capture existed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnknownKeys(Vec<String>);
 

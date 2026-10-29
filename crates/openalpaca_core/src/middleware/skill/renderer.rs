@@ -9,8 +9,8 @@ pub fn render_skill_markdown(doc: &SkillDocument) -> String {
     // -- Frontmatter --
     out.push_str("---\n");
 
-    // Use serde_yaml for serialization. Fall back to manual if it fails.
-    match serde_yaml::to_string(&doc.frontmatter) {
+    // Use serde-saphyr for serialization. Fall back to manual if it fails.
+    match serde_saphyr::to_string(&doc.frontmatter) {
         Ok(yaml) => out.push_str(&yaml),
         Err(_) => {
             // Manual fallback for basic fields

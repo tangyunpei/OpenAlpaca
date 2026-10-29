@@ -1082,7 +1082,8 @@ export interface SkillDiagnostic {
     | "deprecated_field"
     | "slash_conflict"
     | "unknown_key"
-    | "too_large";
+    | "too_large"
+    | "no_tools";
   severity: "error" | "warning";
   path: string;
   /** The directory's name, lowercased — `null` for the skills directory itself. */

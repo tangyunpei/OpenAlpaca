@@ -137,6 +137,8 @@ tasks/storage-design/plan-drafts/
 !tasks/deps-upgrade/baselines/
 !tasks/deps-upgrade/baselines/*/
 !tasks/deps-upgrade/baselines/*/*.md
+# E6's corpus (P30; A-07 (2)): the SKILL.md edge-case fixtures beside its comparators.
+!tasks/deps-upgrade/tools/e6/corpus/*/SKILL.md
 tasks/deps-upgrade/*.tar.gz
 !tasks/deps-upgrade-audit-*.md
 !tasks/pending-decisions.md

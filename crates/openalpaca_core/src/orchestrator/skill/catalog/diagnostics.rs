@@ -48,6 +48,10 @@ pub enum SkillDiagnosticCode {
     UnknownKey,
     /// The file is larger than [`MAX_SKILL_MD_BYTES`].
     TooLarge,
+    /// The skill declares no tools at all — no `requires_capabilities`, no
+    /// `tools.allow`, no `scripts`, no `depends_on` — so it runs with none
+    /// (audit Z3-04).
+    NoTools,
 }
 
 impl SkillDiagnosticCode {
@@ -65,6 +69,7 @@ impl SkillDiagnosticCode {
             SkillParseError::DeprecatedField { .. } => Self::DeprecatedField,
             SkillParseError::SlashConflict { .. } => Self::SlashConflict,
             SkillParseError::UnknownKey(_) => Self::UnknownKey,
+            SkillParseError::NoTools => Self::NoTools,
         }
     }
 
@@ -80,6 +85,7 @@ impl SkillDiagnosticCode {
             Self::SlashConflict => "slash_conflict",
             Self::UnknownKey => "unknown_key",
             Self::TooLarge => "too_large",
+            Self::NoTools => "no_tools",
         }
     }
 
@@ -94,9 +100,11 @@ impl SkillDiagnosticCode {
             | Self::InvalidYaml
             | Self::MissingField
             | Self::TooLarge => SkillDiagnosticSeverity::Error,
-            Self::IdMismatch | Self::DeprecatedField | Self::SlashConflict | Self::UnknownKey => {
-                SkillDiagnosticSeverity::Warning
-            }
+            Self::IdMismatch
+            | Self::DeprecatedField
+            | Self::SlashConflict
+            | Self::UnknownKey
+            | Self::NoTools => SkillDiagnosticSeverity::Warning,
         }
     }
 }

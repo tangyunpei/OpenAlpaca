@@ -767,6 +767,7 @@ invoke:
   aliases:
     - "/forget"
     - "/jot"
+requires_capabilities: [file_read]
 ---
 
 ## Instructions
@@ -787,7 +788,7 @@ fn a_skill_claiming_a_reserved_slash_name_loads_with_one_warn() {
     create_skill_dir(
         tmp.path(),
         "memories",
-        "---\nname: \"Scrapbook\"\ndescription: \"By id only\"\n---\n\nEcho.\n",
+        "---\nname: \"Scrapbook\"\ndescription: \"By id only\"\nrequires_capabilities: [file_read]\n---\n\nEcho.\n",
     );
 
     let catalog = SkillCatalog::new();

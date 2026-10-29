@@ -70,6 +70,8 @@ A `SKILL.md` file has two parts:
 1. **YAML frontmatter** between `---` delimiters
 2. **Markdown body** with `## Section` headings
 
+The closing `---` is a line of its own (trailing spaces allowed): a `----` or `---x` line is part of the frontmatter, not its end. A byte-order mark before the opening `---` is ignored, and CRLF line ends read as LF.
+
 ```markdown
 ---
 name: My Skill
@@ -715,6 +717,7 @@ The catalog keeps what its last scan of the skills directory found — and what 
 | `deprecated_field` | warning | `context.summarize.enabled` or `tools.defaults` is set; neither has an effect. |
 | `id_mismatch` | warning | The frontmatter's `id` is not the directory's name, which is the skill's id. |
 | `slash_conflict` | warning | Two skills claim one slash command; the diagnostic is on the skill that answers it, once per other claimant. A plugin skill's claim is not compared. |
+| `no_tools` | warning | The skill declares no tools at all — `requires_capabilities`, `tools.allow`, `scripts` and `depends_on` are all empty — so it runs with none. A skill that needs none may ignore it; a misspelt `requires_capabilities` shows here beside its `unknown_key`. |
 
 The `message` is the parser's own sentence (`SkillParseError`'s text). Dependency errors are not diagnostics: they stay warnings in the log (see §8, *Skill Composition*).
 
