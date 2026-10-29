@@ -12,7 +12,7 @@ mod stdio;
 mod http;
 
 pub use http::StreamableHttpTransport;
-pub use stdio::StdioTransport;
+pub use stdio::{ExitObserver, StdioTransport};
 
 /// Abstraction over how bytes reach an MCP server.
 ///

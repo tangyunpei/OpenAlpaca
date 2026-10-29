@@ -1119,6 +1119,15 @@ depends on the registry dropping the last reference.
   consecutive reconnects with no successful call between them (exponential
   backoff) end in `ReconnectExhausted`.  A client sealed by a disable does
   not reconnect.
+- A stdio child's exit is learned at once (N-MCP-1b): an exit observer on
+  every spawn (`transport/stdio.rs`, `ReportExit`) hands the client the
+  status the process's wait returned, the client reports it as
+  `ConnectionEvent::Exited` unless it is sealed, and the supervisor's
+  receiver runs `ExtensionLedger::mark_exited` — the row `Failed{Crashed}`,
+  its detail the status, announced once, not reaped, the gate still
+  admitting calls (`admits_calls`).  The next call's reconnect, on success,
+  is `ConnectionEvent::Reconnected` and `mark_recovered` (back to `Enabled`,
+  same generation); `ReconnectExhausted` takes the row to the reaper.
 
 ---
 

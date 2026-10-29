@@ -70,6 +70,11 @@ struct StubOpts {
     /// Answer `initialize` with a JSON-RPC error: with the default probe, the
     /// legacy fallback fails too (rmcp's `LegacyFallbackFailed`).
     reject_initialize: bool,
+    /// Exit with this code once [`Stub::exit_now`] asks, between calls and
+    /// with no request in flight (N-MCP-1b). The read loop then runs in the
+    /// background, so [`Stub::kill_child`] no longer reaches what holds the
+    /// pipe; a test of a signal kills a stub without this option.
+    exit_on_trigger: Option<i32>,
 }
 
 /// How a stub answers the `server/discover` probe.
@@ -110,6 +115,9 @@ struct Stub {
     escapee_log: PathBuf,
     /// Every line each incarnation read, as `<pid> <message>`.
     sent_log: PathBuf,
+    /// While this exists, a server built with `StubOpts::exit_on_trigger`
+    /// exits with that code; the incarnation that exits removes it first.
+    exit_trigger: PathBuf,
 }
 
 impl Stub {
@@ -208,6 +216,12 @@ impl Stub {
         std::fs::write(&self.break_list, "").expect("write break trigger");
     }
 
+    /// Ask a server built with `StubOpts::exit_on_trigger` to exit with its
+    /// code, now — no request is sent for it.
+    fn exit_now(&self) {
+        std::fs::write(&self.exit_trigger, "").expect("write exit trigger");
+    }
+
     fn kill_child(&self) {
         for pid in self.pids() {
             if alive(pid) {
@@ -293,6 +307,7 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     let descendant_log = dir.join(format!("{tag}-descendants.log"));
     let escapee_log = dir.join(format!("{tag}-escapees.log"));
     let sent_log = dir.join(format!("{tag}-sent.log"));
+    let exit_trigger = dir.join(format!("{tag}-exit"));
 
     std::fs::write(&pid_log, "").expect("create pid log");
     std::fs::write(&tools_file, tools_json(&["echo"])).expect("create tools file");
@@ -389,6 +404,31 @@ fi
         r#"pv=`printf '%s' "$line" | sed -n 's/.*"protocolVersion":"\([^"]*\)".*/\1/p'`
       printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"%s","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"stub","version":"0.0.1"}}}\n' "$id" "$pv""#.to_string()
     };
+    // A shell blocked in `read` cannot exit on its own between requests, so
+    // with `exit_on_trigger` the read loop runs in the background on the
+    // client's pipe — saved on fd 3, since an asynchronous list's own stdin is
+    // `/dev/null` — and this shell, the process the client spawned, watches
+    // for the trigger, ends the loop and exits with the code.
+    let (serve_open, serve_close) = match opts.exit_on_trigger {
+        None => (String::new(), String::new()),
+        Some(code) => (
+            "exec 3<&0\n(\nexec 0<&3 3<&-\n".to_string(),
+            format!(
+                r#") &
+LOOP=$!
+exec 0</dev/null 3<&-
+while [ ! -f '{trigger}' ]; do
+  kill -0 "$LOOP" 2>/dev/null || exit 0
+  sleep 0.05
+done
+rm -f '{trigger}'
+kill "$LOOP"
+exit {code}
+"#,
+                trigger = exit_trigger.display()
+            ),
+        ),
+    };
 
     let body = format!(
         r#"#!/bin/sh
@@ -401,7 +441,7 @@ hang() {{
   echo "$!" >> '{sleep_log}'
   wait "$!"
 }}
-{slow_start}{notifier}{forks}while IFS= read -r line; do
+{slow_start}{notifier}{forks}{serve_open}while IFS= read -r line; do
   printf '%s %s\n' "$$" "$line" >> '{sent_log}'
   id=`printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'`
   case "$line" in
@@ -428,7 +468,7 @@ hang() {{
       ;;
   esac
 done
-"#,
+{serve_close}"#,
         pid_log = pid_log.display(),
         sleep_log = sleep_log.display(),
         tools_file = tools_file.display(),
@@ -452,6 +492,7 @@ done
         descendant_log,
         escapee_log,
         sent_log,
+        exit_trigger,
     }
 }
 
@@ -647,6 +688,51 @@ async fn transport_closed(client: &openalpaca_mcp::McpClient, timeout: Duration)
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// The detail of `srv`'s row once it reads `failed/crashed`, waiting up to
+/// `timeout` for it (`Duration::ZERO` reads it once). `None` when it never
+/// does.
+async fn failed_detail(h: &Harness, timeout: Duration) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(ExtensionState::Failed {
+            reason: FailureReason::Crashed,
+            detail,
+            ..
+        }) = h.state("srv")
+        {
+            return Some(detail);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The `extension_state_changed` frames for `srv` on `events`, as
+/// `(state, generation)`, once `settle` has passed — so a second frame that
+/// should not be there has had the time to arrive.
+async fn state_events(
+    events: &mut tokio::sync::broadcast::Receiver<SystemEvent>,
+    settle: Duration,
+) -> Vec<(String, u64)> {
+    tokio::time::sleep(settle).await;
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let SystemEvent::ExtensionStateChanged {
+            extension,
+            state,
+            generation,
+            ..
+        } = event
+            && extension == mcp("srv")
+        {
+            seen.push((state, generation));
+        }
+    }
+    seen
 }
 
 // ============================================================================
@@ -1506,19 +1592,20 @@ async fn mcp_supervisor_records_every_registered_tool() {
 
 /// **The crash sequence, stated rather than hidden (§3.6 item 1).**
 ///
-/// A stdio server's pre-send reconnect **respawns the child** (N-MCP-1), and
-/// only a successful call resets the attempt counter — so a child killed out
-/// of band while its command still runs is transparently recovered by the next
-/// call and the row correctly stays `Enabled`. Only after **four** consecutive
-/// calls whose pre-send reconnect found no working server does the client
-/// report `ReconnectExhausted`, and only that variant marks the row
-/// `failed/crashed`.
+/// A stdio server's exit is learned at once (N-MCP-1b, §13 Q8): the row reads
+/// `failed/crashed`, its detail the exit, while its tools stay published and
+/// the gate still admits a call. That call's pre-send reconnect **respawns the
+/// child** (N-MCP-1) and returns the row to `Enabled`, because the server *is*
+/// running again. Only a successful call resets the attempt counter, so after
+/// **four** consecutive calls whose pre-send reconnect found no working server
+/// the client reports `ReconnectExhausted`, and only that variant makes the
+/// failure the reaper's: tools unpublished, client sealed, Retry the way back.
 ///
-/// This is the opposite of Claude Code's stdio policy, and deliberately so
+/// Recovery is the opposite of Claude Code's stdio policy, and deliberately so
 /// (§13 Q8, T6(a) taken as N-MCP-1's form): the cost is that a crashed child
-/// can be respawned three times before anyone learns it crashed. The test is
+/// can be respawned three times before the row stops recovering. The test is
 /// written to that sequence so nobody "fixes" it into a first-failure rule by
-/// accident.
+/// accident. (Before N-MCP-1b the row read `Enabled` until the fourth call.)
 #[tokio::test]
 async fn a_stdio_server_respawns_transparently_then_reports_crashed_after_four_failures() {
     let h = Harness::new(1);
@@ -1549,26 +1636,45 @@ command = "{}"
     let generation = h.record("srv").expect("record").generation;
     assert_eq!(stub.spawn_count(), 1);
 
-    // (1) The recovery. The command still runs, so the next call respawns and
-    // succeeds — and the row stays `Enabled`, because the server *is* running.
+    // (1) The exit, then the recovery. The row reads the exit at once; the
+    // command still runs, so the next call respawns and succeeds — and the row
+    // reads `Enabled` again, because the server *is* running.
     let client = h.client_of("srv__echo").expect("the entry holds a client");
     stub.kill_child();
+    let exited = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("the row reads the exit at once, got {:?}", h.state("srv")));
+    assert!(
+        exited.contains("SIGKILL"),
+        "the detail names the signal: {exited}"
+    );
     assert!(
         transport_closed(&client, Duration::from_secs(5)).await,
         "the client must see the child's exit"
+    );
+    assert!(
+        h.registry.get("srv__echo").is_some(),
+        "an exit is not reaped"
     );
     let recovered = h
         .registry
         .execute("srv__echo", &serde_json::json!({}))
         .await
-        .expect("a live client respawns its child and the call succeeds");
+        .expect("the gate admits the call and its reconnect respawns the child");
     assert_eq!(recovered, "ok");
     assert_eq!(stub.spawn_count(), 2, "the child was respawned");
-    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled), "still active");
+    assert_eq!(
+        h.state("srv"),
+        Some(ExtensionState::Enabled),
+        "active again"
+    );
 
     // (2) Now make the command un-spawnable and drive four calls.
     stub.kill_child();
     std::fs::remove_file(&stub.script).expect("delete the server script");
+    let exited = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("the row reads the exit at once, got {:?}", h.state("srv")));
     assert!(
         transport_closed(&client, Duration::from_secs(5)).await,
         "the client must see the child's exit"
@@ -1582,13 +1688,19 @@ command = "{}"
             .expect_err("the handshake cannot succeed");
         assert!(
             !err.contains("is not running"),
-            "attempt {attempt} must fail with its own handshake error, got: {err}"
+            "attempt {attempt}: the gate admits the call, which fails with its own handshake \
+             error, got: {err}"
         );
         assert_eq!(
-            h.state("srv"),
-            Some(ExtensionState::Enabled),
-            "the row is still active after {attempt} failed reconnect(s)"
+            failed_detail(&h, Duration::ZERO).await.as_deref(),
+            Some(exited.as_str()),
+            "the row still reads the exit after {attempt} failed reconnect(s)"
         );
+        assert!(
+            h.registry.get("srv__echo").is_some(),
+            "its tools are still published after {attempt} failed reconnect(s)"
+        );
+        assert!(reaper.try_recv().is_err(), "an exit queues no reap");
     }
 
     let fourth = h
@@ -1611,6 +1723,11 @@ command = "{}"
         "the row now reads failed/crashed, got {:?}",
         h.state("srv")
     );
+    assert_ne!(
+        failed_detail(&h, Duration::ZERO).await.as_deref(),
+        Some(exited.as_str()),
+        "the detail is the exhausted reconnect's now, not the exit's"
+    );
 
     // The reaper is what unpublishes and seals.
     let queued = reaper.try_recv().expect("mark_failed queued a reap");
@@ -1631,7 +1748,11 @@ command = "{}"
             .contains("stopped unexpectedly"),
         "the S4 crash row, not a transport string"
     );
-    assert_eq!(stub.spawn_count(), spawns, "a failed server never respawns again");
+    assert_eq!(
+        stub.spawn_count(),
+        spawns,
+        "a reaped server never respawns again: only a row reading an exit is recovered by a call"
+    );
 
     // (3) Retry recovers, with a new generation. Rewriting the same script
     // under the same tag restores the command the declaration names.
@@ -1642,6 +1763,197 @@ command = "{}"
     assert!(stub2.any_alive(), "and a new child");
 
     h.supervisor.shutdown_all().await;
+}
+
+// ============================================================================
+// The ledger learns at the child's exit — N-MCP-1b (T6(a)'s sub-choice)
+// ============================================================================
+
+/// **An exit between calls reads `Failed` at once, naming its code** (§13 Q8,
+/// taken 2026-10-19). No call is in flight and none is made: the ledger learns
+/// from the child's exit itself, with one `extension_state_changed`. Nothing is
+/// respawned, and the server's tools stay registered and on the surface, so
+/// the next call can bring it back (the recovery test below).
+#[tokio::test]
+async fn a_stdio_server_that_exits_between_calls_reads_failed_at_once_naming_its_exit_code() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "exit-code",
+        StubOpts {
+            exit_on_trigger: Some(3),
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let generation = h.record("srv").expect("record").generation;
+    let mut events = h.bus.subscribe();
+
+    stub.exit_now();
+    let detail = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "the row reads failed once the process exits, got {:?}",
+                h.state("srv")
+            )
+        });
+    assert!(
+        detail.contains("exit status: 3"),
+        "the detail names the exit code: {detail}"
+    );
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        vec![("failed".to_string(), generation)],
+        "one announcement, at the load's generation"
+    );
+    assert_eq!(stub.spawn_count(), 1, "nothing was respawned");
+    assert!(
+        !stub.sent().iter().any(|(_, m)| m["method"] == "tools/call"),
+        "no call was made"
+    );
+    assert!(
+        h.registry.get("srv__echo").is_some(),
+        "its tools stay registered"
+    );
+    assert!(
+        h.registry
+            .extension_tool_defs()
+            .iter()
+            .any(|d| d.name == "srv__echo"),
+        "and on the surface"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A process ended by a signal reads `Failed` naming the signal.** SIGTERM,
+/// so the name read back is the one the test sent, not the SIGKILL the
+/// teardown of a group sends after its leader exits.
+#[tokio::test]
+async fn a_stdio_server_killed_by_a_signal_reads_failed_naming_the_signal() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "exit-signal", StubOpts::default());
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let generation = h.record("srv").expect("record").generation;
+    let mut events = h.bus.subscribe();
+
+    let pid = stub.pids()[0];
+    // SAFETY: a plain SIGTERM to the pid this test's stub wrote down.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let detail = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "the row reads failed once the process is killed, got {:?}",
+                h.state("srv")
+            )
+        });
+    assert!(
+        detail.contains("SIGTERM"),
+        "the detail names the signal: {detail}"
+    );
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        vec![("failed".to_string(), generation)],
+        "one announcement, at the load's generation"
+    );
+    assert_eq!(stub.spawn_count(), 1, "nothing was respawned");
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **The next call's one reconnect returns the row to `Enabled`** — T6(a)'s
+/// recovery, unchanged: the gate admits the call to a row reading an exit, its
+/// pre-send reconnect respawns the server, and the row reads `Enabled` at the
+/// same generation, announced once, by the time the call returns.
+#[tokio::test]
+async fn the_next_call_after_an_exit_reconnects_once_and_returns_the_row_to_enabled() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "exit-recover",
+        StubOpts {
+            exit_on_trigger: Some(3),
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    let generation = h.record("srv").expect("record").generation;
+    let mut events = h.bus.subscribe();
+
+    stub.exit_now();
+    failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "the row reads failed once the process exits, got {:?}",
+                h.state("srv")
+            )
+        });
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        vec![("failed".to_string(), generation)]
+    );
+
+    let ok = h
+        .registry
+        .execute("srv__echo", &serde_json::json!({}))
+        .await
+        .expect("the gate admits the call and its reconnect respawns the server");
+    assert_eq!(ok, "ok");
+    assert_eq!(
+        h.state("srv"),
+        Some(ExtensionState::Enabled),
+        "the row is enabled again"
+    );
+    assert_eq!(
+        h.record("srv").expect("record").generation,
+        generation,
+        "the same load: a reconnect is not a new incarnation"
+    );
+    assert_eq!(stub.spawn_count(), 2, "respawned once");
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        vec![("enabled".to_string(), generation)],
+        "the return is announced once"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A close the daemon makes is not read as an exit.** Shutdown leaves the
+/// ledger alone (§3.5) and closes each live connection, so the child's exit
+/// that follows the close must not turn an `Enabled` row `Failed` — the client
+/// is sealed first, and a sealed client reports no exit.
+#[tokio::test]
+async fn a_close_the_daemon_makes_is_not_read_as_an_exit() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "exit-own-close", StubOpts::default());
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    let mut events = h.bus.subscribe();
+
+    h.supervisor.shutdown_all().await;
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.any_alive()).await,
+        "the shutdown ended the child"
+    );
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        Vec::<(String, u64)>::new(),
+        "no transition is announced"
+    );
+    assert_eq!(
+        h.state("srv"),
+        Some(ExtensionState::Enabled),
+        "the row is left alone"
+    );
 }
 
 // ============================================================================

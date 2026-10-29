@@ -856,7 +856,8 @@ impl ToolRegistry {
                         // error and the backend's generation are both in hand
                         // here, and only a *terminal* class may flip the row.
                         // `mark_failed` is itself guarded twice — `Enabled`
-                        // only, current generation only — so a stale snapshot
+                        // (or the `Failed` a stdio exit left, N-MCP-1b) only,
+                        // current generation only — so a stale snapshot
                         // cannot tear down the load that replaced it.
                         if let Some(reason) =
                             crate::tools::mcp::classify_call_failure(&e)
@@ -1292,7 +1293,9 @@ impl ToolRegistry {
     /// and tool ordering feeds prompt-cache fingerprints).
     /// Tools whose extension is not `Enabled` are dropped — **hygiene only**,
     /// so the model does not burn a round on a call the gate will refuse. An
-    /// absent ledger entry counts as enabled (design §6.2 #2, §6.2a).
+    /// absent ledger entry counts as enabled (design §6.2 #2, §6.2a), and so
+    /// does a row reading a stdio server's exit, whose next call the gate
+    /// admits to reconnect it (N-MCP-1b).
     pub fn extension_tool_defs(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
             .tools
@@ -1316,10 +1319,7 @@ impl ToolRegistry {
     pub fn extension_is_available(&self, tool: &RegisteredTool) -> bool {
         match tool.extension_id() {
             None => true,
-            Some(ext) => self
-                .extensions
-                .state(&ext)
-                .is_none_or(|state| state.is_enabled()),
+            Some(ext) => self.extensions.admits_calls(&ext).unwrap_or(true),
         }
     }
 

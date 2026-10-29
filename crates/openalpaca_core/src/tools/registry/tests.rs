@@ -2476,6 +2476,42 @@ fn extension_tool_defs_drops_tools_whose_extension_is_not_enabled() {
     );
 }
 
+/// A row reading a stdio server's exit (N-MCP-1b) keeps its tools on the
+/// surface and its names unwithheld — the gate admits the next call, whose
+/// reconnect brings the server back, so the model must be able to make it.
+#[test]
+fn a_row_reading_an_exit_keeps_its_tools_on_the_surface_and_unwithheld() {
+    let registry = ToolRegistry::default();
+    let ext = ExtensionId::mcp("srv");
+    let generation = enabled_record(registry.extensions(), &ext, &["srv__echo"]);
+    registry
+        .register(mcp_tool("srv__echo", "srv", generation))
+        .unwrap();
+    assert!(
+        registry
+            .extensions()
+            .mark_exited(&ext, generation, "exit status: 3")
+    );
+
+    assert_eq!(registry.extension_tool_defs().len(), 1, "on the surface");
+    assert!(
+        registry.withheld_name("srv__echo").is_none(),
+        "the legacy arm's name classification agrees with the gate"
+    );
+
+    assert!(registry.extensions().mark_failed(
+        &ext,
+        generation,
+        crate::tools::extensions::FailureReason::Crashed,
+        "reconnect exhausted"
+    ));
+    assert!(
+        registry.extension_tool_defs().is_empty(),
+        "a reaped failure leaves the surface"
+    );
+    assert!(registry.withheld_name("srv__echo").is_some());
+}
+
 // ── §7.2 classification ──────────────────────────────────────────────────
 
 #[test]

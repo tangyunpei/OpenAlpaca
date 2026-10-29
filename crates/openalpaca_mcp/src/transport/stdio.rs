@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::ExitStatus;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use process_wrap::tokio::CommandWrap;
@@ -11,6 +13,12 @@ use tokio::process::Command;
 use crate::error::McpError;
 
 use super::{Transport, TransportConnection, TransportInner};
+
+/// Told what a spawned server's wait returned, once per process — however the
+/// wait was reached: rmcp's close when the server's output ends, its kill
+/// after the 3 s close wait, its drop guard's kill (N-MCP-1b). Called on the
+/// task that reaped the process, so it must not block.
+pub type ExitObserver = Arc<dyn Fn(ExitStatus) + Send + Sync>;
 
 /// Spawns an MCP server as a subprocess; communicates via stdin/stdout.
 ///
@@ -23,6 +31,7 @@ pub struct StdioTransport {
     args: Vec<String>,
     env: HashMap<String, String>,
     cwd: Option<PathBuf>,
+    exit_observer: Option<ExitObserver>,
 }
 
 impl StdioTransport {
@@ -33,6 +42,7 @@ impl StdioTransport {
             args: Vec::new(),
             env: HashMap::new(),
             cwd: None,
+            exit_observer: None,
         }
     }
 
@@ -48,6 +58,12 @@ impl StdioTransport {
 
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
         self.cwd = Some(cwd);
+        self
+    }
+
+    /// Report each spawned process's exit status to `observer`.
+    pub fn with_exit_observer(mut self, observer: ExitObserver) -> Self {
+        self.exit_observer = Some(observer);
         self
     }
 
@@ -81,7 +97,7 @@ impl Transport for StdioTransport {
             "connecting MCP stdio transport"
         );
 
-        let command = server_command(cmd, &self.server_name);
+        let command = server_command(cmd, &self.server_name, self.exit_observer.clone());
         let child = TokioChildProcess::new(command).map_err(|e| {
             // TokioChildProcess::new returns an io::Error on spawn failure.
             McpError::Transport(std::io::Error::other(
@@ -115,7 +131,10 @@ impl Transport for StdioTransport {
 ///
 /// On Windows the server runs in a job object; no test exercises that leg
 /// (DU-33).
-fn server_command(cmd: Command, server_name: &str) -> CommandWrap {
+///
+/// An `observer` goes on last, outermost, so what it is told is the status
+/// the reap beneath it returned, the group already ended (N-MCP-1b).
+fn server_command(cmd: Command, server_name: &str, observer: Option<ExitObserver>) -> CommandWrap {
     let mut wrap = CommandWrap::from(cmd);
     #[cfg(unix)]
     wrap.wrap(process_wrap::tokio::ProcessGroup::leader())
@@ -127,7 +146,113 @@ fn server_command(cmd: Command, server_name: &str) -> CommandWrap {
         let _ = server_name;
         wrap.wrap(process_wrap::tokio::JobObject);
     }
+    if let Some(observer) = observer {
+        wrap.wrap(exit::ReportExit { observer });
+    }
     wrap
+}
+
+/// The exit observer's wrapper (N-MCP-1b).
+///
+/// rmcp owns the child and exposes no exit status: it waits for the process
+/// inside its own close and logs the status at most (`graceful_shutdown`,
+/// rmcp-3.5.1 `src/transport/child_process.rs:81-107`). Every wait rmcp makes
+/// goes through the wrapper stack, so the outermost wrapper is where the
+/// status can be read. When a server exits by itself its output ends, rmcp's
+/// service loop closes the transport (`src/service.rs:1805`), and that close's
+/// wait returns at once for a process already gone — before the service task
+/// ends and `Peer::is_transport_closed()` turns true, so the exit is reported
+/// before any call can find the transport closed.
+mod exit {
+    use std::fmt;
+    use std::future::Future;
+    use std::io;
+    use std::pin::Pin;
+    use std::process::ExitStatus;
+    use std::sync::Arc;
+
+    use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper};
+
+    use super::ExitObserver;
+
+    pub(super) struct ReportExit {
+        pub(super) observer: ExitObserver,
+    }
+
+    impl fmt::Debug for ReportExit {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("ReportExit").finish_non_exhaustive()
+        }
+    }
+
+    impl CommandWrapper for ReportExit {
+        fn wrap_child(
+            &mut self,
+            inner: Box<dyn ChildWrapper>,
+            _core: &CommandWrap,
+        ) -> io::Result<Box<dyn ChildWrapper>> {
+            Ok(Box::new(ExitReportingChild {
+                inner,
+                observer: Arc::clone(&self.observer),
+                reported: false,
+            }))
+        }
+    }
+
+    struct ExitReportingChild {
+        inner: Box<dyn ChildWrapper>,
+        observer: ExitObserver,
+        reported: bool,
+    }
+
+    impl fmt::Debug for ExitReportingChild {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("ExitReportingChild")
+                .field("inner", &self.inner)
+                .field("reported", &self.reported)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl ExitReportingChild {
+        /// Tell the observer, once: a process is reaped once, but `wait` can
+        /// be asked again for the status it already returned.
+        fn report(&mut self, status: ExitStatus) {
+            if !std::mem::replace(&mut self.reported, true) {
+                (self.observer)(status);
+            }
+        }
+    }
+
+    impl ChildWrapper for ExitReportingChild {
+        fn inner(&self) -> &dyn ChildWrapper {
+            self.inner.as_ref()
+        }
+
+        fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+            self.inner.as_mut()
+        }
+
+        fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+            self.inner
+        }
+
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            let status = self.inner.try_wait()?;
+            if let Some(status) = status {
+                self.report(status);
+            }
+            Ok(status)
+        }
+
+        fn wait(&mut self) -> Pin<Box<dyn Future<Output = io::Result<ExitStatus>> + Send + '_>> {
+            Box::pin(async move {
+                let status = self.inner.wait().await?;
+                self.report(status);
+                Ok(status)
+            })
+        }
+    }
 }
 
 /// The server's process group ends with its leader.
@@ -480,6 +605,43 @@ mod tests {
         let mut all = descendants.clone();
         all.push(leader);
         assert!(all_gone(&all).await, "the kill reaches the whole group");
+    }
+
+    /// The exit observer is told what the process's wait returned — its own
+    /// exit code, or the signal that ended it — once, through the stack the
+    /// group wrappers sit in (N-MCP-1b).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_exit_observer_is_told_the_status_a_server_ended_with_once() {
+        for (script, expected) in [
+            ("exit 3", "exit status: 3"),
+            ("kill -TERM $$", "signal: 15 (SIGTERM)"),
+        ] {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::<ExitStatus>::new()));
+            let observer: ExitObserver = {
+                let seen = Arc::clone(&seen);
+                Arc::new(move |status| seen.lock().expect("lock").push(status))
+            };
+            let conn = StdioTransport::new("exits", "/bin/sh")
+                .with_args(vec!["-c".into(), script.into()])
+                .with_exit_observer(observer)
+                .connect()
+                .await
+                .expect("spawn");
+            let mut child = match conn.inner {
+                TransportInner::Stdio(child) => child,
+                TransportInner::Http(_) => unreachable!("a stdio transport"),
+            };
+            close(&mut child).await;
+            drop(child);
+            let seen: Vec<String> = seen
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(seen, [expected], "`{script}`: one report, its status");
+        }
     }
 
     /// A connection dropped without a close — rmcp's drop guard, whose kill is

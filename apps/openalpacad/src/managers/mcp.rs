@@ -48,8 +48,8 @@ use openalpaca_core::tools::mcp::{
     classify_bringup_failure, classify_call_failure, config_fingerprint,
 };
 use openalpaca_mcp::{
-    ConnectionSnapshot, Implementation, McpClient, McpClientConfig, McpError, ProtocolMode,
-    ServerChange, TransportKind,
+    ConnectionEvent, ConnectionEventHandler, ConnectionSnapshot, Implementation, McpClient,
+    McpClientConfig, McpError, ProtocolMode, ServerChange, TransportKind,
 };
 use openalpaca_storage::hash::sha256_hex;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -74,7 +74,8 @@ const OWN_WRITE_RING: usize = 8;
 /// What the supervisor holds for one *loaded* server. Its presence in the map
 /// is the answer to "does this extension hold a handle?" — T4 asks the map, not
 /// the state, which is what makes it correct from `Enabled` **and** from a
-/// pre-reaper `Failed{Crashed}` and a no-op from every other cell (§3.2 T4).
+/// pre-reaper `Failed{Crashed}` or one a stdio exit left (N-MCP-1b), and a
+/// no-op from every other cell (§3.2 T4).
 struct ServerHandle {
     client: Arc<McpClient>,
     generation: u64,
@@ -84,7 +85,9 @@ struct ServerHandle {
     request_timeout: Duration,
     /// `serverInfo.version` from this incarnation's handshake — the API row's
     /// `version` (§8). It is a fact about the *live* connection, so a row that
-    /// is not `Enabled` reports `null` rather than a remembered string.
+    /// holds no handle reports `null` rather than a remembered string; the
+    /// `Failed` a stdio exit left keeps its handle, and reports the exited
+    /// incarnation's (N-MCP-1b).
     version: Option<String>,
     /// E4's name collisions for this load — the API row's `skipped_tools`
     /// (§8, §10 case 13).
@@ -1073,8 +1076,11 @@ impl McpSupervisor {
     /// load path, so no entrant can skip it.
     ///
     /// It runs the reaper's shape (T1 → T4, **no** T3 drain — the gate has
-    /// refused since `mark_failed`) with cause `Crash`, because the only state
-    /// that reaches here holding anything is a pre-reaper `Failed{Crashed}`.
+    /// refused since `mark_failed`) with cause `Crash`, because the only states
+    /// that reach here holding anything are a pre-reaper `Failed{Crashed}` and
+    /// the `Failed{Crashed}` a stdio server's exit left, which keeps its handle
+    /// for the next call's reconnect (N-MCP-1b) — a Retry of that one finds a
+    /// call still admitted, and the T4 seal ends it.
     /// Without it a Retry that wins the mutex before the reaper would build
     /// load N+1 on top of load N's live residue and the reaper would then find
     /// "superseded" and do nothing.
@@ -1188,6 +1194,9 @@ impl McpSupervisor {
         // the mutex this load still holds and then re-checks for `Enabled`, so
         // a notification during a failed bring-up is dropped by that re-check.
         self.spawn_change_reader(&ext, generation, &client).await;
+        // E2 — and the receiver of the client's own connection events, so the
+        // ledger learns a stdio server's exit at once (N-MCP-1b).
+        self.watch_connection(&ext, generation, &client);
 
         // E3 — the one-shot fetch. A client that has just handshaken has no
         // reconnect to make, so bring-up stays bounded by `connect_timeout` +
@@ -1275,9 +1284,9 @@ impl McpSupervisor {
     }
 
     /// Is `tool_name` currently served by a **different**, live extension? Only
-    /// a live incumbent blocks a name: not `Enabled`, or `Enabled` but holding
-    /// the name in its own `server_withdrawn` set, means the newcomer takes it
-    /// (§10 case 13).
+    /// a live incumbent blocks a name: one the gate does not admit
+    /// (`admits_calls`), or one it admits but holding the name in its own
+    /// `server_withdrawn` set, means the newcomer takes it (§10 case 13).
     fn is_live_incumbent(&self, ext: &ExtensionId, tool_name: &str) -> bool {
         let Some(incumbent) = self.ledger.owner_of(tool_name) else {
             return false;
@@ -1285,9 +1294,10 @@ impl McpSupervisor {
         if &incumbent == ext {
             return false;
         }
-        self.ledger
-            .state(&incumbent)
-            .is_some_and(|s| s.is_enabled() && !self.ledger.is_server_withdrawn(&incumbent, tool_name))
+        // A row reading a stdio server's exit still serves its names, which
+        // its next call reconnects (N-MCP-1b).
+        self.ledger.admits_calls(&incumbent) == Some(true)
+            && !self.ledger.is_server_withdrawn(&incumbent, tool_name)
     }
 
     /// **E-FAIL.** Tear down a handle whose bring-up failed *after*
@@ -1349,6 +1359,41 @@ impl McpSupervisor {
         }
         self.emit(ext, "failed", self.ledger.generation(ext).unwrap_or(0), false);
         state
+    }
+
+    /// **N-MCP-1b** (T6(a)'s sub-choice, design §3.6, §13 Q8): what this
+    /// load's client learns about its own connection reaches the ledger at
+    /// once. A stdio server's exit turns an `Enabled` row `Failed{Crashed}`,
+    /// its detail the exit code or the signal, with nothing reaped — the tools
+    /// stay published and the gate admits the next call; that call's pre-send
+    /// reconnect, on success, returns the row to `Enabled`.
+    ///
+    /// Both are ledger CASes at **this** load's generation, announced by the
+    /// ledger itself and never here, so an event from a torn-down load changes
+    /// nothing; and a close the daemon makes seals the client first, which
+    /// then reports no exit at all. An exit during the bring-up itself, before
+    /// E5 commits `Enabled`, changes nothing either: the next call's pre-send
+    /// reconnect finds it, as before.
+    fn watch_connection(&self, ext: &ExtensionId, generation: u64, client: &McpClient) {
+        let ledger = Arc::clone(&self.ledger);
+        let id = ext.clone();
+        let handler: ConnectionEventHandler = Arc::new(move |event| match event {
+            ConnectionEvent::Exited(status) => {
+                ledger.mark_exited(
+                    &id,
+                    generation,
+                    format!(
+                        "the server's process exited ({status}); the next call starts it again"
+                    ),
+                );
+            }
+            ConnectionEvent::Reconnected => {
+                ledger.mark_recovered(&id, generation);
+            }
+        });
+        if !client.on_connection_event(handler) {
+            tracing::debug!(extension = %ext, "MCP connection receiver already installed");
+        }
     }
 
     // ── §3.7 — the server changes its own tool set ───────────────────────
@@ -1835,7 +1880,10 @@ impl McpSupervisor {
         let generation = record.generation;
 
         match record.state {
-            ExtensionState::Enabled => {
+            // A row reading a stdio server's exit is torn down as a live one
+            // is, T0 and the drain included: the gate still admits its calls
+            // (N-MCP-1b).
+            _ if self.ledger.admits_calls(&ext) == Some(true) => {
                 if let Transition::Took(_) =
                     self.ledger
                         .begin(&ext, ExtensionState::Disabling, Some(WithdrawalCause::DeclarationGone))
@@ -1848,8 +1896,10 @@ impl McpSupervisor {
             // A pre-reaper `Failed{Crashed}` still owns load N's residue. There
             // is no T0 and no drain on this exit — the gate has refused since
             // `mark_failed` — but the residue must still come down, or the
-            // child would outlive the declaration.
-            ExtensionState::Failed { .. } => {
+            // child would outlive the declaration. `Enabled` too: the guard
+            // above reads the live state, and a `mark_failed` (outside this
+            // mutex) may have landed since the snapshot was taken.
+            ExtensionState::Enabled | ExtensionState::Failed { .. } => {
                 self.t1(&ext, WithdrawalCause::Crash);
                 self.t4(name).await;
             }

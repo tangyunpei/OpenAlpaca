@@ -1325,7 +1325,10 @@ Primary controls are the toggle plus, where they apply: `Approve` / `Deny` on a
 plugin awaiting consent, `Configure` on one missing keys (one input per missing
 key, posted one at a time — setting the last one starts the plugin without a
 second call), `Retry` on a crashed or unreachable one, and `Remove` on an orphan
-row. `Reload`, `Update` and `Uninstall` live in the row's overflow menu instead,
+row. A stdio MCP server whose process exited reads crashed at once, its detail
+naming the exit status; its tools stay available, and the next call to one of
+them starts it again and turns the row back on — `Retry` does the same sooner.
+`Reload`, `Update` and `Uninstall` live in the row's overflow menu instead,
 because nothing is wrong and the last two change what is *installed* rather than
 whether it is on; both open an inline strip that has to be confirmed.
 

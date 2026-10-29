@@ -377,3 +377,82 @@ async fn one_deadline_spans_the_pre_send_reconnect_and_the_call() {
     assert!(took < Duration::from_millis(2500), "ended after {took:?}");
     assert_eq!(stub.calls(), 0, "nothing was sent");
 }
+
+/// The events a test's receiver was handed, in order.
+fn recording_handler() -> (
+    ConnectionEventHandler,
+    Arc<std::sync::Mutex<Vec<ConnectionEvent>>>,
+) {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let handler: ConnectionEventHandler = {
+        let seen = Arc::clone(&seen);
+        Arc::new(move |event| seen.lock().expect("lock").push(event))
+    };
+    (handler, seen)
+}
+
+fn rendered(seen: &std::sync::Mutex<Vec<ConnectionEvent>>) -> Vec<String> {
+    seen.lock()
+        .expect("lock")
+        .iter()
+        .map(|event| match event {
+            ConnectionEvent::Exited(status) => format!("exited: {status}"),
+            ConnectionEvent::Reconnected => "reconnected".to_string(),
+        })
+        .collect()
+}
+
+/// N-MCP-1b's mechanism, below the ledger: a stdio server's exit reaches the
+/// client's receiver with what the process's wait returned, before the client
+/// can see its transport closed — so before any pre-send reconnect — and the
+/// reconnect that follows is reported after it. A close the client makes
+/// itself reports nothing.
+#[tokio::test]
+async fn a_stdio_exit_is_reported_with_its_status_before_the_transport_reads_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = stub(dir.path(), "reported", OnCall::DieFirst, 0);
+    let client = McpClient::connect(config(&stub, Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+    let (handler, seen) = recording_handler();
+    assert!(
+        client.on_connection_event(handler),
+        "the first install takes"
+    );
+    let (again, _) = recording_handler();
+    assert!(!client.on_connection_event(again), "a second is refused");
+
+    // The server exits with code 3 on receiving the call.
+    let first = client.call_tool("echo", serde_json::json!({}), None).await;
+    assert!(first.is_err(), "the call the server died on fails");
+    assert!(
+        eventually(Duration::from_secs(5), async || transport_closed(&client)
+            .await)
+        .await,
+        "rmcp must notice the child's exit"
+    );
+    assert_eq!(
+        rendered(&seen),
+        ["exited: exit status: 3"],
+        "reported once, by the time the transport reads closed"
+    );
+
+    let second = client
+        .call_tool("echo", serde_json::json!({}), None)
+        .await
+        .unwrap_or_else(|e| panic!("the next call respawns and is answered: {e}"));
+    assert_eq!(second.content.len(), 1);
+    assert_eq!(
+        rendered(&seen),
+        ["exited: exit status: 3", "reconnected"],
+        "the respawn before the send is reported after the exit"
+    );
+
+    client.disconnect().await.expect("disconnect");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        rendered(&seen),
+        ["exited: exit status: 3", "reconnected"],
+        "the close a disconnect makes is not reported as an exit"
+    );
+}

@@ -270,18 +270,21 @@ impl DependentScan<'_> {
                 .is_empty()
     }
 
-    /// Is this allowed tool name gone, in the §6.2 #12 sense? Owned by a
-    /// non-`Enabled` extension, or server-withdrawn under an `Enabled` one.
+    /// Is this allowed tool name gone, in the §6.2 #12 sense? Owned by an
+    /// extension the gate does not admit (`admits_calls`), or server-withdrawn
+    /// under one it admits.
     /// A name with no ledger owner — a builtin, a typo — counts as satisfiable,
     /// preserving today's silent degrade for unattributed misses.
     fn name_lost(&self, name: &str) -> bool {
         let ledger = self.registry.extensions();
         match ledger.owner_of(name) {
             None => false,
-            Some(ext) => match ledger.state(&ext) {
+            // The gate's own predicate: a row reading a stdio server's exit
+            // still serves its names (N-MCP-1b).
+            Some(ext) => match ledger.admits_calls(&ext) {
                 None => false,
-                Some(state) if !state.is_enabled() => true,
-                Some(_) => ledger.is_server_withdrawn(&ext, name),
+                Some(false) => true,
+                Some(true) => ledger.is_server_withdrawn(&ext, name),
             },
         }
     }

@@ -17,7 +17,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::error::McpError;
 use crate::lifecycle::{ConnectionSnapshot, ConnectionState, ProtocolMode};
-use crate::transport::{Transport, TransportInner, TransportKind};
+use crate::transport::{ExitObserver, Transport, TransportInner, TransportKind};
 
 /// Something the *server* changed about itself mid-session, announced over one
 /// of MCP's `notifications/*_list_changed` methods.
@@ -36,6 +36,25 @@ pub enum ServerChange {
     ResourceList,
     PromptList,
 }
+
+/// What a client learns about its own connection without a request of its
+/// own — the facts the supervisor sets the extension's ledger row by
+/// (N-MCP-1b; extension design §3.6, §13 Q8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionEvent {
+    /// The stdio server's process exited — by itself, or by a signal from
+    /// outside — while the client was not closing it: what the process's wait
+    /// returned. Reported once per process, as its connection ends, and
+    /// before the client can see the transport closed.
+    Exited(std::process::ExitStatus),
+    /// A reconnect opened a fresh connection: the respawn before a send
+    /// (N-MCP-1) handshook.
+    Reconnected,
+}
+
+/// Receives a client's [`ConnectionEvent`]s, on the task that learned each —
+/// rmcp's, for an exit; the call's, for a reconnect — so it must not block.
+pub type ConnectionEventHandler = Arc<dyn Fn(ConnectionEvent) + Send + Sync>;
 
 /// The `ClientHandler` every connection is served with: it forwards the three
 /// list-changed notifications onto the client's own channel and does nothing
@@ -199,6 +218,9 @@ pub(crate) struct ClientInner {
     /// disconnect (a stale extension snapshot, an in-flight retry loop) can
     /// never respawn the child the owner just disabled.
     pub(crate) closed: AtomicBool,
+    /// The receiver of [`ConnectionEvent`]s, installed once by
+    /// [`McpClient::on_connection_event`]. An event before it is dropped.
+    pub(crate) connection_events: std::sync::OnceLock<ConnectionEventHandler>,
 }
 
 impl ClientInner {
@@ -221,12 +243,20 @@ impl ClientInner {
             closed: AtomicBool::new(false),
             changes_tx: Mutex::new(Some(changes_tx)),
             changes_rx: Mutex::new(Some(changes_rx)),
+            connection_events: std::sync::OnceLock::new(),
         }
     }
 
     /// `true` once [`McpClient::disconnect`] has run on any clone.
     pub(crate) fn is_sealed(&self) -> bool {
         self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Hand `event` to the installed receiver, if there is one.
+    fn announce(&self, event: ConnectionEvent) {
+        if let Some(handler) = self.connection_events.get() {
+            handler(event);
+        }
     }
 }
 
@@ -263,7 +293,7 @@ impl McpClient {
     /// Build a Transport from the configured TransportKind, connect, then open
     /// the connection's lifecycle through [`serve`].
     pub(crate) async fn do_handshake(&self) -> Result<(), McpError> {
-        let transport = build_transport(&self.inner.config)?;
+        let transport = build_transport(&self.inner.config, self.exit_observer())?;
         let conn = transport.connect().await?;
 
         tracing::info!(
@@ -377,6 +407,35 @@ impl McpClient {
     /// Async because the state lives under a `tokio::sync::RwLock`.
     pub async fn connection_state(&self) -> ConnectionSnapshot {
         ConnectionSnapshot::from(&*self.inner.state.read().await)
+    }
+
+    /// Install the receiver of this client's [`ConnectionEvent`]s. **Once** —
+    /// a second call is refused and returns `false`, as [`Self::changes`] is
+    /// take-once. The supervisor installs it at E2, with the client; an event
+    /// before that has no receiver and is dropped (N-MCP-1b).
+    pub fn on_connection_event(&self, handler: ConnectionEventHandler) -> bool {
+        self.inner.connection_events.set(handler).is_ok()
+    }
+
+    /// What every stdio process this client spawns reports its exit to: an
+    /// [`ConnectionEvent::Exited`], unless the client is sealed — a close the
+    /// daemon itself made, a disable's, a failed bring-up's, a shutdown's
+    /// (design §3.2 T4, §3.5), whose exit is no news. It holds the client
+    /// weakly, so a process never keeps its client alive.
+    fn exit_observer(&self) -> ExitObserver {
+        let inner = Arc::downgrade(&self.inner);
+        Arc::new(move |status| {
+            let Some(inner) = inner.upgrade() else { return };
+            if inner.is_sealed() {
+                return;
+            }
+            tracing::info!(
+                server_name = %inner.config.server_name,
+                %status,
+                "MCP stdio server process exited"
+            );
+            inner.announce(ConnectionEvent::Exited(status));
+        })
     }
 
     /// Take the server-change receiver. **Once** — a second call returns
@@ -566,8 +625,10 @@ impl McpClient {
 
         tokio::time::sleep(delay).await;
 
-        // Re-handshake.
+        // Re-handshake. A success is news to the ledger only after an exit
+        // (N-MCP-1b), and its receiver decides that.
         self.do_handshake().await?;
+        self.inner.announce(ConnectionEvent::Reconnected);
         Ok(())
     }
 
@@ -736,8 +797,12 @@ where
     }
 }
 
-/// Internal: materialise a Transport impl from a TransportKind.
-fn build_transport(cfg: &McpClientConfig) -> Result<Box<dyn Transport>, McpError> {
+/// Internal: materialise a Transport impl from a TransportKind. A stdio
+/// transport reports each process's exit to `exit_observer`.
+fn build_transport(
+    cfg: &McpClientConfig,
+    exit_observer: ExitObserver,
+) -> Result<Box<dyn Transport>, McpError> {
     use crate::transport::{StdioTransport, StreamableHttpTransport};
     match &cfg.transport {
         TransportKind::Stdio {
@@ -746,7 +811,9 @@ fn build_transport(cfg: &McpClientConfig) -> Result<Box<dyn Transport>, McpError
             env,
             cwd,
         } => {
-            let mut t = StdioTransport::new(&cfg.server_name, command).with_args(args.clone());
+            let mut t = StdioTransport::new(&cfg.server_name, command)
+                .with_args(args.clone())
+                .with_exit_observer(exit_observer);
             for (k, v) in env {
                 t = t.with_env(k, v);
             }
