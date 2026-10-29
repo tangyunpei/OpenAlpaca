@@ -73,12 +73,18 @@ fn extract_docx(path: &str, max_chars: usize) -> (Option<String>, Option<String>
         Err(e) => return (None, Some(format!("Failed to read DOCX as ZIP: {e}"))),
     };
     let mut xml_content = String::new();
-    if let Ok(mut entry) = archive.by_name("word/document.xml") {
-        if entry.read_to_string(&mut xml_content).is_err() {
-            return (None, Some("Failed to read word/document.xml".to_string()));
+    match archive.by_name("word/document.xml") {
+        Ok(mut entry) => {
+            if entry.read_to_string(&mut xml_content).is_err() {
+                return (None, Some("Failed to read word/document.xml".to_string()));
+            }
         }
-    } else {
-        return (None, Some("DOCX missing word/document.xml".to_string()));
+        Err(zip::result::ZipError::FileNotFound) => {
+            return (None, Some("DOCX missing word/document.xml".to_string()));
+        }
+        // Present but not readable here — e.g. an entry compressed with a
+        // method other than deflate, which OOXML does not allow (DU-7).
+        Err(e) => return (None, Some(format!("Failed to read word/document.xml: {e}"))),
     }
     let text = strip_xml_tags(&xml_content);
     (Some(truncate_text(&text, max_chars)), None)
@@ -99,7 +105,13 @@ fn extract_spreadsheet(path: &str, max_chars: usize) -> (Option<String>, Option<
         text.push_str(&format!("## Sheet: {}\n", sheet_name));
         if let Ok(range) = workbook.worksheet_range(sheet_name) {
             for row in range.rows() {
-                let cells: Vec<String> = row.iter().map(|c| c.to_string()).collect();
+                // Cells are joined by TAB and rows end in LF, so a TAB, LF or
+                // CR inside a cell would read as a cell or row boundary: each
+                // becomes a space (DU-9 (b′)).
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|c| c.to_string().replace(['\t', '\n', '\r'], " "))
+                    .collect();
                 text.push_str(&cells.join("\t"));
                 text.push('\n');
                 if text.len() >= max_chars {
@@ -195,7 +207,8 @@ fn extract_iwork(path: &str, kind: &str, max_chars: usize) -> (Option<String>, O
             break;
         }
         if let Ok(entry) = archive.by_index(i) {
-            let name = entry.name().to_string();
+            let Ok(name) = entry.name() else { continue };
+            let name = name.into_owned();
             if name.ends_with(".iwa") {
                 // IWA files are snappy-compressed protobuf.
                 // Best-effort: read raw bytes and extract printable text runs.
@@ -488,9 +501,9 @@ mod tests {
     // ------------------------------------------------------------------------
     // Characterisation of extraction on generated fixtures (deps plan P14;
     // owner decisions DU-7, DU-8, DU-9). Each test pins what pdf-extract 0.12
-    // (P15), calamine 0.26.1 and zip 2.4.2 produce on this tree; the commit
-    // that moves calamine and zip (P16) changes the expectations named below,
-    // and nothing else may.
+    // (P15), calamine 0.36 and zip 9 (P16) produce on this tree; a commit that
+    // moves one of them changes the expectations it names, and nothing else
+    // may.
     // ------------------------------------------------------------------------
 
     const XLSX_MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -513,8 +526,8 @@ mod tests {
 
     /// A three-sheet workbook over one shared-strings table. Sheet `Cases`
     /// holds the cell-text cases, one per row beside a plain `Label`; sheets
-    /// `StrayV` and `EmptyV` each hold one malformed cell calamine 0.26
-    /// rejects the whole sheet for.
+    /// `StrayV` and `EmptyV` each hold one malformed cell — calamine 0.26
+    /// rejected the whole sheet for it, 0.36 drops the cell alone.
     fn write_cases_xlsx(path: &std::path::Path) {
         const CT: &str = concat!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
@@ -609,20 +622,23 @@ mod tests {
         );
     }
 
-    /// Today's cell text, as calamine 0.26.1 reads it and `extract_spreadsheet`
-    /// joins it (cells by TAB, rows by LF — `cells.join("\t")`): whitespace is
-    /// kept whether or not `xml:space` says so; a plain `<t>` before a rich run
-    /// ends the cell, so the run is lost; CRLF, a TAB and a LF inside a cell
-    /// come through unchanged and collide with the separators; Excel's
-    /// `_x00HH_` escapes stay literal; CDATA inside `<t>` reads as nothing; and
-    /// a stray `<v>` beside an `inlineStr` or an empty `<v/>` on a shared-string
-    /// cell makes the whole sheet unreadable, which `extract_spreadsheet` skips
-    /// without a word. P16 (calamine 0.36, zip 8.6) changes the whitespace, the
-    /// rich run, the escapes, the CDATA and the two rejected sheets, and under
-    /// DU-9 (b′) maps TAB, LF and CR inside a cell to a space — rows 5, 7 and 8
-    /// here — so those expectations move with it, in that commit alone.
+    /// The cell text as calamine 0.36 reads it and `extract_spreadsheet` joins
+    /// it (cells by TAB, rows by LF). Untagged leading and trailing whitespace
+    /// is trimmed — each untagged `<t>` of a rich string on its own, so `Plain `
+    /// before a bold run loses its space — and `xml:space="preserve"` keeps
+    /// it; a rich run after a plain `<t>` is kept; CRLF inside a cell reads as
+    /// LF; every `_x00HH_` escape is unescaped, so NUL and ESC reach the text
+    /// as they do from a plain-text upload (DU-9 (a)); inline CDATA is read;
+    /// and a stray `<v>` beside an `inlineStr`, or an empty `<v/>` on a
+    /// shared-string cell, drops that cell alone (`StrayV`, whose one cell it
+    /// is, reads empty) where calamine 0.26 dropped the whole sheet without a
+    /// word. A TAB, LF or CR inside a cell, literal or unescaped, becomes a
+    /// space (DU-9 (b′); rows 5, 6 and 7), so the text has the file's cells
+    /// and rows. calamine 0.26 kept whitespace, lost the run, passed CRLF, TAB
+    /// and LF through into the separators, left the escapes literal, read
+    /// CDATA as nothing and skipped both malformed sheets.
     #[test]
-    fn xlsx_cell_text_is_pinned_as_calamine_0_26_reads_it() {
+    fn xlsx_cell_text_is_pinned_as_calamine_0_36_reads_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cases.xlsx");
         write_cases_xlsx(&path);
@@ -630,17 +646,18 @@ mod tests {
         assert!(error.is_none(), "unexpected XLSX error: {error:?}");
         let expected = concat!(
             "## Sheet: Cases\n",
-            "Label\t  leading and trailing  \n",
+            "Label\tleading and trailing\n",
             "Label\t  preserved spaces  \n",
-            "Label\tPlain \n",
+            "Label\tPlainBold run\n",
             "Label\tRun one run two\n",
-            "Label\tline1\r\nline2\n",
-            "Label\ta_x000D_b_x0009_c_x0000_d_x001B_e\n",
-            "Label\tTab\there\n",
-            "Label\t\nnewline-led\n",
-            "  inline padded  \t\n",
+            "Label\tline1 line2\n",
+            "Label\ta b c\u{0}d\u{1b}e\n",
+            "Label\tTab here\n",
+            "Label\tnewline-led\n",
+            "inline padded\tcdata <text> & more\n",
             "## Sheet: StrayV\n",
             "## Sheet: EmptyV\n",
+            "Label\n",
         );
         assert_eq!(text.as_deref(), Some(expected));
     }
@@ -648,10 +665,8 @@ mod tests {
     /// `d02_bzip2_entry.docx` (898 bytes): a two-entry DOCX whose entries are
     /// bzip2-compressed, a method OOXML does not allow. Made once with Python's
     /// `zipfile` (`ZIP_BZIP2`) by the dependency research's `make_fixtures.py`
-    /// and embedded here because zip loses its `bzip2` feature at P16 and could
-    /// not write it afterwards. Today zip 2.4.2's default features read it.
-    /// P16 (zip 8.6, `deflate` only) turns this into an unreadable
-    /// `word/document.xml` — that commit moves the expectation.
+    /// and embedded here because zip lost its `bzip2` feature at P16 and could
+    /// not write it afterwards.
     const D02_BZIP2_ENTRY_DOCX: &[u8] = &[
         0x50, 0x4B, 0x03, 0x04, 0x2E, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x07, 0x76, 0x39, 0x5D, 0xE5,
         0x7F, 0x93, 0x24, 0x7E, 0x01, 0x00, 0x00, 0xB8, 0x03, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00,
@@ -715,17 +730,31 @@ mod tests {
         0x00, 0x02, 0x00, 0x80, 0x00, 0x00, 0x00, 0xEC, 0x02, 0x00, 0x00, 0x00, 0x00,
     ];
 
+    /// zip 9 with `deflate` only (DU-7) cannot decompress a bzip2 entry
+    /// (method 12), and the extractor says so rather than calling the part
+    /// missing. zip 2.4.2's default features read it: `Hello DOCX, 你好, café.
+    /// Second paragraph.`
     #[test]
-    fn a_docx_with_bzip2_entries_is_read_by_zip_2() {
+    fn a_docx_with_bzip2_entries_is_not_read_by_a_deflate_only_zip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bzip2.docx");
         std::fs::write(&path, D02_BZIP2_ENTRY_DOCX).unwrap();
         let (text, error) = extract_text(path.to_str().unwrap(), DOCX_MIME, 10000);
-        assert!(error.is_none(), "unexpected DOCX error: {error:?}");
+        assert_eq!(text, None);
         assert_eq!(
-            text.as_deref(),
-            Some("Hello DOCX, 你好, café. Second paragraph.")
+            error.as_deref(),
+            Some("Failed to read word/document.xml: compression method not supported: 12")
         );
+    }
+
+    #[test]
+    fn a_docx_without_word_document_xml_is_reported_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.docx");
+        write_deflated_zip_fixture(&path, &[("word/styles.xml", "<w:styles/>")]);
+        let (text, error) = extract_text(path.to_str().unwrap(), DOCX_MIME, 10000);
+        assert_eq!(text, None);
+        assert_eq!(error.as_deref(), Some("DOCX missing word/document.xml"));
     }
 
     /// `e01_p01_encrypted_v4.pdf` (1,380 bytes): `make_fixtures.py`'s two-page
