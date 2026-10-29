@@ -324,6 +324,23 @@ fn test_audio_mime_flac_aliases() {
 }
 
 #[test]
+fn test_audio_mime_mp3_aliases() {
+    let aliases = ["audio/mpeg", "audio/mp3"];
+    for a in &aliases {
+        for b in &aliases {
+            assert!(
+                InputSanitizer::is_audio_mime_compatible(a, b),
+                "{a} should be compatible with {b}"
+            );
+        }
+    }
+    assert!(!InputSanitizer::is_audio_mime_compatible(
+        "audio/mp3",
+        "audio/mp4"
+    ));
+}
+
+#[test]
 fn test_audio_mime_rejects_unrelated() {
     // Different audio formats should NOT be compatible
     assert!(!InputSanitizer::is_audio_mime_compatible(
@@ -563,17 +580,32 @@ fn text_mime_compatibility_covers_an_incidental_pdf_or_dwg_signature_only() {
     }
 }
 
-/// The two connector media cases (DU-6 m): an `audio/mp3` clip whose first
-/// frame is MPEG-2 (`FF F3`) and an `image/heic` whose ftyp brand is `heix`.
-/// infer 0.16 knows MP3 by an ID3 tag or `FF FB` and HEIF by brand `heic`
-/// only, so both are undetectable and pass. infer 0.22 would report
-/// `audio/mpeg` and `image/heif` and refuse both as mismatches; P17a (DU-6
-/// m-b) accepts `audio/mp3` as an alias of `audio/mpeg`.
+/// The first connector media case (DU-6 m): an `audio/mp3` clip passes
+/// whether its first frame is MPEG-2 (`FF F3`) or MPEG-1 (`FF FB`), because
+/// `audio/mp3` is an alias of `audio/mpeg` (P17a, DU-6 (m-b)). infer 0.16
+/// knows MP3 by an ID3 tag or `FF FB` only, so it reports the MPEG-1 clip as
+/// `audio/mpeg` — refused before P17a, like a body with a leading ID3 tag —
+/// and cannot classify the MPEG-2 one; infer 0.22 (P18) reports both as
+/// `audio/mpeg`.
 #[test]
-fn the_two_connector_media_uploads_pass_today() {
-    let mut mp3 = vec![0xFF, 0xF3, 0x44, 0xC4];
-    mp3.extend_from_slice(&[0u8; 60]);
-    assert!(upload_passes("clip.mp3", &mp3, "audio/mp3"));
+fn an_audio_mp3_upload_of_mpeg_frames_passes() {
+    for frame in [[0xFF, 0xF3, 0x44, 0xC4], [0xFF, 0xFB, 0x90, 0x64]] {
+        let mut mp3 = frame.to_vec();
+        mp3.extend_from_slice(&[0u8; 60]);
+        assert!(
+            upload_passes("clip.mp3", &mp3, "audio/mp3"),
+            "frame {frame:02X?}"
+        );
+    }
+}
+
+/// The second connector media case (DU-6 m): an `image/heic` whose ftyp
+/// brand is `heix`. infer 0.16 knows HEIF by brand `heic` only, so it cannot
+/// classify it and the upload passes. infer 0.22 (P18) reports `image/heif`,
+/// which no alias admits for `image/heic` (DU-6 (m-c) not taken), and moves
+/// this pin.
+#[test]
+fn a_heix_heic_upload_passes_today() {
     let mut heic = b"\x00\x00\x00\x18ftypheix\x00\x00\x00\x00mif1heix".to_vec();
     heic.extend_from_slice(&[0u8; 32]);
     assert!(upload_passes("photo.heic", &heic, "image/heic"));

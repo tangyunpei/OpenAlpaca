@@ -568,6 +568,17 @@ mod tests {
         );
     }
 
+    // --- Media declarations (deps plan P17a; DU-6 (m-b)). `audio/mp3` is an
+    //     alias of the `audio/mpeg` infer reports for MPEG audio; MPEG-1
+    //     frames (`FF FB`) are `audio/mpeg` under infer 0.16 and 0.22 alike. ---
+
+    #[test]
+    fn an_audio_mp3_file_of_mpeg_1_frames_is_accepted() {
+        let mut mp3 = vec![0xFF, 0xFB, 0x90, 0x64];
+        mp3.extend_from_slice(&[0u8; 60]);
+        assert_eq!(validate_magic_mime("audio/mp3", &mp3), Ok(()));
+    }
+
     fn open_ok(_path: &str, _file_id: &str, _filename: &str, _stage: bool) -> Result<(), String> {
         Ok(())
     }

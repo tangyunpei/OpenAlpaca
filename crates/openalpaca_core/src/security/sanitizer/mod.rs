@@ -307,10 +307,15 @@ impl InputSanitizer {
     /// Browsers, OS file pickers, and the `infer` crate may report different MIME
     /// strings for the same audio format. For example, M4A may be declared as
     /// `audio/mp4` (Chrome/Firefox) or `audio/x-m4a` (Safari) while `infer` detects
-    /// it as `audio/m4a`. This function treats known alias groups as compatible.
+    /// it as `audio/m4a`, and MP3 arrives declared `audio/mp3` while `infer` detects
+    /// `audio/mpeg`. This function treats known alias groups as compatible.
     pub fn is_audio_mime_compatible(declared: &str, detected: &str) -> bool {
         let m4a = ["audio/m4a", "audio/mp4", "audio/x-m4a"];
         if m4a.contains(&declared) && m4a.contains(&detected) {
+            return true;
+        }
+        let mp3 = ["audio/mpeg", "audio/mp3"];
+        if mp3.contains(&declared) && mp3.contains(&detected) {
             return true;
         }
         let wav = ["audio/wav", "audio/x-wav", "audio/wave"];
