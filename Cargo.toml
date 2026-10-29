@@ -66,7 +66,7 @@ tracing-test = "0.2"
 # daemon api (server)
 axum = { version = "0.8.8", features = ["ws", "multipart"] }
 futures-util = { version = "0.3.31", features = ["sink"] }
-tower-http = { version = "0.6.8", features = ["cors"] }
+tower-http = { version = "0.7.1", features = ["cors"] }
 # Dev-only: `ServiceExt::oneshot` drives a `Router` in the daemon's route tests.
 tower = { version = "0.5.3", features = ["util"] }
 
