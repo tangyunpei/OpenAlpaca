@@ -167,7 +167,7 @@ apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 windows-native-keyring-store = "1.1"
 # `crypto-rust`: secret-service refuses to compile without a crypto feature.
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
-opener = "0.8"
+opener = "0.9.0"
 tauri = "~2.12"
 tauri-build = "~2.7"
 tauri-plugin-dialog = "=2.8.3"
