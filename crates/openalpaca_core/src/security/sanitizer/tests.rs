@@ -510,7 +510,8 @@ fn allow_still_checks_a_shell_tool_for_injection() {
     );
 }
 
-// --- Upload sniffing verdicts on infer 0.16 (deps plan P14; DU-6) ---
+// --- Upload sniffing verdicts on infer 0.22 (deps plan P14, P17, P17a, P18;
+//     DU-6) ---
 
 /// `validate_upload_with_image_limit` as the upload route calls it, with the
 /// route's default image bound; `true` when the upload passes.
@@ -520,11 +521,12 @@ fn upload_passes(filename: &str, data: &[u8], declared_mime: &str) -> bool {
 }
 
 /// A text body whose first KiB names a PDF header, and a CSV whose first cell
-/// is AutoCAD 2000's `AC1015` signature, pass as declared `text/*`: infer 0.16
-/// reads `%PDF` at offset 0 only and has no DWG matcher, so it classifies
-/// neither; infer 0.22 (P18) reports `application/pdf` and `image/vnd.dwg`,
-/// which `is_text_mime_compatible` (P17, DU-6 (b)) does not hold against a
-/// declared text file.
+/// is AutoCAD 2000's `AC1015` signature, pass as declared `text/*`: infer 0.22
+/// reports `application/pdf` (a `%PDF` anywhere in the first KiB) and
+/// `image/vnd.dwg`, which `is_text_mime_compatible` (P17, DU-6 (b)) does not
+/// hold against a declared text file — the verdict infer 0.16, which read
+/// `%PDF` at offset 0 only and had no DWG matcher, reached by classifying
+/// neither.
 #[test]
 fn a_declared_text_upload_with_a_pdf_or_dwg_signature_inside_passes() {
     let notes = b"Notes on file formats.\nA PDF starts with %PDF-1.7 then a comment.\n";
@@ -581,12 +583,10 @@ fn text_mime_compatibility_covers_an_incidental_pdf_or_dwg_signature_only() {
 }
 
 /// The first connector media case (DU-6 m): an `audio/mp3` clip passes
-/// whether its first frame is MPEG-2 (`FF F3`) or MPEG-1 (`FF FB`), because
-/// `audio/mp3` is an alias of `audio/mpeg` (P17a, DU-6 (m-b)). infer 0.16
-/// knows MP3 by an ID3 tag or `FF FB` only, so it reports the MPEG-1 clip as
-/// `audio/mpeg` — refused before P17a, like a body with a leading ID3 tag —
-/// and cannot classify the MPEG-2 one; infer 0.22 (P18) reports both as
-/// `audio/mpeg`.
+/// whether its first frame is MPEG-2 (`FF F3`) or MPEG-1 (`FF FB`): infer 0.22
+/// reports both as `audio/mpeg`, and `audio/mp3` is its alias (P17a, DU-6
+/// (m-b)). infer 0.16 knew MP3 by an ID3 tag or `FF FB` only — the MPEG-2
+/// clip passed unclassified, the MPEG-1 one was refused until P17a.
 #[test]
 fn an_audio_mp3_upload_of_mpeg_frames_passes() {
     for frame in [[0xFF, 0xF3, 0x44, 0xC4], [0xFF, 0xFB, 0x90, 0x64]] {
@@ -600,13 +600,26 @@ fn an_audio_mp3_upload_of_mpeg_frames_passes() {
 }
 
 /// The second connector media case (DU-6 m): an `image/heic` whose ftyp
-/// brand is `heix`. infer 0.16 knows HEIF by brand `heic` only, so it cannot
-/// classify it and the upload passes. infer 0.22 (P18) reports `image/heif`,
-/// which no alias admits for `image/heic` (DU-6 (m-c) not taken), and moves
-/// this pin.
+/// brand is `heix` is refused. infer 0.22 reports `image/heif`, which no alias
+/// admits for a declared `image/heic` (DU-6 (m-c), which would also admit
+/// every ordinary iPhone HEIC — refused by infer 0.16 and 0.22 alike — is not
+/// taken). infer 0.16 knew HEIF by brand `heic` only, so the upload passed
+/// unclassified until P18.
 #[test]
-fn a_heix_heic_upload_passes_today() {
+fn a_heix_heic_upload_is_refused_as_heif() {
     let mut heic = b"\x00\x00\x00\x18ftypheix\x00\x00\x00\x00mif1heix".to_vec();
     heic.extend_from_slice(&[0u8; 32]);
-    assert!(upload_passes("photo.heic", &heic, "image/heic"));
+    let err = InputSanitizer::validate_upload_with_image_limit(
+        "photo.heic",
+        &heic,
+        "image/heic",
+        1 << 20,
+        8192,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Input blocked: MIME type mismatch: declared 'image/heic' but content detected as \
+         'image/heif'"
+    );
 }

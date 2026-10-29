@@ -535,12 +535,12 @@ mod tests {
     }
 
     // --- Declared text whose body carries another format's signature (deps
-    //     plan P14, P17; DU-6 (b)). infer 0.16 reads `%PDF` at offset 0 only
-    //     and has no DWG matcher; infer 0.22 (P18) reports `application/pdf`
-    //     for a `%PDF` anywhere in the first KiB and `image/vnd.dwg` for
-    //     `AC1015`, which `InputSanitizer::is_text_mime_compatible` does not
-    //     hold against a declared text file. A body that starts with `%PDF`
-    //     is a PDF under both. ---
+    //     plan P14, P17; DU-6 (b)). infer 0.22 reports `application/pdf` for a
+    //     `%PDF` anywhere in the first KiB and `image/vnd.dwg` for `AC1015`,
+    //     which `InputSanitizer::is_text_mime_compatible` does not hold
+    //     against a declared text file (infer 0.16 read `%PDF` at offset 0
+    //     only and had no DWG matcher). A body that starts with `%PDF` is a
+    //     PDF under both. ---
 
     #[test]
     fn a_declared_text_file_naming_a_pdf_header_past_offset_0_is_accepted() {
@@ -577,6 +577,47 @@ mod tests {
         let mut mp3 = vec![0xFF, 0xFB, 0x90, 0x64];
         mp3.extend_from_slice(&[0u8; 60]);
         assert_eq!(validate_magic_mime("audio/mp3", &mp3), Ok(()));
+    }
+
+    // --- What infer 0.22 (P18) classifies that infer 0.16 could not, on the
+    //     upload route (the documents report's §6 table): each of these bodies
+    //     was undetectable, so each non-text declaration below was 415
+    //     MIME_UNDETECTABLE. ---
+
+    fn mpeg_2_clip() -> Vec<u8> {
+        let mut mp3 = vec![0xFF, 0xF3, 0x44, 0xC4];
+        mp3.extend_from_slice(&[0u8; 60]);
+        mp3
+    }
+
+    fn heix_heif() -> Vec<u8> {
+        let mut heif = b"\x00\x00\x00\x18ftypheix\x00\x00\x00\x00mif1heix".to_vec();
+        heif.extend_from_slice(&[0u8; 32]);
+        heif
+    }
+
+    #[test]
+    fn mpeg_2_audio_is_accepted_as_audio_mpeg_and_its_mp3_alias() {
+        assert_eq!(validate_magic_mime("audio/mpeg", &mpeg_2_clip()), Ok(()));
+        assert_eq!(validate_magic_mime("audio/mp3", &mpeg_2_clip()), Ok(()));
+    }
+
+    #[test]
+    fn a_heix_heif_is_accepted_as_image_heif_and_a_mismatch_as_image_heic() {
+        assert_eq!(validate_magic_mime("image/heif", &heix_heif()), Ok(()));
+        assert_eq!(
+            validate_magic_mime("image/heic", &heix_heif()),
+            Err(MimeMagicValidationError::Mismatch {
+                detected: "image/heif".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_pdf_whose_header_follows_other_bytes_is_accepted_as_a_pdf() {
+        let mut pdf = b"From: a mail gateway that prefixed this attachment\n".to_vec();
+        pdf.extend_from_slice(b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        assert_eq!(validate_magic_mime("application/pdf", &pdf), Ok(()));
     }
 
     fn open_ok(_path: &str, _file_id: &str, _filename: &str, _stage: bool) -> Result<(), String> {
