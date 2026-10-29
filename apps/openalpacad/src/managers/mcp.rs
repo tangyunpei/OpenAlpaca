@@ -79,8 +79,8 @@ struct ServerHandle {
     client: Arc<McpClient>,
     generation: u64,
     /// The bound T4 waits for `disconnect` under, from this server's own
-    /// declaration: `call_tool` holds the transport mutex across its await, so
-    /// a straggler can hold `disconnect` off for up to one request.
+    /// declaration. A call in flight no longer holds the transport — it runs
+    /// on a cloned peer (N-MCP-3) — so what the bound caps is the close.
     request_timeout: Duration,
     /// `serverInfo.version` from this incarnation's handshake — the API row's
     /// `version` (§8). It is a fact about the *live* connection, so a row that
@@ -988,11 +988,14 @@ impl McpSupervisor {
     ///
     /// `disconnect` seals the shared inner *before* it takes the service lock,
     /// so from that instant no clone can reconnect and no in-flight handshake
-    /// can install a live child. It is awaited under `request_timeout + 1s`,
-    /// because `call_tool` holds the transport mutex across its request; on
-    /// expiry a **fresh** `disconnect` future is spawned detached (the timed-out
-    /// one is consumed) and the caller is told, since the seal is already set
-    /// and nothing can reconnect meanwhile.
+    /// can install a live child. A call in flight no longer holds the
+    /// transport — it runs on a cloned peer (N-MCP-3) and ends with the close,
+    /// reading `Closed` — so what `disconnect` waits for is the close itself
+    /// (rmcp's graceful stdio close, at most `CLOSE_TIMEOUT`). It is still
+    /// awaited under `request_timeout + 1s`; on expiry a **fresh**
+    /// `disconnect` future is spawned detached (the timed-out one is consumed)
+    /// and the caller is told, since the seal is already set and nothing can
+    /// reconnect meanwhile.
     ///
     /// The `tools/list_changed` reader is not joined here: it is waiting on the
     /// very mutex this teardown holds, so joining it would deadlock. Dropping

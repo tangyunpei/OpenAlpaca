@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{ClientRequest, Implementation, PingRequest, ProtocolVersion};
-use rmcp::service::{NotificationContext, RoleClient, RunningService, ServiceExt};
+use rmcp::service::{NotificationContext, Peer, RoleClient, RunningService, ServiceExt};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -372,12 +372,42 @@ impl McpClient {
     ///   would hold its handles for minutes against a dying server.
     pub async fn list_tools_once(&self) -> Result<Vec<rmcp::model::Tool>, McpError> {
         let op = async {
-            let guard = self.inner.service.lock().await;
-            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-            let result = running.list_all_tools().await.map_err(McpError::from)?;
+            let peer = self.current_peer().await?;
+            let result = peer
+                .list_all_tools()
+                .await
+                .map_err(|e| self.call_error(e))?;
             Ok::<_, McpError>(result)
         };
         with_cancel_and_timeout(op, None, self.inner.config.request_timeout).await
+    }
+
+    /// A clone of the current service's [`Peer`], taken under the service
+    /// lock and returned **without** it: the request is then awaited on the
+    /// clone, so no call, list or ping holds the lock across its RPC — two
+    /// calls run concurrently, and a queued one no longer spends its deadline
+    /// waiting for the lock (N-MCP-3). A `disconnect` takes the service and
+    /// closes it under that lock; a request in flight on a clone then ends
+    /// with the close (see [`Self::call_error`]).
+    async fn current_peer(&self) -> Result<Peer<RoleClient>, McpError> {
+        self.inner
+            .service
+            .lock()
+            .await
+            .as_ref()
+            .map(|running| running.peer().clone())
+            .ok_or(McpError::TransportClosed)
+    }
+
+    /// Translate a failed request. A request cut off because the owner sealed
+    /// the client — a `disconnect` closed the service under it — reads
+    /// [`McpError::Closed`], the deliberate close, never the unexpected
+    /// `TransportClosed` (design §3.2 T4b).
+    fn call_error(&self, error: rmcp::service::ServiceError) -> McpError {
+        match McpError::from(error) {
+            McpError::TransportClosed if self.inner.is_sealed() => McpError::Closed,
+            other => other,
+        }
     }
 
     /// Server identity from the last successful handshake.
@@ -392,12 +422,13 @@ impl McpClient {
 
     /// Health check — sends an MCP `ping`.
     pub async fn ping(&self) -> Result<(), McpError> {
-        let guard = self.inner.service.lock().await;
-        let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+        let peer = self.current_peer().await?;
         // rmcp 0.16 does not expose a typed `ping()` helper on `Peer<RoleClient>`;
         // construct a PingRequest manually and discard the (empty) server response.
         let req: ClientRequest = PingRequest::default().into();
-        running.peer().send_request(req).await.map_err(McpError::from)?;
+        peer.send_request(req)
+            .await
+            .map_err(|e| self.call_error(e))?;
         Ok(())
     }
 
@@ -491,8 +522,11 @@ impl McpClient {
             "MCP reconnect scheduled"
         );
 
-        // Drop the old service (if any) so its subprocess/HTTP connection is released.
-        if let Some(mut old) = self.inner.service.lock().await.take() {
+        // Drop the old service (if any) so its subprocess/HTTP connection is
+        // released — taken under the lock, closed after it is released, so a
+        // slow close holds up no other caller.
+        let old = self.inner.service.lock().await.take();
+        if let Some(mut old) = old {
             let _ = old.close_with_timeout(ABANDONED_CLOSE_TIMEOUT).await;
         }
         *self.inner.state.write().await = ConnectionState::Reconnecting { attempt };
@@ -512,9 +546,11 @@ impl McpClient {
         use std::sync::atomic::Ordering;
         loop {
             let op = async {
-                let guard = self.inner.service.lock().await;
-                let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-                let result = running.list_all_tools().await.map_err(McpError::from)?;
+                let peer = self.current_peer().await?;
+                let result = peer
+                    .list_all_tools()
+                    .await
+                    .map_err(|e| self.call_error(e))?;
                 Ok::<_, McpError>(result)
             };
             match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
@@ -566,11 +602,16 @@ impl McpClient {
         // error, a transport error or a transport that closes mid-call goes
         // back to the caller, and the next call's pre-send check respawns a
         // dead child (N-MCP-1; extension design §3.6 item 1).
+        // The request runs on a cloned peer, never under the service lock
+        // (N-MCP-3), and the lock is taken only inside this deadline for the
+        // instant the clone takes.
         let op = async {
             self.ensure_connected().await?;
-            let guard = self.inner.service.lock().await;
-            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-            let result = running.call_tool(params).await.map_err(McpError::from)?;
+            let peer = self.current_peer().await?;
+            let result = peer
+                .call_tool(params)
+                .await
+                .map_err(|e| self.call_error(e))?;
             Ok::<_, McpError>(result)
         };
         match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
@@ -1430,3 +1471,7 @@ mod tests {
 // N-MCP-1: a call that may have reached the server is never sent again.
 #[cfg(test)]
 mod call_tests;
+
+// N-MCP-3: a call does not hold the service lock across its RPC.
+#[cfg(test)]
+mod concurrency_tests;

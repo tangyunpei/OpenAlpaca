@@ -1,6 +1,6 @@
 # Extension Enable — the two-axis design (N5)
 
-**Status:** design of record, **rev 20 — implemented: C1–C8 landed; rev 20 records N-MCP-1's client half as built: §3.6 item 1 and §10 case 7(d) now say a call reconnects once before it is sent, never after, under one deadline, and that only a successful call resets the attempt count; Q8's ledger half stays not built, now N-MCP-1b, right after P19** (see the revision log). **Rev 19 records the owner's answer of 2026-10-19 (PDT; 2026-10-20T00:26Z) on the one question rev 18 left pending, Q8's ledger sub-choice: taken as a third option, the ledger learning `Failed` at a stdio child's exit — not built; N-MCP-1's amended entry carries it** (see the revision log). **Rev 18 records the owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z): §13 Q5–Q14 taken as their recommendations (Q8's ledger sub-choice left pending, no recommendation; Q13 with nothing to build), Q4's default confirmed by the audit's B-06, the audit's B-05, B-17 and B-26 taken where they amend this design, and the lessons' T2, T5 and T6(b) recorded taken as this design applied them — none is built, and the design text each one would change stays what ships until a commit builds it** (see the revision log). Rev 17 brings §9.2's denied row up to the copy that ships. Rev 16: **implemented: C1–C8 landed** (`e92d76e..eff30cb` on `feat/ui-rework`; C8 is the `global_tool_deny` purge + the documentation sweep). Rev 16 changes no mechanism: it records the corrections and residue observed while building C1–C8 (see the revision log) and leaves §13 Q5–Q14 pending and unapplied. Rev 15 was the verified design implemented from: **rev 15 — verified.** Directive fidelity (S1–S4), source claims and plan/KB consistency passed on earlier revisions; the consistency lens confirmed every remaining check on rev 13 and its two follow-ups found only step-order wording, the last a single word in E-PRE's closing sentence (rev 14 → 15), fixed and grep-verified — no live sentence pairs E-PRE with "then E0". Implement from this revision. (rev 14: one residual — five sites still read "E-PRE, then E0"; all now say E0 CAS → E-PRE → E1–E5. Every other check confirmed: §3.3.1 derived cell by cell, the four crash races under the table, E-FAIL, C1, §3.7, one predicate, §12, §13, ~60 anchors; round-11 — the §3.3.1 table is regenerated row by row from §4.1 and the prose, E-PRE runs after E0's CAS so a redundant `enable` can never tear down a live handle; round-10 — handle ownership is now a derived state × verb table, §3.3.1, and every exit from a pre-reaper `Failed{Crashed}` tears the residue down; round-9 — a Retry that beats the crash reaper now tears down load N before building load N+1 (E-PRE); round-8 — a bring-up failure after a successful connect/spawn now tears down the just-built handle before `Failed` is committed; round-6: three internal-consistency blockers on rev 7 repaired — §6.2 #8 deny is write-first like every other statement of W-deny; §3.7 step 4 diffs against the live subset so a server-re-added tool is reachable; one skill-refusal predicate, `CapabilityOracle::is_satisfiable`, at every consumer), accepted mechanism. **Residue for the next pass:** none blocking in this file; the owner-gated items are enumerated in §13 (Q5–Q14) and are **not applied anywhere** in this document — §13's arrows are recommendations, and silence enacts none of them. **Cross-file follow-ups still owed (not this file):** the cost-lockout fix now has its slot (api-fix-plan Phase 0 **A5** with its *Verify* clause) and the roadmap's Known-broken row reads confirmed + scheduled (both 2026-09-02); plan Phase 0 **A1** now orders deny write-first, matching §6.2 #8; the GUI `GapId` union (`unavailable.ts:37`/`:233` still read `GAP-19`, C7 work); and the small plan/KB wording items listed in the rev-7 log entry. The plan-side N5/Phase 8/ADR-030 items rev 6 listed as owed **landed** with plan rev 3 and ADR-030 (`94a8f42`). Supersedes ADR-029 (flat per-tool disable list) entirely.
+**Status:** design of record, **rev 21 — implemented: C1–C8 landed; rev 21 records N-MCP-3 as built: a call, a list and a ping run on a `Peer` cloned out of the service lock, so §3.2 T4 and §8's disable no longer wait for an MCP call in flight, only for the close** (see the revision log). **Rev 20 records N-MCP-1's client half as built: §3.6 item 1 and §10 case 7(d) now say a call reconnects once before it is sent, never after, under one deadline, and that only a successful call resets the attempt count; Q8's ledger half stays not built, now N-MCP-1b, right after P19** (see the revision log). **Rev 19 records the owner's answer of 2026-10-19 (PDT; 2026-10-20T00:26Z) on the one question rev 18 left pending, Q8's ledger sub-choice: taken as a third option, the ledger learning `Failed` at a stdio child's exit — not built; N-MCP-1's amended entry carries it** (see the revision log). **Rev 18 records the owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z): §13 Q5–Q14 taken as their recommendations (Q8's ledger sub-choice left pending, no recommendation; Q13 with nothing to build), Q4's default confirmed by the audit's B-06, the audit's B-05, B-17 and B-26 taken where they amend this design, and the lessons' T2, T5 and T6(b) recorded taken as this design applied them — none is built, and the design text each one would change stays what ships until a commit builds it** (see the revision log). Rev 17 brings §9.2's denied row up to the copy that ships. Rev 16: **implemented: C1–C8 landed** (`e92d76e..eff30cb` on `feat/ui-rework`; C8 is the `global_tool_deny` purge + the documentation sweep). Rev 16 changes no mechanism: it records the corrections and residue observed while building C1–C8 (see the revision log) and leaves §13 Q5–Q14 pending and unapplied. Rev 15 was the verified design implemented from: **rev 15 — verified.** Directive fidelity (S1–S4), source claims and plan/KB consistency passed on earlier revisions; the consistency lens confirmed every remaining check on rev 13 and its two follow-ups found only step-order wording, the last a single word in E-PRE's closing sentence (rev 14 → 15), fixed and grep-verified — no live sentence pairs E-PRE with "then E0". Implement from this revision. (rev 14: one residual — five sites still read "E-PRE, then E0"; all now say E0 CAS → E-PRE → E1–E5. Every other check confirmed: §3.3.1 derived cell by cell, the four crash races under the table, E-FAIL, C1, §3.7, one predicate, §12, §13, ~60 anchors; round-11 — the §3.3.1 table is regenerated row by row from §4.1 and the prose, E-PRE runs after E0's CAS so a redundant `enable` can never tear down a live handle; round-10 — handle ownership is now a derived state × verb table, §3.3.1, and every exit from a pre-reaper `Failed{Crashed}` tears the residue down; round-9 — a Retry that beats the crash reaper now tears down load N before building load N+1 (E-PRE); round-8 — a bring-up failure after a successful connect/spawn now tears down the just-built handle before `Failed` is committed; round-6: three internal-consistency blockers on rev 7 repaired — §6.2 #8 deny is write-first like every other statement of W-deny; §3.7 step 4 diffs against the live subset so a server-re-added tool is reachable; one skill-refusal predicate, `CapabilityOracle::is_satisfiable`, at every consumer), accepted mechanism. **Residue for the next pass:** none blocking in this file; the owner-gated items are enumerated in §13 (Q5–Q14) and are **not applied anywhere** in this document — §13's arrows are recommendations, and silence enacts none of them. **Cross-file follow-ups still owed (not this file):** the cost-lockout fix now has its slot (api-fix-plan Phase 0 **A5** with its *Verify* clause) and the roadmap's Known-broken row reads confirmed + scheduled (both 2026-09-02); plan Phase 0 **A1** now orders deny write-first, matching §6.2 #8; the GUI `GapId` union (`unavailable.ts:37`/`:233` still read `GAP-19`, C7 work); and the small plan/KB wording items listed in the rev-7 log entry. The plan-side N5/Phase 8/ADR-030 items rev 6 listed as owed **landed** with plan rev 3 and ADR-030 (`94a8f42`). Supersedes ADR-029 (flat per-tool disable list) entirely.
 **Rev 8 in one line:** three rev-7 self-contradictions closed, nothing else moved — §6.2 #8 now reads as
 §3.2 W-deny / §4.1 / C3 / ADR-030 (a) already did (write the denial, then T0–T4, `Unapproved{Denied}` at T5);
 §3.7 step 4 diffs the fetched list against `retained \ server_withdrawn` so a name the server drops and later
@@ -646,29 +646,39 @@ pins that. `ToolRegistry::register` /
   depends on dropping the last registry Arc (`McpClient` has no `Drop` impl — an implicit drop performs no
   close at all).
 
-  *The true bound on T4, stated.* `call_tool` holds the `inner.service` mutex **across its request await**
-  (`client.rs:286-288`: `lock().await` … `running.call_tool(params).await` inside one guard scope), and
-  `disconnect` takes the same mutex (`client.rs:166`). So if the drain expired with an MCP call still in
-  flight, `disconnect` blocks until that call's future is dropped — by the sandbox timeout
-  (`max_tool_runtime_secs`) or by `with_cancel_and_timeout`'s `request_timeout` (30 s, `client.rs:41`),
-  whichever fires first. T4 therefore awaits `disconnect()` under
-  `tokio::time::timeout(request_timeout + 1s)`. `tokio::time::timeout` **consumes** the future it timed out,
-  so on expiry T4 spawns a **fresh** `(*arc).clone().disconnect()` detached (it completes when the straggler
-  releases the lock — the `closed` seal below is already set, so nothing can reconnect meanwhile) and proceeds
-  to T5 with a `"teardown pending: 1 call still holding the transport"` warning in the response. One clause so
-  nobody expects more of that second call: if the timeout fired *inside* `close_with_timeout` rather than at
-  the lock, `guard.take()` (`client.rs:167`) has already run, so the detached `disconnect` finds `None` and only
-  flips `ConnectionState` — the close is already in progress in the first future's `RunningService`, which
-  rmcp finishes on drop. The honest statement for §8 is: a disable returns within
-  **`mutex_wait + drain_timeout_secs + min(max_tool_runtime_secs, request_timeout) + 1s`**, where `mutex_wait`
-  is the time to acquire the per-extension mutex — zero unless another holder is in flight, and the holders
-  are exactly four: an `Enabling` or `reload` bring-up (§4.1 queues the `disable` behind it), bounded by that
-  server's `connect_timeout_secs` (default 30 s, `tools/mcp/config.rs:40`); the reaper's T4 (§3.6), bounded by
-  `request_timeout + 1 s` by the detach rule above; and a §3.7 refresh's **apply** step, which is in-memory and
-  microseconds because the fetch runs outside the mutex — so `mutex_wait ≤ max(connect_timeout_secs,
-  request_timeout + 1 s)` — and a `200` means *no new call can reach the extension and its
-  teardown is either done or unstoppably in progress*. Plugins have no equivalent contention:
-  `process.kill()` is non-blocking (`process_pool.rs:166-172`, `start_kill`).
+  *The true bound on T4, stated.* No call holds the `inner.service` mutex across its request (N-MCP-3, rev 21):
+  `call_tool`, `list_tools`, `list_tools_once` and `ping` take it only to clone the current service's `Peer`
+  (`McpClient::current_peer`) and await the request on the clone, and `reconnect` takes the old service under it and
+  closes that after releasing it. `disconnect` takes the same mutex — every other holder keeps it for an instant —
+  takes the service and closes it under its guard with `close_with_timeout(CLOSE_TIMEOUT)` (5 s); for a stdio server
+  that close is rmcp's graceful one: stdin closed, up to 3 s for the child to exit, then a kill
+  (`TokioChildProcess::graceful_shutdown`, `MAX_WAIT_ON_DROP_SECS`, rmcp-0.16.0 `src/transport/child_process.rs`),
+  and a server hung in a call never reads the EOF, so it takes the whole 3 s. So if the drain expired with an MCP
+  call still in flight, `disconnect` does not wait for that call: the close ends it, and the call reads
+  `McpError::Closed` — `McpClient::call_error` maps a request's `TransportClosed` on a sealed client — which the
+  registry's `Mcp` arm words *"client sealed by disable"* (T4b (a)), instead of running to its own deadline. (Before
+  rev 21 `call_tool` held the mutex across its request await, so `disconnect` blocked until that call's future was
+  dropped — by the sandbox timeout (`max_tool_runtime_secs`) or by `with_cancel_and_timeout`'s `request_timeout`
+  (30 s), whichever fired first.) T4 still awaits `disconnect()` under `tokio::time::timeout(request_timeout + 1s)`.
+  `tokio::time::timeout` **consumes** the future it timed out, so on expiry T4 spawns a **fresh**
+  `(*arc).clone().disconnect()` detached (the `closed` seal below is already set, so nothing can reconnect
+  meanwhile) and proceeds to T5 with a `"teardown pending: 1 call still holding the transport"` warning in the
+  response. Since rev 21 the expiry falls inside `close_with_timeout`, after `guard.take()` has run (every wait
+  before it is on an instant's hold), so the detached `disconnect` finds `None` and only flips `ConnectionState` —
+  the close is already in progress in the first future's `RunningService`, which rmcp finishes on drop — and the
+  detach is reachable only when the close outlasts `request_timeout + 1 s`, which `CLOSE_TIMEOUT` allows only for a
+  `request_timeout_secs` below 4. The warning's words now name a cause that no longer occurs (a slow close holds T4,
+  not a call); they are what ships, and their rewording is presented, not adopted (N-MCP-3's commit). The honest
+  statement for §8 is: a disable returns within **`mutex_wait + drain_timeout_secs + min(CLOSE_TIMEOUT,
+  request_timeout + 1 s)`** (before rev 21, `mutex_wait + drain_timeout_secs + min(max_tool_runtime_secs,
+  request_timeout) + 1s`), where `mutex_wait` is the time to acquire the per-extension mutex — zero unless another
+  holder is in flight, and the holders are exactly four: an `Enabling` or `reload` bring-up (§4.1 queues the
+  `disable` behind it), bounded by that server's `connect_timeout_secs` (default 30 s, `tools/mcp/config.rs:40`);
+  the reaper's T4 (§3.6), bounded by the same close and never more than `request_timeout + 1 s` by the detach rule
+  above; and a §3.7 refresh's **apply** step, which is in-memory and microseconds because the fetch runs outside the
+  mutex — so `mutex_wait ≤ max(connect_timeout_secs, request_timeout + 1 s)` — and a `200` means *no new call can
+  reach the extension and its teardown is either done or unstoppably in progress*. Plugins have no equivalent
+  contention: `process.kill()` is non-blocking (`process_pool.rs:166-172`, `start_kill`).
 
   *How "the child is gone" is observed for MCP.* The daemon holds **no** handle on an MCP child. The
   `TokioChildProcess` is owned inside rmcp's `RunningService` (`transport/mod.rs:42`, built at
@@ -707,7 +717,12 @@ running. Guarantee (b) of §10 case 7 ("the gate refuses before either") does no
 was legitimately under way before the gate flipped.
 *(Rev 20: since N-MCP-1 a timeout no longer enters `reconnect()` — a timed-out call goes back to its caller;
 the in-flight reconnect of this race is now the pre-send one, a call that finds its child exited (§3.6 item 1),
-and the window and its fix are unchanged. T4's disable-bound text is N-MCP-3's to amend.)*
+and the window and its fix are unchanged. T4's disable-bound text is N-MCP-3's to amend — amended in rev 21.)*
+*(Rev 21: since N-MCP-3 no call holds the service lock across its request — it runs on a cloned `Peer`
+(`McpClient::current_peer`) — so the lookup this paragraph quotes is `current_peer`'s `ok_or(TransportClosed)`,
+reached after the pre-send check, whose reconnect a sealed client refuses `Closed`; a request still in flight on
+a clone when `disconnect` closes the service reads `Closed` too (`McpClient::call_error`), so "closed on
+purpose" and "closed unexpectedly" stay apart (X-5 (a) below). The two windows and the seal are unchanged.)*
 
 The fix, ~15 lines in `openalpaca_mcp`, **checking the seal at both points**:
 
@@ -973,7 +988,7 @@ names — and **`record_tools` never touches that set**: §3.7 step 7 writes the
 and relies on the flags surviving the write (rev 6 had `record_tools` clearing them, which would have erased
 every flag the refresh had just set and dropped both gate arms back to *"not found"*). For MCP, the
 `tools/list_changed` receiver is taken at **E2**, with the client (once, through `McpClient::changes()`), and
-the per-server reader task is spawned there too; its first message is **applied** only after E5 (the fetch itself runs outside the mutex and may overlap E3/E4 or E-FAIL, holding the service lock for up to `request_timeout`; T4's timeout + detach rule covers E-FAIL's `disconnect`), because
+the per-server reader task is spawned there too; its first message is **applied** only after E5 (the fetch itself runs outside the mutex and may overlap E3/E4 or E-FAIL; since rev 21 it runs on a cloned `Peer` and takes the service lock only for the clone (N-MCP-3), so E-FAIL's `disconnect` waits for the close, not the fetch, under T4's timeout + detach rule), because
 §3.7 step 3 takes the per-extension mutex the enable still holds and then re-checks for `Enabled` — a
 notification during a failed bring-up is dropped by that re-check. The receiver is dropped at T4 with the
 client, so a notification can never outlive the load that produced it — and because the sender lives on
@@ -1186,7 +1201,8 @@ interior-mutable, an `OnceLock` per kind, so `ToolRegistry::new()` keeps its arg
 supervisors register after the registry exists, §7.1).
 
 **The reaper re-checks under the mutex; it never writes state.** The per-kind reaper is one sequential task,
-and its MCP T4 can block for up to `request_timeout + 1 s` (the detach rule above). While it is tearing down
+and its MCP T4 can block for up to `request_timeout + 1 s` (the detach rule above; since rev 21 what it waits
+for is the close, at most `CLOSE_TIMEOUT`, §3.2 T4). While it is tearing down
 server A, server B's crash sits in the channel with B's row already reading `failed/crashed`; the owner
 clicks Retry; `enable` takes B's mutex first, **E0 CASes `Failed{*} → Enabling` and bumps the generation (one `begin` call, §4.1), runs E-PRE
 (T1→T2→T4, cause `Crash`) on load N's still-held handle**, publishes load N+1 and commits `Enabled`. If the reaper then dequeued B and ran T1→T2→T4
@@ -2212,16 +2228,21 @@ skipped — the bit is already `true`). `404` unknown, `409` orphaned.
 
 Runs W, then T0–T5 synchronously. Bounded by the **per-extension mutex wait** (zero unless another holder is
 in flight — an `Enabling`/`reload` bring-up, at most that server's `connect_timeout_secs`, default 30 s,
-`tools/mcp/config.rs:40`; the reaper's T4, at most `request_timeout + 1 s`; or a §3.7 refresh's in-memory
-apply step, microseconds, because its fetch runs outside the mutex — §3.2 T4 lists the four) **plus**
-`drain_timeout_secs` **plus, for MCP, at most one in-flight call** — `min(max_tool_runtime_secs,
-request_timeout) + 1s` — because `call_tool` holds the transport mutex across its await and `disconnect` needs
-it (§3.2 T4). A `200` means: the bit is on disk (W), no new call can reach the extension (T0), its tools
-and contributions are unpublished (T1/T2), and its teardown is done or unstoppably in progress (a detached
-`disconnect` that completes when the straggler's future drops; the `closed` seal is already set). **`500`**
+`tools/mcp/config.rs:40`; the reaper's T4, at most the close below; or a §3.7 refresh's in-memory apply
+step, microseconds, because its fetch runs outside the mutex — §3.2 T4 lists the four) **plus**
+`drain_timeout_secs` **plus, for MCP, the close** — at most `CLOSE_TIMEOUT` (5 s) and never more than
+`request_timeout + 1 s`; a stdio server's graceful close waits up to 3 s for the child, so a disable of a
+server hung in a call returns after the drain plus about 3 s (§3.2 T4). A call still in flight past the drain
+no longer holds the transport — it runs on a cloned `Peer` (N-MCP-3, rev 21) — so the close cuts it and it
+reads *"client sealed by disable"*. (Before rev 21: plus at most one in-flight call, `min(max_tool_runtime_secs,
+request_timeout) + 1s`, because `call_tool` held the transport mutex across its await and `disconnect` needed
+it.) A `200` means: the bit is on disk (W), no new call can reach the extension (T0), its tools and
+contributions are unpublished (T1/T2), and its teardown is done or unstoppably in progress (a detached
+`disconnect` whose close rmcp finishes on drop; the `closed` seal is already set). **`500`**
 only when the W write fails — nothing was torn down and the row still reads `enabled: true`. Returns the
 row with `enabled: false, state: "disabled"`; carries `"warnings": ["torn down with N call(s) in flight"]` if
-the drain expired and/or `"teardown pending: 1 call still holding the transport"` if T4 had to detach.
+the drain expired and/or `"teardown pending: 1 call still holding the transport"` if T4 had to detach (since
+rev 21 only when the close outlasts `request_timeout + 1 s`; the words are the ones that ship, §3.2 T4).
 Idempotent. On an `Unapproved` plugin it clears the bit — writing a **decision-less** entry
 `{enabled = false}` if the plugin had none (§5, §5.1) — and returns `state: "unapproved", enabled: false`
 (§4.1); nothing was loaded, so nothing is torn down, and a restart reads `never_seen` + `enabled: false` from
@@ -3442,3 +3463,19 @@ lanes (T11) — live in `tasks/api-fix-plan.md` and are listed here only so nobo
   `ReconnectExhausted` on the fourth call. Notes at §3.2 T4b (the race's in-flight reconnect is now the pre-send one;
   T4's disable-bound text left to N-MCP-3) and §3.6 item 3 (the client sees a closed transport at its next pre-send
   check; the ledger does not, until N-MCP-1b). Nothing else moves.
+- **rev 21** (2026-10-28, branch `chore/toolchain-and-deps`) — N-MCP-3 built (`fix(mcp): a call does not hold the
+  service lock across its RPC`, Phase G's second commit; Z5-04). `call_tool`, `list_tools`, `list_tools_once` and
+  `ping` take the service lock only to clone the current service's `Peer` (`McpClient::current_peer`) and await the
+  request on the clone, so two calls to one server run at once and a queued call no longer spends its deadline
+  waiting for the lock; `reconnect` closes the old service after releasing the lock; a request a `disconnect` cuts
+  on a sealed client reads `McpError::Closed` (`McpClient::call_error`), not `TransportClosed`. T3 confirmed: the
+  drain counts the registry's `CallGuard`, not the service lock, so it bounds a call on a cloned peer (a test pins
+  it). §3.2 T4's bound paragraph: what `disconnect` waits for is the close (`CLOSE_TIMEOUT`, 5 s; rmcp's graceful
+  stdio close, up to 3 s for the child), so a disable returns within `mutex_wait + drain_timeout_secs +
+  min(CLOSE_TIMEOUT, request_timeout + 1 s)` and a call still in flight past the drain is cut and reads "client
+  sealed by disable"; the detach path is reachable only when the close outlasts `request_timeout + 1 s`, and its
+  warning's words, which now name a cause that no longer occurs, are left as they ship (their rewording
+  presented). §8's `POST …/disable` says the same; §3.6's reaper sentence names the close; §3.3.1's reader-task
+  sentence says the refresh fetch takes the service lock only for the clone, so E-FAIL's `disconnect` waits for the
+  close; §3.2 T4b gains a rev 21 note and its rev 20 note reads "amended in rev 21". The status line leads with
+  rev 21. Nothing else moves.

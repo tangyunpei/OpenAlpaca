@@ -46,8 +46,10 @@ struct StubOpts {
     /// hold a handshake open across a `disable`.
     slow_start_secs: u64,
     /// Hold `tools/call` in [`HANG_SECS`] of sleep — past every request
-    /// timeout here — which is how a call enters `reconnect()`.
+    /// timeout here.
     hang_call: bool,
+    /// Answer `tools/call` after this many seconds (N-MCP-3's drain test).
+    call_secs: u64,
     /// Run the background notifier that turns a trigger file into
     /// `notifications/tools/list_changed`.
     notifier: bool,
@@ -201,7 +203,13 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     } else {
         String::new()
     };
-    let hang_call = if opts.hang_call { "hang\n" } else { "" };
+    let hang_call = if opts.hang_call {
+        "hang\n".to_string()
+    } else if opts.call_secs > 0 {
+        format!("sleep {}\n", opts.call_secs)
+    } else {
+        String::new()
+    };
     // The notifier is a child of this shell, and a SIGKILL of the shell will
     // not reach it — so it polls its parent and exits with it. Without that a
     // torn-down server would leave a stray process behind.
@@ -681,6 +689,135 @@ command = "{}"
         stub.spawn_count(),
         spawns_after_disable,
         "a sealed client must not spawn"
+    );
+}
+
+// ============================================================================
+// N-MCP-3 — a call runs on a cloned peer, not under the service lock
+// ============================================================================
+
+/// The drain still bounds a call that runs on a cloned peer: T3 counts the
+/// registry's `CallGuard`, not the service lock, so a disable waits for a call
+/// that finishes inside `drain_timeout_secs`, and the call's answer arrives.
+#[tokio::test]
+async fn a_disable_waits_within_the_drain_for_a_call_running_on_a_cloned_peer() {
+    let h = Harness::new(4);
+    let stub = stub_server(
+        h.path(),
+        "drained",
+        StubOpts {
+            call_secs: 1,
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    let registry = Arc::clone(&h.registry);
+    let call =
+        tokio::spawn(async move { registry.execute("srv__echo", &serde_json::json!({})).await });
+    assert!(
+        eventually(Duration::from_secs(2), || h.ledger().in_flight(&mcp("srv"))
+            > 0)
+        .await,
+        "the call is in flight"
+    );
+
+    let started = tokio::time::Instant::now();
+    let row = h.supervisor.disable(&mcp("srv")).await.expect("disable");
+    let took = started.elapsed();
+    let answer = call.await.expect("call task");
+    assert_eq!(
+        answer.as_deref(),
+        Ok("ok"),
+        "the drain waited for the call and its answer arrived"
+    );
+    assert!(
+        row.warnings.is_empty(),
+        "drained, nothing cut: {:?}",
+        row.warnings
+    );
+    assert!(took < Duration::from_secs(4), "the disable took {took:?}");
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.any_alive()).await,
+        "the child is gone"
+    );
+}
+
+/// Past the drain a hung call no longer holds the transport: T4's
+/// `disconnect` closes the service at once — no detached teardown, no
+/// `"teardown pending"` warning — the child is gone, and the cut call reads the
+/// deliberate close rather than waiting out its own `request_timeout`.
+#[tokio::test]
+async fn a_disable_after_the_drain_cuts_a_hung_call_at_once_and_detaches_nothing() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "cut",
+        StubOpts {
+            hang_call: true,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&format!(
+        r#"[defaults]
+connect_timeout_secs = 10
+request_timeout_secs = 10
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.srv]
+transport = "stdio"
+command = "{}"
+"#,
+        stub.script.display()
+    ));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    let registry = Arc::clone(&h.registry);
+    let call =
+        tokio::spawn(async move { registry.execute("srv__echo", &serde_json::json!({})).await });
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.sleeps().is_empty()).await,
+        "the call reached the server and hangs there"
+    );
+    let _hang = stub
+        .sleeps()
+        .into_iter()
+        .map(KillOnFail)
+        .collect::<Vec<_>>();
+
+    let started = tokio::time::Instant::now();
+    let row = h.supervisor.disable(&mcp("srv")).await.expect("disable");
+    let took = started.elapsed();
+    // The drain (1 s) plus rmcp's graceful stdio close — stdin closed, up to
+    // 3 s for the child to exit, then a kill (`rmcp-0.16.0`
+    // `src/transport/child_process.rs`, `MAX_WAIT_ON_DROP_SECS`); a server
+    // hung in a call never reads the EOF, so it takes the whole 3 s. The
+    // parent waited for the call's own 10 s deadline instead.
+    assert!(
+        took < Duration::from_secs(6),
+        "drain + close, not the call's 10 s deadline: took {took:?}"
+    );
+    assert!(
+        !row.warnings.iter().any(|w| w.contains("teardown pending")),
+        "nothing holds the transport, so nothing detaches: {:?}",
+        row.warnings
+    );
+    let cut = tokio::time::timeout(Duration::from_secs(3), call)
+        .await
+        .expect("the cut call ends with the close, not at its deadline")
+        .expect("call task")
+        .expect_err("a call the disable cut off fails");
+    assert!(
+        cut.contains("sealed by disable"),
+        "the deliberate close, not an unexpected one: {cut}"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.any_alive()).await,
+        "the child is gone"
     );
 }
 
