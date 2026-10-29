@@ -11,7 +11,7 @@ This file is for people changing the GUI. For using it, read [`docs/GUI_Manual.m
 | Concern      | Choice                                                                                                              |
 | ------------ | ------------------------------------------------------------------------------------------------------------------- |
 | Shell        | Tauri 2 (`src-tauri/`), with the `dialog` plugin only                                                               |
-| UI           | React 19, TypeScript 7 (native compiler, `strict`), Vite 7                                                          |
+| UI           | React 19, TypeScript 7 (native compiler, `strict`), Vite 8                                                          |
 | Styling      | Tailwind CSS 4 via `@tailwindcss/vite`, CSS-first `@theme` in `src/styles.css`                                      |
 | Server state | TanStack Query v5                                                                                                   |
 | Client state | Zustand v5                                                                                                          |

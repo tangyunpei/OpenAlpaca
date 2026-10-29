@@ -208,7 +208,7 @@ bun run check && bun run test && bun run format:check && bun run build
 - CI (`.github/workflows/ci.yml`) has three jobs: the Rust build, tests and clippy above, run `--locked` on the toolchain `rust-toolchain.toml` pins; the four `bun run` gates under the Bun the root `package.json` pins; and the Windows install-script tests on Pester 6.2.0. Its actions are pinned by commit SHA.
 - To run the daemon in the foreground on the repo's own config, use `OPENALPACA_CONFIG_DIR="$PWD/config" cargo run -p openalpacad`. Export the same variable for the CLI, so `openalpaca config set` edits the same files.
 - `docs/api/` is generated. Run `python3 scripts/gen_api_docs.py`; never edit it by hand.
-- Toolchain: Rust 1.99.1. Frontend: Bun 1.4.3, TypeScript 7, React 19, Vite 7, Tailwind 4, Vitest 4.
+- Toolchain: Rust 1.99.1. Frontend: Bun 1.4.3, TypeScript 7, React 19, Vite 8, Tailwind 4, Vitest 5.
 
 ## Status and limitations
 
