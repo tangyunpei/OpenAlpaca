@@ -308,6 +308,7 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     let escapee_log = dir.join(format!("{tag}-escapees.log"));
     let sent_log = dir.join(format!("{tag}-sent.log"));
     let exit_trigger = dir.join(format!("{tag}-exit"));
+    let listen_id = dir.join(format!("{tag}-listen-id"));
 
     std::fs::write(&pid_log, "").expect("create pid log");
     std::fs::write(&tools_file, tools_json(&["echo"])).expect("create tools file");
@@ -329,6 +330,21 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     } else {
         String::new()
     };
+    // A `2026-07-28` server announces a change only on the
+    // `subscriptions/listen` stream the client opened, tagged with that
+    // request's id (P19b) — with none open it announces nothing; a legacy
+    // server sends the bare notification.
+    let announce = if opts.probe == Probe::Answer {
+        format!(
+            r#"if [ -f '{listen_id}' ]; then
+        printf '{{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{{"_meta":{{"io.modelcontextprotocol/subscriptionId":%s}}}}}}\n' "`cat '{listen_id}'`"
+      fi"#,
+            listen_id = listen_id.display()
+        )
+    } else {
+        r#"printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}'"#
+            .to_string()
+    };
     // The notifier is a child of this shell, and a SIGKILL of the shell will
     // not reach it — so it polls its parent and exits with it. Without that a
     // torn-down server would leave a stray process behind.
@@ -339,7 +355,7 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
   while kill -0 "$PARENT" 2>/dev/null; do
     if [ -f '{notify}' ]; then
       rm -f '{notify}'
-      printf '%s\n' '{{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}}'
+      {announce}
     fi
     sleep 0.05
   done
@@ -463,6 +479,10 @@ hang() {{
       text=ok
       {echo_name}{hang_call}printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"%s"}}],"isError":false}}}}\n' "$id" "$text"
       ;;
+    *'"method":"subscriptions/listen"'*)
+      printf '%s' "$id" > '{listen_id}'
+      printf '{{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{{"_meta":{{"io.modelcontextprotocol/subscriptionId":%s}},"notifications":{{"toolsListChanged":true}}}}}}\n' "$id"
+      ;;
     *'"method":"ping"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
       ;;
@@ -475,6 +495,7 @@ done
         hang_list = hang_list.display(),
         break_list = break_list.display(),
         sent_log = sent_log.display(),
+        listen_id = listen_id.display(),
     );
 
     std::fs::write(&script, body).expect("write stub server");
@@ -4189,6 +4210,56 @@ async fn a_server_killed_mid_session_is_respawned_into_the_era_its_load_negotiat
     );
     let initialize = initialize_of(&stub, 1).expect("the respawn's initialize");
     assert_eq!(initialize["params"]["protocolVersion"], "2025-11-25");
+}
+
+/// P19b: a `2026-07-28` server's tool-list change reaches the registry. Such a
+/// server announces a change only on the `subscriptions/listen` stream the
+/// client opened — the stub, like it, announces nothing with none open — and
+/// the supervisor's §3.7 refresh then registers what it added.
+#[tokio::test]
+async fn a_modern_servers_tool_list_change_reaches_the_registry_through_its_subscription() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "modern-change",
+        StubOpts {
+            probe: Probe::Answer,
+            notifier: true,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&lifecycle_declaration(&stub, None, 30));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    assert_eq!(srv_row(&h).await["protocol_version"], "2026-07-28");
+
+    // The listen, then the acknowledgment's own `tools/list` (A1-12) beside
+    // the load's, before the server changes anything.
+    let lists = || {
+        stub.methods_of(0)
+            .iter()
+            .filter(|m| m.as_str() == "tools/list")
+            .count()
+    };
+    assert!(
+        eventually(Duration::from_secs(5), || {
+            stub.methods_of(0)
+                .iter()
+                .any(|m| m == "subscriptions/listen")
+                && lists() >= 2
+        })
+        .await,
+        "the client opens the subscription and refreshes on its acknowledgment; the server saw {:?}",
+        stub.methods_of(0)
+    );
+
+    stub.set_tools(&["echo", "added"]);
+    stub.notify();
+    assert!(
+        wait_for_tools(&h, &["echo", "added"]).await,
+        "the change announced on the subscription is refreshed into the registry"
+    );
+    h.supervisor.shutdown_all().await;
 }
 
 /// Everything this thread logs at WARN and above, for a test that asserts a

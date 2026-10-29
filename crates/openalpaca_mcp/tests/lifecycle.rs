@@ -89,7 +89,11 @@ mod stdio {
 
     /// A stdio MCP server in `sh` that appends every line it reads to a log,
     /// answers the probe as `probe` says, and answers `initialize` (echoing
-    /// the version offered) and `tools/list` (one tool, `echo`).
+    /// the version offered) and `tools/list` (one tool, `echo`). Its
+    /// `initialize` declares `tools.listChanged`, as most servers do, so a
+    /// `subscriptions/listen` sent in a legacy session — where the server's
+    /// notifications reach the handler and nothing listens (P19b) — would show
+    /// in the log the tests read whole.
     struct Stub {
         _dir: tempfile::TempDir,
         script: PathBuf,
@@ -130,7 +134,7 @@ while IFS= read -r line; do
       ;;
     *'"method":"initialize"'*)
       pv=`printf '%s' "$line" | sed -n 's/.*"protocolVersion":"\([^"]*\)".*/\1/p'`
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"%s","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"legacy-stub","version":"1.0.0"}}}}}}\n' "$id" "$pv"
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"%s","capabilities":{{"tools":{{"listChanged":true}}}},"serverInfo":{{"name":"legacy-stub","version":"1.0.0"}}}}}}\n' "$id" "$pv"
       ;;
     *'"method":"tools/list"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"tools":[{{"name":"echo","description":"stub","inputSchema":{{"type":"object","properties":{{}}}}}}]}}}}\n' "$id"
@@ -346,7 +350,8 @@ mod http {
     enum Behaviour {
         /// A legacy server: the probe is a plain-text `400`, as a server that
         /// predates `server/discover` answers a pre-session request it does
-        /// not know; `initialize` is served.
+        /// not know; `initialize` is served, declaring `tools.listChanged`
+        /// (no `subscriptions/listen` follows in a legacy session, P19b).
         LegacyPlainText400,
         /// The probe is refused `401` with a challenge.
         UnauthorizedProbe,
@@ -396,7 +401,7 @@ mod http {
                 .into_response(),
             (_, "initialize") => json(serde_json::json!({
                 "protocolVersion": message["params"]["protocolVersion"],
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {"listChanged": true}},
                 "serverInfo": {"name": "legacy-http-stub", "version": "1.0.0"},
             })),
             (_, "tools/list") => json(serde_json::json!({"tools": [{

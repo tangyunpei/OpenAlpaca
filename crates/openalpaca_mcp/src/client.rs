@@ -7,13 +7,16 @@ use std::time::Duration;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
     ClientCapabilities, ClientConfig, ClientRequest, Implementation, PingRequest, ProtocolVersion,
+    ServerCapabilities, ServerNotification, SubscriptionFilter,
 };
 use rmcp::service::{
     ClientInitializeError, ClientLifecycleMode, ClientServiceExt, NotificationContext, Peer,
-    RoleClient, RunningService,
+    RoleClient, RunningService, ServiceError, Subscription, SubscriptionEnd,
 };
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{
+    UnboundedReceiver, UnboundedSender, WeakUnboundedSender, unbounded_channel,
+};
 
 use crate::error::McpError;
 use crate::lifecycle::{ConnectionSnapshot, ConnectionState, ProtocolMode};
@@ -993,7 +996,9 @@ fn lifecycle(mode: ProtocolMode, negotiated: Option<&ProtocolVersion>) -> Client
 }
 
 /// Serve `handler` over `transport` in `lifecycle` — the one entry every
-/// connection, and every test that stands one up, goes through.
+/// connection, and every test that stands one up, goes through — and, when
+/// the session is in the 2026-07-28 lifecycle, open its change subscription
+/// ([`ChangeListener`]).
 async fn serve<T, E, A>(
     handler: NotifyingHandler,
     transport: T,
@@ -1003,7 +1008,256 @@ where
     T: rmcp::transport::IntoTransport<RoleClient, E, A>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    handler.serve_with_lifecycle(transport, lifecycle).await
+    let changes = ChangeListener::for_handler(&handler);
+    let running = handler.serve_with_lifecycle(transport, lifecycle).await?;
+    if let Some(info) = running.peer_info()
+        && !info.protocol_version.has_initialize()
+    {
+        changes.listen(running.peer().clone(), &info.capabilities);
+    }
+    Ok(running)
+}
+
+/// The `subscriptions/listen` stream of a session in the 2026-07-28
+/// lifecycle, forwarding the server's list changes onto the client's change
+/// channel (design §3.7).
+///
+/// A 2026-07-28 server sends `notifications/tools/list_changed` and its two
+/// siblings only on a `subscriptions/listen` stream
+/// (`rmcp-3.5.1/src/service/server.rs:268-311`), and rmcp's client opens
+/// none by itself — so without this a modern server would be reached and
+/// never heard to change its tools: the silent hole §3.7 closed (X-35). A
+/// legacy session needs none; its notifications reach [`NotifyingHandler`].
+/// rmcp drops the list caches a change invalidates before handing it over
+/// (`rmcp-3.5.1/src/service.rs:1626`), so the refresh it triggers reads anew.
+struct ChangeListener {
+    server_name: String,
+    /// Weak, so the stream never holds the change channel open: the
+    /// supervisor's receiver still ends when `disconnect` drops the last
+    /// strong sender (§3.7, §3.3 E5).
+    tx: Option<WeakUnboundedSender<ServerChange>>,
+}
+
+impl ChangeListener {
+    fn for_handler(handler: &NotifyingHandler) -> Self {
+        Self {
+            server_name: handler.server_name.clone(),
+            tx: handler.tx.as_ref().map(UnboundedSender::downgrade),
+        }
+    }
+
+    /// Ask for the list changes the server declares, and forward each one
+    /// for as long as the session lives. The connect does not wait on the
+    /// acknowledgment; a refusal is announced, never silent.
+    ///
+    /// D5 (a): each acknowledgment asks for one `tools/list` refresh (A1-12),
+    /// closing the window between `serve` returning and the stream opening;
+    /// a stream that ends while the connection lives, before its
+    /// acknowledgment or after, is opened once more, and a second end in the
+    /// same connection keeps the warning. A stream that fails is a warning
+    /// at once.
+    fn listen(self, peer: Peer<RoleClient>, capabilities: &ServerCapabilities) {
+        let (Some(tx), Some(wanted)) = (self.tx, declared_list_changes(capabilities)) else {
+            return;
+        };
+        let refresh_tools = wanted.tools_list_changed == Some(true);
+        let server_name = self.server_name;
+        tokio::spawn(async move {
+            let mut reopened = false;
+            loop {
+                let mut subscription = match peer.listen(wanted.clone()).await {
+                    Ok(subscription) => subscription,
+                    // The connection ended before the acknowledgment came — a
+                    // disconnect, or a reopen raced by the close.
+                    Err(e) if peer.is_transport_closed() => {
+                        tracing::debug!(
+                            server_name = %server_name,
+                            error = %e,
+                            "MCP connection ended before its change subscription was acknowledged"
+                        );
+                        return;
+                    }
+                    // The connection lives, so only the stream was cut, before
+                    // its acknowledgment: over HTTP rmcp fails the listen with
+                    // the error the connection's own end gives (the citation
+                    // below). An end like one after the acknowledgment.
+                    Err(ServiceError::TransportClosed) => {
+                        if !reopen_once(
+                            &mut reopened,
+                            &server_name,
+                            "cut before its acknowledgment",
+                        ) {
+                            return;
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            server_name = %server_name,
+                            error = %e,
+                            "MCP server refused the change subscription; a tool it adds or drops \
+                             is not noticed until the server is reloaded"
+                        );
+                        return;
+                    }
+                };
+                if subscription.acknowledged() != &wanted {
+                    tracing::warn!(
+                        server_name = %server_name,
+                        requested = ?wanted,
+                        acknowledged = ?subscription.acknowledged(),
+                        "MCP server acknowledged fewer list changes than it declares; \
+                         the others are not noticed until the server is reloaded"
+                    );
+                }
+                // A1-12: a change made before the stream opened was announced
+                // nowhere; one refresh on the acknowledgment picks it up. The
+                // refresh is ours, not the server's, so rmcp has invalidated
+                // nothing: without the clear, a `tools/list` the connect cached
+                // under the server's `ttlMs` (SEP-2549) would answer it.
+                if refresh_tools {
+                    peer.clear_response_cache().await;
+                    if !forward(&tx, ServerChange::ToolList, &server_name) {
+                        return;
+                    }
+                }
+                let Drained::Ended(reason) = drain(&mut subscription, &tx, &server_name).await
+                else {
+                    return;
+                };
+                // Whether the connection lives decides it, not how rmcp ended
+                // the stream: over HTTP a listen stream the server or the
+                // network cuts while the session lives reads `Abrupt`, as the
+                // connection's own end does (rmcp-3.5.1
+                // `src/transport/streamable_http_client.rs:1767-1786`). A
+                // reopen the close races fails at once, a `debug` above.
+                if peer.is_transport_closed() {
+                    tracing::debug!(
+                        server_name = %server_name,
+                        reason = %reason,
+                        "MCP change subscription ended with its connection"
+                    );
+                    return;
+                }
+                if !reopen_once(&mut reopened, &server_name, &reason) {
+                    return;
+                }
+            }
+        });
+    }
+}
+
+/// A stream that ended while the connection lives, for `reason`: the first
+/// end is opened once more (`true`), a second keeps the warning (`false`).
+fn reopen_once(reopened: &mut bool, server_name: &str, reason: &str) -> bool {
+    if *reopened {
+        tracing::warn!(
+            server_name = %server_name,
+            reason = %reason,
+            "MCP change subscription ended again while the connection lives; \
+             list changes are not noticed until the server is reloaded"
+        );
+        return false;
+    }
+    tracing::info!(
+        server_name = %server_name,
+        reason = %reason,
+        "MCP change subscription ended while the connection lives; opening it once more"
+    );
+    *reopened = true;
+    true
+}
+
+/// How one subscription's stream stopped delivering.
+enum Drained {
+    /// The client is disconnected: nobody to tell.
+    ClientGone,
+    /// The stream failed — the server broke the protocol on it or answered
+    /// the listen with an error — and is warned about; it is not reopened.
+    Failed,
+    /// The stream ended, for the reason given.
+    Ended(String),
+}
+
+/// Forward `subscription`'s list changes until it ends.
+async fn drain(
+    subscription: &mut Subscription,
+    tx: &WeakUnboundedSender<ServerChange>,
+    server_name: &str,
+) -> Drained {
+    loop {
+        let change = match subscription.next().await {
+            Ok(Some(ServerNotification::ToolListChangedNotification(_))) => ServerChange::ToolList,
+            Ok(Some(ServerNotification::ResourceListChangedNotification(_))) => {
+                ServerChange::ResourceList
+            }
+            Ok(Some(ServerNotification::PromptListChangedNotification(_))) => {
+                ServerChange::PromptList
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => {
+                let reason = match subscription.end() {
+                    Some(SubscriptionEnd::Graceful(_)) => "the server sent its final result",
+                    Some(SubscriptionEnd::Cancelled) => "cancelled",
+                    Some(SubscriptionEnd::Lagged { .. }) => "lagged",
+                    _ => "closed without a final result",
+                };
+                return Drained::Ended(reason.to_string());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    server_name = %server_name,
+                    error = %e,
+                    "MCP change subscription failed; list changes are not noticed \
+                     until the server is reloaded"
+                );
+                return Drained::Failed;
+            }
+        };
+        if !forward(tx, change, server_name) {
+            return Drained::ClientGone;
+        }
+    }
+}
+
+/// Send one change onto the client's channel; `false` once the client is
+/// disconnected (the weak sender no longer upgrades).
+fn forward(
+    tx: &WeakUnboundedSender<ServerChange>,
+    change: ServerChange,
+    server_name: &str,
+) -> bool {
+    let Some(tx) = tx.upgrade() else { return false };
+    if tx.send(change).is_err() {
+        tracing::debug!(
+            server_name = %server_name,
+            ?change,
+            "MCP server change dropped: no receiver"
+        );
+    }
+    true
+}
+
+/// The list changes `capabilities` declares (`listChanged: true`), as a
+/// subscription filter — `None` when it declares none.
+fn declared_list_changes(capabilities: &ServerCapabilities) -> Option<SubscriptionFilter> {
+    let tools = capabilities.tools.as_ref().and_then(|c| c.list_changed) == Some(true);
+    let prompts = capabilities.prompts.as_ref().and_then(|c| c.list_changed) == Some(true);
+    let resources = capabilities.resources.as_ref().and_then(|c| c.list_changed) == Some(true);
+    if !(tools || prompts || resources) {
+        return None;
+    }
+    let mut filter = SubscriptionFilter::builder();
+    if tools {
+        filter = filter.tools_list_changed();
+    }
+    if prompts {
+        filter = filter.prompts_list_changed();
+    }
+    if resources {
+        filter = filter.resources_list_changed();
+    }
+    Some(filter.build())
 }
 
 #[cfg(test)]
@@ -1856,6 +2110,27 @@ mod tests {
             "{text}"
         );
     }
+
+    /// P19b: the subscription asks for exactly the list changes the server
+    /// declares — and for none when it declares none.
+    #[test]
+    fn a_subscription_asks_for_exactly_the_list_changes_the_server_declares() {
+        assert_eq!(declared_list_changes(&ServerCapabilities::default()), None);
+        let tools_only = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_tool_list_changed()
+            .build();
+        assert_eq!(
+            declared_list_changes(&tools_only),
+            Some(SubscriptionFilter::builder().tools_list_changed().build())
+        );
+        let without = ServerCapabilities::builder().enable_tools().build();
+        assert_eq!(
+            declared_list_changes(&without),
+            None,
+            "tools without listChanged"
+        );
+    }
 }
 
 // N-MCP-1: a call that may have reached the server is never sent again.
@@ -1865,3 +2140,7 @@ mod call_tests;
 // N-MCP-3: a call does not hold the service lock across its RPC.
 #[cfg(test)]
 mod concurrency_tests;
+
+// P19b: a 2026-07-28 session subscribes to its server's list changes.
+#[cfg(test)]
+mod listen_tests;
