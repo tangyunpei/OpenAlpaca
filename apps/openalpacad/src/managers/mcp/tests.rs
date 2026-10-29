@@ -462,6 +462,22 @@ fn mcp(name: &str) -> ExtensionId {
     ExtensionId::mcp(name)
 }
 
+/// Wait until `client` has seen its transport close — after a test kills the
+/// child out of band — so the next call's pre-send check finds the death
+/// rather than sending into the closing transport (N-MCP-1).
+async fn transport_closed(client: &openalpaca_mcp::McpClient, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if client.is_transport_closed_for_tests().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 // ============================================================================
 // The integration test the cell names first
 // ============================================================================
@@ -573,11 +589,12 @@ async fn a_disable_kills_the_child_refuses_both_arms_and_a_re_enable_restores_cl
 // T4b, window 2 — the seal that closes the in-flight reconnect
 // ============================================================================
 
-/// **The race the seal exists for.** A hung call times out and enters
-/// `reconnect()`, which spawns a *fresh* child; the drain expires while that
-/// handshake is still in flight, so T4's `disconnect` finds the service lock
-/// free and `service == None`, seals, and returns. The handshake then completes
-/// — and must close the child it just spawned instead of installing it.
+/// **The race the seal exists for.** A call finds its child dead and
+/// reconnects before sending (N-MCP-1), which spawns a *fresh* child; the
+/// drain expires while that handshake is still in flight, so T4's
+/// `disconnect` finds the service lock free and `service == None`, seals, and
+/// returns. The handshake then completes — and must close the child it just
+/// spawned instead of installing it.
 ///
 /// Without the install-point check the disabled server would be **running**:
 /// the registry entry is gone, the supervisor never calls `disconnect` on that
@@ -591,14 +608,15 @@ async fn a_disable_that_lands_mid_reconnect_seals_the_client_and_leaves_no_child
         StubOpts {
             // Slow enough that the reconnect's handshake outlives the drain.
             slow_start_secs: 2,
-            hang_call: true,
             ..StubOpts::default()
         },
     );
+    // The call's one deadline spans its pre-send reconnect, so it must outlast
+    // the slow handshake for that handshake to be in flight at the disable.
     h.write_config(&format!(
         r#"[defaults]
 connect_timeout_secs = 10
-request_timeout_secs = 1
+request_timeout_secs = 5
 max_reconnect_attempts = 3
 reconnect_backoff_ms = 20
 
@@ -616,9 +634,14 @@ command = "{}"
     // The stale snapshot's handle — the one that must end up sealed.
     let client = h.client_of("srv__echo").expect("the entry holds a client");
 
-    // A call that hangs: it times out after `request_timeout`, and `Timeout` is
-    // retriable, so `call_tool` enters `reconnect()` — which spawns a second
-    // child that will not finish its handshake for two seconds.
+    // The child dies; the next call's pre-send check finds it dead and
+    // reconnects — spawning a second child that will not finish its handshake
+    // for two seconds.
+    stub.kill_child();
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client must see the child's exit"
+    );
     let registry = Arc::clone(&h.registry);
     let call = tokio::spawn(async move {
         registry
@@ -626,10 +649,10 @@ command = "{}"
             .await
     });
 
-    // Let the call time out and the reconnect's handshake get under way.
+    // Let the pre-send reconnect's handshake get under way.
     assert!(
         eventually(Duration::from_secs(5), || stub.spawn_count() >= 2).await,
-        "the retriable timeout should have entered reconnect and respawned"
+        "the call should have reconnected before sending and respawned"
     );
 
     h.supervisor.disable(&mcp("srv")).await.expect("disable");
@@ -973,17 +996,19 @@ async fn mcp_supervisor_records_every_registered_tool() {
 
 /// **The crash sequence, stated rather than hidden (§3.6 item 1).**
 ///
-/// A stdio server's `reconnect()` **respawns the child**, and a successful
-/// handshake resets the attempt counter — so a child killed out of band while
-/// its command still runs is transparently recovered and the row correctly
-/// stays `Enabled`. Only after **four** consecutive `reconnect()` entries with
-/// no successful handshake does the client report `ReconnectExhausted`, and
-/// only that variant marks the row `failed/crashed`.
+/// A stdio server's pre-send reconnect **respawns the child** (N-MCP-1), and
+/// only a successful call resets the attempt counter — so a child killed out
+/// of band while its command still runs is transparently recovered by the next
+/// call and the row correctly stays `Enabled`. Only after **four** consecutive
+/// calls whose pre-send reconnect found no working server does the client
+/// report `ReconnectExhausted`, and only that variant marks the row
+/// `failed/crashed`.
 ///
 /// This is the opposite of Claude Code's stdio policy, and deliberately so
-/// (§13 Q8, not applied): the cost is that a crashed child can be respawned
-/// three times before anyone learns it crashed. The test is written to that
-/// sequence so nobody "fixes" it into a first-failure rule by accident.
+/// (§13 Q8, T6(a) taken as N-MCP-1's form): the cost is that a crashed child
+/// can be respawned three times before anyone learns it crashed. The test is
+/// written to that sequence so nobody "fixes" it into a first-failure rule by
+/// accident.
 #[tokio::test]
 async fn a_stdio_server_respawns_transparently_then_reports_crashed_after_four_failures() {
     let h = Harness::new(1);
@@ -1016,7 +1041,12 @@ command = "{}"
 
     // (1) The recovery. The command still runs, so the next call respawns and
     // succeeds — and the row stays `Enabled`, because the server *is* running.
+    let client = h.client_of("srv__echo").expect("the entry holds a client");
     stub.kill_child();
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client must see the child's exit"
+    );
     let recovered = h
         .registry
         .execute("srv__echo", &serde_json::json!({}))
@@ -1029,6 +1059,10 @@ command = "{}"
     // (2) Now make the command un-spawnable and drive four calls.
     stub.kill_child();
     std::fs::remove_file(&stub.script).expect("delete the server script");
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client must see the child's exit"
+    );
 
     for attempt in 1..=3 {
         let err = h

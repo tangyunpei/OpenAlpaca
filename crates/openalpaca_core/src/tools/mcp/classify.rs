@@ -47,8 +47,10 @@ pub fn classify_bringup_failure(error: &McpError) -> FailureReason {
 /// * [`McpError::ReconnectExhausted`] → `Crashed`. The client's own terminal
 ///   state is the trigger — no string matching. Note what that means for a
 ///   stdio server, because the design states it rather than hiding it: each
-///   `reconnect()` respawns the child, so a dead server reads `active` until
-///   **four** consecutive calls have failed to re-handshake.
+///   pre-send `reconnect()` respawns the child and only a successful call
+///   resets the count (N-MCP-1), so a dead server reads `active` until **four**
+///   consecutive calls have found it dead before sending — whether each
+///   respawn failed to handshake or handshook and then died on its call.
 /// * [`McpError::Unauthorized`] → `NeedsAuthorization`. It fires mid-session,
 ///   and taking it out of the retry ladder is what stops an expired token from
 ///   burning the four reconnect entries and ending as `Failed{Crashed}` with a
@@ -119,7 +121,8 @@ mod tests {
             Some(FailureReason::NeedsAuthorization)
         );
         for error in [
-            // An ordinary failure the reconnect ladder is still working on.
+            // An ordinary failure: it goes back to the model, and the next
+            // call reconnects first only if the transport has closed (N-MCP-1).
             McpError::TransportClosed,
             McpError::Timeout(Duration::from_secs(1)),
             McpError::ServerInternal("x".into()),

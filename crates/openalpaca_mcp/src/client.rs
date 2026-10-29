@@ -152,7 +152,13 @@ pub(crate) struct ClientInner {
     pub(crate) service: Mutex<Option<RunningService<RoleClient, NotifyingHandler>>>,
     pub(crate) server_info: tokio::sync::OnceCell<Implementation>,
     pub(crate) protocol_version: tokio::sync::OnceCell<ProtocolVersion>,
+    /// Reconnects since the last successful call: a handshake alone does not
+    /// reset it (N-MCP-1), so a server that handshakes and then fails every
+    /// call reaches [`McpError::ReconnectExhausted`].
     pub(crate) attempt_counter: AtomicU32,
+    /// Serialises the pre-send reconnect, so two calls that find the same dead
+    /// transport respawn the child once, not twice (N-MCP-1).
+    pub(crate) reconnect_lock: Mutex<()>,
     /// The sender half of the server-change channel, created **once** with the
     /// client and cloned into every handshake's handler. `disconnect` `take()`s
     /// it beside the service, so the supervisor's receiver ends when — and only
@@ -185,6 +191,7 @@ impl ClientInner {
             server_info: tokio::sync::OnceCell::new(),
             protocol_version: tokio::sync::OnceCell::new(),
             attempt_counter: AtomicU32::new(0),
+            reconnect_lock: Mutex::new(()),
             closed: AtomicBool::new(false),
             changes_tx: Mutex::new(Some(changes_tx)),
             changes_rx: Mutex::new(Some(changes_rx)),
@@ -291,7 +298,6 @@ impl McpClient {
         &self,
         mut running: RunningService<RoleClient, NotifyingHandler>,
     ) -> Result<(), McpError> {
-        use std::sync::atomic::Ordering;
         let mut guard = self.inner.service.lock().await;
         if self.inner.is_sealed() {
             drop(guard);
@@ -320,9 +326,11 @@ impl McpClient {
         // reporting a live connection. (Lock order is service → state
         // throughout the client: `disconnect` does the same, and no path takes
         // them the other way round, so there is no inversion here.)
+        // The attempt counter is deliberately left alone: only a successful
+        // call or list resets it, so a server that handshakes and then fails
+        // every call still reaches `ReconnectExhausted` (N-MCP-1).
         *guard = Some(running);
         *self.inner.state.write().await = ConnectionState::Connected;
-        self.inner.attempt_counter.store(0, Ordering::Relaxed);
         drop(guard);
         Ok(())
     }
@@ -430,6 +438,10 @@ impl McpClient {
 
     /// Attempt to reconnect by rebuilding the transport and rerunning handshake.
     /// Honours max_reconnect_attempts and backoff. On exhaustion, transitions to Failed.
+    ///
+    /// `call_tool` enters it only **before** a send, through
+    /// [`Self::ensure_connected`], never after one (N-MCP-1): a call that may
+    /// have reached the server is not sent again.
     ///
     /// Refuses outright — before the attempt counter, before any spawn — when
     /// the client is sealed or its state already says it is down. This is the
@@ -549,36 +561,75 @@ impl McpClient {
             task: None,
         };
 
-        loop {
-            let op = {
-                let params = params.clone();
-                async move {
-                    let guard = self.inner.service.lock().await;
-                    let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-                    let result = running.call_tool(params).await.map_err(McpError::from)?;
-                    Ok::<_, McpError>(result)
-                }
-            };
-            match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
-                Ok(result) => {
-                    self.inner.attempt_counter.store(0, Ordering::Relaxed);
-                    return Ok(result);
-                }
-                Err(e) if e.is_cancelled() => return Err(e),
-                Err(e) if e.is_retriable() => {
-                    tracing::warn!(
+        // One deadline spans the pre-send reconnect and the call. Once the
+        // request may have left, it is never sent again: a timeout, a server
+        // error, a transport error or a transport that closes mid-call goes
+        // back to the caller, and the next call's pre-send check respawns a
+        // dead child (N-MCP-1; extension design §3.6 item 1).
+        let op = async {
+            self.ensure_connected().await?;
+            let guard = self.inner.service.lock().await;
+            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+            let result = running.call_tool(params).await.map_err(McpError::from)?;
+            Ok::<_, McpError>(result)
+        };
+        match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
+            Ok(result) => {
+                self.inner.attempt_counter.store(0, Ordering::Relaxed);
+                Ok(result)
+            }
+            Err(e) => {
+                if !e.is_cancelled() {
+                    tracing::debug!(
                         server_name = %self.inner.config.server_name,
                         operation = "call_tool",
                         tool = %name,
                         error = %e,
-                        "operation failed; triggering reconnect"
+                        "MCP call failed; it is not sent again"
                     );
-                    self.reconnect().await?;
-                    continue;
                 }
-                Err(e) => return Err(e),
+                Err(e)
             }
         }
+    }
+
+    /// N-MCP-1's pre-send half: when the current service is absent or its
+    /// transport has closed — a stdio child that exited since the last call —
+    /// reconnect **once**, before anything is sent. The transparent respawn of
+    /// a dead child (extension design §3.6 item 1) lives here and only here.
+    async fn ensure_connected(&self) -> Result<(), McpError> {
+        if self.service_is_live().await {
+            return Ok(());
+        }
+        let _serial = self.inner.reconnect_lock.lock().await;
+        // A caller that waited here may find the child another one respawned.
+        if self.service_is_live().await {
+            return Ok(());
+        }
+        tracing::info!(
+            server_name = %self.inner.config.server_name,
+            "MCP transport closed before the call; reconnecting once before sending"
+        );
+        self.reconnect().await
+    }
+
+    /// A service is installed and its transport has not closed.
+    async fn service_is_live(&self) -> bool {
+        self.inner
+            .service
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|running| !running.peer().is_transport_closed())
+    }
+
+    /// Whether the client's transport has closed — its stdio child exited or
+    /// its HTTP session ended — or no service is installed. Test-only: the
+    /// daemon's tests wait on it after killing a child out of band, so the next
+    /// call's pre-send check sees the death (N-MCP-1).
+    #[cfg(feature = "test-utils")]
+    pub async fn is_transport_closed_for_tests(&self) -> bool {
+        !self.service_is_live().await
     }
 }
 
@@ -1375,3 +1426,7 @@ mod tests {
         assert!(matches!(&*state, ConnectionState::Failed { .. }), "expected Failed state");
     }
 }
+
+// N-MCP-1: a call that may have reached the server is never sent again.
+#[cfg(test)]
+mod call_tests;

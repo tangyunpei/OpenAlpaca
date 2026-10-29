@@ -1106,9 +1106,13 @@ depends on the registry dropping the last reference.
   and ruling X-36 fixes their lifecycle in advance: once added, a server's
   resources and prompts are discovered, registered and withdrawn by the same
   supervisor, under the same toggle, as its tools.
-- Retriable transport errors trigger the client's internal
-  reconnect/retry loop (`max_reconnect_attempts`, exponential backoff).  A
-  client sealed by a disable does not reconnect.
+- A call whose transport has closed (a stdio child that exited since the
+  last call) reconnects once, before it is sent, inside the call's one
+  deadline; a call that may have reached the server is never sent again —
+  its timeout or error goes back to the caller.  `max_reconnect_attempts`
+  consecutive reconnects with no successful call between them (exponential
+  backoff) end in `ReconnectExhausted`.  A client sealed by a disable does
+  not reconnect.
 
 ---
 
