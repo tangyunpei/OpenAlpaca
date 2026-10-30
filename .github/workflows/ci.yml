@@ -16,8 +16,9 @@ env:
 jobs:
   rust:
     name: Build & test (Rust)
-    # Pinned for the dependency wave: ubuntu-latest moves to 26.04 between
-    # 2026-10-19 and 2026-11-19 (actions/runner-images#14748); P39 reverts this.
+    # Pinned: ubuntu-latest moves to 26.04 between 2026-10-19 and 2026-11-19
+    # (actions/runner-images#14748). The label stays pinned (A-15 (b)); a newer
+    # image is a hand-made commit, which reads the image's Node then.
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -57,8 +58,9 @@ jobs:
 
   gui:
     name: Build & test (GUI frontend)
-    # Pinned for the dependency wave: ubuntu-latest moves to 26.04 between
-    # 2026-10-19 and 2026-11-19 (actions/runner-images#14748); P39 reverts this.
+    # Pinned: ubuntu-latest moves to 26.04 between 2026-10-19 and 2026-11-19
+    # (actions/runner-images#14748). The label stays pinned (A-15 (b)); a newer
+    # image is a hand-made commit, which reads the image's Node then.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -82,6 +84,36 @@ jobs:
       # imports, Tailwind token typos) that `tsc --noEmit` cannot see.
       - name: Build
         run: bun run build
+
+  # Seconds long: the scripts' tests, the generated docs' drift check and the
+  # repository-policy guard (B-23), with no network and no cargo.
+  tooling:
+    name: Scripts and repository policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The interpreter pinned here is the scripts' Python floor (DU-D3 (b)):
+      # the oldest Python they promise to run on, as macOS's /usr/bin/python3
+      # (3.9) runs them.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.9.25"
+      - name: Generated API docs are current
+        run: python3 -I scripts/gen_api_docs.py --check
+      - name: Script tests
+        run: |
+          python3 -I scripts/tests/test_gen_api_docs.py
+          python3 -I scripts/tests/test_repo_policy.py
+          python3 -I tasks/deps-upgrade/tools/gbase/tests/test_lockdates.py
+      # Every cargo call --locked, every action at a full commit SHA with its
+      # version comment, every checkout without credentials, no toolchain
+      # literal, CARGO_BUILD_BUILD_DIR beside every CARGO_TARGET_DIR, and the
+      # zip ignores lifted once calamine's zip 8 leaves the lock.
+      - name: Repository policy
+        run: python3 -I scripts/repo_policy.py
 
   # The only Windows job, and deliberately the smallest one: no Rust, no bun,
   # just the Pester suite for install-windows.ps1 / uninstall-windows.ps1 (and
