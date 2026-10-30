@@ -128,7 +128,7 @@ toml_edit = "0.25"
 dashmap = "6"
 which = "8"
 tokio-util = { version = "0.7", features = ["rt"] }
-rustyline = "18.0.1"
+rustyline = "19.0.0"
 
 # middleware
 regex = "1.12.3"

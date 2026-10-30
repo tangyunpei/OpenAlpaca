@@ -1,4 +1,4 @@
-//! Stateless ReplHelper — tab completion + inline hints for rustyline v18
+//! Stateless ReplHelper — tab completion + inline hints for rustyline v19
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
