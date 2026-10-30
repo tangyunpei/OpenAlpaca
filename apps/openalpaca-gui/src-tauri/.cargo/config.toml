@@ -10,7 +10,7 @@
 #
 # The build-dir is the target dir (M63, DU-M5 (b)). tauri-build finds its
 # target dir by walking OUT_DIR up to its `build` folder and taking the parent
-# (tauri-build 2.7.3, target_dir_from_out_dir; cargo#5457), and OUT_DIR lives
+# (tauri-build 2.7.4, target_dir_from_out_dir; cargo#5457), and OUT_DIR lives
 # in the build-dir: under the root's build-dir the copy would land in
 # ~/.cargo/build/<hash>/<profile>/, not beside the shell's binary, and the
 # shell's build would split between two trees. So the two stay one path. From
