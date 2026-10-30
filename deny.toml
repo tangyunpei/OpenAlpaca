@@ -18,11 +18,9 @@ unmaintained = "workspace"
 unsound = "workspace"
 # Every ignore names why it is safe to carry and what lifts it. The same ids
 # are cargo-audit's (.cargo/audit.toml) and the DU-23 (c) waiver record's.
-ignore = [
-    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0, calamine 0.36.1's own (calamine requires zip ^8; our zip is 9.0.3): SUID/SGID bits kept by ZipArchive::extract()/ZipStreamReader, which nothing in the daemon calls (extraction.rs and calamine-0.36.1/src read entries through by_name/by_index only); the id matches zip < 9 only; lifted when calamine requires zip ^9" },
-    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0, calamine 0.36.1's own (calamine requires zip ^8; our zip is 9.0.3): symlinks out of the destination created by ZipArchive::extract(), which nothing in the daemon calls (extraction.rs and calamine-0.36.1/src read entries through by_name/by_index only); the id matches zip < 9 only; lifted when calamine requires zip ^9" },
-    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0, calamine 0.36.1's own (calamine requires zip ^8; our zip is 9.0.3): permissions applied through symlinks by ZipStreamReader::extract()/ZipArchive::extract(), which nothing in the daemon calls (extraction.rs and calamine-0.36.1/src read entries through by_name/by_index only); the id matches zip < 9 only; lifted when calamine requires zip ^9" },
-]
+# None today: P34's three, on calamine 0.36.1's own zip 8.6.0, were lifted
+# when calamine 0.37 moved to zip ^9.
+ignore = []
 
 [licenses]
 # Each licence a crate in Cargo.lock needs, by name, and nothing more: a crate

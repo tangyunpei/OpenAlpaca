@@ -165,10 +165,10 @@ lru = "0.18.5"
 infer = "0.22.0"
 pdf-extract = "0.12.1"
 # The daemon's own archive reads (DOCX, PPTX, iWork); `deflate` only, the one
-# method OOXML and iWork use (DU-7). calamine 0.36 requires zip ^8.6 and keeps
-# its own 8.6.0 beside this one until it moves to 9 (DU-21 sub-row (b)).
+# method OOXML and iWork use (DU-7). calamine 0.37 requires zip ^9.0 with no
+# default features and `deflate`, so its reads share this one zip.
 zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
-calamine = "0.36.1"
+calamine = "0.37.0"
 # The OS keychain: keyring-core's `Entry` API over the native store per OS —
 # the stores and options keyring 4's `v1` facade selected, so every item keeps
 # its address. openalpaca_llm declares each store for its own target and owns
