@@ -223,6 +223,7 @@ impl SecretStore for CachingSecretStore {
 
 /// In-memory secret store for testing.
 #[cfg(test)]
+#[derive(Default)]
 pub struct MemorySecretStore {
     store: Mutex<HashMap<String, String>>,
 }
@@ -230,9 +231,7 @@ pub struct MemorySecretStore {
 #[cfg(test)]
 impl MemorySecretStore {
     pub fn new() -> Self {
-        Self {
-            store: Mutex::new(HashMap::new()),
-        }
+        Self::default()
     }
 }
 

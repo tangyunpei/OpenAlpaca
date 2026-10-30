@@ -999,6 +999,10 @@ fn lifecycle(mode: ProtocolMode, negotiated: Option<&ProtocolVersion>) -> Client
 /// connection, and every test that stands one up, goes through — and, when
 /// the session is in the 2026-07-28 lifecycle, open its change subscription
 /// ([`ChangeListener`]).
+#[allow(
+    clippy::result_large_err,
+    reason = "rmcp's error, read once by handshake_error; a Box buys nothing"
+)]
 async fn serve<T, E, A>(
     handler: NotifyingHandler,
     transport: T,

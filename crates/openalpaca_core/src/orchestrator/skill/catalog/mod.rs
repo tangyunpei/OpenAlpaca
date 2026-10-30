@@ -519,21 +519,21 @@ impl SkillCatalog {
         self.remove_index_entries(old_slash_cmd.as_deref(), &old_aliases);
 
         // Build command index from effective_slash_command (entries lock released)
-        if let Some(ref cmd) = new_slash_cmd {
-            if let Ok(mut idx) = self.command_index.write() {
-                let cmd_lower = cmd.to_lowercase();
-                // Check for slash command conflicts
-                if let Some(existing_key) = idx.get(&cmd_lower)
-                    && *existing_key != key
-                {
-                    let msg = format!(
-                        "Slash command '{}' conflict: skill '{}' overrides '{}'",
-                        cmd, key, existing_key
-                    );
-                    tracing::warn!("SkillCatalog: {}", msg);
-                }
-                idx.insert(cmd_lower, key.clone());
+        if let Some(ref cmd) = new_slash_cmd
+            && let Ok(mut idx) = self.command_index.write()
+        {
+            let cmd_lower = cmd.to_lowercase();
+            // Check for slash command conflicts
+            if let Some(existing_key) = idx.get(&cmd_lower)
+                && *existing_key != key
+            {
+                let msg = format!(
+                    "Slash command '{}' conflict: skill '{}' overrides '{}'",
+                    cmd, key, existing_key
+                );
+                tracing::warn!("SkillCatalog: {}", msg);
             }
+            idx.insert(cmd_lower, key.clone());
         }
         // Build alias index (entries lock released)
         if let Ok(mut alias_idx) = self.alias_index.write() {
@@ -578,10 +578,10 @@ impl SkillCatalog {
     /// Accepts extracted frontmatter fields so that the entries lock does NOT need
     /// to be held while the index locks are acquired, preventing deadlocks.
     fn remove_index_entries(&self, slash_cmd: Option<&str>, aliases: &[String]) {
-        if let Some(cmd) = slash_cmd {
-            if let Ok(mut idx) = self.command_index.write() {
-                idx.remove(&cmd.to_lowercase());
-            }
+        if let Some(cmd) = slash_cmd
+            && let Ok(mut idx) = self.command_index.write()
+        {
+            idx.remove(&cmd.to_lowercase());
         }
         if let Ok(mut alias_idx) = self.alias_index.write() {
             for alias in aliases {
@@ -628,10 +628,10 @@ impl SkillCatalog {
                 alias_guard.get(&cmd_lower).cloned(),
             )
         };
-        if let Some(id) = cmd_id {
-            if let Some(entry) = self.get_by_id(&id) {
-                return Some(entry);
-            }
+        if let Some(id) = cmd_id
+            && let Some(entry) = self.get_by_id(&id)
+        {
+            return Some(entry);
         }
         if let Some(id) = alias_id
             && let Some(entry) = self.get_by_id(&id)

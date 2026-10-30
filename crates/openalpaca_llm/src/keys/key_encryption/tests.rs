@@ -61,7 +61,7 @@ fn test_decrypt_invalid_base64() {
 #[test]
 fn test_decrypt_too_short() {
     let enc = test_encryptor();
-    let short = format!("aes256:{}", BASE64.encode(&[0u8; 5]));
+    let short = format!("aes256:{}", BASE64.encode([0u8; 5]));
     let result = enc.decrypt(&short);
     assert!(result.is_err());
 }

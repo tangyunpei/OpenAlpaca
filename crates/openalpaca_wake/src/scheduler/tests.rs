@@ -44,10 +44,10 @@ async fn test_schedule_cron_ticks() {
     let mut tick_count = 0;
     let result = timeout(Duration::from_secs(5), async {
         while tick_count < 2 {
-            if let Some(WakeEvent::Timer { job_id, .. }) = rx.recv().await {
-                if job_id == "test_cron" {
-                    tick_count += 1;
-                }
+            if let Some(WakeEvent::Timer { job_id, .. }) = rx.recv().await
+                && job_id == "test_cron"
+            {
+                tick_count += 1;
             }
         }
     })

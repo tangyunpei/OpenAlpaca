@@ -127,10 +127,9 @@ impl Orchestrator {
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
-            for name in &["update_persona"] {
-                if !tool_names.contains(&name.to_string()) {
-                    tool_names.push(name.to_string());
-                }
+            let name = "update_persona";
+            if !tool_names.contains(&name.to_string()) {
+                tool_names.push(name.to_string());
             }
         }
 

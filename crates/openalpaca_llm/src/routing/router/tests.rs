@@ -139,7 +139,7 @@ async fn test_key_rotation_on_rate_limit() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: provider,
+            provider,
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -182,7 +182,7 @@ async fn test_overloaded_error_does_not_cooldown_key() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: provider,
+            provider,
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -233,7 +233,7 @@ async fn test_openai_overloaded_error_does_not_cooldown_key() {
     providers.insert(
         ProviderType::OpenAI,
         ProviderEntry {
-            provider: provider,
+            provider,
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -517,7 +517,7 @@ async fn test_all_failed_no_fallback() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: provider,
+            provider,
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );
@@ -557,7 +557,7 @@ async fn test_hot_reload_keys() {
     providers.insert(
         ProviderType::Anthropic,
         ProviderEntry {
-            provider: provider,
+            provider,
             key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
         },
     );

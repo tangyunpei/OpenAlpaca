@@ -31,6 +31,10 @@ pub fn spawn_event_bridge(
                 openalpaca_core::events::SystemEvent::ConnectorStatus { id, status, .. } => {
                     eb.connector_status(&id, &status);
                 }
+                #[allow(
+                    clippy::unneeded_wildcard_pattern,
+                    reason = "R79: the bridge ignores created_by on purpose, and says so"
+                )]
                 openalpaca_core::events::SystemEvent::TaskCreated {
                     task_id,
                     title,

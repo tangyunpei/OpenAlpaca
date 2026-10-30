@@ -155,7 +155,7 @@ impl ConnectorSendBridge {
             .ok()
             .flatten()
             .filter(|t| !t.is_empty())
-            .map(|t| twilight_http::Client::new(t))
+            .map(twilight_http::Client::new)
     }
 }
 

@@ -1550,9 +1550,9 @@ fn show_prints_no_escape_sequence() {
     note["title"] = serde_json::json!(EVIL);
     note["frontmatter"]["aliases"] = serde_json::json!([EVIL]);
     note["frontmatter"]["tags"] = serde_json::json!([EVIL]);
-    note["body"] = serde_json::json!(format!(
-        "# Build\n\nRun \u{1b}[2Jthe checks\u{9b}31m.\n\u{202e}right-to-left\u{202c}\n"
-    ));
+    note["body"] = serde_json::json!(
+        "# Build\n\nRun \u{1b}[2Jthe checks\u{9b}31m.\n\u{202e}right-to-left\u{202c}\n".to_string()
+    );
     let text = note_text(&note, false);
     assert!(!text.contains("\u{1b}[2J"), "{text:?}");
     assert!(!text.contains('\u{9b}'), "a C1 control: {text:?}");

@@ -484,18 +484,18 @@ impl DiscordConnector {
 
         // Check guild_id restriction
         let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
-        if let Ok(Some(allowed_guild)) = config_repo.get("discord.guild_id") {
-            if !allowed_guild.is_empty() {
-                if let Some(gid) = guild_id {
-                    if gid.to_string() != allowed_guild {
-                        debug!("Discord message from non-allowed guild {gid}, skipping");
-                        return Ok(());
-                    }
-                } else {
-                    // DM — block when guild restriction is active
-                    debug!("Discord DM blocked by guild_id restriction");
+        if let Ok(Some(allowed_guild)) = config_repo.get("discord.guild_id")
+            && !allowed_guild.is_empty()
+        {
+            if let Some(gid) = guild_id {
+                if gid.to_string() != allowed_guild {
+                    debug!("Discord message from non-allowed guild {gid}, skipping");
                     return Ok(());
                 }
+            } else {
+                // DM — block when guild restriction is active
+                debug!("Discord DM blocked by guild_id restriction");
+                return Ok(());
             }
         }
 

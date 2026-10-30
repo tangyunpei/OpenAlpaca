@@ -531,6 +531,10 @@ impl MemoryApi {
     /// recorded is answered exactly as an upload's is and no note is touched —
     /// then `f` runs under a context built on the recorded root. A refusal of
     /// `f`'s is [`refusal`]'s answer.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Err is the route's answer, an axum Response"
+    )]
     async fn run_write<T, F>(&self, headers: &HeaderMap, f: F) -> Result<T, Response>
     where
         T: Send + 'static,

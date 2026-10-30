@@ -447,34 +447,29 @@ pub(super) fn build_task_outcome(
     // Try to read state_json for rich outcome data
     if let Some(db) = db {
         let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        if let Ok(Some(task)) = repo.get(task_id) {
-            if let Some(ref sj) = task.state_json {
-                if let Ok(state) = serde_json::from_str::<TaskState>(sj) {
-                    let fallback = if final_content.is_empty() {
-                        if success { "Task completed." } else { "Task failed." }
-                    } else {
-                        final_content
-                    };
-                    let mut outcome = state.build_outcome(fallback, None);
-                    if !success {
-                        outcome.outcome_kind = OutcomeKind::Failed;
-                        // Prepend error reason if it's not already in the summary
-                        if !final_content.is_empty() && !outcome.summary.contains(final_content) {
-                            outcome.summary =
-                                format!("{}\n\n{}", final_content, outcome.summary);
-                        }
-                    }
-                    let has_summary = !outcome.summary.is_empty()
-                        && outcome.summary != "Task completed."
-                        && outcome.summary != "Task failed.";
-                    merge_produced_artifacts(
-                        &mut outcome,
-                        produced_artifacts(db, task_id),
-                        has_summary,
-                    );
-                    return outcome;
+        if let Ok(Some(task)) = repo.get(task_id)
+            && let Some(ref sj) = task.state_json
+            && let Ok(state) = serde_json::from_str::<TaskState>(sj)
+        {
+            let fallback = if final_content.is_empty() {
+                if success { "Task completed." } else { "Task failed." }
+            } else {
+                final_content
+            };
+            let mut outcome = state.build_outcome(fallback, None);
+            if !success {
+                outcome.outcome_kind = OutcomeKind::Failed;
+                // Prepend error reason if it's not already in the summary
+                if !final_content.is_empty() && !outcome.summary.contains(final_content) {
+                    outcome.summary =
+                        format!("{}\n\n{}", final_content, outcome.summary);
                 }
             }
+            let has_summary = !outcome.summary.is_empty()
+                && outcome.summary != "Task completed."
+                && outcome.summary != "Task failed.";
+            merge_produced_artifacts(&mut outcome, produced_artifacts(db, task_id), has_summary);
+            return outcome;
         }
     }
 

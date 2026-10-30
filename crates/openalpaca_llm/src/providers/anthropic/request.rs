@@ -266,13 +266,13 @@ pub(super) fn build_request_body(
                     }]);
                 }
                 serde_json::Value::Array(mut arr) if has_cacheable_system => {
-                    if let Some(first) = arr.first_mut() {
-                        if let Some(obj) = first.as_object_mut() {
-                            obj.insert(
-                                "cache_control".to_string(),
-                                serde_json::json!(CacheControl::ephemeral()),
-                            );
-                        }
+                    if let Some(first) = arr.first_mut()
+                        && let Some(obj) = first.as_object_mut()
+                    {
+                        obj.insert(
+                            "cache_control".to_string(),
+                            serde_json::json!(CacheControl::ephemeral()),
+                        );
                     }
                     body["system"] = serde_json::Value::Array(arr);
                 }
@@ -284,43 +284,42 @@ pub(super) fn build_request_body(
         }
 
         // Second breakpoint: last tool in the list.
-        if let Some(serde_json::Value::Array(tools_arr)) = body.get_mut("tools") {
-            if let Some(last_tool) = tools_arr.last_mut() {
-                if let Some(obj) = last_tool.as_object_mut() {
-                    obj.insert(
-                        "cache_control".to_string(),
-                        serde_json::json!(CacheControl::ephemeral()),
-                    );
-                }
-            }
+        if let Some(serde_json::Value::Array(tools_arr)) = body.get_mut("tools")
+            && let Some(last_tool) = tools_arr.last_mut()
+            && let Some(obj) = last_tool.as_object_mut()
+        {
+            obj.insert(
+                "cache_control".to_string(),
+                serde_json::json!(CacheControl::ephemeral()),
+            );
         }
 
         // Third breakpoint: conversation tail. Attach cache_control to the
         // last message's last content block. (Introduced in P1 / Task 1.)
-        if let Some(serde_json::Value::Array(msgs_arr)) = body.get_mut("messages") {
-            if let Some(last_msg) = msgs_arr.last_mut() {
-                let content = &mut last_msg["content"];
-                match content {
-                    serde_json::Value::String(s) => {
-                        let text = std::mem::take(s);
-                        *content = serde_json::json!([{
-                            "type": "text",
-                            "text": text,
-                            "cache_control": CacheControl::ephemeral(),
-                        }]);
-                    }
-                    serde_json::Value::Array(arr) => {
-                        if let Some(last_block) = arr.last_mut() {
-                            if let Some(obj) = last_block.as_object_mut() {
-                                obj.insert(
-                                    "cache_control".to_string(),
-                                    serde_json::json!(CacheControl::ephemeral()),
-                                );
-                            }
-                        }
-                    }
-                    _ => {}
+        if let Some(serde_json::Value::Array(msgs_arr)) = body.get_mut("messages")
+            && let Some(last_msg) = msgs_arr.last_mut()
+        {
+            let content = &mut last_msg["content"];
+            match content {
+                serde_json::Value::String(s) => {
+                    let text = std::mem::take(s);
+                    *content = serde_json::json!([{
+                        "type": "text",
+                        "text": text,
+                        "cache_control": CacheControl::ephemeral(),
+                    }]);
                 }
+                serde_json::Value::Array(arr) => {
+                    if let Some(last_block) = arr.last_mut()
+                        && let Some(obj) = last_block.as_object_mut()
+                    {
+                        obj.insert(
+                            "cache_control".to_string(),
+                            serde_json::json!(CacheControl::ephemeral()),
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }

@@ -457,7 +457,7 @@ impl BuiltInTool for SpawnSubagentTool {
         let run_id = format!(
             "{}::{}",
             agent_id,
-            &instance_id.split("::").last().unwrap_or(&instance_id)
+            instance_id.split("::").last().unwrap_or(&instance_id)
         );
         self.bus.publish(SystemEvent::AgentStatusChanged {
             agent_id: instance_id.clone(),

@@ -513,13 +513,12 @@ impl SessionLogHandle {
     /// never this prefix (§5.4: "the spill files they reference").
     pub fn reserve_spill(&self, tool_name: &str, tool_use_id: &str) -> String {
         let floor = self.written_seq.load(Ordering::Relaxed) + 1;
-        let mut number = floor;
-        let _ = self
+        let prev = self
             .next_spill
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                number = current.max(floor);
-                Some(number + 1)
+            .update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.max(floor) + 1
             });
+        let number = prev.max(floor);
         format!(
             "{}/{number:06}-{}-{}.txt",
             record::RESULTS_DIR,

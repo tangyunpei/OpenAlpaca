@@ -461,7 +461,7 @@ pub(crate) fn cap_data(data: Value) -> (Value, bool) {
         collect_cuttable(value, &mut path, &mut victims);
         path.pop();
     }
-    victims.sort_by(|a, b| b.1.cmp(&a.1));
+    victims.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     let mut cut: Vec<String> = Vec::new();
     for (path, len) in victims {

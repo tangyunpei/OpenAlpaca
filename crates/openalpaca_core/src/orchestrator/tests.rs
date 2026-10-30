@@ -146,8 +146,10 @@ fn make_orchestrator_with_capturing_llm(
 #[test]
 fn test_update_system_persona_updates_active_snapshot() {
     let orch = make_orchestrator();
-    let mut replacement = SystemPersona::default();
-    replacement.name = "Soul Reloaded".to_string();
+    let replacement = SystemPersona {
+        name: "Soul Reloaded".to_string(),
+        ..Default::default()
+    };
 
     orch.update_system_persona(replacement.clone());
 

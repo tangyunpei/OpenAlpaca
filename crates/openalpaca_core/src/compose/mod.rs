@@ -109,6 +109,10 @@ pub struct StaticPromptSubFingerprints {
 /// Tagged cache value that pairs each output with its per-sub-field
 /// fingerprints. Replaces the previous `GlobalCacheValue` shape.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "each entry sits behind an Arc in the LRU, built once"
+)]
 pub enum CachedEntry {
     Persona {
         output: Arc<PersonaOutput>,

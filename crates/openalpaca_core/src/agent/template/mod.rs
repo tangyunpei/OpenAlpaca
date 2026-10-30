@@ -17,21 +17,16 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 /// Where an agent's execution logic comes from.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum AgentSource {
     /// Internal agent running the built-in agentic loop.
+    #[default]
     Internal,
     /// Plugin-backed agent running an external reasoning loop.
     Plugin {
         plugin_id: String,
         executor: Arc<dyn openalpaca_api::plugin_traits::PluginAgentExecutor>,
     },
-}
-
-impl Default for AgentSource {
-    fn default() -> Self {
-        Self::Internal
-    }
 }
 
 impl std::fmt::Debug for AgentSource {

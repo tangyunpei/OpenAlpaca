@@ -1381,9 +1381,7 @@ fn test_assembly_budget_trim_drops_oldest_non_system_history() {
     });
 
     assert!(
-        out.section_registry
-            .iter()
-            .any(|name| *name == "<trimmed:history>"),
+        out.section_registry.contains(&"<trimmed:history>"),
         "assembly should record a <trimmed:history> marker when trimming fires"
     );
     // Final message list must be shorter than (history_len + 1) — some

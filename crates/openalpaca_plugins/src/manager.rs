@@ -1014,7 +1014,7 @@ impl PluginManager {
         //    plugin's own entry goes — by its exact id, when its source is this
         //    plugin — never a file skill that took the key or is merely named
         //    like it (N-PLUG-6).
-        let skills: Vec<String> = state.registered_skills.drain(..).collect();
+        let skills: Vec<String> = std::mem::take(&mut state.registered_skills);
         if let Some(catalog) = &self.skill_catalog {
             for skill_id in &skills {
                 catalog.remove_plugin_skill(skill_id, id);
@@ -1024,7 +1024,7 @@ impl PluginManager {
 
         // 3. agent templates — same tombstone, for `spawn_subagent`, and the
         //    same rule: only a template whose source is this plugin.
-        let agents: Vec<String> = state.registered_agents.drain(..).collect();
+        let agents: Vec<String> = std::mem::take(&mut state.registered_agents);
         if let Some(registry) = &self.agent_registry {
             for agent_id in &agents {
                 registry.remove_plugin_template(agent_id, id);
