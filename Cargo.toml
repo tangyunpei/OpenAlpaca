@@ -111,9 +111,14 @@ base64 = "0.23.1"
 rand = "0.10.0"
 libc = "0.2.191"
 tempfile = "3.24.0"
-# Already vendored transitively (pdf-extract → openalpacad); promoted to a
-# direct dependency for the artifact-grammar slugifier's NFKD step (store/artifact.rs).
-unicode-normalization = "0.1.25"
+# Already vendored transitively (pdf-extract → openalpacad); a direct
+# dependency of openalpaca_storage for four callers: the artifact-grammar
+# slugifier's NFKD step (store/artifact.rs), a project's folder name
+# (store/projects.rs), the memory index's query::normalize and learning's
+# duplicate check (memory_files/note.rs). A release that moves its Unicode
+# version changes what query::normalize returns, so it bumps
+# memory_index::SCHEMA_VERSION (0.1.26: 6 -> 7).
+unicode-normalization = "0.1.26"
 # The artifact store's line diff: the write-time added/removed counts and the
 # unified patch `GET /v1/artifacts/{id}/diff` serves both come out of one
 # `TextDiff`, so the two can never disagree. Pure Rust, no build script,

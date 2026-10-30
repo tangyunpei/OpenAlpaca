@@ -74,6 +74,11 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// Version 6 (storage design R21) changes no table: every project
 /// partition's key went from its directory's hash to its project id's
 /// (R18), so the rows of a version-5 cache sit under keys nothing reads.
+/// Version 7 (the FRESHNESS-SWEEP's S12) changes no table:
+/// unicode-normalization 0.1.26 reads Unicode 18, so [`query::normalize`]
+/// now folds 68 of its new characters (the subscript `w`, U+209D, to `w`)
+/// and orders 34 new combining marks by their combining class, and a row of
+/// a version-6 cache can hold what the same note bytes no longer give.
 ///
 /// **It versions what a row holds, not only the tables.** Since scale slice
 /// S1 the service re-indexes a note only when its bytes, its file's stat or
@@ -87,7 +92,7 @@ pub const INDEX_FILE_NAME: &str = "memory-index-v1.sqlite";
 /// `fts_tri` hold — must bump this too, or the old rows are served for
 /// good; the bump is what re-derives every row, by a rebuild off the
 /// request path.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 /// Design §4: a note is at most 32 KiB. A larger body is refused by
 /// [`MemoryIndex::upsert`] so the cache stays bounded by what `memory_files`
 /// would have written.
