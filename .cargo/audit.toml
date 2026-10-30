@@ -1,0 +1,11 @@
+# cargo-audit's half of the advisory policy (P34; DU-21's zip sub-row): the
+# same three ignores as deny.toml's [advisories], with their reason there —
+# calamine 0.36.1's own zip 8.6.0, whose extract()/ZipStreamReader paths
+# nothing in the daemon calls; lifted when calamine requires zip ^9. No other
+# id is ignored here or there.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+]

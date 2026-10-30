@@ -1,0 +1,52 @@
+# cargo-deny's policy (P34; DU-21 (a), B-22 (b)). CI reads it in
+# .github/workflows/audit.yml — on every pull request, every push to main and
+# weekly — and locally:
+#   cargo deny --locked --all-features --workspace check advisories licenses sources
+# A red run is the owner's to answer (DU-21 (a)): on an unchanged lock (the
+# weekly run) it is a new advisory, answered by a lock refresh, a bump or a
+# reasoned ignore below; on a pull request it belongs to the change that moved
+# the lock. No check here is a bans check.
+
+[advisories]
+# A yanked version in Cargo.lock fails the check.
+yanked = "deny"
+# Unmaintained and unsound advisories fail for a crate a workspace member
+# depends on directly; on a transitive crate cargo-deny passes them over
+# (cargo-audit lists them as warnings) — they are an upstream's to answer
+# (programme-plan §7: read the transitive unmaintained list once a year).
+unmaintained = "workspace"
+unsound = "workspace"
+# Every ignore names why it is safe to carry and what lifts it. The same ids
+# are cargo-audit's (.cargo/audit.toml) and the DU-23 (c) waiver record's.
+ignore = [
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0, calamine 0.36.1's own (calamine requires zip ^8; our zip is 9.0.3): SUID/SGID bits kept by ZipArchive::extract()/ZipStreamReader, which nothing in the daemon calls (extraction.rs and calamine-0.36.1/src read entries through by_name/by_index only); the id matches zip < 9 only; lifted when calamine requires zip ^9" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0, calamine 0.36.1's own (calamine requires zip ^8; our zip is 9.0.3): symlinks out of the destination created by ZipArchive::extract(), which nothing in the daemon calls (extraction.rs and calamine-0.36.1/src read entries through by_name/by_index only); the id matches zip < 9 only; lifted when calamine requires zip ^9" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0, calamine 0.36.1's own (calamine requires zip ^8; our zip is 9.0.3): permissions applied through symlinks by ZipStreamReader::extract()/ZipArchive::extract(), which nothing in the daemon calls (extraction.rs and calamine-0.36.1/src read entries through by_name/by_index only); the id matches zip < 9 only; lifted when calamine requires zip ^9" },
+]
+
+[licenses]
+# Each licence a crate in Cargo.lock needs, by name, and nothing more: a crate
+# whose licence expression these do not satisfy fails, and its pull request
+# allows the licence here by name with its reason, or refuses the crate
+# (programme-plan §7, the per-PR checklist's (8)). The workspace's own crates
+# are MIT (`[workspace.package] license`) and checked like the rest.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[sources]
+# crates.io only: a git or another registry's dependency fails.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

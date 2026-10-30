@@ -206,6 +206,7 @@ bun run check && bun run test && bun run format:check && bun run build
 
 - A bare `cargo build` or `cargo test` covers the library crates only. Name the apps with `-p`, or use `--workspace`.
 - CI (`.github/workflows/ci.yml`) has three jobs: the Rust build, tests and clippy above, run `--locked` on the toolchain `rust-toolchain.toml` pins; the four `bun run` gates under the Bun the root `package.json` pins; and the Windows install-script tests on Pester 6.2.0. Its actions are pinned by commit SHA.
+- Advisories (`.github/workflows/audit.yml`), on every pull request, every push to `main` and weekly: cargo-deny checks the crates the workspace resolves to (not every `Cargo.lock` entry) against RustSec, the licence allow list and crates.io as the only source (`deny.toml`); cargo-audit, run by hand from the root, reads the whole lock with the same ignores (`.cargo/audit.toml`); and `bun audit` checks `bun.lock`. The owner answers a red run: a lock refresh, a bump, or an ignore with its reason.
 - To run the daemon in the foreground on the repo's own config, use `OPENALPACA_CONFIG_DIR="$PWD/config" cargo run -p openalpacad`. Export the same variable for the CLI, so `openalpaca config set` edits the same files.
 - `docs/api/` is generated. Run `python3 scripts/gen_api_docs.py`; never edit it by hand.
 - Toolchain: Rust 1.99.1. Frontend: Bun 1.4.3, TypeScript 7, React 19, Vite 8, Tailwind 4, Vitest 5.
