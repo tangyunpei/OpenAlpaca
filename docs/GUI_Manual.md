@@ -108,6 +108,14 @@ there only with your approval, each write and each command asking first. A
 conversation with no project works in its own folder under `scratch/`, which
 goes when the conversation is deleted.
 
+One thing lives outside that root: the webview's own `localStorage`. The app
+keeps the project you chose (`oa-project`), the pane widths (`oa-pane-widths`)
+and a mirror of the artifact pins (`oa-pins`) there, and WKWebView stores it
+under the app's bundle identifier in `~/Library`. Neither
+`OPENALPACA_HOME_STORE` nor `openalpaca config reset --factory` touches it, and
+it is the same whichever store the daemon serves, until a later build keeps
+those keys per store.
+
 ## Connection lifecycle
 
 The webview asks the Rust shell for a connection; these Tauri commands are the
@@ -1512,6 +1520,16 @@ disposition bit lives and what the load could not publish. A plugin needs
 consent (`Approve`) before it runs at all, and one that is enabled but failing
 keeps its switch on with a failure tag — that is the bit you set, not the state
 it reached.
+
+**An MCP server starts from a terminal but not from the app.** A daemon the
+app starts inherits the app's environment, and an app opened from the Finder or
+the Dock gets the minimal `PATH` macOS gives apps, not your shell's — so `npx`,
+`uvx`, Homebrew's `node` or `claude` can be found by a daemon that `openalpaca
+daemon start` started and be missing for the one the app started (reasoned from
+how macOS starts apps, not measured). Give the server an absolute `command`, or
+set `PATH` in its `env`, in `config/mcp.toml` ([Daemon Manual → MCP
+Servers](Daemon_Manual.md#mcp-servers)); or start the daemon from a terminal
+first, and the app uses that one.
 
 **Connector failures.** The connector row distinguishes a connector that
 started and exited from one that never started. Beyond that, the Event log and

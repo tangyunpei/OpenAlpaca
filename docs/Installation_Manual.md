@@ -75,9 +75,11 @@ Package contents:
 - `uninstall.sh`
 - `manifest.json` — build metadata: `name`, `version`, `target`, `built_at_utc`, `git_sha`
 
-Note: binaries and the `.app` bundle are **not codesigned**. macOS Gatekeeper
-will show "unidentified developer" warnings; the installer works around this by
-stripping the quarantine attribute (see Troubleshooting).
+Note: binaries and the `.app` bundle are **not codesigned and not notarised**.
+macOS Gatekeeper will show "unidentified developer" warnings; the installer
+works around this by stripping the quarantine attribute (see Troubleshooting).
+That is the first beta's form, installed through the installer; the app is to be
+signed and notarised before any wider distribution.
 
 ## Install on Target Machine
 
@@ -153,6 +155,13 @@ approval, each write and each command asking first. A conversation with no
 project works in a folder of its own under `scratch/`, removed with the
 conversation. The root describes itself: the daemon seeds a `README.md` there
 that explains every entry.
+
+One thing the desktop app keeps outside the runtime root: the webview's own
+`localStorage` — the project you chose, the pane widths and a mirror of the
+artifact pins — which WKWebView stores under the app's bundle identifier in
+`~/Library`. Neither `OPENALPACA_HOME_STORE` nor `openalpaca config reset
+--factory` touches it, `uninstall.sh` leaves it, and it is the same whichever
+store the daemon serves, until a later build keeps those keys per store.
 
 When the CLI or the desktop app launches the daemon, it sets
 `OPENALPACA_CONFIG_DIR` to the runtime config directory above — that is the
@@ -793,7 +802,8 @@ The uninstaller removes the GUI MSI, the prefix, the Start Menu folder and the
 - `Target mismatch` during install
   - Use artifact matching your machine architecture.
 - GUI blocked by macOS quarantine
-  - Release binaries are not codesigned, so Gatekeeper may warn or block.
+  - Release binaries are not codesigned or notarised, so Gatekeeper may warn or
+    block.
     The installer already runs best-effort quarantine removal; if needed:
     - `xattr -dr com.apple.quarantine ~/Applications/openalpaca-gui.app`
 - Daemon not starting
