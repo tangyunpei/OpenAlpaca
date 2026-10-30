@@ -5,6 +5,8 @@
 /target/
 debug/
 *.pdb
+# rustc's output for a crate read from stdin (`rustc -`)
+/rust_out
 
 # ============================================
 # Python (scripts/)

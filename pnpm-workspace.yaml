@@ -1,5 +1,0 @@
-packages:
-  - apps/openalpaca-gui
-
-onlyBuiltDependencies:
-  - esbuild
