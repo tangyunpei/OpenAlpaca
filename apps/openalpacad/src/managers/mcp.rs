@@ -2361,7 +2361,7 @@ impl McpSupervisor {
 
 /// rmcp's `DEFAULT_AUTO_DISCOVER_TIMEOUT` — private in rmcp, so restated here
 /// for the one comparison that needs it (DU-25 (m-d);
-/// `rmcp-3.5.1/src/service/client.rs:657`).
+/// `rmcp-3.7.0/src/service/client.rs:719`).
 const AUTO_DISCOVER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Milliseconds since `started`, for the row's durations (DU-25 (m-g)).

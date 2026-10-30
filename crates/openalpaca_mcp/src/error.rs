@@ -150,7 +150,7 @@ impl McpError {
 
 // rmcp::service::ServiceError → McpError translation.
 //
-// rmcp 3.5 `ServiceError` variants (see rmcp/src/service.rs):
+// rmcp 3.7 `ServiceError` variants (see rmcp/src/service.rs):
 //   - McpError(ErrorData)           : JSON-RPC error from the peer.
 //   - TransportSend(DynamicTransportError) : local transport send failure.
 //   - TransportClosed               : the transport reports EOF / closure.
@@ -169,7 +169,7 @@ impl McpError {
 /// rmcp's reqwest-backed streamable-HTTP client maps a `401` carrying a
 /// `www-authenticate` header to [`StreamableHttpError::AuthRequired`] and a
 /// `403` carrying one to [`StreamableHttpError::InsufficientScope`]
-/// (`rmcp-3.5.1/src/transport/common/reqwest/streamable_http_client.rs:108`,
+/// (`rmcp-3.7.0/src/transport/common/reqwest/streamable_http_client.rs:108`,
 /// `:121` on the GET stream, `:223`, `:236` on a POST); every other status
 /// is folded into an untyped response error before
 /// it reaches us. So this recovers exactly the two the design classifies

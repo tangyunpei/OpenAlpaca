@@ -156,10 +156,10 @@ fn server_command(cmd: Command, server_name: &str, observer: Option<ExitObserver
 ///
 /// rmcp owns the child and exposes no exit status: it waits for the process
 /// inside its own close and logs the status at most (`graceful_shutdown`,
-/// rmcp-3.5.1 `src/transport/child_process.rs:81-107`). Every wait rmcp makes
+/// rmcp-3.7.0 `src/transport/child_process.rs:81-107`). Every wait rmcp makes
 /// goes through the wrapper stack, so the outermost wrapper is where the
 /// status can be read. When a server exits by itself its output ends, rmcp's
-/// service loop closes the transport (`src/service.rs:1805`), and that close's
+/// service loop closes the transport (`src/service.rs:1795`), and that close's
 /// wait returns at once for a process already gone — before the service task
 /// ends and `Peer::is_transport_closed()` turns true, so the exit is reported
 /// before any call can find the transport closed.
@@ -260,7 +260,7 @@ mod exit {
 /// `ProcessGroup::leader()` alone does not make a disabled server's
 /// descendants go. rmcp closes a stdio connection by closing the server's
 /// stdin and waiting up to 3 s for it to exit, and kills it — then by `killpg`
-/// — only if it is still running (`rmcp-3.5.1/src/transport/child_process.rs:81-107`).
+/// — only if it is still running (`rmcp-3.7.0/src/transport/child_process.rs:81-107`).
 /// A server that exits on the EOF, as a well-behaved one does, is reaped and
 /// nothing else is signalled: what it started and left running — a helper in
 /// the background, a grandchild already handed to init — goes on running,

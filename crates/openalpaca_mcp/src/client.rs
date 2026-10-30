@@ -103,7 +103,7 @@ impl ClientHandler for NotifyingHandler {
     ///
     /// The version is rmcp's to choose under `Auto` and `Discover` (the
     /// fallback overwrites it with `legacy_version`, the probe offers its
-    /// preferred versions; rmcp-3.5.1 `src/service/client.rs:777-845`), but
+    /// preferred versions; rmcp-3.7.0 `src/service/client.rs:839-907`), but
     /// `Initialize` — `protocol = "legacy"`, and a respawn pinned to a legacy
     /// era — sends this one as it stands, and rmcp's default is `LATEST`
     /// (`2026-07-28`), a version with no `initialize` at all. So it is the
@@ -518,7 +518,7 @@ impl McpClient {
     /// Health check — sends an MCP `ping`.
     pub async fn ping(&self) -> Result<(), McpError> {
         let peer = self.current_peer().await?;
-        // rmcp (still at 3.5) does not expose a typed `ping()` helper on `Peer<RoleClient>`;
+        // rmcp (still at 3.7) does not expose a typed `ping()` helper on `Peer<RoleClient>`;
         // construct a PingRequest manually and discard the (empty) server response.
         let req: ClientRequest = PingRequest::default().into();
         peer.send_request(req)
@@ -769,12 +769,15 @@ impl McpClient {
 
 /// Apply per-operation cancellation and timeout to an async operation.
 ///
-/// On cancel: returns `McpError::Cancelled` immediately. (Protocol-level
-/// cancellation notification is added in a later refinement; for P1 we
-/// bail locally — the rmcp transport will carry an implicit cancellation
-/// when the future drops.)
+/// On cancel: returns `McpError::Cancelled` immediately.
 ///
 /// On timeout: returns `McpError::Timeout(duration)`.
+///
+/// Either way `op` is dropped, and with it rmcp's request: since rmcp 3.6 a
+/// `tools/call` or `tools/list` dropped before its answer sends one
+/// `notifications/cancelled` naming its id ("request abandoned by the
+/// caller"), which `call_tests.rs` pins for a timed-out call. A cancel
+/// carrying a reason of our own is a later refinement.
 async fn with_cancel_and_timeout<F, T>(
     op: F,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
@@ -868,14 +871,14 @@ fn build_transport(
 /// JSON-RPC error — rmcp's own evidence of a legacy server, which `Discover`
 /// returns as it stands — unless its code is one of the two refusals a
 /// `2026-07-28` server itself sends (`MISSING_REQUIRED_CLIENT_CAPABILITY`,
-/// `HEADER_MISMATCH`; rmcp's `is_modern_rejection_code`, rmcp-3.5.1
-/// `src/service/client.rs:861-867`), which rmcp returns raw in every
+/// `HEADER_MISMATCH`; rmcp's `is_modern_rejection_code`, rmcp-3.7.0
+/// `src/service/client.rs:923-929`), which rmcp returns raw in every
 /// lifecycle and which stay a handshake failure here as under `Auto`.
 /// Everything else stays a handshake failure.
 ///
 /// rmcp types no phase on `ConnectionClosed`: its text is the response the
 /// handshake was waiting for (`expect_next_message`'s context,
-/// rmcp-3.5.1 `src/service/client.rs:148-159`), and `"discover response"` is
+/// rmcp-3.7.0 `src/service/client.rs:148-159`), and `"discover response"` is
 /// the probe's. A rename upstream would turn a close during the probe back
 /// into `Unreachable`; the daemon's test of that case pins it. The close is
 /// any close: a stdio server that exits while the probe waits — a crash at
@@ -955,7 +958,7 @@ fn negotiation_advice(lifecycle: &ClientLifecycleMode, respawn: bool) -> &'stati
 ///   at all. A server that answers the probe with a correlated JSON-RPC error
 ///   — or, over streamable HTTP, with a pre-session 4xx other than 401/403,
 ///   which rmcp turns into one
-///   (`rmcp-3.5.1/src/transport/streamable_http_client.rs:375-406`) — is
+///   (`rmcp-3.7.0/src/transport/streamable_http_client.rs:381-412`) — is
 ///   legacy, and the same connection then runs the `initialize` handshake
 ///   offering [`ProtocolVersion::LATEST_WITH_INITIALIZE`] (`2025-11-25`).
 /// * `Legacy` — rmcp's `Initialize`: that handshake at once, never the probe.
@@ -965,10 +968,10 @@ fn negotiation_advice(lifecycle: &ClientLifecycleMode, respawn: bool) -> &'stati
 /// The costs of `Auto` are rmcp's, named here so nobody rediscovers them: a
 /// server that ignores an unknown method is found legacy only when rmcp's
 /// 10 s discover timeout runs out — a private constant no entry point lets us
-/// set (`DEFAULT_AUTO_DISCOVER_TIMEOUT`, `rmcp-3.5.1/src/service/client.rs:657`)
+/// set (`DEFAULT_AUTO_DISCOVER_TIMEOUT`, `rmcp-3.7.0/src/service/client.rs:719`)
 /// — so a `connect_timeout_secs` at or under 10 s fails it (the supervisor
 /// warns), and a 401/403, a 5xx, a transport failure or a malformed 2xx
-/// answer to the probe fails the connect with no fallback (`:1044-1057`).
+/// answer to the probe fails the connect with no fallback (`:1122-1135`).
 ///
 /// **A respawn reopens in the era the first negotiated** (DU-25 (m-c)) — the
 /// pre-send reconnect of N-MCP-1 included: `Initialize` for a version that has
@@ -1028,12 +1031,12 @@ where
 ///
 /// A 2026-07-28 server sends `notifications/tools/list_changed` and its two
 /// siblings only on a `subscriptions/listen` stream
-/// (`rmcp-3.5.1/src/service/server.rs:268-311`), and rmcp's client opens
+/// (`rmcp-3.7.0/src/service/server.rs:253-296`), and rmcp's client opens
 /// none by itself — so without this a modern server would be reached and
 /// never heard to change its tools: the silent hole §3.7 closed (X-35). A
 /// legacy session needs none; its notifications reach [`NotifyingHandler`].
 /// rmcp drops the list caches a change invalidates before handing it over
-/// (`rmcp-3.5.1/src/service.rs:1626`), so the refresh it triggers reads anew.
+/// (`rmcp-3.7.0/src/service.rs:1612`), so the refresh it triggers reads anew.
 struct ChangeListener {
     server_name: String,
     /// Weak, so the stream never holds the change channel open: the
@@ -1132,8 +1135,8 @@ impl ChangeListener {
                 // Whether the connection lives decides it, not how rmcp ended
                 // the stream: over HTTP a listen stream the server or the
                 // network cuts while the session lives reads `Abrupt`, as the
-                // connection's own end does (rmcp-3.5.1
-                // `src/transport/streamable_http_client.rs:1767-1786`). A
+                // connection's own end does (rmcp-3.7.0
+                // `src/transport/streamable_http_client.rs:1777-1796`). A
                 // reopen the close races fails at once, a `debug` above.
                 if peer.is_transport_closed() {
                     tracing::debug!(

@@ -394,7 +394,7 @@ fi
 "#
     };
 
-    // The discover result a modern server answers with, as rmcp 3.5.1
+    // The discover result a modern server answers with, as rmcp 3.7.0
     // serializes `DiscoverResult::new(..).with_server_info(..)`.
     let discover_result = |versions: &str| {
         format!(

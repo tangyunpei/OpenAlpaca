@@ -78,7 +78,7 @@ fn tool_list_changed(listen: &RequestId) -> ServerJsonRpcMessage {
 
 /// The listen request's final result: the server ends the stream while the
 /// connection lives, as rmcp's own server does
-/// (`rmcp-3.5.1/src/handler/server.rs:179-181`).
+/// (`rmcp-3.7.0/src/handler/server.rs:179-181`).
 fn listen_complete(listen: &RequestId) -> ServerJsonRpcMessage {
     ServerJsonRpcMessage::response(
         ServerResult::SubscriptionsListenResult(SubscriptionsListenResult::complete(

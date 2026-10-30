@@ -3,7 +3,8 @@
 //! Every server here is a POSIX `sh` loop over stdio that rejects the
 //! `server/discover` probe as a legacy server does, answers `initialize`,
 //! records each `tools/call` it receives, and then does what the
-//! test asks of it — answer, stay silent, or exit. Each incarnation leads its
+//! test asks of it — answer, stay silent, or exit; it records each
+//! `notifications/cancelled` too. Each incarnation leads its
 //! own process group (`perl`'s `setpgrp`, as the daemon's stubs do), so the
 //! stub's teardown ends whatever the shell started, a slow start's `sleep`
 //! included, whether or not the client killed the shell first.
@@ -32,6 +33,8 @@ struct Stub {
     script: PathBuf,
     spawns: PathBuf,
     calls: PathBuf,
+    call_ids: PathBuf,
+    cancels: PathBuf,
 }
 
 impl Stub {
@@ -51,6 +54,26 @@ impl Stub {
     /// One entry per `tools/call` a server received, across incarnations.
     fn calls(&self) -> usize {
         Self::lines(&self.calls).len()
+    }
+
+    /// The JSON-RPC id of each `tools/call` a server received, oldest first.
+    fn call_ids(&self) -> Vec<i32> {
+        Self::lines(&self.call_ids)
+    }
+
+    /// The `requestId` of each `notifications/cancelled` a server received,
+    /// oldest first: one entry per notification, `Null` where none was named.
+    fn cancelled(&self) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(&self.cancels)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .map_or(serde_json::Value::Null, |message| {
+                        message["params"]["requestId"].clone()
+                    })
+            })
+            .collect()
     }
 
     /// SIGKILL the live incarnation (the newest pid), out of band.
@@ -89,10 +112,14 @@ fn stub(dir: &Path, tag: &str, on_call: OnCall, slow_respawn_secs: u64) -> Stub 
     let script = dir.join(format!("{tag}-server.sh"));
     let spawns = dir.join(format!("{tag}-spawns.log"));
     let calls = dir.join(format!("{tag}-calls.log"));
+    let call_ids = dir.join(format!("{tag}-call-ids.log"));
+    let cancels = dir.join(format!("{tag}-cancels.log"));
     let mark = dir.join(format!("{tag}-first-call-seen"));
     let started = dir.join(format!("{tag}-started-once"));
     std::fs::write(&spawns, "").expect("spawn log");
     std::fs::write(&calls, "").expect("call log");
+    std::fs::write(&call_ids, "").expect("call id log");
+    std::fs::write(&cancels, "").expect("cancel log");
 
     let mark = mark.display();
     let reply = r#"printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}\n' "$id""#;
@@ -133,13 +160,19 @@ echo "$$" >> '{spawns}'
       ;;
     *'"method":"tools/call"'*)
       echo "$$" >> '{calls}'
+      echo "$id" >> '{call_ids}'
       {on_call}
+      ;;
+    *'"method":"notifications/cancelled"'*)
+      printf '%s\n' "$line" >> '{cancels}'
       ;;
   esac
 done
 "#,
         spawns = spawns.display(),
         calls = calls.display(),
+        call_ids = call_ids.display(),
+        cancels = cancels.display(),
     );
     std::fs::write(&script, body).expect("write stub");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
@@ -147,6 +180,8 @@ done
         script,
         spawns,
         calls,
+        call_ids,
+        cancels,
     }
 }
 
@@ -221,6 +256,58 @@ async fn a_call_that_times_out_is_sent_once_and_the_caller_gets_the_timeout() {
         .unwrap_or_else(|e| panic!("the next call: {e}"));
     assert_eq!(next.content.len(), 1);
     assert_eq!(stub.spawns().len(), 1, "still the first child");
+    client.disconnect().await.expect("disconnect");
+}
+
+/// The wire side of a timed-out call: the deadline drops rmcp's request
+/// future, and rmcp (from 3.6) then sends one `notifications/cancelled`
+/// naming that request's id, so the server can stop work nobody will read.
+/// An answered call sends none.
+#[tokio::test]
+async fn a_timed_out_call_is_cancelled_once_by_its_id_and_an_answered_call_is_not() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = stub(dir.path(), "cancelled", OnCall::SilentFirst, 0);
+    let client = McpClient::connect(config(&stub, Duration::from_secs(1)))
+        .await
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+
+    let outcome = client.call_tool("echo", serde_json::json!({}), None).await;
+    assert!(
+        matches!(outcome, Err(McpError::Timeout(_))),
+        "the caller must receive the timeout, got {:?}",
+        outcome.map(|_| "a result")
+    );
+    let timed_out = stub.call_ids();
+    assert_eq!(timed_out.len(), 1, "the call reached the server once");
+    let cancel_seen = async || !stub.cancelled().is_empty();
+    assert!(
+        eventually(Duration::from_secs(5), cancel_seen).await,
+        "the timed-out call {} must be cancelled on the wire",
+        timed_out[0]
+    );
+    // Give a second notification the time it would take to land.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        stub.cancelled(),
+        [serde_json::json!(timed_out[0])],
+        "one notifications/cancelled, naming the timed-out call's id"
+    );
+
+    let answered = client
+        .call_tool("echo", serde_json::json!({}), None)
+        .await
+        .unwrap_or_else(|e| panic!("the next call: {e}"));
+    assert_eq!(answered.content.len(), 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ids = stub.call_ids();
+    assert_eq!(ids.len(), 2, "one send per call");
+    assert_eq!(
+        stub.cancelled(),
+        [serde_json::json!(timed_out[0])],
+        "the answered call {} is not cancelled",
+        ids[1]
+    );
+    assert_eq!(stub.spawns().len(), 1, "one child throughout");
     client.disconnect().await.expect("disconnect");
 }
 
