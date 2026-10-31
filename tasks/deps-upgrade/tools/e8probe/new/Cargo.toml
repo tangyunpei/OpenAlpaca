@@ -1,0 +1,20 @@
+[package]
+name = "e8probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A standalone crate: it lives inside the repository tree but is not a member
+# of its workspace. Build it with `--manifest-path`. `old/` and `new/` share
+# `../src/main.rs` and differ in the `rusqlite` and `sha2` lines alone
+# (`diff` them); README.md, *The two locks*, says what else their locks hold.
+[workspace]
+
+[[bin]]
+name = "e8probe"
+path = "../src/main.rs"
+
+[dependencies]
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+sha2 = "=0.11.1"
+serde_json = "=1.0.154"
