@@ -278,13 +278,12 @@ impl DiscordConnector {
     }
 
     /// Main event loop.
+    ///
+    /// The shard's socket and the HTTP client run on the process's rustls
+    /// crypto provider, which the host installs before any connector starts
+    /// (openalpacad's `tls.rs`); this crate installs none.
     pub async fn run_loop(&self) -> Result<(), ConnectorError> {
         info!("Starting Discord connector...");
-
-        // Initialize rustls provider (idempotent — safe to call multiple times)
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
 
         let intents =
             Intents::GUILD_MESSAGES | Intents::DIRECT_MESSAGES | Intents::MESSAGE_CONTENT;
@@ -485,18 +484,18 @@ impl DiscordConnector {
 
         // Check guild_id restriction
         let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
-        if let Ok(Some(allowed_guild)) = config_repo.get("discord.guild_id") {
-            if !allowed_guild.is_empty() {
-                if let Some(gid) = guild_id {
-                    if gid.to_string() != allowed_guild {
-                        debug!("Discord message from non-allowed guild {gid}, skipping");
-                        return Ok(());
-                    }
-                } else {
-                    // DM — block when guild restriction is active
-                    debug!("Discord DM blocked by guild_id restriction");
+        if let Ok(Some(allowed_guild)) = config_repo.get("discord.guild_id")
+            && !allowed_guild.is_empty()
+        {
+            if let Some(gid) = guild_id {
+                if gid.to_string() != allowed_guild {
+                    debug!("Discord message from non-allowed guild {gid}, skipping");
                     return Ok(());
                 }
+            } else {
+                // DM — block when guild restriction is active
+                debug!("Discord DM blocked by guild_id restriction");
+                return Ok(());
             }
         }
 
@@ -879,9 +878,11 @@ mod tests {
     async fn an_approval_message_asks_discord_for_no_embeds() {
         use twilight_http::request::TryIntoRequest;
 
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
+        // The provider the daemon installs at start (openalpacad's `tls.rs`);
+        // a test binary has no `main`. Left to itself twilight's
+        // `ClientConfig::builder()` picks one by rustls's crate features,
+        // which teloxide over rustls (reqwest 0.12's `ring`) makes ambiguous.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let http = twilight_http::Client::new("test".to_string());
         let channel = twilight_model::id::Id::new(7);
         let sent = |message: CreateMessage<'_>| -> serde_json::Value {
@@ -1018,5 +1019,139 @@ mod tests {
             intercept_confirmation_reply("/yes", &111222333u64, &broker, &pending).unwrap();
         assert!(reply.contains("Approved"));
         assert!(rx.try_recv().unwrap().approved);
+    }
+
+    // ── twilight against a loopback stub of Discord (A-09 (2)) ──────────
+    //
+    // The live connect and message with the owner's test bot is P41's gate
+    // of record: only it reaches discord.com and the gateway over rustls on
+    // the provider the daemon installs. This stub, a supplement, pins what a
+    // stub can: twilight's HTTP client sends our message where it is pointed,
+    // and its gateway identifies and reads a READY, with the process's
+    // provider installed first as `main` installs it — the gateway's
+    // `Config` builds its rustls config even for a plain `ws://` URL.
+
+    /// What the stub saw: each request line or gateway opcode, with its body.
+    type Seen = Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+
+    /// A loopback Discord: `POST /api/v10/channels/{id}/messages` answers
+    /// 200, and `/` upgrades to a gateway that sends HELLO, reads IDENTIFY
+    /// and answers READY. Returns its `127.0.0.1:<port>` and the record.
+    async fn discord_stub() -> (String, Seen) {
+        use axum::extract::ws::{Message as WsMessage, WebSocketUpgrade};
+        use axum::extract::{Path, State};
+        use axum::routing::{any, post};
+        let seen: Seen = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        async fn create_message(
+            State((seen, _)): State<(Seen, String)>,
+            Path(channel): Path<u64>,
+            headers: axum::http::HeaderMap,
+            body: axum::body::Bytes,
+        ) -> axum::Json<serde_json::Value> {
+            let mut body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            body["authorization"] = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .into();
+            seen.lock()
+                .unwrap()
+                .push((format!("POST channels/{channel}/messages"), body));
+            axum::Json(serde_json::json!({}))
+        }
+        async fn gateway(
+            State((seen, addr)): State<(Seen, String)>,
+            upgrade: WebSocketUpgrade,
+        ) -> axum::response::Response {
+            upgrade.on_upgrade(move |mut socket| async move {
+                let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 45_000}});
+                socket
+                    .send(WsMessage::Text(hello.to_string().into()))
+                    .await
+                    .unwrap();
+                while let Some(Ok(WsMessage::Text(text))) = socket.recv().await {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let op = frame["op"].as_u64().unwrap_or_default();
+                    seen.lock()
+                        .unwrap()
+                        .push((format!("gateway op {op}"), frame["d"].clone()));
+                    if op == 2 {
+                        let ready = serde_json::json!({"op": 0, "s": 1, "t": "READY", "d": {
+                            "v": 10, "session_id": "stub-session", "shard": [0, 1],
+                            "resume_gateway_url": format!("ws://{addr}"), "guilds": [],
+                            "application": {"id": "100", "flags": 0},
+                            "user": {"id": "3", "username": "stub", "discriminator": "0",
+                                     "avatar": null, "bot": true, "mfa_enabled": false}
+                        }});
+                        socket
+                            .send(WsMessage::Text(ready.to_string().into()))
+                            .await
+                            .unwrap();
+                    }
+                }
+            })
+        }
+        let app = axum::Router::new()
+            .route("/api/v10/channels/{channel}/messages", post(create_message))
+            .route("/", any(gateway))
+            .with_state((seen.clone(), addr.clone()));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr, seen)
+    }
+
+    /// twilight's HTTP client posts our message to the channel it names, with
+    /// the bot's token, and its gateway identifies with the intents the
+    /// connector asks for and yields the READY it is sent.
+    #[tokio::test]
+    async fn twilight_sends_a_message_and_reads_ready_against_a_loopback_discord() {
+        // What `main` does before anything builds a TLS client.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (addr, seen) = discord_stub().await;
+
+        let http = twilight_http::Client::builder()
+            .token("stub-token".to_string())
+            .proxy(addr.clone(), true)
+            .ratelimiter(None)
+            .build();
+        send_with_retry(&http, twilight_model::id::Id::new(7), "one message")
+            .await
+            .expect("the message is sent");
+
+        let intents = Intents::GUILD_MESSAGES | Intents::DIRECT_MESSAGES | Intents::MESSAGE_CONTENT;
+        let config = twilight_gateway::ConfigBuilder::new("stub-token".to_string(), intents)
+            .proxy_url(format!("ws://{addr}"))
+            .build();
+        let mut shard = Shard::with_config(ShardId::ONE, config);
+        let ready = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match shard.next_event(EventTypeFlags::all()).await {
+                    Some(Ok(Event::Ready(ready))) => break ready,
+                    Some(Ok(_)) => continue,
+                    other => panic!("the gateway ended before READY: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("READY within 20 s");
+        assert_eq!(ready.user.name, "stub");
+        assert_eq!(ready.session_id, "stub-session");
+
+        let seen = seen.lock().unwrap().clone();
+        let message = seen
+            .iter()
+            .find(|(what, _)| what == "POST channels/7/messages")
+            .expect("the message reached the stub");
+        assert_eq!(message.1["content"], "one message");
+        assert_eq!(message.1["authorization"], "Bot stub-token");
+        let identify = seen
+            .iter()
+            .find(|(what, _)| what == "gateway op 2")
+            .expect("the shard identified");
+        // twilight sends the token as Discord requires it, prefixed `Bot `.
+        assert_eq!(identify.1["token"], "Bot stub-token");
+        assert_eq!(identify.1["intents"], intents.bits());
     }
 }

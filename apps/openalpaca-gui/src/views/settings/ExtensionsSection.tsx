@@ -337,14 +337,20 @@ export function ExtensionsSection() {
 }
 
 /**
- * What a consent row asks for, escaped, and — when anything was — the line
- * that counts it, in the words every approval surface uses. It wraps
- * anywhere, so a capability with no break in it cannot run past the row.
+ * What a consent row asks for, escaped, the manifest's standing warnings
+ * (N-PLUG-2) and — when anything was escaped — the line that counts it, in
+ * the words every approval surface uses. It wraps anywhere, so a capability
+ * with no break in it cannot run past the row.
  */
 function ConsentAsks({ consent }: { consent: RowConsent }) {
   return (
     <span className="block wrap-anywhere">
       <EscapedText escaped={consent.asks} />
+      {consent.warnings.map((warning, index) => (
+        <span key={index} className="mt-[2px] block text-amber-ink">
+          Warning: <EscapedText escaped={warning} />
+        </span>
+      ))}
       {consent.notice !== null && (
         <span className="mt-[2px] block text-red-ink">{consent.notice}</span>
       )}

@@ -869,28 +869,17 @@ async fn test_max_tokens_retries_exhausted_returns_truncated() {
     assert_eq!(result.rounds_used, 3);
 }
 
-// ─── tool error hint tests ────────────────────────────────────────────
+// ─── tool error text ──────────────────────────────────────────────────
 
+/// N-TOOL-4: the loop marks a failed call's text and adds nothing of its
+/// own — a hint is the failing tool's (file_read's, for instance, in
+/// `tools::builtins::file_ops`'s tests), never a guess from the words.
 #[test]
-fn test_tool_error_hint_file_read() {
-    let result = format_tool_error_with_hint("file_read", "not found: /foo/bar.txt");
-    assert!(result.starts_with("[tool_error] not found:"));
-    assert!(
-        result.contains(
-            "Hint: paths are relative to the working folder; file_list shows what a folder holds."
-        ),
-        "{result}"
+fn a_tool_error_is_marked_and_given_no_hint_by_the_loop() {
+    assert_eq!(
+        format_tool_error("not found: /foo/bar.txt"),
+        "[tool_error] not found: /foo/bar.txt"
     );
-    // ST-14: every shell command asks, so a hint must not send the model there
-    // for a question file_list answers without a card.
-    assert!(!result.contains("shell_execute"), "{result}");
-}
-
-#[test]
-fn test_tool_error_hint_no_match_returns_plain() {
-    let result = format_tool_error_with_hint("unknown_tool", "something broke");
-    assert_eq!(result, "[tool_error] something broke");
-    assert!(!result.contains("Hint:"));
 }
 
 // ─── cost warning tests ───────────────────────────────────────────────
@@ -3362,6 +3351,21 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
     );
     assert!(seen[0].contains("use read_result to page"));
 
+    // §5.6c: a resumed run is re-primed with the stub the model first saw,
+    // byte for byte.
+    let replay = crate::session_log::replay::rebuild(&session_dir, "task-big", 4).unwrap();
+    let replayed: Vec<&str> = replay
+        .messages
+        .iter()
+        .filter(|m| m.tool_call_id.as_deref() == Some("tc_big"))
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        replayed,
+        [seen[0].as_str()],
+        "the replay hands back the same stub"
+    );
+
     // The index row points at the same file and previews the same bytes.
     let (preview, result_ref): (String, String) = db
         .with_connection(|conn| {
@@ -3605,8 +3609,13 @@ async fn a_dropped_spill_record_leaves_the_model_an_inline_head_not_a_reference(
     let emitted = log_spill_event(&config, None, "a1", serde_json::json!({}), Some(spill));
     assert!(!emitted, "a full channel drops the record instead of writing it");
 
-    let model_text =
-        model_visible_result(&config, &result_text, true, emitted.then_some(rel.as_str()));
+    let model_text = model_visible_result(
+        &config,
+        &result_text,
+        true,
+        emitted.then_some(rel.as_str()),
+        false,
+    );
     assert!(
         !model_text.contains("result_ref"),
         "no reference to a file that will never exist: {model_text}"
@@ -4031,6 +4040,7 @@ fn result_with(finish_reason: LoopFinishReason, content: &str) -> LoopResult {
         model_used: None,
         elapsed: std::time::Duration::from_secs(1),
         estimated_cost: 0.0,
+        cap_spend: 0.0,
         last_tool_error: None,
         working_state: None,
     }
@@ -4408,4 +4418,552 @@ async fn a_loop_without_a_guard_ships_whatever_the_model_said() {
 
     assert_eq!(result.final_content, "a false claim");
     assert_eq!(result.rounds_used, 1);
+}
+
+/// N-TOOL-1 (Z1-05): what a loop tells the model about a tool's time limit is
+/// the limit its sandbox enforces — `shell_execute`'s definition states the
+/// figure, and a call cut at it is told what to do instead of to raise a
+/// `timeout` parameter that does not exist.
+mod stated_tool_timeout {
+    use super::*;
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use std::sync::Mutex;
+
+    /// Answers from a script and keeps every request it was handed.
+    struct Scripted {
+        replies: Vec<ChatResponse>,
+        seen: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for Scripted {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+            seen.push(request);
+            let index = (seen.len() - 1).min(self.replies.len() - 1);
+            Ok(self.replies[index].clone())
+        }
+    }
+
+    fn reply(tool_calls: Vec<openalpaca_llm::ToolCall>) -> ChatResponse {
+        let finish_reason = if tool_calls.is_empty() {
+            FinishReason::Stop
+        } else {
+            FinishReason::ToolUse
+        };
+        ChatResponse {
+            content: if tool_calls.is_empty() {
+                "done".to_string()
+            } else {
+                String::new()
+            },
+            tool_calls,
+            model: "mock-model".to_string(),
+            usage: Usage::default(),
+            finish_reason,
+            thinking: None,
+            parts: None,
+        }
+    }
+
+    fn policy(max_tool_runtime_secs: u64) -> SandboxPolicy {
+        SandboxPolicy {
+            agent_id: "test".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        }
+    }
+
+    /// The registered `shell_execute`, as every loop's surface carries it.
+    fn shell() -> RegisteredTool {
+        crate::tools::builtins::builtin_tools(None, None, None)
+            .into_iter()
+            .find(|tool| tool.definition.name == "shell_execute")
+            .expect("shell_execute is a builtin")
+    }
+
+    /// Run one loop whose sandbox cuts a tool at `secs`, with `tool` on its
+    /// surface, and return every request the model was handed.
+    async fn requests(
+        secs: u64,
+        tool: RegisteredTool,
+        replies: Vec<ChatResponse>,
+    ) -> Vec<ChatRequest> {
+        let definition = tool.definition.clone();
+        let registry = ToolRegistry::default();
+        registry.register(tool).unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let provider = Scripted {
+            replies,
+            seen: Mutex::new(Vec::new()),
+        };
+        let config = LoopConfig {
+            enable_caching: false,
+            ..Default::default()
+        };
+        let result = run_agentic_loop(
+            &provider,
+            vec![ChatMessage::user("build it")],
+            vec![definition],
+            &config,
+            Some(&sandbox),
+            "test",
+            Some(&policy(secs)),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        provider
+            .seen
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn shell_description(request: &ChatRequest) -> String {
+        request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "shell_execute")
+            .expect("the request carries shell_execute")
+            .description
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn the_shell_definition_states_the_timeout_the_loops_sandbox_enforces() {
+        let seen = requests(45, shell(), vec![reply(vec![])]).await;
+        let description = shell_description(&seen[0]);
+        assert!(
+            description.contains("still running after 45 seconds is stopped"),
+            "{description}"
+        );
+        assert!(!description.contains("300"), "{description}");
+    }
+
+    /// A sandbox that allows longer than the tool's own bound does not move
+    /// it: the command is still stopped at 300 s, and that is what is stated.
+    #[tokio::test]
+    async fn a_sandbox_longer_than_the_shells_own_bound_states_the_shells() {
+        let seen = requests(900, shell(), vec![reply(vec![])]).await;
+        let description = shell_description(&seen[0]);
+        assert!(
+            description.contains("still running after 300 seconds is stopped"),
+            "{description}"
+        );
+        assert!(!description.contains("900"), "{description}");
+    }
+
+    /// The registered definition, which reaches a model only through a loop,
+    /// names no time limit of its own: no surface can state a wrong one.
+    #[test]
+    fn the_registered_shell_definition_names_no_time_limit() {
+        let description = shell().definition.description;
+        let words: Vec<&str> = description.split_whitespace().collect();
+        let stated = words.windows(2).any(|pair| {
+            pair[0].chars().all(|c| c.is_ascii_digit()) && pair[1].starts_with("second")
+        });
+        assert!(!stated, "{description}");
+    }
+
+    /// Stands in for a command that runs past the sandbox's cut.
+    struct Hangs;
+
+    #[async_trait]
+    impl BuiltInTool for Hangs {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok("never".to_string())
+        }
+    }
+
+    /// A call cut at the sandbox's limit is told the limit and what to do —
+    /// never to raise a `timeout` parameter, which no tool here takes.
+    #[tokio::test]
+    async fn a_timed_out_command_is_told_its_limit_and_no_timeout_parameter() {
+        let hangs = RegisteredTool {
+            backend: ToolBackend::BuiltIn(Arc::new(Hangs)),
+            annotations: None,
+            ..shell()
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tc_slow".to_string(),
+            name: "shell_execute".to_string(),
+            arguments: serde_json::json!({"command": "make"}),
+        };
+        let seen = requests(1, hangs, vec![reply(vec![call]), reply(vec![])]).await;
+        let result = seen[1]
+            .messages
+            .iter()
+            .find(|m| m.role == openalpaca_llm::Role::Tool)
+            .expect("the cut call's result reached the model")
+            .content
+            .clone();
+        assert!(result.contains("timed out after 1s"), "{result}");
+        assert!(
+            result.contains("Hint:"),
+            "a cut command is told what to do: {result}"
+        );
+        assert!(
+            !result.to_lowercase().contains("timeout"),
+            "no `timeout` parameter exists to raise: {result}"
+        );
+    }
+}
+
+/// N-TOOL-4 (Z1-13): whether a tool call failed is the call's own result —
+/// its `Err` — carried on the message as `is_error`; the loop never reads it
+/// off the text, and the text keeps its `[tool_error]` marker for the wires
+/// that have no error field.
+mod tool_error_flag {
+    use super::*;
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use std::sync::Mutex;
+
+    /// Answers with one call of `says`, then with text; keeps every request.
+    struct CallsOnce {
+        seen: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CallsOnce {
+        fn name(&self) -> &str {
+            "calls-once"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let first = {
+                let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+                seen.push(request);
+                seen.len() == 1
+            };
+            let tool_calls = if first {
+                vec![openalpaca_llm::ToolCall {
+                    id: "tc_says".to_string(),
+                    name: "says".to_string(),
+                    arguments: serde_json::json!({}),
+                }]
+            } else {
+                vec![]
+            };
+            Ok(ChatResponse {
+                content: if first {
+                    String::new()
+                } else {
+                    "done".to_string()
+                },
+                finish_reason: if first {
+                    FinishReason::ToolUse
+                } else {
+                    FinishReason::Stop
+                },
+                tool_calls,
+                model: "mock-model".to_string(),
+                usage: Usage::default(),
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// A tool that answers with exactly what it was built with.
+    struct Says(Result<&'static str, &'static str>);
+
+    #[async_trait]
+    impl BuiltInTool for Says {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            self.0.map(str::to_string).map_err(str::to_string)
+        }
+    }
+
+    /// One loop whose tool answers `answer`: its result, and the tool-result
+    /// message the model was handed next.
+    async fn run(answer: Result<&'static str, &'static str>) -> (LoopResult, ChatMessage) {
+        let registry = ToolRegistry::default();
+        registry
+            .register(RegisteredTool {
+                definition: openalpaca_llm::ToolDefinition {
+                    name: "says".to_string(),
+                    description: "Says".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                    input_examples: None,
+                },
+                backend: ToolBackend::BuiltIn(Arc::new(Says(answer))),
+                provides_capabilities: vec![],
+                exempt_from_timeout: false,
+                annotations: None,
+                version: "test-0.0.0".into(),
+                author: "test".into(),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let policy = SandboxPolicy {
+            agent_id: "test".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let provider = CallsOnce {
+            seen: Mutex::new(Vec::new()),
+        };
+        let config = LoopConfig {
+            enable_caching: false,
+            ..Default::default()
+        };
+        let result = run_agentic_loop(
+            &provider,
+            vec![ChatMessage::user("go")],
+            vec![],
+            &config,
+            Some(&sandbox),
+            "test",
+            Some(&policy),
+            None,
+            None,
+            None,
+        )
+        .await;
+        let seen = provider
+            .seen
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner());
+        let message = seen[1]
+            .messages
+            .iter()
+            .find(|m| m.role == openalpaca_llm::Role::Tool)
+            .expect("the tool's result reached the model")
+            .clone();
+        (result, message)
+    }
+
+    /// The flag as the message carries it on the wire (absent when false).
+    fn flagged(message: &ChatMessage) -> bool {
+        serde_json::to_value(message).unwrap()["is_error"] == serde_json::json!(true)
+    }
+
+    /// A successful call whose output happens to begin with the marker — a
+    /// file that quotes it, a log — is a success: the text decides nothing.
+    #[tokio::test]
+    async fn a_success_whose_text_looks_like_an_error_is_a_success() {
+        let (result, message) = run(Ok("[tool_error] is what the old log said")).await;
+        assert_eq!(result.last_tool_error, None, "no tool failed");
+        assert!(!flagged(&message), "a success is not flagged: {message:?}");
+        assert_eq!(message.content, "[tool_error] is what the old log said");
+    }
+
+    /// A failed call is flagged on the message the model reads, and its text
+    /// is still marked for an OpenAI-compatible wire, which has no field.
+    #[tokio::test]
+    async fn a_failed_call_is_flagged_on_the_message_the_model_reads() {
+        let (result, message) = run(Err("boom")).await;
+        assert!(flagged(&message), "a failure is flagged: {message:?}");
+        assert_eq!(message.content, "[tool_error] boom");
+        assert_eq!(result.last_tool_error.as_deref(), Some("[tool_error] boom"));
+    }
+}
+
+/// N-TOOL-7 (Z1-16): a **command**'s spilled output is previewed head and
+/// tail, within the Err path's budget, so the end of a long build — the
+/// summary, the last warning — is in front of the model with the reference
+/// beside it. (A tool that is not a command keeps the head-only stub:
+/// `a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub`.)
+#[tokio::test]
+async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    /// 40 KB of build log: over the inline threshold, under the envelope.
+    const LOG_BYTES: usize = 40 * 1024;
+    const LAST_LINE: &str = "Finished release in 41s — 3 warnings (see above)";
+
+    struct LongBuild;
+    #[async_trait]
+    impl BuiltInTool for LongBuild {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok(format!(
+                "{}\n{LAST_LINE}",
+                "compiling crate\n".repeat(LOG_BYTES / 16)
+            ))
+        }
+    }
+
+    // Stands in for the builtin under its name: the sanitizer's shell set,
+    // which is what makes a tool a command.
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "shell_execute".to_string(),
+                description: "Run".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(LongBuild)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "code_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+        unattended: false,
+    };
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Building.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_build".to_string(),
+                name: "shell_execute".to_string(),
+                arguments: serde_json::json!({"command": "cargo build --release"}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "Built.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-long-build");
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("build it")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "code_agent::a1",
+        Some(&policy),
+        Some("task-build"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-long-build")).unwrap();
+    let logged = records
+        .iter()
+        .find(|r| r.kind == "tool_result")
+        .expect("the result is narrated");
+    let rel = logged.data["result"]["spill"]["rel"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the long output spills: {logged:?}"));
+
+    let seen = provider.tool_results_seen();
+    assert_eq!(seen.len(), 1, "one tool result reached the backend");
+    let stub = &seen[0];
+    assert!(
+        stub.contains(LAST_LINE),
+        "the build's last line is in front of the model: …{}",
+        &stub[stub.len().saturating_sub(300)..]
+    );
+    assert!(stub.starts_with("[result too large: "), "{}", &stub[..120]);
+    assert!(
+        stub.ends_with(&format!(
+            "[full result: result_ref=file:{rel} — use read_result to page]"
+        )),
+        "the reference is beside it"
+    );
+    assert!(
+        stub.len() <= MAX_TOOL_RESULT_SIZE + 512,
+        "within the Err path's budget: {} bytes",
+        stub.len()
+    );
+
+    // §5.6c: a resumed run is re-primed with the stub the model first saw,
+    // head and tail, byte for byte — rebuilt from the file the record names,
+    // so the build's last line comes back too and the prompt's prefix holds.
+    let replay =
+        crate::session_log::replay::rebuild(&dir.path().join("sess-long-build"), "task-build", 4)
+            .unwrap();
+    let replayed: Vec<&str> = replay
+        .messages
+        .iter()
+        .filter(|m| m.tool_call_id.as_deref() == Some("tc_build"))
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        replayed,
+        [stub.as_str()],
+        "the replay hands back the same stub"
+    );
 }

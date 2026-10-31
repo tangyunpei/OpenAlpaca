@@ -321,11 +321,14 @@ async fn open_leaf_as_set(
 /// project's sentence. `create_dir_all` re-made such a root, and the write
 /// landed in a stub folder that then read as the project, present.
 /// `target` is the write resolver's answer, so it lies under `root`; one
-/// that does not is refused rather than made.
+/// that does not is refused rather than made. Any other failure to make a
+/// folder is `other`'s to word, as [`open_leaf`]'s is — the calling tool's
+/// own hint goes there (N-TOOL-4).
 pub(super) fn make_parents_below(
     relative_path: &str,
     root: &Path,
     target: &Path,
+    other: impl FnOnce(std::io::Error) -> String,
 ) -> Result<(), String> {
     let below = target
         .parent()
@@ -337,7 +340,7 @@ pub(super) fn make_parents_below(
             root: root.to_string_lossy().into_owned(),
         }
         .to_string()),
-        Err(e) => Err(format!("Failed to create directories: {e}")),
+        Err(e) => Err(other(e)),
     }
 }
 

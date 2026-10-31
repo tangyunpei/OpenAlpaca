@@ -6,6 +6,7 @@ pub mod keys;
 pub mod providers;
 pub mod routing;
 pub mod streaming;
+mod tool_arguments;
 pub mod types;
 
 /// Loopback HTTP server used by the crate's own tests. Test-only: nothing in a
@@ -55,6 +56,7 @@ pub use routing::router::{
     RoutedStream, RouterRequest,
 };
 pub use streaming::collect_stream;
+pub use tool_arguments::UnreadableArguments;
 pub use types::*;
 
 use async_trait::async_trait;
@@ -192,6 +194,7 @@ mod tests {
                 arguments: serde_json::json!({"query": "rust"}),
             }]),
             tool_call_id: None,
+            is_error: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("tool_calls"));

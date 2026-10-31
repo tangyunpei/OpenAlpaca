@@ -265,6 +265,11 @@ pub struct PluginManager {
     /// event so the `NotificationDispatcher` knows where to write the cron
     /// notice (design §7.3 step 1). Empty until `with_notice_lane`.
     notice_lane: String,
+    /// Test seam (N-PLUG-4): when set, the next update's commit step fails
+    /// as a rename into place would, so the rollback can be shown. Compiled
+    /// out of every build but this crate's tests — no production flag.
+    #[cfg(test)]
+    pub(crate) fail_swap_commit: std::sync::atomic::AtomicBool,
 }
 
 impl PluginManager {
@@ -298,6 +303,8 @@ impl PluginManager {
             locks: StdMutex::new(HashMap::new()),
             reaper_rx: StdMutex::new(Some(rx)),
             notice_lane: String::new(),
+            #[cfg(test)]
+            fail_swap_commit: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -390,6 +397,12 @@ impl PluginManager {
     pub async fn start(&self) -> Result<(), PluginError> {
         info!(dir = %self.plugin_dir.display(), "scanning plugin directory");
 
+        // Before the scan reads a single directory: an update a crash cut off
+        // between its trash move and its commit is put back, so the plugin is
+        // found under its own name, and an earlier process's staging copies
+        // are swept (N-PLUG-4).
+        self.recover_interrupted_swaps().await;
+
         let dirs = self.plugin_directories().await?;
         let table = self.permission_gate.load_table();
         for dir in &dirs {
@@ -410,6 +423,55 @@ impl PluginManager {
         let plugins = self.plugins.read().await;
         info!(count = plugins.len(), "plugin scan complete");
         Ok(())
+    }
+
+    /// The boot half of N-PLUG-4: finish every swap a `.staging/<id>.swap`
+    /// marker records ([`install::recover_swap`]), then sweep the staging
+    /// copies an earlier process left ([`install::sweep_stale_staging`]).
+    ///
+    /// Each marker is handled under its plugin's mutex, which an update holds
+    /// across its whole swap, so a marker this process is still using is
+    /// never mistaken for a crash's. Nothing here deletes a tree the owner
+    /// dropped in: the incumbent only moves back, and a marker that does not
+    /// name a directory inside `.trash/` is left for a person to read.
+    async fn recover_interrupted_swaps(&self) {
+        for id in install::swap_markers(&self.plugin_dir) {
+            if !valid_plugin_id(&id) {
+                warn!(marker = %id, "ignoring a swap marker whose name is not a plugin id");
+                continue;
+            }
+            let _lock = self.lock_for(&id).await;
+            if !install::swap_marker(&self.plugin_dir, &id).is_file() {
+                continue;
+            }
+            match install::recover_swap(&self.plugin_dir, &id) {
+                Ok(install::SwapRecovery::Restored { from }) => warn!(
+                    plugin = %id,
+                    from = %from.display(),
+                    "an update was cut off before its commit; the previous tree is back in place"
+                ),
+                Ok(install::SwapRecovery::Settled) => {
+                    debug!(plugin = %id, "a swap marker outlived its commit; dropped")
+                }
+                Ok(install::SwapRecovery::Missing { recorded }) => warn!(
+                    plugin = %id,
+                    recorded = %recorded.display(),
+                    "a swap marker names a tree that is not there; nothing to put back"
+                ),
+                Ok(install::SwapRecovery::Unreadable { reason }) => {
+                    warn!(plugin = %id, %reason, "a swap marker could not be read; left in place")
+                }
+                Err(e) => error!(
+                    plugin = %id,
+                    error = %e,
+                    "an interrupted update could not be finished; the marker stays for the next start"
+                ),
+            }
+        }
+        let swept = install::sweep_stale_staging(&self.plugin_dir);
+        if swept > 0 {
+            info!(swept, "swept staging copies an earlier process left");
+        }
     }
 
     /// Every subdirectory of the plugins root that carries a `plugin.toml`.
@@ -576,6 +638,8 @@ impl PluginManager {
             .await;
             return;
         }
+
+        log_manifest_warnings(&id, &manifest);
 
         // §5.1: the store fails closed, so an unreadable one parks *every*
         // plugin — nothing loads and nothing is written.
@@ -946,8 +1010,11 @@ impl PluginManager {
         // 2. skills. The removal leaves a **tombstone** (design §10 case 5(a)):
         //    `remove` scrubs the command and alias indices, so without one a
         //    `/slash` or `invoke_skill` for a withdrawn plugin skill reads as
-        //    an unknown name and gets a dump of every catalog entry.
-        let skills: Vec<String> = state.registered_skills.drain(..).collect();
+        //    an unknown name and gets a dump of every catalog entry. Only the
+        //    plugin's own entry goes — by its exact id, when its source is this
+        //    plugin — never a file skill that took the key or is merely named
+        //    like it (N-PLUG-6).
+        let skills: Vec<String> = std::mem::take(&mut state.registered_skills);
         if let Some(catalog) = &self.skill_catalog {
             for skill_id in &skills {
                 catalog.remove_plugin_skill(skill_id, id);
@@ -955,8 +1022,9 @@ impl PluginManager {
             }
         }
 
-        // 3. agent templates — same tombstone, for `spawn_subagent`.
-        let agents: Vec<String> = state.registered_agents.drain(..).collect();
+        // 3. agent templates — same tombstone, for `spawn_subagent`, and the
+        //    same rule: only a template whose source is this plugin.
+        let agents: Vec<String> = std::mem::take(&mut state.registered_agents);
         if let Some(registry) = &self.agent_registry {
             for agent_id in &agents {
                 registry.remove_plugin_template(agent_id, id);
@@ -1429,9 +1497,23 @@ impl PluginManager {
         let mut registered_agents = Vec::new();
         if let (Some(registry), Some(template)) = (self.agent_registry.as_ref(), discovered.agent) {
             let agent_id = template.frontmatter.id.clone();
-            registry.register_template(template);
-            info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
-            registered_agents.push(agent_id);
+            // `register_template` refuses an id another template holds by
+            // answering `false`. N-PLUG-6: that answer is honoured — the id is
+            // recorded as this plugin's only when it registered, so T2 can
+            // never take a template the plugin never had (a plugin answering
+            // `agent/info` with `writing_agent` used to delete the shipped
+            // one at its next disable). What a plugin may claim over a live
+            // incumbent is the skip rule, B-05, not this.
+            if registry.register_template(template) {
+                info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
+                registered_agents.push(agent_id);
+            } else {
+                warn!(
+                    plugin = %id,
+                    agent = %agent_id,
+                    "another template already holds this id; the plugin's agent template is not registered"
+                );
+            }
         }
 
         let capability_provider_handle = if manifest.capabilities.virtual_.provides.is_empty() {
@@ -1470,8 +1552,10 @@ impl PluginManager {
                 self.tool_registry.remove_capability_provider(handle);
             }
             if let Some(catalog) = &self.skill_catalog {
+                // This attempt's own entries, by id — never `remove`'s scan by
+                // display name (N-PLUG-6).
                 for skill_id in &registered_skills {
-                    catalog.remove(skill_id);
+                    catalog.remove_plugin_entry(skill_id, &id);
                 }
             }
             if let Some(registry) = &self.agent_registry {
@@ -1676,6 +1760,13 @@ impl PluginManager {
         self.guard_orphan(&ext)?;
         let _lock = self.lock_for(name).await;
         let (dir, manifest) = self.declaration(&ext).await?;
+        // N-PLUG-2: the row an approve answers with says what the declaration
+        // it consents to holds that nothing reads, on every exit.
+        let warnings = manifest.warnings();
+        let with_warnings = |record: ExtensionRecord| ExtensionRecord {
+            warnings: [warnings.clone(), record.warnings].concat(),
+            ..record
+        };
 
         // W first: the consent decision reaches disk before anything starts.
         self.permission_gate.load_table().map_err(store_error)?;
@@ -1687,23 +1778,23 @@ impl PluginManager {
             self.ledger.state(&ext),
             Some(ExtensionState::Unapproved { .. })
         ) {
-            return self.row(&ext).await;
+            return self.row(&ext).await.map(with_warnings);
         }
 
         let table = self.permission_gate.load_table().map_err(store_error)?;
         if !table.enabled(name) {
             self.ledger.upsert(&ext, false, ExtensionState::Disabled);
             self.emit_record(&ext);
-            return self.row(&ext).await;
+            return self.row(&ext).await.map(with_warnings);
         }
 
         let Transition::Took(generation) = self.ledger.begin(&ext, ExtensionState::Enabling, None)
         else {
-            return self.row(&ext).await;
+            return self.row(&ext).await.map(with_warnings);
         };
         self.e_pre(&ext).await;
         self.load(&ext, &dir, manifest, &table, generation).await;
-        self.row(&ext).await
+        self.row(&ext).await.map(with_warnings)
     }
 
     /// **deny.** Record the refusal, then perform the full unload (design §4.1,
@@ -1792,6 +1883,10 @@ impl PluginManager {
                 capabilities: state.manifest.capabilities.provides.clone(),
                 virtual_capabilities: state.manifest.capabilities.virtual_.provides.clone(),
                 types: declared_types(&state.manifest),
+                // N-PLUG-2: on the listed row too, so the row awaiting
+                // consent — the app's approve preview — says them. Rendered
+                // from the cached parse; nothing is logged on a read.
+                warnings: state.manifest.warnings(),
             });
             record.skills = state.registered_skills.clone();
             record.agents = state.registered_agents.clone();
@@ -1832,6 +1927,7 @@ impl PluginManager {
         let (dir, manifest) = cached;
         match PluginManifest::from_dir_for_load(&dir) {
             Ok(fresh) if fresh.plugin.name == ext.name => {
+                log_manifest_warnings(&ext.name, &fresh);
                 if let Some(state) = self.plugins.write().await.get_mut(&ext.name) {
                     state.manifest = fresh.clone();
                 }
@@ -1926,6 +2022,10 @@ impl PluginManager {
         self.permission_gate
             .remove_entry(name)
             .map_err(store_error)?;
+        // An update whose rename back failed left the row orphaned and its
+        // marker in place for the next start; removing the row ends that
+        // plugin, so nothing may put its tree back (N-PLUG-4).
+        install::drop_swap_marker(&self.plugin_dir, name);
         self.ledger.drop_record(&ext);
         self.plugins.write().await.remove(name);
         info!(plugin = name, "orphaned plugin entry removed");
@@ -2008,6 +2108,9 @@ impl PluginManager {
         };
 
         let mut record = self.reconcile(&ext).await?;
+        // N-PLUG-2: what the manifest says that nothing reads, beside the
+        // provenance warning — the install's row says both.
+        record.warnings.extend(manifest.warnings.iter().cloned());
         record.warnings.extend(staged);
         info!(plugin = %name, from = %source.display(), "plugin installed");
         Ok(InstallOutcome {
@@ -2039,6 +2142,15 @@ impl PluginManager {
     /// **before** the swap, exactly as it is on install, so no window exists in
     /// which a tree asking for unapproved capabilities sits under an `approved
     /// = true` entry.
+    ///
+    /// The swap itself is [`install::replace`]'s (N-PLUG-4): a marker in
+    /// `.staging/` records where the incumbent went, a failed rename into
+    /// place puts the incumbent back before the error returns — with the
+    /// consent decision a capability change had dropped, and the row is then
+    /// read again from it — and a crash between the two is put back by the
+    /// next [`Self::start`]. The crash path puts back the tree only: a
+    /// decision dropped before the crash stays dropped, and the owner
+    /// approves the old tree again.
     pub async fn update_from_path(
         &self,
         id: &str,
@@ -2049,7 +2161,6 @@ impl PluginManager {
         self.known(&ext).await?;
         self.guard_orphan(&ext)?;
 
-        let dest = self.plugin_dir.join(id);
         let (added, consent_reset, warnings) = {
             let _lock = self.lock_for(id).await;
             self.guard_settled(&ext)?;
@@ -2066,6 +2177,11 @@ impl PluginManager {
                 manifest.capabilities.iter().collect();
             let approved: std::collections::BTreeSet<&String> = recorded.iter().collect();
             let consent_reset = table.approved(id).is_some() && declared != approved;
+            // The decision as it stands, to put back if the swap fails and
+            // the incumbent — the tree it was given for — is in place again.
+            let consent_before = table
+                .entry(id)
+                .and_then(|e| e.approved.map(|a| (a, e.approved_at.clone())));
 
             let staged = install::stage(source, &self.plugin_dir, id).await?;
 
@@ -2093,15 +2209,44 @@ impl PluginManager {
                 self.permission_gate.reset_consent(id).map_err(store_error)?;
             }
 
-            if dest.exists() {
-                install::trash(&self.plugin_dir, &dest, id)?;
+            // The swap (N-PLUG-4): the incumbent to the trash and the staged
+            // tree into its name, recorded in `.staging/<id>.swap` between the
+            // two. A commit that fails puts the incumbent back before the
+            // error returns; a crash in between is put back at the next start.
+            let swapped = install::replace_with(&self.plugin_dir, id, staged, |staged, dest| {
+                self.commit_step(staged, dest)
+            });
+            match swapped {
+                Ok(()) => (added, consent_reset, self.record_provenance(id, source)),
+                Err(failed) => {
+                    // The incumbent is in place again, so the decision the
+                    // reset dropped is the one this tree ran under: put it
+                    // back, word for word, before the row is read. Not when
+                    // the incumbent stays in the trash — whatever holds the
+                    // name then is not the tree the owner decided on.
+                    if consent_reset
+                        && failed.incumbent_in_place
+                        && let Some((approved, at)) = &consent_before
+                        && let Err(e) =
+                            self.permission_gate
+                                .put_back_consent(id, *approved, at.as_deref())
+                    {
+                        warn!(plugin = id, error = %e, "could not put back the consent a failed update had dropped");
+                    }
+                    // The teardown above left the row `disabled` over the
+                    // tree that is back: read it again from the disk — under
+                    // its own hold — before saying the update failed.
+                    drop(_lock);
+                    if let Err(e) = self.reconcile(&ext).await {
+                        warn!(plugin = id, error = %e, "could not reconcile after a failed update");
+                    }
+                    return Err(failed.error);
+                }
             }
-            staged.commit(&dest)?;
-
-            (added, consent_reset, self.record_provenance(id, source))
         };
 
         let mut record = self.reconcile(&ext).await?;
+        record.warnings.extend(manifest.warnings.iter().cloned());
         record.warnings.extend(warnings);
         info!(plugin = id, from = %source.display(), "plugin updated");
         Ok(InstallOutcome {
@@ -2157,6 +2302,9 @@ impl PluginManager {
         } else {
             None
         };
+        // A marker an interrupted update left would put an older tree back
+        // over the freed name at the next start (N-PLUG-4).
+        install::drop_swap_marker(&self.plugin_dir, name);
         let data = install::data_dir(&self.plugin_dir, name);
         let data_trashed = match (keep_data, data.is_dir()) {
             (false, true) => Some(install::trash(
@@ -2185,6 +2333,24 @@ impl PluginManager {
             kept_data: keep_data,
             data_trashed,
         })
+    }
+
+    /// An update's commit step: rename the staged tree into place. In this
+    /// crate's tests [`Self::fail_swap_commit`] can make it fail as the rename
+    /// would, dropping the staged copy exactly as a failed commit does.
+    fn commit_step(&self, staged: install::Staged, dest: &Path) -> Result<(), InstallError> {
+        #[cfg(test)]
+        if self
+            .fail_swap_commit
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            drop(staged);
+            return Err(InstallError::Io(format!(
+                "cannot move into place {}: failed by the test seam",
+                dest.display()
+            )));
+        }
+        staged.commit(dest)
     }
 
     /// Record where an installed tree came from, as a warning rather than a
@@ -2725,6 +2891,15 @@ fn store_error(e: PluginError) -> ExtensionError {
     match e {
         PluginError::StoreUnreadable(detail) => ExtensionError::StoreUnreadable(detail),
         other => ExtensionError::WriteFailed(other.to_string()),
+    }
+}
+
+/// The log's half of N-PLUG-2: one `warn!` per thing the manifest says that
+/// nothing reads, each time a declaration is read for a load or a verb (the
+/// scan, a reconcile, enable, reload, approve) — never on a list read.
+fn log_manifest_warnings(id: &str, manifest: &PluginManifest) {
+    for warning in manifest.warnings() {
+        warn!(plugin = %id, "{warning}");
     }
 }
 

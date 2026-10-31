@@ -11,7 +11,7 @@ This file is for people changing the GUI. For using it, read [`docs/GUI_Manual.m
 | Concern      | Choice                                                                                                              |
 | ------------ | ------------------------------------------------------------------------------------------------------------------- |
 | Shell        | Tauri 2 (`src-tauri/`), with the `dialog` plugin only                                                               |
-| UI           | React 19, TypeScript 7 (native compiler, `strict`), Vite 7                                                          |
+| UI           | React 19, TypeScript 7 (native compiler, `strict`), Vite 8                                                          |
 | Styling      | Tailwind CSS 4 via `@tailwindcss/vite`, CSS-first `@theme` in `src/styles.css`                                      |
 | Server state | TanStack Query v5                                                                                                   |
 | Client state | Zustand v5                                                                                                          |
@@ -47,7 +47,7 @@ bun run format             # prettier --write .
 bun run format:check       # prettier --check .
 ```
 
-The Rust shell is checked from the workspace root with `cargo check -p openalpaca_gui`.
+The Rust shell is checked from `src-tauri/` with `cargo check` (its `.cargo/config.toml` puts both its target dir and its build-dir in `target/gui`), or from the workspace root with `CARGO_TARGET_DIR=target/gui CARGO_BUILD_BUILD_DIR=target/gui cargo check -p openalpaca_gui` — both variables, the same path. Without them the shell builds into the workspace's build-dir under `~/.cargo/build/` (the root `.cargo/config.toml`), tauri-build's copy of the staged sidecar with it; with `CARGO_TARGET_DIR` alone its final files go to `target/gui` and the rest still to that build-dir.
 
 Two things to know before the first run:
 
@@ -56,15 +56,19 @@ Two things to know before the first run:
 
 ### The sidecar
 
-`tauri dev` and `tauri build` run the sidecar step first (`beforeDevCommand` / `beforeBuildCommand` in `src-tauri/tauri.conf.json`). `scripts/prepare-sidecar.ts`:
+`tauri dev` and `tauri build` run the same sidecar step first, `bun run prepare:sidecar` (`beforeDevCommand` / `beforeBuildCommand` in `src-tauri/tauri.conf.json`, each followed by its frontend half). `scripts/prepare-sidecar.ts`:
 
-1. detects the host target triple via `rustc -vV`,
-2. runs `cargo build -p openalpacad` at the workspace root (`--release` for build),
-3. copies the binary to `src-tauri/bin/openalpacad-{triple}[.exe]`.
+1. takes the target triple and the profile from Tauri's CLI when Tauri runs it. A run is Tauri's when `TAURI_ENV_TARGET_TRIPLE` (its `--target`, else src-tauri's cargo `build.target`, else the host) and `TAURI_ENV_PLATFORM_VERSION` are both set, as Tauri sets them for every hook; `TAURI_ENV_DEBUG` is `true` for `tauri dev` and `tauri build --debug` and unset for `tauri build` (a release). It refuses a `--target` naming another triple, `--release` in a debug build, `universal-apple-darwin`, and any of the three variables set without the pair complete: Tauri sets the pair together, so such a variable was exported in the shell. `tauri dev` sets `TAURI_ENV_DEBUG` whatever its flags, so `tauri dev --release` stages a dev daemon. Run by hand, as the release scripts run it, the triple is `--target <triple>` when given, else the host from `rustc -vV`, and the profile `--release`, else dev,
+2. runs `cargo build -p openalpacad --locked [--release] [--target <triple>] --message-format=json-render-diagnostics` at the workspace root — with `--target` when one is given or, run by Tauri, when Tauri's triple is not the host's: without `--target` cargo builds for the host, so the hook compares Tauri's triple with `rustc -vV`'s host (for that comparison only, never for the triple). For the host's triple cargo runs as it does by hand, so the hook builds the artifact a by-hand call builds; a cross build (`tauri build --target <triple>`) builds into `<target dir>/<triple>/<profile>/`, or — expected, not shown here — fails in rustc when that target is not installed (`rustup target add <triple>`). Cargo decides what is fresh, and the daemon's executable path is read from cargo's own `compiler-artifact` message, so `CARGO_TARGET_DIR`, a `[build] target-dir`, a `--target` triple and the profile are all followed (nothing hard-codes `target/<profile>`, and no two binaries' mtimes are compared),
+3. copies that artifact to `src-tauri/bin/openalpacad-<triple>[.exe]`, stamped with the time of the copy (tauri-build re-copies the sidecar into the shell's target dir only when the staged file is newer than its last run), and writes beside it `<name>.sha256` (the sha256 of the staged bytes, `shasum -a 256` format) and `<name>.provenance.json` (the staged sha256, git HEAD and dirty flag, the profile and the triple with where each came from, `rustc -V`, the `Cargo.lock`'s sha256, a UTC timestamp, cargo's artifact path — values read, never produced by running the daemon).
 
-Steps 2 and 3 are skipped when the copy already exists and is at least as new as `target/<profile>/openalpacad`. The script compares the two **binaries**, not the daemon's source: after editing daemon code, run `cargo build -p openalpacad` yourself (or delete the copy in `src-tauri/bin/`) so the next `tauri dev` picks the change up. Stop any daemon an earlier session left running too — it is detached, and the app reuses a live one rather than spawning the new binary.
+What the environment cannot show: Tauri adds its variables to the hook's environment and removes none, so a `TAURI_ENV_DEBUG=true` exported in the shell reaches `tauri build`'s release hook too, and that run cannot be told apart from `tauri build --debug`'s — it stages a dev daemon into the release bundle. The refusal of a lone `TAURI_ENV_DEBUG` is an early warning in a run by hand, not that protection. A release is protected by the release scripts: their first, by-hand `--release` call refuses the exported variable before `tauri build` starts, and they hold the bundled daemon to the sha256 that call recorded. Never export `TAURI_ENV_*`, and read a stage's profile in its provenance file (`profile`, `profile_from`).
 
-Run it by hand with `bun run prepare:sidecar:dev` or `bun run prepare:sidecar:release`. `tauri.conf.json` declares `bundle.externalBin: ["bin/openalpacad"]`, so the daemon ships inside the app bundle.
+After editing daemon code, the next `tauri dev` rebuilds and re-stages it on its own. Stop any daemon an earlier session left running too — it is detached, and the app reuses a live one rather than spawning the new binary.
+
+To skip the build during development, `OPENALPACA_SIDECAR_REUSE=1 bun run tauri dev` (the same as `--reuse` by hand): no cargo call and, run by Tauri, no toolchain command at all; the staged copy is kept only when its sha256 matches its `.sha256` and its provenance file names that sha256, this run's profile and this run's triple (a release stage, or one for another triple, is not kept for a dev build); otherwise the script exits 1 and says to run without it. The variable is how `beforeDevCommand` — a plain command string, which Tauri's config gives no conditional for — is told; a release never reuses (`--reuse` in a release build, `tauri build`'s or `--release`, is refused). `--dry-run` prints the resolved target dir and the paths and builds nothing. The daemon builds into whatever cargo resolves at the workspace root (`target/` by default). The shell builds into `target/gui`: `src-tauri/.cargo/config.toml` sets it for `tauri dev` and `tauri build`, which run cargo from `src-tauri/` (the app bundles land under `target/gui/release/bundle/`, or `target/gui/debug/bundle/` for `tauri build --debug`), and a `cargo check -p openalpaca_gui` from the root must be run with `CARGO_TARGET_DIR=target/gui` by hand — because tauri-build copies the staged sidecar to `<target dir>/<profile>/openalpacad`, which in a shared target dir is the path the daemon's own build writes.
+
+Run it by hand with `bun run prepare:sidecar` (dev, for the host) or `bun run prepare:sidecar:release`; `--target <triple>` builds for another triple — cargo writes `<target dir>/<triple>/<profile>/openalpacad`, staged as `openalpacad-<triple>` — and the hook of `tauri build --target <triple>` does the same. `tauri.conf.json` declares `bundle.externalBin: ["bin/openalpacad"]`, so the daemon ships inside the app bundle.
 
 ### Before you push: the four CI gates
 

@@ -16,7 +16,7 @@ use backend::LlmBackend;
 pub(crate) use context::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
 pub(crate) use tool_helpers::MAX_TOOL_RESULT_SIZE;
 use crate::utils::text::head_tail;
-use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result_to};
+use tool_helpers::{format_tool_error, truncate_tool_result_to};
 #[cfg(test)]
 use tool_helpers::truncate_tool_result;
 
@@ -24,7 +24,9 @@ use chrono::Utc;
 use crate::runner::steering::SteeringMsg;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
-use crate::session_log::{Record, RecordType, spill_preview, spill_stub};
+use crate::session_log::{
+    Record, RecordType, command_spill_stub, command_stub_marker, spill_preview, spill_stub,
+};
 use crate::tools::registry::ToolContext;
 use serde_json::{Value, json};
 use openalpaca_llm::{
@@ -63,6 +65,8 @@ struct LoopState {
     last_model: Option<String>,
     max_tokens_retries: usize,
     last_cost: f64,
+    /// The spend the cost cap was last checked against (`LoopResult::cap_spend`).
+    cap_spend: f64,
     /// V3: the last tool result that was an error, so a turn that ends with
     /// nothing can say what it last tripped over.
     last_tool_error: Option<String>,
@@ -83,6 +87,7 @@ impl LoopState {
             last_model: None,
             max_tokens_retries: 0,
             last_cost: 0.0,
+            cap_spend: 0.0,
             last_tool_error: None,
             working_state: None,
         }
@@ -100,6 +105,7 @@ impl LoopState {
             model_used: self.last_model.clone(),
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
+            cap_spend: self.cap_spend,
             last_tool_error: self.last_tool_error.clone(),
             working_state: self.working_state.clone(),
         }
@@ -121,6 +127,7 @@ impl LoopState {
             model_used: self.last_model.clone(),
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
+            cap_spend: self.cap_spend,
             last_tool_error: self.last_tool_error.clone(),
             working_state: self.working_state.clone(),
         }
@@ -273,11 +280,15 @@ fn log_spill_event(
 /// `spill_error` plus the reference it could not honour — and `read_result`
 /// reads that record so the model is told the spill was never written rather
 /// than that the reference does not exist.
+///
+/// `command` is whether the call ran a command (`ToolRegistry::is_command_tool`):
+/// a command's stub previews its output's head **and** tail (N-TOOL-7).
 fn model_visible_result(
     config: &LoopConfig,
     result_text: &str,
     ok: bool,
     spill_ref: Option<&str>,
+    command: bool,
 ) -> String {
     // An `Err`'s head **and** tail, because a compiler or test failure is at
     // the tail — §5.4: an error "stays inline but switches to head+tail". That
@@ -287,6 +298,12 @@ fn model_visible_result(
         return head_tail(result_text, config.tool_result_inline_bytes);
     }
     match spill_ref {
+        // N-TOOL-7 (Z1-16): a long build that succeeded keeps its summary at
+        // the tail too — the same budget the `Err` above gets, beside the
+        // reference.
+        Some(rel) if command => {
+            command_spill_stub(result_text, config.tool_result_inline_bytes, rel)
+        }
         Some(rel) => spill_stub(result_text.len(), &spill_preview(result_text), rel),
         None => truncate_tool_result_to(result_text.to_string(), config.tool_result_inline_bytes),
     }
@@ -448,6 +465,14 @@ async fn run_agentic_loop_core(
     state.last_cost = backend.agent_cost(0, 0).await;
     let cost_acc = cost_accumulator.unwrap_or_default();
     let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
+    // N-TOOL-1 (Z1-05): a definition that states a time limit states this
+    // loop's — the cut its sandbox enforces — so the model is never told
+    // 300 s by a tool its sandbox stops at 60. With no policy nothing runs
+    // (every call answers "sandbox not configured"), and no figure is added.
+    let mut tools = tools;
+    if let Some(policy) = sandbox_policy {
+        crate::tools::builtins::state_enforced_timeout(&mut tools, policy.max_tool_runtime_secs);
+    }
     let tools_arc = Arc::new(tools);
     let mut consecutive_llm_errors: usize = 0;
     const MAX_LLM_RETRIES: usize = 3;
@@ -561,6 +586,7 @@ async fn run_agentic_loop_core(
         }
         state.last_cost = round_cost;
         let accumulated_cost = cost_acc.total_usd();
+        state.cap_spend = accumulated_cost;
         let cost_ratio = accumulated_cost / config.max_cost;
         {
             let _span = tracing::info_span!(
@@ -1130,21 +1156,25 @@ async fn run_agentic_loop_core(
                     // that goes into the model's context — never on the copy
                     // the log records. The envelope cap still bounds what
                     // lands inline in the record.
+                    // N-TOOL-4 (Z1-13): each call yields its text and whether
+                    // it failed — the call's own `Err`. The flag decides
+                    // everything below; the text keeps the `[tool_error]`
+                    // marker for the wires that have no error field. A hint
+                    // is the failing tool's (or the sandbox's) own words.
                     let tool_futures = executable.iter().map(|&tc| {
                         let ctx_ref = &effective_ctx;
                         async move {
                             if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
                                 match sbx.execute_tool(tc, policy, ctx_ref).await {
-                                    Ok(output) => output,
-                                    Err(err) => {
-                                        format_tool_error_with_hint(&tc.name, &err.to_string())
-                                    }
+                                    Ok(output) => (output, false),
+                                    Err(err) => (format_tool_error(&err), true),
                                 }
                             } else {
-                                format_tool_error(&format!(
+                                let err = format_tool_error(&format!(
                                     "tool '{}' not available — sandbox not configured",
                                     tc.name
-                                ))
+                                ));
+                                (err, true)
                             }
                         }
                     });
@@ -1178,9 +1208,9 @@ async fn run_agentic_loop_core(
                     let batch_duration_ms = tool_started.elapsed().as_millis() as i64;
 
                     // Collect results in order (join_all preserves input order)
-                    for (tc, result_text) in executable.iter().zip(results.iter()) {
+                    for (tc, (result_text, failed)) in executable.iter().zip(results.iter()) {
                         state.tool_calls_made += 1;
-                        let ok = !result_text.starts_with("[tool_error]");
+                        let ok = !*failed;
                         if !ok {
                             // V3: the reason a turn that reaches no answer
                             // usually reached none. The last one wins — it is
@@ -1205,6 +1235,9 @@ async fn run_agentic_loop_core(
                         // name two lines below and the bytes belong to the
                         // record, which is about to take ownership of them.
                         let spill_ref = spill.as_ref().map(|(rel, _)| rel.clone());
+                        // N-TOOL-7: a command's stub previews head and tail.
+                        let command =
+                            sandbox.is_some_and(|s| s.registry().is_command_tool(&tc.name));
                         let mut record = json!({
                             "tool_use_id": tc.id,
                             "name": tc.name,
@@ -1238,6 +1271,16 @@ async fn run_agentic_loop_core(
                                     Value::from(spill_preview(result_text)),
                                 );
                             }
+                            // N-TOOL-7: the model is about to be shown this
+                            // command's head and tail, which the preview the
+                            // writer keeps cannot rebuild; naming the form and
+                            // its budget lets a replay rebuild it from the file.
+                            if ok && command {
+                                map.insert(
+                                    "stub".into(),
+                                    command_stub_marker(config.tool_result_inline_bytes),
+                                );
+                            }
                         }
                         let emitted = log_spill_event(config, task_id, agent_id, record, spill);
                         // What the model is handed. The spill's stub above the
@@ -1249,6 +1292,7 @@ async fn run_agentic_loop_core(
                             result_text,
                             ok,
                             spill_ref.as_deref().filter(|_| emitted),
+                            command,
                         );
                         persist_span.in_scope(|| {
                             tracing::debug!(
@@ -1256,14 +1300,18 @@ async fn run_agentic_loop_core(
                                 round = state.rounds,
                                 tool = %tc.name,
                                 tool_call_number = state.tool_calls_made,
-                                success = !result_text.starts_with("[tool_error]"),
+                                success = ok,
                                 result_len = result_text.len(),
                                 model_visible_len = model_text.len(),
                                 "Tool execution completed"
                             );
                         });
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::tool_result(&tc.id, &model_text));
+                        let message = if ok {
+                            ChatMessage::tool_result(&tc.id, &model_text)
+                        } else {
+                            ChatMessage::tool_error(&tc.id, &model_text)
+                        };
+                        Arc::make_mut(&mut messages).push(message);
                     }
 
                     // Over-budget tools get error
@@ -1271,15 +1319,13 @@ async fn run_agentic_loop_core(
                         let err = format_tool_error(
                             "max_tool_calls limit reached — no more tool calls allowed",
                         );
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::tool_result(&tc.id, &err));
+                        Arc::make_mut(&mut messages).push(ChatMessage::tool_error(&tc.id, &err));
                     }
 
                     // Overflow tools (exceeding max_tools_per_round) get error
                     for tc in response.tool_calls.iter().skip(calls_this_round) {
                         let err = format_tool_error("max tools per round exceeded");
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::tool_result(&tc.id, &err));
+                        Arc::make_mut(&mut messages).push(ChatMessage::tool_error(&tc.id, &err));
                     }
 
                     state.max_tokens_retries = 0;

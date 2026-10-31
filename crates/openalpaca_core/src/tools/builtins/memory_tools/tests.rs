@@ -1512,7 +1512,7 @@ async fn the_preview_is_daemon_authored_and_bounded() {
 /// again, on exactly the cards where something was hidden.
 #[tokio::test]
 async fn the_preview_keeps_its_tail_at_its_worst_case() {
-    use sha2::Digest;
+    use openalpaca_storage::hash::sha256_hex;
     let h = Harness::new();
     let tool = MemoryConfirmTool::new(h.service.clone());
     let long = "word ".repeat(2000);
@@ -1545,7 +1545,7 @@ async fn the_preview_keeps_its_tail_at_its_worst_case() {
             .unwrap()
             .replacen("## Knowledge\nword", "## Knowledge\nWord", 1);
         fs::write(&file, text.as_bytes()).unwrap();
-        let revision = format!("{:x}", sha2::Sha256::digest(text.as_bytes()));
+        let revision = sha256_hex(text.as_bytes());
         let preview = tool
             .confirmation_preview(
                 &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": revision}),
@@ -3178,7 +3178,7 @@ fn neither_writer_says_a_plain_search_supplies_the_revision() {
 /// the line still names every one of them, in the wire's order.
 #[tokio::test]
 async fn the_preview_keeps_its_tail_with_a_changes_line_at_its_worst_case() {
-    use sha2::Digest;
+    use openalpaca_storage::hash::sha256_hex;
     let h = Harness::new();
     let tool = MemoryConfirmTool::new(h.service.clone());
     let long = "word ".repeat(2000);
@@ -3225,7 +3225,7 @@ async fn the_preview_keeps_its_tail_with_a_changes_line_at_its_worst_case() {
             .unwrap()
             .replacen("## Knowledge\nword", "## Knowledge\nWord", 1);
         fs::write(&file, text.as_bytes()).unwrap();
-        let revision = format!("{:x}", sha2::Sha256::digest(text.as_bytes()));
+        let revision = sha256_hex(text.as_bytes());
         let preview = tool
             .confirmation_preview(
                 &serde_json::json!({"id": s.id.to_string(), "expected_revision": s.revision, "target_revision": revision}),

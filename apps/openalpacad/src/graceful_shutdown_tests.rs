@@ -9,8 +9,16 @@
 //!
 //! Resolution is the defect. If `serve` does not resolve, `main.rs`'s 10 s
 //! watchdog calls `process::exit(1)`, which skips the cost flush, the
-//! session-log flush, the MCP/plugin child sweep, the connector stop and the
-//! discovery removal.
+//! session-log flush, the MCP/plugin child sweep and the connector stop (the
+//! discovery file it removes itself first, since N-DAEMON-1).
+//!
+//! The tests after them pin N-DAEMON-1's half of the same window: a stage of
+//! the tail after the server — a connector's stop, the wake manager's — ends
+//! at its deadline instead of holding the rest, and that deadline is
+//! `shutdown::TAIL_RESERVE` before the force-exit instant, so what follows it
+//! runs before the watchdog; and the watchdog removes the discovery file it is
+//! given before it exits. (The connector manager's own loop is pinned in
+//! `managers/connector.rs`.)
 //!
 //! What was measured when this was written (axum 0.8.9, hyper 1.11): the SSE
 //! body without a cancel arm held `serve` for the whole window — that is the
@@ -241,4 +249,180 @@ async fn graceful_shutdown_completes_with_a_live_chat_stream() {
     );
 
     drop(tx);
+}
+
+// ── The shutdown tail's stages and the forced exit (N-DAEMON-1) ─────────────
+
+/// A window far below the daemon's 10 s, so a stage that ignores it fails the
+/// test instead of slowing it down.
+const STAGE_WINDOW: Duration = Duration::from_millis(200);
+
+/// A connector whose shutdown never returns — Telegram's waits for its
+/// dispatcher to finish, and nothing bounded that wait — no longer holds the
+/// shutdown: its stage ends at the window, so the wake manager and the
+/// discovery file after it are still reached. `ConnectorManager::shutdown_all`
+/// runs every handle, and `main.rs` the wake manager, through this one helper;
+/// the helper is driven here with a future that never resolves, and the
+/// manager's loop with a stop that never returns in `managers/connector.rs`.
+#[tokio::test]
+async fn graceful_shutdown_a_stage_that_never_returns_ends_at_the_window() {
+    let started = std::time::Instant::now();
+    let deadline = started + STAGE_WINDOW;
+    let finished = tokio::time::timeout(
+        SERVE_MUST_RESOLVE_WITHIN,
+        crate::shutdown::within(
+            "a connector that never stops",
+            deadline,
+            std::future::pending::<()>(),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "a stage that never returns held the shutdown past its {STAGE_WINDOW:?} window — \
+             the daemon would sit out its watchdog and force-exit"
+        )
+    });
+    assert_eq!(
+        finished, None,
+        "a stage cut at the window reports that it did not finish"
+    );
+    assert!(
+        started.elapsed() >= STAGE_WINDOW / 2,
+        "the stage was given its window, not cut at once: {:?}",
+        started.elapsed()
+    );
+}
+
+/// Past the window a stage is still started once: a connector whose stop is a
+/// cancel — Discord's, iMessage's, a plugin connector's — is told to stop even
+/// when the stages before it spent the whole window.
+#[tokio::test]
+async fn graceful_shutdown_a_stage_reached_after_the_window_is_still_run_once() {
+    let deadline = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let token = CancellationToken::new();
+    let stop = token.clone();
+    let finished =
+        crate::shutdown::within("a connector stopped by its token", deadline, async move {
+            stop.cancel();
+        })
+        .await;
+    assert_eq!(
+        finished,
+        Some(()),
+        "a stage that is done at its first poll is done"
+    );
+    assert!(token.is_cancelled(), "the connector was told to stop");
+}
+
+/// The force-exit watchdog removes the discovery file before
+/// `process::exit(1)`, so no client reads the port and token of a daemon that
+/// is gone. The watchdog is handed the path the boot wrote; this drives the
+/// same function with a temporary one — no store, no environment.
+#[test]
+fn graceful_shutdown_the_forced_exit_removes_the_discovery_file_it_is_given() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("discovery.json");
+    std::fs::write(&path, b"{\"pid\": 1}").expect("write the file");
+
+    crate::shutdown::before_forced_exit(&path);
+    assert!(
+        !path.exists(),
+        "the forced exit left {} behind",
+        path.display()
+    );
+
+    // Already gone — removed by the shutdown tail a moment before the
+    // watchdog fired: nothing to do, and nothing panics.
+    crate::shutdown::before_forced_exit(&path);
+    assert!(!path.exists());
+}
+
+/// The connector and wake stages end [`TAIL_RESERVE`] before the force-exit
+/// instant, not at it: a stop that never returns is given up while the tail
+/// still has time for what follows it — the handles after it, the wake
+/// manager's stop, the discovery file's removal — instead of meeting the
+/// watchdog's timer on the same tick, where either could run first.
+///
+/// [`TAIL_RESERVE`]: crate::shutdown::TAIL_RESERVE
+#[tokio::test]
+async fn graceful_shutdown_a_hung_stage_ends_before_the_watchdog_fires() {
+    use crate::shutdown::TAIL_RESERVE;
+
+    let force_exit_at = std::sync::OnceLock::new();
+    let watchdog_fires = std::time::Instant::now() + TAIL_RESERVE + STAGE_WINDOW;
+    force_exit_at
+        .set(watchdog_fires)
+        .expect("the instant is published once");
+
+    let ends = crate::shutdown::stage_deadline(&force_exit_at);
+    assert_eq!(
+        ends,
+        watchdog_fires - TAIL_RESERVE,
+        "the stages end at the force-exit instant itself, in a race with the watchdog"
+    );
+
+    let finished = tokio::time::timeout(
+        SERVE_MUST_RESOLVE_WITHIN,
+        crate::shutdown::within(
+            "a connector that never stops",
+            ends,
+            std::future::pending::<()>(),
+        ),
+    )
+    .await
+    .expect("the stage ended at its deadline");
+    assert_eq!(finished, None);
+    let left = watchdog_fires.saturating_duration_since(std::time::Instant::now());
+    assert!(
+        left >= TAIL_RESERVE / 2,
+        "a hung stage left the tail {left:?} before the watchdog fires"
+    );
+}
+
+/// The watchdog itself — the task `main.rs` spawns — publishes its instant
+/// once the token is cancelled, and when the tail has not returned by then
+/// removes the discovery file it was handed **before** it exits. The exit is
+/// a closure here, `std::process::exit` in the daemon; it reports whether the
+/// file was still there when it was called.
+#[tokio::test]
+async fn graceful_shutdown_the_watchdog_removes_the_discovery_file_before_it_exits() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("discovery.json");
+    std::fs::write(&path, b"{\"pid\": 1}").expect("write the file");
+    let cancel = CancellationToken::new();
+    let (exited, exit_seen) = tokio::sync::oneshot::channel();
+    let probe = path.clone();
+    let force_exit_at = crate::shutdown::spawn_force_exit_watchdog(
+        cancel.clone(),
+        path.clone(),
+        STAGE_WINDOW,
+        move |code| {
+            let _ = exited.send((code, probe.exists()));
+        },
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        force_exit_at.get().is_none(),
+        "nothing is published before the cancellation"
+    );
+
+    let cancelled = std::time::Instant::now();
+    cancel.cancel();
+    let (code, file_was_there) = tokio::time::timeout(SERVE_MUST_RESOLVE_WITHIN, exit_seen)
+        .await
+        .expect("the watchdog never fired")
+        .expect("the watchdog called its exit");
+    assert_eq!(code, 1, "a forced exit is exit code 1");
+    assert!(
+        !file_was_there,
+        "the watchdog exited with {} still there",
+        path.display()
+    );
+    let published = *force_exit_at.get().expect("the instant was published");
+    assert!(
+        published >= cancelled + STAGE_WINDOW,
+        "the published instant is the window from the cancellation"
+    );
 }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use openalpaca_mcp::{
-    Implementation, McpClient, McpClientConfig, McpError, TransportKind,
+    Implementation, McpClient, McpClientConfig, McpError, ProtocolMode, TransportKind,
 };
 
 fn mk_config(tmp: &std::path::Path) -> McpClientConfig {
@@ -21,17 +21,18 @@ fn mk_config(tmp: &std::path::Path) -> McpClientConfig {
             command: "npx".into(),
             args: vec![
                 "-y".into(),
-                "@modelcontextprotocol/server-filesystem".into(),
+                // Pinned (F-14): the newest release published before the
+                // programme's max date (2026-10-14T19:53Z), i.e. at least 7
+                // days old at the cut instant — 1.0.0, 2026-10-11T02:40:29Z —
+                // never whatever `npx` resolves today.
+                "@modelcontextprotocol/server-filesystem@1.0.0".into(),
                 tmp.to_string_lossy().into_owned(),
             ],
             env: HashMap::new(),
             cwd: None,
         },
-        client_info: Implementation {
-            name: "openalpaca-mcp-test".into(),
-            version: "0.1.0".into(),
-            ..Default::default()
-        },
+        client_info: Implementation::new("openalpaca-mcp-test", "0.1.0"),
+        protocol: ProtocolMode::Auto,
         request_timeout: Duration::from_secs(30),
         max_reconnect_attempts: 1,
         reconnect_backoff_ms: 100,
@@ -72,10 +73,7 @@ async fn filesystem_server_list_and_call_read_file() {
     let text = result
         .content
         .iter()
-        .find_map(|c| match c.raw {
-            rmcp::model::RawContent::Text(ref t) => Some(t.text.clone()),
-            _ => None,
-        })
+        .find_map(|c| c.as_text().map(|t| t.text.clone()))
         .expect("read_file should return text content");
     assert!(text.contains("world"), "expected file contents in result, got: {text}");
 

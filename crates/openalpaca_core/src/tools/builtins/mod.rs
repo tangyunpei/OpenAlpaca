@@ -56,6 +56,7 @@ use self::artifact_read::artifact_read_tool;
 use self::file_ops::{file_edit_tool, file_list_tool, file_read_tool, file_write_tool};
 use self::read_result::read_result_tool;
 use self::shell_execute::shell_execute_tool;
+pub(crate) use self::shell_execute::state_enforced_timeout;
 use self::update_persona::update_persona_tool;
 use self::web_fetch::web_fetch_tool;
 use self::web_search::web_search_tool;
@@ -660,54 +661,44 @@ pub fn approval_is_per_call(name: &str) -> bool {
 }
 
 fn read_only_annotations() -> openalpaca_mcp::ToolAnnotations {
-    openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(false),
-        read_only_hint: Some(true),
-        idempotent_hint: Some(true),
-        open_world_hint: Some(false),
-        ..Default::default()
-    }
+    openalpaca_mcp::ToolAnnotations::new()
+        .destructive(false)
+        .read_only(true)
+        .idempotent(true)
+        .open_world(false)
 }
 
 fn read_only_open_world_annotations() -> openalpaca_mcp::ToolAnnotations {
-    openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(false),
-        read_only_hint: Some(true),
-        idempotent_hint: Some(true),
-        open_world_hint: Some(true),
-        ..Default::default()
-    }
+    openalpaca_mcp::ToolAnnotations::new()
+        .destructive(false)
+        .read_only(true)
+        .idempotent(true)
+        .open_world(true)
 }
 
 /// A by-product writer (ST-15): writes only under ~/.openalpaca, never asks.
 fn local_write_annotations() -> openalpaca_mcp::ToolAnnotations {
-    openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(false),
-        read_only_hint: Some(false),
-        idempotent_hint: Some(false),
-        open_world_hint: Some(false),
-        ..Default::default()
-    }
+    openalpaca_mcp::ToolAnnotations::new()
+        .destructive(false)
+        .read_only(false)
+        .idempotent(false)
+        .open_world(false)
 }
 
 fn destructive_local_annotations() -> openalpaca_mcp::ToolAnnotations {
-    openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        read_only_hint: Some(false),
-        idempotent_hint: Some(false),
-        open_world_hint: Some(false),
-        ..Default::default()
-    }
+    openalpaca_mcp::ToolAnnotations::new()
+        .destructive(true)
+        .read_only(false)
+        .idempotent(false)
+        .open_world(false)
 }
 
 fn destructive_open_world_annotations() -> openalpaca_mcp::ToolAnnotations {
-    openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        read_only_hint: Some(false),
-        idempotent_hint: Some(false),
-        open_world_hint: Some(true),
-        ..Default::default()
-    }
+    openalpaca_mcp::ToolAnnotations::new()
+        .destructive(true)
+        .read_only(false)
+        .idempotent(false)
+        .open_world(true)
 }
 
 /// Convert JSON object to `--key=value` CLI arguments.

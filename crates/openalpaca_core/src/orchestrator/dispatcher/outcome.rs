@@ -319,14 +319,75 @@ fn project_files(db: &openalpaca_storage::Database, task_id: &str) -> Vec<String
         })
 }
 
+/// How many subagents [`stopped_subagents_note`] names before it counts the
+/// rest.
+const STOPPED_SUBAGENTS_SHOWN: usize = 8;
+
+/// How many characters the lane labels [`stopped_subagents_note`] names may
+/// take together. With the two lines above it the runtime's lines stay under
+/// about 1,800 characters, inside the summary's [`MAX_SUMMARY_LENGTH`] cut
+/// with room for the report's own prose.
+const STOPPED_SUBAGENTS_LIST_CHARS: usize = 160;
+
+/// **N-LEAD-1.** The runtime-authored line naming the subagents the run's end
+/// stopped — `None` when it stopped none. Each is named by its lane's label,
+/// as the run's timeline names it; a label carries its template's id, which
+/// a plugin chose, so it is shown escaped like the other lines' names.
+pub(super) fn stopped_subagents_note(labels: &[String]) -> Option<String> {
+    if labels.is_empty() {
+        return None;
+    }
+    let list = bounded_list(
+        labels,
+        STOPPED_SUBAGENTS_SHOWN,
+        STOPPED_SUBAGENTS_LIST_CHARS,
+    );
+    let (subject, verb) = if labels.len() == 1 {
+        ("this subagent", "it was")
+    } else {
+        ("these subagents", "they were")
+    };
+    Some(format!(
+        "Stopped when the run ended — {subject} had not finished, so {verb} \
+         cancelled: {list}."
+    ))
+}
+
+/// The lanes of this run its end stopped (N-LEAD-1), oldest first: closed as
+/// cancelled with the run-ended detail, which only the run's end writes. The
+/// lead's run waits for every lane to close before it returns, so they are
+/// all closed by the time the report is written. A read failure costs the
+/// line, never the finalisation.
+fn stopped_subagents(db: &openalpaca_storage::Database, task_id: &str) -> Vec<String> {
+    openalpaca_storage::SubagentSpanRepository::new(db)
+        .list_for_task(task_id)
+        .map(|spans| {
+            spans
+                .into_iter()
+                .filter(|span| {
+                    span.state == openalpaca_storage::SpanState::Cancelled.as_str()
+                        && span.detail.as_deref()
+                            == Some(crate::runner::lead_agent::SUBAGENT_RUN_ENDED_DETAIL)
+                })
+                .map(|span| span.label)
+                .collect()
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!(task_id, "Failed to read the run's stopped subagents: {e}");
+            Vec::new()
+        })
+}
+
 /// The runtime's own lines a run's report and its summary end with — what
-/// nobody could approve (S4), then what it wrote into the project (R38) —
-/// joined by a blank line, or `None` when there is neither. One function for
-/// the report message and the summary's cut, so both keep the same lines.
+/// nobody could approve (S4), what it wrote into the project (R38), then the
+/// subagents its end stopped (N-LEAD-1) — joined by a blank line, or `None`
+/// when there is none. One function for the report message and the
+/// summary's cut, so both keep the same lines.
 pub(super) fn runtime_notes(db: &openalpaca_storage::Database, task_id: &str) -> Option<String> {
     let notes: Vec<String> = [
         unapprovable_note(&unapprovable_tools(db, task_id)),
         project_files_note(&project_files(db, task_id)),
+        stopped_subagents_note(&stopped_subagents(db, task_id)),
     ]
     .into_iter()
     .flatten()
@@ -386,34 +447,29 @@ pub(super) fn build_task_outcome(
     // Try to read state_json for rich outcome data
     if let Some(db) = db {
         let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        if let Ok(Some(task)) = repo.get(task_id) {
-            if let Some(ref sj) = task.state_json {
-                if let Ok(state) = serde_json::from_str::<TaskState>(sj) {
-                    let fallback = if final_content.is_empty() {
-                        if success { "Task completed." } else { "Task failed." }
-                    } else {
-                        final_content
-                    };
-                    let mut outcome = state.build_outcome(fallback, None);
-                    if !success {
-                        outcome.outcome_kind = OutcomeKind::Failed;
-                        // Prepend error reason if it's not already in the summary
-                        if !final_content.is_empty() && !outcome.summary.contains(final_content) {
-                            outcome.summary =
-                                format!("{}\n\n{}", final_content, outcome.summary);
-                        }
-                    }
-                    let has_summary = !outcome.summary.is_empty()
-                        && outcome.summary != "Task completed."
-                        && outcome.summary != "Task failed.";
-                    merge_produced_artifacts(
-                        &mut outcome,
-                        produced_artifacts(db, task_id),
-                        has_summary,
-                    );
-                    return outcome;
+        if let Ok(Some(task)) = repo.get(task_id)
+            && let Some(ref sj) = task.state_json
+            && let Ok(state) = serde_json::from_str::<TaskState>(sj)
+        {
+            let fallback = if final_content.is_empty() {
+                if success { "Task completed." } else { "Task failed." }
+            } else {
+                final_content
+            };
+            let mut outcome = state.build_outcome(fallback, None);
+            if !success {
+                outcome.outcome_kind = OutcomeKind::Failed;
+                // Prepend error reason if it's not already in the summary
+                if !final_content.is_empty() && !outcome.summary.contains(final_content) {
+                    outcome.summary =
+                        format!("{}\n\n{}", final_content, outcome.summary);
                 }
             }
+            let has_summary = !outcome.summary.is_empty()
+                && outcome.summary != "Task completed."
+                && outcome.summary != "Task failed.";
+            merge_produced_artifacts(&mut outcome, produced_artifacts(db, task_id), has_summary);
+            return outcome;
         }
     }
 

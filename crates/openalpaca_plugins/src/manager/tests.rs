@@ -924,26 +924,154 @@ mcp_compatible = true
     #[tokio::test]
     async fn t2_leaves_a_tombstone_for_a_withdrawn_agent_template() {
         let tmp = tempfile::tempdir().unwrap();
-        install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        // The stub answers `agent/info` from a file when one is present, so
+        // E4 registers the template itself (N-PLUG-6: T2 removes only what
+        // the plugin's own load registered).
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"reader"}"#).unwrap();
         let h = Harness::new(tmp.path());
         load_running_stub(&h, "echo-test").await;
-
-        // Stand in for E4's template registration, which needs `agent/info`.
-        h.agents.register_template(agent_template("reader", &[]));
+        assert_eq!(
+            h.registered("echo-test").await.agents,
+            vec!["reader".to_string()]
+        );
         assert!(h.agents.template_tombstone("reader").is_none());
 
-        h.agents.remove_plugin_template("reader", "echo-test");
+        h.manager.disable(&ext("echo-test")).await.unwrap();
         assert!(h.agents.get_template("reader").is_none());
         assert_eq!(
             h.agents.template_tombstone("reader").as_deref(),
             Some("echo-test")
         );
 
-        h.agents.register_template(agent_template("reader", &[]));
+        h.manager.enable(&ext("echo-test")).await.unwrap();
+        assert!(h.agents.get_template("reader").is_some());
         assert!(
             h.agents.template_tombstone("reader").is_none(),
             "a template that came back invalidates its own tombstone"
         );
+    }
+
+    // ── N-PLUG-6: a plugin's unload removes only what it owns ────────
+
+    /// **A plugin that claims a shipped template's id does not take it, and
+    /// its disable leaves it** (N-PLUG-6, Z2-01/Z3-07). `register_template`
+    /// refuses a duplicate id by answering `false`; the manager ignored the
+    /// answer, recorded the id as the plugin's own, and T2 then removed the
+    /// shipped template — `writing_agent` deleted at the plugin's next
+    /// disable. Now the refusal is honoured and T2 removes a template only
+    /// when its source is this plugin.
+    #[tokio::test]
+    async fn a_plugin_claiming_a_shipped_template_id_leaves_it_after_its_disable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"writing_agent"}"#).unwrap();
+        let h = Harness::new(tmp.path());
+        // The shipped template, loaded before any plugin.
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        load_running_stub(&h, "echo-test").await;
+
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+
+        let shipped = h
+            .agents
+            .get_template("writing_agent")
+            .expect("the shipped template survives the plugin's disable");
+        assert!(
+            matches!(
+                shipped.source,
+                openalpaca_core::agent::template::AgentSource::Internal
+            ),
+            "and it is still the shipped one: {:?}",
+            shipped.source
+        );
+        assert!(
+            h.agents.template_tombstone("writing_agent").is_none(),
+            "nothing of the plugin's was withdrawn, so nothing is attributed to it"
+        );
+        h.manager.enable(&ext("echo-test")).await.unwrap();
+        assert!(
+            h.row("echo-test").await.agents.is_empty(),
+            "a refused id is never recorded as the plugin's"
+        );
+    }
+
+    /// Lay out a file skill directory, as `config/skills/<dir>/SKILL.md`.
+    fn file_skill(root: &Path, dir: &str, name: &str) -> PathBuf {
+        let skill = root.join(dir);
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!(
+                "---\nname: \"{name}\"\ndescription: \"a file skill\"\n---\n\n## Instructions\n\nDo it.\n"
+            ),
+        )
+        .unwrap();
+        skill
+    }
+
+    /// **A plugin's unload never removes a file skill through the
+    /// display-name scan** (N-PLUG-6). `remove` falls back to a scan by
+    /// display name when the id is not a key, so once the plugin's own entry
+    /// was gone — a hot-reloaded file skill took its key, and that file skill
+    /// was then deleted — the plugin's disable deleted whichever file skill
+    /// happened to be *named* like the plugin's skill id.
+    #[tokio::test]
+    async fn a_plugin_unload_never_removes_a_file_skill_through_the_name_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nskill = true\n",
+        );
+        std::fs::write(
+            dir.join("skill-info.json"),
+            r#"{"id":"triage","name":"Plugin Triage"}"#,
+        )
+        .unwrap();
+        let skills_root = tmp.path().join(".skills");
+        // A shipped file skill whose *display name* is the plugin skill's id.
+        file_skill(&skills_root, "code-review", "triage");
+        let h = Harness::new(tmp.path());
+        h.skills.scan_directory(
+            &skills_root,
+            openalpaca_core::middleware::skill::SkillScope::Project,
+        );
+        load_running_stub(&h, "echo-test").await;
+        assert_eq!(
+            h.registered("echo-test").await.skills,
+            vec!["triage".to_string()]
+        );
+
+        // A file skill directory named `triage` hot-reloads over the plugin's
+        // key, and is then deleted: the key is gone from the catalog.
+        let taker = file_skill(&skills_root, "triage", "Taker");
+        h.skills.reload_skill(&taker).unwrap();
+        std::fs::remove_dir_all(&taker).unwrap();
+        h.skills.reload_skill(&taker).unwrap();
+        assert!(h.skills.get("code-review").is_some());
+
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+
+        let survivor = h
+            .skills
+            .get("code-review")
+            .expect("the file skill named like the plugin's skill id survives its unload");
+        assert!(matches!(
+            survivor.source,
+            openalpaca_core::orchestrator::skill_catalog::SkillSource::FileBased
+        ));
     }
 
     // ── C4 — T1 step 3: the dependent scan (§3.2 T1, §7.3) ───────────
@@ -2835,6 +2963,151 @@ mod install_tests {
         assert!(!h.root.join("echo-test").exists(), "validate copies nothing");
     }
 
+    // ── N-PLUG-2: a key nobody reads, a type nothing wires ───────────
+
+    /// The manifest's own warnings, read off the serialised summary — the
+    /// shape the validate route and the install envelope hand the owner.
+    fn summary_warnings(summary: &crate::install::ManifestSummary) -> Vec<String> {
+        serde_json::to_value(summary).unwrap()["warnings"]
+            .as_array()
+            .map(|warnings| {
+                warnings
+                    .iter()
+                    .filter_map(|w| w.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **A typo is warned about, never refused** (N-PLUG-2, Z2-04). `tool =
+    /// true` at the top level — the switch is `types.tools`, and tool discovery
+    /// runs only under it — used to validate clean and load a plugin with zero
+    /// tools and no message. Now the dry run, the install preview and the
+    /// install's row each name the key, and the install still lands.
+    #[tokio::test]
+    async fn a_manifest_typo_validates_and_installs_with_a_warning_naming_the_key() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "");
+        // The stray key goes above `[plugin]`: `source`'s `extra` lands inside
+        // that table, where it would read `plugin.tool`.
+        std::fs::write(
+            source.join("plugin.toml"),
+            "tool = true\n\n[plugin]\nname = \"echo-test\"\nversion = \"0.1.0\"\n\
+             entry = \"./echo-server.sh\"\nmcp_compatible = true\n",
+        )
+        .unwrap();
+
+        let summary = h.manager.validate_source(&source).await.expect("validate");
+        let warnings = summary_warnings(&summary);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("'tool'") && w.contains("types.tools")),
+            "the dry run names the key and the switch it reads like: {warnings:?}"
+        );
+
+        let outcome = h
+            .manager
+            .install_from_path(&source)
+            .await
+            .expect("a warning is not a refusal");
+        assert!(
+            summary_warnings(&outcome.manifest)
+                .iter()
+                .any(|w| w.contains("'tool'")),
+            "the install preview carries the same warning"
+        );
+        assert!(
+            outcome.record.warnings.iter().any(|w| w.contains("'tool'")),
+            "the install's row says it too: {:?}",
+            outcome.record.warnings
+        );
+        assert_eq!(
+            outcome.record.state,
+            ExtensionState::Unapproved {
+                reason: UnapprovedReason::NeverSeen
+            }
+        );
+        assert!(h.root.join("echo-test/plugin.toml").is_file());
+
+        // Approving reads the declaration again, and its row says it again.
+        let approved = h
+            .manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        assert!(
+            approved.warnings.iter().any(|w| w.contains("'tool'")),
+            "the approve's row carries the warning: {:?}",
+            approved.warnings
+        );
+    }
+
+    /// **An unwired type is warned about, never refused.** `types.provider`
+    /// and `types.connector` are probed at load and were listed in the preview
+    /// with no caveat, though neither bridge has a production caller.
+    #[tokio::test]
+    async fn an_unwired_type_installs_with_a_warning_that_its_bridge_is_not_wired() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\nprovider = true\nconnector = true\n",
+        );
+
+        let summary = h.manager.validate_source(&source).await.expect("validate");
+        let warnings = summary_warnings(&summary);
+        assert!(
+            warnings.iter().any(|w| w.contains("types.provider") && w.contains("provider bridge is not wired")),
+            "the provider warning: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(
+                |w| w.contains("types.connector") && w.contains("connectors are not supported")
+            ),
+            "the connector warning: {warnings:?}"
+        );
+
+        let outcome = h
+            .manager
+            .install_from_path(&source)
+            .await
+            .expect("a warning is not a refusal");
+        assert!(
+            outcome
+                .record
+                .warnings
+                .iter()
+                .any(|w| w.contains("provider bridge is not wired")),
+            "the install's row: {:?}",
+            outcome.record.warnings
+        );
+        assert!(h.root.join("echo-test/plugin.toml").is_file());
+    }
+
+    /// A manifest that says only what OpenAlpaca reads carries no warning —
+    /// `plugin.env` and `config.<key>` are maps whose keys are the author's.
+    #[tokio::test]
+    async fn a_clean_manifest_carries_no_warning() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "args = [\"--quiet\"]\n[plugin.env]\nANY_NAME = \"1\"\n\
+             [capabilities]\nprovides = [\"notes\"]\n[capabilities.virtual]\nprovides = [\"x:y\"]\n\
+             [types]\ntools = true\nskill = true\nagent = true\n\
+             [config.api_key]\ntype = \"secret\"\nrequired = true\nsensitive = true\n\
+             description = \"key\"\ndefault = \"\"\n",
+        );
+
+        let summary = h.manager.validate_source(&source).await.expect("validate");
+        assert!(
+            summary_warnings(&summary).is_empty(),
+            "{:?}",
+            summary_warnings(&summary)
+        );
+    }
+
     // ── update ───────────────────────────────────────────────────────
 
     /// The child runs with `current_dir(plugin_dir)`, so a live plugin is never
@@ -3027,6 +3300,335 @@ mod install_tests {
                 .unwrap_or(true),
             "and it left no staging copy behind"
         );
+    }
+
+    // ── N-PLUG-4: a failed swap is rolled back, a crashed one recovered ──
+
+    /// A second supervisor over the same plugins root, as a daemon restart is:
+    /// fresh in-memory state, the same files on disk. `h` keeps the home-store
+    /// guard, so none is taken here.
+    fn restarted(h: &Harness) -> Arc<PluginManager> {
+        let tools = Arc::new(ToolRegistry::with_event_bus(EventBus::new(256)).unwrap());
+        Arc::new(
+            PluginManager::new(
+                h.root.clone(),
+                tools,
+                Some(Arc::new(SkillCatalog::new())),
+                Some(Arc::new(AgentRegistry::new())),
+            )
+            .with_notice_lane("owner:gui"),
+        )
+    }
+
+    fn staging_entries(h: &Harness) -> Vec<String> {
+        std::fs::read_dir(h.root.join(crate::install::STAGING_DIR))
+            .map(|dir| {
+                dir.flatten()
+                    .filter_map(|e| e.file_name().to_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **The commit step fails: the old tree goes back before the error
+    /// returns** (N-PLUG-4, Z2-09). `update_from_path` trashed the incumbent
+    /// and then committed the staged copy with nothing between the two, and a
+    /// failed commit's `Staged` drop swept the copy too — the plugin was then
+    /// absent, its last good tree only in `.trash/`. Now the trashed tree is
+    /// renamed back, the swap marker is gone, the error still returns, and the
+    /// row is read again from the tree that is back in place.
+    #[tokio::test]
+    async fn an_update_whose_commit_fails_puts_the_old_tree_back_and_returns_the_error() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "[types]\ntools = true\n");
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Enabled);
+
+        let next = h.source("echo-test", "0.2.0", "[types]\ntools = true\n");
+        std::fs::write(next.join("NEW"), "second version\n").unwrap();
+        h.manager
+            .fail_swap_commit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let error = h
+            .manager
+            .update_from_path("echo-test", &next)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.code(),
+            "copy_failed",
+            "the commit's error returns: {error}"
+        );
+        let incumbent = std::fs::read_to_string(h.root.join("echo-test/plugin.toml"))
+            .expect("the old tree is back in place");
+        assert!(incumbent.contains("0.1.0"), "{incumbent}");
+        assert!(!h.root.join("echo-test/NEW").exists());
+        assert!(
+            h.trashed().is_empty(),
+            "the old tree was moved back, not left in the trash: {:?}",
+            h.trashed()
+        );
+        assert!(
+            staging_entries(&h).is_empty(),
+            "no swap marker and no staging copy is left: {:?}",
+            staging_entries(&h)
+        );
+        let row = h.row("echo-test").await;
+        assert_eq!(
+            row.state,
+            ExtensionState::Enabled,
+            "it runs on its old tree again"
+        );
+        assert_eq!(row.version.as_deref(), Some("0.1.0"));
+    }
+
+    /// **The consent the old tree ran under comes back with it.** A
+    /// replacement declaring a different set of capabilities drops the
+    /// decision before the swap (the ordering D7 pins); if the commit then
+    /// fails, the tree that is back is the one the owner approved, so the
+    /// decision is put back too — word for word, its `approved_at` included.
+    /// Before, the old tree returned `unapproved` / `never_seen` and stopped,
+    /// and the owner had to approve again a tree they had already approved.
+    #[tokio::test]
+    async fn a_failed_swap_puts_back_the_consent_its_old_tree_ran_under() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"a\"]\n",
+        );
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Enabled);
+        let before = h
+            .manager
+            .permission_gate
+            .load_table()
+            .unwrap()
+            .entry("echo-test")
+            .cloned()
+            .expect("the approved entry");
+
+        // One capability more: `consent_reset` is true, so the decision is
+        // dropped before the tree moves.
+        let next = h.source(
+            "echo-test",
+            "0.2.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"a\", \"b\"]\n",
+        );
+        h.manager
+            .fail_swap_commit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let error = h
+            .manager
+            .update_from_path("echo-test", &next)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "copy_failed", "{error}");
+        let incumbent = std::fs::read_to_string(h.root.join("echo-test/plugin.toml"))
+            .expect("the old tree is back in place");
+        assert!(incumbent.contains("0.1.0"), "{incumbent}");
+        let after = h
+            .manager
+            .permission_gate
+            .load_table()
+            .unwrap()
+            .entry("echo-test")
+            .cloned()
+            .expect("the entry");
+        assert_eq!(after.approved, Some(true), "the decision is back");
+        assert_eq!(
+            after.approved_at, before.approved_at,
+            "as it was, not a new approval"
+        );
+        assert_eq!(after.capabilities, before.capabilities);
+        let row = h.row("echo-test").await;
+        assert_eq!(
+            row.state,
+            ExtensionState::Enabled,
+            "it runs on its old tree, under its old consent"
+        );
+        assert_eq!(row.consent, Some(Consent::Approved));
+        assert!(h.holds_process("echo-test").await);
+    }
+
+    /// The disk as an update whose rename back failed leaves it: the incumbent
+    /// in the trash, its marker kept for the next start, the name free — and
+    /// the row, read again, `orphaned`.
+    async fn orphaned_by_a_failed_rename_back(h: &Harness) -> PathBuf {
+        let source = h.source("echo-test", "0.1.0", "[types]\ntools = true\n");
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        h.manager.shutdown_all().await;
+        let trashed = h.root.join(".trash/echo-test-20261017T000000.000000000Z");
+        std::fs::create_dir_all(h.root.join(".trash")).unwrap();
+        std::fs::rename(h.root.join("echo-test"), &trashed).unwrap();
+        std::fs::create_dir_all(h.root.join(".staging")).unwrap();
+        std::fs::write(
+            h.root.join(".staging/echo-test.swap"),
+            ".trash/echo-test-20261017T000000.000000000Z\n",
+        )
+        .unwrap();
+        let ext = ExtensionId::plugin("echo-test".to_string());
+        h.manager.reconcile(&ext).await.expect("reconcile");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Orphaned);
+        trashed
+    }
+
+    /// **Removing the orphan row ends the plugin, marker included.** Kept, the
+    /// marker restored the trashed tree at the next start, and the plugin the
+    /// owner had just removed was listed again.
+    #[tokio::test]
+    async fn an_orphan_removed_after_a_failed_swap_stays_removed_across_a_restart() {
+        let h = Harness::new();
+        let trashed = orphaned_by_a_failed_rename_back(&h).await;
+
+        h.manager.remove_orphan("echo-test").await.expect("remove");
+
+        let manager = restarted(&h);
+        manager.start().await.unwrap();
+        assert!(
+            !h.root.join("echo-test").exists(),
+            "the removed plugin's tree is not put back"
+        );
+        assert!(trashed.is_dir(), "it stays in the trash, never deleted");
+        assert!(
+            manager
+                .row(&ExtensionId::plugin("echo-test".to_string()))
+                .await
+                .is_err(),
+            "and no row comes back"
+        );
+    }
+
+    /// The uninstall of that orphan drops the marker the same way.
+    #[tokio::test]
+    async fn an_orphan_uninstalled_after_a_failed_swap_stays_gone_across_a_restart() {
+        let h = Harness::new();
+        let trashed = orphaned_by_a_failed_rename_back(&h).await;
+
+        h.manager
+            .uninstall("echo-test", true)
+            .await
+            .expect("uninstall");
+
+        let manager = restarted(&h);
+        manager.start().await.unwrap();
+        assert!(
+            !h.root.join("echo-test").exists(),
+            "the uninstalled plugin's tree is not put back"
+        );
+        assert!(trashed.is_dir());
+    }
+
+    /// A denial the replacement had dropped comes back the same way: the old
+    /// tree is still the one the owner refused.
+    #[tokio::test]
+    async fn a_failed_swap_puts_back_a_denial_too() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"a\"]\n",
+        );
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager.deny_plugin("echo-test").await.expect("deny");
+
+        let next = h.source(
+            "echo-test",
+            "0.2.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"a\", \"b\"]\n",
+        );
+        h.manager
+            .fail_swap_commit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        h.manager
+            .update_from_path("echo-test", &next)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            h.manager
+                .permission_gate
+                .load_table()
+                .unwrap()
+                .approved("echo-test"),
+            Some(false),
+            "the old tree is still the one the owner refused"
+        );
+        assert_eq!(h.row("echo-test").await.consent, Some(Consent::Denied));
+        assert!(!h.holds_process("echo-test").await);
+    }
+
+    /// **A crash between the trash move and the commit is put back at the
+    /// next start.** The marker `.staging/<id>.swap` names where the old tree
+    /// went; the boot pass finds it, renames the tree back, removes the
+    /// marker, and sweeps the staging copies an earlier process left — while
+    /// the plugin then loads from its own tree as before.
+    #[tokio::test]
+    async fn a_swap_interrupted_by_a_crash_is_put_back_at_the_next_start() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "[types]\ntools = true\n");
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        h.manager.shutdown_all().await;
+
+        // The crash, as the disk records it: the incumbent in the trash, the
+        // marker naming it, nothing committed — and the dead process's
+        // staging copy (pid 1 was never this process) beside it.
+        let trashed = h.root.join(".trash/echo-test-20261017T000000.000000000Z");
+        std::fs::create_dir_all(h.root.join(".trash")).unwrap();
+        std::fs::rename(h.root.join("echo-test"), &trashed).unwrap();
+        std::fs::create_dir_all(h.root.join(".staging")).unwrap();
+        std::fs::write(
+            h.root.join(".staging/echo-test.swap"),
+            ".trash/echo-test-20261017T000000.000000000Z\n",
+        )
+        .unwrap();
+        let stale = h
+            .root
+            .join(".staging/echo-test.1.20261017T000000.000000000Z");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("plugin.toml"), "partial").unwrap();
+
+        let manager = restarted(&h);
+        manager.start().await.unwrap();
+
+        let back = std::fs::read_to_string(h.root.join("echo-test/plugin.toml"))
+            .expect("the old tree is back under its name");
+        assert!(back.contains("0.1.0"), "{back}");
+        assert!(!trashed.exists(), "moved back, not copied");
+        assert!(
+            !h.root.join(".staging/echo-test.swap").exists(),
+            "the marker is gone once recovered"
+        );
+        assert!(
+            !stale.exists(),
+            "an earlier process's staging copy is swept"
+        );
+        let row = manager
+            .row(&ExtensionId::plugin("echo-test".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(row.state, ExtensionState::Enabled, "and it loads as before");
+        manager.shutdown_all().await;
     }
 
     // ── uninstall ────────────────────────────────────────────────────

@@ -1,0 +1,115 @@
+diff --git a/crates/openalpaca_core/src/middleware/skill/mod.rs b/crates/openalpaca_core/src/middleware/skill/mod.rs
+--- a/crates/openalpaca_core/src/middleware/skill/mod.rs
++++ b/crates/openalpaca_core/src/middleware/skill/mod.rs
+@@ -84,13 +84,41 @@ impl std::error::Error for SkillParseError {}
+ // Public API
+ // ---------------------------------------------------------------------------
+ 
++/// How SKILL.md frontmatter is read: serde-saphyr, set as close to how the
++/// serde_yaml 0.9 it replaced read a file as its options go. `yes`/`no`/`on`/
++/// `off`/`y`/`n` stay strings (a `parameters` schema goes to the model
++/// verbatim), a `<<` key is an ordinary key rather than a merge, a repeated key
++/// keeps its last value, a run of comments is read the way serde_yaml read it
++/// (serde-saphyr's default refuses 33 or more comment lines between a key and
++/// its block value), a `!!binary` value or a `.inf` in a string field stays the
++/// text it was written as, and an error is one line with no excerpt of the
++/// file. Where it differs: in a `serde_json::Value` position (`tools.defaults`,
++/// a `parameters` schema, a context source) a non-finite float becomes its
++/// canonical spelling as a string (`.inf`, `-.inf`, `.nan`; `1e999` reads
++/// `.inf`), where serde_yaml gave null (and kept `1e999` as written).
++fn yaml_options() -> serde_saphyr::Options {
++    serde_saphyr::options! {
++        strict_booleans: true,
++        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
++        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::LastWins,
++        non_finite_float_policy: serde_saphyr::NonFiniteFloatPolicy::AsString,
++        ignore_binary_tag_for_string: true,
++        with_snippet: false,
++        emit_comments: false,
++    }
++}
++
++fn parse_yaml(yaml_str: &str) -> Result<SkillFrontmatter, SkillParseError> {
++    serde_saphyr::from_str_with_options(yaml_str, yaml_options())
++        .map_err(|e| SkillParseError::InvalidYaml(e.to_string()))
++}
++
+ /// Parse only the YAML frontmatter from a SKILL.md file (Level 1).
+ ///
+ /// Use this for lightweight catalog scanning at startup — does NOT parse the body.
+ pub fn parse_skill_frontmatter(input: &str) -> Result<SkillFrontmatter, SkillParseError> {
+     let (yaml_str, _body_lines) = parser::extract_frontmatter_str(input)?;
+-    let fm: SkillFrontmatter =
+-        serde_yaml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
++    let fm = parse_yaml(yaml_str)?;
+     fm.validate()?;
+     Ok(fm)
+ }
+@@ -98,8 +126,7 @@ pub fn parse_skill_frontmatter(input: &str) -> Result<SkillFrontmatter, SkillPar
+ /// Parse the full SKILL.md file including body sections (Level 2).
+ pub fn parse_skill_markdown(input: &str) -> Result<SkillDocument, SkillParseError> {
+     let (yaml_str, body_lines) = parser::extract_frontmatter_str(input)?;
+-    let frontmatter: SkillFrontmatter =
+-        serde_yaml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
++    let frontmatter = parse_yaml(yaml_str)?;
+     frontmatter.validate()?;
+     let (body, sections) = super::body_sections::parse_body_sections(&body_lines);
+ 
+diff --git a/crates/openalpaca_core/src/middleware/skill/renderer.rs b/crates/openalpaca_core/src/middleware/skill/renderer.rs
+--- a/crates/openalpaca_core/src/middleware/skill/renderer.rs
++++ b/crates/openalpaca_core/src/middleware/skill/renderer.rs
+@@ -9,8 +9,8 @@ pub fn render_skill_markdown(doc: &SkillDocument) -> String {
+     // -- Frontmatter --
+     out.push_str("---\n");
+ 
+-    // Use serde_yaml for serialization. Fall back to manual if it fails.
+-    match serde_yaml::to_string(&doc.frontmatter) {
++    // Use serde-saphyr for serialization. Fall back to manual if it fails.
++    match serde_saphyr::to_string(&doc.frontmatter) {
+         Ok(yaml) => out.push_str(&yaml),
+         Err(_) => {
+             // Manual fallback for basic fields
+diff --git a/crates/openalpaca_core/src/middleware/skill/tests.rs b/crates/openalpaca_core/src/middleware/skill/tests.rs
+--- a/crates/openalpaca_core/src/middleware/skill/tests.rs
++++ b/crates/openalpaca_core/src/middleware/skill/tests.rs
+@@ -316,3 +316,40 @@ fn test_skill_without_scripts_has_empty_vec() {
+     let fm = parse_skill_frontmatter(MINIMAL_SKILL).expect("minimal skill should parse");
+     assert!(fm.scripts.is_empty());
+ }
++
++/// serde_yaml 0.9 read these YAML 1.1 spellings as plain text, and a script's
++/// `parameters` schema reaches the model as written. serde-saphyr's defaults
++/// would turn `n`/`yes`/`off` into booleans, merge `<<`, refuse the repeated
++/// key and quote the file in the error; `yaml_options` keeps all four as they
++/// were.
++#[test]
++fn yaml_1_1_spellings_read_the_way_serde_yaml_0_9_read_them() {
++    let input = "---\nname: N\ndescription: n\n\
++                 scripts:\n  - file: a.sh\n    name: a\n    description: d\n    \
++                 parameters:\n      type: object\n      properties:\n        \
++                 flag: {type: string, enum: [yes, no, on, off, y, n], default: yes}\n\
++                 tools:\n  defaults:\n    k: 1\n    k: 2\n\
++                 invoke:\n  <<: {mode: auto}\n---\n";
++    let fm = parse_skill_frontmatter(input).expect("parses");
++    assert_eq!(fm.name, "N");
++    assert_eq!(fm.description, "n");
++    assert_eq!(
++        fm.scripts[0].parameters["properties"]["flag"],
++        serde_json::json!({
++            "type": "string",
++            "enum": ["yes", "no", "on", "off", "y", "n"],
++            "default": "yes",
++        })
++    );
++    assert_eq!(fm.tools.defaults["k"], serde_json::json!(2));
++    assert_eq!(fm.invoke.mode, "manual", "`<<` is an ordinary key, not a merge");
++
++    let err = parse_skill_frontmatter(
++        "---\nname: N\ndescription: D\npermissions:\n  sandbox:\n    net: yes\n---\n",
++    )
++    .expect_err("`yes` is not a boolean");
++    match err {
++        SkillParseError::InvalidYaml(msg) => assert!(!msg.contains('\n'), "one line: {msg}"),
++        other => panic!("expected InvalidYaml, got {other:?}"),
++    }
++}

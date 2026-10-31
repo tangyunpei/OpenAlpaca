@@ -127,10 +127,9 @@ impl Orchestrator {
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
-            for name in &["update_persona"] {
-                if !tool_names.contains(&name.to_string()) {
-                    tool_names.push(name.to_string());
-                }
+            let name = "update_persona";
+            if !tool_names.contains(&name.to_string()) {
+                tool_names.push(name.to_string());
             }
         }
 
@@ -315,6 +314,20 @@ impl Orchestrator {
         // authoritative content, so a dropped delta costs a flicker.
         let stream_callback = turn_sink.map(delta_forwarder);
 
+        // N-TOOL-1 (Z1-05): the cut a tool call of this turn runs under —
+        // `[execution.agent_defaults] max_tool_runtime_secs` (60 s, the figure
+        // `LoopConfig::default()` hard-coded before), read per turn like the
+        // confirmation timeout beside it so a reload reaches the next turn.
+        // One number for the sandbox's cut and the loop's config; the loop
+        // states it on `shell_execute`'s definition.
+        let max_tool_runtime = std::time::Duration::from_secs(
+            self.daemon_config
+                .load()
+                .execution
+                .agent_defaults
+                .max_tool_runtime_secs,
+        );
+
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
             tracing::info!(
@@ -337,7 +350,7 @@ impl Orchestrator {
                 denied_capabilities: vec![],
                 require_confirmation_for: vec![],
                 max_tool_calls: None,
-                max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+                max_tool_runtime_secs: max_tool_runtime.as_secs(),
                 stream_id: stream_id.map(|s| s.to_string()),
                 lane_key: Some(lane_key.to_string()),
                 confirmation_timeout_secs: Some(
@@ -383,6 +396,7 @@ impl Orchestrator {
                 tool_result_inline_bytes: inline_bytes,
                 model: turn_model,
                 stream_callback: stream_callback.clone(),
+                max_tool_runtime,
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
@@ -394,6 +408,7 @@ impl Orchestrator {
                 tool_result_inline_bytes: inline_bytes,
                 model: turn_model,
                 stream_callback,
+                max_tool_runtime,
                 ..self.loop_config.clone()
             };
         }

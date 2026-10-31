@@ -31,6 +31,8 @@ const state = vi.hoisted(() => ({
   configWrites: [] as Array<{ id: string; key: string; value: string }>,
   /** The daemon's refusal sentence for the next config write, if any. */
   configFail: null as string | null,
+  /** The dry run's `manifest.warnings` (N-PLUG-2). */
+  manifestWarnings: [] as string[],
 }));
 
 /** A mutation double that records its input and calls the caller back. */
@@ -153,6 +155,16 @@ vi.mock("@/hooks/useExtensions", async (importOriginal) => ({
 const basename = (path: string) =>
   path.split("/").filter(Boolean).pop() ?? path;
 
+/**
+ * What the daemon's `PluginManifest::warnings()` says for a key nothing reads
+ * that hides a U+202E and a U+200B — the key escaped, the count in the
+ * warning's own last sentence (N-PLUG-2; pinned on the daemon's side by
+ * `a_hidden_character_in_a_key_is_shown_and_counted`).
+ */
+const HIDDEN_KEY_WARNING =
+  "plugin.toml sets 'to<U+202E>ol<U+200B>', which OpenAlpaca does not read, so it is " +
+  "ignored. Note: this request contains 2 hidden characters, shown as <U+…>.";
+
 function manifestSummary(name: string): ManifestSummary {
   return {
     name,
@@ -164,6 +176,7 @@ function manifestSummary(name: string): ManifestSummary {
     types: { tool: true, skill: false },
     required_config_keys: ["token"],
     sensitive_config_keys: ["token"],
+    warnings: state.manifestWarnings,
   };
 }
 
@@ -179,6 +192,7 @@ beforeEach(() => {
   state.fail = null;
   state.configWrites = [];
   state.configFail = null;
+  state.manifestWarnings = [];
   useUiStore.setState({ toast: null, settingsSectionId: "extensions" });
 });
 
@@ -423,6 +437,78 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
     expect(useUiStore.getState().toast).toBe(
       "notion installed — approve it to start it",
     );
+  });
+
+  /**
+   * N-PLUG-2: the dry run's warnings — a key nothing reads, a type nothing
+   * wires — are on screen beside the manifest, never a refusal. The daemon
+   * sends a hidden character in a key already as `<U+XXXX>`, counted in the
+   * warning's own last sentence; it is drawn as sent. One that arrived raw
+   * (the third warning) is still shown as a highlighted escape, so nothing
+   * raw reaches the page.
+   */
+  it("shows the manifest's warnings in the preview, escaped", async () => {
+    state.manifestWarnings = [
+      "plugin.toml sets 'tool', which OpenAlpaca does not read, so it is ignored — did you mean 'types.tools'?",
+      HIDDEN_KEY_WARNING,
+      "plugin.toml sets 'x\u202E\u200B', which OpenAlpaca does not read, so it is ignored",
+    ];
+    render(<ExtensionsSection />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Add extension" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Plugin directory" }),
+      "/src/notion",
+    );
+    await user.click(screen.getByRole("button", { name: "Check" }));
+
+    expect(
+      screen.getByText(/did you mean 'types\.tools'\?/),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).toContain(
+      `Warning: ${HIDDEN_KEY_WARNING}`,
+    );
+    expect(
+      Array.from(
+        document.querySelectorAll("[data-hidden-char]"),
+        (node) => node.textContent,
+      ),
+    ).toEqual(["<U+202E>", "<U+200B>"]);
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
+    // A warning is not a refusal: Install is still offered.
+    expect(screen.getByRole("button", { name: "Install" })).toBeEnabled();
+  });
+
+  /**
+   * N-PLUG-2: the row awaiting consent is the approve preview, so it says
+   * the manifest's standing warnings (`declared.warnings`) before Approve —
+   * a plugin dropped in by hand never had a dry run to say them.
+   */
+  it("says the manifest's warnings on the row awaiting consent", () => {
+    state.rows = [
+      extensionRow({
+        id: "notes",
+        state: "unapproved",
+        reason: "never_seen",
+        declared: {
+          capabilities: [],
+          virtual_capabilities: [],
+          types: { tool: false },
+          warnings: [
+            "plugin.toml sets 'tool', which OpenAlpaca does not read, so it is ignored — did you mean 'types.tools'?",
+            HIDDEN_KEY_WARNING,
+          ],
+        },
+      }),
+    ];
+    const { container } = render(<ExtensionsSection />);
+
+    expect(
+      screen.getByText(/did you mean 'types\.tools'\?/),
+    ).toBeInTheDocument();
+    expect(container.textContent).toContain(`Warning: ${HIDDEN_KEY_WARNING}`);
+    expect(container.textContent).not.toMatch(/[\u202E\u200B]/);
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
   });
 
   it("declares an MCP server from the same add panel", async () => {

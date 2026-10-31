@@ -976,3 +976,131 @@ fn create_below_takes_plain_names_only() {
     assert!(!tmp.path().join("a").exists());
     assert!(!tmp.path().parent().unwrap().join("escape").exists());
 }
+
+// ============================================================================
+// Open's copies and the CLI's editor buffers (N-STORE-1)
+// ============================================================================
+
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Open's copy lands at `state/cache/open/<file id>/<name>` in 0700 folders;
+/// a second Open of the file replaces the first copy, under whatever name;
+/// neither the id nor the name can lead out of the folder; and removing by
+/// id takes only that folder.
+#[test]
+fn an_open_copy_is_staged_in_its_own_private_folder_and_stays_inside_it() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().canonicalize().unwrap().join("home");
+    let _env = HomeStoreGuard::set(&home);
+    let source = tmp.path().join("03-report.bin");
+    fs::write(&source, b"v1").unwrap();
+    let open = home.join("state").join("cache").join("open");
+
+    let first = stage_open_copy(&source, "f-1", "Report.pdf").unwrap();
+    assert_eq!(first, open.join("f-1").join("Report.pdf"));
+    assert_eq!(fs::read(&first).unwrap(), b"v1");
+    #[cfg(unix)]
+    {
+        assert_eq!(mode_of(&open), 0o700);
+        assert_eq!(mode_of(&open.join("f-1")), 0o700);
+    }
+    fs::write(&source, b"v2").unwrap();
+    let second = stage_open_copy(&source, "f-1", "Report (2).pdf").unwrap();
+    assert!(!first.exists(), "the earlier copy goes with the fresh one");
+    assert_eq!(fs::read(&second).unwrap(), b"v2");
+
+    for (id, name) in [
+        ("../state", "x.pdf"),
+        ("a/b", "x.pdf"),
+        ("", "x.pdf"),
+        ("..", "x.pdf"),
+        ("f-2", "../x.pdf"),
+        ("f-2", "a/x.pdf"),
+        ("f-2", ".."),
+    ] {
+        assert!(
+            stage_open_copy(&source, id, name).is_err(),
+            "{id:?} / {name:?} was staged"
+        );
+    }
+    assert!(!open.join("f-2").exists());
+    assert!(!home.join("state").join("x.pdf").exists());
+
+    assert!(
+        !remove_open_copy("../cache").unwrap(),
+        "not one name: nothing"
+    );
+    assert!(open.exists(), "the folder of copies stays");
+    assert!(remove_open_copy("f-1").unwrap());
+    assert!(!open.join("f-1").exists());
+    assert!(!remove_open_copy("f-1").unwrap(), "already gone");
+    assert_eq!(sweep_open_copies().unwrap(), 0);
+}
+
+/// `state/cache/open` left as a link to another folder — by hand, or by an
+/// approved shell command — is never followed: the boot sweep deletes nothing
+/// in the folder it leads to, and Open refuses to stage there (nor makes that
+/// folder 0700), naming the link.
+#[cfg(unix)]
+#[test]
+fn a_link_at_the_folder_of_open_copies_is_never_followed() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().canonicalize().unwrap().join("home");
+    let _env = HomeStoreGuard::set(&home);
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir_all(elsewhere.join("a folder")).unwrap();
+    fs::write(elsewhere.join("keep.txt"), b"not Open's").unwrap();
+    fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o755)).unwrap();
+    let cache = home.join("state").join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let open = cache.join("open");
+    std::os::unix::fs::symlink(&elsewhere, &open).unwrap();
+
+    assert_eq!(sweep_open_copies().unwrap(), 0, "the sweep took nothing");
+    assert_eq!(
+        fs::read(elsewhere.join("keep.txt")).unwrap(),
+        b"not Open's",
+        "the sweep deleted a file the link leads to"
+    );
+    assert!(elsewhere.join("a folder").is_dir());
+
+    let source = tmp.path().join("03-report.bin");
+    fs::write(&source, b"v1").unwrap();
+    let refused = stage_open_copy(&source, "f-1", "Report.pdf")
+        .expect_err("Open staged through a link")
+        .to_string();
+    assert!(refused.contains("is a link"), "{refused}");
+    assert!(!elsewhere.join("f-1").exists());
+    assert_eq!(mode_of(&elsewhere), 0o755, "the link's target was chmodded");
+    // Nor does a project's delete reach through it by a file id.
+    assert!(!remove_open_copy("a folder").unwrap());
+    assert!(elsewhere.join("a folder").is_dir());
+    assert!(
+        fs::symlink_metadata(&open)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link is the user's to remove"
+    );
+}
+
+/// The CLI's editor buffers live in `state/editor/`, made 0700 with `state/`.
+#[test]
+fn the_editor_dir_is_a_private_folder_under_state() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().canonicalize().unwrap().join("home");
+    let _env = HomeStoreGuard::set(&home);
+    let dir = editor_dir().unwrap();
+    assert_eq!(dir, home.join("state").join("editor"));
+    assert!(dir.is_dir());
+    #[cfg(unix)]
+    {
+        assert_eq!(mode_of(&dir), 0o700);
+        assert_eq!(mode_of(&home.join("state")), 0o700);
+    }
+}

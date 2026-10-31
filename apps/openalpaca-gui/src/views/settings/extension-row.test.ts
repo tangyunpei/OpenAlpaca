@@ -295,6 +295,51 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
   });
 
   /**
+   * N-PLUG-2: the row awaiting consent is the app's approve preview, so it
+   * carries the manifest's standing warnings (`declared.warnings`) — said
+   * before Approve, for a plugin dropped in by hand too. The daemon sends a
+   * key's hidden characters already escaped and counted in the warning's own
+   * last sentence, so nothing more is counted; one that arrived raw would be
+   * shown and counted with the rest.
+   */
+  it("unapproved — the manifest's standing warnings come with the consent", () => {
+    const daemonSaid =
+      "plugin.toml sets 'to<U+202E>ol<U+200B>', which OpenAlpaca does not read, so it is " +
+      "ignored. Note: this request contains 2 hidden characters, shown as <U+…>.";
+    const row = (warnings: string[]) =>
+      extensionRow({
+        id: "notes",
+        state: "unapproved",
+        reason: "never_seen",
+        declared: {
+          capabilities: [],
+          virtual_capabilities: [],
+          types: { tool: false },
+          warnings,
+        },
+      });
+
+    const view = extensionRowView(row([daemonSaid]));
+    expect(view.consent?.warnings.map((w) => w.text)).toEqual([daemonSaid]);
+    expect(view.consent?.notice).toBeNull();
+
+    const raw = extensionRowView(row(["sets 'x\u202E\u200B'"]));
+    expect(raw.consent?.warnings.map((w) => w.text)).toEqual([
+      "sets 'x<U+202E><U+200B>'",
+    ]);
+    expect(raw.consent?.notice).toBe(
+      "Note: this request contains 2 hidden characters, shown as <U+…>.",
+    );
+
+    // A daemon built before them sends none.
+    expect(
+      extensionRowView(
+        extensionRow({ state: "unapproved", reason: "never_seen" }),
+      ).consent?.warnings,
+    ).toEqual([]);
+  });
+
+  /**
    * Only the consent row: a failed row's detail — a child's stderr, an HTTP
    * body — is quoted as it came, which is its own, display-only surface.
    */
@@ -408,6 +453,32 @@ describe("extensionRowView (ADR-030 §9.2)", () => {
         }),
       ).toggleChecked,
     ).toBe(false);
+  });
+
+  it("failed/protocol_negotiation_failed — asks, the detail quoted, and the server's block named", () => {
+    const view = extensionRowView(
+      extensionRow({
+        kind: "mcp",
+        id: "old",
+        state: "failed",
+        reason: "protocol_negotiation_failed",
+        actionable: true,
+        detail:
+          'connect: MCP protocol negotiation failed: …; set `protocol = "legacy"`',
+        enabled: true,
+      }),
+    );
+
+    expect(view).toMatchObject({
+      tag: "protocol-mismatch",
+      tone: "asks",
+      toggleChecked: true,
+    });
+    expect(view.description).toBe(
+      '"connect: MCP protocol negotiation failed: …; set `protocol = "legacy"`"',
+    );
+    expect(view.secondary).toBe("config/mcp.toml → [servers.old]");
+    expect(view.actions).not.toContain("retry");
   });
 
   it("failed/crashed — warn, Retry, and the switch stays ON", () => {

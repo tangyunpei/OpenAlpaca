@@ -5,8 +5,8 @@
 //! `#[path = "common/eval.rs"] mod eval;` and uses what it needs.
 #![allow(dead_code)]
 
+use openalpaca_storage::hash::sha256_hex;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -437,12 +437,6 @@ pub fn eval_dir() -> PathBuf {
 
 pub fn read_bytes(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    format!("{:x}", h.finalize())
 }
 
 /// Parse a JSON data file and return it with the SHA-256 of its exact bytes.

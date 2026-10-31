@@ -83,6 +83,13 @@ pub(super) fn workflow_contract_suffix(steering_attached: bool) -> String {
 /// carried right after `lead_persona` as a raw block, whose content Layer 2
 /// hashes: a changed `USER.md` is a new prompt, not a cache hit. Absent or
 /// empty, nothing is emitted and the prompt is what it always was.
+///
+/// `skills_catalog` is the catalog's `<available_skills>` block
+/// (`SkillCatalog::available_skills_block`, N-SKILL-1) — the lead holds
+/// `invoke_skill` and `extension_tools_suffix` tells it to use catalog
+/// skills. `SubagentMinimal` renders raw blocks only, so it is carried as
+/// the last raw block, `skills_catalog`, the nearest to that suffix. Absent
+/// or empty, nothing is emitted.
 pub fn build_lead_agent_prompt_from_templates(
     compose_engine: &ComposeEngine,
     base_persona: &str,
@@ -90,6 +97,7 @@ pub fn build_lead_agent_prompt_from_templates(
     model_window: usize,
     user_document: Option<&UserDocument>,
     user_budget: Option<usize>,
+    skills_catalog: Option<&str>,
 ) -> String {
 
     // Available agents catalog (High — important for delegation decisions).
@@ -133,7 +141,8 @@ pub fn build_lead_agent_prompt_from_templates(
          Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
          queued ones), or check_subagent_status for individual progress.\n\
          Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
-         retry with an adjusted objective or a different agent.\n\
+         retry with an adjusted objective or a different agent — unless its failure says a \
+         retry will not help.\n\
          Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
          that directly addresses the user's original request.\n\
          </workflow>";
@@ -160,8 +169,9 @@ pub fn build_lead_agent_prompt_from_templates(
          cut after its first part with a note of how much it shows. Failed: returns the error and \
          the last output, as head and tail when long.\n\
          wait_for_subagents: Block until ALL spawned subagents finish, including any that are \
-         queued for execution. Returns a summary of all results: each answer's head and tail, \
-         with a notice of what lies between — read one in full with check_subagent_status. \
+         queued for execution. Returns each result once: every answer not reported before, as \
+         its head and tail with a notice of what lies between, and a line naming the run ids \
+         reported earlier — read any of them in full with check_subagent_status. \
          Call this after spawning all subagents.\n\
          workspace_read / workspace_write: Share context between subagents. Write setup data before spawning; \
          read results after completion.\n\
@@ -180,7 +190,7 @@ pub fn build_lead_agent_prompt_from_templates(
          Do not simply list raw subagent outputs — integrate, summarize, and resolve any conflicts.\n\
          </output>";
 
-    let mut raw_blocks: Vec<SystemBlock> = Vec::with_capacity(9);
+    let mut raw_blocks: Vec<SystemBlock> = Vec::with_capacity(10);
     raw_blocks.push(SystemBlock {
         name: "lead_persona",
         content: Arc::<str>::from(base_persona.to_string()),
@@ -228,6 +238,13 @@ pub fn build_lead_agent_prompt_from_templates(
             priority: SectionPriority::Normal,
         },
     ]);
+    if let Some(catalog) = skills_catalog.filter(|c| !c.is_empty()) {
+        raw_blocks.push(SystemBlock {
+            name: "skills_catalog",
+            content: Arc::<str>::from(catalog),
+            priority: SectionPriority::Normal,
+        });
+    }
 
     let persona_input = PersonaInput {
         system_persona: Arc::new(SystemPersona::default()),

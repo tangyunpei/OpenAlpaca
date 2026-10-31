@@ -515,6 +515,7 @@ impl TaskDispatcher {
         let connector_block = self.connector_guidance_block();
         let broker = self.confirmation_broker.read().ok().and_then(|g| g.clone());
         let followup_runner = self.followup_runner.read().ok().and_then(|g| g.clone());
+        let daemon_shutdown = self.shutdown.get().cloned();
         let skill_catalog = self.skill_catalog.clone();
         let context_manager = self.context_manager.clone();
         let compose_engine = self.compose_engine.clone();
@@ -561,7 +562,7 @@ impl TaskDispatcher {
         // text is carried inline by the rebuilt history instead.
         let resume = resume.map(|seed| {
             let plan = seed.replay;
-            let note = resume_interjection(plan.last_ts.unwrap_or_else(Utc::now));
+            let note = resume_interjection(plan.last_ts.unwrap_or_else(Utc::now), &plan.subagents);
             let delivered = steering_inbox.as_ref().is_some_and(|inbox| {
                 inbox
                     .push(SteeringMsg {
@@ -624,7 +625,7 @@ impl TaskDispatcher {
             // one lead lane per run, so the id stays reconstructible from the
             // task alone. Opened after the status flip, so a reader that sees
             // a running task always sees a lane for it.
-            let lead_span_id = format!("lead::{task_id}");
+            let lead_span_id = crate::runner::span::lead_span_id(&task_id);
             let lead_label = crate::runner::span::open_span(
                 db.as_ref(),
                 &bus,
@@ -1063,14 +1064,32 @@ impl TaskDispatcher {
             // carries this run's result, so the next `start` on it is refused
             // by R43's guard rather than racing this tail. Nothing between
             // `run_lead_agent` returning and here reads the token — the only
-            // other readers are `cancel_task` (a cancel during the tail already
-            // had nothing left to stop) and `claim_run_slot` itself.
+            // other readers are `cancel_task` and `claim_run_slot` itself —
+            // and a cancel during the tail has nothing left to stop:
+            // `run_lead_agent` stopped every subagent the run left running
+            // before it returned (N-LEAD-1), so removing the token without
+            // cancelling it strands nothing.
             ctx.remove_cancellation_token(&task_id);
 
             // Routing V2: auto-start the next queued follow-up for this lane.
             // Inert unless a runner is wired AND a `followup` row is queued
             // (only the steering-gated `queue_followup` tool writes those).
-            if daemon_config.load().orchestrator.routing.followup_autostart
+            //
+            // Never once the daemon is shutting down (Z4-03): `claim_next`
+            // flips the row to `running`, and only the turn it starts marks it
+            // done — a turn that would not outlive the process, leaving a row
+            // nothing ever settles. Unclaimed, it stays `queued`, the lane's.
+            let shutting_down = daemon_shutdown
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
+            if shutting_down {
+                tracing::info!(
+                    lane_key = %lane_key,
+                    "The daemon is shutting down: follow-up autostart skipped; a queued follow-up stays queued"
+                );
+            }
+            if !shutting_down
+                && daemon_config.load().orchestrator.routing.followup_autostart
                 && let (Some(runner), Some(db)) = (followup_runner, db.as_ref())
             {
                 let repo = openalpaca_storage::repository::FollowupRepository::new(db);

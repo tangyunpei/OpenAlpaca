@@ -1,22 +1,14 @@
 //! The filesystem primitives the two content writers share.
 //!
 //! [`crate::artifacts::ArtifactStore`] and [`crate::uploads::UploadStore`] place
-//! bytes under the same store roots with the same durability rules, so hashing,
+//! bytes under the same store roots with the same durability rules, so
 //! directory `fsync` and best-effort cleanup live here once rather than being
-//! copied per writer. Nothing here decides *where* a file goes — that is
-//! [`crate::store`]'s job — and nothing here touches the database.
+//! copied per writer; the hash both write is [`crate::hash::sha256_hex`].
+//! Nothing here decides *where* a file goes — that is [`crate::store`]'s job
+//! — and nothing here touches the database.
 
 use std::fs;
 use std::path::Path;
-
-use sha2::{Digest, Sha256};
-
-/// The lowercase hex SHA-256 of `bytes` — the `file_assets.sha256` spelling.
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
 
 /// `fsync` a directory so a rename that just happened is durable.
 ///

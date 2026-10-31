@@ -104,8 +104,10 @@ fn test_compaction_not_triggered_below_threshold() {
 
 #[test]
 fn test_autocompact_buffer_ratio_config() {
-    let mut config = ContextBudgetConfig::default();
-    config.autocompact_buffer_ratio = 0.25;
+    let config = ContextBudgetConfig {
+        autocompact_buffer_ratio: 0.25,
+        ..Default::default()
+    };
     let mgr = ContextBudgetManager::new(100_000, &config);
     assert_eq!(mgr.autocompact_buffer(), 25_000);
     assert_eq!(mgr.free_zone_capacity(), 75_000);

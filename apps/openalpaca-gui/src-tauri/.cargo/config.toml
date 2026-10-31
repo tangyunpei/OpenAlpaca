@@ -1,0 +1,21 @@
+# The Tauri shell builds into its own target directory, target/gui at the
+# repository root (the paths are relative to src-tauri/, the folder holding
+# this .cargo/). `tauri dev` and `tauri build` run cargo from src-tauri/, so
+# they read this file, which wins over the root's .cargo/config.toml; the
+# daemon's build in scripts/prepare-sidecar.ts runs at the workspace root and
+# does not. tauri-build copies the staged sidecar to
+# <target dir>/<profile>/openalpacad, beside the shell's own binary, and here
+# that copy can no longer land on the daemon the workspace builds share
+# (plan-rev3 §3.3, DU-30 (a)).
+#
+# The build-dir is the target dir (M63, DU-M5 (b)). tauri-build finds its
+# target dir by walking OUT_DIR up to its `build` folder and taking the parent
+# (tauri-build 2.7.4, target_dir_from_out_dir; cargo#5457), and OUT_DIR lives
+# in the build-dir: under the root's build-dir the copy would land in
+# ~/.cargo/build/<hash>/<profile>/, not beside the shell's binary, and the
+# shell's build would split between two trees. So the two stay one path. From
+# the root, `cargo check -p openalpaca_gui` sets both, the same path:
+# CARGO_TARGET_DIR=target/gui CARGO_BUILD_BUILD_DIR=target/gui (MF-5).
+[build]
+target-dir = "../../../target/gui"
+build-dir = "../../../target/gui"

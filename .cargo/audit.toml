@@ -1,0 +1,5 @@
+# cargo-audit's half of the advisory policy (P34): the same ignores as
+# deny.toml's [advisories], each with its reason there. None today: the three
+# zip 8.6.0 ids were lifted when calamine 0.37 moved to zip ^9.
+[advisories]
+ignore = []

@@ -1380,6 +1380,14 @@ mod read_result {
             err.contains("spill_error"),
             "and points at the record that says why: {err}"
         );
+        // True of either stub the model was shown — the head-only one, or a
+        // command's head and tail (N-TOOL-7) — and of a resumed transcript.
+        assert!(
+            err.ends_with(
+                "Only what the transcript already shows of that result survives; the rest is gone."
+            ),
+            "{err}"
+        );
 
         // A reference the log knows nothing about keeps the plain refusal.
         let missing = call(

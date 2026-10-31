@@ -33,11 +33,12 @@ Linux and Windows have equivalent scripts (`scripts/release/package-linux.sh`,
 On the machine that builds release artifacts, install:
 
 - `cargo` / `rustc`
-- `bun` / `bunx`
+- `bun` / `bunx` — Bun 1.4.3, the version the root `package.json`'s `packageManager` field pins
 - `tar`, `shasum`, `git`
 - Standard Unix tools: `awk`, `sed`, `date` (present on any macOS machine)
 
-The script checks for each of these and stops with the missing command's name.
+The script checks for each of these and stops with the missing command's name,
+and stops when `bun --version` is not the pinned version, naming both.
 
 ## Build Release Artifact
 
@@ -47,8 +48,17 @@ From repository root:
 ./scripts/release/package-macos.sh
 ```
 
-It must run on macOS, and it packages for the host architecture only. It builds
-the two release binaries and the Tauri app bundle itself.
+It must run on macOS, and it packages for the host architecture only. It
+installs the GUI's JS dependencies from the frozen lockfile
+(`bun install --frozen-lockfile`), builds the daemon once —
+`apps/openalpaca-gui/scripts/prepare-sidecar.ts --release`, which stages
+cargo's artifact as the Tauri sidecar and records its sha256 beside it — builds
+the CLI alone (`cargo build --release --locked -p openalpaca`), builds the Tauri
+app bundle, and then checks that the daemon inside the bundle and the
+`libexec/openalpacad` it packages are byte for byte that one build; it stops if
+they differ (an unsigned bundle is assumed: signing changes the bytes). `package-linux.sh` and `package-windows.ps1` follow the same
+sequence (the daemon is read out of the AppImage with `--appimage-extract`, out
+of the MSI with an administrative `msiexec /a` install into a scratch folder).
 
 Expected output:
 
@@ -65,9 +75,11 @@ Package contents:
 - `uninstall.sh`
 - `manifest.json` — build metadata: `name`, `version`, `target`, `built_at_utc`, `git_sha`
 
-Note: binaries and the `.app` bundle are **not codesigned**. macOS Gatekeeper
-will show "unidentified developer" warnings; the installer works around this by
-stripping the quarantine attribute (see Troubleshooting).
+Note: binaries and the `.app` bundle are **not codesigned and not notarised**.
+macOS Gatekeeper will show "unidentified developer" warnings; the installer
+works around this by stripping the quarantine attribute (see Troubleshooting).
+That is the first beta's form, installed through the installer; the app is to be
+signed and notarised before any wider distribution.
 
 ## Install on Target Machine
 
@@ -143,6 +155,13 @@ approval, each write and each command asking first. A conversation with no
 project works in a folder of its own under `scratch/`, removed with the
 conversation. The root describes itself: the daemon seeds a `README.md` there
 that explains every entry.
+
+One thing the desktop app keeps outside the runtime root: the webview's own
+`localStorage` — the project you chose, the pane widths and a mirror of the
+artifact pins — which WKWebView stores under the app's bundle identifier in
+`~/Library`. Neither `OPENALPACA_HOME_STORE` nor `openalpaca config reset
+--factory` touches it, `uninstall.sh` leaves it, and it is the same whichever
+store the daemon serves, until a later build keeps those keys per store.
 
 When the CLI or the desktop app launches the daemon, it sets
 `OPENALPACA_CONFIG_DIR` to the runtime config directory above — that is the
@@ -718,7 +737,11 @@ the platform's data-directory convention.
 
 - **Build:** `./scripts/release/package-linux.sh`, on a Linux machine
   (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`). It needs
-  `sha256sum` where the macOS script needs `shasum`. Output:
+  `sha256sum` (and `find`) where the macOS script needs `shasum`. The daemon
+  inside the AppImage is compared with the staged build but not required to
+  match it: linuxdeploy sets a `RUNPATH` on it while it makes the AppImage, so
+  a difference is reported as a warning, and the byte check that stops the
+  script is `libexec/openalpacad` against the staged build. Output:
   `dist/openalpaca-linux-<target>-v<version>.tar.gz` plus `.sha256`.
 - **GUI:** an AppImage, installed to `<prefix>/gui/openalpaca-gui.AppImage`
   with a desktop entry (`OpenAlpaca`) and an icon under `~/.local/share/`.
@@ -731,16 +754,22 @@ the platform's data-directory convention.
 
 ### Windows
 
-**Status: experimental.** CI tests the two installer scripts on Windows, but
+**Status: experimental.** CI tests the two installer scripts and the packaging
+script's hash helpers on Windows, but
 never builds or runs the binaries there, and the CLI's daemon start/stop code
 is written against Unix signals. Expect `package-windows.ps1` to fail at the
 build step until that is ported.
+
+Windows 7 is not supported: the desktop app is built on Tauri 2.12, whose
+Windows libraries (`windows` 0.62, `webview2-com` 0.39) dropped it, so a
+Windows 7 machine cannot run the GUI at all. Like the rest of this section,
+that is a note, not a verified platform — releases are verified on macOS.
 
 The scripts, all PowerShell 5.1 or later, in `scripts/release/`:
 
 | Script | Usage |
 |---|---|
-| `package-windows.ps1` | No arguments. Needs `cargo`, `rustc`, `bun`, `git`. Writes `dist\openalpaca-windows-<target>-v<version>.zip` plus `.sha256`, with the GUI as an MSI. |
+| `package-windows.ps1` | No arguments. Needs `cargo`, `rustc`, `bun` (the version the root `package.json` pins; any other stops it, naming both), `git`. Writes `dist\openalpaca-windows-<target>-v<version>.zip` plus `.sha256`, with the GUI as an MSI. |
 | `install-windows.ps1` | `-File <archive.zip>` or `-Url <https://…/archive.zip>`, plus `-Prefix <dir>` (default `%LOCALAPPDATA%\OpenAlpaca`) and `-Yes`. |
 | `uninstall-windows.ps1` | `-Prefix <dir>` and `-Yes`. |
 
@@ -773,7 +802,8 @@ The uninstaller removes the GUI MSI, the prefix, the Start Menu folder and the
 - `Target mismatch` during install
   - Use artifact matching your machine architecture.
 - GUI blocked by macOS quarantine
-  - Release binaries are not codesigned, so Gatekeeper may warn or block.
+  - Release binaries are not codesigned or notarised, so Gatekeeper may warn or
+    block.
     The installer already runs best-effort quarantine removal; if needed:
     - `xattr -dr com.apple.quarantine ~/Applications/openalpaca-gui.app`
 - Daemon not starting

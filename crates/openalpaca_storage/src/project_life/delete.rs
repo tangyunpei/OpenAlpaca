@@ -70,6 +70,10 @@ pub struct DeleteOutcome {
     /// Every message the transaction deleted, in id order — the route forgets
     /// those conversations' summaries by them (design 09 §13.3).
     pub message_ids: Vec<i64>,
+    /// Every file whose row the transaction deleted, in id order. Open's
+    /// copies of them under `state/cache/open/` are removed after the commit
+    /// (N-STORE-1); a kept file's row lives on, and so does its copy.
+    pub file_ids: Vec<String>,
 }
 
 /// [`delete_project_data`] refused: inside its own transaction, `runs` runs
@@ -412,7 +416,9 @@ fn strings(conn: &Connection, sql: &str, root: &str) -> Result<Vec<String>> {
 /// hang off its sessions and runs, `learning_cursor` included. A failure
 /// anywhere deletes nothing and takes the copies back — [`RunsInFlight`]
 /// when the transaction finds a run of the project in flight. Never iterates
-/// `storage_path`; removes no file of the project (step 3 is the route's).
+/// `storage_path`; removes no file of the project (step 3 is the route's) —
+/// only, after the commit, Open's copies of the files whose rows went, which
+/// are the store's derived data in `state/cache/open/` (N-STORE-1).
 pub fn delete_project_data(db: &Database, project: &Project) -> Result<DeleteOutcome> {
     let root = project.root_string();
     // The kept files, where each lands, and whether a committed row already
@@ -452,8 +458,20 @@ pub fn delete_project_data(db: &Database, project: &Project) -> Result<DeleteOut
         tx.commit()?;
         Ok(outcome)
     });
-    if result.is_err() {
-        unplace(&placed);
+    match &result {
+        // Open's copies of the files whose rows went (N-STORE-1): derived
+        // data in `state/cache/open/`, by file id. Best effort — the rows are
+        // gone, and the next start's sweep takes a copy left here.
+        Ok(outcome) => {
+            for id in &outcome.file_ids {
+                if let Err(e) = crate::store::remove_open_copy(id) {
+                    tracing::warn!(
+                        "Deleted the data of {root}, but not Open's copy of {id}: {e:#}"
+                    );
+                }
+            }
+        }
+        Err(_) => unplace(&placed),
     }
     result
 }
@@ -625,6 +643,13 @@ fn delete_within(tx: &Connection, root: &str, placed: &[Placed]) -> Result<Delet
     )?;
     let tasks = tx.execute("DELETE FROM task WHERE workspace_id = ?1", bind)?;
 
+    // Every file row still naming the project goes below — step 1's kept
+    // rows were re-addressed above, so these are the ones that do not stay.
+    let file_ids = strings(
+        tx,
+        "SELECT id FROM file_assets WHERE project_root = ?1 ORDER BY id",
+        root,
+    )?;
     // A result file's pointer row goes with the project's rows; its file is
     // the user's and stays (R39). Uncounted — neither an upload nor a
     // by-product — so the plan's counts and these agree.
@@ -657,6 +682,7 @@ fn delete_within(tx: &Connection, root: &str, placed: &[Placed]) -> Result<Delet
         },
         session_ids,
         message_ids,
+        file_ids,
     })
 }
 

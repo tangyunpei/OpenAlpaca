@@ -41,13 +41,15 @@ teloxide = { workspace = true }
 twilight-http = { workspace = true }
 twilight-model = { workspace = true }
 tokio-util.workspace = true
-sha2.workspace = true
 infer.workspace = true
 pdf-extract.workspace = true
 zip.workspace = true
 calamine.workspace = true
 signal-hook.workspace = true
 opener.workspace = true
+# The process's one rustls crypto provider, aws-lc-rs, installed at start
+# (`src/tls.rs`).
+rustls.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -60,6 +62,9 @@ openalpaca_mcp = { path = "../../crates/openalpaca_mcp", features = ["test-utils
 # A real WebSocket client for `src/graceful_shutdown_tests.rs`. Already in the
 # lockfile — the CLI's `daemon tail` uses it — so no new external crate.
 tokio-tungstenite.workspace = true
+# `ServiceExt::oneshot` for the CORS test in `router.rs`. tower is already in
+# the lockfile (axum's), so no new external crate either.
+tower.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

@@ -153,6 +153,13 @@ pub struct DeclaredContributions {
     pub virtual_capabilities: Vec<String>,
     /// `plugin.toml`'s `[types]` table, as declared.
     pub types: std::collections::BTreeMap<String, bool>,
+    /// What the declaration holds that nothing acts on — a key OpenAlpaca does
+    /// not read, `types.connector` / `types.provider` while their bridges are
+    /// unwired (N-PLUG-2) — in the daemon's words, a key's hidden characters
+    /// already shown as `<U+XXXX>`. Standing, unlike the row's per-call
+    /// `warnings`, so the row awaiting consent says them before Approve.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// What class of thing an extension contributed. Tools are the only class
@@ -217,6 +224,12 @@ pub enum FailureReason {
     Unreachable,
     /// not actionable — retry
     Crashed,
+    /// actionable (the `protocol` key) — the server and the client found no
+    /// common lifecycle: no version in common, an unexpected answer to the
+    /// probe or the handshake, a close during the probe, a failed legacy
+    /// fallback, or a legacy server under the `2026-07-28` pin (P19, DU-25
+    /// (m-b)). ZCode's word for the same failure (its `failureKind`).
+    ProtocolNegotiationFailed,
 }
 
 impl FailureReason {
@@ -225,7 +238,10 @@ impl FailureReason {
     pub fn actionable(&self) -> bool {
         matches!(
             self,
-            Self::NeedsAuthorization | Self::NeedsConfig { .. } | Self::ConfigInvalid
+            Self::NeedsAuthorization
+                | Self::NeedsConfig { .. }
+                | Self::ConfigInvalid
+                | Self::ProtocolNegotiationFailed
         )
     }
 
@@ -237,6 +253,7 @@ impl FailureReason {
             Self::ConfigInvalid => "config_invalid",
             Self::Unreachable => "unreachable",
             Self::Crashed => "crashed",
+            Self::ProtocolNegotiationFailed => "protocol_negotiation_failed",
         }
     }
 }

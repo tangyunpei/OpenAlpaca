@@ -234,9 +234,11 @@ async fn test_registry_uses_key_rate_limit() {
 
 #[tokio::test]
 async fn test_registry_circuit_breaker() {
-    let mut config = RateLimitConfig::default();
-    config.circuit_breaker_threshold = 2;
-    config.circuit_breaker_recovery_secs = 60;
+    let config = RateLimitConfig {
+        circuit_breaker_threshold: 2,
+        circuit_breaker_recovery_secs: 60,
+        ..Default::default()
+    };
     let registry = RateLimiterRegistry::new(config);
 
     assert!(registry.check_circuit().await.is_ok());

@@ -61,8 +61,10 @@ pub enum Uninstalled {
 
 /// What a sweep's T4 may add on top of the T3 drain: the plugin half waits
 /// `CHILD_EXIT_TIMEOUT` (2 s) for a child to exit after `shutdown`, and the MCP
-/// half waits one `request_timeout` for `disconnect` to take the transport
-/// mutex. One bound covers the last straggler of either kind.
+/// half waits for `disconnect`'s close — at most `CLOSE_TIMEOUT` (5 s), a stdio
+/// server's graceful close up to 3 s — no longer for a call holding the
+/// transport mutex, which no call holds across its request since N-MCP-3. One
+/// bound covers the last straggler of either kind.
 const T4_BOUND: Duration = Duration::from_secs(2);
 
 /// What the sweep must leave behind for everything that shuts down **after** it

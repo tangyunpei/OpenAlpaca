@@ -21,8 +21,9 @@ pub(super) fn initialize_secret_store(
 
     if use_keychain {
         // Opt-in keychain mode: CachingSecretStore + prefetch
-        let caching =
-            openalpaca_llm::CachingSecretStore::new(Box::new(openalpaca_llm::KeyringSecretStore));
+        let caching = openalpaca_llm::CachingSecretStore::new(Box::new(
+            openalpaca_llm::KeyringSecretStore::native(),
+        ));
 
         let refs: Vec<String> = if llm_config_path.exists() {
             openalpaca_llm::read_config(llm_config_path)
@@ -65,7 +66,7 @@ pub(super) fn initialize_secret_store(
                     refs.len()
                 );
                 // Temporarily create a keyring store to read the secrets
-                let temp_keyring = openalpaca_llm::KeyringSecretStore;
+                let temp_keyring = openalpaca_llm::KeyringSecretStore::native();
                 match openalpaca_llm::reverse_migrate_llm_secrets(llm_config_path, &temp_keyring) {
                     Ok(0) => info!("No keys needed reverse migration"),
                     Ok(n) => info!(

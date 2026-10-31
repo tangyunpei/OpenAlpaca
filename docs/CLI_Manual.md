@@ -108,6 +108,7 @@ openalpaca llm status                        # shows which model will answer
 | [`store`](#store) | Projects: list them, re-point a moved one, delete one's data |
 | [`memory`](#memory) | Memory notes: list, search, add, edit, confirm, undo, forget, sync, doctor, adopt |
 | [`persona`](#persona) | `USER.md`: show it, edit it |
+| [`skills`](#skills) | The skill catalog and the problems its last scan found |
 | [`chat`](#chat) | Talk to the orchestrator |
 
 ### `daemon`
@@ -178,7 +179,7 @@ Which file is edited: the one in `OPENALPACA_CONFIG_DIR` when that names a direc
 - It **refuses while a daemon is running.** Stop it with `openalpaca daemon stop` first. Deleting a file the daemon has open would leave it writing into an unlinked inode while the next start created a second database beside it. The check is the daemon's own singleton lock, taken before the prompt and held until the files are gone, so a daemon that is still booting also refuses it, and a daemon started while the prompt is open — the app, or `daemon start` in another terminal — exits on the lock instead of opening the database. When the lock is held but no running daemon can be found — one still booting, or a lock file you cannot write (a daemon once run under `sudo` leaves `state/openalpacad.lock` owned by root) — it refuses with a message naming that file instead of telling you to stop a daemon that `openalpaca daemon stop` will not find.
 - It prints the absolute store root it is about to wipe — `OPENALPACA_HOME_STORE` may point anywhere — and the absolute paths of the `llm.toml` and `daemon.toml` it will clear, found the way `config set` finds them (above), so a run from a repository checkout names the checkout's own `./config/` files when that is where they resolve; a file that does not exist is named as none. It then requires you to type `factory-reset`. `y` is not enough, there is no `--yes` flag, and the prompt cannot be answered by a pipe: run it at a terminal.
 - **No backup is taken and there is no undo.**
-- **Not touched:** `state/memory-control/` (each memory partition's control snapshot — revisions, origins and the tombstones of forgotten notes), `state/cache/` (the memory search index, `memory-index-v1.sqlite`, which the next start opens as it is — a disposable cache, rebuilt in the background when it is missing, damaged, of another version or grown past twice its size after its last rebuild), `state/.master_key`, `state/logs/`, `state/backups/`, `config/mcp.toml`, `config/agents/`, `config/skills/`, `config/orchestrator/` (so `USER.md` stays as it is), and `~/.openalpaca/plugins/`.
+- **Not touched:** `state/memory-control/` (each memory partition's control snapshot — revisions, origins and the tombstones of forgotten notes), `state/cache/` (the memory search index, `memory-index-v1.sqlite`, which the next start opens as it is — a disposable cache, rebuilt in the background when it is missing, damaged, of another version or grown past twice its size after its last rebuild; and Open's copies under `open/`, which the next start sweeps), `state/editor/` (the files `memory add`, `memory edit` and `persona edit user` hand your editor, a refused or conflicting edit's text among them), `state/.master_key`, `state/logs/`, `state/backups/`, `config/mcp.toml`, `config/agents/`, `config/skills/`, `config/orchestrator/` (so `USER.md` stays as it is), and `~/.openalpaca/plugins/`.
 - **Left on disk, orphaned until adopted:** your memory notes under `memory/` and in each project's folder under `projects/`. The next start mints a new owner id, so `openalpaca memory doctor` lists the old partitions as orphaned; nothing reassigns them for you — `openalpaca memory adopt <owner-key>` re-binds them, finding each project's by the project's id.
 - **Left on disk, now unreferenced:** everything under `artifacts/`, `uploads/`, `sessions/`, `scratch/`, and each project's `projects/<name>/artifacts/` and `projects/<name>/uploads/`. The rows that indexed those files are gone; the bytes are not. Delete those directories yourself if you want the space back.
 - **A project's folder under `projects/` is not unreferenced.** Its `project.json` — the project's id and path — still registers it, so `store list` lists it and the next turn in that project uses the same folder, and its `memory/` holds the project's notes, which `openalpaca memory adopt` re-binds (above). Deleting the folder drops those notes.
@@ -254,7 +255,7 @@ Notes:
 `resume` is one word over two verbs:
 
 - On a **paused** run it is the plain transition back to running.
-- On an **interrupted** run it is *replay resume* — **experimental, and off by default**. The daemon rebuilds the run's loop history from its session log (its rounds and their tool results) and continues it under the same id, telling the model not to repeat side-effecting calls it already made. Nothing recorded is re-executed.
+- On an **interrupted** run it is *replay resume* — **experimental, and off by default**. The daemon rebuilds the run's loop history from its session log (the lead's rounds and their tool results) and continues it under the same id, telling the model not to repeat side-effecting calls it already made. The run's subagents come back too: one that finished is known again with its whole answer, kept beside the log, and one the stop interrupted is reported as interrupted, so the lead can collect the first and spawn the second again. Nothing recorded is re-executed.
 - Turn replay resume on with `resume_enabled = true` under `[orchestrator.routing]` in `daemon.toml`. Until then an interrupted run answers `RESUME_DISABLED`.
 - The other way to redo an interrupted run is a re-run: the GUI's `Re-run` button, or `POST /v1/tasks/{id}/rerun` directly. The CLI has no `rerun` verb yet.
 - A resume that finds no usable transcript (the sweep took the log) answers `RESUME_LOG_MISSING` and leaves the row exactly as it was.
@@ -387,11 +388,19 @@ openalpaca ext mcp remove <name>
 Notes:
 - `enable` writes the toggle and then loads; `disable` writes it, drains
   in-flight calls (`[extensions] drain_timeout_secs`, default 10 s) and unloads
-  — the plugin child is killed, the MCP connection dropped, no reconnect.
+  — the plugin child is killed, the MCP connection dropped (a stdio server's
+  whole process group with it), no reconnect.
 - `enable` on a plugin that has not been approved records the bit and leaves it
   `unapproved`: consent pre-empts the switch. `approve` records consent and
   does **not** turn the plugin on; `deny` refuses it and unloads it.
 - `reload` re-applies an edited declaration or a rotated credential.
+- `info` on a connected MCP server also prints `Protocol:` (the MCP version
+  its connection negotiated), `Connected in:` and `Tools listed in:` (how long
+  the connect and the first tool listing took); a connect of about 10 000 ms
+  is a server that ignored the `server/discover` probe, which
+  `protocol = "legacy"` in its `config/mcp.toml` block avoids. A row that
+  failed with reason `protocol_negotiation_failed` names in its detail the
+  `protocol` value to set.
 - `remove` drops the permissions entry of an *orphaned* plugin — one whose
   directory is gone. `list --include-orphaned` is how you see those.
 - `list` rows report `kind`, `id`, `enabled`, `state` (`enabled`, `disabled`,
@@ -427,6 +436,17 @@ and the count under the manifest covers them: they are the manifest's own name
 and capabilities. A warning `update` prints shows its control characters as
 `<U+XXXX>` and is not counted.
 
+Under the manifest, a `warning:` line names each key `plugin.toml` sets that
+OpenAlpaca does not read — a top-level `tool = true` is ignored, since the
+switch is `types.tools`, and the line says what the key likely meant — and says
+that `types.connector` (connectors are not supported) and `types.provider` (the
+plugin provider bridge is not wired) contribute nothing. A warning never
+refuses: `install --dry-run`, `install` and `update` print it, the
+`ext approve` row repeats it, and `ext info plugin <id>` says it for an
+installed plugin — one dropped in by hand included, before you approve it. The
+key is shown with its hidden characters as `<U+XXXX>`, as every manifest line
+is.
+
 ```bash
 openalpaca ext install ~/src/openalpaca-notion --dry-run   # parse and report only
 openalpaca ext install ~/src/openalpaca-notion
@@ -442,7 +462,16 @@ in-place replace is never allowed), the incumbent tree is moved to
 `plugins/.trash/`, the replacement is renamed into place, and the load path
 runs again. Consent survives an update whose declared capabilities are
 unchanged; if they changed, consent goes back to pending and the command says
-what the new version also asks for.
+what the new version also asks for. If the rename into place fails, the
+incumbent is moved back before the command reports the error, and the plugin
+comes back on its old tree under the consent it had (a decision the new
+version's capability change had dropped is put back with it); if the daemon
+dies between the two moves, its next start puts the old tree back (a one-line
+marker, `plugins/.staging/<id>.swap`, records where it went) and sweeps the
+staging copies the dead process left — a decision dropped before the crash
+stays dropped there, and `ext approve <id>` restores it. Either way the plugin
+is never left absent, and `ext remove` or `ext uninstall` of the plugin drops
+its marker, so nothing it ended is put back later.
 
 `uninstall <kind> <id>` is the real removal, and it **deletes nothing**: the
 plugin is unloaded, its `.permissions.toml` entry removed, and its directory
@@ -787,7 +816,8 @@ Notes:
   is kept. The save carries the revision that was fetched: if the note changed
   while the editor was open — the app, a chat turn, the extractor — the daemon
   answers `409`, the command prints both revisions and **keeps your text in a
-  named temp file** (`openalpaca-memory-<id8>-….md`); run `show`, merge, and edit
+  named temp file** (`openalpaca-memory-<id8>-….md` in `~/.openalpaca/state/editor/`,
+  where every file the editor opens is made); run `show`, merge, and edit
   again. An editor session that changes nothing sends nothing. An edit through
   this verb re-records the note as yours (`user`), whatever wrote it before.
   A note file holds at most 32 KiB, frontmatter included, so a read always
@@ -931,11 +961,45 @@ Notes:
   with the revision it fetched. If the file changed while the editor was open —
   the onboarding conversation's `update_persona`, or the app's Settings →
   Persona — the daemon answers `409 PERSONA_REVISION_CONFLICT`, the command
-  prints both revisions and **keeps your text in a named temp file**; merge and
-  edit again. An editor session that changes nothing sends nothing. A document
+  prints both revisions and **keeps your text in a named temp file** in
+  `~/.openalpaca/state/editor/`; merge and edit again. An editor session that changes nothing sends nothing. A document
   `update_persona` would refuse is `400 PERSONA_INVALID`.
 - `user` is the only document with an editor; `soul` and `identity` are refused
   by the argument parser.
+
+### `skills`
+
+The skills the daemon loaded from `config/skills/`, and every problem its last
+scan of that directory found, through `GET /v1/skills` and
+`GET /v1/skills/diagnostics`. Both are reads: a skill has no on/off switch.
+
+```bash
+openalpaca skills list                 # the catalog, then the problems
+openalpaca skills list --format json   # {"skills": [...], "diagnostics": [...]}
+openalpaca skills info review          # one skill, by id or slash command
+openalpaca skills info /review
+```
+
+Notes:
+- A problem is `error` when the daemon did not load the SKILL.md — at start-up
+  the skill is then missing; after an edit while the daemon runs, the skill
+  stays listed but does not run until the file is fixed (invoking it answers
+  with the error), and `info` says so — and `warning` when it read the file in
+  spite of the problem. The count line reads "3 problems in the
+  skill files (2 not loaded, 1 warning)". The codes: `read_failed` (unreadable, or not a
+  regular file — a FIFO or a directory named `SKILL.md`; a link you made to a
+  file is followed), `too_large` (over 256 KiB), `missing_frontmatter`,
+  `invalid_yaml` and `missing_field` (not loaded), and `unknown_key` (a top-level
+  key the daemon does not read — `require_capabilities` for
+  `requires_capabilities` leaves the skill with no tools), `deprecated_field`,
+  `id_mismatch` (the frontmatter's `id` is not the directory's name, which is
+  the id), `slash_conflict` (two skills claim one slash command; the one
+  named answers it) and `no_tools` (no `requires_capabilities`, `tools.allow`,
+  `scripts` or `depends_on`: the skill runs with no tools), warnings. Each line gives the file and the daemon's message.
+- `info` on a skill the daemon skipped says it is not loaded and shows why; a
+  name that is neither a loaded skill nor in the problems is an error.
+- The scan runs when the daemon starts, and a skill's problems are re-read when
+  its directory changes.
 
 ### `chat`
 

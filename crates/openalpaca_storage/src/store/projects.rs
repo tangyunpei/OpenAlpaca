@@ -168,7 +168,7 @@ fn name_parts(root: &Path) -> (String, bool) {
 /// The first [`NAME_HASH_HEX`] hex characters of SHA-256 over the root as
 /// written — truncated, never cut with a byte range.
 fn path_hash(root: &Path) -> String {
-    let mut hash = crate::memory_files::sha256_hex(root.to_string_lossy().as_bytes());
+    let mut hash = crate::hash::sha256_hex(root.to_string_lossy().as_bytes());
     hash.truncate(NAME_HASH_HEX);
     hash
 }

@@ -566,17 +566,19 @@ async fn an_open_never_follows_a_link_put_at_the_leaf_after_the_resolver_answere
 /// the project's root one level at a time. A level that is a file is
 /// refused, a root that is gone is refused with the missing project's
 /// sentence and never re-made, and a target outside the root makes nothing.
+/// Any other failure is worded by the caller's `other`.
 #[test]
 fn the_folders_above_a_target_are_made_below_the_root_and_never_the_root() {
     let gp = crate::test_util::GuardedProject::new();
     let root = gp.root.clone();
+    let other = |e: std::io::Error| format!("Failed to create directories: {e}");
 
-    make_parents_below("a/b/c.txt", &root, &root.join("a/b/c.txt")).unwrap();
+    make_parents_below("a/b/c.txt", &root, &root.join("a/b/c.txt"), other).unwrap();
     assert!(root.join("a/b").is_dir());
 
     std::fs::write(root.join("file"), "x").unwrap();
     let refused =
-        make_parents_below("file/d/e.txt", &root, &root.join("file/d/e.txt")).unwrap_err();
+        make_parents_below("file/d/e.txt", &root, &root.join("file/d/e.txt"), other).unwrap_err();
     assert!(
         refused.starts_with("Failed to create directories: "),
         "{refused}"
@@ -584,7 +586,7 @@ fn the_folders_above_a_target_are_made_below_the_root_and_never_the_root() {
 
     let elsewhere = tempfile::tempdir().unwrap();
     assert_eq!(
-        make_parents_below("x/y.txt", &root, &elsewhere.path().join("x/y.txt")).unwrap_err(),
+        make_parents_below("x/y.txt", &root, &elsewhere.path().join("x/y.txt"), other).unwrap_err(),
         "Path 'x/y.txt' resolves outside the workspace boundary"
     );
     assert!(!elsewhere.path().join("x").exists());
@@ -592,7 +594,7 @@ fn the_folders_above_a_target_are_made_below_the_root_and_never_the_root() {
     let away = tempfile::tempdir().unwrap();
     std::fs::rename(&root, away.path().join("app")).unwrap();
     assert_eq!(
-        make_parents_below("new/z.txt", &root, &root.join("new/z.txt")).unwrap_err(),
+        make_parents_below("new/z.txt", &root, &root.join("new/z.txt"), other).unwrap_err(),
         WorkingFolderRefusal::ProjectMissing {
             root: root.to_string_lossy().into_owned()
         }

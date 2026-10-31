@@ -21,6 +21,7 @@ pub use tools::{
     CheckSubagentStatusTool, PostUpdateTool, QueueFollowupTool, SpawnSubagentTool,
     SpawnSubagentsBatchTool, WaitForSubagentsTool,
 };
+pub use tools::{SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL};
 pub use tracker::{SubagentStatus, SubagentTracker};
 
 use crate::agent::subagent::SubAgent;
@@ -246,6 +247,16 @@ pub async fn run_lead_agent(
         lead_agent,
     )
     .max_cost;
+    // The same `<available_skills>` block the main loop gets (N-SKILL-1),
+    // read before the catalog moves into the tool.
+    let skills_catalog_block = skill_catalog.available_skills_block(
+        daemon_config
+            .load()
+            .orchestrator
+            .prompt_budgets
+            .skills_catalog_budget,
+        crate::orchestrator::skill_catalog::SkillsAudience::Lead,
+    );
     let invoke_skill_tool = Arc::new(crate::tools::builtins::InvokeSkillTool::new(
         skill_catalog,
         tool_registry.clone(),
@@ -259,14 +270,25 @@ pub async fn run_lead_agent(
 
     // 4. Build coordination tools with shared SubagentTracker, sized to the
     //    inline bound the lead's own loop applies to every tool result, so a
-    //    batch of eight answers reaches the lead as one in-bound summary (F2).
-    let tracker = Arc::new(SubagentTracker::with_inline_bytes(
-        daemon_config
-            .load()
-            .orchestrator
-            .sessions
-            .tool_result_inline_bytes,
-    ));
+    //    batch of eight answers reaches the lead as one in-bound summary (F2),
+    //    and told whether the run keeps a log a long answer spills to
+    //    (N-LEAD-3).
+    let tracker = Arc::new(
+        SubagentTracker::with_inline_bytes(
+            daemon_config
+                .load()
+                .orchestrator
+                .sessions
+                .tool_result_inline_bytes,
+        )
+        .with_log(session_log.is_some()),
+    );
+    // N-LEAD-4: a resumed run knows its subagents again — rebuilt from their
+    // lanes' records in the session log — so `check_subagent_status` and
+    // `wait_for_subagents` answer for them instead of "Unknown".
+    if let Some(history) = resume.as_ref() {
+        tracker.restore(&history.plan.subagents);
+    }
 
     // Resolve parent context bundle once, shared across all subagent spawns.
     // TODO: In future, resolve via context_manager.resolve() with LeadAgent path
@@ -452,6 +474,7 @@ pub async fn run_lead_agent(
                 .prompt_budgets
                 .user_profile_budget,
         ),
+        Some(&skills_catalog_block),
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {
@@ -737,6 +760,15 @@ pub async fn run_lead_agent(
     )
     .await;
 
+    // N-LEAD-1: nothing outlives the run. A lead that stopped on its round
+    // or cost cap, or past the wait's 600 s cap, may leave subagents queued
+    // or running — calling the model outside every cap, writing the
+    // project's files and raising cards nobody can reach with `/cancel` once
+    // the dispatcher has released the run's token. They are stopped here,
+    // before this returns, and each lane is closed as cancelled — "the run
+    // ended before this subagent finished" — which the run's report lists.
+    let stopped = spawn_tool.stop_subagents().await;
+
     let success = matches!(
         &result.finish_reason,
         crate::runner::LoopFinishReason::Complete
@@ -747,12 +779,13 @@ pub async fn run_lead_agent(
     let subagents_spawned = spawn_tool.spawn_count();
 
     tracing::info!(
-        "Lead agent '{}' finished task '{}': success={}, rounds={}, subagents_spawned={}, tokens={}/{}",
+        "Lead agent '{}' finished task '{}': success={}, rounds={}, subagents_spawned={}, subagents_stopped={}, tokens={}/{}",
         lead_agent.id,
         task_id,
         success,
         result.rounds_used,
         subagents_spawned,
+        stopped.len(),
         result.total_input_tokens,
         result.total_output_tokens,
     );

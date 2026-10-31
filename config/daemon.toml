@@ -90,6 +90,11 @@ turns_per_flush = 10
 [orchestrator.prompt_budgets]
 identity_budget = 300
 user_profile_budget = 1000
+# Characters of skill lines in <available_skills>, the skill catalog the main
+# loop and the lead agent are given (each line: id, /slash, description cut
+# at 100 characters). When the lines do not fit, every skill is listed by its
+# id alone — none is dropped. Range 100..=20000.
+skills_catalog_budget = 500
 
 [orchestrator.routing]
 # Routing V2: everything past the deterministic tier (slash task control,

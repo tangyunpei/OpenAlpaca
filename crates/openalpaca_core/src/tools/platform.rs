@@ -44,6 +44,14 @@ pub fn shown_output(kept: &[u8], stream: &str) -> String {
     text
 }
 
+/// What a command stopped at its time limit is told — by the shell's own
+/// bound and by the sandbox's cut alike (N-TOOL-4, Z1-13: the hint belongs to
+/// whoever enforced the limit, not to a guess the loop makes from the words).
+/// The message it follows names the limit; no tool takes a parameter that
+/// raises it (N-TOOL-1, Z1-05).
+pub const COMMAND_TIMED_OUT_HINT: &str = "Hint: that is the most a command may run here; split \
+    the work into smaller commands that each finish sooner.";
+
 /// Why [`run_bounded`] produced no output.
 #[derive(Debug)]
 pub enum RunFailure {

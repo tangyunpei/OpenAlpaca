@@ -227,6 +227,7 @@ Untouched:
   - {root}/state/cache/memory-index-v1.sqlite — the memory search index,
     checked and rebuilt on the next start
   - the rest of {root}/state/cache/
+  - {root}/state/editor/ — text a refused or conflicting CLI edit kept
   - {root}/state/.master_key
   - {root}/state/logs/
   - {root}/state/backups/

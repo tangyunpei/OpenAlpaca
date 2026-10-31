@@ -124,7 +124,7 @@ under `crates/openalpaca_core/src/`.
 | File | Purpose |
 |------|---------|
 | `runner/agentic_loop/mod.rs` | `run_agentic_loop()`, `run_agentic_loop_routed()`, the tool phase, spill planning |
-| `runner/agentic_loop/tool_helpers.rs` | `truncate_tool_result_to()`, `format_tool_error()`, `format_tool_error_with_hint()` (the head-and-tail cut is `head_tail()` in `utils/text.rs`) |
+| `runner/agentic_loop/tool_helpers.rs` | `truncate_tool_result_to()`, `format_tool_error()` (a recovery hint is each tool's own text; the head-and-tail cut is `head_tail()` in `utils/text.rs`) |
 | `runner/agentic_loop/config.rs` | `LoopConfig`, `LoopResult` |
 | `runner/agentic_loop/answer_guard.rs` | `AnswerGuard` — a last look at the finished answer (used by the chat loop) |
 | `runner/agentic_loop/backend.rs`, `context.rs`, `cost.rs` | LLM backend abstraction, loop state, `LoopCostAccumulator` |
@@ -396,7 +396,14 @@ extension events; `new()` is what tests use.  Both install the default
 ### Dispatch
 
 Both public execute methods funnel into one private `dispatch()`, so the
-extension gate is taken exactly once per call:
+extension gate is held exactly once per call.  Steps 1–3 are one private
+`admit()`, which the sandbox also asks through `precheck()` for every call on
+the confirm list, before the approval cache, `auto_approve` or a card answers
+it (N-TOOL-2): a call dispatch would refuse — arguments its schema refuses, a
+tool whose extension is not enabled — is refused with dispatch's own words and
+raises no card.  `precheck()` gives the gate's guard back before it returns;
+dispatch takes it again.  A new refusal added to `admit()` reaches both; one
+added after it, in dispatch alone, is met only after the click.
 
 1. Look the tool up.  On a **miss**, ask the ledger who used to own the
    name; if that extension is not enabled, return its attributed refusal.
@@ -413,7 +420,16 @@ extension gate is taken exactly once per call:
 
 ### Argument Validation
 
-Before executing, `validate_tool_arguments()` performs:
+`admit()`'s last step is `check_arguments()` (N-TOOL-5).  It first refuses
+the stand-in (`UnreadableArguments`) that `openalpaca_llm`'s reader puts in
+place of arguments a provider sent that could not be read — the reader has
+already warned once, with the tool, the byte length and the problem, never the
+text.  The refusal names the problem and the length, and the call never runs
+with `{}`, whatever its schema accepts.  It decodes nothing: only the provider
+layer reads a JSON string as the object it holds, before the sandbox's
+sanitizer; a string that reaches the registry by another path stays a string,
+because the sanitizer checked only its outer text.  Then
+`validate_tool_arguments()` performs:
 
 1. **Root type check:** If schema specifies `"type": "object"`, args must be an object.
 2. **Required fields:** All entries in `"required"` array must be present.
@@ -421,6 +437,13 @@ Before executing, `validate_tool_arguments()` performs:
    (`string`, `number`, `integer`, `boolean`, `array`, `object`, `null`).
 4. **Enum constraints:** If a property schema declares `"enum": [...]`, the
    argument value must be one of the listed values.
+
+Every problem is reported in one result: a single problem keeps its sentence
+(`Tool 'x': missing required parameter 'path'`); several read `Tool 'x': the
+arguments have N problems: a; b; c`, the missing parameters first, then each
+parameter of the wrong type or outside its enum.  A root that is not an
+object is the one problem reported alone.  Parameters the schema does not
+name are not refused.
 
 This is not a full JSON Schema validator — it catches the most common
 argument errors early with clear messages.
@@ -830,7 +853,7 @@ why custom TOML tools may not use the four coordination names.
 
 | Tool | Parameters | Notes |
 |------|-----------|-------|
-| `spawn_subagent` | `agent_id`, `objective` (both required) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency semaphore sized by `max_concurrent_subagents` (waits up to 30 s for a slot) |
+| `spawn_subagent` | `agent_id`, `objective` (both required) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency bound `max_concurrent_subagents`: past it the subagent is registered `queued`, its `run_id` returned at once, and it starts when a slot frees (N-LEAD-2, 2026-10-17) |
 | `spawn_subagents_batch` | `subagents`: 1–8 × `{agent_id, objective}` | Registered when `execution.lead_agent_defaults.batch_spawn_enabled` (default `true`); more than 8 items is an error |
 | `check_subagent_status` | `subagent_run_id` (required) | `exempt_from_timeout: true` |
 | `wait_for_subagents` | none | Blocks until every spawned subagent finishes, or returns early when the user steers the run. `exempt_from_timeout: true` |
@@ -1060,7 +1083,13 @@ depends on the registry dropping the last reference.
 
 - Registered name is **namespaced**: `<server_name>__<remote_name>`
   (e.g. `fs__read_file`) so MCP tools cannot collide with built-ins or
-  other servers.
+  other servers, mapped by `mcp_tool_name()` into the providers' alphabet
+  `[A-Za-z0-9_-]` (any other character becomes `_`) and capped at 64
+  characters in all (past that the remote part ends in `_` and 8 hex
+  digits of its SHA-256); the backend keeps the raw remote name for the
+  call. `map_tool_list()` maps one server's list before registration: of
+  two tools that map to one name the first listed is kept, with a warning
+  naming both.
 - `author = "mcp:<server>"`; `version` comes from the server's reported
   version; `annotations` are taken from the server's tool metadata;
   `exempt_from_timeout` is always `false`; `provides_capabilities` is the
@@ -1083,9 +1112,22 @@ depends on the registry dropping the last reference.
   and ruling X-36 fixes their lifecycle in advance: once added, a server's
   resources and prompts are discovered, registered and withdrawn by the same
   supervisor, under the same toggle, as its tools.
-- Retriable transport errors trigger the client's internal
-  reconnect/retry loop (`max_reconnect_attempts`, exponential backoff).  A
-  client sealed by a disable does not reconnect.
+- A call whose transport has closed (a stdio child that exited since the
+  last call) reconnects once, before it is sent, inside the call's one
+  deadline; a call that may have reached the server is never sent again —
+  its timeout or error goes back to the caller.  `max_reconnect_attempts`
+  consecutive reconnects with no successful call between them (exponential
+  backoff) end in `ReconnectExhausted`.  A client sealed by a disable does
+  not reconnect.
+- A stdio child's exit is learned at once (N-MCP-1b): an exit observer on
+  every spawn (`transport/stdio.rs`, `ReportExit`) hands the client the
+  status the process's wait returned, the client reports it as
+  `ConnectionEvent::Exited` unless it is sealed, and the supervisor's
+  receiver runs `ExtensionLedger::mark_exited` — the row `Failed{Crashed}`,
+  its detail the status, announced once, not reaped, the gate still
+  admitting calls (`admits_calls`).  The next call's reconnect, on success,
+  is `ConnectionEvent::Reconnected` and `mark_recovered` (back to `Enabled`,
+  same generation); `ReconnectExhausted` takes the row to the reaper.
 
 ---
 
@@ -1549,6 +1591,21 @@ The stub, from `spill_stub()`:
 [full result: result_ref=file:results/<file> — use read_result to page]
 ```
 
+A command's — `shell_execute` or a `Command`-backend tool
+(`ToolRegistry::is_command_tool`) — from `command_spill_stub()`, its head
+and tail at the budget an error result gets (N-TOOL-7):
+
+```text
+[result too large: <N> bytes; its head and tail follow]
+<head_tail(result, tool_result_inline_bytes)>
+[full result: result_ref=file:results/<file> — use read_result to page]
+```
+
+Its `tool_result` record carries `stub: {"form": "head_tail", "budget": <bytes>}`
+(`command_stub_marker()`), since the record keeps only the head's preview: a
+resumed run's replay (`session_log::replay`) rebuilds the same stub from the
+`results/` file, checked against the record's `bytes` and `sha256`.
+
 `read_result(result_ref, offset?, limit?)` pages the file back in.  It is a
 **grant, not ambient**: the chat loop offers it when the daemon has a
 session log and a database; the lead and subagents get it when their
@@ -1578,21 +1635,27 @@ elided.
 ```rust
 pub(super) fn format_tool_error(msg: &str) -> String
 // Returns: "[tool_error] {msg}"
-
-pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String
-// Returns the same line, plus a "Hint: …" line when one applies
 ```
 
-**Recovery hints by tool:**
+Whether a call failed is the call's own `Err`, carried on the tool-result
+message as `ChatMessage::is_error` (`ChatMessage::tool_error`); the loop
+never reads it off the text. The Anthropic provider sends it as the
+`tool_result` block's `is_error`; the OpenAI-compatible wire has no such
+field, so there the `[tool_error]` mark on the text says it (the text keeps
+the mark on every wire). A session-log replay restores the flag from the
+record's `ok`.
 
-| Tool | Error Pattern | Hint |
-|------|--------------|------|
-| `file_read` | "not found" / "No such file" | paths are relative to the working folder; file_list shows what a folder holds |
-| `file_write` | "Permission denied" | check file permissions or try a different output path |
-| `web_fetch` | "404" / "not found" | use web_search to find the correct URL first |
-| `web_fetch` | "timeout" | the URL may be unreachable; try a different source |
-| `shell_execute` | "timed out" | break the command into smaller steps or increase timeout |
-| `shell_execute` | "not found" | check if the command is installed or use the full path |
+**Recovery hints are the failing tool's own text** (N-TOOL-4), added where
+the failure is known — the loop adds none:
+
+| Tool | When | Hint |
+|------|------|------|
+| `file_read` | the path names nothing (checked after the path's shape passed) | paths are relative to the working folder; file_list shows what a folder holds |
+| `file_write` | the system refuses the write (`PermissionDenied`), on the file or on a folder it makes above it | check the file's permissions, or write it under another path |
+| `web_fetch` | HTTP 404 | use web_search to find the correct URL first |
+| `web_fetch` | the request or the body read ran out of time | the URL may be unreachable; try a different source |
+| `shell_execute`, `Command` tools | cut at the sandbox's limit, or the shell's own 300 s | that is the most a command may run here; split the work into smaller commands that each finish sooner (`tools::platform::COMMAND_TIMED_OUT_HINT`) |
+| `shell_execute` | exit 127 | check that the command is installed, or give its full path |
 
 ---
 

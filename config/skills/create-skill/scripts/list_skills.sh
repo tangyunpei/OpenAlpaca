@@ -36,10 +36,27 @@ scan_dir() {
     local skill_id
     skill_id="$(basename "$skill_dir")"
 
-    # Extract name and slash from frontmatter (simple grep)
-    local name slash
-    name="$(grep -m1 '^name:' "$skill_md" 2>/dev/null | sed 's/^name: *//' | sed 's/^"//' | sed 's/"$//' || echo "$skill_id")"
-    slash="$(grep -m1 'slash:' "$skill_md" 2>/dev/null | sed 's/.*slash: *//' | sed 's/^"//' | sed 's/"$//' || echo "/$skill_id")"
+    # Name and slash from the frontmatter only: the lines after the opening
+    # `---` up to the first line that is `---` and nothing else, as the
+    # daemon's parser delimits it (one leading BOM and CRs dropped), with
+    # `slash` read only as `invoke:`'s own key — never a `slash:` in the body
+    # or under another key. The daemon's catalog stays the reader of record
+    # (`openalpaca skills list`); this is the conflict hint the wizard shows.
+    local fields name slash
+    fields="$(awk '
+      NR == 1 { sub(/^\357\273\277/, "") }
+      { sub(/\r$/, "") }
+      !open { if ($0 ~ /^[ \t]*$/) next; if ($0 !~ /^[ \t]*---/) exit; open = 1; next }
+      /^---[ \t]*$/ { exit }
+      /^[^ \t#]/ { section = $0; sub(/:.*/, "", section) }
+      /^name:/ { name = $0; sub(/^name:[ \t]*/, "", name) }
+      section == "invoke" && /^[ \t]+slash:/ { slash = $0; sub(/^[ \t]+slash:[ \t]*/, "", slash) }
+      END { print name; print slash }
+    ' "$skill_md" 2>/dev/null || true)"
+    name="$(printf '%s\n' "$fields" | sed -n 1p | sed 's/^["'"'"']//; s/["'"'"']$//')"
+    slash="$(printf '%s\n' "$fields" | sed -n 2p | sed 's/^["'"'"']//; s/["'"'"']$//')"
+    [[ -n "$name" ]] || name="$skill_id"
+    [[ -n "$slash" ]] || slash="/$skill_id"
 
     if [[ "$FIRST" == "true" ]]; then
       FIRST=false

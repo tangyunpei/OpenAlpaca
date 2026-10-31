@@ -180,10 +180,11 @@ fn test_catalog_summary() {
 
     let summary = catalog.catalog_summary();
     assert_eq!(summary.len(), 2);
-    // Sorted by name
-    assert_eq!(summary[0].0, "Code Review");
-    assert_eq!(summary[1].0, "Explain Code");
-    assert_eq!(summary[0].2, Some("review".to_string()));
+    // Sorted by name, each row carrying the id `invoke_skill` resolves.
+    assert_eq!(summary[0].name, "Code Review");
+    assert_eq!(summary[1].name, "Explain Code");
+    assert_eq!(summary[0].id, "code-review");
+    assert_eq!(summary[0].command, Some("review".to_string()));
 }
 
 #[test]
@@ -766,6 +767,7 @@ invoke:
   aliases:
     - "/forget"
     - "/jot"
+requires_capabilities: [file_read]
 ---
 
 ## Instructions
@@ -786,7 +788,7 @@ fn a_skill_claiming_a_reserved_slash_name_loads_with_one_warn() {
     create_skill_dir(
         tmp.path(),
         "memories",
-        "---\nname: \"Scrapbook\"\ndescription: \"By id only\"\n---\n\nEcho.\n",
+        "---\nname: \"Scrapbook\"\ndescription: \"By id only\"\nrequires_capabilities: [file_read]\n---\n\nEcho.\n",
     );
 
     let catalog = SkillCatalog::new();

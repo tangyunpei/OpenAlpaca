@@ -11,6 +11,9 @@
 #   provider/info → the contents of ./provider-info.json when the plugin
 #                 directory holds one (a provider_name and a models list),
 #                 otherwise an empty result
+#   agent/info  → the contents of ./agent-info.json when the plugin directory
+#                 holds one (an agent template id, say), otherwise an empty
+#                 result (the daemon then defaults the id to the plugin's own)
 #   everything else → an empty result
 
 while true; do
@@ -75,6 +78,11 @@ elif method == 'provider/info' and os.path.exists('provider-info.json'):
     # Same shape for the provider probe: a test that needs the supervisor to
     # record models drops a {"provider_name": …, "models": [{"id": …}]} here.
     with open('provider-info.json') as f:
+        resp = {'jsonrpc': '2.0', 'id': mid, 'result': json.load(f)}
+elif method == 'agent/info' and os.path.exists('agent-info.json'):
+    # And for the agent probe: a test that needs a plugin to claim a given
+    # template id drops an object naming that id here.
+    with open('agent-info.json') as f:
         resp = {'jsonrpc': '2.0', 'id': mid, 'result': json.load(f)}
 else:
     resp = {'jsonrpc': '2.0', 'id': mid, 'result': {}}

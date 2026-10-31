@@ -2,21 +2,123 @@
 //!
 //! - [`rmcp_tool_to_registered`] — wrap a discovered `rmcp::Tool` as a
 //!   [`RegisteredTool`] with a [`ToolBackend::Mcp`] backend.
+//! - [`mcp_tool_name`] / [`map_tool_list`] — the registry name of a remote
+//!   tool, in the providers' alphabet, and one server's list mapped with its
+//!   collisions resolved (N-MCP-4).
 //! - [`serialize_call_result`] — flatten a `CallToolResult` into the
 //!   `Result<String, String>` shape the rest of the tool-call path consumes.
 
 use std::sync::Arc;
 
-use openalpaca_mcp::{CallToolResult, McpClient, RawContent, Tool};
+use openalpaca_mcp::{CallToolResult, ContentBlock, McpClient, Tool};
 
 use crate::tools::registry::{RegisteredTool, ToolBackend};
+
+/// The longest tool name every provider accepts: OpenAI's documented limit
+/// for a function name ("a-z, A-Z, 0-9, or contain underscores and dashes,
+/// with a maximum length of 64"; `openai-openapi` `FunctionObject.name`).
+/// Anthropic's is `^[a-zA-Z0-9_-]{1,128}$` (Messages API, tool `name`); Ollama
+/// documents none. The alphabet is the same for both.
+pub const PROVIDER_TOOL_NAME_MAX: usize = 64;
+
+/// The registry name of remote tool `remote_name` on server `server_name`:
+/// `<server_name>__<remote_name>` with every character outside
+/// `[A-Za-z0-9_-]` replaced by `_`, capped at [`PROVIDER_TOOL_NAME_MAX`]
+/// (N-MCP-4). A name already in the alphabet and within the cap is returned
+/// unchanged, so a template or skill naming it keeps matching.
+///
+/// Past the cap the remote half keeps its first characters and ends in `_`
+/// plus the first 8 hex digits of the SHA-256 of the **raw** remote name, so
+/// two long names sharing a prefix stay two names. The call itself always
+/// goes to the server under the raw name (the backend's `remote_name`).
+///
+/// Server names are `^[a-zA-Z][a-zA-Z0-9_-]{0,30}$` (`McpConfig::parse`), so
+/// at least 22 characters of the remote half survive the cap.
+pub fn mcp_tool_name(server_name: &str, remote_name: &str) -> String {
+    let mapped: String = remote_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let full = format!("{server_name}__{mapped}");
+    if full.len() <= PROVIDER_TOOL_NAME_MAX {
+        return full;
+    }
+    let digest = openalpaca_storage::hash::sha256_hex(remote_name.as_bytes());
+    let suffix = &digest[..8];
+    // `mapped` is ASCII by construction, so any byte index is a char boundary.
+    let keep = PROVIDER_TOOL_NAME_MAX
+        .saturating_sub(server_name.len() + 2 + 1 + suffix.len())
+        .min(mapped.len());
+    format!("{server_name}__{}_{suffix}", &mapped[..keep])
+}
+
+/// One server's tool list under its registry names, in the server's order.
+pub struct MappedTools {
+    /// `(registry name, tool)` — the first tool to claim each name.
+    pub tools: Vec<(String, Tool)>,
+    /// Every later tool whose name mapped onto one already claimed.
+    pub collisions: Vec<NameCollision>,
+}
+
+/// Two remote names of one server that map to the same registry name.
+pub struct NameCollision {
+    pub registry_name: String,
+    /// The raw remote name that keeps it (listed first).
+    pub kept: String,
+    /// The raw remote name that is not registered.
+    pub dropped: String,
+}
+
+/// Map one server's list with [`mcp_tool_name`], **before** anything is
+/// registered: of two remote names that map to the same registry name the
+/// first listed is kept and the other is left out with a warning naming both
+/// originals (N-MCP-4). Without this the second would replace the first in
+/// the registry — the case-13 rule skips only another extension's incumbent
+/// (`McpSupervisor::is_live_incumbent`).
+pub fn map_tool_list(server_name: &str, tools: Vec<Tool>) -> MappedTools {
+    let mut claimed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut mapped = MappedTools {
+        tools: Vec::new(),
+        collisions: Vec::new(),
+    };
+    for tool in tools {
+        let raw = tool.name.to_string();
+        let name = mcp_tool_name(server_name, &raw);
+        if let Some(kept) = claimed.get(&name) {
+            tracing::warn!(
+                server = %server_name,
+                tool = %name,
+                kept = %kept,
+                dropped = %raw,
+                "two MCP tools map to one name; keeping the first listed"
+            );
+            mapped.collisions.push(NameCollision {
+                registry_name: name,
+                kept: kept.clone(),
+                dropped: raw,
+            });
+            continue;
+        }
+        claimed.insert(name.clone(), raw);
+        mapped.tools.push((name, tool));
+    }
+    mapped
+}
 
 /// Convert an rmcp `Tool` (discovered via `McpClient::list_tools`) into a
 /// [`RegisteredTool`] with a [`ToolBackend::Mcp`] backend.
 ///
 /// The registered definition uses the namespaced name
-/// `<server_name>__<remote_name>` so MCP-provided tools can't collide with
-/// built-ins or with tools from other servers.
+/// `<server_name>__<remote_name>`, mapped into the providers' alphabet by
+/// [`mcp_tool_name`], so MCP-provided tools can't collide with built-ins or
+/// with tools from other servers; the backend keeps the raw remote name for
+/// the call.
 ///
 /// `generation` is the load this handle belongs to — the number E0 handed the
 /// supervisor (extension design §3.0 Fact 3). This is the **single** production
@@ -31,7 +133,7 @@ pub fn rmcp_tool_to_registered(
     generation: u64,
 ) -> RegisteredTool {
     let remote_name = tool.name.to_string();
-    let namespaced_name = format!("{server_name}__{remote_name}");
+    let namespaced_name = mcp_tool_name(server_name, &remote_name);
 
     let description = tool
         .description
@@ -87,9 +189,9 @@ pub fn serialize_call_result(result: CallToolResult) -> Result<String, String> {
         if !buf.is_empty() {
             buf.push('\n');
         }
-        match &content.raw {
-            RawContent::Text(t) => buf.push_str(&t.text),
-            RawContent::Image(_) => {
+        match content {
+            ContentBlock::Text(t) => buf.push_str(&t.text),
+            ContentBlock::Image(_) => {
                 buf.push_str(
                     "[image content omitted — P2 does not yet surface non-text MCP content]",
                 );
@@ -106,23 +208,26 @@ pub fn serialize_call_result(result: CallToolResult) -> Result<String, String> {
     Ok(buf)
 }
 
-fn content_kind_name(c: &RawContent) -> &'static str {
+fn content_kind_name(c: &ContentBlock) -> &'static str {
     match c {
-        RawContent::Text(_) => "text",
-        RawContent::Image(_) => "image",
-        RawContent::Audio(_) => "audio",
-        RawContent::Resource(_) => "resource",
-        RawContent::ResourceLink(_) => "resource_link",
+        ContentBlock::Text(_) => "text",
+        ContentBlock::Image(_) => "image",
+        ContentBlock::Audio(_) => "audio",
+        ContentBlock::Resource(_) => "resource",
+        ContentBlock::ResourceLink(_) => "resource_link",
+        // `ContentBlock` is `#[non_exhaustive]` since rmcp 3; a block kind a
+        // later rmcp adds still reaches the model as a placeholder.
+        _ => "unknown",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openalpaca_mcp::Content;
+    use openalpaca_mcp::ContentBlock;
 
-    fn text_content(s: &str) -> Content {
-        Content::text(s.to_string())
+    fn text_content(s: &str) -> ContentBlock {
+        ContentBlock::text(s.to_string())
     }
 
     #[test]
@@ -206,6 +311,103 @@ mod tests {
         let defs = resolve_agent_tools(&agent, &registry, None);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "srv__echo");
+    }
+
+    fn backend_remote_name(registered: &RegisteredTool) -> &str {
+        match &registered.backend {
+            ToolBackend::Mcp { remote_name, .. } => remote_name,
+            _ => panic!("an MCP tool has an MCP backend"),
+        }
+    }
+
+    /// N-MCP-4: the registry name is in the providers' alphabet; the call goes
+    /// to the server under the name it gave.
+    #[test]
+    fn a_remote_name_outside_the_alphabet_registers_under_the_mapped_name_and_calls_with_the_raw_one()
+     {
+        let client = Arc::new(McpClient::disconnected_for_tests("srv"));
+        let tool = Tool::new("read.file", "Read a file", serde_json::Map::new());
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
+        assert_eq!(registered.definition.name, "srv__read_file");
+        assert_eq!(
+            registered.provides_capabilities,
+            vec!["srv__read_file".to_string()]
+        );
+        assert_eq!(backend_remote_name(&registered), "read.file");
+    }
+
+    /// N-MCP-4: a name the providers already accept is left exactly as it was,
+    /// so a template naming it keeps matching.
+    #[test]
+    fn a_name_already_in_the_alphabet_is_unchanged() {
+        let client = Arc::new(McpClient::disconnected_for_tests("srv"));
+        let tool = Tool::new("Read_file-2", "Read a file", serde_json::Map::new());
+        let registered = rmcp_tool_to_registered("srv", "1.0", tool, client, 0);
+        assert_eq!(registered.definition.name, "srv__Read_file-2");
+        assert_eq!(backend_remote_name(&registered), "Read_file-2");
+    }
+
+    /// N-MCP-4: the combined name fits the strictest provider's 64-character
+    /// limit, and two long names that share a prefix stay distinct.
+    #[test]
+    fn a_combined_name_past_64_characters_is_capped_and_stays_distinct() {
+        let long_a = format!("{}_alpha", "x".repeat(80));
+        let long_b = format!("{}_beta", "x".repeat(80));
+        let names: Vec<String> = [long_a.as_str(), long_b.as_str()]
+            .iter()
+            .map(|remote| {
+                let client = Arc::new(McpClient::disconnected_for_tests("filesystem"));
+                let tool = Tool::new(remote.to_string(), "long", serde_json::Map::new());
+                let registered = rmcp_tool_to_registered("filesystem", "1.0", tool, client, 0);
+                assert_eq!(
+                    backend_remote_name(&registered),
+                    *remote,
+                    "the call keeps the raw name"
+                );
+                registered.definition.name
+            })
+            .collect();
+        for name in &names {
+            assert!(name.len() <= 64, "{name} is {} characters", name.len());
+            assert!(name.starts_with("filesystem__xxx"), "{name}");
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "{name}"
+            );
+        }
+        assert_ne!(
+            names[0], names[1],
+            "two long names must not collapse into one"
+        );
+    }
+
+    /// N-MCP-4: `read.file` beside `read_file` — the first keeps the name,
+    /// the second is left out, and the warning names both originals.
+    #[tracing_test::traced_test]
+    #[test]
+    fn read_file_beside_read_dot_file_keeps_the_first_and_warns_naming_both() {
+        let tools = vec![
+            Tool::new("read.file", "first", serde_json::Map::new()),
+            Tool::new("read_file", "second", serde_json::Map::new()),
+            Tool::new("list", "unrelated", serde_json::Map::new()),
+        ];
+        let mapped = map_tool_list("srv", tools);
+        let names: Vec<(&str, &str)> = mapped
+            .tools
+            .iter()
+            .map(|(name, tool)| (name.as_str(), tool.name.as_ref()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("srv__read_file", "read.file"), ("srv__list", "list")]
+        );
+        assert_eq!(mapped.collisions.len(), 1);
+        assert_eq!(mapped.collisions[0].kept, "read.file");
+        assert_eq!(mapped.collisions[0].dropped, "read_file");
+        assert!(logs_contain("two MCP tools map to one name"));
+        assert!(logs_contain("kept=read.file"));
+        assert!(logs_contain("dropped=read_file"));
     }
 
     #[test]

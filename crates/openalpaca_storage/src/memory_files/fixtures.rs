@@ -14,6 +14,7 @@
 //! `@rev:` and `@derived` is read back through the library.
 
 use super::*;
+use crate::hash::sha256_hex;
 use crate::store::tests::HomeStoreGuard;
 use crate::store::{ContentKind, StoreScope, content_dir};
 use chrono::{DateTime, Utc};

@@ -17,6 +17,7 @@ pub mod memory;
 pub mod persona;
 pub mod plugin;
 pub mod sessions;
+pub mod skills;
 mod llm_keys;
 mod llm_status;
 pub mod status;

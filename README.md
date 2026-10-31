@@ -24,10 +24,10 @@ These steps build from source and end with a first reply. To package and install
 
 ### 1. Prerequisites
 
-- **Rust** through [rustup](https://rustup.rs). The repo pins 1.93.0 in `rust-toolchain.toml`; rustup fetches it on the first build.
+- **Rust** through [rustup](https://rustup.rs). The repo pins 1.99.1 in `rust-toolchain.toml`; rustup fetches it on the first build.
 - **A model:** [Ollama](https://ollama.com) running locally, or an Anthropic or OpenAI API key.
-- **[Bun](https://bun.sh)**, only for the desktop app (step 6).
-- Linux only: `sudo apt-get install -y libdbus-1-dev pkg-config`. The desktop app also needs [Tauri's system libraries](https://tauri.app/start/prerequisites/).
+- **[Bun](https://bun.sh)** 1.4.3 (the version the root `package.json` pins), only for the desktop app (step 6).
+- Linux only: `sudo apt-get install -y pkg-config`. The desktop app also needs `libdbus-1-dev` and [Tauri's system libraries](https://tauri.app/start/prerequisites/).
 
 ### 2. Build
 
@@ -204,11 +204,12 @@ cd apps/openalpaca-gui && bun install
 bun run check && bun run test && bun run format:check && bun run build
 ```
 
-- A bare `cargo build` or `cargo test` covers the library crates only. Name the apps with `-p`, or use `--workspace`.
-- CI (`.github/workflows/ci.yml`) has three jobs: the Rust build, tests and clippy above; the four `bun run` gates; and the Windows install-script tests.
+- A bare `cargo build` or `cargo test` covers what `--workspace --exclude openalpaca_gui` does: `default-members` is every member but the desktop shell, both apps included. Check the shell in its own `target/gui`, as [apps/openalpaca-gui/README.md](apps/openalpaca-gui/README.md) says.
+- CI (`.github/workflows/ci.yml`) has four jobs: the Rust build, tests and clippy above, run `--locked` on the toolchain `rust-toolchain.toml` pins; the four `bun run` gates under the Bun the root `package.json` pins; the Windows install-script tests on Pester 6.2.0; and a tooling job — the scripts' tests, `gen_api_docs.py --check` and the repository-policy guard `scripts/repo_policy.py` — on Python 3.9.25, the scripts' floor. Its actions are pinned by commit SHA.
+- Advisories (`.github/workflows/audit.yml`), on every pull request, every push to `main` and weekly: cargo-deny checks the crates the workspace resolves to (not every `Cargo.lock` entry) against RustSec, the licence allow list and crates.io as the only source (`deny.toml`); cargo-audit, run by hand from the root, reads the whole lock with the same ignores (`.cargo/audit.toml`); and `bun audit` checks `bun.lock`. The owner answers a red run: a lock refresh, a bump, or an ignore with its reason.
 - To run the daemon in the foreground on the repo's own config, use `OPENALPACA_CONFIG_DIR="$PWD/config" cargo run -p openalpacad`. Export the same variable for the CLI, so `openalpaca config set` edits the same files.
 - `docs/api/` is generated. Run `python3 scripts/gen_api_docs.py`; never edit it by hand.
-- Toolchain: Rust 1.93.0. Frontend: Bun, TypeScript 7, React 19, Vite 7, Tailwind 4, Vitest 4.
+- Toolchain: Rust 1.99.1. Frontend: Bun 1.4.3, TypeScript 7, React 19, Vite 8, Tailwind 4, Vitest 5.
 
 ## Status and limitations
 

@@ -1,0 +1,580 @@
+diff --git a/apps/openalpacad/src/managers/mcp.rs b/apps/openalpacad/src/managers/mcp.rs
+--- a/apps/openalpacad/src/managers/mcp.rs
++++ b/apps/openalpacad/src/managers/mcp.rs
+@@ -2312,11 +2312,7 @@ fn build_client_config(
+     Ok(McpClientConfig {
+         server_name: server_name.to_string(),
+         transport,
+-        client_info: Implementation {
+-            name: "openalpaca-mcp".to_string(),
+-            version: env!("CARGO_PKG_VERSION").to_string(),
+-            ..Default::default()
+-        },
++        client_info: Implementation::new("openalpaca-mcp", env!("CARGO_PKG_VERSION")),
+         request_timeout,
+         max_reconnect_attempts: defaults.max_reconnect_attempts,
+         reconnect_backoff_ms: defaults.reconnect_backoff_ms,
+diff --git a/apps/openalpacad/src/routes/tools/tests.rs b/apps/openalpacad/src/routes/tools/tests.rs
+--- a/apps/openalpacad/src/routes/tools/tests.rs
++++ b/apps/openalpacad/src/routes/tools/tests.rs
+@@ -30,10 +30,7 @@ fn mcp_tool(server: &str, name: &str) -> RegisteredTool {
+         },
+         provides_capabilities: vec![name.to_string()],
+         exempt_from_timeout: false,
+-        annotations: Some(openalpaca_mcp::ToolAnnotations {
+-            destructive_hint: Some(true),
+-            ..Default::default()
+-        }),
++        annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(true)),
+         version: "1.4.0".to_string(),
+         author: format!("mcp:{server}"),
+         created_at: chrono::Utc::now(),
+diff --git a/crates/openalpaca_core/src/security/sandbox/tests.rs b/crates/openalpaca_core/src/security/sandbox/tests.rs
+--- a/crates/openalpaca_core/src/security/sandbox/tests.rs
++++ b/crates/openalpaca_core/src/security/sandbox/tests.rs
+@@ -758,10 +758,7 @@ fn make_registry_with_destructive() -> Arc<ToolRegistry> {
+             backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+             provides_capabilities: vec![],
+             exempt_from_timeout: false,
+-            annotations: Some(openalpaca_mcp::ToolAnnotations {
+-                destructive_hint: Some(true),
+-                ..Default::default()
+-            }),
++            annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(true)),
+             version: "test-0.0.0".into(),
+             author: "test".into(),
+             created_at: chrono::Utc::now(),
+@@ -780,10 +777,7 @@ fn make_registry_with_destructive() -> Arc<ToolRegistry> {
+             backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+             provides_capabilities: vec![],
+             exempt_from_timeout: false,
+-            annotations: Some(openalpaca_mcp::ToolAnnotations {
+-                destructive_hint: Some(false),
+-                ..Default::default()
+-            }),
++            annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(false)),
+             version: "test-0.0.0".into(),
+             author: "test".into(),
+             created_at: chrono::Utc::now(),
+diff --git a/crates/openalpaca_core/src/tools/builtins/mod.rs b/crates/openalpaca_core/src/tools/builtins/mod.rs
+--- a/crates/openalpaca_core/src/tools/builtins/mod.rs
++++ b/crates/openalpaca_core/src/tools/builtins/mod.rs
+@@ -660,54 +660,44 @@ pub fn approval_is_per_call(name: &str) -> bool {
+ }
+ 
+ fn read_only_annotations() -> openalpaca_mcp::ToolAnnotations {
+-    openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(false),
+-        read_only_hint: Some(true),
+-        idempotent_hint: Some(true),
+-        open_world_hint: Some(false),
+-        ..Default::default()
+-    }
++    openalpaca_mcp::ToolAnnotations::new()
++        .destructive(false)
++        .read_only(true)
++        .idempotent(true)
++        .open_world(false)
+ }
+ 
+ fn read_only_open_world_annotations() -> openalpaca_mcp::ToolAnnotations {
+-    openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(false),
+-        read_only_hint: Some(true),
+-        idempotent_hint: Some(true),
+-        open_world_hint: Some(true),
+-        ..Default::default()
+-    }
++    openalpaca_mcp::ToolAnnotations::new()
++        .destructive(false)
++        .read_only(true)
++        .idempotent(true)
++        .open_world(true)
+ }
+ 
+ /// A by-product writer (ST-15): writes only under ~/.openalpaca, never asks.
+ fn local_write_annotations() -> openalpaca_mcp::ToolAnnotations {
+-    openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(false),
+-        read_only_hint: Some(false),
+-        idempotent_hint: Some(false),
+-        open_world_hint: Some(false),
+-        ..Default::default()
+-    }
++    openalpaca_mcp::ToolAnnotations::new()
++        .destructive(false)
++        .read_only(false)
++        .idempotent(false)
++        .open_world(false)
+ }
+ 
+ fn destructive_local_annotations() -> openalpaca_mcp::ToolAnnotations {
+-    openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(true),
+-        read_only_hint: Some(false),
+-        idempotent_hint: Some(false),
+-        open_world_hint: Some(false),
+-        ..Default::default()
+-    }
++    openalpaca_mcp::ToolAnnotations::new()
++        .destructive(true)
++        .read_only(false)
++        .idempotent(false)
++        .open_world(false)
+ }
+ 
+ fn destructive_open_world_annotations() -> openalpaca_mcp::ToolAnnotations {
+-    openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(true),
+-        read_only_hint: Some(false),
+-        idempotent_hint: Some(false),
+-        open_world_hint: Some(true),
+-        ..Default::default()
+-    }
++    openalpaca_mcp::ToolAnnotations::new()
++        .destructive(true)
++        .read_only(false)
++        .idempotent(false)
++        .open_world(true)
+ }
+ 
+ /// Convert JSON object to `--key=value` CLI arguments.
+diff --git a/crates/openalpaca_core/src/tools/config/annotations.rs b/crates/openalpaca_core/src/tools/config/annotations.rs
+--- a/crates/openalpaca_core/src/tools/config/annotations.rs
++++ b/crates/openalpaca_core/src/tools/config/annotations.rs
+@@ -18,13 +18,13 @@ pub struct ToolAnnotationsConfig {
+ 
+ impl ToolAnnotationsConfig {
+     pub fn into_mcp_annotations(self) -> openalpaca_mcp::ToolAnnotations {
+-        openalpaca_mcp::ToolAnnotations {
+-            destructive_hint: self.destructive_hint,
+-            read_only_hint: self.read_only_hint,
+-            idempotent_hint: self.idempotent_hint,
+-            open_world_hint: self.open_world_hint,
+-            ..Default::default()
+-        }
++        openalpaca_mcp::ToolAnnotations::from_raw(
++            None, // title
++            self.read_only_hint, // read_only_hint
++            self.destructive_hint, // destructive_hint
++            self.idempotent_hint, // idempotent_hint
++            self.open_world_hint, // open_world_hint
++        )
+     }
+ }
+ 
+diff --git a/crates/openalpaca_core/src/tools/mcp/bridge.rs b/crates/openalpaca_core/src/tools/mcp/bridge.rs
+--- a/crates/openalpaca_core/src/tools/mcp/bridge.rs
++++ b/crates/openalpaca_core/src/tools/mcp/bridge.rs
+@@ -7,7 +7,7 @@
+ 
+ use std::sync::Arc;
+ 
+-use openalpaca_mcp::{CallToolResult, McpClient, RawContent, Tool};
++use openalpaca_mcp::{CallToolResult, ContentBlock, McpClient, Tool};
+ 
+ use crate::tools::registry::{RegisteredTool, ToolBackend};
+ 
+@@ -87,9 +87,9 @@ pub fn serialize_call_result(result: CallToolResult) -> Result<String, String> {
+         if !buf.is_empty() {
+             buf.push('\n');
+         }
+-        match &content.raw {
+-            RawContent::Text(t) => buf.push_str(&t.text),
+-            RawContent::Image(_) => {
++        match content {
++            ContentBlock::Text(t) => buf.push_str(&t.text),
++            ContentBlock::Image(_) => {
+                 buf.push_str(
+                     "[image content omitted — P2 does not yet surface non-text MCP content]",
+                 );
+@@ -106,23 +106,26 @@ pub fn serialize_call_result(result: CallToolResult) -> Result<String, String> {
+     Ok(buf)
+ }
+ 
+-fn content_kind_name(c: &RawContent) -> &'static str {
++fn content_kind_name(c: &ContentBlock) -> &'static str {
+     match c {
+-        RawContent::Text(_) => "text",
+-        RawContent::Image(_) => "image",
+-        RawContent::Audio(_) => "audio",
+-        RawContent::Resource(_) => "resource",
+-        RawContent::ResourceLink(_) => "resource_link",
++        ContentBlock::Text(_) => "text",
++        ContentBlock::Image(_) => "image",
++        ContentBlock::Audio(_) => "audio",
++        ContentBlock::Resource(_) => "resource",
++        ContentBlock::ResourceLink(_) => "resource_link",
++        // `ContentBlock` is `#[non_exhaustive]` since rmcp 3; a block kind a
++        // later rmcp adds still reaches the model as a placeholder.
++        _ => "unknown",
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use openalpaca_mcp::Content;
++    use openalpaca_mcp::ContentBlock;
+ 
+-    fn text_content(s: &str) -> Content {
+-        Content::text(s.to_string())
++    fn text_content(s: &str) -> ContentBlock {
++        ContentBlock::text(s.to_string())
+     }
+ 
+     #[test]
+diff --git a/crates/openalpaca_core/src/tools/registry/capabilities.rs b/crates/openalpaca_core/src/tools/registry/capabilities.rs
+--- a/crates/openalpaca_core/src/tools/registry/capabilities.rs
++++ b/crates/openalpaca_core/src/tools/registry/capabilities.rs
+@@ -129,13 +129,13 @@ mod tests {
+         idempotent: Option<bool>,
+         open_world: Option<bool>,
+     ) -> openalpaca_mcp::ToolAnnotations {
+-        openalpaca_mcp::ToolAnnotations {
+-            destructive_hint: destructive,
+-            read_only_hint: readonly,
+-            idempotent_hint: idempotent,
+-            open_world_hint: open_world,
+-            ..Default::default()
+-        }
++        openalpaca_mcp::ToolAnnotations::from_raw(
++            None, // title
++            readonly, // read_only_hint
++            destructive, // destructive_hint
++            idempotent, // idempotent_hint
++            open_world, // open_world_hint
++        )
+     }
+ 
+     #[test]
+diff --git a/crates/openalpaca_core/src/tools/registry/tests.rs b/crates/openalpaca_core/src/tools/registry/tests.rs
+--- a/crates/openalpaca_core/src/tools/registry/tests.rs
++++ b/crates/openalpaca_core/src/tools/registry/tests.rs
+@@ -1241,30 +1241,19 @@ async fn test_enum_validation_invalid_value() {
+ 
+ #[test]
+ fn permission_tier_destructive_returns_admin() {
+-    let ann = openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(true),
+-        ..Default::default()
+-    };
++    let ann = openalpaca_mcp::ToolAnnotations::new().destructive(true);
+     assert_eq!(permission_tier(Some(&ann)), PermissionTier::Admin);
+ }
+ 
+ #[test]
+ fn permission_tier_readonly_returns_readonly() {
+-    let ann = openalpaca_mcp::ToolAnnotations {
+-        read_only_hint: Some(true),
+-        destructive_hint: Some(false),
+-        ..Default::default()
+-    };
++    let ann = openalpaca_mcp::ToolAnnotations::new().read_only(true).destructive(false);
+     assert_eq!(permission_tier(Some(&ann)), PermissionTier::ReadOnly);
+ }
+ 
+ #[test]
+ fn permission_tier_neither_returns_readwrite() {
+-    let ann = openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(false),
+-        read_only_hint: Some(false),
+-        ..Default::default()
+-    };
++    let ann = openalpaca_mcp::ToolAnnotations::new().destructive(false).read_only(false);
+     assert_eq!(permission_tier(Some(&ann)), PermissionTier::ReadWrite);
+ }
+ 
+@@ -1275,11 +1264,7 @@ fn permission_tier_none_annotations_returns_readwrite() {
+ 
+ #[test]
+ fn permission_tier_destructive_takes_precedence_over_readonly() {
+-    let ann = openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(true),
+-        read_only_hint: Some(true),
+-        ..Default::default()
+-    };
++    let ann = openalpaca_mcp::ToolAnnotations::new().destructive(true).read_only(true);
+     assert_eq!(permission_tier(Some(&ann)), PermissionTier::Admin);
+ }
+ 
+@@ -1287,10 +1272,7 @@ fn permission_tier_destructive_takes_precedence_over_readonly() {
+ fn iter_registered_tools_snapshots_state() {
+     let registry = ToolRegistry::new().unwrap();
+     let mut destructive = make_tool_with_caps("tool_a", vec![]);
+-    destructive.annotations = Some(openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(true),
+-        ..Default::default()
+-    });
++    destructive.annotations = Some(openalpaca_mcp::ToolAnnotations::new().destructive(true));
+     let plain = make_tool_with_caps("tool_b", vec![]);
+ 
+     registry.register(destructive).unwrap();
+@@ -1393,23 +1375,19 @@ fn make_tool_with_annotations(
+ }
+ 
+ fn readonly_annotations() -> openalpaca_mcp::ToolAnnotations {
+-    openalpaca_mcp::ToolAnnotations {
+-        read_only_hint: Some(true),
+-        destructive_hint: Some(false),
+-        idempotent_hint: Some(true),
+-        open_world_hint: Some(false),
+-        ..Default::default()
+-    }
++    openalpaca_mcp::ToolAnnotations::new()
++        .read_only(true)
++        .destructive(false)
++        .idempotent(true)
++        .open_world(false)
+ }
+ 
+ fn destructive_annotations() -> openalpaca_mcp::ToolAnnotations {
+-    openalpaca_mcp::ToolAnnotations {
+-        read_only_hint: Some(false),
+-        destructive_hint: Some(true),
+-        idempotent_hint: Some(false),
+-        open_world_hint: Some(true),
+-        ..Default::default()
+-    }
++    openalpaca_mcp::ToolAnnotations::new()
++        .read_only(false)
++        .destructive(true)
++        .idempotent(false)
++        .open_world(true)
+ }
+ 
+ #[test]
+@@ -1497,14 +1475,8 @@ fn deny_annotation_cap_excludes_string_matched_tool() {
+ #[test]
+ fn non_destructive_inverse_matches_only_explicit_false() {
+     let registry = ToolRegistry::new().unwrap();
+-    let ann_true = openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(true),
+-        ..Default::default()
+-    };
+-    let ann_false = openalpaca_mcp::ToolAnnotations {
+-        destructive_hint: Some(false),
+-        ..Default::default()
+-    };
++    let ann_true = openalpaca_mcp::ToolAnnotations::new().destructive(true);
++    let ann_false = openalpaca_mcp::ToolAnnotations::new().destructive(false);
+     registry.register(make_tool_with_annotations("tool_a", vec![], Some(ann_false))).unwrap();
+     registry.register(make_tool_with_annotations("tool_b", vec![], None)).unwrap();
+     registry.register(make_tool_with_annotations("tool_c", vec![], Some(ann_true))).unwrap();
+diff --git a/crates/openalpaca_core/tests/mcp_integration.rs b/crates/openalpaca_core/tests/mcp_integration.rs
+--- a/crates/openalpaca_core/tests/mcp_integration.rs
++++ b/crates/openalpaca_core/tests/mcp_integration.rs
+@@ -27,11 +27,7 @@ fn mk_config(tmp_canonical: &std::path::Path) -> McpClientConfig {
+             env: HashMap::new(),
+             cwd: None,
+         },
+-        client_info: Implementation {
+-            name: "openalpaca-mcp-p2-test".into(),
+-            version: "0.1.0".into(),
+-            ..Default::default()
+-        },
++        client_info: Implementation::new("openalpaca-mcp-p2-test", "0.1.0"),
+         request_timeout: Duration::from_secs(30),
+         max_reconnect_attempts: 1,
+         reconnect_backoff_ms: 100,
+diff --git a/crates/openalpaca_mcp/src/client.rs b/crates/openalpaca_mcp/src/client.rs
+--- a/crates/openalpaca_mcp/src/client.rs
++++ b/crates/openalpaca_mcp/src/client.rs
+@@ -126,11 +126,7 @@ impl Default for McpClientConfig {
+                 env: std::collections::HashMap::new(),
+                 cwd: None,
+             },
+-            client_info: Implementation {
+-                name: "openalpaca-mcp".to_string(),
+-                version: env!("CARGO_PKG_VERSION").to_string(),
+-                ..Default::default()
+-            },
++            client_info: Implementation::new("openalpaca-mcp", env!("CARGO_PKG_VERSION")),
+             request_timeout: Duration::from_secs(30),
+             max_reconnect_attempts: 3,
+             reconnect_backoff_ms: 100,
+@@ -261,14 +257,22 @@ impl McpClient {
+ 
+         // Record server identity (first-time only; immutable across reconnects).
+         if let Some(peer_info) = running.peer_info() {
+-            let _ = self.inner.server_info.set(peer_info.server_info.clone());
++            // `server_info` is `Option` since rmcp 3 (a `server/discover`
++            // answer need not carry one); the `initialize` handshake used here
++            // always fills it.
++            if let Some(server_info) = &peer_info.server_info {
++                let _ = self.inner.server_info.set(server_info.clone());
++            }
+             let _ = self
+                 .inner
+                 .protocol_version
+                 .set(peer_info.protocol_version.clone());
+             tracing::info!(
+                 server_name = %self.inner.config.server_name,
+-                server_version = %peer_info.server_info.version,
++                server_version = peer_info
++                    .server_info
++                    .as_ref()
++                    .map_or("unknown", |i| i.version.as_str()),
+                 protocol_version = ?peer_info.protocol_version,
+                 "MCP handshake complete"
+             );
+@@ -386,7 +390,7 @@ impl McpClient {
+     pub async fn ping(&self) -> Result<(), McpError> {
+         let guard = self.inner.service.lock().await;
+         let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+-        // rmcp 0.16 does not expose a typed `ping()` helper on `Peer<RoleClient>`;
++        // rmcp (still at 3.5) does not expose a typed `ping()` helper on `Peer<RoleClient>`;
+         // construct a PingRequest manually and discard the (empty) server response.
+         let req: ClientRequest = PingRequest::default().into();
+         running.peer().send_request(req).await.map_err(McpError::from)?;
+@@ -534,19 +538,15 @@ impl McpClient {
+         cancel_token: Option<&tokio_util::sync::CancellationToken>,
+     ) -> Result<rmcp::model::CallToolResult, McpError> {
+         use std::sync::atomic::Ordering;
+-        let params = rmcp::model::CallToolRequestParams {
+-            meta: None,
+-            name: name.to_string().into(),
+-            arguments: match arguments {
+-                serde_json::Value::Object(map) => Some(map),
+-                serde_json::Value::Null => None,
+-                other => {
+-                    return Err(McpError::InvalidArguments(format!(
+-                        "call_tool arguments must be an object or null, got: {other}"
+-                    )));
+-                }
+-            },
+-            task: None,
++        let params = rmcp::model::CallToolRequestParams::new(name.to_string());
++        let params = match arguments {
++            serde_json::Value::Object(map) => params.with_arguments(map),
++            serde_json::Value::Null => params,
++            other => {
++                return Err(McpError::InvalidArguments(format!(
++                    "call_tool arguments must be an object or null, got: {other}"
++                )));
++            }
+         };
+ 
+         loop {
+@@ -735,17 +735,11 @@ mod tests {
+             let Some((_request, id)) = msg.into_request() else {
+                 continue; // the `initialized` notification carries no id
+             };
+-            let result =
+-                rmcp::model::ServerResult::InitializeResult(rmcp::model::InitializeResult {
+-                    protocol_version: ProtocolVersion::default(),
+-                    capabilities: Default::default(),
+-                    server_info: Implementation {
+-                        name: "stub".into(),
+-                        version: "0.0.1".into(),
+-                        ..Default::default()
+-                    },
+-                    instructions: None,
+-                });
++            let result = rmcp::model::ServerResult::InitializeResult(
++                rmcp::model::InitializeResult::new(Default::default())
++                    .with_protocol_version(ProtocolVersion::default())
++                    .with_server_info(Implementation::new("stub", "0.0.1")),
++            );
+             let mut out =
+                 serde_json::to_string(&rmcp::model::ServerJsonRpcMessage::response(result, id))
+                     .expect("serialize initialize result");
+@@ -1246,11 +1240,7 @@ mod tests {
+                 env: Default::default(),
+                 cwd: None,
+             },
+-            client_info: Implementation {
+-                name: "openalpaca-mcp-test".into(),
+-                version: "0.1.0".into(),
+-                ..Default::default()
+-            },
++            client_info: Implementation::new("openalpaca-mcp-test", "0.1.0"),
+             request_timeout: Duration::from_secs(1),
+             max_reconnect_attempts: 0,
+             reconnect_backoff_ms: 100,
+@@ -1341,11 +1331,7 @@ mod tests {
+                 env: Default::default(),
+                 cwd: None,
+             },
+-            client_info: Implementation {
+-                name: "openalpaca-mcp-test".into(),
+-                version: "0.1.0".into(),
+-                ..Default::default()
+-            },
++            client_info: Implementation::new("openalpaca-mcp-test", "0.1.0"),
+             request_timeout: Duration::from_secs(1),
+             max_reconnect_attempts: 2,
+             reconnect_backoff_ms: 10, // fast test
+diff --git a/crates/openalpaca_mcp/src/error.rs b/crates/openalpaca_mcp/src/error.rs
+--- a/crates/openalpaca_mcp/src/error.rs
++++ b/crates/openalpaca_mcp/src/error.rs
+@@ -117,13 +117,17 @@ impl McpError {
+ 
+ // rmcp::service::ServiceError → McpError translation.
+ //
+-// rmcp 0.16 `ServiceError` variants (see rmcp/src/service.rs):
++// rmcp 3.5 `ServiceError` variants (see rmcp/src/service.rs):
+ //   - McpError(ErrorData)           : JSON-RPC error from the peer.
+ //   - TransportSend(DynamicTransportError) : local transport send failure.
+ //   - TransportClosed               : the transport reports EOF / closure.
+ //   - UnexpectedResponse            : protocol-level mismatch.
++//   - SubscriptionLagged { capacity } : a `subscriptions/listen` consumer fell
++//                                     behind (we open no subscription).
+ //   - Cancelled { reason }          : the operation was cancelled.
+ //   - Timeout { timeout }           : the operation timed out.
++//   - InputRequiredRoundsExceeded { max_rounds } : an MRTR `input_required`
++//                                     loop did not finish (we answer no input).
+ //
+ // Best-effort classification; unknown (`#[non_exhaustive]`) variants fall
+ // through to `Sdk(...)` with a warn log so we notice rmcp additions.
+@@ -132,8 +136,9 @@ impl McpError {
+ /// rmcp's reqwest-backed streamable-HTTP client maps a `401` carrying a
+ /// `www-authenticate` header to [`StreamableHttpError::AuthRequired`] and a
+ /// `403` carrying one to [`StreamableHttpError::InsufficientScope`]
+-/// (`rmcp-0.16.0/src/transport/common/reqwest/streamable_http_client.rs:130`,
+-/// `:145`); every other status is folded into an untyped response error before
++/// (`rmcp-3.5.0/src/transport/common/reqwest/streamable_http_client.rs:108`,
++/// `:121` on the GET stream, `:223`, `:236` on a POST); every other status
++/// is folded into an untyped response error before
+ /// it reaches us. So this recovers exactly the two the design classifies
+ /// (§4.2) and nothing else — no string matching, no guessing.
+ ///
+diff --git a/crates/openalpaca_mcp/src/lib.rs b/crates/openalpaca_mcp/src/lib.rs
+--- a/crates/openalpaca_mcp/src/lib.rs
++++ b/crates/openalpaca_mcp/src/lib.rs
+@@ -22,6 +22,6 @@ pub use transport::{HttpAuth, StdioTransport, Transport, TransportKind};
+ 
+ // Re-exports from rmcp — data types pass through unchanged.
+ pub use rmcp::model::{
+-    CallToolResult, Content, Implementation, Prompt, PromptMessage, ProtocolVersion, RawContent,
++    CallToolResult, ContentBlock, Implementation, Prompt, PromptMessage, ProtocolVersion,
+     Resource, ResourceContents, Tool, ToolAnnotations,
+ };
+diff --git a/crates/openalpaca_mcp/tests/filesystem_e2e.rs b/crates/openalpaca_mcp/tests/filesystem_e2e.rs
+--- a/crates/openalpaca_mcp/tests/filesystem_e2e.rs
++++ b/crates/openalpaca_mcp/tests/filesystem_e2e.rs
+@@ -27,11 +27,7 @@ fn mk_config(tmp: &std::path::Path) -> McpClientConfig {
+             env: HashMap::new(),
+             cwd: None,
+         },
+-        client_info: Implementation {
+-            name: "openalpaca-mcp-test".into(),
+-            version: "0.1.0".into(),
+-            ..Default::default()
+-        },
++        client_info: Implementation::new("openalpaca-mcp-test", "0.1.0"),
+         request_timeout: Duration::from_secs(30),
+         max_reconnect_attempts: 1,
+         reconnect_backoff_ms: 100,
+@@ -72,10 +68,7 @@ async fn filesystem_server_list_and_call_read_file() {
+     let text = result
+         .content
+         .iter()
+-        .find_map(|c| match c.raw {
+-            rmcp::model::RawContent::Text(ref t) => Some(t.text.clone()),
+-            _ => None,
+-        })
++        .find_map(|c| c.as_text().map(|t| t.text.clone()))
+         .expect("read_file should return text content");
+     assert!(text.contains("world"), "expected file contents in result, got: {text}");
+ 

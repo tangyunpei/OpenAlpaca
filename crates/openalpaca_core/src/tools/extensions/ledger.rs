@@ -113,6 +113,17 @@ pub enum Transition {
     Refused(Option<ExtensionState>),
 }
 
+/// What a failure leaves of a record ([`ExtensionLedger::mark_failed`],
+/// [`ExtensionLedger::mark_exited`]).
+#[derive(Debug, Clone, Copy)]
+enum Failure {
+    /// Torn down by the reaper: the gate refuses, Retry is the way back.
+    Reaped,
+    /// A stdio server's exit: nothing reaped, the gate admitting the next
+    /// call, whose reconnect is the way back (N-MCP-1b).
+    AwaitingReconnect,
+}
+
 /// A read-only snapshot of one ledger record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionRecord {
@@ -164,6 +175,19 @@ pub struct ExtensionRecord {
     /// MCP only — `"stdio"` or `"streamable-http"`, read from the declaration
     /// (design §8). `None` for plugins and for the pseudo-record.
     pub transport: Option<String>,
+    /// MCP only — the protocol version this incarnation's handshake negotiated:
+    /// `2026-07-28` after `server/discover`, or the version a legacy server
+    /// answered `initialize` with. Like `version`, a fact about the live
+    /// connection: `None` when none is (P19, DU-25 (m-g)).
+    pub protocol_version: Option<String>,
+    /// MCP only — how long this incarnation's connect took, in milliseconds:
+    /// the spawn or the HTTP connect and the lifecycle handshake, so about
+    /// 10 000 for a server that ignored `server/discover`. `None` when no
+    /// connection is live (DU-25 (m-g)).
+    pub connect_ms: Option<u64>,
+    /// MCP only — how long this incarnation's first `tools/list` (E3) took, in
+    /// milliseconds. `None` when no connection is live (DU-25 (m-g)).
+    pub list_ms: Option<u64>,
     /// E4 name collisions: names this load did **not** publish because another
     /// *enabled* extension currently serves them (design §8, §10 case 13).
     pub skipped_tools: Vec<String>,
@@ -224,6 +248,12 @@ struct LedgerEntry {
     in_flight: Arc<AtomicUsize>,
     config_fingerprint: Option<String>,
     tools_changed_at: Option<DateTime<Utc>>,
+    /// The record reads `Failed{Crashed}` because its stdio server's process
+    /// exited, and its next call's reconnect is still to run (N-MCP-1b;
+    /// design §3.6, §13 Q8): the gate admits that call, the tools stay where
+    /// they are, and nothing is reaped. Set by [`ExtensionLedger::mark_exited`]
+    /// alone; every other write of the state clears it.
+    awaiting_reconnect: bool,
 }
 
 impl LedgerEntry {
@@ -239,7 +269,14 @@ impl LedgerEntry {
             in_flight: Arc::new(AtomicUsize::new(0)),
             config_fingerprint: None,
             tools_changed_at: None,
+            awaiting_reconnect: false,
         }
+    }
+
+    /// Does the gate admit a call to this load? `Enabled`, or `Failed` with
+    /// its process's exit read and its next call's reconnect to come.
+    fn serves(&self) -> bool {
+        self.state.is_enabled() || self.awaiting_reconnect
     }
 
     fn snapshot(&self, id: &ExtensionId) -> ExtensionRecord {
@@ -266,6 +303,9 @@ impl LedgerEntry {
             disposition_readable: true,
             version: None,
             transport: None,
+            protocol_version: None,
+            connect_ms: None,
+            list_ms: None,
             skipped_tools: Vec::new(),
             consent: None,
             declared: None,
@@ -348,6 +388,10 @@ impl ExtensionLedger {
     ///
     /// **An `ExtensionId` with no ledger entry resolves to `Allow`** — absence
     /// means *"no supervisor owns this yet"*, not *"disabled"* (design §6.2a).
+    ///
+    /// The state check admits `Enabled` and one `Failed`: a stdio server's
+    /// whose exit [`Self::mark_exited`] read, until its next call's reconnect
+    /// (N-MCP-1b, design §6.2 #1).
     pub fn check(
         &self,
         ext: &ExtensionId,
@@ -358,7 +402,7 @@ impl ExtensionLedger {
         let lowered = tool_name.to_lowercase();
         // Count first, read state second — under one shard guard, so the T0 CAS
         // cannot interleave between the two.
-        let (guard, state, generation, pending_cause, server_withdrawn) = {
+        let (guard, state, serves, generation, pending_cause, server_withdrawn) = {
             let Some(entry) = self.records.get(ext) else {
                 return Ok(CallGuard::noop());
             };
@@ -366,13 +410,16 @@ impl ExtensionLedger {
             (
                 CallGuard::held(Arc::clone(&entry.in_flight)),
                 entry.state.clone(),
+                entry.serves(),
                 entry.generation,
                 entry.pending_cause,
                 entry.server_withdrawn.contains_key(&lowered),
             )
         };
 
-        let (described, state_word, stale) = if !state.is_enabled() {
+        // `serves`, not `is_enabled`: a row reading a stdio server's exit
+        // admits the call whose pre-send reconnect brings it back (N-MCP-1b).
+        let (described, state_word, stale) = if !serves {
             (
                 state.describe(ext, pending_cause, Audience::Model),
                 state.word(),
@@ -578,6 +625,7 @@ impl ExtensionLedger {
                             && entry.pending_cause == Some(WithdrawalCause::Reload);
                         entry.generation += 1;
                         entry.state = ExtensionState::Enabling;
+                        entry.awaiting_reconnect = false;
                         entry.pending_cause = reloading.then_some(WithdrawalCause::Reload);
                         entry.since = Utc::now();
                         Transition::Took(entry.generation)
@@ -596,6 +644,7 @@ impl ExtensionLedger {
                     return Transition::Refused(Some(entry.state.clone()));
                 }
                 entry.state = ExtensionState::Disabling;
+                entry.awaiting_reconnect = false;
                 entry.pending_cause = cause;
                 entry.since = Utc::now();
                 Transition::Took(entry.generation)
@@ -627,6 +676,7 @@ impl ExtensionLedger {
                 return false;
             }
             entry.state = to;
+            entry.awaiting_reconnect = false;
             entry.pending_cause = None;
             entry.since = Utc::now();
             true
@@ -648,6 +698,7 @@ impl ExtensionLedger {
                 let entry = slot.get_mut();
                 entry.disposition = disposition;
                 entry.state = state;
+                entry.awaiting_reconnect = false;
                 entry.pending_cause = None;
                 entry.since = Utc::now();
             }
@@ -663,6 +714,7 @@ impl ExtensionLedger {
                 return false;
             };
             entry.state = state;
+            entry.awaiting_reconnect = false;
             entry.pending_cause = None;
             entry.since = Utc::now();
             true
@@ -736,14 +788,16 @@ impl ExtensionLedger {
     /// **`mark_failed`** — `Enabled → Failed{Crashed, ..}`, guarded twice
     /// (design §3.6).
     ///
-    /// It is a no-op from any state other than `Enabled`, so a crash observed
-    /// during `Disabling` does not fight the toggle; and a no-op unless
-    /// `generation` is the record's current one, so a handle from a previous
-    /// load cannot flip the incarnation that replaced it.
+    /// It is a no-op from any state other than `Enabled` — or the `Failed` a
+    /// stdio server's exit left, whose reconnects ran out (N-MCP-1b: the
+    /// failure becomes the reaper's) — so a crash observed during `Disabling`
+    /// does not fight the toggle; and a no-op unless `generation` is the
+    /// record's current one, so a handle from a previous load cannot flip the
+    /// incarnation that replaced it.
     ///
-    /// On success it logs the transition itself and sends `(ExtensionId,
-    /// generation)` down the kind's reaper channel. It publishes nothing: the
-    /// `failed` event is the reaper's until C4 installs the ledger's bus.
+    /// On success it logs the transition itself, announces it over the
+    /// ledger's bus, and sends `(ExtensionId, generation)` down the kind's
+    /// reaper channel.
     pub fn mark_failed(
         &self,
         ext: &ExtensionId,
@@ -751,14 +805,54 @@ impl ExtensionLedger {
         reason: FailureReason,
         detail: impl Into<String>,
     ) -> bool {
-        let detail = detail.into();
+        self.fail(ext, generation, reason, detail.into(), Failure::Reaped)
+    }
+
+    /// **`mark_exited`** — `Enabled → Failed{Crashed, ..}` because the
+    /// extension's stdio server's process exited between calls: the ledger
+    /// learns at the child's exit (N-MCP-1b; T6(a)'s sub-choice, design §13
+    /// Q8, taken 2026-10-19). `detail` names the exit code or the signal.
+    ///
+    /// Guarded as [`Self::mark_failed`] is — `Enabled` only, current
+    /// generation only — and announced the same way, once, but **not
+    /// reaped**: the tools stay registered and on the surface, and the gate
+    /// admits the next call, whose pre-send reconnect, on success, returns the
+    /// row to `Enabled` ([`Self::mark_recovered`]). If its reconnects run out
+    /// instead, `mark_failed` takes the row from here to the reaper.
+    pub fn mark_exited(
+        &self,
+        ext: &ExtensionId,
+        generation: u64,
+        detail: impl Into<String>,
+    ) -> bool {
+        self.fail(
+            ext,
+            generation,
+            FailureReason::Crashed,
+            detail.into(),
+            Failure::AwaitingReconnect,
+        )
+    }
+
+    fn fail(
+        &self,
+        ext: &ExtensionId,
+        generation: u64,
+        reason: FailureReason,
+        detail: String,
+        failure: Failure,
+    ) -> bool {
         let word;
         {
             let Some(mut entry) = self.records.get_mut(ext) else {
                 tracing::debug!(extension = %ext, generation, "mark_failed on an unrecorded extension");
                 return false;
             };
-            if !entry.state.is_enabled() {
+            let legal = match failure {
+                Failure::Reaped => entry.serves(),
+                Failure::AwaitingReconnect => entry.state.is_enabled(),
+            };
+            if !legal {
                 tracing::debug!(
                     extension = %ext,
                     generation,
@@ -782,25 +876,37 @@ impl ExtensionLedger {
                 detail: detail.clone(),
                 since: Utc::now(),
             };
+            entry.awaiting_reconnect = matches!(failure, Failure::AwaitingReconnect);
             entry.pending_cause = None;
             entry.since = Utc::now();
             word = entry.state.word();
         }
 
-        tracing::warn!(
-            extension = %ext,
-            generation,
-            reason = reason.word(),
-            detail = %detail,
-            "extension marked failed"
-        );
+        match failure {
+            Failure::Reaped => tracing::warn!(
+                extension = %ext,
+                generation,
+                reason = reason.word(),
+                detail = %detail,
+                "extension marked failed"
+            ),
+            Failure::AwaitingReconnect => tracing::warn!(
+                extension = %ext,
+                generation,
+                reason = reason.word(),
+                detail = %detail,
+                "extension marked failed: its process exited; its next call reconnects"
+            ),
+        }
         self.clear_warned(ext);
 
         // `mark_failed` is a transition and is announced like one — from C4 by
         // the ledger over its own bus, not by the reaper on dequeue (design
         // §3.6). A superseded reap therefore still announces the crash that
         // *did* happen, and the event carries the generation so a late notice
-        // arriving after load N+1's `enabled` stays unambiguous.
+        // arriving after load N+1's `enabled` stays unambiguous. An exit is
+        // announced here too, and only here: never a second time by the
+        // supervisor (N-MCP-1b).
         self.publish(SystemEvent::ExtensionStateChanged {
             extension: ext.clone(),
             state: word.to_string(),
@@ -809,11 +915,53 @@ impl ExtensionLedger {
             timestamp: Utc::now(),
         });
 
-        if let Some(tx) = self.reaper(ext.kind)
+        if matches!(failure, Failure::Reaped)
+            && let Some(tx) = self.reaper(ext.kind)
             && tx.send((ext.clone(), generation)).is_err()
         {
             tracing::warn!(extension = %ext, "crash reaper channel closed");
         }
+        true
+    }
+
+    /// **`mark_recovered`** — the `Failed` an exit left back to `Enabled`, at
+    /// the same generation: the next call's pre-send reconnect handshook
+    /// (N-MCP-1b; T6(a)'s recovery, unchanged). A no-op from every other
+    /// state and for any other generation — a reconnect after a `Retry`, a
+    /// disable or another kind of failure changes nothing. Announced once,
+    /// over the ledger's bus.
+    pub fn mark_recovered(&self, ext: &ExtensionId, generation: u64) -> bool {
+        {
+            let Some(mut entry) = self.records.get_mut(ext) else {
+                return false;
+            };
+            if !entry.awaiting_reconnect || entry.generation != generation {
+                tracing::debug!(
+                    extension = %ext,
+                    generation,
+                    state = entry.state.word(),
+                    "mark_recovered: no exit at this generation to recover from"
+                );
+                return false;
+            }
+            entry.state = ExtensionState::Enabled;
+            entry.awaiting_reconnect = false;
+            entry.pending_cause = None;
+            entry.since = Utc::now();
+        }
+        tracing::info!(
+            extension = %ext,
+            generation,
+            "extension recovered: its call's reconnect started the server again"
+        );
+        self.clear_warned(ext);
+        self.publish(SystemEvent::ExtensionStateChanged {
+            extension: ext.clone(),
+            state: ExtensionState::Enabled.word().to_string(),
+            generation,
+            tools_changed: false,
+            timestamp: Utc::now(),
+        });
         true
     }
 
@@ -1016,7 +1164,8 @@ impl ExtensionLedger {
     }
 
     /// The recorded providers that are currently unable to serve `capability`:
-    /// non-`Enabled`, **or** `Enabled` but holding the name in
+    /// non-`Enabled` (a row reading a stdio exit still serves, N-MCP-1b),
+    /// **or** `Enabled` but holding the name in
     /// `server_withdrawn`. The `bool` says which — `true` for the second, whose
     /// attribution names the owner as *still enabled* (design §7.2).
     pub fn blocked_providers(&self, capability: &str) -> Vec<(ExtensionId, bool)> {
@@ -1025,7 +1174,7 @@ impl ExtensionLedger {
             .filter_map(|ext| {
                 let flag = {
                     let entry = self.records.get(&ext)?;
-                    if !entry.state.is_enabled() {
+                    if !entry.serves() {
                         Some(false)
                     } else if entry
                         .server_withdrawn
@@ -1045,6 +1194,15 @@ impl ExtensionLedger {
 
     pub fn record(&self, ext: &ExtensionId) -> Option<ExtensionRecord> {
         self.records.get(ext).map(|e| e.snapshot(ext))
+    }
+
+    /// Does the gate admit a call to this extension? `Enabled`, or `Failed`
+    /// with its stdio server's exit read and its next call's reconnect to come
+    /// (N-MCP-1b). `None` when the ledger has no record (§6.2a: fail-open is
+    /// the caller's to apply). The one predicate the gate, the surface filter
+    /// and the withheld classification share.
+    pub fn admits_calls(&self, ext: &ExtensionId) -> Option<bool> {
+        self.records.get(ext).map(|e| e.serves())
     }
 
     pub fn state(&self, ext: &ExtensionId) -> Option<ExtensionState> {

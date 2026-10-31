@@ -190,7 +190,7 @@ impl LlmSettingsService {
 
         for provider_type in ProviderType::all() {
             let provider_name = provider_type.to_string();
-            let is_configured = configured.contains(&provider_type);
+            let is_configured = configured.contains(provider_type);
 
             // Get live key statuses (only available for configured providers)
             let statuses = if is_configured {
@@ -1157,9 +1157,7 @@ impl LlmSettingsService {
                 tracing::info!("Registered provider in router");
                 Ok(())
             }
-            None => Err(format!(
-                "Provider not available (feature not enabled)"
-            )),
+            None => Err("Provider not available (feature not enabled)".to_string()),
         }
     }
 

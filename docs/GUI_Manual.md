@@ -32,8 +32,9 @@ bun install
 bun run tauri dev
 ```
 
-`tauri dev` runs `bun run prepare:sidecar:dev` (which stages the daemon binary
-as the Tauri sidecar) and then the Vite dev server on port 1420, per
+`tauri dev` runs `bun run prepare:sidecar` (which stages the daemon binary
+as the Tauri sidecar, in the profile and for the triple `tauri dev` hands it —
+a dev build for this machine) and then the Vite dev server on port 1420, per
 `src-tauri/tauri.conf.json`.
 
 `bun run dev` starts the frontend alone. It is useful for layout work, but the
@@ -106,6 +107,14 @@ OpenAlpaca's is written inside the project's own folder — an agent writes
 there only with your approval, each write and each command asking first. A
 conversation with no project works in its own folder under `scratch/`, which
 goes when the conversation is deleted.
+
+One thing lives outside that root: the webview's own `localStorage`. The app
+keeps the project you chose (`oa-project`), the pane widths (`oa-pane-widths`)
+and a mirror of the artifact pins (`oa-pins`) there, and WKWebView stores it
+under the app's bundle identifier in `~/Library`. Neither
+`OPENALPACA_HOME_STORE` nor `openalpaca config reset --factory` touches it, and
+it is the same whichever store the daemon serves, until a later build keeps
+those keys per store.
 
 ## Connection lifecycle
 
@@ -1292,6 +1301,15 @@ from `GET /v1/skills`. A health row for a skill the catalog no longer holds (a
 deleted directory, a disabled plugin's withdrawn contribution) keeps showing the
 id the log has rather than a placeholder name.
 
+Under it, when the daemon's last scan of the skills directory found a problem,
+one line counts them from `GET /v1/skills/diagnostics` — "3 problems in the
+skill files — 2 not loaded, 1 warning" — and points at
+`openalpaca skills list`, which names each file and what is wrong with it. A
+skill whose file was not loaded after an edit stays listed, but it does not
+run until the file is fixed: invoking it answers with that error. The line is
+read again when a skill's file changes, whether or not the change loads.
+Nothing is drawn when the scan found nothing.
+
 ### Extensions
 
 One list over both kinds — MCP servers and out-of-process plugins — each row
@@ -1315,7 +1333,10 @@ Primary controls are the toggle plus, where they apply: `Approve` / `Deny` on a
 plugin awaiting consent, `Configure` on one missing keys (one input per missing
 key, posted one at a time — setting the last one starts the plugin without a
 second call), `Retry` on a crashed or unreachable one, and `Remove` on an orphan
-row. `Reload`, `Update` and `Uninstall` live in the row's overflow menu instead,
+row. A stdio MCP server whose process exited reads crashed at once, its detail
+naming the exit status; its tools stay available, and the next call to one of
+them starts it again and turns the row back on — `Retry` does the same sooner.
+`Reload`, `Update` and `Uninstall` live in the row's overflow menu instead,
 because nothing is wrong and the last two change what is *installed* rather than
 whether it is on; both open an inline strip that has to be confirmed.
 
@@ -1326,24 +1347,35 @@ every hidden character (a bidi override, a zero-width or control character, a
 variation selector, any space but a plain one, an object replacement character,
 a code point Unicode has not assigned or leaves to private use, a line break or
 a tab) as a highlighted `<U+XXXX>`, and a line under them counts them: `Note:
-this request contains 1 hidden character, shown as <U+…>.` The id and the
-version wrap at the row's edge rather than being cut or pushing `Approve` aside.
-`Approve` grants exactly those strings, and it answers for the plugin by the id
-the daemon listed.
+this request contains 1 hidden character, shown as <U+…>.` Under what it asks
+for, a `Warning:` line says each thing its manifest declares that nothing acts
+on — the lines `Check` shows below — so a plugin dropped in by hand says them
+before `Approve` too. The id and the version wrap at the row's edge rather than
+being cut or pushing `Approve` aside. `Approve` grants exactly those strings,
+and it answers for the plugin by the id the daemon listed.
 
 `Add extension` installs either kind:
 
 - **A plugin is a directory.** The form takes an absolute path, picked or
   typed, and `Check` runs the daemon's dry run so the manifest is on screen
-  before anything is copied. Installing **grants nothing**: the row lands
-  unapproved, and `Approve` is the single action that starts it.
+  before anything is copied. Under it, a `Warning:` line names each key the
+  manifest sets that OpenAlpaca does not read (a top-level `tool = true`, whose
+  switch is `types.tools`, is ignored — the line says so and what it likely
+  meant), and says that `types.connector` and `types.provider` do nothing while
+  their bridges are not wired. A warning never refuses the install. Installing
+  **grants nothing**: the row lands unapproved, and `Approve` is the single
+  action that starts it.
 - **An MCP server is a declaration.** Writing it into your own
   `config/mcp.toml` is the consent, so there is no approve step — `Connect now`
   is the ENABLE bit.
 
 `Update` replaces an installed plugin's tree: the incumbent goes to
 `plugins/.trash/`, the replacement is renamed into place, and the load path
-runs. Consent survives an update whose declared capabilities are unchanged;
+runs. A rename into place that fails moves the incumbent back before the
+error is shown, under the consent it had, and a daemon that dies between the
+two moves puts it back at its next start (where a consent the replacement had
+dropped stays dropped, and `Approve` restores it), so an update never leaves
+the plugin absent. Consent survives an update whose declared capabilities are unchanged;
 otherwise it is reset and the response names what the replacement additionally
 asks for.
 
@@ -1488,6 +1520,16 @@ disposition bit lives and what the load could not publish. A plugin needs
 consent (`Approve`) before it runs at all, and one that is enabled but failing
 keeps its switch on with a failure tag — that is the bit you set, not the state
 it reached.
+
+**An MCP server starts from a terminal but not from the app.** A daemon the
+app starts inherits the app's environment, and an app opened from the Finder or
+the Dock gets the minimal `PATH` macOS gives apps, not your shell's — so `npx`,
+`uvx`, Homebrew's `node` or `claude` can be found by a daemon that `openalpaca
+daemon start` started and be missing for the one the app started (reasoned from
+how macOS starts apps, not measured). Give the server an absolute `command`, or
+set `PATH` in its `env`, in `config/mcp.toml` ([Daemon Manual → MCP
+Servers](Daemon_Manual.md#mcp-servers)); or start the daemon from a terminal
+first, and the app uses that one.
 
 **Connector failures.** The connector row distinguishes a connector that
 started and exited from one that never started. Beyond that, the Event log and

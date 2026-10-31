@@ -44,13 +44,14 @@ use openalpaca_core::tools::extensions::{
     WithdrawnSet,
 };
 use openalpaca_core::tools::mcp::{
-    HttpAuthConfig, LoadError, McpConfig, McpDefaults, McpServerConfig, bridge,
+    HttpAuthConfig, LoadError, McpConfig, McpDefaults, McpProtocol, McpServerConfig, bridge,
     classify_bringup_failure, classify_call_failure, config_fingerprint,
 };
 use openalpaca_mcp::{
-    ConnectionSnapshot, Implementation, McpClient, McpClientConfig, McpError, ServerChange,
-    TransportKind,
+    ConnectionEvent, ConnectionEventHandler, ConnectionSnapshot, Implementation, McpClient,
+    McpClientConfig, McpError, ProtocolMode, ServerChange, TransportKind,
 };
+use openalpaca_storage::hash::sha256_hex;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 /// The id of the whole-file pseudo-record §5.1 registers when
@@ -73,21 +74,30 @@ const OWN_WRITE_RING: usize = 8;
 /// What the supervisor holds for one *loaded* server. Its presence in the map
 /// is the answer to "does this extension hold a handle?" — T4 asks the map, not
 /// the state, which is what makes it correct from `Enabled` **and** from a
-/// pre-reaper `Failed{Crashed}` and a no-op from every other cell (§3.2 T4).
+/// pre-reaper `Failed{Crashed}` or one a stdio exit left (N-MCP-1b), and a
+/// no-op from every other cell (§3.2 T4).
 struct ServerHandle {
     client: Arc<McpClient>,
     generation: u64,
     /// The bound T4 waits for `disconnect` under, from this server's own
-    /// declaration: `call_tool` holds the transport mutex across its await, so
-    /// a straggler can hold `disconnect` off for up to one request.
+    /// declaration. A call in flight no longer holds the transport — it runs
+    /// on a cloned peer (N-MCP-3) — so what the bound caps is the close.
     request_timeout: Duration,
     /// `serverInfo.version` from this incarnation's handshake — the API row's
     /// `version` (§8). It is a fact about the *live* connection, so a row that
-    /// is not `Enabled` reports `null` rather than a remembered string.
+    /// holds no handle reports `null` rather than a remembered string; the
+    /// `Failed` a stdio exit left keeps its handle, and reports the exited
+    /// incarnation's (N-MCP-1b).
     version: Option<String>,
     /// E4's name collisions for this load — the API row's `skipped_tools`
     /// (§8, §10 case 13).
     skipped_tools: Vec<String>,
+    /// The protocol version this incarnation negotiated, and how long its
+    /// connect and its E3 `tools/list` took — the row's `protocol_version`,
+    /// `connect_ms` and `list_ms` (DU-25 (m-g)).
+    protocol_version: Option<String>,
+    connect_ms: u64,
+    list_ms: u64,
 }
 
 /// The last **declaration set that parsed** (§10 case 15). An unparseable
@@ -680,7 +690,7 @@ impl McpSupervisor {
     /// swallows it, so a route-driven toggle runs only its in-process
     /// transition (§10 case 15).
     pub fn swallow_own_write(&self, contents: &str) -> bool {
-        let hash = content_hash(contents);
+        let hash = sha256_hex(contents.as_bytes());
         let mut ring = self.own_writes.lock_or_recover();
         match ring.iter().position(|h| *h == hash) {
             Some(pos) => {
@@ -693,7 +703,7 @@ impl McpSupervisor {
 
     fn remember_own_write(&self, contents: &str) {
         let mut ring = self.own_writes.lock_or_recover();
-        ring.push_back(content_hash(contents));
+        ring.push_back(sha256_hex(contents.as_bytes()));
         while ring.len() > OWN_WRITE_RING {
             ring.pop_front();
         }
@@ -752,6 +762,9 @@ impl McpSupervisor {
         if let Some(handle) = self.handles.lock_or_recover().get(&ext.name) {
             record.version = handle.version.clone();
             record.skipped_tools = handle.skipped_tools.clone();
+            record.protocol_version = handle.protocol_version.clone();
+            record.connect_ms = Some(handle.connect_ms);
+            record.list_ms = Some(handle.list_ms);
         }
         Ok(record)
     }
@@ -987,11 +1000,14 @@ impl McpSupervisor {
     ///
     /// `disconnect` seals the shared inner *before* it takes the service lock,
     /// so from that instant no clone can reconnect and no in-flight handshake
-    /// can install a live child. It is awaited under `request_timeout + 1s`,
-    /// because `call_tool` holds the transport mutex across its request; on
-    /// expiry a **fresh** `disconnect` future is spawned detached (the timed-out
-    /// one is consumed) and the caller is told, since the seal is already set
-    /// and nothing can reconnect meanwhile.
+    /// can install a live child. A call in flight no longer holds the
+    /// transport — it runs on a cloned peer (N-MCP-3) and ends with the close,
+    /// reading `Closed` — so what `disconnect` waits for is the close itself
+    /// (rmcp's graceful stdio close, at most `CLOSE_TIMEOUT`). It is still
+    /// awaited under `request_timeout + 1s`; on expiry a **fresh**
+    /// `disconnect` future is spawned detached (the timed-out one is consumed)
+    /// and the caller is told, since the seal is already set and nothing can
+    /// reconnect meanwhile.
     ///
     /// The `tools/list_changed` reader is not joined here: it is waiting on the
     /// very mutex this teardown holds, so joining it would deadlock. Dropping
@@ -1060,8 +1076,11 @@ impl McpSupervisor {
     /// load path, so no entrant can skip it.
     ///
     /// It runs the reaper's shape (T1 → T4, **no** T3 drain — the gate has
-    /// refused since `mark_failed`) with cause `Crash`, because the only state
-    /// that reaches here holding anything is a pre-reaper `Failed{Crashed}`.
+    /// refused since `mark_failed`) with cause `Crash`, because the only states
+    /// that reach here holding anything are a pre-reaper `Failed{Crashed}` and
+    /// the `Failed{Crashed}` a stdio server's exit left, which keeps its handle
+    /// for the next call's reconnect (N-MCP-1b) — a Retry of that one finds a
+    /// call still admitted, and the T4 seal ends it.
     /// Without it a Retry that wins the mutex before the reaper would build
     /// load N+1 on top of load N's live residue and the reaper would then find
     /// "superseded" and do nothing.
@@ -1125,6 +1144,21 @@ impl McpSupervisor {
             cfg.connect_timeout_secs()
                 .unwrap_or(defaults.connect_timeout_secs),
         );
+        // DU-25 (m-d): a warning, never a refusal. Under `auto` a server that
+        // ignores `server/discover` is found legacy only when rmcp's private
+        // 10 s discover timeout runs out, so a connect timeout at or under it
+        // ends the connect first; a server that answers the probe is unharmed.
+        if cfg.protocol().is_auto() && connect_timeout <= AUTO_DISCOVER_TIMEOUT {
+            tracing::warn!(
+                extension = %ext,
+                connect_timeout_secs = connect_timeout.as_secs(),
+                "connect_timeout_secs is 10 or less under protocol = \"auto\": a server that \
+                 ignores server/discover is reached only after rmcp's 10 s discover timeout, so \
+                 it cannot connect; raise connect_timeout_secs, or set protocol = \"legacy\" \
+                 for such a server"
+            );
+        }
+        let connect_started = std::time::Instant::now();
         let client = match tokio::time::timeout(connect_timeout, McpClient::connect(client_config))
             .await
         {
@@ -1152,15 +1186,22 @@ impl McpSupervisor {
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
+        let connect_ms = elapsed_ms(connect_started);
+        let protocol_version = client.protocol_version().map(ToString::to_string);
+
         // E2 — take the change receiver with the client, once, and start the
         // reader. Its first message is *applied* only after E5: step 3 takes
         // the mutex this load still holds and then re-checks for `Enabled`, so
         // a notification during a failed bring-up is dropped by that re-check.
         self.spawn_change_reader(&ext, generation, &client).await;
+        // E2 — and the receiver of the client's own connection events, so the
+        // ledger learns a stdio server's exit at once (N-MCP-1b).
+        self.watch_connection(&ext, generation, &client);
 
         // E3 — the one-shot fetch. A client that has just handshaken has no
         // reconnect to make, so bring-up stays bounded by `connect_timeout` +
         // one `request_timeout`, not four reconnect cycles under the mutex.
+        let list_started = std::time::Instant::now();
         let tools = match client.list_tools_once().await {
             Ok(tools) => tools,
             Err(e) => {
@@ -1171,10 +1212,15 @@ impl McpSupervisor {
             }
         };
 
+        let list_ms = elapsed_ms(list_started);
+
         // E4 — publish, remove-before-register, with the case-13 collision rule.
+        // Names are mapped into the providers' alphabet first, and two of this
+        // server's own tools that map to one name keep the first listed
+        // (N-MCP-4; `map_tool_list` warns naming both).
         let mut registered: Vec<String> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
-        for tool in tools {
+        for (_, tool) in bridge::map_tool_list(name, tools).tools {
             let registered_tool = bridge::rmcp_tool_to_registered(
                 name,
                 &server_version,
@@ -1218,6 +1264,9 @@ impl McpSupervisor {
                 request_timeout,
                 version: client_version,
                 skipped_tools: skipped.clone(),
+                protocol_version,
+                connect_ms,
+                list_ms,
             },
         );
         self.ledger.restore(&ext);
@@ -1235,9 +1284,9 @@ impl McpSupervisor {
     }
 
     /// Is `tool_name` currently served by a **different**, live extension? Only
-    /// a live incumbent blocks a name: not `Enabled`, or `Enabled` but holding
-    /// the name in its own `server_withdrawn` set, means the newcomer takes it
-    /// (§10 case 13).
+    /// a live incumbent blocks a name: one the gate does not admit
+    /// (`admits_calls`), or one it admits but holding the name in its own
+    /// `server_withdrawn` set, means the newcomer takes it (§10 case 13).
     fn is_live_incumbent(&self, ext: &ExtensionId, tool_name: &str) -> bool {
         let Some(incumbent) = self.ledger.owner_of(tool_name) else {
             return false;
@@ -1245,9 +1294,10 @@ impl McpSupervisor {
         if &incumbent == ext {
             return false;
         }
-        self.ledger
-            .state(&incumbent)
-            .is_some_and(|s| s.is_enabled() && !self.ledger.is_server_withdrawn(&incumbent, tool_name))
+        // A row reading a stdio server's exit still serves its names, which
+        // its next call reconnects (N-MCP-1b).
+        self.ledger.admits_calls(&incumbent) == Some(true)
+            && !self.ledger.is_server_withdrawn(&incumbent, tool_name)
     }
 
     /// **E-FAIL.** Tear down a handle whose bring-up failed *after*
@@ -1309,6 +1359,41 @@ impl McpSupervisor {
         }
         self.emit(ext, "failed", self.ledger.generation(ext).unwrap_or(0), false);
         state
+    }
+
+    /// **N-MCP-1b** (T6(a)'s sub-choice, design §3.6, §13 Q8): what this
+    /// load's client learns about its own connection reaches the ledger at
+    /// once. A stdio server's exit turns an `Enabled` row `Failed{Crashed}`,
+    /// its detail the exit code or the signal, with nothing reaped — the tools
+    /// stay published and the gate admits the next call; that call's pre-send
+    /// reconnect, on success, returns the row to `Enabled`.
+    ///
+    /// Both are ledger CASes at **this** load's generation, announced by the
+    /// ledger itself and never here, so an event from a torn-down load changes
+    /// nothing; and a close the daemon makes seals the client first, which
+    /// then reports no exit at all. An exit during the bring-up itself, before
+    /// E5 commits `Enabled`, changes nothing either: the next call's pre-send
+    /// reconnect finds it, as before.
+    fn watch_connection(&self, ext: &ExtensionId, generation: u64, client: &McpClient) {
+        let ledger = Arc::clone(&self.ledger);
+        let id = ext.clone();
+        let handler: ConnectionEventHandler = Arc::new(move |event| match event {
+            ConnectionEvent::Exited(status) => {
+                ledger.mark_exited(
+                    &id,
+                    generation,
+                    format!(
+                        "the server's process exited ({status}); the next call starts it again"
+                    ),
+                );
+            }
+            ConnectionEvent::Reconnected => {
+                ledger.mark_recovered(&id, generation);
+            }
+        });
+        if !client.on_connection_event(handler) {
+            tracing::debug!(extension = %ext, "MCP connection receiver already installed");
+        }
     }
 
     // ── §3.7 — the server changes its own tool set ───────────────────────
@@ -1429,10 +1514,12 @@ impl McpSupervisor {
             .server_info()
             .map(|i| i.version.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let mut incoming: BTreeMap<String, openalpaca_mcp::Tool> = BTreeMap::new();
-        for tool in fetched {
-            incoming.insert(format!("{}__{}", ext.name, tool.name), tool);
-        }
+        // The same mapping and within-server collision rule as E4 (N-MCP-4).
+        let incoming: BTreeMap<String, openalpaca_mcp::Tool> =
+            bridge::map_tool_list(&ext.name, fetched)
+                .tools
+                .into_iter()
+                .collect();
 
         let removed: Vec<String> = live_before
             .iter()
@@ -1793,7 +1880,10 @@ impl McpSupervisor {
         let generation = record.generation;
 
         match record.state {
-            ExtensionState::Enabled => {
+            // A row reading a stdio server's exit is torn down as a live one
+            // is, T0 and the drain included: the gate still admits its calls
+            // (N-MCP-1b).
+            _ if self.ledger.admits_calls(&ext) == Some(true) => {
                 if let Transition::Took(_) =
                     self.ledger
                         .begin(&ext, ExtensionState::Disabling, Some(WithdrawalCause::DeclarationGone))
@@ -1806,8 +1896,10 @@ impl McpSupervisor {
             // A pre-reaper `Failed{Crashed}` still owns load N's residue. There
             // is no T0 and no drain on this exit — the gate has refused since
             // `mark_failed` — but the residue must still come down, or the
-            // child would outlive the declaration.
-            ExtensionState::Failed { .. } => {
+            // child would outlive the declaration. `Enabled` too: the guard
+            // above reads the live state, and a `mark_failed` (outside this
+            // mutex) may have landed since the snapshot was taken.
+            ExtensionState::Enabled | ExtensionState::Failed { .. } => {
                 self.t1(&ext, WithdrawalCause::Crash);
                 self.t4(name).await;
             }
@@ -2267,6 +2359,16 @@ impl McpSupervisor {
 // Client config
 // ============================================================================
 
+/// rmcp's `DEFAULT_AUTO_DISCOVER_TIMEOUT` — private in rmcp, so restated here
+/// for the one comparison that needs it (DU-25 (m-d);
+/// `rmcp-3.7.0/src/service/client.rs:719`).
+const AUTO_DISCOVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Milliseconds since `started`, for the row's durations (DU-25 (m-g)).
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 fn build_client_config(
     server_name: &str,
     server_cfg: &McpServerConfig,
@@ -2312,10 +2414,11 @@ fn build_client_config(
     Ok(McpClientConfig {
         server_name: server_name.to_string(),
         transport,
-        client_info: Implementation {
-            name: "openalpaca-mcp".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            ..Default::default()
+        client_info: Implementation::new("openalpaca-mcp", env!("CARGO_PKG_VERSION")),
+        protocol: match server_cfg.protocol() {
+            McpProtocol::Auto => ProtocolMode::Auto,
+            McpProtocol::Legacy => ProtocolMode::Legacy,
+            McpProtocol::Modern => ProtocolMode::Modern,
         },
         request_timeout,
         max_reconnect_attempts: defaults.max_reconnect_attempts,
@@ -2428,11 +2531,6 @@ fn resolve_http_auth(
             }),
         },
     }
-}
-
-fn content_hash(contents: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(contents.as_bytes()))
 }
 
 /// `lock().unwrap_or_else(|p| p.into_inner())` without repeating it fifteen

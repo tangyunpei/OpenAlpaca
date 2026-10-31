@@ -29,6 +29,12 @@ pub(super) fn validate_magic_mime(
             if InputSanitizer::is_audio_mime_compatible(declared_mime, detected_type) {
                 return Ok(());
             }
+            // A declared text file whose only signature is one written inside
+            // the text (a `%PDF` past offset 0, an `AC10xx` DWG header) passes
+            // like text infer cannot classify (DU-6 (b))
+            if InputSanitizer::is_text_mime_compatible(declared_mime, detected_type, data) {
+                return Ok(());
+            }
             Err(MimeMagicValidationError::Mismatch {
                 detected: detected_type.to_string(),
             })
@@ -63,15 +69,15 @@ pub struct FileOpenResponse {
 /// `stage` is the Phase 3 item 6 decision, taken by [`open_asset_for_user`] from
 /// the row's `origin` and passed down rather than re-derived.
 ///
-/// An **upload** is copied to `$TMPDIR/openalpaca-open/<id>-<name>` first. Two
-/// reasons, both still true after D2 gave uploads a real placement
-/// (`<store>/uploads/<date>/NN-<slug>.<ext>`, `openalpaca_storage::uploads`):
-/// the stored name is the store's own, so opening it in place would hand the
-/// user `03-quarterly-report.pdf` instead of the name they uploaded — and a row
-/// written before D2 is still a content-addressed blob under `state/assets/`
-/// with no extension at all — nothing moves it any more — which the
-/// system opener cannot pick an application for. The staged copy restores the
-/// original filename in both cases.
+/// An **upload** is copied to `state/cache/open/<id>/<name>` in the home store
+/// first ([`prepare_open_target_path`]; N-STORE-1 — it was `$TMPDIR`, where
+/// nothing removed a copy): uploads have a real placement since D2
+/// (`<store>/uploads/<date>/NN-<slug>.<ext>`, `openalpaca_storage::uploads`),
+/// but the stored name is the store's own, so opening it in place would hand
+/// the user `03-quarterly-report.pdf` instead of the name they uploaded. The
+/// staged copy restores the original filename. The copies are swept at the
+/// daemon's next start ([`super::files::sweep_open_copies`]) and removed with
+/// their rows when a project's data is deleted.
 ///
 /// A **produced** artifact already lives at a real path under its own name
 /// (§4.2's grammar), so it opens in place — no copy, and "Open" reveals the file
@@ -119,28 +125,26 @@ pub(super) fn sanitize_open_filename(filename: &str) -> String {
         })
         .collect();
     out = out.trim().to_string();
-    if out.is_empty() {
+    // Trimmed, `" ."` or `".. "` is `.` or `..`: no file name, like an empty
+    // one — and the store stages only one plain name.
+    if out.is_empty() || out == "." || out == ".." {
         "attachment".to_string()
     } else {
         out
     }
 }
 
+/// Stages an upload for Open as `state/cache/open/<file_id>/<its uploaded
+/// name, made safe>` and returns the copy's path — a fresh copy every time,
+/// in a 0700 folder of its own (`openalpaca_storage::store::stage_open_copy`).
 pub(super) fn prepare_open_target_path(
     storage_path: &str,
     file_id: &str,
     filename: &str,
 ) -> Result<PathBuf, String> {
-    let open_dir = std::env::temp_dir().join("openalpaca-open");
-    std::fs::create_dir_all(&open_dir).map_err(|e| format!("Failed to prepare open dir: {e}"))?;
     let safe_name = sanitize_open_filename(filename);
-    let target = open_dir.join(format!("{file_id}-{safe_name}"));
-    if target.exists() {
-        std::fs::remove_file(&target).map_err(|e| format!("Failed to refresh open target: {e}"))?;
-    }
-    std::fs::copy(storage_path, &target)
-        .map_err(|e| format!("Failed to stage file for open: {e}"))?;
-    Ok(target)
+    openalpaca_storage::store::stage_open_copy(FsPath::new(storage_path), file_id, &safe_name)
+        .map_err(|e| format!("Failed to stage file for open: {e:#}"))
 }
 
 pub(super) fn open_with_system_default(
@@ -234,7 +238,7 @@ pub(super) async fn open_asset_for_user(
             }
         }
     } else if stage {
-        // An upload is opened through a copy staged in `$TMPDIR`, as before.
+        // An upload is opened through a copy staged under `state/cache/open/`.
         asset.storage_path
     } else {
         let record = asset.clone();

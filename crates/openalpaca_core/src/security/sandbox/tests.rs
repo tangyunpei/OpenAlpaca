@@ -758,10 +758,7 @@ fn make_registry_with_destructive() -> Arc<ToolRegistry> {
             backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
-            annotations: Some(openalpaca_mcp::ToolAnnotations {
-                destructive_hint: Some(true),
-                ..Default::default()
-            }),
+            annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(true)),
             version: "test-0.0.0".into(),
             author: "test".into(),
             created_at: chrono::Utc::now(),
@@ -780,10 +777,7 @@ fn make_registry_with_destructive() -> Arc<ToolRegistry> {
             backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
-            annotations: Some(openalpaca_mcp::ToolAnnotations {
-                destructive_hint: Some(false),
-                ..Default::default()
-            }),
+            annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(false)),
             version: "test-0.0.0".into(),
             author: "test".into(),
             created_at: chrono::Utc::now(),

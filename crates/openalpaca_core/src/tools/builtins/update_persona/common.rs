@@ -2,12 +2,6 @@
 
 use std::path::Path;
 
-/// Compute SHA-256 hash of content.
-pub(super) fn sha256(content: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(content.as_bytes()))
-}
-
 /// Backup the existing file if it exists. Returns the backup path string.
 pub(super) async fn backup_if_exists(
     doc_path: &Path,

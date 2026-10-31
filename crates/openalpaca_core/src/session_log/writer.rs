@@ -10,6 +10,7 @@ use super::record::{
 };
 use super::reader::{LIVE_SEGMENT, segment_first_seq, segment_range};
 use super::{FileSnapshot, SnapshotSpec, snapshot_name};
+use openalpaca_storage::hash::{lower_hex, sha256_hex};
 use openalpaca_storage::{Database, SkillExecutionRepository, ToolExecutionEntry};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -648,12 +649,7 @@ fn write_snapshot_file(dir: &Path, rel: &str, source: &Path) -> io::Result<(u64,
             size += read as u64;
         }
         out.sync_data()?;
-        let digest = hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        Ok((size, digest))
+        Ok((size, lower_hex(&hasher.finalize())))
     })();
 
     match copied {
@@ -706,18 +702,6 @@ fn write_spill_file(dir: &Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
             Err(e)
         }
     }
-}
-
-/// The spill's content hash, as §5.4's stub carries it.
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 // ── The tool-call index row ─────────────────────────────────────────

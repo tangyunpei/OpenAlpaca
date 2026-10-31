@@ -185,6 +185,11 @@ pub(crate) fn row_json(record: &ExtensionRecord) -> serde_json::Value {
         "id": record.id.name,
         "version": record.version,
         "transport": record.transport,
+        // MCP only, while a connection is live: the negotiated protocol
+        // version and the connect and first-list durations (DU-25 (m-g)).
+        "protocol_version": record.protocol_version,
+        "connect_ms": record.connect_ms,
+        "list_ms": record.list_ms,
         // PERSISTED DISPOSITION — `null` on the two rows whose bit nobody can
         // read (design §4, §8).
         "enabled": record.disposition_readable.then_some(record.disposition.0),
@@ -206,6 +211,9 @@ pub(crate) fn row_json(record: &ExtensionRecord) -> serde_json::Value {
             "capabilities": d.capabilities,
             "virtual_capabilities": d.virtual_capabilities,
             "types": d.types,
+            // Standing: what the manifest holds that nothing acts on
+            // (N-PLUG-2), for the row awaiting consent.
+            "warnings": d.warnings,
         })),
         "skills": record.skills,
         "agents": record.agents,
@@ -677,6 +685,10 @@ pub async fn update_extension_handler(
 ///   verbs. Without it a `GET` on a typo answers `200 {}` (an empty config is
 ///   indistinguishable from a missing plugin) and a `POST` writes
 ///   `.config/<typo>.toml` for a plugin that does not exist.
+#[allow(
+    clippy::result_large_err,
+    reason = "the Err is the route's answer, an axum Response"
+)]
 async fn require_config_target(
     extensions: &Extensions,
     kind: &str,
