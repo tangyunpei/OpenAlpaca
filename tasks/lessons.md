@@ -151,3 +151,21 @@ Each entry: what went wrong → the rule that prevents it.
 **What happened:** Twice in one session a command list held in a variable reached its program as one argument. `bunx vitest run $F` found "no test files" for five paths. `verify-commits.sh $C` (with `$C` from `$(git rev-list …)`) got a single empty argument, so its commit loop did nothing. The session's shell is zsh, which does not word-split unquoted parameter expansions as bash does.
 
 **Rule:** In this environment, write the arguments out, use an array, or run the snippet under `bash -c '…'` when a variable carries a list. Check a background loop's first summary line before trusting that it is working through its list.
+
+## 2026-10 — A freshness sweep is bounded, and its tiny lock-only updates share one commit
+
+**What happened:** The before-the-merge freshness sweep (`tasks/deps-upgrade/programme-plan.md` §3.2 *FRESHNESS-SWEEP*) gave every eligible release its own commit and planned a closing pass for what became eligible while it ran. Sixteen of its items were lock-only moves committed one by one, and by its end new releases became eligible every day, so each pass would have found more. The owner ruled twice on 2026-10-30 (PDT): "put the tiny lock-only updates into one commit", built by rewriting the history after S08 (`2ef1197b`), and "let's just use the current version or we will get endless sweep over each package update": the sweep ended at the tip's versions, with no closing pass.
+
+**Rule:** A tiny lock-only update — a version move with no source change and nothing a person or a model meets (`Cargo.lock` or `bun.lock`, at most a root `Cargo.toml` floor equal to the locked version) — shares one commit with the others of its pass; a heavier item keeps its own. A freshness sweep is bounded: it takes what is eligible at one cut-off instant and stops at the current versions. A release that becomes eligible later is named, with its eligible-from and its way out (a later bounded pass, or Dependabot), and never scheduled as a wait for its eligibility.
+
+## 2026-10 — After a checkout switch, a frozen Bun install can report "no changes" without relinking
+
+**What happened:** Re-gating the sweep's rewritten history, `bun install --frozen-lockfile` on a tree reached by a checkout switch reported no changes and did not relink: react-query, vite and vitest stayed in `node_modules` at the newer tree's versions, so the bun gates would have tested packages that tree's `bun.lock` does not name.
+
+**Rule:** A bun gate on a tree reached by a checkout switch runs `bun install --frozen-lockfile --force`, then checks the installed version of every direct dependency, and of each transitive the change moves, against `bun.lock` before it trusts a result.
+
+## 2026-10 — A scratch `HOME` needs the real `RUSTUP_HOME` and `CARGO_HOME`, each assignment its own word
+
+**What happened:** Two of the sweep's runs pointed `HOME` at a scratch folder. S05's set no `RUSTUP_HOME` or `CARGO_HOME`; S18's passed its environment as one zsh string, so `HOME` took the whole string and `RUSTUP_HOME`, `CARGO_HOME` and `OPENALPACA_HOME_STORE` were unset. Each time rustup downloaded a second copy of the pinned toolchain from static.rust-lang.org, outside the hosts the run's brief allowed, and S18's cargo fetched 249 crates into the scratch `HOME`: 2.5 GB and 2.8 GB, deleted as not evidence. S18's probe panicked before any scan, so nothing reached a store.
+
+**Rule:** A run that sets a scratch `HOME` sets `RUSTUP_HOME` and `CARGO_HOME` to the real ones, and `OPENALPACA_HOME_STORE` wherever a store is in play, each assignment its own shell word or one `env VAR=… VAR=…` — never a string held in a variable, which zsh passes as one word (the zsh entry above). The run's log shows the toolchain resolved from the real `RUSTUP_HOME` before its first build.

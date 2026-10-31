@@ -1,4 +1,4 @@
-# Storage and project work — design (rev 1.2, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built; the owner's blanket answer of 2026-10-17 recorded)
+# Storage and project work — design (rev 1.3, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built; the owner's blanket answer of 2026-10-17 recorded; the freshness sweep's S12 residue in §18)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
@@ -1178,6 +1178,20 @@ live check.
   once** (`summariser_calls_today`) in a full core run during the residual pass — code no Stage 2 commit touched — and
   passed in its re-runs and in the gate at `3810d9d8`. To watch.
 
+From the toolchain programme's freshness sweep — its S12 (`252e9c2e`: unicode-normalization 0.1.25 → 0.1.26, the
+tables moved to Unicode 18; `tasks/deps-upgrade/programme-plan.md` §3.2 *FRESHNESS-SWEEP*) — each left as it is.
+Only a name holding a character Unicode 18 assigns is reached:
+
+- **A project whose root holds one of Unicode 18's 37 new combining marks, registered by an earlier build,** is
+  still listed but not found by its root: `store::projects::folder_name` now keeps the mark where it gave a `-`, and
+  `lookup` reads only the plain and the hashed folder name. Registering that root again makes a second project
+  beside the first; nothing is moved or deleted.
+- **A non-ASCII by-product path whose slug changes** — one holding U+209D…U+209F, which now give w, y and z, or one
+  of the 37 marks, now dropped where it gave a separator; 40 code points in all (`store::artifact::slugify`) — is
+  stored under another name, so writing it again with `file_write` starts a second artifact, not its next
+  version. A note whose title holds one of the 40 is renamed to its new slug on its next write; its id prefix
+  finds it either way.
+
 ## 19. What the panel changed (rev 0.1 → 0.2)
 
 - **Blocking, fixed.** Removing `moved_from` would have made every existing snapshot unreadable (R19). Deleting a
@@ -1260,6 +1274,13 @@ beta waits for, so it stays the owner's call (Stages 0–2 are all built).
 
 ## Revision log
 
+- **rev 1.3 (2026-10-31).** The toolchain programme's freshness sweep (`tasks/deps-upgrade/programme-plan.md`
+  rev 1.18): §18 gains two residues of its S12 (`252e9c2e`, unicode-normalization 0.1.26, Unicode 18) — a project
+  whose root holds one of the 37 new combining marks, registered by an earlier build, is listed but not found by its
+  root, and a non-ASCII by-product path whose slug changes starts a second artifact. `tasks/pending-decisions.md`
+  rev 25 lists both among the beta's known limits (§3.2, §3.9). §21 is unchanged: it names no point in the
+  programme for the beta, which the owner's ruling of 2026-10-30 (PDT) places at the end of the whole programme
+  (programme-plan §2, *The beta's scope*), B1–B3 with it.
 - **rev 1.2 (2026-10-17).** The owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z): every pending decision
   taken as its recommendation — 10 rows here; 3 left pending, no recommendation. *"for the decisions all use recommend
   by Zcode or Recommend options"*: each is taken as its current recommendation, the ZCode audit's where it gave or
