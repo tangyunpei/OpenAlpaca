@@ -74,10 +74,12 @@ impl PluginProcess {
         if let Some(stderr) = child.stderr.take() {
             let plugin_name = manifest.plugin.name.clone();
             tokio::spawn(async move {
-                use tokio::io::AsyncBufReadExt;
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
+                let drained = drain_stderr(stderr, |line| {
                     debug!(plugin = %plugin_name, "plugin stderr: {line}");
+                })
+                .await;
+                if let Err(e) = drained {
+                    debug!(plugin = %plugin_name, error = %e, "plugin stderr drain ending");
                 }
             });
         }
@@ -183,5 +185,81 @@ impl PluginProcess {
                 None
             }
         }
+    }
+}
+
+/// Read a plugin's stderr to its end, handing `on_line` each line without its
+/// `\n` or `\r\n`.
+///
+/// The stream is the plugin's bytes, not text: a line that is not UTF-8 is
+/// decoded lossily (U+FFFD for each invalid sequence) and the drain reads on.
+/// Stopping there would drop the pipe's read end, and the plugin's next write
+/// to stderr would then fail with `EPIPE` — or `SIGPIPE` would kill it. Ends
+/// at EOF, or with the first read error.
+async fn drain_stderr<R>(stderr: R, mut on_line: impl FnMut(&str)) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+
+    let mut reader = tokio::io::BufReader::new(stderr);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).await? == 0 {
+            return Ok(());
+        }
+        if line.ends_with(b"\n") {
+            line.pop();
+            if line.ends_with(b"\r") {
+                line.pop();
+            }
+        }
+        on_line(&String::from_utf8_lossy(&line));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    /// A stderr line that is not UTF-8 must not end the drain. The plugin keeps
+    /// writing, and once the drain stops, each of its writes fails: `EPIPE` on
+    /// the real pipe (or `SIGPIPE`, which kills it), `BrokenPipe` here. The
+    /// duplex buffer is far smaller than what follows the bad line, so those
+    /// writes complete only while the drain is still reading.
+    #[tokio::test]
+    async fn the_stderr_drain_reads_past_a_line_that_is_not_utf8() {
+        let (mut plugin, daemon) = tokio::io::duplex(64);
+        let drain = tokio::spawn(async move {
+            let mut lines = Vec::new();
+            let end = drain_stderr(daemon, |line| lines.push(line.to_owned())).await;
+            (end, lines)
+        });
+
+        plugin.write_all(b"caf\xe9 au lait\r\n").await.unwrap();
+        for i in 0..100 {
+            plugin
+                .write_all(format!("line {i}\n").as_bytes())
+                .await
+                .expect("the drain stopped reading after the line that is not UTF-8");
+        }
+        plugin
+            .write_all(b"the last line, unterminated")
+            .await
+            .unwrap();
+        drop(plugin);
+
+        let (end, lines) = tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("the drain did not end at EOF")
+            .expect("the drain task panicked");
+        assert!(end.is_ok(), "EOF ends the drain cleanly: {end:?}");
+        assert_eq!(lines.len(), 102);
+        assert_eq!(lines[0], "caf\u{FFFD} au lait");
+        assert_eq!(lines[1], "line 0");
+        assert_eq!(lines[100], "line 99");
+        assert_eq!(lines[101], "the last line, unterminated");
     }
 }

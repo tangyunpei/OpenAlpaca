@@ -25,6 +25,14 @@ const OBJECTIVE_CHARS: usize = 500;
 /// How much of a failure reason a lane's trailing detail carries.
 const DETAIL_CHARS: usize = 200;
 
+/// The lead's own lane's span id: one per run, derived from the task so it
+/// stays reconstructible from the task alone — the dispatcher opens the lane
+/// under it, and a replay tells the lead's records from its subagents' by it
+/// (N-LEAD-4).
+pub fn lead_span_id(task_id: &str) -> String {
+    format!("lead::{task_id}")
+}
+
 /// Announce a span row — its open, or one of its closes.
 fn publish(bus: &EventBus, record: &SubagentSpanRecord) {
     bus.publish(SystemEvent::SubagentSpan {

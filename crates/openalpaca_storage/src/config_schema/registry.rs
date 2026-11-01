@@ -211,6 +211,19 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.skills_catalog_budget",
+        kind: ConfigKind::Int {
+            min: Some(100),
+            max: Some(20000),
+        },
+        default: Some("500"),
+        description: "Skill catalog (<available_skills>) budget in characters; over it skills are listed by id only",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Daemon: Execution --
     ConfigKeyDef {
         key: "daemon.execution.max_rounds",

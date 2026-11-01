@@ -58,9 +58,13 @@ pub(super) fn parse_response(
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
-            let arguments: serde_json::Value = serde_json::from_str(args_str)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            // A string of JSON, or the object itself from some servers; what
+            // cannot be read is warned about once and refused by the
+            // registry, never run as `{}` (N-TOOL-5).
+            let arguments = crate::tool_arguments::read_tool_arguments_field(
+                &name,
+                &tc["function"]["arguments"],
+            );
             tool_calls.push(ToolCall {
                 id,
                 name,

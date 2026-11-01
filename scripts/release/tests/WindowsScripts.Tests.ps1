@@ -2,22 +2,27 @@
 <#
     Pester tests for the Windows release scripts.
 
-    The two scripts are the only shipped code nothing else in CI can exercise —
-    the Rust and bun gates run on ubuntu — so `.github/workflows/ci.yml` has one
-    small `windows-latest` job that runs this file and nothing else. Run it
-    locally on a Windows box with:
+    The installer and uninstaller are the only shipped code nothing else in CI
+    can exercise — the Rust and bun gates run on ubuntu — so
+    `.github/workflows/ci.yml` has one small `windows-latest` job that runs this
+    file and nothing else. Run it locally on a Windows box with:
 
         Invoke-Pester -Path scripts/release/tests
 
-    Both scripts are standalone (one copy of each ships per release archive), so
-    each defines its own copy of the store-root helpers; the two Describe blocks
-    below dot-source one script apiece and assert the copies agree.
+    Both are standalone (one copy of each ships per release archive), so each
+    defines its own copy of the store-root helpers; the first two Describe
+    blocks below dot-source one script apiece and assert the copies agree. The
+    third dot-sources package-windows.ps1 for the two digest helpers that hold
+    the packaged daemon to the staged sidecar's sha256 and the two that hold
+    the bun on PATH to the root package.json's pin; the packaging itself
+    (cargo, bun, tauri, msiexec) runs nowhere in CI.
 #>
 
 BeforeAll {
     $script:ReleaseDir      = Split-Path -Parent $PSScriptRoot
     $script:InstallScript   = Join-Path $script:ReleaseDir 'install-windows.ps1'
     $script:UninstallScript = Join-Path $script:ReleaseDir 'uninstall-windows.ps1'
+    $script:PackageScript   = Join-Path $script:ReleaseDir 'package-windows.ps1'
 
     $script:SavedHomeStore   = [Environment]::GetEnvironmentVariable('OPENALPACA_HOME_STORE')
     $script:SavedUserProfile = $env:USERPROFILE
@@ -181,7 +186,88 @@ Describe 'uninstall-windows.ps1' {
     }
 }
 
-Describe 'both scripts, as text' {
+Describe 'package-windows.ps1' {
+
+    BeforeAll {
+        . $script:PackageScript -DotSourceOnly
+    }
+
+    Context 'the staged sidecar digest it holds the packaged daemon to' {
+
+        It 'reads the hex digest from a shasum-format .sha256 file' {
+            $file = Join-Path $script:TempRoot 'staged.sha256'
+            Set-Content -Path $file -Value ("$('a' * 64)  openalpacad-x86_64-pc-windows-msvc.exe")
+            Read-Sha256File $file | Should -Be ('a' * 64)
+        }
+
+        It 'lower-cases a digest written in upper case' {
+            $file = Join-Path $script:TempRoot 'upper.sha256'
+            Set-Content -Path $file -Value ("$('B' * 64)  openalpacad.exe")
+            Read-Sha256File $file | Should -Be ('b' * 64)
+        }
+
+        It 'refuses a .sha256 file that holds no 64-hex digest' {
+            # As in the installer's relative-path test: Die reaches its `exit`
+            # only when errors are non-terminating, so assert under Stop.
+            $ErrorActionPreference = 'Stop'
+            $file = Join-Path $script:TempRoot 'bad.sha256'
+            Set-Content -Path $file -Value 'not a digest'
+            { Read-Sha256File $file } | Should -Throw
+        }
+
+        It 'hashes a file the way shasum -a 256 does' {
+            $file = Join-Path $script:TempRoot 'abc.bin'
+            [System.IO.File]::WriteAllBytes($file, [byte[]](0x61, 0x62, 0x63))
+            Compute-SHA256 $file | Should -Be 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+        }
+    }
+
+    Context 'the Bun it requires: the version the root package.json pins' {
+
+        It 'reads the pinned version from a packageManager field' {
+            $file = Join-Path $script:TempRoot 'package.json'
+            Set-Content -Path $file -Value '{ "name": "x", "packageManager": "bun@1.4.3" }'
+            Read-PinnedBunVersion $file | Should -Be '1.4.3'
+        }
+
+        It 'reads a version from the repository root package.json' {
+            $root = Join-Path (Split-Path -Parent (Split-Path -Parent $script:ReleaseDir)) 'package.json'
+            Read-PinnedBunVersion $root | Should -Match '^\d+\.\d+\.\d+$'
+        }
+
+        It 'refuses a package.json that pins no bun' {
+            $ErrorActionPreference = 'Stop'
+            $file = Join-Path $script:TempRoot 'no-pin.json'
+            Set-Content -Path $file -Value '{ "name": "x" }'
+            { Read-PinnedBunVersion $file } | Should -Throw
+        }
+
+        It 'accepts the pinned version' {
+            { Assert-BunVersion '1.4.3' '1.4.3' } | Should -Not -Throw
+        }
+
+        It 'refuses any other version, naming both' {
+            $ErrorActionPreference = 'Stop'
+            { Assert-BunVersion '1.4.2' '1.4.3' } | Should -Throw -ExpectedMessage '*bun 1.4.2*bun@1.4.3*'
+        }
+    }
+}
+
+Describe 'the scripts, as text' {
+
+    It 'package-windows.ps1 builds the daemon once through prepare-sidecar.ts, with a frozen install and locked builds' {
+        $text = Get-Content $script:PackageScript -Raw
+        $text | Should -Match 'prepare-sidecar\.ts --release'
+        $text | Should -Match 'bun install --frozen-lockfile'
+        $text | Should -Match 'cargo build --release --locked -p openalpaca'
+        $text | Should -Not -Match '-p openalpaca -p openalpacad'
+    }
+
+    It 'package-windows.ps1 holds the bun on PATH to the root package.json pin' {
+        $text = Get-Content $script:PackageScript -Raw
+        $text | Should -Match 'Assert-BunVersion \(\(bun --version \| Out-String\)\.Trim\(\)\)'
+        $text | Should -Match 'Read-PinnedBunVersion \(Join-Path \$RepoRoot ''package\.json''\)'
+    }
 
     It 'install-windows.ps1 names the real store root and no legacy data root' {
         $text = Get-Content $script:InstallScript -Raw

@@ -14,7 +14,13 @@
 //!    with a single `rename`. A [`Staged`] that is dropped without
 //!    [`Staged::commit`] — an error, an early return, a panic — sweeps itself,
 //!    so a crash can leave a staging copy behind but never a partial plugin the
-//!    next boot scan would treat as real.
+//!    next boot scan would treat as real; the next start sweeps such a copy
+//!    ([`sweep_stale_staging`]). An update's swap — the incumbent to the
+//!    trash, then the commit — is recorded in `.staging/<id>.swap` between
+//!    the two ([`replace`]): a commit that fails puts the incumbent back
+//!    before the error returns, and a crash in between is put back at the
+//!    next start ([`recover_swap`]), so a failed update never leaves the
+//!    plugin absent (N-PLUG-4).
 //! 2. **A user-dropped directory is never deleted** (§1.3 rule 3). Replacing or
 //!    uninstalling one *moves* it to `<root>/.trash/<name>-<stamp>/`.
 //! 3. **The copy never links out of the store.** A symlink whose target escapes
@@ -167,6 +173,12 @@ pub struct ManifestSummary {
     /// Keys the manifest marks `sensitive`: their values never land in
     /// `plugins/.config/<name>.toml` (X-29).
     pub sensitive_config_keys: Vec<String>,
+    /// What the manifest declares that OpenAlpaca will not act on — a key it
+    /// does not read, `types.connector` or `types.provider` while their
+    /// bridges are unwired ([`PluginManifest::warnings`], N-PLUG-2). Warnings,
+    /// never refusals: the preview says them so approving is decided on what
+    /// will actually run.
+    pub warnings: Vec<String>,
 }
 
 impl ManifestSummary {
@@ -202,6 +214,7 @@ impl ManifestSummary {
             ]),
             required_config_keys: required,
             sensitive_config_keys: sensitive,
+            warnings: manifest.warnings(),
         }
     }
 }
@@ -450,8 +463,8 @@ impl Staged {
     }
 
     /// Rename the staged tree to `dest`. `dest` must not exist — a replace
-    /// [`trash`]es the incumbent first, so the rename is always onto a free
-    /// name and always atomic.
+    /// ([`replace`]) moves the incumbent to the trash first, so the rename is
+    /// always onto a free name and always atomic.
     pub fn commit(mut self, dest: &Path) -> Result<(), InstallError> {
         if dest.exists() {
             return Err(InstallError::AlreadyInstalled(format!(
@@ -684,11 +697,297 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), InstallError> {
 /// replace half of an update and the uninstall land here. The stamp carries
 /// nanoseconds, so two removals of one name in the same second do not collide.
 pub fn trash(plugins_root: &Path, dir: &Path, name: &str) -> Result<PathBuf, InstallError> {
-    let trash_root = plugins_root.join(TRASH_DIR);
-    std::fs::create_dir_all(&trash_root).map_err(|e| io("cannot create", &trash_root, e))?;
-    let target = trash_root.join(format!("{name}-{}", stamp()));
+    let target = trash_target(plugins_root, name)?;
     std::fs::rename(dir, &target).map_err(|e| io("cannot move to the trash", dir, e))?;
     Ok(target)
+}
+
+/// Where [`trash`] would move a directory of this name now — named before
+/// the move, so an update can record it first ([`replace_with`]). Creates
+/// `.trash/` and nothing else.
+fn trash_target(plugins_root: &Path, name: &str) -> Result<PathBuf, InstallError> {
+    let trash_root = plugins_root.join(TRASH_DIR);
+    std::fs::create_dir_all(&trash_root).map_err(|e| io("cannot create", &trash_root, e))?;
+    Ok(trash_root.join(format!("{name}-{}", stamp())))
+}
+
+// ============================================================================
+// The swap — an update's replace-in-place (N-PLUG-4)
+// ============================================================================
+
+/// What a swap marker's file name ends with: `.staging/<id>.swap`.
+const SWAP_SUFFIX: &str = ".swap";
+
+/// The one-line marker an update writes before it moves the incumbent to
+/// the trash and removes after the commit: it names, relative to the plugins
+/// root, where the incumbent went (`.trash/<id>-<stamp>`), so a crash between
+/// the two steps is put back at the next start ([`recover_swap`]).
+pub fn swap_marker(plugins_root: &Path, id: &str) -> PathBuf {
+    plugins_root
+        .join(STAGING_DIR)
+        .join(format!("{id}{SWAP_SUFFIX}"))
+}
+
+/// Replace `plugins/<id>` with the staged tree: the incumbent to the trash,
+/// then the staged copy renamed into the name it vacated, with the swap
+/// recorded on disk between the two (N-PLUG-4).
+///
+/// **A failed commit puts the incumbent back before the error returns.** The
+/// staged copy is gone by then (a [`Staged`] that is not committed sweeps
+/// itself), so without the rollback the plugin would be absent and its last
+/// good tree only in `.trash/`. If even the rollback fails, the marker stays
+/// and the next start restores the tree ([`recover_swap`]). Nothing is ever
+/// deleted: the incumbent only moves (§1.3 rule 3).
+pub fn replace(plugins_root: &Path, id: &str, staged: Staged) -> Result<(), InstallError> {
+    replace_with(plugins_root, id, staged, Staged::commit).map_err(|failed| failed.error)
+}
+
+/// A failed [`replace_with`]: the error, and where it left the incumbent.
+#[derive(Debug)]
+pub(crate) struct SwapFailure {
+    pub(crate) error: InstallError,
+    /// The incumbent is at `plugins/<id>` — it never moved, or it was moved
+    /// back. `false` when it stays in the trash (the name was taken, or the
+    /// rename back failed) or there was no incumbent. The update reads it to
+    /// decide whether the consent it dropped belongs to the tree that is
+    /// there now.
+    pub(crate) incumbent_in_place: bool,
+}
+
+impl SwapFailure {
+    fn in_place(error: InstallError) -> Self {
+        Self {
+            error,
+            incumbent_in_place: true,
+        }
+    }
+
+    fn moved(error: InstallError) -> Self {
+        Self {
+            error,
+            incumbent_in_place: false,
+        }
+    }
+}
+
+/// [`replace`] with the commit step passed in — the plugin manager's test seam
+/// fails it on purpose; production passes [`Staged::commit`].
+pub(crate) fn replace_with(
+    plugins_root: &Path,
+    id: &str,
+    staged: Staged,
+    commit: impl FnOnce(Staged, &Path) -> Result<(), InstallError>,
+) -> Result<(), SwapFailure> {
+    let dest = plugins_root.join(id);
+    if !dest.exists() {
+        // Nothing to move aside, so nothing to put back.
+        return commit(staged, &dest).map_err(SwapFailure::moved);
+    }
+
+    let trashed = trash_target(plugins_root, id).map_err(SwapFailure::in_place)?;
+    let marker = swap_marker(plugins_root, id);
+    let relative = Path::new(TRASH_DIR).join(trashed.file_name().unwrap_or_default());
+    write_marker(&marker, &relative).map_err(SwapFailure::in_place)?;
+
+    if let Err(e) = std::fs::rename(&dest, &trashed) {
+        remove_marker(&marker);
+        return Err(SwapFailure::in_place(io(
+            "cannot move to the trash",
+            &dest,
+            e,
+        )));
+    }
+
+    let Err(failure) = commit(staged, &dest) else {
+        remove_marker(&marker);
+        return Ok(());
+    };
+    if dest.exists() {
+        // Something took the name between the move and the commit; the
+        // incumbent cannot go back over it, so it stays where it is and the
+        // error says where. The marker goes too: the error has told where the
+        // tree is, and a marker kept would put it back at a later start over
+        // whatever then frees the name — an uninstall of what took it.
+        remove_marker(&marker);
+        return Err(SwapFailure::moved(InstallError::Io(format!(
+            "{failure}; the previous tree was kept at '{}'",
+            trashed.display()
+        ))));
+    }
+    match std::fs::rename(&trashed, &dest) {
+        Ok(()) => {
+            remove_marker(&marker);
+            tracing::warn!(plugin = id, error = %failure, "the update's commit failed; the previous tree is back in place");
+            Err(SwapFailure::in_place(failure))
+        }
+        // The marker stays: the next start puts the tree back
+        // ([`recover_swap`]) unless an uninstall or a remove of the row drops
+        // it first ([`drop_swap_marker`]).
+        Err(restore) => Err(SwapFailure::moved(InstallError::Io(format!(
+            "{failure}; and the previous tree could not be put back from '{}' ({restore}) — \
+             the next daemon start puts it back",
+            trashed.display()
+        )))),
+    }
+}
+
+/// Write a swap marker and flush it, so a crash right after the trash move
+/// still finds it.
+fn write_marker(marker: &Path, trashed: &Path) -> Result<(), InstallError> {
+    use std::io::Write as _;
+
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| io("cannot create", parent, e))?;
+    }
+    let mut file = std::fs::File::create(marker).map_err(|e| io("cannot write", marker, e))?;
+    writeln!(file, "{}", trashed.display()).map_err(|e| io("cannot write", marker, e))?;
+    file.sync_all().map_err(|e| io("cannot flush", marker, e))
+}
+
+fn remove_marker(marker: &Path) {
+    if let Err(e) = std::fs::remove_file(marker)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(marker = %marker.display(), error = %e, "could not remove a swap marker");
+    }
+}
+
+/// Drop `.staging/<id>.swap` if one is there — the uninstall and the orphan
+/// row's removal, which end the plugin the marker would put back. Kept, it
+/// would restore the trashed tree at the next start over the name the owner
+/// has just freed. The tree itself stays in `.trash/` (§1.3 rule 3).
+pub fn drop_swap_marker(plugins_root: &Path, id: &str) {
+    remove_marker(&swap_marker(plugins_root, id));
+}
+
+/// What [`recover_swap`] found for one marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwapRecovery {
+    /// The update stopped between the trash move and the commit: the
+    /// incumbent was renamed back to `plugins/<id>`.
+    Restored { from: PathBuf },
+    /// The name is taken — the commit landed, or the move never happened —
+    /// so nothing moved; the marker was dropped.
+    Settled,
+    /// Neither the name nor the recorded tree is there; nothing to put back.
+    Missing { recorded: PathBuf },
+    /// The marker does not name a directory inside `.trash/`; it is left in
+    /// place, untouched, for a person to read.
+    Unreadable { reason: String },
+}
+
+/// Every swap marker under `.staging/`, by plugin id.
+pub fn swap_markers(plugins_root: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = std::fs::read_dir(plugins_root.join(STAGING_DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(SWAP_SUFFIX))
+                .map(String::from)
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Finish the swap a marker records: put the trashed incumbent back when the
+/// name is free, otherwise leave everything where it is; then drop the
+/// marker. Never deletes a tree (§1.3 rule 3), and never moves the old tree
+/// back over a name that is taken — a crash after a commit that landed must
+/// not undo it.
+///
+/// `Err` only when the rename back fails; the marker then stays for the next
+/// start.
+pub fn recover_swap(plugins_root: &Path, id: &str) -> Result<SwapRecovery, InstallError> {
+    let marker = swap_marker(plugins_root, id);
+    let line = std::fs::read_to_string(&marker).map_err(|e| io("cannot read", &marker, e))?;
+    let recorded = Path::new(line.trim());
+    let mut parts = recorded.components();
+    let inside_trash = matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(Component::Normal(dir)), Some(Component::Normal(_)), None) if dir == TRASH_DIR
+    );
+    if !inside_trash {
+        return Ok(SwapRecovery::Unreadable {
+            reason: format!(
+                "'{}' does not name a directory inside {TRASH_DIR}/",
+                line.trim()
+            ),
+        });
+    }
+
+    let trashed = plugins_root.join(recorded);
+    let dest = plugins_root.join(id);
+    let outcome = if dest.exists() {
+        SwapRecovery::Settled
+    } else if trashed.is_dir() {
+        std::fs::rename(&trashed, &dest).map_err(|e| io("cannot put back", &trashed, e))?;
+        SwapRecovery::Restored { from: trashed }
+    } else {
+        SwapRecovery::Missing { recorded: trashed }
+    };
+    remove_marker(&marker);
+    Ok(outcome)
+}
+
+/// Sweep the staging copies an earlier process left: directories under
+/// `.staging/` named as [`stage`] names them, `<name>.<pid>.<stamp>`, whose
+/// pid is not this process's. Returns how many went.
+///
+/// A copy is the daemon's own — its source is still wherever the owner keeps
+/// it — so removing one deletes nothing the owner dropped in. A copy this
+/// process is making carries this pid and is never touched, and neither is a
+/// swap marker or anything that does not read as a staging copy. The rule is
+/// the pid rather than the age because a reused pid only delays a sweep to a
+/// later start, while an age rule could race a copy still being written.
+pub fn sweep_stale_staging(plugins_root: &Path) -> usize {
+    let staging = plugins_root.join(STAGING_DIR);
+    let ours = std::process::id();
+    let mut swept = 0;
+    for entry in std::fs::read_dir(&staging).into_iter().flatten().flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Some(pid) = entry.file_name().to_str().and_then(staging_pid) else {
+            continue;
+        };
+        if pid == ours {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => swept += 1,
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "could not sweep an earlier process's staging copy"
+            ),
+        }
+    }
+    swept
+}
+
+/// The pid in a staging copy's name, `<name>.<pid>.<date>T<time>.<nanos>Z`
+/// ([`stage`], [`stamp`]); `None` for a name that is not one.
+fn staging_pid(name: &str) -> Option<u32> {
+    let mut parts = name.rsplitn(4, '.');
+    let nanos = parts.next()?;
+    let date = parts.next()?;
+    let pid = parts.next()?;
+    let plugin = parts.next()?;
+    let stamp_like = nanos
+        .strip_suffix('Z')
+        .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+        && date.len() == 15
+        && date.as_bytes().get(8) == Some(&b'T');
+    (stamp_like && !plugin.is_empty())
+        .then(|| pid.parse().ok())
+        .flatten()
 }
 
 /// A plugin's own data directory, whatever it holds.

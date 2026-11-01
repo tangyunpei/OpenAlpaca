@@ -267,7 +267,7 @@ pub fn clear_ai_config_at(path: &std::path::Path) -> Result<()> {
     // Delete keychain secrets before clearing providers
     if let Some(ref mut providers) = config.providers {
         let store = secret_store();
-        for (_name, prov) in providers.iter_mut() {
+        for prov in providers.values_mut() {
             if let Some(ref keys) = prov.keys {
                 for k in keys {
                     if let Some(ref sref) = k.secret_ref {

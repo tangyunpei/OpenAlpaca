@@ -38,6 +38,13 @@ impl LlmRouter {
         let backoff_cap = std::time::Duration::from_millis(rate_config.backoff_cap_ms);
         const OVERLOAD_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(10);
 
+        // N-LEAD-5: whether every attempt this call made was refused for its
+        // credentials. A refusal rotates to the next key like a rate limit;
+        // when nothing but refusals came back, the call ends as
+        // `AllKeysRefused` — not transient — instead of `MaxRetriesExceeded`.
+        let mut refusals = 0usize;
+        let mut other_outcomes = 0usize;
+
         // Allow up to 2 rate-limit wait cycles before giving up.
         let mut rate_limit_waits = 0;
         const MAX_RATE_LIMIT_WAITS: u32 = 2;
@@ -53,6 +60,7 @@ impl LlmRouter {
                     }
                     Err(_) => {
                         // AllKeysRateLimited — break to the wait-for-cooldown logic below
+                        other_outcomes += 1;
                         break;
                     }
                 };
@@ -139,6 +147,7 @@ impl LlmRouter {
                             error_kind = "rate_limited",
                             "Provider rate-limited key; applying key cooldown and rotating"
                         );
+                        other_outcomes += 1;
                         pool.report_result(
                             &key_guard.id,
                             CallResult::RateLimited { retry_after_ms },
@@ -165,6 +174,7 @@ impl LlmRouter {
                             std::time::Duration::from_millis(750),
                         );
                         let wait = recommended.saturating_add(jitter).min(backoff_cap);
+                        other_outcomes += 1;
 
                         tracing::warn!(
                             model = model,
@@ -196,11 +206,13 @@ impl LlmRouter {
                             "Authentication error for key '{}', trying next key",
                             key_guard.id
                         );
+                        refusals += 1;
                         pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
                             .await;
                         continue;
                     }
                     Err(e) if e.is_transient() => {
+                        other_outcomes += 1;
                         // Exponential backoff with full jitter
                         let backoff =
                             backoff_with_jitter(backoff_base, attempt as u32, backoff_cap);
@@ -225,6 +237,12 @@ impl LlmRouter {
                         return Err(LlmRouterError::Llm(e));
                     }
                 }
+            }
+
+            // Every attempt was a refusal — of each key the pool offered —
+            // and waiting for a cooldown changes nothing for a refused key.
+            if refusals > 0 && other_outcomes == 0 {
+                return Err(LlmRouterError::AllKeysRefused);
             }
 
             // All keys exhausted or rate-limited — wait for cooldown if we haven't exceeded wait limit

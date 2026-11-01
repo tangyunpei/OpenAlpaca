@@ -49,6 +49,11 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "prompt_budgets"],
         field: "user_profile_budget",
     },
+    TomlMapping {
+        schema_key: "daemon.orchestrator.skills_catalog_budget",
+        section: &["orchestrator", "prompt_budgets"],
+        field: "skills_catalog_budget",
+    },
     // Execution: Agent Defaults
     TomlMapping {
         schema_key: "daemon.execution.max_rounds",

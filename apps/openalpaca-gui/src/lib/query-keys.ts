@@ -135,6 +135,7 @@ export const qk = {
     all: () => ["skills"] as const,
     health: () => ["skills", "health"] as const,
     catalog: () => ["skills", "catalog"] as const,
+    diagnostics: () => ["skills", "diagnostics"] as const,
   },
 
   agents: {

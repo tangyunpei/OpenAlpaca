@@ -1,0 +1,60 @@
+# Version updates, monthly, one pull request per ecosystem (a group each).
+# - cargo: lockfile-only, so the PR is the semver-compatible Cargo.lock refresh
+#   (transitive crates included) and never edits a Cargo.toml requirement;
+#   a semver-incompatible bump (a 0.x minor among them) is planned by hand.
+# - bun: the root bun.lock, for the one workspace (apps/openalpaca-gui), whose
+#   package.json pins exact versions, so every update edits it; a major is
+#   planned by hand.
+# - github-actions: moves each SHA pin and its `# vX.Y.Z` comment together.
+# The Tauri pair (programme-plan §7): no PR here moves a `tauri*` crate or an
+# `@tauri-apps/*` package to a new minor, nor a plugin (`tauri-plugin-*`,
+# `@tauri-apps/plugin-*`) at all — the plugin crate is pinned `=` to its JS
+# twin — so each such move is a hand-made commit that moves both locks.
+# A 7-day cooldown keeps a release yanked or compromised in its first week out
+# of the PR (DU-23).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    versioning-strategy: lockfile-only
+    allow:
+      - dependency-type: all
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "tauri*"
+        update-types: ["version-update:semver-minor"]
+      # every update type
+      - dependency-name: "tauri-plugin-*"
+    groups:
+      cargo-lock-refresh:
+        patterns: ["*"]
+
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@tauri-apps/*"
+        update-types: ["version-update:semver-minor"]
+      # every update type
+      - dependency-name: "@tauri-apps/plugin-*"
+    groups:
+      bun-minor-and-patch:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

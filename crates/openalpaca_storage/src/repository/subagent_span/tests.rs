@@ -313,7 +313,7 @@ fn run_counts_group_every_completed_span_by_its_template() {
     );
     // A template that never ran has no entry at all: the caller reports 0
     // rather than this query inventing a row.
-    assert!(counts.get("research_agent").is_none());
+    assert!(!counts.contains_key("research_agent"));
 }
 
 /// A template whose only spans are still running has no *completed* run at
@@ -330,7 +330,7 @@ fn a_template_with_only_running_spans_is_absent_from_the_map() {
         .run_counts_by_template(None)
         .unwrap();
 
-    assert!(counts.get("review_agent").is_none());
+    assert!(!counts.contains_key("review_agent"));
 }
 
 /// `since` is the cutoff `?window=7d|30d` compiles down to: a completed span
@@ -427,8 +427,8 @@ fn span_counts_group_every_span_by_its_task() {
     assert_eq!(counts.get("t2").copied(), Some(1));
     // A run that spawned nothing is absent, not zero-valued: the caller
     // defaults to 0 rather than this query inventing rows.
-    assert!(counts.get("t3").is_none(), "a run with no spans has no entry");
-    assert!(counts.get("never-existed").is_none());
+    assert!(!counts.contains_key("t3"), "a run with no spans has no entry");
+    assert!(!counts.contains_key("never-existed"));
 }
 
 /// Ids the caller did not ask about are not counted, so a page's numbers

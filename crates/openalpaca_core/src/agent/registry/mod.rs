@@ -5,7 +5,7 @@
 //! Singleton templates (e.g. lead_agent) enforce max 1 active instance.
 
 use super::subagent::{AgentStatus, SubAgent};
-use super::template::AgentTemplate;
+use super::template::{AgentSource, AgentTemplate};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -122,12 +122,38 @@ impl AgentRegistry {
     }
 
     /// Remove a plugin's template and leave a tombstone behind
-    /// (extension design §10 case 5(a)).
+    /// (extension design §10 case 5(a)) — **only when the template under
+    /// this id is that plugin's own** (`AgentSource::Plugin { plugin_id }`).
+    /// Returns whether one was removed.
+    ///
+    /// N-PLUG-6: a plugin whose `agent/info` named a shipped template's id
+    /// (`writing_agent`) was refused at registration, yet its unload removed
+    /// the shipped template by id. A template another source holds is not
+    /// this plugin's to take, and no tombstone is written for it: a
+    /// tombstone records a withdrawal that happened, and attributing a live
+    /// incumbent's id to the plugin would mislead a later miss.
     pub fn remove_plugin_template(&self, template_id: &str, plugin_id: &str) -> bool {
-        let existed = self.lock_templates().remove(template_id).is_some();
-        self.lock_template_tombstones()
-            .insert(template_id.to_string(), plugin_id.to_string());
-        existed
+        let removed = {
+            let mut templates = self.lock_templates();
+            let owned = templates.get(template_id).is_some_and(|template| {
+                matches!(
+                    &template.source,
+                    AgentSource::Plugin { plugin_id: owner, .. } if owner == plugin_id
+                )
+            });
+            owned && templates.remove(template_id).is_some()
+        };
+        if removed {
+            self.lock_template_tombstones()
+                .insert(template_id.to_string(), plugin_id.to_string());
+        } else {
+            tracing::debug!(
+                template = template_id,
+                plugin = plugin_id,
+                "the template under this id is not the plugin's; left in place"
+            );
+        }
+        removed
     }
 
     /// Expire every tombstone this plugin left behind, returning how many were

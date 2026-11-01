@@ -145,10 +145,9 @@ impl IntentParser {
             ("cancel", r)
         } else if let Some(r) = lower.strip_prefix("/pause") {
             ("pause", r)
-        } else if let Some(r) = lower.strip_prefix("/resume") {
-            ("resume", r)
         } else {
-            return None;
+            let r = lower.strip_prefix("/resume")?;
+            ("resume", r)
         };
         // Bare command ("/cancel") → id resolved from the lane's active
         // workflows by the handler. With a trailing id ("/cancel <id>") the

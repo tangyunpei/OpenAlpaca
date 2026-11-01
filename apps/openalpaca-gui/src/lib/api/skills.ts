@@ -1,5 +1,5 @@
 /**
- * The two skill routes.
+ * The skill routes.
  *
  * `GET /v1/skills` is the catalog — id, name, description, triggers, schedule
  * and provenance. `GET /v1/skills/health` is the metrics, keyed by the same
@@ -9,13 +9,29 @@
  */
 
 import { apiFetch } from "../http";
-import type { SkillCatalogEntry, SkillHealthMetrics } from "./types";
+import type {
+  SkillCatalogEntry,
+  SkillDiagnostic,
+  SkillHealthMetrics,
+} from "./types";
 
 /** `GET /v1/skills` — bare array, sorted by id. */
 export async function listSkills(
   signal?: AbortSignal,
 ): Promise<SkillCatalogEntry[]> {
   return await apiFetch<SkillCatalogEntry[]>("/v1/skills", { signal });
+}
+
+/**
+ * `GET /v1/skills/diagnostics` — what the catalog's last scan found, a bare
+ * array sorted by path then code (N-SKILL-2).
+ */
+export async function getSkillDiagnostics(
+  signal?: AbortSignal,
+): Promise<SkillDiagnostic[]> {
+  return await apiFetch<SkillDiagnostic[]>("/v1/skills/diagnostics", {
+    signal,
+  });
 }
 
 /** `GET /v1/skills/health` — bare array keyed by `skill_id`. */

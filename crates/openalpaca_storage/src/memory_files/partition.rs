@@ -31,6 +31,7 @@ use super::{
     OWNERS_DIR, home_partition_key, is_owner_key, is_partition_key, is_revision, owner_key,
     project_partition_key,
 };
+use crate::hash::sha256_hex;
 use crate::store::projects::{self, ProjectId};
 use crate::store::{ContentKind, StoreScope, home_root, state_dir};
 use anyhow::{Context, Result};
@@ -511,7 +512,7 @@ fn classify(
             note.id
         )));
     }
-    let revision = super::sha256_hex(&bytes);
+    let revision = sha256_hex(&bytes);
     Ok(Arc::new(ParsedNote { note, revision }))
 }
 
@@ -1282,9 +1283,7 @@ impl Partition {
                     // A racy entry whose bytes still hash to it is reused,
                     // not parsed again.
                     let reuse = match (&read, hit) {
-                        (Ok(bytes), Some(hit))
-                            if super::sha256_hex(bytes) == hit.parsed.revision =>
-                        {
+                        (Ok(bytes), Some(hit)) if sha256_hex(bytes) == hit.parsed.revision => {
                             Some(Arc::clone(&hit.parsed))
                         }
                         _ => None,
@@ -1400,7 +1399,7 @@ impl Partition {
             };
             let current = read_note_file(&view.path)
                 .ok()
-                .map(|bytes| super::sha256_hex(&bytes));
+                .map(|bytes| sha256_hex(&bytes));
             if current.as_deref() != Some(view.revision.as_str()) {
                 stale.push(view.file_name.clone());
             }
@@ -1579,7 +1578,7 @@ impl Partition {
     ) -> Result<(String, LoadedPartition), MemoryFilesError> {
         self.ensure_laid_out(state)?;
         let bytes = note.serialize();
-        let to_rev = super::sha256_hex(bytes.as_bytes());
+        let to_rev = sha256_hex(bytes.as_bytes());
 
         // Step 1: the single pending field.
         Self::snapshot_mut(state).pending = Some(Pending {
@@ -2309,7 +2308,7 @@ impl Partition {
                 .filter_map(|e| {
                     read_regular_nofollow(&e.path)
                         .ok()
-                        .map(|bytes| (e.path, super::sha256_hex(&bytes)))
+                        .map(|bytes| (e.path, sha256_hex(&bytes)))
                 })
                 .collect();
             let at_to = files.iter().any(|(_, h)| *h == pending.to_rev);

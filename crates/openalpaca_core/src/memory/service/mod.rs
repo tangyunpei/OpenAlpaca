@@ -78,6 +78,7 @@ pub use write_slot::QuiesceGuard;
 
 use chrono::{DateTime, Utc};
 use openalpaca_storage::Database;
+use openalpaca_storage::hash::sha256_hex;
 use openalpaca_storage::memory_files::{
     self as files, Dedup, EffectiveStatus, LoadedPartition, MAX_LIST_ENTRIES, MAX_NOTE_BYTES,
     MAX_SOURCES, MAX_TITLE_CHARS, MemoryFilesError, NewNote, NoteId, NoteParseCache, NoteScope,
@@ -2482,7 +2483,7 @@ fn list_filter_fingerprint(input: &ListInput) -> String {
         "{:?}|{:?}|{:?}|{}|{}",
         input.kind, input.status, input.scope, input.include_history, input.include_candidates
     );
-    files::sha256_hex(text.as_bytes())[..8].to_string()
+    sha256_hex(text.as_bytes())[..8].to_string()
 }
 
 fn encode_cursor(updated_at: &str, id: &str, filter_fp: &str) -> String {

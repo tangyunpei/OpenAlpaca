@@ -1110,7 +1110,7 @@ fn interactive_agent_detail(agent: &TuiAgentItem) -> Result<()> {
         // Print agent summary
         println!();
         println!("{} {}", style("Agent:").dim(), style(&agent.name).bold());
-        println!("{} {}", style("ID:").dim(), &agent.id);
+        println!("{} {}", style("ID:").dim(), agent.id);
         if let Some(ref desc) = agent.description
             && !desc.is_empty()
         {
@@ -1151,7 +1151,7 @@ fn interactive_agent_detail(agent: &TuiAgentItem) -> Result<()> {
         items.push(style("Back").dim().to_string());
 
         let sel = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("Agent: {}", &agent.name))
+            .with_prompt(format!("Agent: {}", agent.name))
             .default(0)
             .items(&items)
             .interact()?;
@@ -1556,11 +1556,11 @@ fn interactive_create_agent() -> Result<()> {
     // Confirm
     println!();
     println!("{}", style("Agent summary:").bold());
-    println!("  {} {}", style("Name:").dim(), &name);
+    println!("  {} {}", style("Name:").dim(), name);
     if !description.is_empty() {
-        println!("  {} {}", style("Desc:").dim(), &description);
+        println!("  {} {}", style("Desc:").dim(), description);
     }
-    println!("  {} {}", style("Model:").dim(), &model);
+    println!("  {} {}", style("Model:").dim(), model);
     if !skills.is_empty() {
         println!("  {} {}", style("Skills:").dim(), skills.join(", "));
     }

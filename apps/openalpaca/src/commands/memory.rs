@@ -75,7 +75,7 @@ use serde_json::{Value, json};
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
-use super::persona::open_in_editor;
+use super::persona::{editor_buffer, open_in_editor};
 use crate::chat_stream::encode_header_path;
 use crate::client::{DaemonClient, error_from_response};
 use crate::output::{OutputFormat, json_with_hidden_escaped, terminal_reset};
@@ -1274,11 +1274,7 @@ pub(crate) async fn edit_note(
     let revision = revision_of(&read)?;
     let text = before.serialize();
 
-    let file = tempfile::Builder::new()
-        .prefix(&format!("openalpaca-memory-{}-", short_id(&id)))
-        .suffix(".md")
-        .tempfile()
-        .context("could not create a temp file for the editor")?;
+    let file = editor_buffer(&format!("openalpaca-memory-{}-", short_id(&id)))?;
     std::fs::write(file.path(), &text)
         .with_context(|| format!("could not write {}", file.path().display()))?;
 
@@ -1523,11 +1519,7 @@ pub(crate) fn note_from_read(read: &Value) -> Result<Note> {
 /// `add` with no body and no `-`: an empty file in `$EDITOR`, its contents
 /// the body.
 fn body_from_editor(title: &str) -> Result<String> {
-    let file = tempfile::Builder::new()
-        .prefix("openalpaca-memory-new-")
-        .suffix(".md")
-        .tempfile()
-        .context("could not create a temp file for the editor")?;
+    let file = editor_buffer("openalpaca-memory-new-")?;
     std::fs::write(file.path(), format!("# {title}\n\n"))
         .with_context(|| format!("could not write {}", file.path().display()))?;
     open_in_editor(file.path())?;

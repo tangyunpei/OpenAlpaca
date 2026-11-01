@@ -30,10 +30,7 @@ fn mcp_tool(server: &str, name: &str) -> RegisteredTool {
         },
         provides_capabilities: vec![name.to_string()],
         exempt_from_timeout: false,
-        annotations: Some(openalpaca_mcp::ToolAnnotations {
-            destructive_hint: Some(true),
-            ..Default::default()
-        }),
+        annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(true)),
         version: "1.4.0".to_string(),
         author: format!("mcp:{server}"),
         created_at: chrono::Utc::now(),

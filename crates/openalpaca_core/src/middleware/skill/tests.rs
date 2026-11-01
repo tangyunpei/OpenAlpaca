@@ -316,3 +316,146 @@ fn test_skill_without_scripts_has_empty_vec() {
     let fm = parse_skill_frontmatter(MINIMAL_SKILL).expect("minimal skill should parse");
     assert!(fm.scripts.is_empty());
 }
+
+/// serde_yaml 0.9 read these YAML 1.1 spellings as plain text, and a script's
+/// `parameters` schema reaches the model as written. serde-saphyr's defaults
+/// would turn `n`/`yes`/`off` into booleans, merge `<<`, refuse the repeated
+/// key and quote the file in the error; `yaml_options` keeps all four as they
+/// were.
+#[test]
+fn yaml_1_1_spellings_read_the_way_serde_yaml_0_9_read_them() {
+    let input = "---\nname: N\ndescription: n\n\
+                 scripts:\n  - file: a.sh\n    name: a\n    description: d\n    \
+                 parameters:\n      type: object\n      properties:\n        \
+                 flag: {type: string, enum: [yes, no, on, off, y, n], default: yes}\n\
+                 tools:\n  defaults:\n    k: 1\n    k: 2\n\
+                 invoke:\n  <<: {mode: auto}\n---\n";
+    let fm = parse_skill_frontmatter(input).expect("parses");
+    assert_eq!(fm.name, "N");
+    assert_eq!(fm.description, "n");
+    assert_eq!(
+        fm.scripts[0].parameters["properties"]["flag"],
+        serde_json::json!({
+            "type": "string",
+            "enum": ["yes", "no", "on", "off", "y", "n"],
+            "default": "yes",
+        })
+    );
+    assert_eq!(fm.tools.defaults["k"], serde_json::json!(2));
+    assert_eq!(
+        fm.invoke.mode, "manual",
+        "`<<` is an ordinary key, not a merge"
+    );
+
+    let err = parse_skill_frontmatter(
+        "---\nname: N\ndescription: D\npermissions:\n  sandbox:\n    net: yes\n---\n",
+    )
+    .expect_err("`yes` is not a boolean");
+    match err {
+        SkillParseError::InvalidYaml(msg) => assert!(!msg.contains('\n'), "one line: {msg}"),
+        other => panic!("expected InvalidYaml, got {other:?}"),
+    }
+}
+
+/// A run of more than 32 comment lines between a key and its block value,
+/// which serde_yaml 0.9 read and serde-saphyr's default comment handling
+/// refuses ("too many consecutive comments"; `emit_comments: false` in
+/// `yaml_options`), and non-finite floats in a `serde_json::Value` position,
+/// which read as their canonical spelling (serde_yaml read them as null).
+#[test]
+fn comment_runs_and_non_finite_floats_saphyr_leg_pin() {
+    let comments: String = (0..40)
+        .map(|i| format!("  # commented-out line {i}\n"))
+        .collect();
+    let input = format!(
+        "---\nname: N\ndescription: D\nrouting:\n{comments}  keywords: [a]\n\
+         tools:\n  defaults:\n    a: .inf\n    b: -.inf\n    c: .NaN\n---\n"
+    );
+    let fm = parse_skill_frontmatter(&input).expect("a long comment run parses");
+    assert_eq!(fm.routing.keywords, vec!["a".to_string()]);
+    assert_eq!(fm.tools.defaults["a"], serde_json::json!(".inf"));
+    assert_eq!(fm.tools.defaults["b"], serde_json::json!("-.inf"));
+    assert_eq!(fm.tools.defaults["c"], serde_json::json!(".nan"));
+}
+
+/// Frontmatter edge cases, each written fresh and read the way serde_yaml 0.9
+/// read it (audit Z3-05; the same values under the serde-saphyr that replaced
+/// it): a byte-order mark, CRLF line ends, the four block-scalar styles, a
+/// quoted value holding `: `, a nested map, an unknown key and an empty body.
+#[test]
+fn frontmatter_edge_cases_read_the_way_serde_yaml_0_9_read_them() {
+    let fm = parse_skill_frontmatter("\u{feff}---\nname: B\ndescription: d\n---\n")
+        .expect("a leading byte-order mark is dropped");
+    assert_eq!((fm.name.as_str(), fm.description.as_str()), ("B", "d"));
+
+    let doc = parse_skill_markdown(
+        "---\r\nname: C\r\ndescription: d\r\ninvoke:\r\n  slash: /c\r\n---\r\n\
+         ## Instructions\r\nDo it.\r\n",
+    )
+    .expect("CRLF line ends");
+    assert_eq!(doc.frontmatter.name, "C");
+    assert_eq!(doc.frontmatter.invoke.slash.as_deref(), Some("/c"));
+    assert_eq!(doc.sections["Instructions"], "Do it.");
+
+    let fm = parse_skill_frontmatter(
+        "---\nname: S\ndescription: >\n  folded\n  text\n\
+         routing:\n  intent:\n    - >-\n      strip\n      folded\n    - |\n      clip\n      literal\n\
+         \x20   - |+\n      keep\n\n  keywords: [k]\n---\n",
+    )
+    .expect("block scalars");
+    assert_eq!(fm.description, "folded text\n");
+    assert_eq!(
+        fm.routing.intent,
+        vec!["strip folded", "clip\nliteral\n", "keep\n\n"]
+    );
+    assert_eq!(fm.routing.keywords, vec!["k"]);
+
+    let fm =
+        parse_skill_frontmatter("---\nname: \"Q: double\"\ndescription: 'single: quoted'\n---\n")
+            .expect("quoted values holding `: `");
+    assert_eq!(fm.name, "Q: double");
+    assert_eq!(fm.description, "single: quoted");
+
+    let fm = parse_skill_frontmatter(
+        "---\nname: M\ndescription: d\npermissions:\n  level: readonly\n  sandbox:\n    net: true\n\
+         tools:\n  defaults:\n    outer:\n      inner: [1, two]\n---\n",
+    )
+    .expect("a nested map");
+    assert_eq!(fm.permissions.level, "readonly");
+    assert!(fm.permissions.sandbox.net);
+    assert_eq!(
+        fm.tools.defaults["outer"],
+        serde_json::json!({"inner": [1, "two"]})
+    );
+
+    let fm = parse_skill_frontmatter(
+        "---\nname: U\ndescription: d\nrequire_capabilities: [file_read]\n---\n",
+    )
+    .expect("an unknown key is read past");
+    assert_eq!(fm.unknown_keys.names(), ["require_capabilities"]);
+    assert!(fm.requires_capabilities.is_empty());
+
+    let doc = parse_skill_markdown("---\nname: E\ndescription: d\n---\n").expect("an empty body");
+    assert_eq!(doc.body, "");
+    assert!(doc.sections.is_empty());
+}
+
+/// The closing `---` is a whole line: a `----` or `---x` line does not end
+/// the frontmatter (audit Z3-05), trailing spaces and a CR do not stop one
+/// that is, and a file that ends on it, with no newline, is closed.
+#[test]
+fn the_closing_delimiter_is_a_whole_line() {
+    assert_eq!(
+        parse_skill_frontmatter("---\nname: N\ndescription: d\n---x\n").unwrap_err(),
+        SkillParseError::UnterminatedFrontmatter
+    );
+    assert!(matches!(
+        parse_skill_frontmatter("---\nname: N\ndescription: d\n----\nmore: x\n---\n"),
+        Err(SkillParseError::InvalidYaml(_))
+    ));
+    let doc = parse_skill_markdown("---\nname: N\ndescription: d\n--- \r\n## A\nbody\n")
+        .expect("trailing space and CR after the delimiter");
+    assert_eq!(doc.sections["A"], "body");
+    let fm = parse_skill_frontmatter("---\nname: N\ndescription: d\n---").expect("no newline");
+    assert_eq!(fm.name, "N");
+}

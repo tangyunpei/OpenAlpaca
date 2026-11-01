@@ -248,33 +248,20 @@ impl Orchestrator {
         block
     }
 
-    /// Build a lightweight `<available_skills>` block for system prompt injection.
-    ///
-    /// Lists all registered skills with their slash commands and descriptions.
-    /// Budget: ~500 chars. Returns empty string if no skills are loaded.
+    /// The main loop's `<available_skills>` block: every available skill by
+    /// its id, within `[orchestrator.prompt_budgets] skills_catalog_budget`
+    /// (N-SKILL-1). The renderer is the catalog's, shared with the lead
+    /// agent; empty when no skill is available.
     pub(super) fn build_skills_catalog_block(&self) -> String {
-        let summaries = self.skill_catalog.catalog_summary();
-        if summaries.is_empty() {
-            return String::new();
-        }
-
-        let mut block = String::from(
-            "<available_skills>\nThe user can invoke these specialized skills with slash commands:\n",
-        );
-        let mut budget = 500usize;
-        for (name, description, command) in &summaries {
-            let line = if let Some(cmd) = command {
-                format!("- {} (/{}): {}\n", name, cmd, description)
-            } else {
-                format!("- {}: {}\n", name, description)
-            };
-            if line.len() > budget {
-                break;
-            }
-            budget -= line.len();
-            block.push_str(&line);
-        }
-        block.push_str("</available_skills>");
-        block
+        let budget = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .prompt_budgets
+            .skills_catalog_budget;
+        self.skill_catalog.available_skills_block(
+            budget,
+            crate::orchestrator::skill_catalog::SkillsAudience::MainLoop,
+        )
     }
 }

@@ -430,6 +430,14 @@ impl RegisteredTool {
     }
 }
 
+/// A call [`ToolRegistry::admit`] let through: the backend to run, and the
+/// extension gate's in-flight guard (`None` for a tool no extension owns),
+/// which counts the call against a drain for as long as it is held.
+struct Admitted {
+    backend: ToolBackend,
+    guard: Option<crate::tools::extensions::CallGuard>,
+}
+
 /// Central registry mapping tool names to definitions and execution backends.
 ///
 /// Backed by `DashMap` for lock-free concurrent reads and writes.
@@ -552,10 +560,11 @@ impl ToolRegistry {
         }
         if name.len() > 256 {
             // The limit is bytes, and so is the preview: a name is
-            // `<server>__<tool>` from a remote MCP server, so it can be any
-            // UTF-8 at all. `&name[..32]` turned this handled refusal into a
-            // panic on the MCP load path whenever byte 32 of an over-long
-            // non-ASCII name fell inside a character.
+            // `<plugin>::<tool>` from a plugin process, so it can be any
+            // UTF-8 at all (an MCP tool's is mapped to ASCII first,
+            // `bridge::mcp_tool_name`). `&name[..32]` turned this handled
+            // refusal into a panic on the MCP load path whenever byte 32 of
+            // an over-long non-ASCII name fell inside a character.
             return Err(format!(
                 "Tool name '{}...' exceeds 256 byte limit",
                 crate::utils::text::byte_prefix(name, 32)
@@ -722,6 +731,26 @@ impl ToolRegistry {
         }
     }
 
+    /// Would dispatch refuse this call before its backend runs? (N-TOOL-2,
+    /// audit Z1-04.)
+    ///
+    /// The sandbox asks just before it raises a confirmation card, so a
+    /// person is never asked about a call refused the moment after the click.
+    /// It is dispatch's own admission ([`Self::admit`]) — the lookup with the
+    /// miss arm's attributed refusal, the extension gate, then the arguments
+    /// against the tool's schema, in that order — so the refusals are
+    /// dispatch's, word for word, only earlier. Nothing runs, and the gate's
+    /// in-flight guard is given back before this returns: the call is counted
+    /// against a drain only from dispatch, which takes the gate again.
+    pub(crate) fn precheck(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: Option<&ToolContext>,
+    ) -> Result<(), String> {
+        self.admit(tool_name, arguments, ctx).map(drop)
+    }
+
     /// [`BuiltInTool::on_confirmation_denied`] of the tool registered as
     /// `tool_name` (design 09 §4.3); `None` for anything that is not a
     /// builtin.
@@ -738,63 +767,26 @@ impl ToolRegistry {
     }
 
     /// The single dispatch path — **and the single place the extension gate
-    /// runs** (design §6.2 #1, §6.3).
+    /// is held across a backend call** (design §6.2 #1, §6.3).
     ///
     /// Both public execute methods funnel here so the gate is taken exactly
-    /// once per call: before the refactor, `execute_with_context`'s
+    /// once per dispatched call: before the refactor, `execute_with_context`'s
     /// `Http | Command | Plugin` arm delegated to `execute`, which would have
-    /// double-taken the `CallGuard` and double-counted the drain.
-    ///
-    /// The gate has **two arms**, because registry removal alone is not
-    /// enforcement:
-    ///
-    /// * **hit** — a run holding a deep snapshot still finds the entry
-    ///   (§3.0 Fact 1). Check the entry's extension, including the generation
-    ///   its handle carries.
-    /// * **miss** — the ordinary skill runs against the live registry and sees
-    ///   the entry vanish at T1 (§3.0 Fact 2). The DashMap miss would
-    ///   short-circuit with an unattributed *"not found"*, so ask the ledger
-    ///   who retains the name and return the same attributed refusal.
+    /// double-taken the `CallGuard` and double-counted the drain. The
+    /// sandbox's [`Self::precheck`] asks the same question earlier and gives
+    /// its guard straight back, so it counts nothing a drain waits for.
     async fn dispatch(
         &self,
         tool_name: &str,
         arguments: &serde_json::Value,
         ctx: Option<&ToolContext>,
     ) -> Result<String, String> {
-        // Extract definition + backend and drop the DashMap guard before any .await
-        let looked_up = self.tools.get(tool_name).map(|entry| {
-            (
-                entry.definition.clone(),
-                entry.backend.clone(),
-                entry.extension_id(),
-                entry.incarnation(),
-            )
-        });
-
-        let Some((definition, backend, extension, incarnation)) = looked_up else {
-            // MISS ARM. `check` returns `Ok` for an unknown owner, for an
-            // `Enabled` owner that is not server-withdrawing the name, and for
-            // an extension with no ledger record at all — all of which fall
-            // through to the ordinary not-found error.
-            if let Some(ext) = self.extensions.owner_of(tool_name) {
-                self.extensions.check(&ext, tool_name, None, ctx)?;
-            }
-            return Err(match ctx {
-                Some(_) => format!("Tool '{}' not found in registry", tool_name),
-                None => format!("Unknown tool: '{}'", tool_name),
-            });
-        };
-
-        // HIT ARM. `None` is a builtin / http / command tool — never gated.
-        // The guard lives across the awaited backend call below, which is what
-        // T3's drain counts.
-        let _guard = match &extension {
-            Some(ext) => Some(self.extensions.check(ext, tool_name, incarnation, ctx)?),
-            None => None,
-        };
-
-        // Pre-validate arguments against the tool's JSON Schema definition.
-        validate_tool_arguments(&definition, arguments)?;
+        // The guard lives across the awaited backend call below, which is
+        // what T3's drain counts.
+        let Admitted {
+            backend,
+            guard: _guard,
+        } = self.admit(tool_name, arguments, ctx)?;
 
         // A command tool reads the context for its working folder (R26);
         // these two do not.
@@ -864,7 +856,8 @@ impl ToolRegistry {
                         // error and the backend's generation are both in hand
                         // here, and only a *terminal* class may flip the row.
                         // `mark_failed` is itself guarded twice — `Enabled`
-                        // only, current generation only — so a stale snapshot
+                        // (or the `Failed` a stdio exit left, N-MCP-1b) only,
+                        // current generation only — so a stale snapshot
                         // cannot tear down the load that replaced it.
                         if let Some(reason) =
                             crate::tools::mcp::classify_call_failure(&e)
@@ -899,6 +892,66 @@ impl ToolRegistry {
                 }
             }
         }
+    }
+
+    /// Everything that decides whether a call reaches its backend, in
+    /// dispatch's order — shared by [`Self::dispatch`] and
+    /// [`Self::precheck`], so the two can never disagree.
+    ///
+    /// The extension gate has **two arms**, because registry removal alone
+    /// is not enforcement:
+    ///
+    /// * **hit** — a run holding a deep snapshot still finds the entry
+    ///   (§3.0 Fact 1). Check the entry's extension, including the generation
+    ///   its handle carries.
+    /// * **miss** — the ordinary skill runs against the live registry and sees
+    ///   the entry vanish at T1 (§3.0 Fact 2). The DashMap miss would
+    ///   short-circuit with an unattributed *"not found"*, so ask the ledger
+    ///   who retains the name and return the same attributed refusal.
+    ///
+    /// Then the arguments are checked against the tool's schema — after the
+    /// gate, so a withheld tool reads as withheld whatever it was sent.
+    fn admit(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        ctx: Option<&ToolContext>,
+    ) -> Result<Admitted, String> {
+        // Extract definition + backend and drop the DashMap guard before the
+        // caller awaits anything
+        let looked_up = self.tools.get(tool_name).map(|entry| {
+            (
+                entry.definition.clone(),
+                entry.backend.clone(),
+                entry.extension_id(),
+                entry.incarnation(),
+            )
+        });
+
+        let Some((definition, backend, extension, incarnation)) = looked_up else {
+            // MISS ARM. `check` returns `Ok` for an unknown owner, for an
+            // `Enabled` owner that is not server-withdrawing the name, and for
+            // an extension with no ledger record at all — all of which fall
+            // through to the ordinary not-found error.
+            if let Some(ext) = self.extensions.owner_of(tool_name) {
+                self.extensions.check(&ext, tool_name, None, ctx)?;
+            }
+            return Err(match ctx {
+                Some(_) => format!("Tool '{}' not found in registry", tool_name),
+                None => format!("Unknown tool: '{}'", tool_name),
+            });
+        };
+
+        // HIT ARM. `None` is a builtin / http / command tool — never gated.
+        let guard = match &extension {
+            Some(ext) => Some(self.extensions.check(ext, tool_name, incarnation, ctx)?),
+            None => None,
+        };
+
+        // The arguments, checked as they were sent.
+        check_arguments(&definition, arguments)?;
+
+        Ok(Admitted { backend, guard })
     }
 
     /// The **raw**, un-deduped capability-index entry for one capability.
@@ -1240,7 +1293,9 @@ impl ToolRegistry {
     /// and tool ordering feeds prompt-cache fingerprints).
     /// Tools whose extension is not `Enabled` are dropped — **hygiene only**,
     /// so the model does not burn a round on a call the gate will refuse. An
-    /// absent ledger entry counts as enabled (design §6.2 #2, §6.2a).
+    /// absent ledger entry counts as enabled (design §6.2 #2, §6.2a), and so
+    /// does a row reading a stdio server's exit, whose next call the gate
+    /// admits to reconnect it (N-MCP-1b).
     pub fn extension_tool_defs(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
             .tools
@@ -1264,11 +1319,23 @@ impl ToolRegistry {
     pub fn extension_is_available(&self, tool: &RegisteredTool) -> bool {
         match tool.extension_id() {
             None => true,
-            Some(ext) => self
-                .extensions
-                .state(&ext)
-                .is_none_or(|state| state.is_enabled()),
+            Some(ext) => self.extensions.admits_calls(&ext).unwrap_or(true),
         }
+    }
+
+    /// Whether `tool_name` runs a command: the sanitizer's shell set — the
+    /// builtin `shell_execute` ([`InputSanitizer::SHELL_TOOLS`]) and every
+    /// `Command`-backend tool, the two it checks for injection. What a
+    /// command is told when it is cut at its time limit (N-TOOL-4) and how
+    /// its spilled output is previewed (N-TOOL-7) follow it.
+    ///
+    /// [`InputSanitizer::SHELL_TOOLS`]: crate::security::sanitizer::InputSanitizer::SHELL_TOOLS
+    pub(crate) fn is_command_tool(&self, tool_name: &str) -> bool {
+        crate::security::sanitizer::InputSanitizer::SHELL_TOOLS.contains(&tool_name)
+            || self
+                .tools
+                .get(tool_name)
+                .is_some_and(|entry| matches!(entry.backend, ToolBackend::Command { .. }))
     }
 
     /// Return the names of tools that use command backends (i.e., execute via shell).
@@ -1510,12 +1577,53 @@ fn command_folder(ctx: Option<&ToolContext>) -> Result<PathBuf, String> {
         .map_err(|refusal| refusal.to_string())
 }
 
+/// The refusal that keeps a call's backend from running for what it was sent
+/// (N-TOOL-5, audit Z1-14), or `Ok` — the backend gets the arguments exactly
+/// as they were sent, the value the sandbox's sanitizer checked.
+///
+/// * Arguments a provider sent that could not be read as a JSON object
+///   arrive as [`openalpaca_llm::UnreadableArguments`]' stand-in, already
+///   warned about once where they were read; the call is refused naming the
+///   problem and the length — never run as `{}`, whatever its schema accepts.
+/// * Then [`validate_tool_arguments`] names every problem it finds.
+///
+/// Nothing is decoded here. A JSON string whose text is an object is read as
+/// that object where a provider's answer is parsed (`openalpaca_llm`'s
+/// reader), before the sandbox sees the call; one that reaches the registry by
+/// another path — a plugin's proxied call — stays the string it is, refused by
+/// a schema that asks for an object, as it always was. The sanitizer saw only
+/// its outer text, where a backtick, a newline, `../` or a NUL inside it are
+/// still JSON escapes, so reading it here would hand the tool what the
+/// sanitizer never checked (found by review; pinned by
+/// `a_json_string_cannot_carry_past_the_sanitizer_what_it_refuses_in_an_object`).
+fn check_arguments(
+    definition: &ToolDefinition,
+    arguments: &serde_json::Value,
+) -> Result<(), String> {
+    if let Some(unreadable) = openalpaca_llm::UnreadableArguments::of(arguments) {
+        return Err(format!(
+            "Tool '{}': the arguments sent with this call could not be read: {} bytes that \
+             were {}. The tool did not run. Call it again with its arguments as one JSON \
+             object.",
+            definition.name, unreadable.bytes, unreadable.problem
+        ));
+    }
+    validate_tool_arguments(definition, arguments)
+}
+
 /// Basic JSON Schema pre-validation for tool arguments.
 ///
 /// Checks:
 /// - Arguments must be a JSON object (if the schema specifies `type: "object"`)
 /// - All fields listed in `required` must be present
-/// - Field types match the schema's `properties.<name>.type` when specified
+/// - Field types match the schema's `properties.<name>.type` when specified,
+///   and a value is one of its `enum` when the schema lists one
+///
+/// Every problem is reported in one result (N-TOOL-5), so a model fixes them
+/// all in its next call instead of meeting them one call at a time: one
+/// problem keeps the sentence it always had (`Tool 'x': missing required
+/// parameter 'path'`); several are counted and listed, the missing
+/// parameters first. Parameters the schema does not name are not refused.
 ///
 /// This is not a full JSON Schema validator — it catches the most common
 /// argument errors early (missing required fields, wrong root type) to provide
@@ -1524,66 +1632,65 @@ fn validate_tool_arguments(
     definition: &ToolDefinition,
     arguments: &serde_json::Value,
 ) -> Result<(), String> {
-    let schema = &definition.parameters;
-
-    // Check root type is object (if schema says so)
-    if schema.get("type").and_then(|t| t.as_str()) == Some("object") && !arguments.is_object() {
-        return Err(format!(
-            "Tool '{}': arguments must be a JSON object, got {}",
+    match argument_problems(&definition.parameters, arguments).as_slice() {
+        [] => Ok(()),
+        [one] => Err(format!("Tool '{}': {one}", definition.name)),
+        several => Err(format!(
+            "Tool '{}': the arguments have {} problems: {}",
             definition.name,
+            several.len(),
+            several.join("; ")
+        )),
+    }
+}
+
+/// Every way `arguments` breaks the checks [`validate_tool_arguments`]
+/// makes, in order: a root that is not the object the schema asks for (then
+/// nothing else can be checked); every missing required parameter; every
+/// parameter of the wrong type, or — of the right type — outside its `enum`.
+fn argument_problems(schema: &serde_json::Value, arguments: &serde_json::Value) -> Vec<String> {
+    if schema.get("type").and_then(|t| t.as_str()) == Some("object") && !arguments.is_object() {
+        return vec![format!(
+            "arguments must be a JSON object, got {}",
             json_type_name(arguments)
-        ));
+        )];
+    }
+    let Some(obj) = arguments.as_object() else {
+        return Vec::new();
+    };
+    let mut problems = Vec::new();
+
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        for field_name in required.iter().filter_map(|req| req.as_str()) {
+            if !obj.contains_key(field_name) {
+                problems.push(format!("missing required parameter '{field_name}'"));
+            }
+        }
     }
 
-    // Check required fields
-    if let Some(required) = schema.get("required").and_then(|r| r.as_array())
-        && let Some(obj) = arguments.as_object()
-    {
-        for req in required {
-            if let Some(field_name) = req.as_str()
-                && !obj.contains_key(field_name)
+    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+        for (key, value) in obj {
+            let Some(prop_schema) = properties.get(key) else {
+                continue;
+            };
+            if let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str())
+                && !json_value_matches_type(value, expected_type)
             {
-                return Err(format!(
-                    "Tool '{}': missing required parameter '{}'",
-                    definition.name, field_name
+                problems.push(format!(
+                    "parameter '{key}' should be {expected_type}, got {}",
+                    json_type_name(value)
+                ));
+            } else if let Some(enum_values) = prop_schema.get("enum").and_then(|e| e.as_array())
+                && !enum_values.contains(value)
+            {
+                problems.push(format!(
+                    "parameter '{key}' value {value} not in allowed values"
                 ));
             }
         }
     }
 
-    // Check field types and enum constraints against schema properties
-    if let (Some(properties), Some(obj)) = (
-        schema.get("properties").and_then(|p| p.as_object()),
-        arguments.as_object(),
-    ) {
-        for (key, value) in obj {
-            if let Some(prop_schema) = properties.get(key) {
-                // Type check
-                if let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str())
-                    && !json_value_matches_type(value, expected_type)
-                {
-                    return Err(format!(
-                        "Tool '{}': parameter '{}' should be {}, got {}",
-                        definition.name,
-                        key,
-                        expected_type,
-                        json_type_name(value)
-                    ));
-                }
-                // Enum check
-                if let Some(enum_values) = prop_schema.get("enum").and_then(|e| e.as_array()) {
-                    if !enum_values.contains(value) {
-                        return Err(format!(
-                            "Tool '{}': parameter '{}' value {} not in allowed values",
-                            definition.name, key, value
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
+    problems
 }
 
 /// Return a human-readable type name for a JSON value.
@@ -1623,3 +1730,13 @@ fn json_value_matches_type(value: &serde_json::Value, expected: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "command_tool_tests.rs"]
+mod command_tool_tests;
+
+#[cfg(test)]
+mod precheck_tests;
+
+#[cfg(test)]
+mod arguments_tests;

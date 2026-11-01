@@ -168,11 +168,7 @@ pub(crate) async fn edit_user(
 ) -> Result<EditOutcome> {
     let before = fetch_user(client).await?;
 
-    let file = tempfile::Builder::new()
-        .prefix("openalpaca-persona-user-")
-        .suffix(".md")
-        .tempfile()
-        .context("could not create a temp file for the editor")?;
+    let file = editor_buffer("openalpaca-persona-user-")?;
     std::fs::write(file.path(), &before.content)
         .with_context(|| format!("could not write {}", file.path().display()))?;
 
@@ -236,6 +232,27 @@ fn short(etag: &str) -> String {
     etag.chars().take(12).collect()
 }
 
+/// A new file for the editor, `<prefix>….md`, in the store's `state/editor/`
+/// (0700, `openalpaca_storage::store::editor_dir`) — never in `$TMPDIR`,
+/// where a kept text was out of reach of every cleanup the store has
+/// (N-STORE-1). It is removed when the handle drops, or kept with
+/// `into_temp_path().keep()` when an edit is refused or conflicts. Shared with
+/// `openalpaca memory add|edit`.
+pub(crate) fn editor_buffer(prefix: &str) -> Result<tempfile::NamedTempFile> {
+    let dir = openalpaca_storage::store::editor_dir()
+        .context("could not make the folder for the editor's file")?;
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".md")
+        .tempfile_in(&dir)
+        .with_context(|| {
+            format!(
+                "could not create a file for the editor in {}",
+                dir.display()
+            )
+        })
+}
+
 /// `$VISUAL`, else `$EDITOR`, else `vi`, run through the shell so a value
 /// with arguments (`code --wait`) works; the file is passed as `$1`. Shared
 /// with `openalpaca memory add|edit`, whose round trip is the same shape.
@@ -265,7 +282,7 @@ pub(crate) fn open_in_editor(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{json_answer, serve};
+    use crate::test_util::{EnvSandbox, json_answer, serve};
     use clap::Parser;
 
     #[derive(Parser)]
@@ -326,6 +343,9 @@ mod tests {
     /// back. The temp file is gone afterwards.
     #[tokio::test]
     async fn edit_sends_the_edited_text_with_the_fetched_revision_as_if_match() {
+        // The editor buffer is made under the store's `state/` (N-STORE-1).
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
         let (addr, server) = serve(vec![
             get_answer(),
             json_answer(
@@ -389,6 +409,9 @@ mod tests {
     /// reported.
     #[tokio::test]
     async fn a_409_keeps_the_edited_text_in_a_named_temp_file() {
+        // The editor buffer is made under the store's `state/` (N-STORE-1).
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
         let conflict = serde_json::json!({
             "error": {
                 "code": "PERSONA_REVISION_CONFLICT",
@@ -438,12 +461,57 @@ mod tests {
     /// An editor that changes nothing sends nothing.
     #[tokio::test]
     async fn an_unchanged_document_is_not_sent() {
+        // The editor buffer is made under the store's `state/` (N-STORE-1).
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
         let (addr, server) = serve(vec![get_answer()]);
         let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
         let outcome = edit_user(&client, &|_: &Path| Ok(())).await.unwrap();
         assert_eq!(outcome, EditOutcome::Unchanged);
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 1, "only the GET");
+    }
+
+    /// N-STORE-1 (Z8-03): the file `persona edit user` hands the editor — the
+    /// one a conflicting edit keeps — is made in the store's `state/editor/`,
+    /// a 0700 folder, never in `$TMPDIR`.
+    #[tokio::test]
+    async fn the_edit_buffer_is_made_in_the_stores_state_editor_folder_at_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
+        let (addr, server) = serve(vec![get_answer()]);
+        let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+        let opened = std::sync::Mutex::new(None);
+        let editor = |p: &Path| {
+            *opened.lock().unwrap() = Some(p.to_path_buf());
+            Ok(())
+        };
+
+        let outcome = edit_user(&client, &editor).await.unwrap();
+        assert_eq!(outcome, EditOutcome::Unchanged);
+
+        let buffer = opened
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the editor was opened");
+        let folder = openalpaca_storage::store::home_root()
+            .unwrap()
+            .join("state")
+            .join("editor");
+        assert_eq!(
+            buffer.parent(),
+            Some(folder.as_path()),
+            "{}",
+            buffer.display()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&folder).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", folder.display());
+        }
+        server.join().unwrap();
     }
 
     #[tokio::test]

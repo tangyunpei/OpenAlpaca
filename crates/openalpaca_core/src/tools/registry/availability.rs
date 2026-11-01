@@ -259,13 +259,14 @@ impl ToolRegistry {
     }
 
     /// Is this **name** withheld, and by whom? `None` for a name with no ledger
-    /// owner (fail-open, §6.2a) and for one whose owner is `Enabled` and still
-    /// offers it. The single classification the legacy arm and
+    /// owner (fail-open, §6.2a) and for one whose owner the gate admits
+    /// (`admits_calls`) and still offers it. The single classification the legacy arm and
     /// `announce_withheld_names` share.
     pub(super) fn withheld_name(&self, name: &str) -> Option<WithheldProvider> {
         let extension = self.extensions.owner_of(name)?;
-        let state = self.extensions.state(&extension)?;
-        if !state.is_enabled() {
+        // The gate's own predicate: a row reading a stdio server's exit still
+        // serves its names (N-MCP-1b).
+        if !self.extensions.admits_calls(&extension)? {
             return self.withheld_provider(name, extension, false);
         }
         if self.extensions.is_server_withdrawn(&extension, name) {

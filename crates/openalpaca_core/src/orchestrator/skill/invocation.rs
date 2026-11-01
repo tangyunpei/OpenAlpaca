@@ -71,7 +71,8 @@ impl Orchestrator {
             .ok_or_else(|| format!("Skill '{}' not found in catalog", skill_name))?;
         let skill_doc = self
             .skill_catalog
-            .load_full(skill_name)
+            .load_full_off_runtime(skill_name)
+            .await
             .map_err(|e| format!("Failed to load skill '{}': {}", skill_name, e))?;
 
         // Permissions preflight: reject early if sandbox config is inconsistent
@@ -275,12 +276,11 @@ impl Orchestrator {
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
-            for name in &["update_persona"] {
-                if !tool_defs.iter().any(|d| &d.name == name) {
-                    if let Some(t) = self.tool_registry.get(name) {
-                        tool_defs.push(t.definition.clone());
-                    }
-                }
+            let name = "update_persona";
+            if !tool_defs.iter().any(|d| d.name == name)
+                && let Some(t) = self.tool_registry.get(name)
+            {
+                tool_defs.push(t.definition.clone());
             }
         }
 
@@ -912,10 +912,10 @@ impl Orchestrator {
             if let Some(ref db) = self.db {
                 per_request_sandbox.set_db(db.clone());
             }
-            if let Ok(guard) = self.confirmation_broker.read() {
-                if let Some(broker) = guard.as_ref() {
-                    per_request_sandbox.set_confirmation_broker(broker.clone());
-                }
+            if let Ok(guard) = self.confirmation_broker.read()
+                && let Some(broker) = guard.as_ref()
+            {
+                per_request_sandbox.set_confirmation_broker(broker.clone());
             }
 
             // Capture tool names before move (used for post-hoc hallucination guard)
@@ -1292,10 +1292,10 @@ impl Orchestrator {
         if let Some(ref db) = self.db {
             sandbox.set_db(db.clone());
         }
-        if let Ok(guard) = self.confirmation_broker.read() {
-            if let Some(broker) = guard.as_ref() {
-                sandbox.set_confirmation_broker(broker.clone());
-            }
+        if let Ok(guard) = self.confirmation_broker.read()
+            && let Some(broker) = guard.as_ref()
+        {
+            sandbox.set_confirmation_broker(broker.clone());
         }
 
         let tool_ctx = ToolContext {

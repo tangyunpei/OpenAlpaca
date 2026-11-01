@@ -3,6 +3,7 @@ use crate::prompt_ctx::ContextKey;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+#[derive(Default)]
 pub struct ContextLifecycle {
     seen: HashMap<ContextKey, SeenEntry>,
 }
@@ -11,12 +12,6 @@ struct SeenEntry {
     message_index: usize,
     injected_at: Instant,
     token_cost: usize,
-}
-
-impl Default for ContextLifecycle {
-    fn default() -> Self {
-        Self { seen: HashMap::new() }
-    }
 }
 
 impl ContextLifecycle {

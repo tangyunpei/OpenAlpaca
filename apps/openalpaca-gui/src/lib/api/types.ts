@@ -838,7 +838,8 @@ export type ExtensionReason =
   | "needs_config"
   | "config_invalid"
   | "unreachable"
-  | "crashed";
+  | "crashed"
+  | "protocol_negotiation_failed";
 
 export type ExtensionConsent = "approved" | "pending" | "denied";
 
@@ -852,6 +853,15 @@ export interface DeclaredContributions {
   virtual_capabilities: string[];
   /** `plugin.toml`'s `[types]` table, as declared. */
   types: Record<string, boolean>;
+  /**
+   * What the manifest holds that nothing acts on — a key OpenAlpaca does not
+   * read, `types.connector` / `types.provider` while their bridges are
+   * unwired (N-PLUG-2) — in the daemon's words, a key's hidden characters
+   * already shown as `<U+XXXX>`. Standing, unlike the row's per-call
+   * `warnings`: the row awaiting consent draws them before Approve. Absent
+   * from a daemon built before them.
+   */
+  warnings?: string[];
 }
 
 /** One row of `GET /v1/extensions` (ADR-030 §8). */
@@ -861,6 +871,15 @@ export interface ExtensionRow {
   version: string | null;
   /** MCP only — `stdio` | `streamable-http`. */
   transport: string | null;
+  /**
+   * MCP only, while a connection is live — the protocol version it
+   * negotiated (`2026-07-28`, or a legacy server's `initialize` answer) and
+   * how long its connect and first `tools/list` took, in milliseconds
+   * (DU-25 (m-g)). `null` otherwise; absent from a daemon built before them.
+   */
+  protocol_version?: string | null;
+  connect_ms?: number | null;
+  list_ms?: number | null;
   /**
    * The **persisted disposition** — the toggle binds here, never to the state
    * word. `null` on the two rows whose bit nobody can read (§4, §8): a plugin
@@ -916,6 +935,13 @@ export interface ManifestSummary {
   required_config_keys: string[];
   /** Values that never land in `plugins/.config/<name>.toml`. */
   sensitive_config_keys: string[];
+  /**
+   * What the manifest declares that OpenAlpaca will not act on — a key it
+   * does not read, `types.connector` / `types.provider` while their bridges
+   * are unwired (N-PLUG-2). Warnings, never refusals. Absent from a daemon
+   * built before them.
+   */
+  warnings?: string[];
 }
 
 /** `POST /v1/extensions/{kind}` and `PUT /v1/extensions/plugin/{id}`. */
@@ -1039,6 +1065,30 @@ export interface SkillCatalogEntry {
   version: string | null;
   /** `plugin:<id>`, `file:project` or `file:user`. */
   author: string;
+}
+
+/**
+ * One thing the skill catalog's last scan found (`GET /v1/skills/diagnostics`,
+ * N-SKILL-2): a SKILL.md it skipped (`error`) or loaded with a problem
+ * (`warning`). `message` is the daemon's own sentence.
+ */
+export interface SkillDiagnostic {
+  code:
+    | "read_failed"
+    | "missing_frontmatter"
+    | "invalid_yaml"
+    | "missing_field"
+    | "id_mismatch"
+    | "deprecated_field"
+    | "slash_conflict"
+    | "unknown_key"
+    | "too_large"
+    | "no_tools";
+  severity: "error" | "warning";
+  path: string;
+  /** The directory's name, lowercased — `null` for the skills directory itself. */
+  skill_id: string | null;
+  message: string;
 }
 
 /**

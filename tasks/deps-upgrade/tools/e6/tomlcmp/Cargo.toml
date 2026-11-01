@@ -1,0 +1,17 @@
+[package]
+name = "tomlcmp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A standalone crate: it lives inside the repository tree but is not a member
+# of its workspace. Build it with `--manifest-path`.
+[workspace]
+
+[dependencies]
+# The two versions under comparison, side by side in one binary (different
+# majors, so cargo allows both): what the tree holds today, and what P29 moves
+# to — 1.1.8, the toml the cut's lock holds (1.1.8+spec-1.1.0, eligible from
+# 2026-10-16; re-pinned from 1.1.6 on 2026-10-20).
+toml09 = { package = "toml", version = "=0.9.12" }
+toml11 = { package = "toml", version = "=1.1.8" }

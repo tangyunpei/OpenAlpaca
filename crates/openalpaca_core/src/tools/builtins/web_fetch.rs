@@ -5,6 +5,24 @@ use std::sync::Arc;
 
 use super::annotations_for_builtin;
 
+/// What a page that is not there is answered with (N-TOOL-4, Z1-13: the
+/// hint is the tool's own text, not a line the loop guessed from its words).
+const NOT_THERE_HINT: &str = "Hint: use web_search to find the correct URL first.";
+
+/// What a fetch that ran out of time is answered with (N-TOOL-4).
+const UNREACHABLE_HINT: &str = "Hint: the URL may be unreachable. Try a different source.";
+
+/// The refusal for a response whose status is not a success; a 404 says
+/// what to do about it.
+fn http_error(status: reqwest::StatusCode) -> String {
+    let failure = format!("HTTP error: {}", status);
+    if status == reqwest::StatusCode::NOT_FOUND {
+        format!("{failure}\n{NOT_THERE_HINT}")
+    } else {
+        failure
+    }
+}
+
 struct WebFetchTool;
 
 #[async_trait]
@@ -43,11 +61,18 @@ impl BuiltInTool for WebFetchTool {
             .timeout(std::time::Duration::from_secs(15))
             .send()
             .await
-            .map_err(|e| format!("Failed to fetch URL: {}", e))?;
+            .map_err(|e| {
+                let failure = format!("Failed to fetch URL: {}", e);
+                if e.is_timeout() {
+                    format!("{failure}\n{UNREACHABLE_HINT}")
+                } else {
+                    failure
+                }
+            })?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("HTTP error: {}", status));
+            return Err(http_error(status));
         }
 
         // Reject non-text content types (images, executables, etc.)
@@ -87,7 +112,7 @@ impl BuiltInTool for WebFetchTool {
             String::from_utf8(bytes).map_err(|_| "Response body is not valid UTF-8".to_string())
         })
         .await
-        .map_err(|_| "Response body read timed out after 15s".to_string())?
+        .map_err(|_| format!("Response body read timed out after 15s\n{UNREACHABLE_HINT}"))?
         .map_err(|e: String| e)?;
 
         // §5.4 (P-16/C-2): the 8 KB cut that used to happen here is **gone**.
@@ -134,5 +159,24 @@ pub(super) fn web_fetch_tool() -> RegisteredTool {
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
         created_at: chrono::Utc::now(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// N-TOOL-4 (Z1-13): a page that is not there is answered, in the tool's
+    /// own error, with what to do; another failing status is not.
+    #[test]
+    fn a_missing_page_is_answered_with_the_hint_to_search_for_it() {
+        assert_eq!(
+            http_error(reqwest::StatusCode::NOT_FOUND),
+            "HTTP error: 404 Not Found\nHint: use web_search to find the correct URL first."
+        );
+        assert_eq!(
+            http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            "HTTP error: 500 Internal Server Error"
+        );
     }
 }

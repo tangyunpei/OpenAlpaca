@@ -327,7 +327,7 @@ fn scan_session(dir: &Path, id: String, protected: bool) -> SessionDir {
     }
 
     // Oldest first inside each class, and the payloads before the narrative.
-    spills.sort_by(|a, b| mtime_secs(&a.path).cmp(&mtime_secs(&b.path)));
+    spills.sort_by_key(|a| mtime_secs(&a.path));
     segments.sort_by_key(|(first, _)| *first);
     let mut evictable = spills;
     evictable.extend(segments.into_iter().map(|(_, victim)| victim));

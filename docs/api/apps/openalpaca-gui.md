@@ -110,6 +110,7 @@
 | POST | `/v1/settings/llm/validate` | `settings.ts` | `apps/openalpaca-gui/src/lib/api/settings.ts` |
 | GET | `/v1/settings/llm` | `settings.ts` | `apps/openalpaca-gui/src/lib/api/settings.ts` |
 | PUT | `/v1/settings/llm` | `settings.ts` | `apps/openalpaca-gui/src/lib/api/settings.ts` |
+| GET | `/v1/skills/diagnostics` | `skills.ts` | `apps/openalpaca-gui/src/lib/api/skills.ts` |
 | GET | `/v1/skills/health` | `skills.ts` | `apps/openalpaca-gui/src/lib/api/skills.ts` |
 | GET | `/v1/skills` | `skills.ts` | `apps/openalpaca-gui/src/lib/api/skills.ts` |
 | GET | `/v1/status` | `status.ts` | `apps/openalpaca-gui/src/lib/api/status.ts` |
@@ -271,8 +272,8 @@
 ### `skills.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/skills.ts`
-- Exported functions: `getSkillHealth`, `listSkills`
-- Endpoints: `GET /v1/skills`, `GET /v1/skills/health`
+- Exported functions: `getSkillDiagnostics`, `getSkillHealth`, `listSkills`
+- Endpoints: `GET /v1/skills`, `GET /v1/skills/diagnostics`, `GET /v1/skills/health`
 
 ### `status.test.ts`
 

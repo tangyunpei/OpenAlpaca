@@ -99,6 +99,13 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// A tool result whose call failed (N-TOOL-4, Z1-13): the call's own
+    /// `Err`, never read off the text. The Anthropic provider sends it as the
+    /// `tool_result` block's `is_error`; the OpenAI-compatible wire has no
+    /// such field, so there the text's `[tool_error]` marker says it. `false`
+    /// on every other message, and absent from the serialized form.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
 }
 
 impl ChatMessage {
@@ -109,6 +116,7 @@ impl ChatMessage {
             parts: None,
             tool_calls: None,
             tool_call_id: None,
+            is_error: false,
         }
     }
 
@@ -119,6 +127,7 @@ impl ChatMessage {
             parts: None,
             tool_calls: None,
             tool_call_id: None,
+            is_error: false,
         }
     }
 
@@ -139,6 +148,7 @@ impl ChatMessage {
             parts: Some(parts),
             tool_calls: None,
             tool_call_id: None,
+            is_error: false,
         }
     }
 
@@ -149,6 +159,7 @@ impl ChatMessage {
             parts: None,
             tool_calls: None,
             tool_call_id: None,
+            is_error: false,
         }
     }
 
@@ -163,6 +174,7 @@ impl ChatMessage {
                 Some(response.tool_calls.clone())
             },
             tool_call_id: None,
+            is_error: false,
         }
     }
 
@@ -173,6 +185,18 @@ impl ChatMessage {
             parts: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
+            is_error: false,
+        }
+    }
+
+    /// The result of a tool call that failed (N-TOOL-4): a tool result with
+    /// [`is_error`](Self::is_error) set. `content` is the text every wire
+    /// shows — marked `[tool_error]` by the loop, since the OpenAI-compatible
+    /// wire has no field to carry the flag.
+    pub fn tool_error(tool_call_id: &str, content: &str) -> Self {
+        Self {
+            is_error: true,
+            ..Self::tool_result(tool_call_id, content)
         }
     }
 
@@ -184,6 +208,7 @@ impl ChatMessage {
             parts: Some(parts),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
+            is_error: false,
         }
     }
 

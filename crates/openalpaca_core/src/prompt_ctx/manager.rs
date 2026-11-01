@@ -366,8 +366,10 @@ mod tests {
             available_budget: 1000,
         };
 
-        let mut constraints = AgentConstraints::default();
-        constraints.denied_sections = vec!["workspace_artifact".to_string()];
+        let constraints = AgentConstraints {
+            denied_sections: vec!["workspace_artifact".to_string()],
+            ..Default::default()
+        };
         let package = manager.distill(&bundle, &constraints, 10_000, "Task", None);
 
         // The denied kind should be filtered out

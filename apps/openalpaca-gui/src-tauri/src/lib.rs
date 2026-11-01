@@ -413,9 +413,16 @@ fn reap_when_it_exits(mut child: std::process::Child) {
 // Tauri App Entry Point
 // ============================================================================
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    with_commands(tauri::Builder::default())
+        .run(tauri::generate_context!())
+        .expect("Error while running Tauri application");
+}
+
+/// The dialog plugin and the five commands the webview invokes: the one list,
+/// which [`run`] builds the app from and the tests drive over a mock runtime.
+fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_connection_info,
@@ -424,6 +431,7 @@ pub fn run() {
             read_daemon_log_tail,
             reveal_path
         ])
-        .run(tauri::generate_context!())
-        .expect("Error while running Tauri application");
 }
+
+#[cfg(test)]
+mod tests;

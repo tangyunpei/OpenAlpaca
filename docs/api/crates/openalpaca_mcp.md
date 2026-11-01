@@ -23,11 +23,11 @@
 
 ## Re-exports
 
-- `pub use client::{McpClient, McpClientConfig, NotifyingHandler, ServerChange};`
+- `pub use client::{ ConnectionEvent, ConnectionEventHandler, McpClient, McpClientConfig, NotifyingHandler, ServerChange, };`
 - `pub use error::{ErrorCategory, McpError};`
-- `pub use lifecycle::ConnectionSnapshot;`
-- `pub use transport::{HttpAuth, StdioTransport, Transport, TransportKind};`
-- `pub use rmcp::model::{ CallToolResult, Content, Implementation, Prompt, PromptMessage, ProtocolVersion, RawContent, Resource, ResourceContents, Tool, ToolAnnotations, };`
+- `pub use lifecycle::{ConnectionSnapshot, ProtocolMode};`
+- `pub use transport::{ExitObserver, HttpAuth, StdioTransport, Transport, TransportKind};`
+- `pub use rmcp::model::{ CallToolResult, ContentBlock, Implementation, Prompt, PromptMessage, ProtocolVersion, Resource, ResourceContents, Tool, ToolAnnotations, };`
 
 ## Related Links
 

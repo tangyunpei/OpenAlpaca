@@ -31,11 +31,27 @@
  * A health row for a skill the catalog no longer holds (a deleted directory, a
  * disabled plugin's withdrawn contribution) keeps showing the id it has: that
  * is the truth the log has, and it is never replaced by a placeholder name.
+ *
+ * Under them, a count of what the catalog's last scan found
+ * (`GET /v1/skills/diagnostics`, N-SKILL-2) — SKILL.md files it did not load,
+ * and warnings — drawn only when there is something to count, and pointing at
+ * `openalpaca skills list`, which names each one. An error says only that the
+ * file was not loaded: at boot its skill is missing; after a hot edit the
+ * skill stays listed but does not run until the file is fixed.
  */
 
 import { Eyebrow, Tag } from "@/components/ui";
-import { useSkillCatalog, useSkillHealth, useTools } from "@/hooks/useSkills";
-import type { SkillCatalogEntry, ToolCatalogEntry } from "@/lib/api/types";
+import {
+  useSkillCatalog,
+  useSkillDiagnostics,
+  useSkillHealth,
+  useTools,
+} from "@/hooks/useSkills";
+import type {
+  SkillCatalogEntry,
+  SkillDiagnostic,
+  ToolCatalogEntry,
+} from "@/lib/api/types";
 import { useUiStore } from "@/stores/ui";
 
 import { GapNote, ListCard, ListRow, ListState } from "./primitives";
@@ -73,6 +89,23 @@ export function skillsByLogKey(
   return byKey;
 }
 
+/**
+ * The count of what the skill catalog's last scan found (N-SKILL-2), in the
+ * CLI's words, or `null` when it found nothing. The problems themselves are
+ * `openalpaca skills list`'s to name.
+ */
+export function skillProblemsLine(
+  diagnostics: SkillDiagnostic[],
+): string | null {
+  if (diagnostics.length === 0) return null;
+  const notLoaded = diagnostics.filter((d) => d.severity === "error").length;
+  const warned = diagnostics.length - notLoaded;
+  const problems =
+    diagnostics.length === 1 ? "1 problem" : `${diagnostics.length} problems`;
+  const warnings = warned === 1 ? "1 warning" : `${warned} warnings`;
+  return `${problems} in the skill files — ${notLoaded} not loaded, ${warnings}. \`openalpaca skills list\` names each one.`;
+}
+
 /** "via MCP `github` — enabled" (§9.3). */
 export function originLabel(entry: ToolCatalogEntry): string | null {
   if (entry.origin === null) return null;
@@ -84,11 +117,15 @@ export function ToolsSection() {
   const tools = useTools();
   const health = useSkillHealth();
   const catalog = useSkillCatalog();
+  const diagnostics = useSkillDiagnostics();
   const setSection = useUiStore((s) => s.setSettingsSection);
 
   const toolRows = tools.data ?? [];
   const healthRows = health.data ?? [];
   const skillsByKey = skillsByLogKey(catalog.data ?? []);
+  // Nothing while the read is pending or failed (a daemon that predates the
+  // route answers 404): the count is a pointer, never a blocker.
+  const problems = skillProblemsLine(diagnostics.data ?? []);
 
   return (
     <>
@@ -170,6 +207,23 @@ export function ToolsSection() {
         Skill health metrics are lifetime totals; the daemon serves no per-day
         breakdown of them.
       </GapNote>
+
+      {problems === null ? null : (
+        <p
+          role="status"
+          className="mt-[12px] mb-0 flex items-center gap-[8px] font-mono text-2xs-plus leading-[1.6] text-secondary"
+        >
+          <Tag
+            value={String(diagnostics.data?.length ?? 0)}
+            tone={
+              diagnostics.data?.some((d) => d.severity === "error")
+                ? "warn"
+                : "asks"
+            }
+          />
+          <span>{problems}</span>
+        </p>
+      )}
     </>
   );
 }

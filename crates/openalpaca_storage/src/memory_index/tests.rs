@@ -3196,10 +3196,41 @@ fn an_index_at_schema_5_is_rebuilt_for_the_project_id_keys() {
     }
     let index = MemoryIndex::open(&path).unwrap();
     let report = index.index_state().unwrap();
-    assert_eq!(SCHEMA_VERSION, 6);
     assert_eq!(report.state, IndexState::Rebuilding);
-    assert_eq!(report.schema_version, 6);
+    assert_eq!(report.schema_version, SCHEMA_VERSION);
     assert_eq!(report.notes, 0, "nothing of the v5 cache is served");
+}
+
+/// The FRESHNESS-SWEEP's S12: unicode-normalization 0.1.26 reads Unicode
+/// 18, and `query::normalize` folds its subscript `w` (U+209D) to `w`, so a
+/// row a schema-6 cache holds for a body carrying it is not what the same
+/// bytes give now: the cache is recreated, never served, and the rebuilt
+/// row is found by the folded word.
+#[test]
+fn an_index_at_schema_6_is_rebuilt_for_unicode_18() {
+    let note = || record("n1", "Release step", "Flip the x\u{209D}y switch.\n");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    {
+        let index = MemoryIndex::open(&path).unwrap();
+        index.rebuild(&[note()]).unwrap();
+        let conn = index.lock();
+        conn.execute(
+            "UPDATE meta SET value = '6' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    }
+    let index = MemoryIndex::open(&path).unwrap();
+    let report = index.index_state().unwrap();
+    assert_eq!(SCHEMA_VERSION, 7);
+    assert_eq!(report.state, IndexState::Rebuilding);
+    assert_eq!(report.schema_version, 7);
+    assert_eq!(report.notes, 0, "nothing of the v6 cache is served");
+    index.rebuild(&[note()]).unwrap();
+    assert_eq!(query::normalize("x\u{209D}y"), "xwy");
+    let r = index.search(&q("xwy")).unwrap();
+    assert_eq!(ids(&r), vec!["n1"]);
 }
 
 /// Five dated notes a day apart, one per status the timeline shows or hides.

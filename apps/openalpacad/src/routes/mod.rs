@@ -107,7 +107,7 @@ pub use memories::{
     sync_memories_handler, timeline_memories_handler, undo_memory_handler,
     update_memory_handler,
 };
-pub use skills::{list_skills_handler, skill_health_handler};
+pub use skills::{list_skills_handler, skill_diagnostics_handler, skill_health_handler};
 pub use status::status_handler;
 pub use tasks::{
     create_task_handler, get_task_handler, get_task_timeline_handler, list_tasks_handler,

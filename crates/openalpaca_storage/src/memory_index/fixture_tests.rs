@@ -25,8 +25,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::hash::sha256_hex;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use super::*;
@@ -40,15 +40,11 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn owner_key(owner_id: &str) -> String {
-    let digest = Sha256::digest(owner_id.as_bytes());
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    hex[..32].to_string()
+    sha256_hex(owner_id.as_bytes())[..32].to_string()
 }
 
 fn dir_key(name: &str) -> String {
-    let digest = Sha256::digest(name.as_bytes());
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    hex[..16].to_string()
+    sha256_hex(name.as_bytes())[..16].to_string()
 }
 
 fn authority(origin: &str) -> i64 {
@@ -279,10 +275,9 @@ fn derive_records(
                         .collect()
                 })
                 .unwrap_or_default();
-            let digest = Sha256::digest(format!("{id}\n{body}").as_bytes());
             IndexRecord {
                 id: id.to_string(),
-                revision: digest.iter().map(|b| format!("{b:02x}")).collect(),
+                revision: sha256_hex(format!("{id}\n{body}").as_bytes()),
                 partition_key: key.to_string(),
                 scope: scope.to_string(),
                 relative_path: format!("notes/{id}--note.md"),

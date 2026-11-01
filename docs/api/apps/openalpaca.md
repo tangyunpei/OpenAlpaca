@@ -31,6 +31,7 @@
 | `openalpaca store` | Manage projects (list them, re-point a moved one, delete one's data) | `apps/openalpaca/src/commands/store.rs` |
 | `openalpaca persona` | Show or edit the persona documents (USER.md) through the daemon | `apps/openalpaca/src/commands/persona.rs` |
 | `openalpaca memory` | Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt) | `apps/openalpaca/src/commands/memory.rs` |
+| `openalpaca skills` | Show the skill catalog and the problems its last scan found (list, info) | `apps/openalpaca/src/commands/skills.rs` |
 
 ## Request/Query Types
 
@@ -241,6 +242,14 @@
 - Enum `SessionsCommands` variants:
   - `delete` (fields: `id`)
 - Parsed flags: `--total`
+
+### `skills`
+
+- Source: `apps/openalpaca/src/commands/skills.rs`
+- Enum `SkillsCommands` variants:
+  - `list` (fields: `format`)
+  - `info` (fields: `skill`, `format`)
+- Parsed flags: `--format`
 
 ### `status`
 

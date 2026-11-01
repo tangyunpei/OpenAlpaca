@@ -27,9 +27,11 @@
  * manifest's version the row shows beside Approve, is shown as `<U+XXXX>`
  * (the one-line escape: a name, a version or a capability has no layout of
  * its own) and the row counts them in the words every approval surface
- * uses, as the CLI's manifest does. Every other row's text — a failed row's
- * quoted detail among it — is shown as it came. Display only: every verb is
- * sent the id the daemon listed.
+ * uses, as the CLI's manifest does. It also says the manifest's standing
+ * warnings (`declared.warnings`, N-PLUG-2) — a key nothing reads, a type
+ * nothing wires — so they are read before Approve, not after it. Every other
+ * row's text — a failed row's quoted detail among it — is shown as it came.
+ * Display only: every verb is sent the id the daemon listed.
  */
 
 import type { TagTone } from "@/components/ui";
@@ -90,6 +92,14 @@ export interface RowConsent {
   asks: Escaped;
   /** The manifest's version, drawn beside Approve; `null` when it has none. */
   version: Escaped | null;
+  /**
+   * The manifest's standing warnings (`declared.warnings`, N-PLUG-2) — a key
+   * nothing reads, a type nothing wires — said before Approve, not after it.
+   * The daemon has already escaped an author's key; the one-line escape here
+   * is the same every field takes, so a raw character is still shown and
+   * counted.
+   */
+  warnings: Escaped[];
   notice: string | null;
 }
 
@@ -290,14 +300,19 @@ function unapproved(row: ExtensionRow, base: Base): ExtensionRowView {
     const name = escapeHiddenLine(row.id);
     const asks = escapeHiddenLine(description);
     const version = row.version === null ? null : escapeHiddenLine(row.version);
+    const warnings = (row.declared?.warnings ?? []).map(escapeHiddenLine);
     return {
       description: asks.text,
       consent: {
         name,
         asks,
         version,
+        warnings,
         notice: hiddenNotice(
-          name.hidden + asks.hidden + (version?.hidden ?? 0),
+          name.hidden +
+            asks.hidden +
+            (version?.hidden ?? 0) +
+            warnings.reduce((sum, warning) => sum + warning.hidden, 0),
         ),
       },
     };
@@ -375,6 +390,16 @@ function failed(row: ExtensionRow, base: Base): ExtensionRowView {
         tag: "config-invalid",
         // The parse error, quoted and never interpreted.
         description: quoted(row.detail) ?? "The declaration could not be read",
+        secondary: configLocation(row),
+      };
+
+    case "protocol_negotiation_failed":
+      return {
+        ...shared,
+        tag: "protocol-mismatch",
+        // The daemon's words: rmcp's error and the `protocol` value to set
+        // in the server's block — quoted, never interpreted.
+        description: quoted(row.detail) ?? "No MCP protocol version in common",
         secondary: configLocation(row),
       };
 

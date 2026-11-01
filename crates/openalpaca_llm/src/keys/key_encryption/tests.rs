@@ -7,7 +7,7 @@ fn test_encryptor() -> KeyEncryptor {
         *b = i as u8;
     }
     KeyEncryptor {
-        key: Key::<Aes256Gcm>::from_slice(&key_bytes).clone(),
+        key: Key::<Aes256Gcm>::from(key_bytes),
     }
 }
 
@@ -61,7 +61,7 @@ fn test_decrypt_invalid_base64() {
 #[test]
 fn test_decrypt_too_short() {
     let enc = test_encryptor();
-    let short = format!("aes256:{}", BASE64.encode(&[0u8; 5]));
+    let short = format!("aes256:{}", BASE64.encode([0u8; 5]));
     let result = enc.decrypt(&short);
     assert!(result.is_err());
 }
@@ -235,4 +235,29 @@ fn load_at_never_mints_a_master_key() {
         .unwrap()
         .expect("the key exists now");
     assert_eq!(read.decrypt(&encrypted).unwrap(), "sk-secret");
+}
+
+// ============================================================================
+// The on-disk secret format is pinned by a literal, never by the code (P05)
+// ============================================================================
+
+/// A secret as `llm.toml` holds it — `aes256:` + base64(12-byte nonce ‖
+/// AES-256-GCM ciphertext ‖ 16-byte tag) — written in September 2026 by the
+/// aes-gcm 0.10 build of this construction under the key `00 01 … 1f`. The
+/// literal, not the code, is the oracle: a build that cannot read it locks
+/// every stored key out, so it stays as it is through any crypto bump
+/// (aes-gcm 0.11, deps plan P11) — a failure here is a format change, never
+/// a test to update.
+#[test]
+fn a_secret_written_by_the_aes_gcm_0_10_build_still_decrypts() {
+    const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const WRITTEN_IN_SEPTEMBER_2026: &str =
+        "aes256:HFTMjzaU0zEto0whNGd6YqMOlnKtBdUbBHMw8KubnY16SHhYQwgboFOmStXEzYAXfEtXNQavok+LGjf7";
+
+    let enc = KeyEncryptor::from_hex(KEY_HEX, "the fixture's key").unwrap();
+    assert!(KeyEncryptor::is_encrypted(WRITTEN_IN_SEPTEMBER_2026));
+    assert_eq!(
+        enc.decrypt(WRITTEN_IN_SEPTEMBER_2026).unwrap(),
+        "sk-ant-api03-test-key-1234567890"
+    );
 }

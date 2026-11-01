@@ -1,0 +1,19 @@
+[package]
+name = "tedit"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A standalone crate: it lives inside the repository tree but is not a member
+# of its workspace. Build it with `--manifest-path`. `old/` and `new/` share
+# `../src/main.rs` and differ in the `toml_edit` line alone (`diff` them).
+[workspace]
+
+[[bin]]
+name = "tedit"
+path = "../src/main.rs"
+
+[dependencies]
+toml_edit = "=0.25.13"
+toml = "=0.9.12"
+sha2 = "0.10"

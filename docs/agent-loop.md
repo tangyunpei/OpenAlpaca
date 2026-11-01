@@ -123,7 +123,9 @@ extension set as the main loop — every installed MCP-bridged
 (`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool whose
 extension is enabled — and a per-request `invoke_skill` instance, so the
 lead can run catalog skills and connected integrations itself or
-delegate them. The lead's `SandboxPolicy` allowlist is extended from the
+delegate them; its system prompt carries the same `<available_skills>`
+block as the main loop, as its last raw block, less the main loop's
+sentence that the user can type a skill's `/slash` command. The lead's `SandboxPolicy` allowlist is extended from the
 final tool definitions at run time (template denials still win);
 subagents stay template-scoped — they get only the capabilities their
 own template declares, never the lead's blanket grant.
@@ -137,6 +139,87 @@ tool calls proxied through the same `SandboxManager::execute_tool` path
 (capability checks, sanitization, confirmation, timeouts) as internal
 subagents. Depth, concurrency-permit, and cancellation semantics are
 unchanged; the cancel token is checked between steps.
+
+**A spawn never waits** (N-LEAD-2). `spawn_subagent`, and each entry of
+`spawn_subagents_batch`, registers the subagent and returns its run id at
+once. Past the lead's bound (`[execution.lead_agent_defaults]
+max_concurrent_subagents`, 6 in the shipped `daemon.toml`) the subagent is
+`queued` — the reply says so — and waits for its slot inside its own task
+(`run_until_cancelled` on the bound's semaphore), `running` when one
+frees; the bound does not change. Its instance and its lane exist from
+the spawn, so a queued subagent's lane reads `running` in the timeline
+(a span has no queued state). A queued subagent that the run's end or a
+`/cancel` reaches never starts.
+
+**Each result reaches the lead once** (N-LEAD-3). `wait_for_subagents`
+returns the subagents it has not reported yet — a finished one's answer as
+its head and its tail, the byte budget shared among those entries alone
+(so a second batch of eight gets the 3,200 bytes an answer the first did,
+Stage 0's F2 sizing), a queued or running one listed again next time —
+and one line naming the run ids reported earlier, so a lead whose context
+was compacted knows to ask for them. `check_subagent_status` re-reads any
+answer whole, as often as asked, and an answer it delivered — whole, or as
+a stub the run's log lets the lead page — is not repeated by a later wait
+(`SubagentTracker::report`); a long one that a run with no log cut after
+its first part still is, as its head and its tail.
+
+**A failed subagent says why, and whether a retry can help** (N-LEAD-5).
+Its failure reaches the lead through `LoopResult::subagent_failure`
+(`runner/agentic_loop/config.rs`), which shares `no_answer_line`'s words:
+the cost cap with its amount and the spend it was checked against
+(`LoopResult::cap_spend`, this attempt's — not the agent's lifetime
+total, which a singleton template's reused id would carry), the error as
+written (never the finish reason's `Debug` form), the last tool error.
+Where a retry
+cannot change the outcome — the cost cap, credentials the provider refused,
+no model the agent can use, a model it may not use — the line says *"A
+retry will not help"*, and the lead prompt's step 5 retries a failure
+unless its failure says so. Credentials the provider refused on every
+attempt reach the loop as the router's `AllKeysRefused` — on the streaming
+and the non-streaming path, and kept past the fallback ladder when no rung
+answers, as `NoApiCompatibleKeys` now is — which the loop does not retry
+as transient; before, the rotation ended as "Max retries exceeded" and the
+ladder's "All fallback models failed", retried three times and then read
+as a failure a retry could fix.
+
+**A resumed run knows its subagents again** (N-LEAD-4). Each subagent's
+whole final answer is spilled to the session's `results/` beside its
+lane's `subagent_close` record, and both of its lane records name its run
+id. A replay resume (`session_log/replay.rs::rebuild`) rebuilds the run's
+subagents from those records (`ReplayPlan::subagents`): a lane that closed
+`done` comes back Completed with its kept answer, one that failed or was
+cancelled Failed with its lane's detail and answer, and one still open —
+the daemon stopped under it — Failed, *"interrupted by the daemon's
+stop"*; `run_lead_agent` seeds the tracker with them, none reported yet,
+and the resume note names each and how it ended. The note is a
+`<system_note>`, so it is the daemon's words only: each run id escaped
+(`<` and `>` as `<U+003C>` and `<U+003E>`, every hidden character as
+`<U+XXXX>`), one word for how its lane ended, at most twenty named — never
+a failure's own text, which `check_subagent_status` returns as a tool
+result. A subagent's own rounds, results and compactions are left out of
+the lead's replayed history: they carry the run's task id too, told apart
+by their span — any span but the lead's own `lead::<task id>`, so a lane
+whose open a trimmed head took is still not read as the lead's.
+
+**No subagent outlives its run** (N-LEAD-1). Each subagent's cancel token
+is a child of the run's *subagents token*, itself a child of the run's own
+token, and each subagent's task is held in the run's `JoinSet`
+(`runner/lead_agent/tools.rs`, `SpawnSubagentTool::stop_subagents`). When
+the lead's loop returns — an answer, its round or cost cap, an error, a
+cancel — `run_lead_agent` cancels the subagents token first (R45's kill of
+a running command's process group rides on it), waits up to 5 s for each
+subagent to close its lane as cancelled with the detail *"the run ended
+before this subagent finished"*, aborts whatever is still running (a
+plugin agent's RPC is not raced against the token), whose lane guard
+closes the lane the same way, and only then returns — so the dispatcher's
+`remove_cancellation_token` strands nothing, and the run's report lists
+the stopped lanes ([The Completion Report](#the-completion-report)). A
+person's `/cancel` reaches the subagents through the run's token, and their
+lanes keep the detail "cancelled". Dropping the run future — the daemon's
+runtime stopping under an in-flight run — drops the set, which aborts the
+subagents; their lanes close as *"interrupted by the daemon's stop"*. The
+lead is given no extra round to wait for or abandon its running subagents
+(owner decision B-15, taken as (1): no completion guard).
 
 The loop also runs outside the multi-agent topology: the main-loop
 front door (below) IS a direct loop invocation per user turn
@@ -238,7 +321,14 @@ server or plugin contributes nothing on either surface), and
 `invoke_skill` (catalog-skill invocation through the nested-skill
 executor; present when an LLM router is configured). So installed
 MCP/plugin tools and `invoke_skill` are on the DEFAULT surface, not just
-under `"full"`. When the lane has active workflows AND steering is
+under `"full"`. The static prompt's `<available_skills>` block names the
+skills `invoke_skill` can run: every available skill (the
+availability-filtered `catalog_summary`) by its id, which is what
+`invoke_skill` resolves, with its `/slash` and its description cut at
+100 characters, within `[orchestrator.prompt_budgets]
+skills_catalog_budget` (500 characters of skill lines); over the budget
+every skill is listed by its id alone, and none is dropped
+(`orchestrator/skill/catalog/prompt.rs`). When the lane has active workflows AND steering is
 enabled, `steer_workflow` + `queue_followup` join the surface.
 Per-request instances go into a per-request registry clone, never the
 global registry. Budgets come from `main_loop_max_rounds` /
@@ -355,9 +445,15 @@ refused: …"* (`outcome.rs::unapprovable_note`). The tool names are read
 from the run's audit rows, which the lead's and every subagent's sandbox
 write, so a refusal inside a subagent is reported too.
 
+When the run's end stopped subagents that had not finished (N-LEAD-1),
+the runtime's last line names their lanes, as the run's timeline names
+them: *"Stopped when the run ended — these subagents had not finished, so
+they were cancelled: …"* (`outcome.rs::stopped_subagents_note`), read from
+the lanes' span rows, which the lead's run closes before it returns.
+
 The task's `result_summary` and the `TaskCompleted` event carry the
 report cut to 2 000 characters (`MAX_SUMMARY_LENGTH`); the cut keeps the
-runtime's "Not run" line whole. The full report lives in lane history
+runtime's lines whole. The full report lives in lane history
 and the task outcome record.
 
 ## The Follow-up Runner
@@ -368,7 +464,11 @@ with the originating principal and the turn's resolved project root
 (`ToolContext.request_workspace_root`, F4) as `workspace_path` — the
 lead's context carries the run's project, so a follow-up a workflow
 promised re-enters in that project; the main loop's carries the turn's. When a
-workflow finalizes and `followup_autostart = true` (default), the spawn
+workflow finalizes and `followup_autostart = true` (default) — and the
+daemon is not shutting down: once its cancel token is set (the dispatcher
+holds it, `TaskDispatcher::set_shutdown_token`) nothing is claimed and the
+row stays queued, since the turn that would mark it done could not outlive
+the process (Z4-03) — the spawn
 claims the lane's next `followup` row (`FollowupRepository::claim_next`
 — which never claims `unprocessed_steering`; those rows are surfaced by
 the lazy context-block injection described under Steering above) and
@@ -542,12 +642,21 @@ One threshold decides what happens to a large tool result:
 | Result | Loop has a session log | Loop has none |
 |---|---|---|
 | At or under the threshold | Inline, unchanged. | Inline, unchanged. |
-| Over it, succeeded | **Spilled**: the whole result is written to the session's `results/` directory, and the model receives a stub — the size, the first 2 KB, and `result_ref=file:results/…` with the instruction to page it with `read_result`. | Cut inline at the threshold, at a sentence, line or word boundary, with a marker naming how much is shown. |
+| Over it, succeeded | **Spilled**: the whole result is written to the session's `results/` directory, and the model receives a stub — the size, the first 2 KB, and `result_ref=file:results/…` with the instruction to page it with `read_result`. A **command**'s stub (`shell_execute`, a `Command`-backend tool) shows the output's head **and** tail instead, half the threshold each — the `Err` budget — so a long build's summary is in front of the model (`session_log::command_spill_stub`). | Cut inline at the threshold, at a sentence, line or word boundary, with a marker naming how much is shown. |
 | Over it, failed | The model's copy keeps the **head and tail** (half the threshold each), because a compiler or test failure sits at the end. The full bytes are still spilled to the log. | Head and tail, same cut. |
 
 If the spill record could not be handed to the log writer, the model gets
 the inline cut instead of a stub — a stub must never promise a file that
-will not exist.
+will not exist. A resumed run's replay restores the stub the model was
+shown: a command's record names its form and budget (`stub`), so its head
+and tail are rebuilt from the `results/` file.
+
+A failed call is the call's own `Err`, never a reading of its text: the
+loop marks the text `[tool_error]` and flags the message (`is_error`). The
+Anthropic provider sends the flag as the `tool_result` block's `is_error`;
+an OpenAI-compatible wire has no such field and reads the mark. A recovery
+hint is the failing tool's own words — or the sandbox's, for a command it
+cut at the time limit — and the loop adds none.
 
 `read_result` is a scoped builtin (`tools/builtins/read_result.rs`) and a
 **grant, not ambient**:
@@ -584,11 +693,38 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   round**, and retries stop once `max_rounds` is used up. The counter
   resets to zero on any success. Anything else ends the loop with
   `Error`.
+- **Per-call time limit** — the sandbox cuts a tool call (all but the few
+  exempt ones) at its policy's `max_tool_runtime_secs`, and a command it
+  cuts is killed with every process it started. A chat turn's limit is
+  `[execution.agent_defaults] max_tool_runtime_secs` (60 s), read per
+  turn; a lead's and a subagent's is their template's `timeout_seconds`,
+  60 s when it sets none (`SandboxPolicy::from_constraints`). The loop
+  writes its policy's figure into `shell_execute`'s definition before the
+  first request — or the shell's own 300 s, where that comes first — so
+  the model is told the limit it really runs under; the registered
+  definition names none.
+- **A tool call's arguments are read, never guessed.** The provider layer
+  reads them with one reader (`openalpaca_llm`'s stream collector and the
+  OpenAI-compatible response parser): nothing or `null` is `{}`, a JSON
+  string whose text is an object is that object, and anything else — text
+  that is not JSON, or JSON that is not an object — is logged once at `warn`
+  with the tool's name, the byte length and the problem (never the text),
+  and the call is refused by the registry with a sentence naming the
+  problem; it never runs with `{}`. A call that breaks its tool's schema is
+  told every problem in one result. Only the provider layer reads a string
+  as an object: the registry decodes nothing, so a JSON string that reaches
+  it by another path (a plugin's proxied call) stays a string, which a
+  schema asking for an object refuses as it always did — the sandbox's
+  sanitizer checked only its outer text.
 - **Approval prompts live in the sandbox, not the loop.** A tool on the
   confirm list blocks inside `SandboxManager::execute_tool` until it is
   approved, denied, times out or is withdrawn; the loop only sees the
   tool's result. A run that declared itself `unattended` has such a tool
-  refused at once. The contract is in the Daemon Manual's
+  refused at once. Before any of that, the sandbox asks the registry whether
+  dispatch would refuse the call (`ToolRegistry::precheck`: the extension
+  gate, then the arguments against the tool's schema); if so, the call is
+  refused with dispatch's own message and no card is raised. The contract is
+  in the Daemon Manual's
   [Tool confirmations](Daemon_Manual.md#tool-confirmations).
 - **Compaction telemetry** — see
   [Context Budget and Compaction](#context-budget-and-compaction).

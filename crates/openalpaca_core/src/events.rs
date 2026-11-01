@@ -179,7 +179,8 @@ pub enum SystemEvent {
     SkillCatalogUpdated {
         /// Skill name that changed
         skill_name: String,
-        /// Action taken: "added", "removed", or "reloaded"
+        /// Action taken: "added", "removed", "reloaded", or "reload_failed"
+        /// (a hot edit the catalog could not load; N-SKILL-2)
         action: String,
         timestamp: DateTime<Utc>,
     },

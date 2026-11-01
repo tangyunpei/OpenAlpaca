@@ -58,6 +58,11 @@ impl LlmRouter {
             pool.len().min(3)
         };
 
+        // N-LEAD-5: how many attempts were refused for their credentials.
+        // When every attempt was, and the attempts reached every key, the
+        // call is `AllKeysRefused`; past three keys it is not known, and the
+        // non-streaming path the caller falls back to decides.
+        let mut refusals = 0usize;
         for attempt in 0..max_attempts {
             let key_guard = match pool.acquire().await {
                 Ok(guard) => guard,
@@ -118,6 +123,7 @@ impl LlmRouter {
                         max_attempts,
                         "Streaming key auth error, rotating"
                     );
+                    refusals += 1;
                     pool.report_result(
                         &key_guard.id,
                         crate::keys::key_pool::CallResult::Error(e.to_string()),
@@ -129,6 +135,9 @@ impl LlmRouter {
             }
         }
 
+        if refusals == max_attempts && max_attempts >= pool.len().max(1) {
+            return Err(LlmRouterError::AllKeysRefused);
+        }
         Err(LlmRouterError::AllKeysRateLimited)
     }
 
@@ -154,13 +163,34 @@ impl LlmRouter {
 
         match self.try_model(model, &request).await {
             Ok(response) => Ok(response),
-            Err(LlmRouterError::NoApiCompatibleKeys) => {
+            // The two answers a key's owner must act on are kept past the
+            // ladder: when no rung answers either, the caller is told the
+            // keys were the problem, not "All fallback models failed" — which
+            // reads as passing and is retried (N-LEAD-5).
+            Err(e @ LlmRouterError::NoApiCompatibleKeys) => {
                 tracing::warn!(
                     model = model,
                     "No API-compatible keys configured (only managed/OAuth tokens). \
                      Add an API key (sk-ant-api*) to avoid CLI fallback. Trying fallback chain."
                 );
-                self.try_fallback(model, &request).await
+                self.try_fallback(model, &request)
+                    .await
+                    .map_err(|fallback| match fallback {
+                        LlmRouterError::AllFallbacksFailed => e,
+                        other => other,
+                    })
+            }
+            Err(e @ LlmRouterError::AllKeysRefused) => {
+                tracing::warn!(
+                    model = model,
+                    "The provider refused every key it was offered. Trying fallback chain."
+                );
+                self.try_fallback(model, &request)
+                    .await
+                    .map_err(|fallback| match fallback {
+                        LlmRouterError::AllFallbacksFailed => e,
+                        other => other,
+                    })
             }
             Err(LlmRouterError::AllKeysRateLimited) => {
                 tracing::warn!(

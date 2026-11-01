@@ -4,11 +4,11 @@ use crate::tools::working_folder::{WorkingFolder, WorkingFolderRefusal, working_
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
+use openalpaca_storage::hash::sha256_hex;
 use openalpaca_storage::store::{
     ContentKind, FILE_NAME_SLUG_BYTES, StoreScope, kind_for_file_name, slugify, store_root,
 };
 use openalpaca_storage::{ArtifactKind, Database};
-use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +27,22 @@ use super::helpers::{
 use super::pre_edit::{EditVerb, PreEdit, check_pre_edit, keep_pre_edit_copy};
 
 // --- file_read ---
+
+/// What `file_read` adds when the path names nothing (N-TOOL-4, Z1-13: the
+/// hint is the tool's own text, not a line the loop guessed from its words).
+const NOTHING_THERE_HINT: &str =
+    "Hint: paths are relative to the working folder; file_list shows what a folder holds.";
+
+/// `refusal`, with [`NOTHING_THERE_HINT`] when nothing is at `in_folder` —
+/// the path, joined to the working folder, before any resolution.
+fn told_what_is_there(refusal: String, in_folder: &Path) -> String {
+    match std::fs::symlink_metadata(in_folder) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            format!("{refusal}\n{NOTHING_THERE_HINT}")
+        }
+        _ => refusal,
+    }
+}
 
 /// Reads one file of the call's working folder (storage design §10, R26):
 /// the project's root, or the conversation's scratch folder. It holds no
@@ -57,13 +73,24 @@ impl BuiltInTool for FileReadTool {
         let (root, rules) = acting_folder(ctx)?;
         // R31: relative, no `..`, resolved whole and under the root. R32 in a
         // project: nothing under a `.openalpaca` folder. `.git` and `.env`
-        // are read like any file — reading never asks (ST-16).
-        let full_path = resolve_workspace_path(path, &root, rules)?;
+        // are read like any file — reading never asks (ST-16). The path's
+        // own shape is refused first, so only a path that names nothing gets
+        // the hint below (N-TOOL-4).
+        validate_workspace_path(path)?;
+        let full_path = resolve_workspace_path(path, &root, rules)
+            .map_err(|e| told_what_is_there(e, &root.join(path)))?;
         // R-T30: opened without following a link put at the leaf since the
         // resolver answered, and judged and sized from the file that was
         // opened. Residual X6: the open does not wait, so a named pipe or a
         // device is refused here rather than blocking the call.
-        let cannot_access = |e: std::io::Error| format!("Cannot access file '{path}': {e}");
+        let cannot_access = |e: std::io::Error| {
+            let refusal = format!("Cannot access file '{path}': {e}");
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!("{refusal}\n{NOTHING_THERE_HINT}")
+            } else {
+                refusal
+            }
+        };
         let mut file = open_leaf_without_waiting(
             tokio::fs::OpenOptions::new().read(true),
             &full_path,
@@ -297,6 +324,20 @@ pub(super) fn file_list_tool() -> RegisteredTool {
 /// The most one `file_write` call writes (10 MB).
 const MAX_FILE_WRITE_SIZE: u64 = 10 * 1024 * 1024;
 
+/// What `file_write` adds when the system refuses the write (N-TOOL-4).
+const WRITE_REFUSED_HINT: &str =
+    "Hint: check the file's permissions, or write it under another path.";
+
+/// `failure`, with [`WRITE_REFUSED_HINT`] beneath it when `e` is the system
+/// refusing the write.
+fn refused_write(failure: String, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        format!("{failure}\n{WRITE_REFUSED_HINT}")
+    } else {
+        failure
+    }
+}
+
 struct FileWriteTool {
     /// Where a result file's pointer row is recorded (R35) and a by-product
     /// is saved (no project). Absent (tests, the CLI): a project write still
@@ -445,10 +486,15 @@ impl FileWriteTool {
             EditVerb::Overwrite,
         )
         .await?;
-        make_parents_below(path, root, target)?;
+        // N-TOOL-4 (Z1-13): a write the system refuses — the file, or a
+        // folder the write has to make above it — carries the tool's own hint.
+        make_parents_below(path, root, target, |e| {
+            refused_write(format!("Failed to create directories: {e}"), &e)
+        })?;
         // R-T30: the leaf is opened without following a link put there since
         // the plan resolved it.
-        let write_failed = |e: std::io::Error| format!("Failed to write file '{path}': {e}");
+        let write_failed =
+            |e: std::io::Error| refused_write(format!("Failed to write file '{path}': {e}"), &e);
         let mut file = open_leaf(
             tokio::fs::OpenOptions::new()
                 .write(true)
@@ -634,10 +680,7 @@ fn artifact_name(path: &str) -> String {
         return path.to_string();
     }
     let extension = &path[title.len()..];
-    let hash: String = Sha256::digest(path.as_bytes())[..4]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let hash = &sha256_hex(path.as_bytes())[..8];
     let slug = slugify(title, FILE_NAME_SLUG_BYTES - hash.len() - 1);
     format!("{slug}-{hash}{extension}")
 }
@@ -3091,6 +3134,11 @@ mod tests {
         assert_ne!(artifact_name("文档.md"), artifact_name("笔记.md"));
         assert!(artifact_name("文档.md").starts_with("artifact-"));
         assert!(artifact_name("报告/plan.md").starts_with("plan-"));
+        // The hash is the first eight hex digits of the path's SHA-256, as
+        // literals (Python's `hashlib`): a by-product's name is its address,
+        // and the same path must reach the same artifact on every build.
+        assert_eq!(artifact_name("文档.md"), "artifact-b4b2f65b.md");
+        assert_eq!(artifact_name("报告/plan.md"), "plan-e6e5d5bc.md");
         // The store drops both extensions (`.bin`), so only the titles can
         // keep these two apart: the hash covers the extension too.
         assert_ne!(
@@ -3547,5 +3595,77 @@ mod tests {
             shown, looked_at,
             "an entry that cannot be looked at is its bare name"
         );
+    }
+
+    // ── N-TOOL-4 (Z1-13): a recovery hint is the tool's own text ──
+
+    /// A file that is not there is answered with what to do about it, in the
+    /// tool's own error — not a line the loop guesses from its words.
+    #[tokio::test]
+    async fn a_missing_file_is_answered_with_the_hint_to_list_the_folder() {
+        let gp = crate::test_util::GuardedProject::new();
+        let err = FileReadTool
+            .execute_with_context(&serde_json::json!({"path": "missing.txt"}), &gp.ctx())
+            .await
+            .expect_err("the file is not there");
+        assert!(err.contains("'missing.txt'"), "{err}");
+        assert!(
+            err.ends_with(
+                "\nHint: paths are relative to the working folder; file_list shows what a \
+                 folder holds."
+            ),
+            "{err}"
+        );
+        // ST-14: every shell command asks, so a hint must not send the model
+        // there for a question file_list answers without a card.
+        assert!(!err.contains("shell_execute"), "{err}");
+
+        // A path the tool refuses before it looks is not "missing": no hint.
+        let refused = FileReadTool
+            .execute_with_context(&serde_json::json!({"path": "../x.txt"}), &gp.ctx())
+            .await
+            .expect_err("`..` is refused");
+        assert!(!refused.contains("Hint:"), "{refused}");
+    }
+
+    /// A write the folder refuses is answered with what to do about it —
+    /// whether the system refuses the file itself or a folder the write has
+    /// to make above it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_write_the_folder_refuses_is_answered_with_the_permissions_hint() {
+        use std::os::unix::fs::PermissionsExt;
+        let gp = crate::test_util::GuardedProject::new();
+        let locked = gp.root.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+        let tool = FileWriteTool {
+            db: None,
+            daemon_config: None,
+        };
+        let mut results = Vec::new();
+        for path in ["locked/out.txt", "locked/sub/out.txt"] {
+            results.push((
+                path,
+                tool.execute_with_context(
+                    &serde_json::json!({"path": path, "content": "x"}),
+                    &gp.ctx(),
+                )
+                .await,
+            ));
+        }
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+        for (path, result) in results {
+            let err = result.expect_err("the folder refuses the write");
+            assert!(err.contains("Permission denied"), "{path}: {err}");
+            assert!(
+                err.ends_with(
+                    "\nHint: check the file's permissions, or write it under another path."
+                ),
+                "{path}: {err}"
+            );
+        }
+        assert!(!locked.join("sub").exists(), "no folder was made");
     }
 }

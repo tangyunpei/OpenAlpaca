@@ -913,3 +913,79 @@ fn test_anthropic_ephemeral_notice_placement_empty_system_with_caching() {
         "notice-only system must NOT carry cache_control even when caching=true"
     );
 }
+
+/// The conversation a round with two tool calls leaves: one call answered,
+/// one failed. The failed result is built from its wire form so the shape
+/// under test is what a message carries, not how a constructor spells it.
+fn one_answered_one_failed() -> Vec<ChatMessage> {
+    let failed: ChatMessage = serde_json::from_value(serde_json::json!({
+        "role": "tool",
+        "content": "[tool_error] boom",
+        "tool_call_id": "tc_bad",
+        "is_error": true,
+    }))
+    .unwrap();
+    vec![
+        ChatMessage::user("go"),
+        ChatMessage {
+            tool_calls: Some(vec![
+                crate::types::ToolCall {
+                    id: "tc_ok".to_string(),
+                    name: "file_read".to_string(),
+                    arguments: serde_json::json!({"path": "a.txt"}),
+                },
+                crate::types::ToolCall {
+                    id: "tc_bad".to_string(),
+                    name: "shell_execute".to_string(),
+                    arguments: serde_json::json!({"command": "make"}),
+                },
+            ]),
+            ..ChatMessage::assistant("")
+        },
+        ChatMessage::tool_result("tc_ok", "fine"),
+        failed,
+    ]
+}
+
+/// N-TOOL-4 (Z1-13): a failed tool's `tool_result` carries Anthropic's
+/// `is_error`, and a successful one is sent exactly as before — no such key.
+#[test]
+fn a_failed_tool_result_carries_is_error_and_a_successful_one_is_unchanged() {
+    let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+    let request = ChatRequest {
+        messages: Arc::new(one_answered_one_failed()),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: None,
+    };
+
+    let body = provider.build_request_body(&request);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages[2],
+        serde_json::json!({
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "tc_ok", "content": "fine"}],
+        }),
+        "a successful result is sent as it always was"
+    );
+    assert_eq!(
+        messages[3],
+        serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "tc_bad",
+                "content": "[tool_error] boom",
+                "is_error": true,
+            }],
+        }),
+        "a failed result says so in Anthropic's own field"
+    );
+}

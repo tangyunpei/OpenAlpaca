@@ -255,6 +255,10 @@ fn the_memory_snapshots_the_index_and_the_master_key_survive_a_factory_reset() {
             b"---\nschema: 1\n---\n# A note\n".as_slice(),
         ),
         ("state/.master_key", b"key material".as_slice()),
+        (
+            "state/editor/openalpaca-memory-55e811b6-kept.md",
+            b"# kept by a refused edit".as_slice(),
+        ),
         ("state/logs/daemon.log", b"a log line".as_slice()),
         ("state/backups/llm.toml.bak.1", b"[providers]".as_slice()),
         ("artifacts/report.md", b"# report".as_slice()),
@@ -348,6 +352,8 @@ fn the_confirmation_names_the_root_and_what_survives() {
     for entry in [
         "state/memory-control/",
         "state/cache/memory-index-v1.sqlite",
+        // N-STORE-1: the CLI's editor files, a kept edit among them.
+        "state/editor/",
     ] {
         assert!(
             untouched.contains(entry),

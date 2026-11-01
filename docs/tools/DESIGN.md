@@ -447,8 +447,9 @@ without losing it.
   `[orchestrator.sessions] tool_result_inline_bytes` (default 32 KB) and
   the loop has a session log, the whole result is written to the session's
   `results/` directory.  The model is handed the first 2 KB plus a
-  `result_ref=file:results/…` reference, and pages the rest back in with
-  **`read_result`**.  A loop with no session log (a skill invocation, for
+  `result_ref=file:results/…` reference — a command's head **and** tail,
+  at the error path's budget, since N-TOOL-7 — and pages the rest back in
+  with **`read_result`**.  A loop with no session log (a skill invocation, for
   one) cuts the result inline at the same threshold instead.  An error
   result is always shown as head **and** tail, so a compiler or test
   failure keeps the assertion at its end.

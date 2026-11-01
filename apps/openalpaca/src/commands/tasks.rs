@@ -327,7 +327,7 @@ fn render_task_status(t: &TaskInner, lanes: Result<&[TimelineLane], &str>) -> St
     match lanes {
         // A run that spawned nothing gets no `Lanes:` block at all — the
         // absence is the answer, and there is nothing to announce.
-        Ok(lanes) if lanes.is_empty() => {}
+        Ok([]) => {}
         Ok(lanes) => {
             let _ = writeln!(out);
             let _ = writeln!(out, "{}", "Lanes:".dimmed());
@@ -553,6 +553,44 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
     let task_id = result["task_id"].as_str().unwrap_or("unknown");
     println!("{} Task created: {}", "✓".green(), task_id);
     Ok(())
+}
+
+async fn task_action(task_id: &str, action: &str) -> Result<()> {
+    let client = DaemonClient::connect()?;
+    let body = serde_json::json!({ "action": action });
+    let result: serde_json::Value = client
+        .post(&format!("/v1/tasks/{}/action", task_id), &body)
+        .await?;
+
+    println!("{}", action_line(task_id, &result));
+    Ok(())
+}
+
+/// The one line an action prints, split out so its shape is testable without
+/// a daemon.
+///
+/// §5.6c gives `resume` a second meaning, and the extra clause is why it is
+/// worth a function: "Task abc12345 -> running" reads the same whether a
+/// transcript came back or the run started from nothing, and those are very
+/// different things to have just done. The clause appears only when the
+/// response carries the replay's own numbers, so an un-pause — and a daemon
+/// too old to send them — prints exactly what it printed before.
+fn action_line(task_id: &str, result: &serde_json::Value) -> String {
+    let status = result["status"].as_str().unwrap_or("unknown");
+    let mut line = format!(
+        "{} Task {} -> {}",
+        "✓".green(),
+        &task_id[..8.min(task_id.len())],
+        status_color(status)
+    );
+    if let Some(rounds) = result["rounds_replayed"].as_u64() {
+        line.push_str(&format!(
+            "\n  replayed {rounds} round{} from session {}",
+            if rounds == 1 { "" } else { "s" },
+            result["session_id"].as_str().unwrap_or("?")
+        ));
+    }
+    line
 }
 
 #[cfg(test)]
@@ -939,42 +977,4 @@ mod tests {
             "the daemon's own values"
         );
     }
-}
-
-async fn task_action(task_id: &str, action: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let body = serde_json::json!({ "action": action });
-    let result: serde_json::Value = client
-        .post(&format!("/v1/tasks/{}/action", task_id), &body)
-        .await?;
-
-    println!("{}", action_line(task_id, &result));
-    Ok(())
-}
-
-/// The one line an action prints, split out so its shape is testable without
-/// a daemon.
-///
-/// §5.6c gives `resume` a second meaning, and the extra clause is why it is
-/// worth a function: "Task abc12345 -> running" reads the same whether a
-/// transcript came back or the run started from nothing, and those are very
-/// different things to have just done. The clause appears only when the
-/// response carries the replay's own numbers, so an un-pause — and a daemon
-/// too old to send them — prints exactly what it printed before.
-fn action_line(task_id: &str, result: &serde_json::Value) -> String {
-    let status = result["status"].as_str().unwrap_or("unknown");
-    let mut line = format!(
-        "{} Task {} -> {}",
-        "✓".green(),
-        &task_id[..8.min(task_id.len())],
-        status_color(status)
-    );
-    if let Some(rounds) = result["rounds_replayed"].as_u64() {
-        line.push_str(&format!(
-            "\n  replayed {rounds} round{} from session {}",
-            if rounds == 1 { "" } else { "s" },
-            result["session_id"].as_str().unwrap_or("?")
-        ));
-    }
-    line
 }

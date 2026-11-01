@@ -35,7 +35,7 @@ pub(super) fn is_keychain_enabled() -> bool {
 /// Get the secret store matching the current config.
 pub(super) fn secret_store() -> Box<dyn SecretStore> {
     if is_keychain_enabled() {
-        Box::new(KeyringSecretStore)
+        Box::new(KeyringSecretStore::native())
     } else {
         Box::new(MemorySecretStore::new())
     }

@@ -635,6 +635,10 @@ const RESUME_ACTION: &str = "resume";
 ///
 /// A run this caller cannot see gets the same `404` a missing one does — never
 /// a `403`, which would confirm that the id belongs to somebody.
+#[allow(
+    clippy::result_large_err,
+    reason = "the Err is the route's answer, an axum Response"
+)]
 fn owned_run(db: &Database, owner_id: &str, id: &str) -> Result<(), Response> {
     match TaskRepository::new(db).get(id) {
         Ok(Some(task))
@@ -933,6 +937,10 @@ fn is_steerable(task: &Task, shared_context: &SharedContext, owner_id: &str) -> 
 
 /// Apply one steering push, as a `Response`. Split out from the handler so
 /// every status code is provable without a router or an `AppState`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the handler's state, passed apart so no AppState is needed"
+)]
 fn steer_task(
     db: &Database,
     shared_context: &SharedContext,

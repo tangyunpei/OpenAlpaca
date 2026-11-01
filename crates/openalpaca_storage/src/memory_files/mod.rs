@@ -72,7 +72,6 @@ pub use snapshot::{
 };
 
 use crate::store::projects::ProjectId;
-use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -136,21 +135,10 @@ pub fn is_conversation_summary(kind: NoteKind, origin: Origin, status: NoteStatu
 // Key derivations (design §2)
 // ============================================================================
 
-/// Lowercase hex SHA-256 of `bytes` — a revision when `bytes` is a note file.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 /// The owner key: the first [`OWNER_KEY_HEX`] characters of
-/// `sha256_hex(owner_id)`.
+/// [`sha256_hex`](crate::hash::sha256_hex)`(owner_id)`.
 pub fn owner_key(owner_id: &str) -> String {
-    let mut key = sha256_hex(owner_id.as_bytes());
+    let mut key = crate::hash::sha256_hex(owner_id.as_bytes());
     key.truncate(OWNER_KEY_HEX);
     key
 }
@@ -161,7 +149,7 @@ pub fn owner_key(owner_id: &str) -> String {
 /// re-point never changes, so a partition keeps its key, its snapshot and
 /// its index rows when its project moves.
 pub fn project_key(project_id: &ProjectId) -> String {
-    let mut key = sha256_hex(project_id.to_string().as_bytes());
+    let mut key = crate::hash::sha256_hex(project_id.to_string().as_bytes());
     key.truncate(DIR_KEY_HEX);
     key
 }

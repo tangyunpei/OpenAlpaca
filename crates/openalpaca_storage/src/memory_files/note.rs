@@ -18,8 +18,9 @@
 
 use super::{
     EMPTY_TITLE_SLUG, MAX_LIST_ENTRIES, MAX_NOTE_BYTES, MAX_SOURCES, MAX_TITLE_CHARS, NOTE_SCHEMA,
-    SLUG_MAX_BYTES, sha256_hex,
+    SLUG_MAX_BYTES,
 };
+use crate::hash::sha256_hex;
 use crate::store::slugify;
 use chrono::{DateTime, Utc};
 use std::fmt;

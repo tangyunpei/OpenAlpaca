@@ -205,6 +205,15 @@ pub async fn initialize_services(
                 count,
                 skills_dir.display()
             );
+            // Each problem was logged where the scan met it; the count says
+            // where to read them all (N-SKILL-2).
+            let problems = catalog.diagnostics().len();
+            if problems > 0 {
+                tracing::warn!(
+                    "Skill catalog: {problems} problem(s) in {} — `openalpaca skills list` or GET /v1/skills/diagnostics shows them",
+                    skills_dir.display()
+                );
+            }
         }
         Arc::new(catalog)
     };

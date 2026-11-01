@@ -321,3 +321,100 @@ fn a_logged_key_no_skill_claims_is_counted_for_nobody() {
     assert_eq!(rows.len(), 1);
     assert_eq!(find(&rows, "code-review")["invocations_today"], 0);
 }
+
+// ── GET /v1/skills/diagnostics (N-SKILL-2) ──────────────────────────────
+
+#[cfg(unix)]
+fn make_fifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path");
+    // SAFETY: a valid NUL-terminated path; mkfifo only creates the node.
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
+}
+
+/// A skills directory holding a malformed SKILL.md, two skills claiming one
+/// slash command, a FIFO named SKILL.md and the review skill — scanned once,
+/// on a helper thread so a scan that blocks fails instead of hanging.
+fn troubled_catalog(dir: &Path) -> std::sync::Arc<SkillCatalog> {
+    let write = |id: &str, body: &str| {
+        std::fs::create_dir_all(dir.join(id)).expect("skill dir");
+        std::fs::write(dir.join(id).join("SKILL.md"), body).expect("SKILL.md");
+    };
+    write("code-review", REVIEW_SKILL);
+    write("broken", "---\nname: [unclosed\ndescription: x\n---\n");
+    write(
+        "second-review",
+        "---\nname: Second Review\ndescription: Also reviews\n\
+         invoke:\n  slash: /review\n---\n\nAlso.\n",
+    );
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(dir.join("piped")).expect("skill dir");
+        make_fifo(&dir.join("piped").join("SKILL.md"));
+    }
+
+    let catalog = std::sync::Arc::new(SkillCatalog::new());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let scanning = catalog.clone();
+    let scanned = dir.to_path_buf();
+    std::thread::spawn(move || {
+        scanning.scan_directory(&scanned, SkillScope::Project);
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the scan did not finish");
+    catalog
+}
+
+#[test]
+fn diagnostics_name_a_malformed_file_a_slash_conflict_and_a_fifo() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let catalog = troubled_catalog(dir.path());
+
+    let rows = diagnostics_json(&catalog);
+    let codes: Vec<&str> = rows.iter().filter_map(|r| r["code"].as_str()).collect();
+    assert!(codes.contains(&"invalid_yaml"), "{rows:?}");
+    assert!(codes.contains(&"slash_conflict"), "{rows:?}");
+    #[cfg(unix)]
+    assert!(codes.contains(&"read_failed"), "{rows:?}");
+
+    for row in &rows {
+        let keys: std::collections::BTreeSet<&str> = row
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["code", "message", "path", "severity", "skill_id"].into();
+        assert_eq!(keys, expected, "{row}");
+    }
+    let broken = rows
+        .iter()
+        .find(|r| r["code"] == "invalid_yaml")
+        .expect("the malformed file");
+    assert_eq!(broken["severity"], "error");
+    assert_eq!(broken["skill_id"], "broken");
+    assert!(
+        broken["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("Invalid YAML: ")),
+        "{broken}"
+    );
+}
+
+/// `GET /v1/skills` is unchanged by them: a bare array of the skills that
+/// loaded, with no diagnostics in it.
+#[test]
+fn the_catalog_stays_a_bare_array_of_the_loaded_skills() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let catalog = troubled_catalog(dir.path());
+
+    let rows = skills_json(&catalog, &ExtensionLedger::new(), &HashMap::new());
+    let ids: Vec<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
+    assert_eq!(ids, ["code-review", "second-review"]);
+    for row in &rows {
+        assert!(row.get("diagnostics").is_none(), "{row}");
+    }
+}

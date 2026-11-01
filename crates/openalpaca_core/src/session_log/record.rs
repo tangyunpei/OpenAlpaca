@@ -177,7 +177,8 @@ pub struct Spill {
     pub content: String,
 }
 
-/// The **model-visible** stub §5.4 specifies, verbatim.
+/// The **model-visible** stub §5.4 specifies, verbatim — for every tool but a
+/// command, whose stub is [`command_spill_stub`].
 ///
 /// One function so the loop, the writer's record and every test agree on the
 /// wording — a model that has been taught to look for `result_ref=` must find
@@ -188,6 +189,44 @@ pub fn spill_stub(bytes: usize, preview: &str, rel: &str) -> String {
          [full result: result_ref=file:{rel} — use read_result to page]"
     )
 }
+
+/// §5.4's stub for a **command**'s output (`shell_execute` and the
+/// `Command`-backend tools; N-TOOL-7, Z1-16): its head **and** its tail —
+/// [`head_tail`](crate::utils::text::head_tail) at `budget` bytes, the
+/// budget the loop gives an `Err` — so a long build's last lines, where its
+/// summary is, are in front of the model and not only behind `read_result`.
+/// The reference line is [`spill_stub`]'s, verbatim.
+pub fn command_spill_stub(content: &str, budget: usize, rel: &str) -> String {
+    format!(
+        "[result too large: {} bytes; its head and tail follow]\n{}\n\
+         [full result: result_ref=file:{rel} — use read_result to page]",
+        content.len(),
+        crate::utils::text::head_tail(content, budget)
+    )
+}
+
+/// The `stub` a spilled command result's `tool_result` record carries
+/// (N-TOOL-7): the form the model's stub took and the budget it was cut at.
+/// The record keeps only the head's preview; with this beside the spill's
+/// `bytes` and `sha256`, a replay rebuilds [`command_spill_stub`] from the
+/// file — the same text the loop handed the model ([`command_stub_budget`]
+/// reads it back). A record without one was shown [`spill_stub`].
+pub fn command_stub_marker(budget: usize) -> Value {
+    serde_json::json!({ "form": COMMAND_STUB_FORM, "budget": budget })
+}
+
+/// The budget a `tool_result` record's [`command_stub_marker`] names, when it
+/// carries one.
+pub(crate) fn command_stub_budget(data: &Value) -> Option<usize> {
+    let stub = data.get("stub")?;
+    if stub.get("form").and_then(Value::as_str) != Some(COMMAND_STUB_FORM) {
+        return None;
+    }
+    usize::try_from(stub.get("budget")?.as_u64()?).ok()
+}
+
+/// [`command_stub_marker`]'s `form`: [`command_spill_stub`]'s head and tail.
+const COMMAND_STUB_FORM: &str = "head_tail";
 
 /// The first [`PREVIEW_CHARS`] characters of a result — the same bytes the
 /// record, the stub and `tool_execution_log.result_preview` all carry, so the
@@ -422,7 +461,7 @@ pub(crate) fn cap_data(data: Value) -> (Value, bool) {
         collect_cuttable(value, &mut path, &mut victims);
         path.pop();
     }
-    victims.sort_by(|a, b| b.1.cmp(&a.1));
+    victims.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     let mut cut: Vec<String> = Vec::new();
     for (path, len) in victims {

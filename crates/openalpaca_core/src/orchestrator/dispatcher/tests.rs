@@ -1427,6 +1427,7 @@ async fn a_daemon_authored_leftover_is_dropped_not_filed_as_a_user_followup() {
     // about the exit.
     let mut note = lifecycle_steering_msg(&crate::session_log::replay::resume_interjection(
         Utc::now(),
+        &[],
     ));
     note.origin = crate::runner::steering::SteeringOrigin::Daemon;
     note.principal = crate::security::policy::Principal::System;
@@ -1512,6 +1513,149 @@ async fn test_lead_agent_lane_attachment_independent_of_steering_flag() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+}
+
+// ── N-DAEMON-1 (Z4-03): no follow-up autostart during shutdown ───────
+
+/// Records the follow-ups the dispatcher hands it, and runs none.
+#[derive(Default)]
+struct RecordingFollowupRunner {
+    started: std::sync::Mutex<Vec<i64>>,
+}
+
+impl crate::orchestrator::FollowupRunner for RecordingFollowupRunner {
+    fn spawn_followup(&self, item: crate::orchestrator::FollowupItem) {
+        self.started.lock().unwrap().push(item.id);
+    }
+}
+
+/// A lead on `user1:cli` that answers at once, one follow-up queued on that
+/// lane, and the recorder wired as the daemon wires its runner.
+fn a_lane_with_a_queued_followup(
+    db: &Database,
+) -> (TaskDispatcher, Arc<RecordingFollowupRunner>, i64) {
+    let dispatcher = dispatcher_with_an_answering_lead(db);
+    let runner = Arc::new(RecordingFollowupRunner::default());
+    dispatcher.set_followup_runner(runner.clone());
+    let principal = serde_json::to_string(&crate::security::policy::Principal::User {
+        global_id: "user1".to_string(),
+    })
+    .unwrap();
+    let id = openalpaca_storage::repository::FollowupRepository::new(db)
+        .queue(
+            "user1:cli",
+            "followup",
+            "then tidy the tests",
+            &principal,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+    (dispatcher, runner, id)
+}
+
+/// Starts a run on `user1:cli` and returns its id.
+fn start_a_run(dispatcher: &TaskDispatcher) -> String {
+    dispatcher
+        .dispatch_lead_agent(
+            "Tidy the notes",
+            "Tidy".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap()
+        .task_id
+}
+
+fn followup_status(db: &Database, id: i64) -> String {
+    openalpaca_storage::repository::FollowupRepository::new(db)
+        .get(id)
+        .unwrap()
+        .expect("the follow-up row is kept")
+        .status
+}
+
+/// The control for the test below: with no shutdown under way, the run's end
+/// claims the queued follow-up — the row reads `running` — and hands it to
+/// the runner. Without it, the test below could pass on a harness that never
+/// reached the autostart at all.
+#[tokio::test]
+async fn a_run_that_ends_outside_a_shutdown_starts_the_lanes_queued_followup() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let (dispatcher, runner, id) = a_lane_with_a_queued_followup(&db);
+    dispatcher.set_shutdown_token(tokio_util::sync::CancellationToken::new());
+
+    start_a_run(&dispatcher);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while runner.started.lock().unwrap().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the run's end never started the queued follow-up"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(*runner.started.lock().unwrap(), vec![id]);
+    assert_eq!(followup_status(&db, id), "running");
+}
+
+/// Z4-03's apply half: a run that ends once the daemon's cancel token is set
+/// starts no follow-up. The claim would flip the row to `running`, and the
+/// turn that marks it done would not outlive the process — nothing ever
+/// settled such a row. Left `queued`, it is still the lane's.
+///
+/// On one thread on purpose: the run's tail has no `.await` from releasing
+/// its slot (`remove_cancellation_token`) through the autostart's decision
+/// and `claim_next`, so by the time this task sees the slot free the decision
+/// has been made — the assertions cannot run before a late claim.
+#[tokio::test(flavor = "current_thread")]
+async fn a_run_that_ends_after_the_shutdown_began_starts_no_followup() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let (dispatcher, runner, id) = a_lane_with_a_queued_followup(&db);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    dispatcher.set_shutdown_token(shutdown.clone());
+    shutdown.cancel();
+
+    let task_id = start_a_run(&dispatcher);
+
+    // The run's slot is released only once its row is terminal, just before
+    // the autostart; `claim_run_slot` answers `Some` from then on, and on
+    // this one thread the autostart has already decided. The moment after is
+    // a belt only.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while dispatcher.shared_context.claim_run_slot(&task_id).is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the run never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    dispatcher
+        .shared_context
+        .remove_cancellation_token(&task_id);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert!(
+        runner.started.lock().unwrap().is_empty(),
+        "a follow-up was started during the shutdown: {:?}",
+        runner.started.lock().unwrap()
+    );
+    assert_eq!(
+        followup_status(&db, id),
+        "queued",
+        "the follow-up stays queued, not claimed for a turn that cannot run"
+    );
 }
 
 // ── Routing V2 §2b: model-authored completion report ─────────────────
@@ -2461,13 +2605,15 @@ fn many_long_tool_names_keep_the_refusal_note_inside_its_budget() {
     assert!(note.chars().count() < 700, "{} characters", note.chars().count());
 }
 
-/// Both runtime lines at their longest still leave the summary's cut room
+/// Every runtime line at its longest still leaves the summary's cut room
 /// for the report's own prose (residual X21): `truncate_summary`'s branch
-/// where the note alone is longer than the cut is unreachable.
+/// where the note alone is longer than the cut is unreachable. N-LEAD-1's
+/// line naming the stopped subagents is the third.
 #[test]
 fn the_runtime_lines_at_their_longest_stay_inside_the_summary_cut() {
     use super::outcome::{
-        MAX_SUMMARY_LENGTH, project_files_note, truncate_summary, unapprovable_note,
+        MAX_SUMMARY_LENGTH, project_files_note, stopped_subagents_note, truncate_summary,
+        unapprovable_note,
     };
 
     let names: Vec<String> = (0..1_000)
@@ -2476,10 +2622,14 @@ fn the_runtime_lines_at_their_longest_stay_inside_the_summary_cut() {
     let paths: Vec<String> = (0..1_000)
         .map(|n| format!("{}{n:04}", "\u{200B}".repeat(60)))
         .collect();
+    let labels: Vec<String> = (0..1_000)
+        .map(|n| format!("{}·{n}", "\u{202E}".repeat(60)))
+        .collect();
     let note = format!(
-        "{}\n\n{}",
+        "{}\n\n{}\n\n{}",
         unapprovable_note(&names).unwrap(),
-        project_files_note(&paths).unwrap()
+        project_files_note(&paths).unwrap(),
+        stopped_subagents_note(&labels).unwrap()
     );
 
     let tail = note.chars().count() + 2;
@@ -3036,6 +3186,205 @@ async fn a_subagents_refusal_reaches_the_runs_report() {
         "the run's report must carry its subagent's refusal: {}",
         message.content
     );
+}
+
+// ── N-LEAD-1: a lead's run stops the subagents it leaves running ────────
+
+/// A provider whose lead spawns one worker and whose worker's model call
+/// never answers — the shape of a subagent still working when its lead
+/// stops. The lead's second round waits until that call is pending, then
+/// asks for one more tool, which spends its last round. It counts the
+/// worker's calls, so a test can see that nothing calls the model for it once
+/// the run has ended.
+struct LeadSpawnsAPendingWorker {
+    worker_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl openalpaca_llm::LlmProvider for LeadSpawnsAPendingWorker {
+    fn name(&self) -> &str {
+        "lead-spawns-a-pending-worker"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, ToolCall, Usage};
+        if !request.tools.iter().any(|t| t.name == "spawn_subagent") {
+            self.worker_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return std::future::pending().await;
+        }
+        let first_round = !request
+            .messages
+            .iter()
+            .any(|m| matches!(m.role, openalpaca_llm::Role::Tool));
+        let call = if first_round {
+            ToolCall {
+                id: "tc_spawn".to_string(),
+                name: "spawn_subagent".to_string(),
+                arguments: serde_json::json!({
+                    "agent_id": "worker",
+                    "objective": "count the alpacas"
+                }),
+            }
+        } else {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            while self.worker_calls.load(std::sync::atomic::Ordering::SeqCst) == 0
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            ToolCall {
+                id: "tc_check".to_string(),
+                name: "check_subagent_status".to_string(),
+                arguments: serde_json::json!({"subagent_run_id": "worker::none"}),
+            }
+        };
+        Ok(ChatResponse {
+            content: String::new(),
+            tool_calls: vec![call],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// **N-LEAD-1.** A lead that runs out of rounds while its subagent's model
+/// call is still pending: the run's end stops the subagent — its lane closes
+/// as cancelled, saying the run ended before it finished, nothing calls the
+/// model for it again, and the run's report names it.
+///
+/// Before the fix the subagent ran on detached: the lead's MaxRounds exit
+/// cancelled nothing and the dispatcher removed the run's token without
+/// cancelling it, so the lane stayed `running`, out of `/cancel`'s reach,
+/// and the report said nothing about it.
+#[tokio::test]
+async fn a_lead_that_runs_out_of_rounds_stops_its_running_subagent() {
+    use openalpaca_llm::ProviderType;
+
+    let provider = Arc::new(LeadSpawnsAPendingWorker {
+        worker_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+
+    // Two rounds: the lead spawns the worker, asks once more while the
+    // worker's call is pending, and its loop exits MaxRounds.
+    let mut lead = make_agent("lead-01", vec!["orchestration"]);
+    lead.constraints.allowed_capabilities = vec!["orchestration".to_string()];
+    lead.constraints.max_rounds = Some(2);
+    let worker = make_agent("worker", vec![]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![lead, worker],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Count the alpacas",
+            "Alpacas".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let message = wait_for_conversation_message(&db, "user1:cli").await;
+    assert!(
+        message
+            .content
+            .starts_with("Task ended early (round budget exhausted):"),
+        "the lead ran out of rounds: {}",
+        message.content
+    );
+
+    // The lane was closed by the run's end, before the report was written.
+    let spans = openalpaca_storage::SubagentSpanRepository::new(&db)
+        .list_for_task(&outcome.task_id)
+        .unwrap();
+    let lane = spans
+        .iter()
+        .find(|s| s.template_id == "worker")
+        .expect("the worker's lane was opened");
+    assert_eq!(
+        lane.state, "cancelled",
+        "the worker's lane must be closed by the run's end: {lane:?}"
+    );
+    assert_eq!(
+        lane.detail.as_deref(),
+        Some("the run ended before this subagent finished"),
+        "{lane:?}"
+    );
+
+    // Nothing calls the model for it once the run has ended.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        provider
+            .worker_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the worker's one pending call, and no other"
+    );
+
+    // The report lists the subagent the run's end stopped.
+    assert!(
+        message.content.contains(&lane.label),
+        "the report must name the stopped subagent ({}): {}",
+        lane.label,
+        message.content
+    );
+    assert!(
+        message.content.contains("had not finished"),
+        "…in the runtime's own words: {}",
+        message.content
+    );
+}
+
+/// The stopped-subagents line: none stopped is no line; one and several
+/// read in the singular and the plural; a label a plugin's template id
+/// carries is shown escaped; past its budget the rest are counted.
+#[test]
+fn the_stopped_subagents_note_names_each_lane_the_runs_end_stopped() {
+    use super::outcome::stopped_subagents_note;
+
+    assert_eq!(stopped_subagents_note(&[]), None);
+    assert_eq!(
+        stopped_subagents_note(&["worker·1".to_string()]).unwrap(),
+        "Stopped when the run ended — this subagent had not finished, so it was \
+         cancelled: worker·1."
+    );
+    assert_eq!(
+        stopped_subagents_note(&["worker·1".to_string(), "review·1".to_string()]).unwrap(),
+        "Stopped when the run ended — these subagents had not finished, so they were \
+         cancelled: worker·1, review·1."
+    );
+    let hidden = stopped_subagents_note(&["evil\u{202E}·1".to_string()]).unwrap();
+    assert!(hidden.contains("evil<U+202E>·1"), "{hidden}");
+    let many: Vec<String> = (1..=20).map(|n| format!("worker·{n}")).collect();
+    let note = stopped_subagents_note(&many).unwrap();
+    assert!(note.ends_with(", and 12 more."), "{note}");
 }
 
 // ── R38: what a run wrote into its project ─────────────────────────────

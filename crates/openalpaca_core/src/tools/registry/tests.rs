@@ -1241,30 +1241,23 @@ async fn test_enum_validation_invalid_value() {
 
 #[test]
 fn permission_tier_destructive_returns_admin() {
-    let ann = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        ..Default::default()
-    };
+    let ann = openalpaca_mcp::ToolAnnotations::new().destructive(true);
     assert_eq!(permission_tier(Some(&ann)), PermissionTier::Admin);
 }
 
 #[test]
 fn permission_tier_readonly_returns_readonly() {
-    let ann = openalpaca_mcp::ToolAnnotations {
-        read_only_hint: Some(true),
-        destructive_hint: Some(false),
-        ..Default::default()
-    };
+    let ann = openalpaca_mcp::ToolAnnotations::new()
+        .read_only(true)
+        .destructive(false);
     assert_eq!(permission_tier(Some(&ann)), PermissionTier::ReadOnly);
 }
 
 #[test]
 fn permission_tier_neither_returns_readwrite() {
-    let ann = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(false),
-        read_only_hint: Some(false),
-        ..Default::default()
-    };
+    let ann = openalpaca_mcp::ToolAnnotations::new()
+        .destructive(false)
+        .read_only(false);
     assert_eq!(permission_tier(Some(&ann)), PermissionTier::ReadWrite);
 }
 
@@ -1275,11 +1268,9 @@ fn permission_tier_none_annotations_returns_readwrite() {
 
 #[test]
 fn permission_tier_destructive_takes_precedence_over_readonly() {
-    let ann = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        read_only_hint: Some(true),
-        ..Default::default()
-    };
+    let ann = openalpaca_mcp::ToolAnnotations::new()
+        .destructive(true)
+        .read_only(true);
     assert_eq!(permission_tier(Some(&ann)), PermissionTier::Admin);
 }
 
@@ -1287,10 +1278,7 @@ fn permission_tier_destructive_takes_precedence_over_readonly() {
 fn iter_registered_tools_snapshots_state() {
     let registry = ToolRegistry::new().unwrap();
     let mut destructive = make_tool_with_caps("tool_a", vec![]);
-    destructive.annotations = Some(openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        ..Default::default()
-    });
+    destructive.annotations = Some(openalpaca_mcp::ToolAnnotations::new().destructive(true));
     let plain = make_tool_with_caps("tool_b", vec![]);
 
     registry.register(destructive).unwrap();
@@ -1373,7 +1361,7 @@ fn custom_provider_produces_virtual_caps_on_registered_tools() {
     let tool = make_tool_with_caps("custom_target", vec![]);
     registry.register(tool).unwrap();
 
-    let tools = registry.tools_for_capabilities(&vec!["annotation:custom".to_string()]);
+    let tools = registry.tools_for_capabilities(&["annotation:custom".to_string()]);
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "custom_target");
 }
@@ -1393,23 +1381,19 @@ fn make_tool_with_annotations(
 }
 
 fn readonly_annotations() -> openalpaca_mcp::ToolAnnotations {
-    openalpaca_mcp::ToolAnnotations {
-        read_only_hint: Some(true),
-        destructive_hint: Some(false),
-        idempotent_hint: Some(true),
-        open_world_hint: Some(false),
-        ..Default::default()
-    }
+    openalpaca_mcp::ToolAnnotations::new()
+        .read_only(true)
+        .destructive(false)
+        .idempotent(true)
+        .open_world(false)
 }
 
 fn destructive_annotations() -> openalpaca_mcp::ToolAnnotations {
-    openalpaca_mcp::ToolAnnotations {
-        read_only_hint: Some(false),
-        destructive_hint: Some(true),
-        idempotent_hint: Some(false),
-        open_world_hint: Some(true),
-        ..Default::default()
-    }
+    openalpaca_mcp::ToolAnnotations::new()
+        .read_only(false)
+        .destructive(true)
+        .idempotent(false)
+        .open_world(true)
 }
 
 #[test]
@@ -1419,7 +1403,7 @@ fn tools_for_capabilities_resolves_annotation_readonly() {
     registry.register(make_tool_with_annotations("readonly_b", vec![], Some(readonly_annotations()))).unwrap();
     registry.register(make_tool_with_annotations("destructive_a", vec![], Some(destructive_annotations()))).unwrap();
 
-    let tools = registry.tools_for_capabilities(&vec!["annotation:readonly".to_string()]);
+    let tools = registry.tools_for_capabilities(&["annotation:readonly".to_string()]);
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(tools.len(), 2);
     assert!(names.contains(&"readonly_a"));
@@ -1437,10 +1421,8 @@ fn tools_for_capabilities_mixed_string_and_annotation() {
     )).unwrap();
     registry.register(make_tool_with_annotations("other_reader", vec![], Some(readonly_annotations()))).unwrap();
 
-    let tools = registry.tools_for_capabilities(&vec![
-        "file_read".to_string(),
-        "annotation:readonly".to_string(),
-    ]);
+    let tools = registry
+        .tools_for_capabilities(&["file_read".to_string(), "annotation:readonly".to_string()]);
     assert_eq!(tools.len(), 2);
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"file_reader"));
@@ -1454,8 +1436,8 @@ fn tools_for_capabilities_with_deny_annotation_destructive() {
     registry.register(make_tool_with_annotations("destructive_a", vec![], Some(destructive_annotations()))).unwrap();
 
     let tools = registry.tools_for_capabilities_with_deny(
-        &vec!["annotation:readonly".to_string(), "annotation:destructive".to_string()],
-        &vec!["annotation:destructive".to_string()],
+        &["annotation:readonly".to_string(), "annotation:destructive".to_string()],
+        &["annotation:destructive".to_string()],
     );
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(tools.len(), 1);
@@ -1472,8 +1454,8 @@ fn deny_string_cap_excludes_annotation_matched_tool() {
     )).unwrap();
 
     let tools = registry.tools_for_capabilities_with_deny(
-        &vec!["annotation:readonly".to_string()],
-        &vec!["file_read".to_string()],
+        &["annotation:readonly".to_string()],
+        &["file_read".to_string()],
     );
     assert_eq!(tools.len(), 0);
 }
@@ -1488,8 +1470,8 @@ fn deny_annotation_cap_excludes_string_matched_tool() {
     )).unwrap();
 
     let tools = registry.tools_for_capabilities_with_deny(
-        &vec!["web_access".to_string()],
-        &vec!["annotation:open_world".to_string()],
+        &["web_access".to_string()],
+        &["annotation:open_world".to_string()],
     );
     assert_eq!(tools.len(), 0);
 }
@@ -1497,19 +1479,13 @@ fn deny_annotation_cap_excludes_string_matched_tool() {
 #[test]
 fn non_destructive_inverse_matches_only_explicit_false() {
     let registry = ToolRegistry::new().unwrap();
-    let ann_true = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(true),
-        ..Default::default()
-    };
-    let ann_false = openalpaca_mcp::ToolAnnotations {
-        destructive_hint: Some(false),
-        ..Default::default()
-    };
+    let ann_true = openalpaca_mcp::ToolAnnotations::new().destructive(true);
+    let ann_false = openalpaca_mcp::ToolAnnotations::new().destructive(false);
     registry.register(make_tool_with_annotations("tool_a", vec![], Some(ann_false))).unwrap();
     registry.register(make_tool_with_annotations("tool_b", vec![], None)).unwrap();
     registry.register(make_tool_with_annotations("tool_c", vec![], Some(ann_true))).unwrap();
 
-    let tools = registry.tools_for_capabilities(&vec!["annotation:non_destructive".to_string()]);
+    let tools = registry.tools_for_capabilities(&["annotation:non_destructive".to_string()]);
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(tools.len(), 1);
     assert!(names.contains(&"tool_a"));
@@ -1522,7 +1498,7 @@ fn register_populates_virtual_caps_in_index() {
     let registry = ToolRegistry::new().unwrap();
     registry.register(make_tool_with_annotations("destructive_tool", vec![], Some(destructive_annotations()))).unwrap();
 
-    let tools = registry.tools_for_capabilities(&vec!["annotation:destructive".to_string()]);
+    let tools = registry.tools_for_capabilities(&["annotation:destructive".to_string()]);
     assert_eq!(tools.len(), 1);
 }
 
@@ -1531,12 +1507,12 @@ fn remove_scrubs_virtual_caps_from_index() {
     let registry = ToolRegistry::new().unwrap();
     registry.register(make_tool_with_annotations("destructive_tool", vec![], Some(destructive_annotations()))).unwrap();
 
-    let before = registry.tools_for_capabilities(&vec!["annotation:destructive".to_string()]);
+    let before = registry.tools_for_capabilities(&["annotation:destructive".to_string()]);
     assert_eq!(before.len(), 1);
 
     registry.remove("destructive_tool");
 
-    let after = registry.tools_for_capabilities(&vec!["annotation:destructive".to_string()]);
+    let after = registry.tools_for_capabilities(&["annotation:destructive".to_string()]);
     assert!(after.is_empty());
 }
 
@@ -1545,11 +1521,11 @@ fn register_with_no_annotations_skips_virtual_caps() {
     let registry = ToolRegistry::new().unwrap();
     registry.register(make_tool_with_annotations("plain_tool", vec!["some_cap"], None)).unwrap();
 
-    let via_string = registry.tools_for_capabilities(&vec!["some_cap".to_string()]);
+    let via_string = registry.tools_for_capabilities(&["some_cap".to_string()]);
     assert_eq!(via_string.len(), 1);
 
     for name in ANNOTATION_CAPABILITY_NAMES {
-        let via_ann = registry.tools_for_capabilities(&vec![name.to_string()]);
+        let via_ann = registry.tools_for_capabilities(&[name.to_string()]);
         assert!(via_ann.is_empty(), "{name} should not contain plain_tool");
     }
 }
@@ -1599,7 +1575,7 @@ fn register_provider_retroactively_indexes_existing_tools() {
     registry.register(make_tool_with_caps("a_target", vec![])).unwrap();
 
     // No provider yet for annotation:custom_a.
-    let before = registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]);
+    let before = registry.tools_for_capabilities(&["annotation:custom_a".to_string()]);
     assert!(before.is_empty());
 
     // Register a provider AFTER the tool exists.
@@ -1610,7 +1586,7 @@ fn register_provider_retroactively_indexes_existing_tools() {
     }));
 
     // Retroactive rebuild — tool is now indexed.
-    let after = registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]);
+    let after = registry.tools_for_capabilities(&["annotation:custom_a".to_string()]);
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].name, "a_target");
 }
@@ -1643,12 +1619,12 @@ fn remove_provider_scrubs_its_only_virtual_caps() {
         known_names: &["annotation:custom_a"],
     }));
 
-    let before = registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]);
+    let before = registry.tools_for_capabilities(&["annotation:custom_a".to_string()]);
     assert_eq!(before.len(), 1);
 
     registry.remove_capability_provider(handle);
 
-    let after = registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]);
+    let after = registry.tools_for_capabilities(&["annotation:custom_a".to_string()]);
     assert!(after.is_empty());
 }
 
@@ -1669,18 +1645,18 @@ fn remove_provider_preserves_caps_from_other_providers() {
     }));
 
     // Both providers emit the same cap for the same tool.
-    let before = registry.tools_for_capabilities(&vec!["annotation:custom_shared".to_string()]);
+    let before = registry.tools_for_capabilities(&["annotation:custom_shared".to_string()]);
     assert_eq!(before.len(), 1);
 
     registry.remove_capability_provider(h1);
 
     // Still resolves via remaining provider.
-    let after = registry.tools_for_capabilities(&vec!["annotation:custom_shared".to_string()]);
+    let after = registry.tools_for_capabilities(&["annotation:custom_shared".to_string()]);
     assert_eq!(after.len(), 1, "cap should still resolve via remaining provider");
 
     registry.remove_capability_provider(h2);
 
-    let final_ = registry.tools_for_capabilities(&vec!["annotation:custom_shared".to_string()]);
+    let final_ = registry.tools_for_capabilities(&["annotation:custom_shared".to_string()]);
     assert!(final_.is_empty());
 }
 
@@ -1709,12 +1685,12 @@ fn register_then_remove_then_register_cycle() {
         known_names: &["annotation:custom_a"],
     }));
     assert_eq!(
-        registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]).len(),
+        registry.tools_for_capabilities(&["annotation:custom_a".to_string()]).len(),
         1
     );
     registry.remove_capability_provider(h1);
     assert!(
-        registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]).is_empty()
+        registry.tools_for_capabilities(&["annotation:custom_a".to_string()]).is_empty()
     );
 
     // Cycle 2: register again (different handle), verify.
@@ -1725,7 +1701,7 @@ fn register_then_remove_then_register_cycle() {
     }));
     assert_ne!(h1, h2, "new registration should issue fresh handle");
     assert_eq!(
-        registry.tools_for_capabilities(&vec!["annotation:custom_a".to_string()]).len(),
+        registry.tools_for_capabilities(&["annotation:custom_a".to_string()]).len(),
         1
     );
 }
@@ -1735,7 +1711,7 @@ fn rebuild_preserves_string_capabilities() {
     let registry = ToolRegistry::new().unwrap();
     registry.register(make_tool_with_caps("tool_with_string_cap", vec!["file_read"])).unwrap();
 
-    let before = registry.tools_for_capabilities(&vec!["file_read".to_string()]);
+    let before = registry.tools_for_capabilities(&["file_read".to_string()]);
     assert_eq!(before.len(), 1);
 
     // Register then remove a dummy provider (triggers rebuild).
@@ -1746,7 +1722,7 @@ fn rebuild_preserves_string_capabilities() {
     }));
     registry.remove_capability_provider(handle);
 
-    let after = registry.tools_for_capabilities(&vec!["file_read".to_string()]);
+    let after = registry.tools_for_capabilities(&["file_read".to_string()]);
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].name, "tool_with_string_cap");
 }
@@ -1812,14 +1788,14 @@ fn plugin_hot_reload_scenario() {
     }));
 
     // Tool is under annotation:my_plugin.
-    let phase1 = registry.tools_for_capabilities(&vec!["annotation:my_plugin".to_string()]);
+    let phase1 = registry.tools_for_capabilities(&["annotation:my_plugin".to_string()]);
     assert_eq!(phase1.len(), 1);
 
     // Phase 2: Unload plugin → remove provider.
     registry.remove_capability_provider(handle);
 
     // Tool no longer under annotation:my_plugin.
-    let phase2 = registry.tools_for_capabilities(&vec!["annotation:my_plugin".to_string()]);
+    let phase2 = registry.tools_for_capabilities(&["annotation:my_plugin".to_string()]);
     assert!(phase2.is_empty());
 
     // Phase 3: Reload plugin → register provider again.
@@ -1830,7 +1806,7 @@ fn plugin_hot_reload_scenario() {
     }));
 
     // Tool is back.
-    let phase3 = registry.tools_for_capabilities(&vec!["annotation:my_plugin".to_string()]);
+    let phase3 = registry.tools_for_capabilities(&["annotation:my_plugin".to_string()]);
     assert_eq!(phase3.len(), 1);
 }
 
@@ -1861,7 +1837,7 @@ fn concurrent_tool_register_during_provider_rebuild() {
     thread_b.join().unwrap();
 
     // After both complete, the new tool's virtual caps should be indexed.
-    let result = registry.tools_for_capabilities(&vec!["annotation:concurrent_test".to_string()]);
+    let result = registry.tools_for_capabilities(&["annotation:concurrent_test".to_string()]);
     assert_eq!(result.len(), 1, "tool registered concurrently should be indexed");
     assert_eq!(result[0].name, "ct_target");
 }
@@ -1899,7 +1875,7 @@ fn lookup_during_rebuild_eventually_sees_full_result() {
     let reg_p = StdArc::clone(&registry);
     let poller = thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
-            let _ = reg_p.tools_for_capabilities(&vec!["annotation:flicker".to_string()]);
+            let _ = reg_p.tools_for_capabilities(&["annotation:flicker".to_string()]);
         }
     });
 
@@ -1907,7 +1883,7 @@ fn lookup_during_rebuild_eventually_sees_full_result() {
     poller.join().unwrap();
 
     // After mutation ends, last remove leaves empty state.
-    let final_ = registry.tools_for_capabilities(&vec!["annotation:flicker".to_string()]);
+    let final_ = registry.tools_for_capabilities(&["annotation:flicker".to_string()]);
     assert!(final_.is_empty(), "after final remove, lookup must be empty");
 }
 
@@ -2496,6 +2472,42 @@ fn extension_tool_defs_drops_tools_whose_extension_is_not_enabled() {
         registry.extension_tool_defs().is_empty(),
         "hygiene: the T0→T1 window must not advertise a tool the gate refuses"
     );
+}
+
+/// A row reading a stdio server's exit (N-MCP-1b) keeps its tools on the
+/// surface and its names unwithheld — the gate admits the next call, whose
+/// reconnect brings the server back, so the model must be able to make it.
+#[test]
+fn a_row_reading_an_exit_keeps_its_tools_on_the_surface_and_unwithheld() {
+    let registry = ToolRegistry::default();
+    let ext = ExtensionId::mcp("srv");
+    let generation = enabled_record(registry.extensions(), &ext, &["srv__echo"]);
+    registry
+        .register(mcp_tool("srv__echo", "srv", generation))
+        .unwrap();
+    assert!(
+        registry
+            .extensions()
+            .mark_exited(&ext, generation, "exit status: 3")
+    );
+
+    assert_eq!(registry.extension_tool_defs().len(), 1, "on the surface");
+    assert!(
+        registry.withheld_name("srv__echo").is_none(),
+        "the legacy arm's name classification agrees with the gate"
+    );
+
+    assert!(registry.extensions().mark_failed(
+        &ext,
+        generation,
+        crate::tools::extensions::FailureReason::Crashed,
+        "reconnect exhausted"
+    ));
+    assert!(
+        registry.extension_tool_defs().is_empty(),
+        "a reaped failure leaves the surface"
+    );
+    assert!(registry.withheld_name("srv__echo").is_some());
 }
 
 // ── §7.2 classification ──────────────────────────────────────────────────

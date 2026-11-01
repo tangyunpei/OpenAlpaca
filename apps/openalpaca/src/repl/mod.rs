@@ -11,6 +11,22 @@ use std::io::{IsTerminal, Write};
 
 const MAX_HISTORY_ENTRIES: usize = 1000;
 
+/// Keep a Ctrl+C typed between prompts from ending the REPL.
+///
+/// rustyline 18 installs its SIGINT handler only while it reads a line
+/// (rustyline #903; 17 kept one for the editor's life), so between prompts —
+/// while the first message's POST is in flight, before any reply stream
+/// awaits `tokio::signal::ctrl_c()` — SIGINT took its default action and the
+/// REPL died, history unsaved. tokio's handler, registered here once, stays
+/// installed for the life of the process: a Ctrl+C outside a stream is then
+/// dropped, as under rustyline 17, and a reply stream's `ctrl_c()` still
+/// sees every one pressed while it waits.
+#[cfg(unix)]
+fn keep_sigint_from_ending_the_repl() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    signal(SignalKind::interrupt()).map(drop)
+}
+
 fn history_path() -> anyhow::Result<std::path::PathBuf> {
     // Machine state, not something the user edits — it lives under state/.
     let dir = openalpaca_storage::store::state_dir()?;
@@ -97,6 +113,8 @@ impl ReplSession {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
+        #[cfg(unix)]
+        keep_sigint_from_ending_the_repl()?;
         self.print_welcome().await;
 
         let config = rustyline::Config::builder()
@@ -261,5 +279,69 @@ impl ReplSession {
             println!("{} {}", "Model:".dimmed(), model);
         }
         println!();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod sigint_tests {
+    /// The child half: run only when the parent below re-executes this test
+    /// binary with the variable set. It registers what `run` registers, then
+    /// raises SIGINT at itself; with the handler in place it returns and its
+    /// harness exits 0, without it the default action ends it by the signal.
+    #[test]
+    #[ignore = "run by a_ctrl_c_between_prompts_does_not_end_the_repl in a child process"]
+    fn sigint_child() {
+        use nix::sys::signal::{SigHandler, Signal, raise, signal};
+        if std::env::var_os("OPENALPACA_SIGINT_CHILD").is_none() {
+            return;
+        }
+        // An ignored SIGINT survives exec (a `cargo test &` from a script
+        // starts the run with one) and would keep this child alive without
+        // the registration, so start from the default action.
+        // SAFETY: SIG_DFL installs no handler, and nothing else in this
+        // process has set one for SIGINT.
+        unsafe { signal(Signal::SIGINT, SigHandler::SigDfl) }.unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            super::keep_sigint_from_ending_the_repl().unwrap();
+            raise(Signal::SIGINT).unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+    }
+
+    /// Ctrl+C while the first message's POST is in flight (P27's manual gate,
+    /// "the skeptic's window"): rustyline 18 holds no handler between prompts,
+    /// so this process survives a SIGINT only by the one `run` registers. The
+    /// SIGINT goes to a child, a re-execution of this binary, so a failure
+    /// ends the child and not the test run.
+    #[test]
+    fn a_ctrl_c_between_prompts_does_not_end_the_repl() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "repl::sigint_tests::sigint_child",
+                "--ignored",
+                "--quiet",
+            ])
+            .env("OPENALPACA_SIGINT_CHILD", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "the child ended with {:?} (signal {:?})",
+            out.status,
+            out.status.signal()
+        );
+        // A filter that matched no test would exit 0 too.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains(" 1 passed;"),
+            "the child ran no test: {stdout}"
+        );
     }
 }

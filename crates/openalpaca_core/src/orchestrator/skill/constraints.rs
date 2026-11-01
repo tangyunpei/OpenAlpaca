@@ -114,20 +114,20 @@ pub fn compose_constraints(
             });
         }
         // Check allow list
-        if let Some(ref allow_set) = allowed {
-            if !allow_set.contains(req) {
-                let denied_by = parent
-                    .source_chain
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| "root".to_string());
-                return Err(ConstraintConflict {
-                    skill_id: child_skill_id.to_string(),
-                    tool: req.clone(),
-                    reason: ConflictReason::NotInAncestorAllowList,
-                    denied_by,
-                });
-            }
+        if let Some(ref allow_set) = allowed
+            && !allow_set.contains(req)
+        {
+            let denied_by = parent
+                .source_chain
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "root".to_string());
+            return Err(ConstraintConflict {
+                skill_id: child_skill_id.to_string(),
+                tool: req.clone(),
+                reason: ConflictReason::NotInAncestorAllowList,
+                denied_by,
+            });
         }
     }
 

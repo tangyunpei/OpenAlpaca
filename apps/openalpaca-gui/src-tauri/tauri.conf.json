@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.tangyunpei.openalpaca-gui",
   "build": {
-    "beforeDevCommand": "bun run prepare:sidecar:dev && bun run dev",
+    "beforeDevCommand": "bun run prepare:sidecar && bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run prepare:sidecar:release && bun run build",
+    "beforeBuildCommand": "bun run prepare:sidecar && bun run build",
     "frontendDist": "../dist"
   },
   "app": {

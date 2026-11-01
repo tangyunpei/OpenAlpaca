@@ -83,6 +83,13 @@ pub enum McpServerConfig {
         connect_timeout_secs: Option<u64>,
         #[serde(default)]
         request_timeout_secs: Option<u64>,
+        /// The lifecycle the connection opens with (DU-25 (m-a)): `"auto"`,
+        /// the default, `"legacy"` or `"2026-07-28"` ([`McpProtocol`]).
+        /// `skip_serializing_if` keeps the §3.3 E2 fingerprint preimage of
+        /// every block without the key — or with `"auto"` — byte-identical
+        /// to what it was before the key existed; a pin is a real change.
+        #[serde(default, skip_serializing_if = "McpProtocol::is_auto")]
+        protocol: McpProtocol,
         #[serde(default = "default_enabled")]
         enabled: bool,
     },
@@ -114,6 +121,13 @@ pub enum McpServerConfig {
         connect_timeout_secs: Option<u64>,
         #[serde(default)]
         request_timeout_secs: Option<u64>,
+        /// The lifecycle the connection opens with (DU-25 (m-a)): `"auto"`,
+        /// the default, `"legacy"` or `"2026-07-28"` ([`McpProtocol`]).
+        /// `skip_serializing_if` keeps the §3.3 E2 fingerprint preimage of
+        /// every block without the key — or with `"auto"` — byte-identical
+        /// to what it was before the key existed; a pin is a real change.
+        #[serde(default, skip_serializing_if = "McpProtocol::is_auto")]
+        protocol: McpProtocol,
         #[serde(default = "default_enabled")]
         enabled: bool,
     },
@@ -144,6 +158,48 @@ impl McpServerConfig {
         match self {
             Self::Stdio { request_timeout_secs, .. }
             | Self::Http { request_timeout_secs, .. } => *request_timeout_secs,
+        }
+    }
+
+    pub fn protocol(&self) -> McpProtocol {
+        match self {
+            Self::Stdio { protocol, .. } | Self::Http { protocol, .. } => *protocol,
+        }
+    }
+}
+
+/// `protocol` in a `[servers.<name>]` block: which lifecycle the connection
+/// opens with (DU-25 (m-a); the client's `openalpaca_mcp::ProtocolMode`).
+///
+/// * `"auto"` (the default) — probe with `server/discover` (MCP `2026-07-28`)
+///   and fall back to `initialize` (`2025-11-25`) for a server the probe finds
+///   legacy;
+/// * `"legacy"` — `initialize` only, never the probe: for a server that
+///   ignores an unknown method, which `"auto"` reaches only after a 10 s wait;
+/// * `"2026-07-28"` — the probe only, never downgraded: a legacy server fails.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum McpProtocol {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "legacy")]
+    Legacy,
+    #[serde(rename = "2026-07-28")]
+    Modern,
+}
+
+impl McpProtocol {
+    /// The default, and what `skip_serializing_if` leaves out.
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
+    /// The value the block spells it with.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Legacy => "legacy",
+            Self::Modern => "2026-07-28",
         }
     }
 }
@@ -351,6 +407,34 @@ mod tests {
         assert!(!is_valid_server_name("has spaces"));
         assert!(!is_valid_server_name("dotted.name"));
         assert!(!is_valid_server_name(&"a".repeat(32)));
+    }
+
+    /// DU-25 (m-a): the three values, `"auto"` when the key is absent, and an
+    /// unknown value refused like any other mistyped key.
+    #[test]
+    fn protocol_parses_its_three_values_and_defaults_to_auto() {
+        let parse = |line: &str| {
+            McpConfig::parse(&format!(
+                "[servers.x]\ntransport = \"stdio\"\ncommand = \"c\"\n{line}\n"
+            ))
+            .map(|c| c.servers["x"].protocol())
+        };
+        assert_eq!(parse("").unwrap(), McpProtocol::Auto);
+        assert_eq!(parse(r#"protocol = "auto""#).unwrap(), McpProtocol::Auto);
+        assert_eq!(
+            parse(r#"protocol = "legacy""#).unwrap(),
+            McpProtocol::Legacy
+        );
+        assert_eq!(
+            parse(r#"protocol = "2026-07-28""#).unwrap(),
+            McpProtocol::Modern
+        );
+        assert!(parse(r#"protocol = "2025-11-25""#).is_err());
+        let http = McpConfig::parse(
+            "[servers.x]\ntransport = \"http\"\nurl = \"https://e.example/mcp\"\nprotocol = \"legacy\"\n",
+        )
+        .expect("parse");
+        assert_eq!(http.servers["x"].protocol(), McpProtocol::Legacy);
     }
 
     #[test]

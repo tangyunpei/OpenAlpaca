@@ -67,7 +67,8 @@ impl InputSanitizer {
     /// Tools whose arguments should be checked for shell injection patterns.
     /// Non-shell tools (file_write, workspace_write, web_search, etc.) can
     /// legitimately contain semicolons, newlines, backticks, and pipes.
-    const SHELL_TOOLS: &'static [&'static str] = &["shell_execute"];
+    /// `ToolRegistry::is_command_tool` reads the same list.
+    pub(crate) const SHELL_TOOLS: &'static [&'static str] = &["shell_execute"];
 
     /// Sanitize tool call arguments, with the `../` check on for every tool:
     /// [`Self::sanitize_tool_args_with`] and [`TraversalRule::Refuse`].
@@ -258,6 +259,7 @@ impl InputSanitizer {
             if declared_mime != inferred_mime
                 && !Self::is_container_compatible_mime(declared_mime, inferred_mime)
                 && !Self::is_audio_mime_compatible(declared_mime, inferred_mime)
+                && !Self::is_text_mime_compatible(declared_mime, inferred_mime, data)
             {
                 return Err(SecurityViolation::InputBlocked {
                     reason: format!(
@@ -305,10 +307,15 @@ impl InputSanitizer {
     /// Browsers, OS file pickers, and the `infer` crate may report different MIME
     /// strings for the same audio format. For example, M4A may be declared as
     /// `audio/mp4` (Chrome/Firefox) or `audio/x-m4a` (Safari) while `infer` detects
-    /// it as `audio/m4a`. This function treats known alias groups as compatible.
+    /// it as `audio/m4a`, and MP3 arrives declared `audio/mp3` while `infer` detects
+    /// `audio/mpeg`. This function treats known alias groups as compatible.
     pub fn is_audio_mime_compatible(declared: &str, detected: &str) -> bool {
         let m4a = ["audio/m4a", "audio/mp4", "audio/x-m4a"];
         if m4a.contains(&declared) && m4a.contains(&detected) {
+            return true;
+        }
+        let mp3 = ["audio/mpeg", "audio/mp3"];
+        if mp3.contains(&declared) && mp3.contains(&detected) {
             return true;
         }
         let wav = ["audio/wav", "audio/x-wav", "audio/wave"];
@@ -320,6 +327,25 @@ impl InputSanitizer {
             return true;
         }
         false
+    }
+
+    /// Check if a declared text MIME type is compatible with a detection that a
+    /// signature written inside the text produced (DU-6 (b)).
+    ///
+    /// `infer` reports `application/pdf` for a `%PDF` anywhere in the first KiB
+    /// (as Acrobat reads a header) and `image/vnd.dwg` for an AutoCAD `AC10xx`
+    /// header, so a note that names a PDF header, or a CSV of part numbers whose
+    /// first cell is `AC1015`, would be refused as a mismatch. For a declared
+    /// `text/*` such a detection counts as none — the file passes as text infer
+    /// cannot classify — while a body that starts with `%PDF` is still a PDF and
+    /// still refused. `data` is the bytes `detected` was read from.
+    pub fn is_text_mime_compatible(declared: &str, detected: &str, data: &[u8]) -> bool {
+        declared.starts_with("text/")
+            && match detected {
+                "application/pdf" => !data.starts_with(b"%PDF"),
+                "image/vnd.dwg" => true,
+                _ => false,
+            }
     }
 
     /// Check if a declared MIME type is compatible with a detected container type.

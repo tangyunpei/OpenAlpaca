@@ -34,6 +34,7 @@
 - `pub use routing::rate_limiter::{ CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter, };`
 - `pub use routing::router::{ LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream, RouterRequest, };`
 - `pub use streaming::collect_stream;`
+- `pub use tool_arguments::UnreadableArguments;`
 - `pub use types::*;`
 
 ## Related Links

@@ -5,6 +5,7 @@ use openalpaca_core::{
     bus::EventBus, daemon_config::load_daemon_config, orchestrator::Orchestrator,
     tools::extensions::ExtensionSupervisor,
 };
+use openalpaca_storage::hash::sha256_hex;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,11 +39,6 @@ pub fn new_config_hashes() -> ConfigHashes {
     )))
 }
 
-fn content_hash(contents: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(contents.as_bytes()))
-}
-
 fn lock_ring(ring: &ConfigHashes) -> std::sync::MutexGuard<'_, VecDeque<String>> {
     ring.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -55,7 +51,7 @@ fn lock_ring(ring: &ConfigHashes) -> std::sync::MutexGuard<'_, VecDeque<String>>
 /// ring.
 pub fn record_own_config_write(ring: &ConfigHashes, contents: &str) {
     let mut ring = lock_ring(ring);
-    ring.push_back(content_hash(contents));
+    ring.push_back(sha256_hex(contents.as_bytes()));
     while ring.len() > OWN_WRITE_RING {
         ring.pop_front();
     }
@@ -64,7 +60,7 @@ pub fn record_own_config_write(ring: &ConfigHashes, contents: &str) {
 /// Did the daemon write these bytes? Consumes the match, so one recorded write
 /// swallows exactly one event.
 fn swallow_own_config_write(ring: &ConfigHashes, contents: &str) -> bool {
-    let hash = content_hash(contents);
+    let hash = sha256_hex(contents.as_bytes());
     let mut ring = lock_ring(ring);
     match ring.iter().position(|h| *h == hash) {
         Some(pos) => {
@@ -240,8 +236,7 @@ fn scheduled_skills_enabled(ctx: &FileWatcherContext) -> bool {
 
 async fn handle_soul_change(ctx: &FileWatcherContext) {
     let should_skip = if let Ok(content) = std::fs::read(&ctx.soul_path) {
-        use sha2::{Digest, Sha256};
-        let file_hash = format!("{:x}", Sha256::digest(&content));
+        let file_hash = sha256_hex(&content);
         let mut ring = ctx.soul_hashes.lock().await;
         if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
             ring.remove(pos);
@@ -275,8 +270,7 @@ async fn handle_soul_change(ctx: &FileWatcherContext) {
 
 async fn handle_user_change(ctx: &FileWatcherContext) {
     let should_skip = if let Ok(content) = std::fs::read(&ctx.user_path) {
-        use sha2::{Digest, Sha256};
-        let file_hash = format!("{:x}", Sha256::digest(&content));
+        let file_hash = sha256_hex(&content);
         let mut ring = ctx.user_hashes.lock().await;
         if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
             ring.remove(pos);
@@ -313,8 +307,7 @@ async fn handle_user_change(ctx: &FileWatcherContext) {
 
 async fn handle_identity_change(ctx: &FileWatcherContext) {
     let should_skip = if let Ok(content) = std::fs::read(&ctx.identity_path) {
-        use sha2::{Digest, Sha256};
-        let file_hash = format!("{:x}", Sha256::digest(&content));
+        let file_hash = sha256_hex(&content);
         let mut ring = ctx.identity_hashes.lock().await;
         if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
             ring.remove(pos);
@@ -557,9 +550,9 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
         && let Some(skill_folder) = relative.components().next()
     {
         let skill_dir = ctx.skills_dir.join(skill_folder);
-        match ctx.skill_catalog.reload_skill(&skill_dir) {
+        let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
+        let action = match ctx.skill_catalog.reload_skill(&skill_dir) {
             Ok(()) => {
-                let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
                 info!("Skill hot-reloaded: {}", skill_dir.display());
                 // Re-sync the skill's cron job (catalog keys are lowercased
                 // directory names). Handles add/change/removal of invoke.cron
@@ -571,17 +564,22 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
                     scheduled_skills_enabled(ctx),
                 )
                 .await;
-                ctx.bus
-                    .publish(openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
-                        skill_name,
-                        action: "reloaded".to_string(),
-                        timestamp: chrono::Utc::now(),
-                    });
+                "reloaded"
             }
             Err(e) => {
-                warn!("Skill reload failed for {}: {}", skill_dir.display(), e)
+                warn!("Skill reload failed for {}: {}", skill_dir.display(), e);
+                // The catalog noted the file's error (N-SKILL-2) and kept any
+                // entry still listed, which fails to run until the file is
+                // fixed; the event tells a client to read the diagnostics again.
+                "reload_failed"
             }
-        }
+        };
+        ctx.bus
+            .publish(openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
+                skill_name,
+                action: action.to_string(),
+                timestamp: chrono::Utc::now(),
+            });
     }
 }
 

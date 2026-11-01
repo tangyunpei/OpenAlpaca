@@ -218,7 +218,9 @@ impl SandboxManager {
     /// Flow:
     /// 1. Capability check (deny/allow lists)
     /// 2. Input sanitization (null bytes, command injection, and `../` for a tool whose arguments reach a program — R29)
-    /// 3. Confirmation check (fail-closed if tool requires confirmation)
+    /// 3. Confirmation check (fail-closed if tool requires confirmation),
+    ///    after the registry's precheck: a call dispatch would refuse raises
+    ///    no card (N-TOOL-2)
     /// 4. Circuit breaker check (block if tool has too many recent failures)
     /// 5. Timeout-wrapped execution
     /// 6. Record outcome for circuit breaker
@@ -282,6 +284,25 @@ impl SandboxManager {
         let mut human_approval: Option<HumanApproval> = None;
 
         if per_call || confirmation_set.iter().any(|t| t == &tool_call.name) {
+            // N-TOOL-2 (audit Z1-04): a call dispatch would refuse — arguments
+            // its schema refuses, a tool whose extension is not enabled — is
+            // refused here, before anything is asked or refused for want of
+            // someone to ask. The registry's own admission, so the refusal is
+            // dispatch's word for word, and recorded as dispatch records it:
+            // one failed call, which no breaker counts. Dispatch checks again
+            // and still holds the gate across the backend call.
+            if let Err(reason) =
+                self.registry
+                    .precheck(&tool_call.name, &tool_call.arguments, Some(ctx))
+            {
+                tracing::info!(
+                    agent_id,
+                    tool = %tool_call.name,
+                    "Tool refused before its confirmation card: {reason}"
+                );
+                self.emit_tool_executed(agent_id, tool_call, false, 0, task_id, session_id);
+                return Err(reason);
+            }
             // Check the approval cache first — a prior user approval (this session)
             // can bypass the prompt when scoped to these args or the whole tool.
             if !per_call && self.approval_cache.is_approved(&tool_call.name, args_hash) {
@@ -582,6 +603,15 @@ impl SandboxManager {
                 // Timeouts are transient — record for circuit breaker
                 self.circuit_breaker
                     .record_failure_for_task(agent_id, &tool_call.name, task_id);
+                // N-TOOL-4 (Z1-13): the limit is enforced here, so a command
+                // cut at it is told what to do here — the hint is this
+                // message's own, not a guess the loop makes from its words.
+                if self.registry.is_command_tool(&tool_call.name) {
+                    return Err(format!(
+                        "{reason}\n{}",
+                        crate::tools::platform::COMMAND_TIMED_OUT_HINT
+                    ));
+                }
                 Err(reason)
             }
         }
@@ -789,3 +819,6 @@ pub(crate) fn effective_confirmation_set(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod precheck_tests;

@@ -12,8 +12,11 @@ members = [
     "apps/openalpaca",
     "apps/openalpaca-gui/src-tauri",
 ]
-# Bare `cargo build` / `cargo test` covers the library crates only; the apps
-# (daemon with all features, CLI, Tauri GUI) build when named with -p or --workspace.
+# A bare `cargo build` / `cargo test` / `cargo clippy` selects what CI selects:
+# every member but the Tauri shell (`--workspace --exclude openalpaca_gui`), so
+# the bare and the explicit form share one set of artifacts in target/ instead
+# of compiling the shared crates twice with different feature sets. The shell
+# builds when named (`cargo check -p openalpaca_gui`, with its own target dir).
 default-members = [
     "crates/openalpaca_api",
     "crates/openalpaca_core",
@@ -23,13 +26,15 @@ default-members = [
     "crates/openalpaca_llm",
     "crates/openalpaca_mcp",
     "crates/openalpaca_plugins",
+    "apps/openalpacad",
+    "apps/openalpaca",
 ]
 resolver = "3"
 
 [workspace.package]
 
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.99"
 version = "0.1.0"
 publish = false
 license = "MIT"
@@ -40,11 +45,14 @@ thiserror = "2.0.18"
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-serde_yaml = "0.9"
-uuid = { version = "1.20.0", features = ["v4", "serde"] }
+# SKILL.md frontmatter. Replaces the archived serde_yaml 0.9: maintained, pure
+# Rust, and set as close to serde_yaml's reading as its options go
+# (`yaml_options` in openalpaca_core::middleware::skill).
+serde-saphyr = "2.0"
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
 chrono = { version = "0.4.43", features = ["serde"] }
 
-tokio = { version = "1.49.0", features = [
+tokio = { version = "1.54.1", features = [
     "rt-multi-thread",
     "macros",
     "time",
@@ -61,10 +69,12 @@ tracing-test = "0.2"
 # daemon api (server)
 axum = { version = "0.8.8", features = ["ws", "multipart"] }
 futures-util = { version = "0.3.31", features = ["sink"] }
-tower-http = { version = "0.6.8", features = ["cors"] }
+tower-http = { version = "0.7.1", features = ["cors"] }
+# Dev-only: `ServiceExt::oneshot` drives a `Router` in the daemon's route tests.
+tower = { version = "0.5.3", features = ["util"] }
 
 # client (CLI tail)
-tokio-tungstenite = "0.28.0"
+tokio-tungstenite = "0.30.0"
 
 # wake
 tokio-cron-scheduler = "0.15.1"
@@ -91,19 +101,24 @@ shell-escape = "0.1.5"
 dialoguer = "0.12.0"
 console = "0.16.2"
 nix = { version = "0.31.1", features = ["signal"] }
-sysinfo = "0.38.1"
+sysinfo = "0.39.6"
 
 # storage
-rusqlite = { version = "0.38.0", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 directories = "6.0.0"
 file-lock = "2.1.11"
-base64 = "0.22.1"
+base64 = "0.23.1"
 rand = "0.10.0"
-libc = "0.2.180"
+libc = "0.2.191"
 tempfile = "3.24.0"
-# Already vendored transitively (pdf-extract → openalpacad); promoted to a
-# direct dependency for the artifact-grammar slugifier's NFKD step (store/artifact.rs).
-unicode-normalization = "0.1.25"
+# Already vendored transitively (pdf-extract → openalpacad); a direct
+# dependency of openalpaca_storage for four callers: the artifact-grammar
+# slugifier's NFKD step (store/artifact.rs), a project's folder name
+# (store/projects.rs), the memory index's query::normalize and learning's
+# duplicate check (memory_files/note.rs). A release that moves its Unicode
+# version changes what query::normalize returns, so it bumps
+# memory_index::SCHEMA_VERSION (0.1.26: 6 -> 7).
+unicode-normalization = "0.1.26"
 # The artifact store's line diff: the write-time added/removed counts and the
 # unified patch `GET /v1/artifacts/{id}/diff` serves both come out of one
 # `TextDiff`, so the two can never disagree. Pure Rust, no build script,
@@ -111,43 +126,67 @@ unicode-normalization = "0.1.25"
 similar = "3.2.0"
 
 # config
-toml = "0.9"
+toml = "1.1.8"
 # Format-preserving TOML editing for the atomic config writer
 # (openalpaca_core::config_io) — every comment in a hand-authored file survives.
 toml_edit = "0.25"
 dashmap = "6"
 which = "8"
 tokio-util = { version = "0.7", features = ["rt"] }
-rustyline = "17"
+rustyline = "19.0.0"
 
 # middleware
 regex = "1.12.3"
 
 # telegram
-teloxide = { version = "0.17.0", features = ["macros"] }
+# teloxide over rustls with the OS root store, not native-tls (OpenSSL on
+# Linux): its default features minus `native-tls`. Its rustls features go
+# through reqwest 0.12's `__rustls-ring`, so `ring` stays compiled for it.
+teloxide = { version = "0.17.0", default-features = false, features = ["macros", "ctrlc_handler", "rustls-native-roots"] }
 async-trait = "0.1.89"
 
 # discord (twilight ecosystem)
-twilight-gateway = "0.17"
+# twilight-gateway without its default `zstd` transport compression: its
+# zstd-safe 7.x carries RUSTSEC-2026-0398 and -0403, fixed only in zstd-safe 8.2,
+# which no twilight release requires; the gateway then receives plain JSON text.
+twilight-gateway = { version = "0.17", default-features = false, features = ["rustls-platform-verifier", "twilight-http"] }
 twilight-http = "0.17"
 twilight-model = "0.17"
 
+# TLS: one rustls crypto provider in the process, aws-lc-rs — the one reqwest
+# 0.13's `rustls` feature brings. The daemon installs it as the process default
+# at start (apps/openalpacad/src/tls.rs); no manifest of ours names `ring`.
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs"] }
+
 openalpaca_llm = { path = "crates/openalpaca_llm" }
 openalpaca_plugins = { path = "crates/openalpaca_plugins" }
-arc-swap = "1"
+arc-swap = "1.9.3"
 signal-hook = "0.4.3"
-aes-gcm = "0.10"
+aes-gcm = "0.11.1"
 bytes = "1"
-sha2 = "0.10"
+sha2 = "0.11.1"
 blake3 = "1.5"
-lru = "0.12"
-infer = "0.16"
-pdf-extract = "0.8"
-zip = "2"
-calamine = "0.26"
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
-opener = "0.8"
-tauri-plugin-dialog = "2"
+lru = "0.19.0"
+infer = "0.22.0"
+pdf-extract = "0.12.1"
+# The daemon's own archive reads (DOCX, PPTX, iWork); `deflate` only, the one
+# method OOXML and iWork use (DU-7). calamine 0.37 requires zip ^9.0 with no
+# default features and `deflate`, so its reads share this one zip.
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
+calamine = "0.37.0"
+# The OS keychain: keyring-core's `Entry` API over the native store per OS —
+# the stores and options keyring 4's `v1` facade selected, so every item keeps
+# its address. openalpaca_llm declares each store for its own target and owns
+# the store it builds entries against (`keys::secret_store`).
+keyring-core = "1.0.1"
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+windows-native-keyring-store = "1.1"
+# `crypto-rust`: secret-service refuses to compile without a crypto feature.
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
+opener = "0.9.0"
+tauri = "~2.12"
+tauri-build = "~2.7"
+tauri-plugin-dialog = "=2.8.3"
 
 # Internal Crates (continued)
 openalpaca_connectors = { path = "crates/openalpaca_connectors" }

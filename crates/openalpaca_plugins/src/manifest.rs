@@ -13,7 +13,67 @@ pub struct PluginManifest {
     pub types: TypesSection,
     #[serde(default)]
     pub config: HashMap<String, ConfigField>,
+    /// The dotted paths of the keys this `plugin.toml` sets that OpenAlpaca
+    /// does not read (`tool`, `plugin.entrypoint`, `config.api_key.requird`),
+    /// filled by [`Self::parse`]. A manifest built any other way reads none.
+    ///
+    /// A record, never a refusal: the struct has no `deny_unknown_fields`, so
+    /// an unknown key is ignored — and [`Self::warnings`] says so (N-PLUG-2).
+    #[serde(skip)]
+    pub unknown_keys: Vec<String>,
 }
+
+/// The keys `[plugin]` holds. `env` is a map whose keys are the author's.
+const PLUGIN_KEYS: &[&str] = &[
+    "name",
+    "version",
+    "description",
+    "author",
+    "license",
+    "entry",
+    "args",
+    "env",
+    "max_concurrent",
+    "mcp_compatible",
+];
+
+/// The switches `[types]` holds.
+const TYPES_KEYS: &[&str] = &["tools", "connector", "provider", "skill", "agent"];
+
+/// The keys one `[config.<name>]` table holds; `<name>` is the author's.
+const CONFIG_FIELD_KEYS: &[&str] = &["type", "required", "default", "description", "sensitive"];
+
+/// Every key path a manifest may set outside the two author-named maps, in
+/// the order a "did you mean" offers them.
+const KNOWN_PATHS: &[&str] = &[
+    "types.tools",
+    "types.connector",
+    "types.provider",
+    "types.skill",
+    "types.agent",
+    "capabilities.provides",
+    "capabilities.virtual.provides",
+    "plugin.name",
+    "plugin.version",
+    "plugin.description",
+    "plugin.author",
+    "plugin.license",
+    "plugin.entry",
+    "plugin.args",
+    "plugin.env",
+    "plugin.max_concurrent",
+    "plugin.mcp_compatible",
+];
+
+/// The warning for `types.connector` while no plugin connector is wired.
+pub const CONNECTOR_NOT_WIRED: &str = "plugin.toml declares types.connector, but connectors are \
+     not supported: the plugin connector bridge is not wired, so nothing this plugin offers as a \
+     connector is used";
+
+/// The warning for `types.provider` while no plugin provider is wired.
+pub const PROVIDER_NOT_WIRED: &str = "plugin.toml declares types.provider, but the plugin \
+     provider bridge is not wired: OpenAlpaca does not use a plugin as a model provider, so \
+     nothing this plugin offers as one is used";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginMeta {
@@ -167,9 +227,73 @@ impl PluginManifest {
         }
         let content = std::fs::read_to_string(&manifest_path)
             .map_err(|e| PluginError::InvalidManifest(e.to_string()))?;
-        let manifest: PluginManifest = toml::from_str(&content)
-            .map_err(|e| PluginError::InvalidManifest(e.to_string()))?;
+        Self::parse(&content)
+    }
+
+    /// Parse a manifest's text, recording the keys it sets that nothing reads
+    /// in [`Self::unknown_keys`].
+    ///
+    /// The struct is deserialized exactly as before, so every refusal and its
+    /// message are unchanged; only a manifest that parses is then walked again
+    /// as a plain table against the keys the struct reads. No
+    /// `deny_unknown_fields`: an unknown key is a warning, never a refusal
+    /// (N-PLUG-2).
+    pub fn parse(text: &str) -> Result<Self, PluginError> {
+        let mut manifest: PluginManifest =
+            toml::from_str(text).map_err(|e| PluginError::InvalidManifest(e.to_string()))?;
+        let table: toml::Table =
+            toml::from_str(text).map_err(|e| PluginError::InvalidManifest(e.to_string()))?;
+        manifest.unknown_keys = unknown_keys(&table);
         Ok(manifest)
+    }
+
+    /// What this manifest declares that OpenAlpaca will not act on, one
+    /// sentence each: every key it does not read ([`Self::unknown_keys`]), and
+    /// `types.connector` / `types.provider` while their bridges are unwired.
+    ///
+    /// Warnings, never refusals (N-PLUG-2): the validate dry run and the
+    /// install preview carry them on the summary, install, update and approve
+    /// on the row's `warnings`, and a load logs them. A key is the author's
+    /// text, so it is shown with every hidden character as `<U+XXXX>` and the
+    /// approval surfaces' count under it.
+    pub fn warnings(&self) -> Vec<String> {
+        use openalpaca_core::utils::text::{escape_hidden_line, hidden_notice};
+
+        let mut warnings: Vec<String> = self
+            .unknown_keys
+            .iter()
+            .map(|path| {
+                let shown = escape_hidden_line(path);
+                let mut warning = match suggestion(path) {
+                    Some(known) => format!(
+                        "plugin.toml sets '{}', which OpenAlpaca does not read, so it is \
+                         ignored — did you mean '{known}'?",
+                        shown.text
+                    ),
+                    None => format!(
+                        "plugin.toml sets '{}', which OpenAlpaca does not read, so it is ignored",
+                        shown.text
+                    ),
+                };
+                if let Some(notice) = hidden_notice(shown.hidden) {
+                    // Its own sentence, after the warning's: `… is ignored.
+                    // Note: …`, or `… mean '…'? Note: …`.
+                    if !warning.ends_with('?') {
+                        warning.push('.');
+                    }
+                    warning.push(' ');
+                    warning.push_str(&notice);
+                }
+                warning
+            })
+            .collect();
+        if self.types.connector {
+            warnings.push(CONNECTOR_NOT_WIRED.to_string());
+        }
+        if self.types.provider {
+            warnings.push(PROVIDER_NOT_WIRED.to_string());
+        }
+        warnings
     }
 
     /// R66's load-path symlink check: resolve the whole chain and require the
@@ -230,6 +354,89 @@ impl PluginManifest {
     }
 }
 
+/// The dotted path of every key in `table` that [`PluginManifest`] does not
+/// read, in the manifest's own key order within each table.
+///
+/// Only called on text that already deserialized, so every known table here
+/// is a table; `plugin.env` and the names under `[config]` are the author's
+/// and never reported.
+fn unknown_keys(table: &toml::Table) -> Vec<String> {
+    let mut unknown = Vec::new();
+    for (key, value) in table {
+        match key.as_str() {
+            "plugin" => unknown_in(value, "plugin", PLUGIN_KEYS, &mut unknown),
+            "types" => unknown_in(value, "types", TYPES_KEYS, &mut unknown),
+            "capabilities" => {
+                for (cap_key, cap_value) in value.as_table().into_iter().flatten() {
+                    match cap_key.as_str() {
+                        "provides" => {}
+                        "virtual" => unknown_in(
+                            cap_value,
+                            "capabilities.virtual",
+                            &["provides"],
+                            &mut unknown,
+                        ),
+                        other => unknown.push(format!("capabilities.{other}")),
+                    }
+                }
+            }
+            "config" => {
+                for (name, field) in value.as_table().into_iter().flatten() {
+                    unknown_in(
+                        field,
+                        &format!("config.{name}"),
+                        CONFIG_FIELD_KEYS,
+                        &mut unknown,
+                    );
+                }
+            }
+            other => unknown.push(other.to_string()),
+        }
+    }
+    unknown
+}
+
+/// The keys of the table `value`, under `prefix`, that `known` does not list.
+fn unknown_in(value: &toml::Value, prefix: &str, known: &[&str], unknown: &mut Vec<String>) {
+    for key in value.as_table().into_iter().flat_map(|t| t.keys()) {
+        if !known.contains(&key.as_str()) {
+            unknown.push(format!("{prefix}.{key}"));
+        }
+    }
+}
+
+/// The key an unknown path most likely meant: the first known path whose last
+/// segment matches the unknown one's, ignoring case, `-` for `_` and a plural
+/// `s` — `tool` and `types.tool` → `types.tools`, `skills` → `types.skill`,
+/// `config.api_key.requird` → nothing. Inside `[config.<name>]` the match is
+/// against that table's own fields.
+fn suggestion(path: &str) -> Option<String> {
+    fn stem(segment: &str) -> String {
+        let lower = segment.to_lowercase().replace('-', "_");
+        lower.strip_suffix('s').map(str::to_string).unwrap_or(lower)
+    }
+    let (parent, leaf) = match path.rsplit_once('.') {
+        Some((parent, leaf)) => (Some(parent), leaf),
+        None => (None, path),
+    };
+    let wanted = stem(leaf);
+    if let Some(parent) = parent
+        && parent.starts_with("config.")
+    {
+        return CONFIG_FIELD_KEYS
+            .iter()
+            .find(|field| stem(field) == wanted)
+            .map(|field| format!("{parent}.{field}"));
+    }
+    KNOWN_PATHS
+        .iter()
+        .find(|known| {
+            let known_leaf = known.rsplit('.').next().unwrap_or(known);
+            stem(known_leaf) == wanted && **known != path
+        })
+        .map(|known| known.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +481,114 @@ description = "Rate limit"
         let provided = HashMap::new();
         let missing = manifest.missing_config_keys(&provided);
         assert_eq!(missing, vec!["api_key"]);
+    }
+
+    // ── N-PLUG-2: what a manifest says that nothing reads ────────────
+
+    const MINIMAL: &str = "[plugin]\nname = \"p\"\nversion = \"1\"\nentry = \"./p\"\n";
+
+    /// Every unknown key is reported by its dotted path, wherever it sits;
+    /// `plugin.env` and the names under `[config]` are the author's.
+    #[test]
+    fn parse_records_every_key_nothing_reads_by_its_path() {
+        let text = format!(
+            "tool = true\n{MINIMAL}entrypoint = \"./x\"\n[plugin.env]\nANY = \"1\"\n\
+             [capabilities]\nprovides = []\nprovide = []\n[capabilities.virtual]\nprovides = []\n\
+             extra = 1\n[types]\ntools = true\ntool = true\n\
+             [config.api_key]\ntype = \"secret\"\nrequird = true\n"
+        );
+        let manifest = PluginManifest::parse(&text).expect("an unknown key is not a refusal");
+        let mut unknown = manifest.unknown_keys.clone();
+        unknown.sort();
+        assert_eq!(
+            unknown,
+            vec![
+                "capabilities.provide",
+                "capabilities.virtual.extra",
+                "config.api_key.requird",
+                "plugin.entrypoint",
+                "tool",
+                "types.tool",
+            ]
+        );
+        assert!(manifest.types.tools, "the known keys still read as before");
+    }
+
+    /// A clean manifest has no unknown keys and, with no unwired type, no
+    /// warning.
+    #[test]
+    fn a_clean_manifest_has_no_warning() {
+        let manifest = PluginManifest::parse(MINIMAL).unwrap();
+        assert!(manifest.unknown_keys.is_empty());
+        assert!(manifest.warnings().is_empty());
+    }
+
+    /// The warning names the key and, when one plainly matches, the key it
+    /// most likely meant.
+    #[test]
+    fn a_warning_names_the_key_and_what_it_likely_meant() {
+        let manifest = PluginManifest::parse(&format!("tool = true\n{MINIMAL}")).unwrap();
+        assert_eq!(
+            manifest.warnings(),
+            vec![
+                "plugin.toml sets 'tool', which OpenAlpaca does not read, so it is ignored — \
+                 did you mean 'types.tools'?"
+                    .to_string()
+            ]
+        );
+        assert_eq!(suggestion("skills").as_deref(), Some("types.skill"));
+        assert_eq!(suggestion("types.tool").as_deref(), Some("types.tools"));
+        assert_eq!(
+            suggestion("config.api_key.types").as_deref(),
+            Some("config.api_key.type")
+        );
+        assert_eq!(suggestion("plugin.entrypoint"), None);
+    }
+
+    /// The key is the author's text: a hidden character in it is shown as
+    /// `<U+XXXX>` and counted in the approval surfaces' words.
+    #[test]
+    fn a_hidden_character_in_a_key_is_shown_and_counted() {
+        // A bidi override and a zero-width space, the two every new approval
+        // surface's test plants.
+        let manifest =
+            PluginManifest::parse(&format!("\"to\u{202e}ol\u{200b}\" = true\n{MINIMAL}")).unwrap();
+        let warnings = manifest.warnings();
+        assert_eq!(
+            warnings,
+            vec![
+                "plugin.toml sets 'to<U+202E>ol<U+200B>', which OpenAlpaca does not read, so \
+                 it is ignored. Note: this request contains 2 hidden characters, shown as \
+                 <U+…>."
+                    .to_string()
+            ]
+        );
+        assert!(!warnings[0].contains('\u{202e}') && !warnings[0].contains('\u{200b}'));
+    }
+
+    /// `types.connector` and `types.provider` warn while their bridges are
+    /// unwired — and only those two types.
+    #[test]
+    fn the_unwired_types_warn_and_the_wired_ones_do_not() {
+        let manifest = PluginManifest::parse(&format!(
+            "{MINIMAL}[types]\ntools = true\nskill = true\nagent = true\nconnector = true\n\
+             provider = true\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            manifest.warnings(),
+            vec![
+                CONNECTOR_NOT_WIRED.to_string(),
+                PROVIDER_NOT_WIRED.to_string()
+            ]
+        );
+    }
+
+    /// A refusal reads exactly as before: the struct is deserialized first.
+    #[test]
+    fn a_manifest_that_does_not_parse_is_still_refused() {
+        let error = PluginManifest::parse("[plugin]\nname = \"p\"\n").unwrap_err();
+        assert!(error.to_string().contains("missing field"), "{error}");
     }
 }
 

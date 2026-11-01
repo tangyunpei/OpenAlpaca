@@ -5,14 +5,22 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::time::Duration;
 
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{ClientRequest, Implementation, PingRequest, ProtocolVersion};
-use rmcp::service::{NotificationContext, RoleClient, RunningService, ServiceExt};
+use rmcp::model::{
+    ClientCapabilities, ClientConfig, ClientRequest, Implementation, PingRequest, ProtocolVersion,
+    ServerCapabilities, ServerNotification, SubscriptionFilter,
+};
+use rmcp::service::{
+    ClientInitializeError, ClientLifecycleMode, ClientServiceExt, NotificationContext, Peer,
+    RoleClient, RunningService, ServiceError, Subscription, SubscriptionEnd,
+};
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{
+    UnboundedReceiver, UnboundedSender, WeakUnboundedSender, unbounded_channel,
+};
 
 use crate::error::McpError;
-use crate::lifecycle::{ConnectionSnapshot, ConnectionState};
-use crate::transport::{Transport, TransportConnection, TransportInner, TransportKind};
+use crate::lifecycle::{ConnectionSnapshot, ConnectionState, ProtocolMode};
+use crate::transport::{ExitObserver, Transport, TransportInner, TransportKind};
 
 /// Something the *server* changed about itself mid-session, announced over one
 /// of MCP's `notifications/*_list_changed` methods.
@@ -32,6 +40,25 @@ pub enum ServerChange {
     PromptList,
 }
 
+/// What a client learns about its own connection without a request of its
+/// own — the facts the supervisor sets the extension's ledger row by
+/// (N-MCP-1b; extension design §3.6, §13 Q8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionEvent {
+    /// The stdio server's process exited — by itself, or by a signal from
+    /// outside — while the client was not closing it: what the process's wait
+    /// returned. Reported once per process, as its connection ends, and
+    /// before the client can see the transport closed.
+    Exited(std::process::ExitStatus),
+    /// A reconnect opened a fresh connection: the respawn before a send
+    /// (N-MCP-1) handshook.
+    Reconnected,
+}
+
+/// Receives a client's [`ConnectionEvent`]s, on the task that learned each —
+/// rmcp's, for an exit; the call's, for a reconnect — so it must not block.
+pub type ConnectionEventHandler = Arc<dyn Fn(ConnectionEvent) + Send + Sync>;
+
 /// The `ClientHandler` every connection is served with: it forwards the three
 /// list-changed notifications onto the client's own channel and does nothing
 /// else (design §3.7 "Client (C2)").
@@ -47,6 +74,9 @@ pub enum ServerChange {
 pub struct NotifyingHandler {
     server_name: String,
     tx: Option<UnboundedSender<ServerChange>>,
+    /// `McpClientConfig::client_info`, which [`ClientHandler::get_info`]
+    /// sends — rmcp's own name and version went out before (DU-25 (m-f)).
+    client_info: Implementation,
 }
 
 impl NotifyingHandler {
@@ -66,6 +96,23 @@ impl NotifyingHandler {
 }
 
 impl ClientHandler for NotifyingHandler {
+    /// What every lifecycle tells the server about this client (DU-25 (m-f)):
+    /// our `client_info` and an explicit capability set, empty — no roots,
+    /// sampling or elicitation is served (M84 adds the first). rmcp sends both
+    /// in the legacy `initialize` and in each `2026-07-28` request's `_meta`.
+    ///
+    /// The version is rmcp's to choose under `Auto` and `Discover` (the
+    /// fallback overwrites it with `legacy_version`, the probe offers its
+    /// preferred versions; rmcp-3.7.0 `src/service/client.rs:839-907`), but
+    /// `Initialize` — `protocol = "legacy"`, and a respawn pinned to a legacy
+    /// era — sends this one as it stands, and rmcp's default is `LATEST`
+    /// (`2026-07-28`), a version with no `initialize` at all. So it is the
+    /// newest that has one, the version `Auto`'s fallback offers too.
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::new(ClientCapabilities::default(), self.client_info.clone())
+            .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
+    }
+
     fn on_tool_list_changed(
         &self,
         _context: NotificationContext<RoleClient>,
@@ -110,7 +157,11 @@ const ABANDONED_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct McpClientConfig {
     pub server_name: String,
     pub transport: TransportKind,
+    /// The identity every handshake sends (see `NotifyingHandler::get_info`).
     pub client_info: Implementation,
+    /// The lifecycle the first handshake opens with (`protocol` in
+    /// `config/mcp.toml`; DU-25 (m-a)).
+    pub protocol: ProtocolMode,
     pub request_timeout: Duration,
     pub max_reconnect_attempts: u32,
     pub reconnect_backoff_ms: u64,
@@ -126,11 +177,8 @@ impl Default for McpClientConfig {
                 env: std::collections::HashMap::new(),
                 cwd: None,
             },
-            client_info: Implementation {
-                name: "openalpaca-mcp".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                ..Default::default()
-            },
+            client_info: Implementation::new("openalpaca-mcp", env!("CARGO_PKG_VERSION")),
+            protocol: ProtocolMode::Auto,
             request_timeout: Duration::from_secs(30),
             max_reconnect_attempts: 3,
             reconnect_backoff_ms: 100,
@@ -152,7 +200,13 @@ pub(crate) struct ClientInner {
     pub(crate) service: Mutex<Option<RunningService<RoleClient, NotifyingHandler>>>,
     pub(crate) server_info: tokio::sync::OnceCell<Implementation>,
     pub(crate) protocol_version: tokio::sync::OnceCell<ProtocolVersion>,
+    /// Reconnects since the last successful call: a handshake alone does not
+    /// reset it (N-MCP-1), so a server that handshakes and then fails every
+    /// call reaches [`McpError::ReconnectExhausted`].
     pub(crate) attempt_counter: AtomicU32,
+    /// Serialises the pre-send reconnect, so two calls that find the same dead
+    /// transport respawn the child once, not twice (N-MCP-1).
+    pub(crate) reconnect_lock: Mutex<()>,
     /// The sender half of the server-change channel, created **once** with the
     /// client and cloned into every handshake's handler. `disconnect` `take()`s
     /// it beside the service, so the supervisor's receiver ends when — and only
@@ -167,6 +221,9 @@ pub(crate) struct ClientInner {
     /// disconnect (a stale extension snapshot, an in-flight retry loop) can
     /// never respawn the child the owner just disabled.
     pub(crate) closed: AtomicBool,
+    /// The receiver of [`ConnectionEvent`]s, installed once by
+    /// [`McpClient::on_connection_event`]. An event before it is dropped.
+    pub(crate) connection_events: std::sync::OnceLock<ConnectionEventHandler>,
 }
 
 impl ClientInner {
@@ -185,15 +242,24 @@ impl ClientInner {
             server_info: tokio::sync::OnceCell::new(),
             protocol_version: tokio::sync::OnceCell::new(),
             attempt_counter: AtomicU32::new(0),
+            reconnect_lock: Mutex::new(()),
             closed: AtomicBool::new(false),
             changes_tx: Mutex::new(Some(changes_tx)),
             changes_rx: Mutex::new(Some(changes_rx)),
+            connection_events: std::sync::OnceLock::new(),
         }
     }
 
     /// `true` once [`McpClient::disconnect`] has run on any clone.
     pub(crate) fn is_sealed(&self) -> bool {
         self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Hand `event` to the installed receiver, if there is one.
+    fn announce(&self, event: ConnectionEvent) {
+        if let Some(handler) = self.connection_events.get() {
+            handler(event);
+        }
     }
 }
 
@@ -215,7 +281,8 @@ impl McpClient {
         }
     }
 
-    /// Connect to the configured MCP server. Performs initialize handshake.
+    /// Connect to the configured MCP server and open its lifecycle
+    /// (`server/discover`, or the legacy `initialize`; see `lifecycle` below).
     pub async fn connect(config: McpClientConfig) -> Result<Self, McpError> {
         // A fresh inner is never sealed, so re-enabling a previously
         // disconnected server through a new `connect` is unaffected.
@@ -226,9 +293,10 @@ impl McpClient {
         Ok(client)
     }
 
-    /// Build a Transport from the configured TransportKind, connect, then run rmcp's serve().
+    /// Build a Transport from the configured TransportKind, connect, then open
+    /// the connection's lifecycle through [`serve`].
     pub(crate) async fn do_handshake(&self) -> Result<(), McpError> {
-        let transport = build_transport(&self.inner.config)?;
+        let transport = build_transport(&self.inner.config, self.exit_observer())?;
         let conn = transport.connect().await?;
 
         tracing::info!(
@@ -238,37 +306,42 @@ impl McpClient {
         );
 
         // Clone — never create — the sender: a per-handshake channel would be
-        // severed by the first in-session reconnect (design §3.7).
+        // severed by the first in-session reconnect (design §3.7). The handler
+        // forwards the server's list-changed notifications.
         let handler = NotifyingHandler {
             server_name: self.inner.config.server_name.clone(),
             tx: self.inner.changes_tx.lock().await.clone(),
+            client_info: self.inner.config.client_info.clone(),
         };
 
-        let running = serve_with_conn(conn, handler).await.map_err(|e| {
-            // A handshake against a streamable-HTTP server that rejected our
-            // credentials is the one bring-up failure that carries a status
-            // (design §4.2); everything else stays a handshake failure.
-            match &e {
-                rmcp::service::ClientInitializeError::TransportError { error, .. } => {
-                    match crate::error::unauthorized_status(error.error.as_ref()) {
-                        Some(status) => McpError::Unauthorized(status),
-                        None => McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}")),
-                    }
-                }
-                _ => McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}")),
-            }
-        })?;
+        // The first handshake follows `protocol`; a respawn reopens in the era
+        // the first negotiated (DU-25 (m-c)).
+        let negotiated = self.inner.protocol_version.get();
+        let lifecycle = lifecycle(self.inner.config.protocol, negotiated);
+        let served = match conn.inner {
+            TransportInner::Stdio(child) => serve(handler, child, lifecycle.clone()).await,
+            TransportInner::Http(http) => serve(handler, http, lifecycle.clone()).await,
+        };
+        let running = served.map_err(|e| handshake_error(&e, &lifecycle, negotiated.is_some()))?;
 
         // Record server identity (first-time only; immutable across reconnects).
         if let Some(peer_info) = running.peer_info() {
-            let _ = self.inner.server_info.set(peer_info.server_info.clone());
+            // `server_info` is `Option` since rmcp 3: an `initialize` answer
+            // always carries it, a `server/discover` answer only in its `_meta`
+            // (`io.modelcontextprotocol/serverInfo`), and may leave it out.
+            if let Some(server_info) = &peer_info.server_info {
+                let _ = self.inner.server_info.set(server_info.clone());
+            }
             let _ = self
                 .inner
                 .protocol_version
                 .set(peer_info.protocol_version.clone());
             tracing::info!(
                 server_name = %self.inner.config.server_name,
-                server_version = %peer_info.server_info.version,
+                server_version = peer_info
+                    .server_info
+                    .as_ref()
+                    .map_or("unknown", |i| i.version.as_str()),
                 protocol_version = ?peer_info.protocol_version,
                 "MCP handshake complete"
             );
@@ -291,7 +364,6 @@ impl McpClient {
         &self,
         mut running: RunningService<RoleClient, NotifyingHandler>,
     ) -> Result<(), McpError> {
-        use std::sync::atomic::Ordering;
         let mut guard = self.inner.service.lock().await;
         if self.inner.is_sealed() {
             drop(guard);
@@ -320,9 +392,11 @@ impl McpClient {
         // reporting a live connection. (Lock order is service → state
         // throughout the client: `disconnect` does the same, and no path takes
         // them the other way round, so there is no inversion here.)
+        // The attempt counter is deliberately left alone: only a successful
+        // call or list resets it, so a server that handshakes and then fails
+        // every call still reaches `ReconnectExhausted` (N-MCP-1).
         *guard = Some(running);
         *self.inner.state.write().await = ConnectionState::Connected;
-        self.inner.attempt_counter.store(0, Ordering::Relaxed);
         drop(guard);
         Ok(())
     }
@@ -336,6 +410,35 @@ impl McpClient {
     /// Async because the state lives under a `tokio::sync::RwLock`.
     pub async fn connection_state(&self) -> ConnectionSnapshot {
         ConnectionSnapshot::from(&*self.inner.state.read().await)
+    }
+
+    /// Install the receiver of this client's [`ConnectionEvent`]s. **Once** —
+    /// a second call is refused and returns `false`, as [`Self::changes`] is
+    /// take-once. The supervisor installs it at E2, with the client; an event
+    /// before that has no receiver and is dropped (N-MCP-1b).
+    pub fn on_connection_event(&self, handler: ConnectionEventHandler) -> bool {
+        self.inner.connection_events.set(handler).is_ok()
+    }
+
+    /// What every stdio process this client spawns reports its exit to: an
+    /// [`ConnectionEvent::Exited`], unless the client is sealed — a close the
+    /// daemon itself made, a disable's, a failed bring-up's, a shutdown's
+    /// (design §3.2 T4, §3.5), whose exit is no news. It holds the client
+    /// weakly, so a process never keeps its client alive.
+    fn exit_observer(&self) -> ExitObserver {
+        let inner = Arc::downgrade(&self.inner);
+        Arc::new(move |status| {
+            let Some(inner) = inner.upgrade() else { return };
+            if inner.is_sealed() {
+                return;
+            }
+            tracing::info!(
+                server_name = %inner.config.server_name,
+                %status,
+                "MCP stdio server process exited"
+            );
+            inner.announce(ConnectionEvent::Exited(status));
+        })
     }
 
     /// Take the server-change receiver. **Once** — a second call returns
@@ -364,12 +467,42 @@ impl McpClient {
     ///   would hold its handles for minutes against a dying server.
     pub async fn list_tools_once(&self) -> Result<Vec<rmcp::model::Tool>, McpError> {
         let op = async {
-            let guard = self.inner.service.lock().await;
-            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-            let result = running.list_all_tools().await.map_err(McpError::from)?;
+            let peer = self.current_peer().await?;
+            let result = peer
+                .list_all_tools()
+                .await
+                .map_err(|e| self.call_error(e))?;
             Ok::<_, McpError>(result)
         };
         with_cancel_and_timeout(op, None, self.inner.config.request_timeout).await
+    }
+
+    /// A clone of the current service's [`Peer`], taken under the service
+    /// lock and returned **without** it: the request is then awaited on the
+    /// clone, so no call, list or ping holds the lock across its RPC — two
+    /// calls run concurrently, and a queued one no longer spends its deadline
+    /// waiting for the lock (N-MCP-3). A `disconnect` takes the service and
+    /// closes it under that lock; a request in flight on a clone then ends
+    /// with the close (see [`Self::call_error`]).
+    async fn current_peer(&self) -> Result<Peer<RoleClient>, McpError> {
+        self.inner
+            .service
+            .lock()
+            .await
+            .as_ref()
+            .map(|running| running.peer().clone())
+            .ok_or(McpError::TransportClosed)
+    }
+
+    /// Translate a failed request. A request cut off because the owner sealed
+    /// the client — a `disconnect` closed the service under it — reads
+    /// [`McpError::Closed`], the deliberate close, never the unexpected
+    /// `TransportClosed` (design §3.2 T4b).
+    fn call_error(&self, error: rmcp::service::ServiceError) -> McpError {
+        match McpError::from(error) {
+            McpError::TransportClosed if self.inner.is_sealed() => McpError::Closed,
+            other => other,
+        }
     }
 
     /// Server identity from the last successful handshake.
@@ -384,12 +517,13 @@ impl McpClient {
 
     /// Health check — sends an MCP `ping`.
     pub async fn ping(&self) -> Result<(), McpError> {
-        let guard = self.inner.service.lock().await;
-        let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-        // rmcp 0.16 does not expose a typed `ping()` helper on `Peer<RoleClient>`;
+        let peer = self.current_peer().await?;
+        // rmcp (still at 3.7) does not expose a typed `ping()` helper on `Peer<RoleClient>`;
         // construct a PingRequest manually and discard the (empty) server response.
         let req: ClientRequest = PingRequest::default().into();
-        running.peer().send_request(req).await.map_err(McpError::from)?;
+        peer.send_request(req)
+            .await
+            .map_err(|e| self.call_error(e))?;
         Ok(())
     }
 
@@ -430,6 +564,10 @@ impl McpClient {
 
     /// Attempt to reconnect by rebuilding the transport and rerunning handshake.
     /// Honours max_reconnect_attempts and backoff. On exhaustion, transitions to Failed.
+    ///
+    /// `call_tool` enters it only **before** a send, through
+    /// [`Self::ensure_connected`], never after one (N-MCP-1): a call that may
+    /// have reached the server is not sent again.
     ///
     /// Refuses outright — before the attempt counter, before any spawn — when
     /// the client is sealed or its state already says it is down. This is the
@@ -479,16 +617,21 @@ impl McpClient {
             "MCP reconnect scheduled"
         );
 
-        // Drop the old service (if any) so its subprocess/HTTP connection is released.
-        if let Some(mut old) = self.inner.service.lock().await.take() {
+        // Drop the old service (if any) so its subprocess/HTTP connection is
+        // released — taken under the lock, closed after it is released, so a
+        // slow close holds up no other caller.
+        let old = self.inner.service.lock().await.take();
+        if let Some(mut old) = old {
             let _ = old.close_with_timeout(ABANDONED_CLOSE_TIMEOUT).await;
         }
         *self.inner.state.write().await = ConnectionState::Reconnecting { attempt };
 
         tokio::time::sleep(delay).await;
 
-        // Re-handshake.
+        // Re-handshake. A success is news to the ledger only after an exit
+        // (N-MCP-1b), and its receiver decides that.
         self.do_handshake().await?;
+        self.inner.announce(ConnectionEvent::Reconnected);
         Ok(())
     }
 
@@ -500,9 +643,11 @@ impl McpClient {
         use std::sync::atomic::Ordering;
         loop {
             let op = async {
-                let guard = self.inner.service.lock().await;
-                let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-                let result = running.list_all_tools().await.map_err(McpError::from)?;
+                let peer = self.current_peer().await?;
+                let result = peer
+                    .list_all_tools()
+                    .await
+                    .map_err(|e| self.call_error(e))?;
                 Ok::<_, McpError>(result)
             };
             match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
@@ -534,62 +679,105 @@ impl McpClient {
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
         use std::sync::atomic::Ordering;
-        let params = rmcp::model::CallToolRequestParams {
-            meta: None,
-            name: name.to_string().into(),
-            arguments: match arguments {
-                serde_json::Value::Object(map) => Some(map),
-                serde_json::Value::Null => None,
-                other => {
-                    return Err(McpError::InvalidArguments(format!(
-                        "call_tool arguments must be an object or null, got: {other}"
-                    )));
-                }
-            },
-            task: None,
+        let params = rmcp::model::CallToolRequestParams::new(name.to_string());
+        let params = match arguments {
+            serde_json::Value::Object(map) => params.with_arguments(map),
+            serde_json::Value::Null => params,
+            other => {
+                return Err(McpError::InvalidArguments(format!(
+                    "call_tool arguments must be an object or null, got: {other}"
+                )));
+            }
         };
 
-        loop {
-            let op = {
-                let params = params.clone();
-                async move {
-                    let guard = self.inner.service.lock().await;
-                    let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-                    let result = running.call_tool(params).await.map_err(McpError::from)?;
-                    Ok::<_, McpError>(result)
-                }
-            };
-            match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
-                Ok(result) => {
-                    self.inner.attempt_counter.store(0, Ordering::Relaxed);
-                    return Ok(result);
-                }
-                Err(e) if e.is_cancelled() => return Err(e),
-                Err(e) if e.is_retriable() => {
-                    tracing::warn!(
+        // One deadline spans the pre-send reconnect and the call. Once the
+        // request may have left, it is never sent again: a timeout, a server
+        // error, a transport error or a transport that closes mid-call goes
+        // back to the caller, and the next call's pre-send check respawns a
+        // dead child (N-MCP-1; extension design §3.6 item 1).
+        // The request runs on a cloned peer, never under the service lock
+        // (N-MCP-3), and the lock is taken only inside this deadline for the
+        // instant the clone takes.
+        let op = async {
+            self.ensure_connected().await?;
+            let peer = self.current_peer().await?;
+            let result = peer
+                .call_tool(params)
+                .await
+                .map_err(|e| self.call_error(e))?;
+            Ok::<_, McpError>(result)
+        };
+        match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
+            Ok(result) => {
+                self.inner.attempt_counter.store(0, Ordering::Relaxed);
+                Ok(result)
+            }
+            Err(e) => {
+                if !e.is_cancelled() {
+                    tracing::debug!(
                         server_name = %self.inner.config.server_name,
                         operation = "call_tool",
                         tool = %name,
                         error = %e,
-                        "operation failed; triggering reconnect"
+                        "MCP call failed; it is not sent again"
                     );
-                    self.reconnect().await?;
-                    continue;
                 }
-                Err(e) => return Err(e),
+                Err(e)
             }
         }
+    }
+
+    /// N-MCP-1's pre-send half: when the current service is absent or its
+    /// transport has closed — a stdio child that exited since the last call —
+    /// reconnect **once**, before anything is sent. The transparent respawn of
+    /// a dead child (extension design §3.6 item 1) lives here and only here.
+    async fn ensure_connected(&self) -> Result<(), McpError> {
+        if self.service_is_live().await {
+            return Ok(());
+        }
+        let _serial = self.inner.reconnect_lock.lock().await;
+        // A caller that waited here may find the child another one respawned.
+        if self.service_is_live().await {
+            return Ok(());
+        }
+        tracing::info!(
+            server_name = %self.inner.config.server_name,
+            "MCP transport closed before the call; reconnecting once before sending"
+        );
+        self.reconnect().await
+    }
+
+    /// A service is installed and its transport has not closed.
+    async fn service_is_live(&self) -> bool {
+        self.inner
+            .service
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|running| !running.peer().is_transport_closed())
+    }
+
+    /// Whether the client's transport has closed — its stdio child exited or
+    /// its HTTP session ended — or no service is installed. Test-only: the
+    /// daemon's tests wait on it after killing a child out of band, so the next
+    /// call's pre-send check sees the death (N-MCP-1).
+    #[cfg(feature = "test-utils")]
+    pub async fn is_transport_closed_for_tests(&self) -> bool {
+        !self.service_is_live().await
     }
 }
 
 /// Apply per-operation cancellation and timeout to an async operation.
 ///
-/// On cancel: returns `McpError::Cancelled` immediately. (Protocol-level
-/// cancellation notification is added in a later refinement; for P1 we
-/// bail locally — the rmcp transport will carry an implicit cancellation
-/// when the future drops.)
+/// On cancel: returns `McpError::Cancelled` immediately.
 ///
 /// On timeout: returns `McpError::Timeout(duration)`.
+///
+/// Either way `op` is dropped, and with it rmcp's request: since rmcp 3.6 a
+/// `tools/call` or `tools/list` dropped before its answer sends one
+/// `notifications/cancelled` naming its id ("request abandoned by the
+/// caller"), which `call_tests.rs` pins for a timed-out call. A cancel
+/// carrying a reason of our own is a later refinement.
 async fn with_cancel_and_timeout<F, T>(
     op: F,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
@@ -615,8 +803,12 @@ where
     }
 }
 
-/// Internal: materialise a Transport impl from a TransportKind.
-fn build_transport(cfg: &McpClientConfig) -> Result<Box<dyn Transport>, McpError> {
+/// Internal: materialise a Transport impl from a TransportKind. A stdio
+/// transport reports each process's exit to `exit_observer`.
+fn build_transport(
+    cfg: &McpClientConfig,
+    exit_observer: ExitObserver,
+) -> Result<Box<dyn Transport>, McpError> {
     use crate::transport::{StdioTransport, StreamableHttpTransport};
     match &cfg.transport {
         TransportKind::Stdio {
@@ -625,7 +817,9 @@ fn build_transport(cfg: &McpClientConfig) -> Result<Box<dyn Transport>, McpError
             env,
             cwd,
         } => {
-            let mut t = StdioTransport::new(&cfg.server_name, command).with_args(args.clone());
+            let mut t = StdioTransport::new(&cfg.server_name, command)
+                .with_args(args.clone())
+                .with_exit_observer(exit_observer);
             for (k, v) in env {
                 t = t.with_env(k, v);
             }
@@ -639,7 +833,11 @@ fn build_transport(cfg: &McpClientConfig) -> Result<Box<dyn Transport>, McpError
             auth,
             extra_headers,
         } => {
-            let mut t = StreamableHttpTransport::new(&cfg.server_name, url.clone());
+            // No total deadline on the client: the request's own is the
+            // `request_timeout` this client applies around every call, and the
+            // transport only keeps a silent body open at least that long.
+            let mut t = StreamableHttpTransport::new(&cfg.server_name, url.clone())
+                .with_request_timeout(cfg.request_timeout);
             match auth {
                 Some(crate::transport::HttpAuth::Bearer(token)) => t = t.with_bearer(token),
                 Some(crate::transport::HttpAuth::ApiKey { header, value }) => {
@@ -655,16 +853,418 @@ fn build_transport(cfg: &McpClientConfig) -> Result<Box<dyn Transport>, McpError
     }
 }
 
-/// Internal: hand a TransportConnection to rmcp's serve(), with the handler
-/// that forwards the server's list-changed notifications (design §3.7).
-async fn serve_with_conn(
-    conn: TransportConnection,
-    handler: NotifyingHandler,
-) -> Result<RunningService<RoleClient, NotifyingHandler>, rmcp::service::ClientInitializeError> {
-    match conn.inner {
-        TransportInner::Stdio(child) => handler.serve(child).await,
-        TransportInner::Http(http) => handler.serve(http).await,
+/// The typed error a failed handshake becomes.
+///
+/// A streamable-HTTP server that rejected our credentials (design §4.2) or
+/// redirected where the client will not follow (N-MCP-2) fails the handshake
+/// with a typed error, in either phase: on the `server/discover` probe, where
+/// it ends the connect with no fallback, or on the legacy `initialize` after
+/// the probe found the server legacy, where rmcp reports both phases in
+/// `LegacyFallbackFailed` — and there the fallback is the handshake that
+/// failed, so its error decides. That check comes first.
+///
+/// Then a failure to negotiate the lifecycle is
+/// [`McpError::ProtocolNegotiationFailed`] (DU-25 (m-b)), whose text names
+/// what to set: rmcp's `NoCompatibleProtocolVersion`, `ExpectedInitResult`
+/// and `LegacyFallbackFailed`; a transport that closed while the probe waited
+/// for its answer; and, under the `2026-07-28` pin, the probe refused by a
+/// JSON-RPC error — rmcp's own evidence of a legacy server, which `Discover`
+/// returns as it stands — unless its code is one of the two refusals a
+/// `2026-07-28` server itself sends (`MISSING_REQUIRED_CLIENT_CAPABILITY`,
+/// `HEADER_MISMATCH`; rmcp's `is_modern_rejection_code`, rmcp-3.7.0
+/// `src/service/client.rs:923-929`), which rmcp returns raw in every
+/// lifecycle and which stay a handshake failure here as under `Auto`.
+/// Everything else stays a handshake failure.
+///
+/// rmcp types no phase on `ConnectionClosed`: its text is the response the
+/// handshake was waiting for (`expect_next_message`'s context,
+/// rmcp-3.7.0 `src/service/client.rs:148-159`), and `"discover response"` is
+/// the probe's. A rename upstream would turn a close during the probe back
+/// into `Unreachable`; the daemon's test of that case pins it. The close is
+/// any close: a stdio server that exits while the probe waits — a crash at
+/// start, a package `npx` cannot find — reads as a failed negotiation too,
+/// and one already gone when the probe is written fails the send instead
+/// (`TransportError`, a handshake failure), a race recorded as P19's residue.
+fn handshake_error(
+    e: &ClientInitializeError,
+    lifecycle: &ClientLifecycleMode,
+    respawn: bool,
+) -> McpError {
+    let failed = match e {
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => fallback.as_ref(),
+        other => other,
+    };
+    if let ClientInitializeError::TransportError { error, .. } = failed
+        && let Some(typed) = crate::error::typed_http_failure(error.error.as_ref())
+    {
+        return typed;
     }
+    let negotiation = match e {
+        ClientInitializeError::NoCompatibleProtocolVersion { .. }
+        | ClientInitializeError::ExpectedInitResult(_)
+        | ClientInitializeError::LegacyFallbackFailed { .. } => true,
+        ClientInitializeError::ConnectionClosed(awaited) => awaited == "discover response",
+        ClientInitializeError::JsonRpcError(data) => {
+            matches!(lifecycle, ClientLifecycleMode::Discover { .. })
+                && !matches!(
+                    data.code,
+                    rmcp::model::ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY
+                        | rmcp::model::ErrorCode::HEADER_MISMATCH
+                )
+        }
+        _ => false,
+    };
+    if negotiation {
+        return McpError::ProtocolNegotiationFailed(format!(
+            "{e:?}; {}",
+            negotiation_advice(lifecycle, respawn)
+        ));
+    }
+    McpError::HandshakeFailed(format!("rmcp serve() failed: {e:?}"))
+}
+
+/// What a failed negotiation tells the owner to set — every form names
+/// `protocol = "legacy"`, the key that reaches a server older than
+/// `2026-07-28` without the probe (DU-25 (m-b)).
+fn negotiation_advice(lifecycle: &ClientLifecycleMode, respawn: bool) -> &'static str {
+    if respawn {
+        return "a respawn reopens in the era this load negotiated; reload the server to \
+                negotiate again, or set `protocol = \"legacy\"` in its config/mcp.toml block \
+                if it predates MCP 2026-07-28";
+    }
+    match lifecycle {
+        ClientLifecycleMode::Initialize => {
+            "the block sets `protocol = \"legacy\"`; if the server serves MCP 2026-07-28, set \
+             `protocol = \"auto\"` in its config/mcp.toml block"
+        }
+        ClientLifecycleMode::Discover { .. } => {
+            "the block pins `protocol = \"2026-07-28\"`; if the server predates that version, set \
+             `protocol = \"legacy\"` (or `\"auto\"`) in its config/mcp.toml block"
+        }
+        _ => {
+            "if the server predates MCP 2026-07-28, set `protocol = \"legacy\"` in its \
+             config/mcp.toml block"
+        }
+    }
+}
+
+/// The lifecycle a handshake opens with.
+///
+/// **The first handshake of a client follows `protocol`** (DU-25 (m-a)):
+///
+/// * `Auto`, the default — rmcp's `Auto` (DU-25 (p4)). It probes with
+///   `server/discover` at [`ProtocolVersion::LATEST`] (`2026-07-28`); a server
+///   that answers it is served in the modern lifecycle, with no `initialize`
+///   at all. A server that answers the probe with a correlated JSON-RPC error
+///   — or, over streamable HTTP, with a pre-session 4xx other than 401/403,
+///   which rmcp turns into one
+///   (`rmcp-3.7.0/src/transport/streamable_http_client.rs:381-412`) — is
+///   legacy, and the same connection then runs the `initialize` handshake
+///   offering [`ProtocolVersion::LATEST_WITH_INITIALIZE`] (`2025-11-25`).
+/// * `Legacy` — rmcp's `Initialize`: that handshake at once, never the probe.
+/// * `Modern` — rmcp's `Discover` at `2026-07-28`: never downgraded, so a
+///   legacy server fails the connect.
+///
+/// The costs of `Auto` are rmcp's, named here so nobody rediscovers them: a
+/// server that ignores an unknown method is found legacy only when rmcp's
+/// 10 s discover timeout runs out — a private constant no entry point lets us
+/// set (`DEFAULT_AUTO_DISCOVER_TIMEOUT`, `rmcp-3.7.0/src/service/client.rs:719`)
+/// — so a `connect_timeout_secs` at or under 10 s fails it (the supervisor
+/// warns), and a 401/403, a 5xx, a transport failure or a malformed 2xx
+/// answer to the probe fails the connect with no fallback (`:1122-1135`).
+///
+/// **A respawn reopens in the era the first negotiated** (DU-25 (m-c)) — the
+/// pre-send reconnect of N-MCP-1 included: `Initialize` for a version that has
+/// an `initialize` handshake, `Discover` pinned to the negotiated version for
+/// one that does not. It neither probes a legacy server again (which `Auto`
+/// would, on every respawn) nor lets a modern one fall back. A fresh
+/// `connect` (an enable, a reload) builds a new client and negotiates again.
+fn lifecycle(mode: ProtocolMode, negotiated: Option<&ProtocolVersion>) -> ClientLifecycleMode {
+    match negotiated {
+        Some(version) if version.has_initialize() => ClientLifecycleMode::Initialize,
+        Some(version) => ClientLifecycleMode::Discover {
+            preferred_versions: vec![version.clone()],
+        },
+        None => match mode {
+            ProtocolMode::Auto => ClientLifecycleMode::Auto {
+                preferred_versions: vec![ProtocolVersion::LATEST],
+                legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
+            },
+            ProtocolMode::Legacy => ClientLifecycleMode::Initialize,
+            ProtocolMode::Modern => ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::LATEST],
+            },
+        },
+    }
+}
+
+/// Serve `handler` over `transport` in `lifecycle` — the one entry every
+/// connection, and every test that stands one up, goes through — and, when
+/// the session is in the 2026-07-28 lifecycle, open its change subscription
+/// ([`ChangeListener`]).
+#[allow(
+    clippy::result_large_err,
+    reason = "rmcp's error, read once by handshake_error; a Box buys nothing"
+)]
+async fn serve<T, E, A>(
+    handler: NotifyingHandler,
+    transport: T,
+    lifecycle: ClientLifecycleMode,
+) -> Result<RunningService<RoleClient, NotifyingHandler>, ClientInitializeError>
+where
+    T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let changes = ChangeListener::for_handler(&handler);
+    let running = handler.serve_with_lifecycle(transport, lifecycle).await?;
+    if let Some(info) = running.peer_info()
+        && !info.protocol_version.has_initialize()
+    {
+        changes.listen(running.peer().clone(), &info.capabilities);
+    }
+    Ok(running)
+}
+
+/// The `subscriptions/listen` stream of a session in the 2026-07-28
+/// lifecycle, forwarding the server's list changes onto the client's change
+/// channel (design §3.7).
+///
+/// A 2026-07-28 server sends `notifications/tools/list_changed` and its two
+/// siblings only on a `subscriptions/listen` stream
+/// (`rmcp-3.7.0/src/service/server.rs:253-296`), and rmcp's client opens
+/// none by itself — so without this a modern server would be reached and
+/// never heard to change its tools: the silent hole §3.7 closed (X-35). A
+/// legacy session needs none; its notifications reach [`NotifyingHandler`].
+/// rmcp drops the list caches a change invalidates before handing it over
+/// (`rmcp-3.7.0/src/service.rs:1612`), so the refresh it triggers reads anew.
+struct ChangeListener {
+    server_name: String,
+    /// Weak, so the stream never holds the change channel open: the
+    /// supervisor's receiver still ends when `disconnect` drops the last
+    /// strong sender (§3.7, §3.3 E5).
+    tx: Option<WeakUnboundedSender<ServerChange>>,
+}
+
+impl ChangeListener {
+    fn for_handler(handler: &NotifyingHandler) -> Self {
+        Self {
+            server_name: handler.server_name.clone(),
+            tx: handler.tx.as_ref().map(UnboundedSender::downgrade),
+        }
+    }
+
+    /// Ask for the list changes the server declares, and forward each one
+    /// for as long as the session lives. The connect does not wait on the
+    /// acknowledgment; a refusal is announced, never silent.
+    ///
+    /// D5 (a): each acknowledgment asks for one `tools/list` refresh (A1-12),
+    /// closing the window between `serve` returning and the stream opening;
+    /// a stream that ends while the connection lives, before its
+    /// acknowledgment or after, is opened once more, and a second end in the
+    /// same connection keeps the warning. A stream that fails is a warning
+    /// at once.
+    fn listen(self, peer: Peer<RoleClient>, capabilities: &ServerCapabilities) {
+        let (Some(tx), Some(wanted)) = (self.tx, declared_list_changes(capabilities)) else {
+            return;
+        };
+        let refresh_tools = wanted.tools_list_changed == Some(true);
+        let server_name = self.server_name;
+        tokio::spawn(async move {
+            let mut reopened = false;
+            loop {
+                let mut subscription = match peer.listen(wanted.clone()).await {
+                    Ok(subscription) => subscription,
+                    // The connection ended before the acknowledgment came — a
+                    // disconnect, or a reopen raced by the close.
+                    Err(e) if peer.is_transport_closed() => {
+                        tracing::debug!(
+                            server_name = %server_name,
+                            error = %e,
+                            "MCP connection ended before its change subscription was acknowledged"
+                        );
+                        return;
+                    }
+                    // The connection lives, so only the stream was cut, before
+                    // its acknowledgment: over HTTP rmcp fails the listen with
+                    // the error the connection's own end gives (the citation
+                    // below). An end like one after the acknowledgment.
+                    Err(ServiceError::TransportClosed) => {
+                        if !reopen_once(
+                            &mut reopened,
+                            &server_name,
+                            "cut before its acknowledgment",
+                        ) {
+                            return;
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            server_name = %server_name,
+                            error = %e,
+                            "MCP server refused the change subscription; a tool it adds or drops \
+                             is not noticed until the server is reloaded"
+                        );
+                        return;
+                    }
+                };
+                if subscription.acknowledged() != &wanted {
+                    tracing::warn!(
+                        server_name = %server_name,
+                        requested = ?wanted,
+                        acknowledged = ?subscription.acknowledged(),
+                        "MCP server acknowledged fewer list changes than it declares; \
+                         the others are not noticed until the server is reloaded"
+                    );
+                }
+                // A1-12: a change made before the stream opened was announced
+                // nowhere; one refresh on the acknowledgment picks it up. The
+                // refresh is ours, not the server's, so rmcp has invalidated
+                // nothing: without the clear, a `tools/list` the connect cached
+                // under the server's `ttlMs` (SEP-2549) would answer it.
+                if refresh_tools {
+                    peer.clear_response_cache().await;
+                    if !forward(&tx, ServerChange::ToolList, &server_name) {
+                        return;
+                    }
+                }
+                let Drained::Ended(reason) = drain(&mut subscription, &tx, &server_name).await
+                else {
+                    return;
+                };
+                // Whether the connection lives decides it, not how rmcp ended
+                // the stream: over HTTP a listen stream the server or the
+                // network cuts while the session lives reads `Abrupt`, as the
+                // connection's own end does (rmcp-3.7.0
+                // `src/transport/streamable_http_client.rs:1777-1796`). A
+                // reopen the close races fails at once, a `debug` above.
+                if peer.is_transport_closed() {
+                    tracing::debug!(
+                        server_name = %server_name,
+                        reason = %reason,
+                        "MCP change subscription ended with its connection"
+                    );
+                    return;
+                }
+                if !reopen_once(&mut reopened, &server_name, &reason) {
+                    return;
+                }
+            }
+        });
+    }
+}
+
+/// A stream that ended while the connection lives, for `reason`: the first
+/// end is opened once more (`true`), a second keeps the warning (`false`).
+fn reopen_once(reopened: &mut bool, server_name: &str, reason: &str) -> bool {
+    if *reopened {
+        tracing::warn!(
+            server_name = %server_name,
+            reason = %reason,
+            "MCP change subscription ended again while the connection lives; \
+             list changes are not noticed until the server is reloaded"
+        );
+        return false;
+    }
+    tracing::info!(
+        server_name = %server_name,
+        reason = %reason,
+        "MCP change subscription ended while the connection lives; opening it once more"
+    );
+    *reopened = true;
+    true
+}
+
+/// How one subscription's stream stopped delivering.
+enum Drained {
+    /// The client is disconnected: nobody to tell.
+    ClientGone,
+    /// The stream failed — the server broke the protocol on it or answered
+    /// the listen with an error — and is warned about; it is not reopened.
+    Failed,
+    /// The stream ended, for the reason given.
+    Ended(String),
+}
+
+/// Forward `subscription`'s list changes until it ends.
+async fn drain(
+    subscription: &mut Subscription,
+    tx: &WeakUnboundedSender<ServerChange>,
+    server_name: &str,
+) -> Drained {
+    loop {
+        let change = match subscription.next().await {
+            Ok(Some(ServerNotification::ToolListChangedNotification(_))) => ServerChange::ToolList,
+            Ok(Some(ServerNotification::ResourceListChangedNotification(_))) => {
+                ServerChange::ResourceList
+            }
+            Ok(Some(ServerNotification::PromptListChangedNotification(_))) => {
+                ServerChange::PromptList
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => {
+                let reason = match subscription.end() {
+                    Some(SubscriptionEnd::Graceful(_)) => "the server sent its final result",
+                    Some(SubscriptionEnd::Cancelled) => "cancelled",
+                    Some(SubscriptionEnd::Lagged { .. }) => "lagged",
+                    _ => "closed without a final result",
+                };
+                return Drained::Ended(reason.to_string());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    server_name = %server_name,
+                    error = %e,
+                    "MCP change subscription failed; list changes are not noticed \
+                     until the server is reloaded"
+                );
+                return Drained::Failed;
+            }
+        };
+        if !forward(tx, change, server_name) {
+            return Drained::ClientGone;
+        }
+    }
+}
+
+/// Send one change onto the client's channel; `false` once the client is
+/// disconnected (the weak sender no longer upgrades).
+fn forward(
+    tx: &WeakUnboundedSender<ServerChange>,
+    change: ServerChange,
+    server_name: &str,
+) -> bool {
+    let Some(tx) = tx.upgrade() else { return false };
+    if tx.send(change).is_err() {
+        tracing::debug!(
+            server_name = %server_name,
+            ?change,
+            "MCP server change dropped: no receiver"
+        );
+    }
+    true
+}
+
+/// The list changes `capabilities` declares (`listChanged: true`), as a
+/// subscription filter — `None` when it declares none.
+fn declared_list_changes(capabilities: &ServerCapabilities) -> Option<SubscriptionFilter> {
+    let tools = capabilities.tools.as_ref().and_then(|c| c.list_changed) == Some(true);
+    let prompts = capabilities.prompts.as_ref().and_then(|c| c.list_changed) == Some(true);
+    let resources = capabilities.resources.as_ref().and_then(|c| c.list_changed) == Some(true);
+    if !(tools || prompts || resources) {
+        return None;
+    }
+    let mut filter = SubscriptionFilter::builder();
+    if tools {
+        filter = filter.tools_list_changed();
+    }
+    if prompts {
+        filter = filter.prompts_list_changed();
+    }
+    if resources {
+        filter = filter.resources_list_changed();
+    }
+    Some(filter.build())
 }
 
 #[cfg(test)]
@@ -719,10 +1319,13 @@ mod tests {
         }
     }
 
-    /// Minimal in-process MCP server over one half of a duplex pipe: answers the
-    /// client's `initialize` request with a valid `InitializeResult`, then reads
-    /// until EOF. Resolves to `true` once the client end has gone away — which is
-    /// how a test observes that a `RunningService` was really closed.
+    /// Minimal in-process legacy MCP server over one half of a duplex pipe:
+    /// rejects the `server/discover` probe as an unknown method, as a server
+    /// that predates `2026-07-28` does, so [`serve`]'s lifecycle falls back to
+    /// `initialize`, which it answers with a valid `InitializeResult` at the
+    /// version offered; then reads until EOF. Resolves to `true` once the client
+    /// end has gone away — which is how a test observes that a `RunningService`
+    /// was really closed.
     async fn stub_initialize_server(stream: tokio::io::DuplexStream) -> bool {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -732,23 +1335,31 @@ mod tests {
             let Ok(msg) = serde_json::from_str::<rmcp::model::ClientJsonRpcMessage>(&line) else {
                 continue;
             };
-            let Some((_request, id)) = msg.into_request() else {
+            let Some((request, id)) = msg.into_request() else {
                 continue; // the `initialized` notification carries no id
             };
-            let result =
-                rmcp::model::ServerResult::InitializeResult(rmcp::model::InitializeResult {
-                    protocol_version: ProtocolVersion::default(),
-                    capabilities: Default::default(),
-                    server_info: Implementation {
-                        name: "stub".into(),
-                        version: "0.0.1".into(),
-                        ..Default::default()
-                    },
-                    instructions: None,
-                });
-            let mut out =
-                serde_json::to_string(&rmcp::model::ServerJsonRpcMessage::response(result, id))
-                    .expect("serialize initialize result");
+            let reply = match request {
+                ClientRequest::DiscoverRequest(_) => rmcp::model::ServerJsonRpcMessage::error(
+                    rmcp::model::ErrorData::new(
+                        rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                        "Method not found",
+                        None,
+                    ),
+                    Some(id),
+                ),
+                ClientRequest::InitializeRequest(init) => {
+                    rmcp::model::ServerJsonRpcMessage::response(
+                        rmcp::model::ServerResult::InitializeResult(
+                            rmcp::model::InitializeResult::new(Default::default())
+                                .with_protocol_version(init.params.protocol_version)
+                                .with_server_info(Implementation::new("stub", "0.0.1")),
+                        ),
+                        id,
+                    )
+                }
+                _ => continue,
+            };
+            let mut out = serde_json::to_string(&reply).expect("serialize the stub's reply");
             out.push('\n');
             if write_half.write_all(out.as_bytes()).await.is_err() {
                 return false;
@@ -851,8 +1462,11 @@ mod tests {
         let handler = NotifyingHandler {
             server_name: "stub".into(),
             tx,
+            client_info: McpClientConfig::default().client_info,
         };
-        let running = handler.serve(transport).await.expect("stub handshake");
+        let running = serve(handler, transport, lifecycle(ProtocolMode::Auto, None))
+            .await
+            .expect("stub handshake");
         assert!(
             running.peer_info().is_some(),
             "handshake should have peer info"
@@ -1169,6 +1783,7 @@ mod tests {
         let handler = NotifyingHandler {
             server_name: "notifier".into(),
             tx: client.inner.changes_tx.lock().await.clone(),
+            client_info: McpClientConfig::default().client_info,
         };
         handler.send(ServerChange::ToolList);
         handler.send(ServerChange::ResourceList);
@@ -1189,6 +1804,7 @@ mod tests {
             let handler = NotifyingHandler {
                 server_name: "notifier".into(),
                 tx: client.inner.changes_tx.lock().await.clone(),
+                client_info: McpClientConfig::default().client_info,
             };
             handler.send(ServerChange::ToolList);
             assert_eq!(rx.recv().await, Some(ServerChange::ToolList));
@@ -1246,11 +1862,8 @@ mod tests {
                 env: Default::default(),
                 cwd: None,
             },
-            client_info: Implementation {
-                name: "openalpaca-mcp-test".into(),
-                version: "0.1.0".into(),
-                ..Default::default()
-            },
+            client_info: Implementation::new("openalpaca-mcp-test", "0.1.0"),
+            protocol: ProtocolMode::Auto,
             request_timeout: Duration::from_secs(1),
             max_reconnect_attempts: 0,
             reconnect_backoff_ms: 100,
@@ -1341,11 +1954,8 @@ mod tests {
                 env: Default::default(),
                 cwd: None,
             },
-            client_info: Implementation {
-                name: "openalpaca-mcp-test".into(),
-                version: "0.1.0".into(),
-                ..Default::default()
-            },
+            client_info: Implementation::new("openalpaca-mcp-test", "0.1.0"),
+            protocol: ProtocolMode::Auto,
             request_timeout: Duration::from_secs(1),
             max_reconnect_attempts: 2,
             reconnect_backoff_ms: 10, // fast test
@@ -1370,4 +1980,174 @@ mod tests {
         let state = client.inner.state.read().await;
         assert!(matches!(&*state, ConnectionState::Failed { .. }), "expected Failed state");
     }
+
+    /// DU-25 (m-a), (m-c): a client's first handshake follows `protocol`;
+    /// once a load has negotiated, every respawn reopens in that era,
+    /// whatever `protocol` says.
+    #[test]
+    fn the_first_lifecycle_follows_the_key_and_a_respawn_keeps_the_negotiated_era() {
+        assert_eq!(
+            lifecycle(ProtocolMode::Auto, None),
+            ClientLifecycleMode::Auto {
+                preferred_versions: vec![ProtocolVersion::LATEST],
+                legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
+            }
+        );
+        assert_eq!(
+            lifecycle(ProtocolMode::Legacy, None),
+            ClientLifecycleMode::Initialize
+        );
+        assert_eq!(
+            lifecycle(ProtocolMode::Modern, None),
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::LATEST],
+            }
+        );
+        for mode in [
+            ProtocolMode::Auto,
+            ProtocolMode::Legacy,
+            ProtocolMode::Modern,
+        ] {
+            for legacy in [ProtocolVersion::V_2025_11_25, ProtocolVersion::V_2025_06_18] {
+                assert_eq!(
+                    lifecycle(mode, Some(&legacy)),
+                    ClientLifecycleMode::Initialize,
+                    "{mode:?} after {legacy}"
+                );
+            }
+            assert_eq!(
+                lifecycle(mode, Some(&ProtocolVersion::V_2026_07_28)),
+                ClientLifecycleMode::Discover {
+                    preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+                },
+                "{mode:?} after 2026-07-28"
+            );
+        }
+    }
+
+    /// DU-25 (m-b): which handshake failures are a failed negotiation —
+    /// each naming `protocol = "legacy"` — and which stay a handshake
+    /// failure.
+    #[test]
+    fn a_failed_negotiation_names_protocol_legacy_and_other_failures_do_not_become_one() {
+        let auto = lifecycle(ProtocolMode::Auto, None);
+        let pinned = lifecycle(ProtocolMode::Modern, None);
+        let legacy = lifecycle(ProtocolMode::Legacy, None);
+        let rejected = || {
+            ClientInitializeError::JsonRpcError(rmcp::model::ErrorData::new(
+                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                "Method not found",
+                None,
+            ))
+        };
+        let negotiation = [
+            (
+                ClientInitializeError::NoCompatibleProtocolVersion {
+                    client_supported: vec![ProtocolVersion::LATEST],
+                    server_supported: vec![],
+                },
+                &auto,
+            ),
+            (ClientInitializeError::ExpectedInitResult(None), &auto),
+            (
+                ClientInitializeError::LegacyFallbackFailed {
+                    discover: Box::new(rejected()),
+                    fallback: Box::new(rejected()),
+                },
+                &auto,
+            ),
+            (
+                ClientInitializeError::ConnectionClosed("discover response".into()),
+                &auto,
+            ),
+            (rejected(), &pinned),
+            (ClientInitializeError::ExpectedInitResult(None), &legacy),
+        ];
+        for (error, lifecycle) in &negotiation {
+            match handshake_error(error, lifecycle, false) {
+                McpError::ProtocolNegotiationFailed(text) => assert!(
+                    text.contains(r#"protocol = "legacy""#),
+                    "{error:?} under {lifecycle:?}: {text}"
+                ),
+                other => panic!("{error:?} under {lifecycle:?}: {other:?}"),
+            }
+        }
+
+        // A 2026-07-28 server's own refusals, which rmcp returns from the
+        // probe as they stand in every lifecycle: not legacy evidence.
+        let modern_rejection = |code| {
+            ClientInitializeError::JsonRpcError(rmcp::model::ErrorData::new(code, "refused", None))
+        };
+        let other = [
+            (
+                ClientInitializeError::ConnectionClosed("initialize response".into()),
+                &auto,
+            ),
+            (rejected(), &auto),
+            (rejected(), &legacy),
+            (ClientInitializeError::Cancelled, &auto),
+            (
+                modern_rejection(rmcp::model::ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY),
+                &pinned,
+            ),
+            (
+                modern_rejection(rmcp::model::ErrorCode::HEADER_MISMATCH),
+                &pinned,
+            ),
+        ];
+        for (error, lifecycle) in &other {
+            assert!(
+                matches!(
+                    handshake_error(error, lifecycle, false),
+                    McpError::HandshakeFailed(_)
+                ),
+                "{error:?} under {lifecycle:?}"
+            );
+        }
+
+        let McpError::ProtocolNegotiationFailed(text) = handshake_error(
+            &ClientInitializeError::ExpectedInitResult(None),
+            &ClientLifecycleMode::Initialize,
+            true,
+        ) else {
+            panic!("a respawn's failed negotiation is still one");
+        };
+        assert!(
+            text.contains("reload the server") && text.contains(r#"protocol = "legacy""#),
+            "{text}"
+        );
+    }
+
+    /// P19b: the subscription asks for exactly the list changes the server
+    /// declares — and for none when it declares none.
+    #[test]
+    fn a_subscription_asks_for_exactly_the_list_changes_the_server_declares() {
+        assert_eq!(declared_list_changes(&ServerCapabilities::default()), None);
+        let tools_only = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_tool_list_changed()
+            .build();
+        assert_eq!(
+            declared_list_changes(&tools_only),
+            Some(SubscriptionFilter::builder().tools_list_changed().build())
+        );
+        let without = ServerCapabilities::builder().enable_tools().build();
+        assert_eq!(
+            declared_list_changes(&without),
+            None,
+            "tools without listChanged"
+        );
+    }
 }
+
+// N-MCP-1: a call that may have reached the server is never sent again.
+#[cfg(test)]
+mod call_tests;
+
+// N-MCP-3: a call does not hold the service lock across its RPC.
+#[cfg(test)]
+mod concurrency_tests;
+
+// P19b: a 2026-07-28 session subscribes to its server's list changes.
+#[cfg(test)]
+mod listen_tests;

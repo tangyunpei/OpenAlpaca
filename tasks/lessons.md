@@ -103,3 +103,69 @@ Each entry: what went wrong → the rule that prevents it.
 **What happened.** Stage 1's live-check plan made its scratch root with `mktemp -d /tmp/stage1-live.XXXXXX` and compared the paths the daemon records — `project.json`'s `root`, the rows' `project_root`, every `storage_path` — against that root by literal prefix. On macOS `/tmp` is a link to `/private/tmp`, and the daemon records canonical paths, so every such comparison would have read `/private/tmp/…` against `/tmp/…` and failed a correct answer. The whole-stage review caught it in the plan (its R21) before the run; the plan's Step 2 now canonicalizes the root once, where it is made (`44d53783`), and the run used `/private/tmp/stage1-live.Tku29E`.
 
 **Rule.** A live check or a test that compares paths the daemon recorded canonicalizes its scratch root once, when it makes it (`realpath`, or `os.path.realpath` in a driver), and builds every expected path from that — never from `mktemp`'s or `$TMPDIR`'s spelling. On macOS `/tmp` and `/var/folders/…` both lead into `/private/`; a literal-prefix comparison against them fails on every correct answer.
+
+## 2026-10 — A counting tool's path filter is asserted against the paths it is meant to keep
+
+**What happened:** The dependency-upgrade research counted clippy warnings with a script that dropped every span whose path contained the substring `registry`, meant to exclude `~/.cargo/registry`. It also dropped `crates/openalpaca_core/src/tools/registry/` — 34 of the warnings — so plan rev 3 recorded 44 → 67 (toolchain) → 66 (wave) where the tree holds 78 → 101 → 100, and explained the mismatch with CLAUDE.md's recorded 78 as "a different counting method". The error was found a day later by a second group that recounted without the filter; the +23 delta and its list were unchanged, and both plans had already used the wrong anchors in gates.
+
+**Rule:** A filter in a counting script is written as an anchored path test (`startswith('crates/')`, `startswith('apps/')`, or `== '/Users/…/.cargo/registry'`), never a substring, and the script prints what it dropped (count and first three paths) beside what it kept. When a measured count disagrees with a recorded one on the same tree, the disagreement is a defect to find before it is explained away — "a different method" is a conclusion the two methods' outputs have to show, not a sentence that closes the gap.
+
+## 2026-10 — In a wave whose problem is build-cache growth, the cache configuration lands before any build
+
+**What happened:** The owner's `target/` had reached 147.6 GiB. The research that diagnosed it built the workspace several more times (in scratch directories, but still) and the execution plan opened with "G-base: build and run the full suite at the branch point" — before the commits that change what a build leaves behind (`default-members`, `CARGO_INCREMENTAL=0` for agent sessions, one toolchain per target directory). The owner stopped it: no tests until necessary, and not before the cache behaviour is changed.
+
+**Rule:** When the work's subject is what a tool leaves on disk (build caches, logs, stores), the configuration that changes that behaviour is the first commit, verified by the cheapest check that proves it (`cargo metadata`, a config read), and every later build runs under it. A full-suite "baseline" is not free when the baseline itself is the problem; take it after the change, or from a recorded earlier gate.
+
+## 2026-10 — A gate is a log with its command line, not a sentence in a report
+
+**What happened:** Phase 0 of the toolchain programme was implemented by five agent groups and reviewed by three. Two reviewers independently found gates reported as "measured" with nothing under the logs directory to read — `shasum -c`, a provenance file's contents, a `diff -r` proof, usage-error exits, rustfmt and `ps` checks — and one dry-run log whose base was not the commit the report named (the script had been amended after the run). The landing re-ran what was cheap; the rest went into the commit messages as "claimed, not logged".
+
+**Rule:** Every check a report or a `Verified:` line calls measured has a log file that starts with the exact command line and its environment (`echo "\$ <cmd>  (HEAD=<sha>)"` before running it) and ends with the exit code; a check re-run after the code changed gets a new log. A brief for an implementer says so, and a reviewer treats a claim with no log as unverified.
+
+## 2026-10 — A brief that confines a tool's writes names every cache the tool keeps, not just the one in its docs
+
+**What happened:** The briefs for the Phase 0 build gates set `BUN_INSTALL_CACHE_DIR` under the scratchpad — the fix from the earlier `~/.bun/install/cache` breach — and still wrote into the owner's home: Bun's runtime transpiler cache (`~/Library/Caches/bun/@t@/*.pile`, 20 files from three sessions of `bun run`), which that variable does not cover, and npm debug logs (`~/.npm/_logs`), written by the Tauri CLI's npm fallback during `tauri build` and `tauri info`. A packaging verifier caught the first; the runner's own check had died on an unmatched zsh glob and reported "nothing changed". The same briefs put `~/.bun-1.4.2/bin` first on `PATH` for Bun 1.4.2, but that folder holds only `bun`, so `bunx` was still 1.3.13.
+
+**Rule:** A brief that keeps a tool's writes in scratch sets every variable the tool reads — for Bun `BUN_INSTALL_CACHE_DIR` and `BUN_RUNTIME_TRANSPILER_CACHE_PATH` (a scratch dir, or `0`); for anything that may shell out to npm `npm_config_cache` and `npm_config_logs_dir`; for a pinned Bun a scratch `bunx` symlink to the pinned `bun` — and ends with a `find <home dirs> -newermt <start>` written for bash, not zsh, so an unmatched glob cannot pass for "nothing changed".
+
+## 2026-10 — "The real store was not touched" is checked from the run's own commands, never by looking at the store
+
+**What happened:** During Q00 two agents — the tier-A runner and the tier-B verifier — confirmed that nothing had touched the owner's `~/.openalpaca` by running `ls -ld`, `find ~/.openalpaca -newer …` and `stat` on it: metadata reads of the very store the brief forbade them to read. Both disclosed it; no content was read and nothing was written.
+
+**Rule:** A brief that forbids a path also says how to prove it was left alone without touching it — every launch's environment (`OPENALPACA_HOME_STORE`, `OPENALPACA_CONFIG_DIR`, `HOME`) logged, every command grepped for the path — and says in so many words that `ls`, `stat` and `find` on it are reads too.
+
+## 2026-10 — Emptying `HOME` does not keep a test off the machine's secrets
+
+**What happened:** The toolchain programme's test hygiene pointed `HOME` at a scratch folder for every test run, and treated that as keeping tests off the owner's data. Four tests of `openalpaca_llm`'s credential discovery called the public functions, which read `$HOME/.claude/.credentials.json` and `$HOME/.codex/auth.json` and, on macOS when the first is missing, fall back to `security find-generic-password -s 'Claude Code-credentials' -w`. On this machine the first file never exists (Claude Code keeps the item in the keychain), so the `security` call ran on every macOS run of the crate's tests — isolated or not, that day's gates and every earlier run — and a run with the real `HOME` also read the Codex file, which does exist. The tests asserted nothing (`let _ = result`), so whether the item came back was never observed. A reviewer of the prep commits found it; nothing was written or sent, and the evidence archives hold no token text (checked). The first account of it blamed the scratch `HOME`, from the source alone, before checking whether the file exists without it. The live daemons were clean only because the isolation rule already switched `[credential_discovery]` off.
+
+**Rule:** Isolating a run by emptying `HOME` is not enough where code has a fallback for a missing file: the fallback fires *because* of the isolation. Code that reads the machine's credentials — a credential file, the keychain, the keyring — takes its host as a parameter, and its test-build constructor for the real host panics (`DiscoveryHost`, `9ec986ec`). That guard covers the crate's own unit tests only; a test in a crate that links it and reaches the same path is unguarded. A disclosure states what was observed apart from what the source implies. No log records a `security` call, so a grep cannot prove its absence; the guard is the check, and a reviewer reads every test that calls a function whose production path can reach a secret.
+
+## 2026-10 — A G-base dry run proves the patches apply, not that the tree compiles
+
+**What happened:** Every pre-cut commit of plan-rev3 §5.4 was checked with `gbase.sh --dry-run`, which passed: its pre-flight checks that the three wave patches apply and the anchors match. Two lane reviews then found commits that would have killed the cut-day run of record anyway. N-MCP-2's new test built rmcp's `CallToolRequestParams` as a struct literal, which does not compile against step 6's rmcp 3.5 (the struct is `#[non_exhaustive]` there and has no `task` field), and N-SKILL-2 added `serde_yaml` calls that step 8 does not patch. Neither shows up in a dry run, because a dry run compiles nothing.
+
+**Rule:** A commit that lands before the cut and adds code against a crate the wave moves (rmcp, serde_yaml/serde-saphyr, anything a G-base step changes) gets a compile probe as well as the dry run. Run `gbase.sh --base <commit> --steps 8 --edits-only`, copy `locks/recut-lock-99-final.lock` into the export, and run `cargo +1.99.0 check --offline --workspace --all-targets --exclude openalpaca_gui`, which must show 0 errors. The pre-cut set at `38649f7e` passed it.
+
+## 2026-10 — zsh does not split an unquoted variable
+
+**What happened:** Twice in one session a command list held in a variable reached its program as one argument. `bunx vitest run $F` found "no test files" for five paths. `verify-commits.sh $C` (with `$C` from `$(git rev-list …)`) got a single empty argument, so its commit loop did nothing. The session's shell is zsh, which does not word-split unquoted parameter expansions as bash does.
+
+**Rule:** In this environment, write the arguments out, use an array, or run the snippet under `bash -c '…'` when a variable carries a list. Check a background loop's first summary line before trusting that it is working through its list.
+
+## 2026-10 — A freshness sweep is bounded, and its tiny lock-only updates share one commit
+
+**What happened:** The before-the-merge freshness sweep (`tasks/deps-upgrade/programme-plan.md` §3.2 *FRESHNESS-SWEEP*) gave every eligible release its own commit and planned a closing pass for what became eligible while it ran. Sixteen of its items were lock-only moves committed one by one, and by its end new releases became eligible every day, so each pass would have found more. The owner ruled twice on 2026-10-30 (PDT): "put the tiny lock-only updates into one commit", built by rewriting the history after S08 (`2ef1197b`), and "let's just use the current version or we will get endless sweep over each package update": the sweep ended at the tip's versions, with no closing pass.
+
+**Rule:** A tiny lock-only update — a version move with no source change and nothing a person or a model meets (`Cargo.lock` or `bun.lock`, at most a root `Cargo.toml` floor equal to the locked version) — shares one commit with the others of its pass; a heavier item keeps its own. A freshness sweep is bounded: it takes what is eligible at one cut-off instant and stops at the current versions. A release that becomes eligible later is named, with its eligible-from and its way out (a later bounded pass, or Dependabot), and never scheduled as a wait for its eligibility.
+
+## 2026-10 — After a checkout switch, a frozen Bun install can report "no changes" without relinking
+
+**What happened:** Re-gating the sweep's rewritten history, `bun install --frozen-lockfile` on a tree reached by a checkout switch reported no changes and did not relink: react-query, vite and vitest stayed in `node_modules` at the newer tree's versions, so the bun gates would have tested packages that tree's `bun.lock` does not name.
+
+**Rule:** A bun gate on a tree reached by a checkout switch runs `bun install --frozen-lockfile --force`, then checks the installed version of every direct dependency, and of each transitive the change moves, against `bun.lock` before it trusts a result.
+
+## 2026-10 — A scratch `HOME` needs the real `RUSTUP_HOME` and `CARGO_HOME`, each assignment its own word
+
+**What happened:** Two of the sweep's runs pointed `HOME` at a scratch folder. S05's set no `RUSTUP_HOME` or `CARGO_HOME`; S18's passed its environment as one zsh string, so `HOME` took the whole string and `RUSTUP_HOME`, `CARGO_HOME` and `OPENALPACA_HOME_STORE` were unset. Each time rustup downloaded a second copy of the pinned toolchain from static.rust-lang.org, outside the hosts the run's brief allowed, and S18's cargo fetched 249 crates into the scratch `HOME`: 2.5 GB and 2.8 GB, deleted as not evidence. S18's probe panicked before any scan, so nothing reached a store.
+
+**Rule:** A run that sets a scratch `HOME` sets `RUSTUP_HOME` and `CARGO_HOME` to the real ones, and `OPENALPACA_HOME_STORE` wherever a store is in play, each assignment its own shell word or one `env VAR=… VAR=…` — never a string held in a variable, which zsh passes as one word (the zsh entry above). The run's log shows the toolchain resolved from the real `RUSTUP_HOME` before its first build.

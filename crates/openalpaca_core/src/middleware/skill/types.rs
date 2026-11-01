@@ -331,6 +331,103 @@ pub struct SkillFrontmatter {
     /// Skill IDs that must be loaded before this skill can be invoked.
     #[serde(default)]
     pub depends_on: Vec<String>,
+
+    /// Top-level keys this build does not read. The parse stays lenient (no
+    /// `deny_unknown_fields`), but a typo such as `require_capabilities`
+    /// leaves a skill with no tools, so the catalog's scan names each one as
+    /// an `unknown_key` diagnostic (N-SKILL-2). Not written back when the
+    /// frontmatter is serialized ([`UnknownKeys`]).
+    #[serde(flatten)]
+    pub unknown_keys: UnknownKeys,
+}
+
+/// The names of the top-level frontmatter keys this build does not read, in
+/// the order they were written (N-SKILL-2's `unknown_key`).
+///
+/// Only the names are kept; each value is skipped unread, whatever its shape,
+/// so the capture refuses no frontmatter the parse accepted without it. It is
+/// read through serde alone and holds no YAML crate's types, so it reads the
+/// same under serde-saphyr as under the serde_yaml 0.9 it replaced (P30). It
+/// serializes as nothing: a rendered frontmatter carries only the keys this
+/// build reads, as before the capture existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnknownKeys(Vec<String>);
+
+impl UnknownKeys {
+    /// The keys, in the order they were written.
+    pub fn names(&self) -> &[String] {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'de> Deserialize<'de> for UnknownKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Keys;
+        impl<'de> serde::de::Visitor<'de> for Keys {
+            type Value = UnknownKeys;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("the frontmatter's remaining keys")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<UnknownKeys, A::Error> {
+                let mut names = Vec::new();
+                while let Some(KeyName(name)) = map.next_key()? {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                    names.push(name);
+                }
+                Ok(UnknownKeys(names))
+            }
+        }
+        deserializer.deserialize_map(Keys)
+    }
+}
+
+impl Serialize for UnknownKeys {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        serializer.serialize_map(Some(0))?.end()
+    }
+}
+
+/// A frontmatter key as written: a string as itself, a number or a boolean
+/// in its plain spelling, a null as `~`.
+struct KeyName(String);
+
+impl<'de> Deserialize<'de> for KeyName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Name;
+        impl serde::de::Visitor<'_> for Name {
+            type Value = KeyName;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a frontmatter key")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<KeyName, E> {
+                Ok(KeyName(v.to_string()))
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<KeyName, E> {
+                Ok(KeyName(v.to_string()))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<KeyName, E> {
+                Ok(KeyName(v.to_string()))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<KeyName, E> {
+                Ok(KeyName(v.to_string()))
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<KeyName, E> {
+                Ok(KeyName(v.to_string()))
+            }
+            fn visit_unit<E>(self) -> Result<KeyName, E> {
+                Ok(KeyName("~".to_string()))
+            }
+        }
+        deserializer.deserialize_any(Name)
+    }
 }
 
 impl SkillFrontmatter {

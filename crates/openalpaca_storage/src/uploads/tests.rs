@@ -530,7 +530,7 @@ fn an_owner_dedups_against_its_own_row_when_another_owners_row_sorts_first() {
 #[test]
 fn a_produced_artifact_never_answers_an_upload_dedup() {
     let fx = Fixture::new();
-    let sha = crate::content_io::sha256_hex(b"report");
+    let sha = crate::hash::sha256_hex(b"report");
     fx.db
         .with_connection(|conn| {
             conn.execute(

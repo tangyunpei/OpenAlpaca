@@ -90,7 +90,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::Database;
-use crate::content_io::{fsync_dir, remove_best_effort, sha256_hex};
+use crate::content_io::{fsync_dir, remove_best_effort};
+use crate::hash::sha256_hex;
 use crate::models::file_asset::{FileAsset, FileAssetStatus};
 use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::repository::file_asset::{FILE_ASSET_COLUMNS, row_to_file_asset};

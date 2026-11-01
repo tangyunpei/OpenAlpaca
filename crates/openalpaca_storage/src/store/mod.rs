@@ -19,6 +19,8 @@
 //!     repl_history     the CLI chat's line history
 //!     backups/         rotated copies of hand-edited config files
 //!     logs/            daemon.log, gui.log
+//!     cache/           derived data: the memory search index; open/<file id>/, Open's copies
+//!     editor/          the CLI's editor buffers (`memory add|edit`, `persona edit user`)
 //!   config/            USER-EDITED runtime config (GUI/CLI-managed daemons)
 //!   plugins/           user-dropped plugin dirs + .permissions.toml
 //!   projects/<name>/   one folder per project: project.json, artifacts/, uploads/, memory/
@@ -32,6 +34,7 @@
 //! root.
 
 mod artifact;
+mod open_copies;
 pub mod projects;
 mod reveal;
 
@@ -40,6 +43,7 @@ pub use artifact::{
     kind_for_file_name, leading_sequence, loose_dir, opens_in_default_app, run_dir, slugify,
     upload_dir, upload_file_name, version_file_path,
 };
+pub use open_copies::{open_copies_dir, remove_open_copy, stage_open_copy, sweep_open_copies};
 pub use reveal::{RevealRefusal, revealable_path};
 
 use anyhow::{Context, Result, bail};
@@ -326,15 +330,29 @@ fn strip_ansi(line: &str) -> String {
     out
 }
 
-/// `state/cache` — derived data the machine can rebuild; today the memory
-/// search index, `memory-index-v1.sqlite`. A pure path query: the index opens
-/// it, and nothing else creates it. Deleting the directory costs one rebuild
-/// of the index from the notes on disk and nothing else.
+/// `state/cache` — derived data the machine can rebuild: the memory search
+/// index, `memory-index-v1.sqlite`, and Open's copies of uploads under
+/// `open/` ([`stage_open_copy`]). A pure path query: the index opens it, and
+/// Open's staging makes it when it is missing. Deleting the directory costs
+/// one rebuild of the index from the notes on disk and nothing else.
 pub fn cache_dir() -> Result<PathBuf> {
     Ok(state_dir()?.join(CACHE_DIR))
 }
 
 const CACHE_DIR: &str = "cache";
+
+/// `state/editor` — the CLI's editor buffers: `openalpaca memory add|edit`
+/// and `openalpaca persona edit user` hand `$EDITOR` a file here, and a
+/// refused or conflicting edit keeps the text in it. The user's unsaved text,
+/// not derived data, so not under `cache/`. Created (0700 on Unix) if
+/// missing, with `state/`.
+pub fn editor_dir() -> Result<PathBuf> {
+    let dir = state_dir()?.join(EDITOR_DIR);
+    create_private_dir(&dir)?;
+    Ok(dir)
+}
+
+const EDITOR_DIR: &str = "editor";
 
 /// `state/backups` — created if missing. The atomic config writer's rotation target.
 pub fn backups_dir() -> Result<PathBuf> {
@@ -775,7 +793,8 @@ directory loses those files only.
 | `state/memory-control/` | one control snapshot per memory partition: the revision the service last wrote, each note's origin, the tombstones of forgotten notes | never swept — the notes' authority and forget history; a backup of `memory/` includes it |
 | `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
 | `state/logs/` | `daemon.log`, `gui.log` | regenerable — swept freely |
-| `state/cache/` | derived data the machine can rebuild — `memory-index-v1.sqlite`, the memory search index | regenerable — deleting it costs one rebuild from the notes on the next start |
+| `state/cache/` | derived data the machine can rebuild — `memory-index-v1.sqlite`, the memory search index, and `open/<file id>/`, the copy of an upload made each time you open it, under the name you uploaded it with | regenerable — deleting it costs one rebuild from the notes on the next start; the copies under `open/` go at each daemon start, and with their project's data |
+| `state/editor/` | the files `openalpaca memory add`, `memory edit` and `persona edit user` open in your editor; a refused or conflicting edit keeps your text here and says where | yours to delete — never swept; remove a kept file once you have merged it |
 | `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `agents/`, `skills/`, `orchestrator/`, `tools/` | yours — never swept |
 | `plugins/` | plugin directories you dropped in, `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/` | yours — never swept |
 | `projects/` | one folder per project you work in, named after the project's path: `project.json` (the project's id and the path of its own folder) and that project's `artifacts/` (its by-products: drafts, pictures, things handed between agents), `uploads/` and `memory/`, laid out like the entries below. OpenAlpaca's stores write nothing inside the project's own folder: the files an agent writes or edits there are real files of the project, each write asking you first. OpenAlpaca keeps no versions of them: before `file_write` or `file_edit` replaces or edits a file, the content it had is copied into that conversation's log (`sessions/<id>/snapshots/`, size-capped like the rest of the log; a shell command's changes keep no copy), and any longer history is the project's own — git's, where the project is a repository | yours — never swept; a factory reset leaves it; `openalpaca store purge <project>` deletes one project's folder with the rest of its data, and never the project's own files |

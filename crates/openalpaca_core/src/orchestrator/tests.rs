@@ -146,8 +146,10 @@ fn make_orchestrator_with_capturing_llm(
 #[test]
 fn test_update_system_persona_updates_active_snapshot() {
     let orch = make_orchestrator();
-    let mut replacement = SystemPersona::default();
-    replacement.name = "Soul Reloaded".to_string();
+    let replacement = SystemPersona {
+        name: "Soul Reloaded".to_string(),
+        ..Default::default()
+    };
 
     orch.update_system_persona(replacement.clone());
 
@@ -770,6 +772,204 @@ mod request_workspace_threading {
 
         assert_eq!(ctx.request_workspace_root.as_deref(), root.to_str());
         assert_eq!(ctx.workspace_id.as_deref(), root.to_str());
+    }
+}
+
+/// D5 (a)'s third condition (P19b), through the front door: an MCP server's
+/// tool-list change that lands while a turn's tool call runs leaves that
+/// turn's tool set as it was, and the next turn is offered the new one. The
+/// main loop builds its surface once per request and the agentic loop offers
+/// that one set every round (extension design §3.7 step 8, §6.2 #2) — so this
+/// is a pin: it holds without P19b too, which only makes the change arrive.
+mod a_list_change_mid_turn {
+    use super::*;
+    use crate::tools::extensions::{ExtensionId, ExtensionState};
+    use crate::tools::registry::BuiltInTool;
+    use openalpaca_llm::{
+        ChatResponse, FinishReason, LlmError, LlmProvider, ToolCall as LlmToolCall, Usage,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A tool of the MCP server `srv`, registered as E4 (or the §3.7
+    /// refresh's step 6) registers it.
+    fn srv_tool(remote: &str) -> RegisteredTool {
+        let mut tool = make_mock_tool(&format!("srv__{remote}"));
+        tool.backend = ToolBackend::Mcp {
+            client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("srv")),
+            remote_name: remote.to_string(),
+            server_name: "srv".to_string(),
+            generation: 1,
+        };
+        tool.author = "mcp:srv".to_string();
+        tool
+    }
+
+    /// A call during which `srv` drops `dropped` and adds `added`: what the
+    /// §3.7 refresh does to the shared registry (steps 5–7), done while the
+    /// turn's tool call is still running.
+    struct TheServerChangesItsList(Arc<ToolRegistry>);
+
+    #[async_trait]
+    impl BuiltInTool for TheServerChangesItsList {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            self.0.remove("srv__dropped");
+            self.0.register(srv_tool("added"))?;
+            self.0
+                .extensions()
+                .record_tools(&ExtensionId::mcp("srv"), ["srv__kept", "srv__added"]);
+            Ok("the list changed".to_string())
+        }
+    }
+
+    /// Calls `change_list` once, the first time it is offered, and answers
+    /// every other request; keeps the sorted tool names of every request that
+    /// offered tools.
+    struct CallsChangeListOnce {
+        called: AtomicBool,
+        offered: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CallsChangeListOnce {
+        fn name(&self) -> &str {
+            "calls-change-list-once"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let mut names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+            names.sort();
+            let offers_it = names.iter().any(|n| n == "change_list");
+            if !names.is_empty() {
+                self.offered
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(names);
+            }
+            let (tool_calls, finish_reason, content) =
+                if offers_it && !self.called.swap(true, Ordering::SeqCst) {
+                    (
+                        vec![LlmToolCall {
+                            id: "tc_1".to_string(),
+                            name: "change_list".to_string(),
+                            arguments: serde_json::json!({}),
+                        }],
+                        FinishReason::ToolUse,
+                        String::new(),
+                    )
+                } else {
+                    (vec![], FinishReason::Stop, "done".to_string())
+                };
+            Ok(ChatResponse {
+                content,
+                tool_calls,
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    ..Default::default()
+                },
+                finish_reason,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_list_change_during_a_turns_tool_call_leaves_its_tool_set_and_reaches_the_next_turn()
+    {
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+
+        let bus = EventBus::default();
+        let registry = Arc::new(ToolRegistry::with_event_bus(bus.clone()).unwrap());
+        let ext = ExtensionId::mcp("srv");
+        registry.register(srv_tool("dropped")).unwrap();
+        registry.register(srv_tool("kept")).unwrap();
+        let ledger = registry.extensions();
+        ledger.upsert(&ext, true, ExtensionState::Enabled);
+        ledger.record_tools(&ext, ["srv__dropped", "srv__kept"]);
+        let mut change_list = make_mock_tool("change_list");
+        change_list.backend =
+            ToolBackend::BuiltIn(Arc::new(TheServerChangesItsList(registry.clone())));
+        registry.register(change_list).unwrap();
+
+        // "full" puts the whole registry on the main-loop surface, so the
+        // trigger is reachable without keyword suggestion; the extension
+        // tools join through `extension_tool_defs` under either mode.
+        let mut config = DaemonConfig::default();
+        config.orchestrator.routing.tool_selection = "full".to_string();
+        let offered = Arc::new(Mutex::new(Vec::new()));
+        let router = openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(CallsChangeListOnce {
+                called: AtomicBool::new(false),
+                offered: offered.clone(),
+            }),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        let gate = make_security_gate_with_registry(&bus, registry.clone());
+        let orch = Orchestrator::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            bus,
+            SystemPersona::default(),
+            Some(Arc::new(router)),
+            LoopConfig::default(),
+            gate,
+            registry.clone(),
+            None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+            Arc::new(ArcSwap::from_pointee(config)),
+        );
+        let turn = |content: &str| {
+            HandleRequest::new(
+                Uuid::new_v4(),
+                "cli",
+                content,
+                Principal::System,
+                Scope::Global,
+                "user1:cli",
+            )
+        };
+
+        orch.handle_message(turn("change the server's tools"))
+            .await
+            .expect("the first turn answers");
+        assert!(
+            registry.get("srv__added").is_some() && registry.get("srv__dropped").is_none(),
+            "the list changed during the first turn's tool call"
+        );
+        orch.handle_message(turn("and now?"))
+            .await
+            .expect("the second turn answers");
+
+        let offered = offered.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        assert_eq!(
+            offered.len(),
+            3,
+            "two rounds of the first turn and one of the second: {offered:?}"
+        );
+        let has = |set: &[String], name: &str| set.iter().any(|n| n == name);
+        assert!(
+            has(&offered[0], "srv__dropped") && !has(&offered[0], "srv__added"),
+            "the first round's set is the turn's: {:?}",
+            offered[0]
+        );
+        assert_eq!(
+            offered[1], offered[0],
+            "the round after the change is offered the turn's set as it was"
+        );
+        assert!(
+            has(&offered[2], "srv__added")
+                && has(&offered[2], "srv__kept")
+                && !has(&offered[2], "srv__dropped"),
+            "the next turn is offered the changed list: {:?}",
+            offered[2]
+        );
     }
 }
 
@@ -4319,17 +4519,18 @@ async fn available_skills_omits_a_skill_whose_requirement_is_wholly_withheld() {
     let (_tmp, catalog) = c5_catalog(registry.clone());
     let orch = c5_orchestrator(&bus, registry, catalog.clone());
 
+    // Each skill is listed by its id (N-SKILL-1).
     let block = orch.build_skills_catalog_block();
     assert!(
-        !block.contains("Triage"),
+        !block.contains("- triage"),
         "the refused skill is gone: {block}"
     );
-    assert!(!block.contains("Filer"), "so is the legacy one: {block}");
+    assert!(!block.contains("- filer"), "so is the legacy one: {block}");
     assert!(
-        block.contains("Finder"),
+        block.contains("- finder (/finder)"),
         "partial loss stays listed: {block}"
     );
-    assert!(block.contains("Mixed"), "{block}");
+    assert!(block.contains("- mixed (/mixed)"), "{block}");
 
     let listed = catalog.available_names();
     assert!(!listed.contains(&"triage".to_string()));
@@ -8533,6 +8734,60 @@ async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
             .iter()
             .map(|m| (m.role.clone(), m.content.clone()))
             .collect::<Vec<_>>()
+    );
+}
+
+/// N-SKILL-2, the case the review named: `/file` after a hot edit left its
+/// SKILL.md unparsable. The skill stays listed — the catalog keeps its
+/// level-1 entry and names the file in an `invalid_yaml` diagnostic — but the
+/// turn answers with the load error, and no model is asked to follow the
+/// instructions the file held before the edit.
+#[tokio::test]
+async fn a_slash_skill_whose_hot_edit_broke_its_file_answers_the_load_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests, skills) = filer_skill_orchestrator(db, "filed");
+    let skill_dir = skills.path().join("filer");
+    let path = skill_dir.join("SKILL.md");
+
+    std::fs::write(&path, "---\nname: [oops\n---\n").unwrap();
+    assert!(orch.skill_catalog.reload_skill(&skill_dir).is_err());
+    assert!(
+        orch.skill_catalog.get_by_command("file").is_some(),
+        "the skill stays listed"
+    );
+    let error = orch
+        .skill_catalog
+        .diagnostics()
+        .into_iter()
+        .find(|d| d.code == skill_catalog::SkillDiagnosticCode::InvalidYaml)
+        .expect("an invalid_yaml diagnostic");
+    assert_eq!(error.path, path.display().to_string());
+
+    let refused = orch
+        .handle_message(HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "/file this bug",
+            Principal::User {
+                global_id: "user1".to_string(),
+            },
+            Scope::Global,
+            "user1:cli",
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.starts_with("Failed to load skill 'Filer': "),
+        "{refused}"
+    );
+    assert!(
+        refused.contains(&error.path) && refused.contains(&error.message),
+        "{refused} / {error:?}"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "no model was asked to run the skill"
     );
 }
 

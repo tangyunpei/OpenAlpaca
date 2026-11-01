@@ -12,7 +12,7 @@ mod stdio;
 mod http;
 
 pub use http::StreamableHttpTransport;
-pub use stdio::StdioTransport;
+pub use stdio::{ExitObserver, StdioTransport};
 
 /// Abstraction over how bytes reach an MCP server.
 ///
@@ -133,3 +133,7 @@ pub mod test_utils {
         }
     }
 }
+
+// The streamable-HTTP client against loopback stub servers (N-MCP-2).
+#[cfg(test)]
+mod http_tests;

@@ -536,3 +536,232 @@ fn the_store_directories_are_invisible_to_the_scan() {
         );
     }
 }
+
+// ── the swap (N-PLUG-4) ──────────────────────────────────────────────────
+
+/// An installed `notion` at version `1.0.0`, plus a staged replacement.
+fn installed_and_staged(plugins: &Path, sources: &Path) -> Staged {
+    let first = source(sources, "notion", "notion");
+    stage_blocking(&first, plugins, "notion", CopyBudget::default())
+        .expect("stage")
+        .commit(&plugins.join("notion"))
+        .expect("commit");
+    let next = sources.join("next");
+    std::fs::create_dir_all(&next).unwrap();
+    std::fs::write(next.join("plugin.toml"), "version two").unwrap();
+    stage_blocking(&next, plugins, "notion", CopyBudget::default()).expect("stage")
+}
+
+fn trash_entries(plugins: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(plugins.join(TRASH_DIR))
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default()
+}
+
+/// A replace that commits moves the incumbent to the trash, puts the staged
+/// tree in its name and leaves no marker.
+#[test]
+fn a_replace_that_commits_trashes_the_incumbent_and_drops_its_marker() {
+    let (_tmp, plugins, sources) = roots();
+    let staged = installed_and_staged(&plugins, &sources);
+
+    replace(&plugins, "notion", staged).expect("replace");
+
+    assert_eq!(
+        std::fs::read_to_string(plugins.join("notion/plugin.toml")).unwrap(),
+        "version two"
+    );
+    let trashed = trash_entries(&plugins);
+    assert_eq!(trashed.len(), 1);
+    assert!(
+        trashed[0].join("lib/helper.js").is_file(),
+        "kept, never deleted"
+    );
+    assert!(!swap_marker(&plugins, "notion").exists());
+}
+
+/// The commit step fails: the incumbent is renamed back before the error
+/// returns, and neither the marker nor the staged copy is left.
+#[test]
+fn a_replace_whose_commit_fails_puts_the_incumbent_back() {
+    let (_tmp, plugins, sources) = roots();
+    let staged = installed_and_staged(&plugins, &sources);
+    let mut marker_seen = false;
+
+    let error = replace_with(&plugins, "notion", staged, |staged, _dest| {
+        // The marker is on disk while the commit runs.
+        marker_seen = swap_marker(&plugins, "notion").is_file();
+        drop(staged);
+        Err(InstallError::Io("cannot move into place: refused".into()))
+    })
+    .unwrap_err();
+
+    assert!(marker_seen, "the swap is recorded before the commit");
+    assert_eq!(error.error.code(), "copy_failed");
+    assert!(error.incumbent_in_place, "and the failure says it is back");
+    assert!(
+        plugins.join("notion/lib/helper.js").is_file(),
+        "the incumbent is back"
+    );
+    assert!(trash_entries(&plugins).is_empty());
+    assert!(!swap_marker(&plugins, "notion").exists());
+    assert!(
+        std::fs::read_dir(plugins.join(STAGING_DIR))
+            .unwrap()
+            .next()
+            .is_none(),
+        "no staging copy and no marker"
+    );
+}
+
+/// Something took the name between the move and the commit: the incumbent
+/// cannot go back over it, so it stays in the trash, the error says where —
+/// and the marker goes, so no later start puts the tree back over whatever
+/// then frees the name (an uninstall of what took it).
+#[test]
+fn a_name_taken_during_the_swap_keeps_the_incumbent_and_drops_the_marker() {
+    let (_tmp, plugins, sources) = roots();
+    let staged = installed_and_staged(&plugins, &sources);
+
+    let failed = replace_with(&plugins, "notion", staged, |staged, dest| {
+        drop(staged);
+        // An out-of-process write lands a tree under the vacated name.
+        std::fs::create_dir_all(dest).unwrap();
+        std::fs::write(dest.join("plugin.toml"), "by hand").unwrap();
+        Err(InstallError::Io("cannot move into place: taken".into()))
+    })
+    .unwrap_err();
+
+    assert!(!failed.incumbent_in_place);
+    let trashed = trash_entries(&plugins);
+    assert_eq!(trashed.len(), 1);
+    assert!(
+        trashed[0].join("lib/helper.js").is_file(),
+        "kept, never deleted"
+    );
+    assert!(
+        failed
+            .error
+            .to_string()
+            .contains(&trashed[0].display().to_string()),
+        "the error says where the tree was kept: {}",
+        failed.error
+    );
+    assert_eq!(
+        std::fs::read_to_string(plugins.join("notion/plugin.toml")).unwrap(),
+        "by hand"
+    );
+    assert!(
+        !swap_marker(&plugins, "notion").exists(),
+        "no marker is left to resurrect the tree later"
+    );
+}
+
+/// The uninstall and the orphan row's removal drop a marker an interrupted
+/// update left, and only that: the trashed tree stays where it is.
+#[test]
+fn dropping_a_swap_marker_moves_nothing() {
+    let (_tmp, plugins, _sources) = roots();
+    let trashed = plugins
+        .join(TRASH_DIR)
+        .join("notion-20261017T000000.000000000Z");
+    std::fs::create_dir_all(&trashed).unwrap();
+    std::fs::create_dir_all(plugins.join(STAGING_DIR)).unwrap();
+    std::fs::write(
+        swap_marker(&plugins, "notion"),
+        ".trash/notion-20261017T000000.000000000Z\n",
+    )
+    .unwrap();
+
+    drop_swap_marker(&plugins, "notion");
+    drop_swap_marker(&plugins, "absent");
+
+    assert!(!swap_marker(&plugins, "notion").exists());
+    assert!(trashed.is_dir(), "the tree stays in the trash");
+    assert!(swap_markers(&plugins).is_empty());
+}
+
+/// A marker whose commit landed — the name is taken — moves nothing: the
+/// old tree stays in the trash and the new one in place. Recovery never drags
+/// an old tree back over a finished update.
+#[test]
+fn recovery_never_moves_the_old_tree_back_over_a_landed_commit() {
+    let (_tmp, plugins, sources) = roots();
+    let staged = installed_and_staged(&plugins, &sources);
+    replace(&plugins, "notion", staged).expect("replace");
+    let trashed = trash_entries(&plugins).remove(0);
+    // The crash came after the commit and before the marker was removed.
+    write_marker(
+        &swap_marker(&plugins, "notion"),
+        &Path::new(TRASH_DIR).join(trashed.file_name().unwrap()),
+    )
+    .unwrap();
+
+    assert_eq!(swap_markers(&plugins), vec!["notion".to_string()]);
+    assert_eq!(
+        recover_swap(&plugins, "notion").unwrap(),
+        SwapRecovery::Settled
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(plugins.join("notion/plugin.toml")).unwrap(),
+        "version two"
+    );
+    assert!(
+        trashed.join("lib/helper.js").is_file(),
+        "the old tree stays kept"
+    );
+    assert!(!swap_marker(&plugins, "notion").exists());
+}
+
+/// A marker that names anything but a directory inside `.trash/` moves
+/// nothing and is left for a person to read.
+#[test]
+fn a_marker_that_leaves_the_trash_is_left_alone() {
+    let (_tmp, plugins, _sources) = roots();
+    std::fs::create_dir_all(plugins.join(STAGING_DIR)).unwrap();
+    for line in ["../elsewhere", "/abs/path", ".trash/../../x", "notion-2026"] {
+        std::fs::write(swap_marker(&plugins, "notion"), format!("{line}\n")).unwrap();
+        assert!(
+            matches!(
+                recover_swap(&plugins, "notion").unwrap(),
+                SwapRecovery::Unreadable { .. }
+            ),
+            "{line}"
+        );
+        assert!(
+            swap_marker(&plugins, "notion").is_file(),
+            "{line}: left in place"
+        );
+    }
+    assert!(!plugins.join("notion").exists(), "and nothing moved");
+}
+
+/// The boot sweep takes an earlier process's staging copies only — never
+/// this process's, never a marker, never a name that is not a staging copy.
+#[test]
+fn the_staging_sweep_takes_only_an_earlier_processs_copies() {
+    let (_tmp, plugins, _sources) = roots();
+    let staging = plugins.join(STAGING_DIR);
+    let stamp = "20261017T120000.123456789Z";
+    let theirs = staging.join(format!("notion.1.{stamp}"));
+    let dotted = staging.join(format!("my.plugin.1.{stamp}"));
+    let ours = staging.join(format!("notion.{}.{stamp}", std::process::id()));
+    let stranger = staging.join("notes-by-hand");
+    for dir in [&theirs, &dotted, &ours, &stranger] {
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+    }
+    std::fs::write(swap_marker(&plugins, "notion"), ".trash/notion-x\n").unwrap();
+
+    assert_eq!(sweep_stale_staging(&plugins), 2);
+
+    assert!(
+        !theirs.exists() && !dotted.exists(),
+        "an earlier process's copies go"
+    );
+    assert!(ours.exists(), "a copy this process is making stays");
+    assert!(stranger.exists(), "a name that is not a staging copy stays");
+    assert!(swap_marker(&plugins, "notion").is_file(), "a marker stays");
+    assert_eq!(staging_pid(&format!("notion.42.{stamp}")), Some(42));
+    assert_eq!(staging_pid("notion.42"), None);
+}

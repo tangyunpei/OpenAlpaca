@@ -41,18 +41,16 @@ pub fn validate_skill_output(
                     }
                 }
             }
-            "json" => {
-                if serde_json::from_str::<serde_json::Value>(output).is_err() {
-                    // Try to extract JSON from markdown code blocks
-                    if let Some(json_str) = extract_json_from_output(output) {
-                        serde_json::from_str::<serde_json::Value>(&json_str)
-                            .map_err(|e| OutputValidationError::InvalidJson(e.to_string()))?;
-                        return Ok(json_str);
-                    }
-                    return Err(OutputValidationError::InvalidJson(
-                        "Output is not valid JSON".to_string(),
-                    ));
+            "json" if serde_json::from_str::<serde_json::Value>(output).is_err() => {
+                // Try to extract JSON from markdown code blocks
+                if let Some(json_str) = extract_json_from_output(output) {
+                    serde_json::from_str::<serde_json::Value>(&json_str)
+                        .map_err(|e| OutputValidationError::InvalidJson(e.to_string()))?;
+                    return Ok(json_str);
                 }
+                return Err(OutputValidationError::InvalidJson(
+                    "Output is not valid JSON".to_string(),
+                ));
             }
             _ => {} // "text", "patchset", or unknown — no validation
         }

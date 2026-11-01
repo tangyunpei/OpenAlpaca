@@ -15,13 +15,16 @@ pub mod transport;
 mod client;
 mod lifecycle;
 
-pub use client::{McpClient, McpClientConfig, NotifyingHandler, ServerChange};
+pub use client::{
+    ConnectionEvent, ConnectionEventHandler, McpClient, McpClientConfig, NotifyingHandler,
+    ServerChange,
+};
 pub use error::{ErrorCategory, McpError};
-pub use lifecycle::ConnectionSnapshot;
-pub use transport::{HttpAuth, StdioTransport, Transport, TransportKind};
+pub use lifecycle::{ConnectionSnapshot, ProtocolMode};
+pub use transport::{ExitObserver, HttpAuth, StdioTransport, Transport, TransportKind};
 
 // Re-exports from rmcp — data types pass through unchanged.
 pub use rmcp::model::{
-    CallToolResult, Content, Implementation, Prompt, PromptMessage, ProtocolVersion, RawContent,
-    Resource, ResourceContents, Tool, ToolAnnotations,
+    CallToolResult, ContentBlock, Implementation, Prompt, PromptMessage, ProtocolVersion, Resource,
+    ResourceContents, Tool, ToolAnnotations,
 };

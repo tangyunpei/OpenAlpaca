@@ -19,6 +19,14 @@ fn test_find_mapping_unknown() {
     assert!(find_mapping("unknown.key").is_none());
 }
 
+/// N-SKILL-1: the skill catalog's budget sits beside the other prompt budgets.
+#[test]
+fn test_find_mapping_skills_catalog_budget() {
+    let m = find_mapping("daemon.orchestrator.skills_catalog_budget").unwrap();
+    assert_eq!(m.section, &["orchestrator", "prompt_budgets"]);
+    assert_eq!(m.field, "skills_catalog_budget");
+}
+
 #[test]
 fn test_string_to_toml_value_int() {
     assert_eq!(string_to_toml_value("42"), toml::Value::Integer(42));

@@ -70,6 +70,8 @@ A `SKILL.md` file has two parts:
 1. **YAML frontmatter** between `---` delimiters
 2. **Markdown body** with `## Section` headings
 
+The closing `---` is a line of its own (trailing spaces allowed): a `----` or `---x` line is part of the frontmatter, not its end. A byte-order mark before the opening `---` is ignored, and CRLF line ends read as LF.
+
 ```markdown
 ---
 name: My Skill
@@ -126,7 +128,7 @@ Controls how the skill is triggered.
 | `invoke.cron` | `Option<String>` | `None` | ENFORCED | Cron expression (6/7-field, seconds first — e.g. `"0 0 9 * * *"` for 09:00 daily). The daemon registers a wake-scheduler job (`skill:<id>`) at boot and re-syncs it on skill hot-reload; each fire injects the skill's slash command (or `/<skill-id>` when no slash command is declared) as a fresh turn on the local user's `scheduled` lane. Invalid expressions are logged and skipped. Any skill with a cron expression is scheduled, regardless of `invoke.mode`. Gated globally by `[orchestrator.routing] scheduled_skills_enabled` in `daemon.toml` (default `true`). See "Scheduled runs" below. |
 | `invoke.max_depth` | `usize` | `2` | PARSED | Intended maximum skill nesting depth. Currently parsed only — the nested-invocation executor hardcodes a maximum depth of 3 (see Section 8). |
 
-Slash-command conflicts between skills (two skills claiming the same command) are detected at scan time; the later-loaded skill wins and a warning is logged.
+Slash-command conflicts between skills (two skills claiming the same command) are detected at scan time; the later-loaded skill wins, a warning is logged, and a `slash_conflict` diagnostic names both (see *Catalog Diagnostics*).
 
 **Scheduled runs.** A cron fire is a turn nobody is watching, so it behaves differently from a typed slash command in three ways:
 
@@ -381,7 +383,7 @@ For a working example, see the shipped `create-skill` skill (`config/skills/crea
 
 The `command`, `trigger_patterns`, `tools_required`, and `auto_load` legacy-compat fields — and the `apply_legacy_compat()` bridge that mapped them onto `invoke.slash`, `routing.intent`, `tools.allow`, and `invoke.mode` — were deleted from `SkillFrontmatter` in a purge (no tracked skill under `config/skills/` used them, and plugin-contributed skills already build the new schema directly). Write skills against `invoke`, `routing`, and `tools`; the old field names are no longer recognized.
 
-One field remains harmless to leave in older frontmatter: `read_when` (`Vec<String>`) is not a `SkillFrontmatter` field, so it is parsed as ordinary YAML and then silently dropped — it has no effect.
+One field remains harmless to leave in older frontmatter: `read_when` (`Vec<String>`) is not a `SkillFrontmatter` field, so it has no effect. As a top-level key it is reported as an `unknown_key` warning (see *Catalog Diagnostics*); the skill still loads.
 
 ---
 
@@ -469,7 +471,7 @@ The skill's markdown body (instructions) is rendered as an XML-tagged block:
 </skill_context>
 ```
 
-The body is truncated to `context.budget_tokens * 4` characters — **16,000 characters (~4,000 tokens) by default**. An empty body produces no block at all.
+The body is truncated to `context.budget_tokens * 4` characters — **16,000 characters (~4,000 tokens) by default**. A truncated body ends with one line saying so, `[instructions cut at N of M characters]` (for example `[instructions cut at 16000 of 20000 characters]`), so the model knows it has only part of the instructions. An empty body produces no block at all.
 
 ### Injected Context Sources
 
@@ -689,7 +691,7 @@ Skill activity is published on the system event bus:
 | `SkillCompleted` / `SkillFailed` | Invocation ends (duration, output preview / error). |
 | `SkillContextInjected` | `context.sources` produced injected context (byte count). |
 | `ContextBudgetComputed` | Token budget breakdown for the invocation's prompt. |
-| `SkillCatalogUpdated` | A skill was hot-reloaded by the file watcher. |
+| `SkillCatalogUpdated` | A skill was hot-reloaded by the file watcher (`action: "reloaded"`), or an edit to it could not be loaded (`"reload_failed"`). |
 | `SkillDiscovered` | A `SKILL.md` was loaded into the catalog (startup scan or reload). |
 
 ### Execution Telemetry
@@ -698,15 +700,30 @@ Every slash, auto-routed and `invoke_skill` invocation is persisted to the `skil
 
 Rows older than 90 days are deleted by a daily cleanup.
 
-`GET /v1/skills` on the daemon lists the catalog; `GET /v1/skills/health` returns per-skill health metrics aggregated from this table.
+`GET /v1/skills` on the daemon lists the catalog; `GET /v1/skills/diagnostics` lists what its last scan found (next section); `GET /v1/skills/health` returns per-skill health metrics aggregated from this table.
 
-### Catalog Warnings
+### Catalog Diagnostics
 
-Scan-time problems — deprecated fields in use, `id`/directory mismatches, slash-command conflicts, dependency errors — are written to the daemon log as warnings (`SkillCatalog: …`). The catalog keeps no list of them, so the log is the only place to look.
+The catalog keeps what its last scan of the skills directory found — and what each hot reload of a skill found since — as diagnostics `{code, severity, path, skill_id, message}`, served by `GET /v1/skills/diagnostics`, printed by `openalpaca skills list` (and, for one skill, `openalpaca skills info <id>`), and counted in the app's Settings → Tools. Each is also written to the daemon log (`SkillCatalog: …`). `severity` is `error` for a `SKILL.md` that was not loaded — at start-up its skill is then missing; after a hot edit the skill stays listed but does not run until the file is fixed (see *Hot Reload*) — and `warning` for a problem in a file that was read anyway:
+
+| Code | Severity | When |
+|---|---|---|
+| `read_failed` | error | The file could not be read, or is not a regular file (a FIFO, a device, a directory named `SKILL.md`). A link you made to a file is followed. |
+| `too_large` | error | The file is over 256 KiB (`MAX_SKILL_MD_BYTES`); it is not read. |
+| `missing_frontmatter` | error | No `---` frontmatter, or one that is never closed. |
+| `invalid_yaml` | error | The frontmatter is not YAML the daemon can read. |
+| `missing_field` | error | `name` or `description` is missing or empty. |
+| `unknown_key` | warning | A top-level key the daemon does not read. The parse stays lenient, but a typo such as `require_capabilities` leaves the skill with no tools. |
+| `deprecated_field` | warning | `context.summarize.enabled` or `tools.defaults` is set; neither has an effect. |
+| `id_mismatch` | warning | The frontmatter's `id` is not the directory's name, which is the skill's id. |
+| `slash_conflict` | warning | Two skills claim one slash command; the diagnostic is on the skill that answers it, once per other claimant. A plugin skill's claim is not compared. |
+| `no_tools` | warning | The skill declares no tools at all — `requires_capabilities`, `tools.allow`, `scripts` and `depends_on` are all empty — so it runs with none. A skill that needs none may ignore it; a misspelt `requires_capabilities` shows here beside its `unknown_key`. |
+
+The `message` is the parser's own sentence (`SkillParseError`'s text). Dependency errors are not diagnostics: they stay warnings in the log (see §8, *Skill Composition*).
 
 ### Hot Reload
 
-The daemon's file watcher monitors the skills directory. When a file under `config/skills/<id>/` changes, the catalog entry for that skill is reloaded (`reload_skill`): renamed or deleted skills are removed, changed skills are re-parsed, and a `SkillCatalogUpdated` event is emitted. If the edited `SKILL.md` no longer parses, a warning is logged (`Skill reload failed for …`) and the previous catalog entry stays in place. A changed `invoke.cron` is re-synced with the scheduler on the same reload.
+The daemon's file watcher monitors the skills directory. When a file under `config/skills/<id>/` changes, the catalog entry for that skill is reloaded (`reload_skill`): renamed or deleted skills are removed, changed skills are re-parsed, and a `SkillCatalogUpdated` event is emitted (`action: "reloaded"`). If the edited `SKILL.md` can no longer be read or parsed, a warning is logged (`Skill reload failed for …`), the previous catalog entry stays in place with its warnings, the file's `error` diagnostic is added beside them, and the event is emitted with `action: "reload_failed"`, so the app's count is read again. The entry kept is the frontmatter only (level 1): the skill stays listed — in `GET /v1/skills` and `<available_skills>`, and its slash command still finds it — but it does not run, because every invocation reads the `SKILL.md` again (level 2) and answers with the same error until the file is fixed. That read takes the scan's guards (a regular file, a link you made still followed, at most 256 KiB), so a file swapped for a FIFO or grown past the limit is refused at once. A changed `invoke.cron` is re-synced with the scheduler on the same reload.
 
 ### Plugin-Backed Skills
 
@@ -1009,11 +1026,11 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 The chat-only tools (`start_workflow`, `task_status`, `memory_store`, `memory_update`, `memory_forget`, `steer_workflow`, `queue_followup`, the general `invoke_skill`) and the lead agent's coordination tools are created per request and are **not** in the shared registry, so a skill cannot list them.
 
 **Beyond built-ins**, the registry can also contain:
-- **MCP tools** from `config/mcp.toml`, named `<server>__<tool>`;
+- **MCP tools** from `config/mcp.toml`, named `<server>__<tool>` — the tool's part mapped into `A–Z`, `a–z`, `0–9`, `_` and `-` and the whole capped at 64 characters, so a server's `read.file` is `<server>__read_file` (the Daemon Manual, *MCP Servers*);
 - **Plugin tools**, named `<plugin>::<tool>`;
 - **Custom declarative tools** from `config/tools/*.toml` (HTTP- or command-backed).
 
-All three are addressable in `tools.allow` by their registered names. With `requires_capabilities`, list an MCP tool's own name, a plugin manifest's capability, or a custom tool's `provides_capabilities` entry.
+All three are addressable in `tools.allow` by their registered names. With `requires_capabilities`, list an MCP tool's registered name, a plugin manifest's capability, or a custom tool's `provides_capabilities` entry.
 
 ### Script Tools (`skill_script:*`)
 

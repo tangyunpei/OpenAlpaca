@@ -1,4 +1,5 @@
-//! Skill routes: `GET /v1/skills` (the catalog) and `GET /v1/skills/health`
+//! Skill routes: `GET /v1/skills` (the catalog), `GET /v1/skills/diagnostics`
+//! (what the catalog's last scan found, N-SKILL-2) and `GET /v1/skills/health`
 //! (the metrics).
 //!
 //! The catalog is GAP-18's remaining half — the listing that lets a client name
@@ -170,6 +171,33 @@ pub(crate) fn skills_json(
 
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows.into_iter().map(|(_, row)| row).collect()
+}
+
+/// `GET /v1/skills/diagnostics` — what the catalog's last scan found
+/// (N-SKILL-2): every SKILL.md it skipped (`severity: "error"`) and every
+/// problem of one it loaded (`"warning"`), as `{code, severity, path,
+/// skill_id, message}`. A bare array, sorted by path then code, like the
+/// catalog beside it — which stays a bare array of the loaded skills.
+pub async fn skill_diagnostics_handler(State(state): State<Arc<AppState>>) -> Response {
+    let body = diagnostics_json(&state.orchestrator.skill_catalog);
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// The diagnostics array, one object of five keys per diagnostic.
+pub(crate) fn diagnostics_json(catalog: &SkillCatalog) -> Vec<serde_json::Value> {
+    catalog
+        .diagnostics()
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "code": d.code.as_str(),
+                "severity": d.severity,
+                "path": d.path,
+                "skill_id": d.skill_id,
+                "message": d.message,
+            })
+        })
+        .collect()
 }
 
 /// `GET /v1/skills/health` — per-skill lifetime metrics keyed by `skill_id`.

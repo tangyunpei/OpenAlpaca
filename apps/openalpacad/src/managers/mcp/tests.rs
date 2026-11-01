@@ -8,7 +8,11 @@
 //! start, and liveness is `kill -0` on those pids.
 //!
 //! The server is a POSIX `sh` script rather than a Node or Python one so the
-//! suite has no dependency the workspace does not already have.
+//! suite needs nothing a developer's or CI's machine does not already have.
+//! Its one program beyond `sh` and its utilities is `perl` — in macOS's base
+//! system, and essential on Debian and Ubuntu — for the `setpgrp` that `sh`
+//! cannot do: each server leads its own process group, so a stub's teardown
+//! ends everything it started (`impl Drop for Stub`).
 
 #![cfg(unix)]
 
@@ -41,23 +45,79 @@ struct StubOpts {
     /// Sleep this many seconds before answering `initialize`, so a test can
     /// hold a handshake open across a `disable`.
     slow_start_secs: u64,
-    /// Never answer `tools/call`, which is how a call enters `reconnect()`.
+    /// Hold `tools/call` in [`HANG_SECS`] of sleep — past every request
+    /// timeout here.
     hang_call: bool,
+    /// Answer `tools/call` after this many seconds (N-MCP-3's drain test).
+    call_secs: u64,
+    /// Answer `tools/call` with the tool name the call carried instead of
+    /// `ok`, so a test can see which remote name reached the server (N-MCP-4).
+    echo_name: bool,
     /// Run the background notifier that turns a trigger file into
     /// `notifications/tools/list_changed`.
     notifier: bool,
+    /// Before serving, start a background child (`sleep 3600 &`), a
+    /// grandchild handed to init at once (`( sleep 3600 & )`) and a grandchild
+    /// that leaves the group (`setsid`), record their pids, and leave all three
+    /// running: none polices itself, so only a teardown that reaches the
+    /// server's process group ends the first two, and nothing short of a
+    /// descendant walk ends the third (P19, the walk (i): none). The server
+    /// does **not** lead a group of its own here — the group it is in is the
+    /// one the client's spawn made.
+    forks: bool,
+    /// How the server answers the `server/discover` probe (P19, DU-25 (m)).
+    probe: Probe,
+    /// Answer `initialize` with a JSON-RPC error: with the default probe, the
+    /// legacy fallback fails too (rmcp's `LegacyFallbackFailed`).
+    reject_initialize: bool,
+    /// Exit with this code once [`Stub::exit_now`] asks, between calls and
+    /// with no request in flight (N-MCP-1b). The read loop then runs in the
+    /// background, so [`Stub::kill_child`] no longer reaches what holds the
+    /// pipe; a test of a signal kills a stub without this option.
+    exit_on_trigger: Option<i32>,
+}
+
+/// How a stub answers the `server/discover` probe.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// A JSON-RPC `-32601 Method not found`, as a server that predates
+    /// `2026-07-28` answers it: rmcp falls back to `initialize` at once.
+    #[default]
+    RejectAsUnknown,
+    /// A `DiscoverResult` supporting `2026-07-28`: a modern server.
+    Answer,
+    /// A `DiscoverResult` supporting only `2099-01-01`, a version the client
+    /// does not know (rmcp's `NoCompatibleProtocolVersion`).
+    AnswerUnsupported,
+    /// A `tools/list` result where the discover result belongs (rmcp's
+    /// `ExpectedInitResult`).
+    AnswerOther,
+    /// Exit on reading the probe, closing the transport under it.
+    Close,
 }
 
 struct Stub {
     script: PathBuf,
     pid_log: PathBuf,
+    /// The pid of every sleep a hang started, oldest first.
+    sleep_log: PathBuf,
     tools_file: PathBuf,
     notify: PathBuf,
-    /// While this exists, `tools/list` never answers — the caller's
+    /// While this exists, `tools/list` hangs for [`HANG_SECS`] — the caller's
     /// `request_timeout` is what ends the fetch.
     hang_list: PathBuf,
     /// While this exists, `tools/list` answers a JSON-RPC error.
     break_list: PathBuf,
+    /// The pids `StubOpts::forks` started that stay in the group, two per
+    /// incarnation.
+    descendant_log: PathBuf,
+    /// The pid of each incarnation's `setsid` grandchild.
+    escapee_log: PathBuf,
+    /// Every line each incarnation read, as `<pid> <message>`.
+    sent_log: PathBuf,
+    /// While this exists, a server built with `StubOpts::exit_on_trigger`
+    /// exits with that code; the incarnation that exits removes it first.
+    exit_trigger: PathBuf,
 }
 
 impl Stub {
@@ -74,8 +134,68 @@ impl Stub {
         self.pids().len()
     }
 
+    /// The pids of the sleeps this server's hangs started, oldest first —
+    /// children of the server's shell, so a kill of the shell orphans them.
+    fn sleeps(&self) -> Vec<i32> {
+        std::fs::read_to_string(&self.sleep_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse::<i32>().ok())
+            .collect()
+    }
+
     fn any_alive(&self) -> bool {
         self.pids().iter().any(|pid| alive(*pid))
+    }
+
+    /// The pids `StubOpts::forks` started in the group, oldest first.
+    fn descendants(&self) -> Vec<i32> {
+        std::fs::read_to_string(&self.descendant_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse::<i32>().ok())
+            .collect()
+    }
+
+    /// The pids of the `setsid` grandchildren, oldest first.
+    fn escapees(&self) -> Vec<i32> {
+        std::fs::read_to_string(&self.escapee_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.trim().parse::<i32>().ok())
+            .collect()
+    }
+
+    /// Every message an incarnation read, in order, with the pid it ran as.
+    fn sent(&self) -> Vec<(i32, serde_json::Value)> {
+        std::fs::read_to_string(&self.sent_log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let (pid, message) = l.split_once(' ')?;
+                Some((pid.parse().ok()?, serde_json::from_str(message).ok()?))
+            })
+            .collect()
+    }
+
+    /// The messages the `n`th incarnation (0-based, in spawn order) read.
+    fn sent_by(&self, n: usize) -> Vec<serde_json::Value> {
+        let Some(pid) = self.pids().get(n).copied() else {
+            return Vec::new();
+        };
+        self.sent()
+            .into_iter()
+            .filter(|(p, _)| *p == pid)
+            .map(|(_, message)| message)
+            .collect()
+    }
+
+    /// The methods the `n`th incarnation read, in order.
+    fn methods_of(&self, n: usize) -> Vec<String> {
+        self.sent_by(n)
+            .iter()
+            .filter_map(|m| m["method"].as_str().map(str::to_string))
+            .collect()
     }
 
     /// Replace the tool set the next `tools/list` will answer with.
@@ -96,6 +216,12 @@ impl Stub {
         std::fs::write(&self.break_list, "").expect("write break trigger");
     }
 
+    /// Ask a server built with `StubOpts::exit_on_trigger` to exit with its
+    /// code, now — no request is sent for it.
+    fn exit_now(&self) {
+        std::fs::write(&self.exit_trigger, "").expect("write exit trigger");
+    }
+
     fn kill_child(&self) {
         for pid in self.pids() {
             if alive(pid) {
@@ -106,10 +232,49 @@ impl Stub {
     }
 }
 
+/// How long a hang sleeps: longer than any test here waits on one, short
+/// enough that a sleep a crashed run leaves behind does not outlive it by much.
+const HANG_SECS: u64 = 30;
+
+/// Every test's teardown, a failing one's too (locals drop on unwind): each
+/// incarnation leads its own process group (the script's first lines), so one
+/// SIGKILL per recorded pid ends the shell, a hang's sleep, the notifier and
+/// anything else in flight — whether or not the supervisor killed the shell
+/// first. A group outlives its leader while any member lives, and an empty one
+/// answers ESRCH.
+impl Drop for Stub {
+    fn drop(&mut self) {
+        for pgid in self.pids() {
+            // Never 0 or 1: `kill(0)` is this test's own group, `kill(-1)`
+            // every process this user owns.
+            if pgid > 1 {
+                // SAFETY: `kill` only sends a signal, to the group whose
+                // leader's pid the stub's own shell wrote down.
+                unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            }
+        }
+    }
+}
+
 fn alive(pid: i32) -> bool {
     // SAFETY: `kill(pid, 0)` performs no signal delivery; it only reports
     // whether the pid exists and is signallable.
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// A process a stub started, sent SIGKILL when this guard drops — so a test
+/// that fails before the code under test (or the stub's own teardown) killed
+/// it leaves no orphan behind. The shape of core's `test_util::KillOnFail`.
+struct KillOnFail(i32);
+
+impl Drop for KillOnFail {
+    fn drop(&mut self) {
+        if self.0 > 1 {
+            // SAFETY: `kill` only sends a signal, to a pid the stub this test
+            // owns wrote down; one already gone answers ESRCH.
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+        }
+    }
 }
 
 fn tools_json(names: &[&str]) -> String {
@@ -124,17 +289,26 @@ fn tools_json(names: &[&str]) -> String {
     format!("[{}]", entries.join(","))
 }
 
-/// Write a stdio MCP server: a `sh` loop that answers `initialize`,
-/// `tools/list`, `tools/call` and `ping`, and records every spawn.
+/// Write a stdio MCP server: a `sh` loop that rejects the `server/discover`
+/// probe as an unknown method, as a server that predates `2026-07-28` does —
+/// so the client falls back to `initialize` at once rather than after rmcp's
+/// 10 s discover timeout — answers `initialize`, `tools/list`, `tools/call` and
+/// `ping`, and records every spawn.
 fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     use std::os::unix::fs::PermissionsExt;
 
     let script = dir.join(format!("{tag}-server.sh"));
     let pid_log = dir.join(format!("{tag}-pids.log"));
+    let sleep_log = dir.join(format!("{tag}-sleeps.log"));
     let tools_file = dir.join(format!("{tag}-tools.json"));
     let notify = dir.join(format!("{tag}-notify"));
     let hang_list = dir.join(format!("{tag}-hang-list"));
     let break_list = dir.join(format!("{tag}-break-list"));
+    let descendant_log = dir.join(format!("{tag}-descendants.log"));
+    let escapee_log = dir.join(format!("{tag}-escapees.log"));
+    let sent_log = dir.join(format!("{tag}-sent.log"));
+    let exit_trigger = dir.join(format!("{tag}-exit"));
+    let listen_id = dir.join(format!("{tag}-listen-id"));
 
     std::fs::write(&pid_log, "").expect("create pid log");
     std::fs::write(&tools_file, tools_json(&["echo"])).expect("create tools file");
@@ -144,7 +318,33 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     } else {
         String::new()
     };
-    let hang_call = if opts.hang_call { "sleep 3600\n" } else { "" };
+    let echo_name = if opts.echo_name {
+        "text=`printf '%s' \"$line\" | sed -n 's/.*\"name\":\"\\([^\"]*\\)\".*/\\1/p'`\n"
+    } else {
+        ""
+    };
+    let hang_call = if opts.hang_call {
+        "hang\n".to_string()
+    } else if opts.call_secs > 0 {
+        format!("sleep {}\n", opts.call_secs)
+    } else {
+        String::new()
+    };
+    // A `2026-07-28` server announces a change only on the
+    // `subscriptions/listen` stream the client opened, tagged with that
+    // request's id (P19b) — with none open it announces nothing; a legacy
+    // server sends the bare notification.
+    let announce = if opts.probe == Probe::Answer {
+        format!(
+            r#"if [ -f '{listen_id}' ]; then
+        printf '{{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{{"_meta":{{"io.modelcontextprotocol/subscriptionId":%s}}}}}}\n' "`cat '{listen_id}'`"
+      fi"#,
+            listen_id = listen_id.display()
+        )
+    } else {
+        r#"printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}'"#
+            .to_string()
+    };
     // The notifier is a child of this shell, and a SIGKILL of the shell will
     // not reach it — so it polls its parent and exits with it. Without that a
     // torn-down server would leave a stray process behind.
@@ -155,7 +355,7 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
   while kill -0 "$PARENT" 2>/dev/null; do
     if [ -f '{notify}' ]; then
       rm -f '{notify}'
-      printf '%s\n' '{{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}}'
+      {announce}
     fi
     sleep 0.05
   done
@@ -167,18 +367,108 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
         String::new()
     };
 
+    let forks = if opts.forks {
+        format!(
+            r#"sleep 3600 &
+echo "$!" >> '{log}'
+( sleep 3600 & echo "$!" >> '{log}' )
+perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!\n"; exec "sleep", "3600" or die "exec: $!\n"' &
+echo "$!" >> '{escapees}'
+"#,
+            log = descendant_log.display(),
+            escapees = escapee_log.display(),
+        )
+    } else {
+        String::new()
+    };
+    // Every other stub leads a process group of its own, so its teardown
+    // (`impl Drop for Stub`) reaches what the shell starts whatever the client
+    // did; the forking fixture does not, so the group its descendants share is
+    // the one the client's spawn made (`transport/stdio.rs`).
+    let grouped = if opts.forks {
+        ""
+    } else {
+        r#"if [ "$1" != --grouped ]; then
+  exec perl -e 'setpgrp(0, 0) or die "setpgrp: $!\n"; exec @ARGV or die "exec: $!\n"' -- /bin/sh "$0" --grouped
+fi
+"#
+    };
+
+    // The discover result a modern server answers with, as rmcp 3.7.0
+    // serializes `DiscoverResult::new(..).with_server_info(..)`.
+    let discover_result = |versions: &str| {
+        format!(
+            r#"{{"resultType":"complete","supportedVersions":[{versions}],"capabilities":{{"tools":{{"listChanged":true}}}},"ttlMs":0,"cacheScope":"private","_meta":{{"io.modelcontextprotocol/serverInfo":{{"name":"stub","version":"0.0.1"}}}}}}"#
+        )
+    };
+    let discover = match opts.probe {
+        Probe::RejectAsUnknown => r#"printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"Method not found"}}\n' "$id""#.to_string(),
+        Probe::Answer => format!(
+            r#"printf '{{"jsonrpc":"2.0","id":%s,"result":%s}}\n' "$id" '{}'"#,
+            discover_result(r#""2026-07-28""#)
+        ),
+        Probe::AnswerUnsupported => format!(
+            r#"printf '{{"jsonrpc":"2.0","id":%s,"result":%s}}\n' "$id" '{}'"#,
+            discover_result(r#""2099-01-01""#)
+        ),
+        Probe::AnswerOther => r#"printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id""#.to_string(),
+        Probe::Close => "exit 0".to_string(),
+    };
+    let initialize = if opts.reject_initialize {
+        r#"printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32600,"message":"stub refuses initialize"}}\n' "$id""#.to_string()
+    } else {
+        r#"pv=`printf '%s' "$line" | sed -n 's/.*"protocolVersion":"\([^"]*\)".*/\1/p'`
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"%s","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"stub","version":"0.0.1"}}}\n' "$id" "$pv""#.to_string()
+    };
+    // A shell blocked in `read` cannot exit on its own between requests, so
+    // with `exit_on_trigger` the read loop runs in the background on the
+    // client's pipe — saved on fd 3, since an asynchronous list's own stdin is
+    // `/dev/null` — and this shell, the process the client spawned, watches
+    // for the trigger, ends the loop and exits with the code.
+    let (serve_open, serve_close) = match opts.exit_on_trigger {
+        None => (String::new(), String::new()),
+        Some(code) => (
+            "exec 3<&0\n(\nexec 0<&3 3<&-\n".to_string(),
+            format!(
+                r#") &
+LOOP=$!
+exec 0</dev/null 3<&-
+while [ ! -f '{trigger}' ]; do
+  kill -0 "$LOOP" 2>/dev/null || exit 0
+  sleep 0.05
+done
+rm -f '{trigger}'
+kill "$LOOP"
+exit {code}
+"#,
+                trigger = exit_trigger.display()
+            ),
+        ),
+    };
+
     let body = format!(
         r#"#!/bin/sh
-echo "$$" >> '{pid_log}'
-{slow_start}{notifier}while IFS= read -r line; do
+# Lead a process group of its own (unless forking): only a group reaches what
+# the shell starts once the shell is killed. Both execs keep the pid, so `$$`
+# below is also the group's id.
+{grouped}echo "$$" >> '{pid_log}'
+hang() {{
+  sleep {HANG_SECS} &
+  echo "$!" >> '{sleep_log}'
+  wait "$!"
+}}
+{slow_start}{notifier}{forks}{serve_open}while IFS= read -r line; do
+  printf '%s %s\n' "$$" "$line" >> '{sent_log}'
   id=`printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'`
   case "$line" in
+    *'"method":"server/discover"'*)
+      {discover}
+      ;;
     *'"method":"initialize"'*)
-      pv=`printf '%s' "$line" | sed -n 's/.*"protocolVersion":"\([^"]*\)".*/\1/p'`
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"%s","capabilities":{{"tools":{{"listChanged":true}}}},"serverInfo":{{"name":"stub","version":"0.0.1"}}}}}}\n' "$id" "$pv"
+      {initialize}
       ;;
     *'"method":"tools/list"'*)
-      if [ -f '{hang_list}' ]; then sleep 3600; fi
+      if [ -f '{hang_list}' ]; then hang; fi
       if [ -f '{break_list}' ]; then
         printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32603,"message":"stub refuses to list"}}}}\n' "$id"
       else
@@ -186,18 +476,26 @@ echo "$$" >> '{pid_log}'
       fi
       ;;
     *'"method":"tools/call"'*)
-      {hang_call}printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"ok"}}],"isError":false}}}}\n' "$id"
+      text=ok
+      {echo_name}{hang_call}printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"%s"}}],"isError":false}}}}\n' "$id" "$text"
+      ;;
+    *'"method":"subscriptions/listen"'*)
+      printf '%s' "$id" > '{listen_id}'
+      printf '{{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{{"_meta":{{"io.modelcontextprotocol/subscriptionId":%s}},"notifications":{{"toolsListChanged":true}}}}}}\n' "$id"
       ;;
     *'"method":"ping"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
       ;;
   esac
 done
-"#,
+{serve_close}"#,
         pid_log = pid_log.display(),
+        sleep_log = sleep_log.display(),
         tools_file = tools_file.display(),
         hang_list = hang_list.display(),
         break_list = break_list.display(),
+        sent_log = sent_log.display(),
+        listen_id = listen_id.display(),
     );
 
     std::fs::write(&script, body).expect("write stub server");
@@ -207,10 +505,15 @@ done
     Stub {
         script,
         pid_log,
+        sleep_log,
         tools_file,
         notify,
         hang_list,
         break_list,
+        descendant_log,
+        escapee_log,
+        sent_log,
+        exit_trigger,
     }
 }
 
@@ -392,6 +695,67 @@ fn mcp(name: &str) -> ExtensionId {
     ExtensionId::mcp(name)
 }
 
+/// Wait until `client` has seen its transport close — after a test kills the
+/// child out of band — so the next call's pre-send check finds the death
+/// rather than sending into the closing transport (N-MCP-1).
+async fn transport_closed(client: &openalpaca_mcp::McpClient, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if client.is_transport_closed_for_tests().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The detail of `srv`'s row once it reads `failed/crashed`, waiting up to
+/// `timeout` for it (`Duration::ZERO` reads it once). `None` when it never
+/// does.
+async fn failed_detail(h: &Harness, timeout: Duration) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(ExtensionState::Failed {
+            reason: FailureReason::Crashed,
+            detail,
+            ..
+        }) = h.state("srv")
+        {
+            return Some(detail);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The `extension_state_changed` frames for `srv` on `events`, as
+/// `(state, generation)`, once `settle` has passed — so a second frame that
+/// should not be there has had the time to arrive.
+async fn state_events(
+    events: &mut tokio::sync::broadcast::Receiver<SystemEvent>,
+    settle: Duration,
+) -> Vec<(String, u64)> {
+    tokio::time::sleep(settle).await;
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let SystemEvent::ExtensionStateChanged {
+            extension,
+            state,
+            generation,
+            ..
+        } = event
+            && extension == mcp("srv")
+        {
+            seen.push((state, generation));
+        }
+    }
+    seen
+}
+
 // ============================================================================
 // The integration test the cell names first
 // ============================================================================
@@ -500,14 +864,136 @@ async fn a_disable_kills_the_child_refuses_both_arms_and_a_re_enable_restores_cl
 }
 
 // ============================================================================
+// Disabled means the child is gone, descendants included (ADR-030)
+// ============================================================================
+
+/// Kills every pid it is given when dropped, so a failed assertion leaves no
+/// `sleep 3600` behind.
+struct KillOnDrop(Vec<i32>);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            // SAFETY: a plain SIGKILL to a pid this test started.
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+    }
+}
+
+/// `ps -o pid,ppid,pgid,command` for `pids`, for the log.
+fn ps_tree(pids: &[i32]) -> String {
+    let list = pids
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let out = std::process::Command::new("ps")
+        .args(["-o", "pid,ppid,pgid,command", "-p", &list])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// **The forking server through the disable / re-enable path.** A stdio
+/// server that leaves a background child and a grandchild running — neither
+/// policing itself — loses both when it is disabled, and again after a
+/// re-enable and a second disable: the server leads its own process group and
+/// the group ends with the connection. The trees are printed before and after
+/// each disable for the gate's log (`--nocapture`).
+///
+/// A third descendant calls `setsid` and so leaves the group: no group signal
+/// reaches it, and the taken descendant walk is (i), none — so it survives,
+/// and the check names it in a warning (one of R45's recorded edges) while a
+/// guard kills it. Every pid that stayed in the group must be gone.
+///
+/// The stub exits on the EOF of its stdin, so this is rmcp's graceful close,
+/// in which it signals nothing; without `EndGroupWithLeader` the leader goes
+/// and both descendants survive it.
+#[tokio::test]
+async fn a_disable_ends_every_process_the_server_started_again_after_a_re_enable() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "forks",
+        StubOpts {
+            forks: true,
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    for round in 1..=2usize {
+        let recorded = || stub.descendants().len() == 2 * round;
+        assert!(
+            eventually(Duration::from_secs(5), recorded).await,
+            "round {round}: the server records its two descendants"
+        );
+        let leader = stub.pids()[round - 1];
+        let descendants = stub.descendants()[2 * (round - 1)..].to_vec();
+        let mut tree = descendants.clone();
+        tree.insert(0, leader);
+        let _reap = KillOnDrop(tree.clone());
+        let recorded_escapee = || stub.escapees().len() == round;
+        assert!(
+            eventually(Duration::from_secs(5), recorded_escapee).await,
+            "round {round}: the server records its setsid grandchild"
+        );
+        let escapee = stub.escapees()[round - 1];
+        let _escapee = KillOnDrop(vec![escapee]);
+
+        eprintln!("round {round}, before the disable:\n{}", ps_tree(&tree));
+        for pid in &tree {
+            assert!(alive(*pid), "round {round}: {pid} runs before the disable");
+            // SAFETY: `getpgid` only reads the process table.
+            let pgid = unsafe { libc::getpgid(*pid) };
+            assert_eq!(
+                pgid, leader,
+                "round {round}: {pid} is in the server's own group"
+            );
+        }
+
+        h.supervisor.disable(&mcp("srv")).await.expect("disable");
+        assert_eq!(h.state("srv"), Some(ExtensionState::Disabled));
+        let gone = eventually(Duration::from_secs(5), || tree.iter().all(|p| !alive(*p))).await;
+        eprintln!("round {round}, after the disable:\n{}", ps_tree(&tree));
+        assert!(
+            gone,
+            "round {round}: no process of the server's tree survives the disable"
+        );
+        if alive(escapee) {
+            eprintln!(
+                "warning: round {round}: pid {escapee} left the server's process group (setsid) \
+                 and survives the disable; no descendant walk is taken (P19, (i)):\n{}",
+                ps_tree(&[escapee])
+            );
+        }
+
+        if round == 1 {
+            h.supervisor.enable(&mcp("srv")).await.expect("enable");
+            assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+            assert_eq!(
+                stub.spawn_count(),
+                2,
+                "the re-enable starts exactly one new server"
+            );
+        }
+    }
+
+    h.supervisor.shutdown_all().await;
+}
+
+// ============================================================================
 // T4b, window 2 — the seal that closes the in-flight reconnect
 // ============================================================================
 
-/// **The race the seal exists for.** A hung call times out and enters
-/// `reconnect()`, which spawns a *fresh* child; the drain expires while that
-/// handshake is still in flight, so T4's `disconnect` finds the service lock
-/// free and `service == None`, seals, and returns. The handshake then completes
-/// — and must close the child it just spawned instead of installing it.
+/// **The race the seal exists for.** A call finds its child dead and
+/// reconnects before sending (N-MCP-1), which spawns a *fresh* child; the
+/// drain expires while that handshake is still in flight, so T4's
+/// `disconnect` finds the service lock free and `service == None`, seals, and
+/// returns. The handshake then completes — and must close the child it just
+/// spawned instead of installing it.
 ///
 /// Without the install-point check the disabled server would be **running**:
 /// the registry entry is gone, the supervisor never calls `disconnect` on that
@@ -521,14 +1007,15 @@ async fn a_disable_that_lands_mid_reconnect_seals_the_client_and_leaves_no_child
         StubOpts {
             // Slow enough that the reconnect's handshake outlives the drain.
             slow_start_secs: 2,
-            hang_call: true,
             ..StubOpts::default()
         },
     );
+    // The call's one deadline spans its pre-send reconnect, so it must outlast
+    // the slow handshake for that handshake to be in flight at the disable.
     h.write_config(&format!(
         r#"[defaults]
 connect_timeout_secs = 10
-request_timeout_secs = 1
+request_timeout_secs = 5
 max_reconnect_attempts = 3
 reconnect_backoff_ms = 20
 
@@ -546,9 +1033,14 @@ command = "{}"
     // The stale snapshot's handle — the one that must end up sealed.
     let client = h.client_of("srv__echo").expect("the entry holds a client");
 
-    // A call that hangs: it times out after `request_timeout`, and `Timeout` is
-    // retriable, so `call_tool` enters `reconnect()` — which spawns a second
-    // child that will not finish its handshake for two seconds.
+    // The child dies; the next call's pre-send check finds it dead and
+    // reconnects — spawning a second child that will not finish its handshake
+    // for two seconds.
+    stub.kill_child();
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client must see the child's exit"
+    );
     let registry = Arc::clone(&h.registry);
     let call = tokio::spawn(async move {
         registry
@@ -556,10 +1048,10 @@ command = "{}"
             .await
     });
 
-    // Let the call time out and the reconnect's handshake get under way.
+    // Let the pre-send reconnect's handshake get under way.
     assert!(
         eventually(Duration::from_secs(5), || stub.spawn_count() >= 2).await,
-        "the retriable timeout should have entered reconnect and respawned"
+        "the call should have reconnected before sending and respawned"
     );
 
     h.supervisor.disable(&mcp("srv")).await.expect("disable");
@@ -589,6 +1081,224 @@ command = "{}"
         spawns_after_disable,
         "a sealed client must not spawn"
     );
+}
+
+// ============================================================================
+// N-MCP-3 — a call runs on a cloned peer, not under the service lock
+// ============================================================================
+
+/// The drain still bounds a call that runs on a cloned peer: T3 counts the
+/// registry's `CallGuard`, not the service lock, so a disable waits for a call
+/// that finishes inside `drain_timeout_secs`, and the call's answer arrives.
+#[tokio::test]
+async fn a_disable_waits_within_the_drain_for_a_call_running_on_a_cloned_peer() {
+    let h = Harness::new(4);
+    let stub = stub_server(
+        h.path(),
+        "drained",
+        StubOpts {
+            call_secs: 1,
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    let registry = Arc::clone(&h.registry);
+    let call =
+        tokio::spawn(async move { registry.execute("srv__echo", &serde_json::json!({})).await });
+    assert!(
+        eventually(Duration::from_secs(2), || h.ledger().in_flight(&mcp("srv"))
+            > 0)
+        .await,
+        "the call is in flight"
+    );
+
+    let started = tokio::time::Instant::now();
+    let row = h.supervisor.disable(&mcp("srv")).await.expect("disable");
+    let took = started.elapsed();
+    let answer = call.await.expect("call task");
+    assert_eq!(
+        answer.as_deref(),
+        Ok("ok"),
+        "the drain waited for the call and its answer arrived"
+    );
+    assert!(
+        row.warnings.is_empty(),
+        "drained, nothing cut: {:?}",
+        row.warnings
+    );
+    assert!(took < Duration::from_secs(4), "the disable took {took:?}");
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.any_alive()).await,
+        "the child is gone"
+    );
+}
+
+/// Past the drain a hung call no longer holds the transport: T4's
+/// `disconnect` closes the service at once — no detached teardown, no
+/// `"teardown pending"` warning — the child is gone, and the cut call reads the
+/// deliberate close rather than waiting out its own `request_timeout`.
+#[tokio::test]
+async fn a_disable_after_the_drain_cuts_a_hung_call_at_once_and_detaches_nothing() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "cut",
+        StubOpts {
+            hang_call: true,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&format!(
+        r#"[defaults]
+connect_timeout_secs = 10
+request_timeout_secs = 10
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.srv]
+transport = "stdio"
+command = "{}"
+"#,
+        stub.script.display()
+    ));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    let registry = Arc::clone(&h.registry);
+    let call =
+        tokio::spawn(async move { registry.execute("srv__echo", &serde_json::json!({})).await });
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.sleeps().is_empty()).await,
+        "the call reached the server and hangs there"
+    );
+    let _hang = stub
+        .sleeps()
+        .into_iter()
+        .map(KillOnFail)
+        .collect::<Vec<_>>();
+
+    let started = tokio::time::Instant::now();
+    let row = h.supervisor.disable(&mcp("srv")).await.expect("disable");
+    let took = started.elapsed();
+    // The drain (1 s) plus rmcp's graceful stdio close — stdin closed, up to
+    // 3 s for the child to exit, then a kill (`rmcp-0.16.0`
+    // `src/transport/child_process.rs`, `MAX_WAIT_ON_DROP_SECS`); a server
+    // hung in a call never reads the EOF, so it takes the whole 3 s. The
+    // parent waited for the call's own 10 s deadline instead.
+    assert!(
+        took < Duration::from_secs(6),
+        "drain + close, not the call's 10 s deadline: took {took:?}"
+    );
+    assert!(
+        !row.warnings.iter().any(|w| w.contains("teardown pending")),
+        "nothing holds the transport, so nothing detaches: {:?}",
+        row.warnings
+    );
+    let cut = tokio::time::timeout(Duration::from_secs(3), call)
+        .await
+        .expect("the cut call ends with the close, not at its deadline")
+        .expect("call task")
+        .expect_err("a call the disable cut off fails");
+    assert!(
+        cut.contains("sealed by disable"),
+        "the deliberate close, not an unexpected one: {cut}"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.any_alive()).await,
+        "the child is gone"
+    );
+}
+
+// ============================================================================
+// N-MCP-4 — remote tool names in the providers' alphabet
+// ============================================================================
+
+/// A server listing `read.file` and then `read_file`: both map to
+/// `srv__read_file`; the first is kept — registered under the mapped name and
+/// called with its own raw name — and the second is not registered over it.
+#[tokio::test]
+async fn read_dot_file_beside_read_file_keeps_the_first_under_the_mapped_name_and_calls_it_raw() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "names",
+        StubOpts {
+            echo_name: true,
+            ..StubOpts::default()
+        },
+    );
+    stub.set_tools(&["read.file", "read_file"]);
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    assert!(
+        h.registry.get("srv__read.file").is_none(),
+        "no name outside [A-Za-z0-9_-] reaches the registry"
+    );
+    let answer = h
+        .registry
+        .execute("srv__read_file", &serde_json::json!({}))
+        .await
+        .expect("the mapped name serves");
+    assert_eq!(
+        answer, "read.file",
+        "the first listed tool, called by its raw name"
+    );
+    assert_eq!(
+        h.ledger().tool_names(&mcp("srv")),
+        vec!["srv__read_file".to_string()],
+        "one tool recorded for the two that collided"
+    );
+    h.supervisor.shutdown_all().await;
+}
+
+/// The same mapping on the §3.7 refresh: a server that adds `read.file` and
+/// `read_file` in one change gets one tool under the mapped name — the first
+/// listed, called by its raw name — and the ledger records exactly the names
+/// the registry holds.
+#[tokio::test]
+async fn a_refresh_maps_the_added_names_and_keeps_the_first_of_two_that_collide() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "refresh-names",
+        StubOpts {
+            notifier: true,
+            echo_name: true,
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+
+    stub.set_tools(&["echo", "read.file", "read_file"]);
+    stub.notify();
+    assert!(
+        wait_for_tools(&h, &["echo", "read_file"]).await,
+        "the refresh registers the mapped name once and no raw one"
+    );
+    let answer = h
+        .registry
+        .execute("srv__read_file", &serde_json::json!({}))
+        .await
+        .expect("the mapped name serves");
+    assert_eq!(
+        answer, "read.file",
+        "the first listed tool, called by its raw name"
+    );
+    let mut recorded = h.ledger().tool_names(&mcp("srv"));
+    recorded.sort();
+    assert_eq!(
+        recorded,
+        vec!["srv__echo".to_string(), "srv__read_file".to_string()],
+        "the ledger records the registry's names"
+    );
+    h.supervisor.shutdown_all().await;
 }
 
 // ============================================================================
@@ -903,17 +1613,20 @@ async fn mcp_supervisor_records_every_registered_tool() {
 
 /// **The crash sequence, stated rather than hidden (§3.6 item 1).**
 ///
-/// A stdio server's `reconnect()` **respawns the child**, and a successful
-/// handshake resets the attempt counter — so a child killed out of band while
-/// its command still runs is transparently recovered and the row correctly
-/// stays `Enabled`. Only after **four** consecutive `reconnect()` entries with
-/// no successful handshake does the client report `ReconnectExhausted`, and
-/// only that variant marks the row `failed/crashed`.
+/// A stdio server's exit is learned at once (N-MCP-1b, §13 Q8): the row reads
+/// `failed/crashed`, its detail the exit, while its tools stay published and
+/// the gate still admits a call. That call's pre-send reconnect **respawns the
+/// child** (N-MCP-1) and returns the row to `Enabled`, because the server *is*
+/// running again. Only a successful call resets the attempt counter, so after
+/// **four** consecutive calls whose pre-send reconnect found no working server
+/// the client reports `ReconnectExhausted`, and only that variant makes the
+/// failure the reaper's: tools unpublished, client sealed, Retry the way back.
 ///
-/// This is the opposite of Claude Code's stdio policy, and deliberately so
-/// (§13 Q8, not applied): the cost is that a crashed child can be respawned
-/// three times before anyone learns it crashed. The test is written to that
-/// sequence so nobody "fixes" it into a first-failure rule by accident.
+/// Recovery is the opposite of Claude Code's stdio policy, and deliberately so
+/// (§13 Q8, T6(a) taken as N-MCP-1's form): the cost is that a crashed child
+/// can be respawned three times before the row stops recovering. The test is
+/// written to that sequence so nobody "fixes" it into a first-failure rule by
+/// accident. (Before N-MCP-1b the row read `Enabled` until the fourth call.)
 #[tokio::test]
 async fn a_stdio_server_respawns_transparently_then_reports_crashed_after_four_failures() {
     let h = Harness::new(1);
@@ -944,21 +1657,49 @@ command = "{}"
     let generation = h.record("srv").expect("record").generation;
     assert_eq!(stub.spawn_count(), 1);
 
-    // (1) The recovery. The command still runs, so the next call respawns and
-    // succeeds — and the row stays `Enabled`, because the server *is* running.
+    // (1) The exit, then the recovery. The row reads the exit at once; the
+    // command still runs, so the next call respawns and succeeds — and the row
+    // reads `Enabled` again, because the server *is* running.
+    let client = h.client_of("srv__echo").expect("the entry holds a client");
     stub.kill_child();
+    let exited = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("the row reads the exit at once, got {:?}", h.state("srv")));
+    assert!(
+        exited.contains("SIGKILL"),
+        "the detail names the signal: {exited}"
+    );
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client must see the child's exit"
+    );
+    assert!(
+        h.registry.get("srv__echo").is_some(),
+        "an exit is not reaped"
+    );
     let recovered = h
         .registry
         .execute("srv__echo", &serde_json::json!({}))
         .await
-        .expect("a live client respawns its child and the call succeeds");
+        .expect("the gate admits the call and its reconnect respawns the child");
     assert_eq!(recovered, "ok");
     assert_eq!(stub.spawn_count(), 2, "the child was respawned");
-    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled), "still active");
+    assert_eq!(
+        h.state("srv"),
+        Some(ExtensionState::Enabled),
+        "active again"
+    );
 
     // (2) Now make the command un-spawnable and drive four calls.
     stub.kill_child();
     std::fs::remove_file(&stub.script).expect("delete the server script");
+    let exited = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| panic!("the row reads the exit at once, got {:?}", h.state("srv")));
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client must see the child's exit"
+    );
 
     for attempt in 1..=3 {
         let err = h
@@ -968,13 +1709,19 @@ command = "{}"
             .expect_err("the handshake cannot succeed");
         assert!(
             !err.contains("is not running"),
-            "attempt {attempt} must fail with its own handshake error, got: {err}"
+            "attempt {attempt}: the gate admits the call, which fails with its own handshake \
+             error, got: {err}"
         );
         assert_eq!(
-            h.state("srv"),
-            Some(ExtensionState::Enabled),
-            "the row is still active after {attempt} failed reconnect(s)"
+            failed_detail(&h, Duration::ZERO).await.as_deref(),
+            Some(exited.as_str()),
+            "the row still reads the exit after {attempt} failed reconnect(s)"
         );
+        assert!(
+            h.registry.get("srv__echo").is_some(),
+            "its tools are still published after {attempt} failed reconnect(s)"
+        );
+        assert!(reaper.try_recv().is_err(), "an exit queues no reap");
     }
 
     let fourth = h
@@ -997,6 +1744,11 @@ command = "{}"
         "the row now reads failed/crashed, got {:?}",
         h.state("srv")
     );
+    assert_ne!(
+        failed_detail(&h, Duration::ZERO).await.as_deref(),
+        Some(exited.as_str()),
+        "the detail is the exhausted reconnect's now, not the exit's"
+    );
 
     // The reaper is what unpublishes and seals.
     let queued = reaper.try_recv().expect("mark_failed queued a reap");
@@ -1017,7 +1769,11 @@ command = "{}"
             .contains("stopped unexpectedly"),
         "the S4 crash row, not a transport string"
     );
-    assert_eq!(stub.spawn_count(), spawns, "a failed server never respawns again");
+    assert_eq!(
+        stub.spawn_count(),
+        spawns,
+        "a reaped server never respawns again: only a row reading an exit is recovered by a call"
+    );
 
     // (3) Retry recovers, with a new generation. Rewriting the same script
     // under the same tag restores the command the declaration names.
@@ -1028,6 +1784,197 @@ command = "{}"
     assert!(stub2.any_alive(), "and a new child");
 
     h.supervisor.shutdown_all().await;
+}
+
+// ============================================================================
+// The ledger learns at the child's exit — N-MCP-1b (T6(a)'s sub-choice)
+// ============================================================================
+
+/// **An exit between calls reads `Failed` at once, naming its code** (§13 Q8,
+/// taken 2026-10-19). No call is in flight and none is made: the ledger learns
+/// from the child's exit itself, with one `extension_state_changed`. Nothing is
+/// respawned, and the server's tools stay registered and on the surface, so
+/// the next call can bring it back (the recovery test below).
+#[tokio::test]
+async fn a_stdio_server_that_exits_between_calls_reads_failed_at_once_naming_its_exit_code() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "exit-code",
+        StubOpts {
+            exit_on_trigger: Some(3),
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let generation = h.record("srv").expect("record").generation;
+    let mut events = h.bus.subscribe();
+
+    stub.exit_now();
+    let detail = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "the row reads failed once the process exits, got {:?}",
+                h.state("srv")
+            )
+        });
+    assert!(
+        detail.contains("exit status: 3"),
+        "the detail names the exit code: {detail}"
+    );
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        vec![("failed".to_string(), generation)],
+        "one announcement, at the load's generation"
+    );
+    assert_eq!(stub.spawn_count(), 1, "nothing was respawned");
+    assert!(
+        !stub.sent().iter().any(|(_, m)| m["method"] == "tools/call"),
+        "no call was made"
+    );
+    assert!(
+        h.registry.get("srv__echo").is_some(),
+        "its tools stay registered"
+    );
+    assert!(
+        h.registry
+            .extension_tool_defs()
+            .iter()
+            .any(|d| d.name == "srv__echo"),
+        "and on the surface"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A process ended by a signal reads `Failed` naming the signal.** SIGTERM,
+/// so the name read back is the one the test sent, not the SIGKILL the
+/// teardown of a group sends after its leader exits.
+#[tokio::test]
+async fn a_stdio_server_killed_by_a_signal_reads_failed_naming_the_signal() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "exit-signal", StubOpts::default());
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let generation = h.record("srv").expect("record").generation;
+    let mut events = h.bus.subscribe();
+
+    let pid = stub.pids()[0];
+    // SAFETY: a plain SIGTERM to the pid this test's stub wrote down.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let detail = failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "the row reads failed once the process is killed, got {:?}",
+                h.state("srv")
+            )
+        });
+    assert!(
+        detail.contains("SIGTERM"),
+        "the detail names the signal: {detail}"
+    );
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        vec![("failed".to_string(), generation)],
+        "one announcement, at the load's generation"
+    );
+    assert_eq!(stub.spawn_count(), 1, "nothing was respawned");
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **The next call's one reconnect returns the row to `Enabled`** — T6(a)'s
+/// recovery, unchanged: the gate admits the call to a row reading an exit, its
+/// pre-send reconnect respawns the server, and the row reads `Enabled` at the
+/// same generation, announced once, by the time the call returns.
+#[tokio::test]
+async fn the_next_call_after_an_exit_reconnects_once_and_returns_the_row_to_enabled() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "exit-recover",
+        StubOpts {
+            exit_on_trigger: Some(3),
+            ..StubOpts::default()
+        },
+    );
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    let generation = h.record("srv").expect("record").generation;
+    let mut events = h.bus.subscribe();
+
+    stub.exit_now();
+    failed_detail(&h, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "the row reads failed once the process exits, got {:?}",
+                h.state("srv")
+            )
+        });
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        vec![("failed".to_string(), generation)]
+    );
+
+    let ok = h
+        .registry
+        .execute("srv__echo", &serde_json::json!({}))
+        .await
+        .expect("the gate admits the call and its reconnect respawns the server");
+    assert_eq!(ok, "ok");
+    assert_eq!(
+        h.state("srv"),
+        Some(ExtensionState::Enabled),
+        "the row is enabled again"
+    );
+    assert_eq!(
+        h.record("srv").expect("record").generation,
+        generation,
+        "the same load: a reconnect is not a new incarnation"
+    );
+    assert_eq!(stub.spawn_count(), 2, "respawned once");
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        vec![("enabled".to_string(), generation)],
+        "the return is announced once"
+    );
+
+    h.supervisor.shutdown_all().await;
+}
+
+/// **A close the daemon makes is not read as an exit.** Shutdown leaves the
+/// ledger alone (§3.5) and closes each live connection, so the child's exit
+/// that follows the close must not turn an `Enabled` row `Failed` — the client
+/// is sealed first, and a sealed client reports no exit.
+#[tokio::test]
+async fn a_close_the_daemon_makes_is_not_read_as_an_exit() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "exit-own-close", StubOpts::default());
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    let mut events = h.bus.subscribe();
+
+    h.supervisor.shutdown_all().await;
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.any_alive()).await,
+        "the shutdown ended the child"
+    );
+    assert_eq!(
+        state_events(&mut events, Duration::from_millis(300)).await,
+        Vec::<(String, u64)>::new(),
+        "no transition is announced"
+    );
+    assert_eq!(
+        h.state("srv"),
+        Some(ExtensionState::Enabled),
+        "the row is left alone"
+    );
 }
 
 // ============================================================================
@@ -1665,6 +2612,43 @@ async fn a_server_hanging_on_tools_list_does_not_hold_up_a_disable() {
     let row = disable.await.expect("task").expect("disable");
     assert_eq!(row.state, ExtensionState::Disabled, "and T1–T5 complete normally");
     assert!(eventually(Duration::from_secs(10), || !stub.any_alive()).await);
+}
+
+/// **The suite's own hygiene, not a supervisor guarantee.** A hang is a sleep
+/// in a child of the server's shell, and a disable kills only that shell
+/// (rmcp 0.16 signals its direct child; reaching the descendants is P19's
+/// process group, plan-rev3 §5.3), so the sleep is reparented to init and keeps
+/// the test binary's stderr open until it wakes — a piped `cargo test` waits on
+/// it. Whatever the supervisor leaves, a stub's teardown must reach.
+#[tokio::test]
+async fn a_hung_stubs_sleep_is_gone_once_the_stub_is_torn_down() {
+    let (h, stub) = notifying_harness("orphan").await;
+
+    stub.hang_next_list();
+    stub.notify();
+    assert!(
+        eventually(Duration::from_secs(5), || !stub.sleeps().is_empty()).await,
+        "the refresh should have reached the hanging `tools/list`"
+    );
+    let sleeper = stub.sleeps()[0];
+    let _orphan = KillOnFail(sleeper);
+    assert!(alive(sleeper), "the hang is under way");
+    // SAFETY: `getpgid` only reads the process group of a pid.
+    let group = unsafe { libc::getpgid(sleeper) };
+    assert_eq!(
+        group,
+        stub.pids()[0],
+        "the sleep is in the group its server's shell leads"
+    );
+
+    h.supervisor.disable(&mcp("srv")).await.expect("disable");
+    drop(stub);
+    drop(h);
+
+    assert!(
+        eventually(Duration::from_secs(5), || !alive(sleeper)).await,
+        "the stub's sleep {sleeper} outlived the stub's teardown"
+    );
 }
 
 /// **(7) Remove, then re-add across two notifications.** The step-4 diff base
@@ -2868,5 +3852,528 @@ async fn an_ordinary_url_is_still_written() {
             assert_eq!(url.as_str(), "https://example.com/mcp/@acme?team=acme&v=2")
         }
         other => panic!("expected an http block, got {other:?}"),
+    }
+}
+
+// ============================================================================
+// A streamable-HTTP server whose URL relies on a redirect (N-MCP-2)
+// ============================================================================
+
+/// The requests a loopback HTTP stub received: method, path and headers.
+type SeenRequests = Arc<StdMutex<Vec<(String, String, axum::http::HeaderMap)>>>;
+
+/// A loopback HTTP stub that records every request. With `redirect_to` it
+/// answers each one `307` to that URL; without, it is a minimal
+/// streamable-HTTP MCP server (JSON answers, no server-initiated stream).
+async fn http_stub(redirect_to: Option<String>) -> (String, SeenRequests) {
+    use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, header};
+    use axum::response::IntoResponse;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let origin = format!("http://{}", listener.local_addr().expect("local addr"));
+    let seen: SeenRequests = Arc::default();
+    let log = Arc::clone(&seen);
+    let app = axum::Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes| {
+            let log = Arc::clone(&log);
+            let redirect_to = redirect_to.clone();
+            async move {
+                log.lock()
+                    .unwrap()
+                    .push((method.to_string(), uri.path().to_string(), headers));
+                if let Some(to) = redirect_to {
+                    return (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, to)])
+                        .into_response();
+                }
+                if method != Method::POST {
+                    return StatusCode::METHOD_NOT_ALLOWED.into_response();
+                }
+                let message: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let result = match message.get("method").and_then(|m| m.as_str()) {
+                    Some("initialize") => serde_json::json!({
+                        "protocolVersion": message.pointer("/params/protocolVersion"),
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "stub", "version": "0.0.1" },
+                    }),
+                    Some("tools/list") => serde_json::json!({ "tools": [] }),
+                    _ => return StatusCode::ACCEPTED.into_response(),
+                };
+                let id = message.get("id").cloned().unwrap_or_default();
+                let body = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                (
+                    [
+                        (header::CONTENT_TYPE, "application/json"),
+                        (HeaderName::from_static("mcp-session-id"), "stub-session"),
+                    ],
+                    body.to_string(),
+                )
+                    .into_response()
+            }
+        },
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    (origin, seen)
+}
+
+/// **The row names the origin and the fix.** A server whose `url` redirects
+/// to a second port reads `Failed{ConfigInvalid}` with the target origin and
+/// the remedy in its detail; the first port saw one request (no reconnect
+/// ladder ran), and the second origin received nothing — neither the bearer
+/// token nor the extra header the declaration carries.
+#[tokio::test]
+async fn a_server_whose_url_redirects_to_another_origin_reads_config_invalid_naming_it() {
+    let h = Harness::new(1);
+    let (second, second_seen) = http_stub(None).await;
+    let (first, first_seen) = http_stub(Some(format!("{second}/mcp"))).await;
+    h.write_config(&format!(
+        r#"[defaults]
+connect_timeout_secs = 10
+request_timeout_secs = 3
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.remote]
+transport = "http"
+url = "{first}/mcp"
+auth = {{ bearer = "t-secret" }}
+extra_headers = {{ X-Tenant = "t-1" }}
+enabled = true
+"#
+    ));
+
+    h.supervisor.reconcile_all().await;
+
+    let carried: Vec<String> = second_seen
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|(method, path, headers)| {
+            ["authorization", "x-tenant"]
+                .into_iter()
+                .filter(|name| headers.contains_key(*name))
+                .map(move |name| format!("{method} {path} carried {name}"))
+        })
+        .collect();
+    assert_eq!(
+        carried,
+        Vec::<String>::new(),
+        "the second origin received a credential"
+    );
+    assert!(
+        second_seen.lock().unwrap().is_empty(),
+        "the refused hop was never made"
+    );
+    match h.state("remote") {
+        Some(ExtensionState::Failed {
+            reason: FailureReason::ConfigInvalid,
+            detail,
+            ..
+        }) => assert!(
+            detail.contains(&format!(
+                "server redirected to {second}; set `url` to the canonical endpoint"
+            )),
+            "the detail names the origin and the fix: {detail}"
+        ),
+        other => panic!("expected Failed{{ConfigInvalid}}, got {other:?}"),
+    }
+    assert_eq!(
+        first_seen.lock().unwrap().len(),
+        1,
+        "one request (the `server/discover` probe), never retried"
+    );
+}
+
+// ============================================================================
+// P19 — the lifecycle key, the negotiation failure, the era pin, the row
+// (DU-25 (m) (b))
+// ============================================================================
+
+/// `protocol` in the server block, the harness's defaults around it, and a
+/// connect timeout of `connect_secs`.
+fn lifecycle_declaration(stub: &Stub, protocol: Option<&str>, connect_secs: u64) -> String {
+    let protocol = protocol.map_or(String::new(), |p| format!("protocol = \"{p}\"\n"));
+    format!(
+        r#"[defaults]
+connect_timeout_secs = {connect_secs}
+request_timeout_secs = 3
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.srv]
+transport = "stdio"
+command = "{command}"
+{protocol}"#,
+        command = stub.script.display(),
+    )
+}
+
+/// The `initialize` an incarnation read, if it read one.
+fn initialize_of(stub: &Stub, n: usize) -> Option<serde_json::Value> {
+    stub.sent_by(n)
+        .into_iter()
+        .find(|m| m["method"] == "initialize")
+}
+
+/// The row `GET /v1/extensions` serves for `srv`.
+async fn srv_row(h: &Harness) -> serde_json::Value {
+    let record = h
+        .supervisor
+        .list()
+        .await
+        .into_iter()
+        .find(|r| r.id.name == "srv")
+        .expect("the srv row");
+    crate::routes::extensions::row_json(&record)
+}
+
+/// `protocol = "legacy"` (m-a): a modern server is sent the `initialize`
+/// handshake at `2025-11-25`, and never the probe.
+#[tokio::test]
+async fn protocol_legacy_sends_a_modern_server_initialize_at_2025_11_25_and_never_the_probe() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "pin-legacy",
+        StubOpts {
+            probe: Probe::Answer,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&lifecycle_declaration(&stub, Some("legacy"), 10));
+
+    h.supervisor.reconcile_all().await;
+
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let methods = stub.methods_of(0);
+    assert_eq!(
+        methods.first().map(String::as_str),
+        Some("initialize"),
+        "the legacy pin opens with initialize; the server saw {methods:?}"
+    );
+    assert!(
+        !methods.iter().any(|m| m == "server/discover"),
+        "the legacy pin never probes; the server saw {methods:?}"
+    );
+    let initialize = initialize_of(&stub, 0).expect("one initialize");
+    assert_eq!(initialize["params"]["protocolVersion"], "2025-11-25");
+}
+
+/// `protocol = "2026-07-28"` (m-a, the pin never downgrading): a legacy server
+/// fails with the new word, not `unreachable`, and is never sent `initialize`.
+#[tokio::test]
+async fn protocol_2026_07_28_fails_a_legacy_server_with_protocol_negotiation_failed() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "pin-modern", StubOpts::default());
+    h.write_config(&lifecycle_declaration(&stub, Some("2026-07-28"), 10));
+
+    h.supervisor.reconcile_all().await;
+
+    let row = srv_row(&h).await;
+    assert_eq!(row["state"], "failed", "row: {row}");
+    assert_eq!(row["reason"], "protocol_negotiation_failed", "row: {row}");
+    assert_eq!(row["actionable"], true, "the owner can act on it: {row}");
+    let detail = row["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(r#"protocol = "legacy""#),
+        "the detail names the fix: {detail}"
+    );
+    let methods = stub.methods_of(0);
+    assert!(
+        !methods.iter().any(|m| m == "initialize"),
+        "the 2026-07-28 pin never falls back; the server saw {methods:?}"
+    );
+}
+
+/// Bring a stub answering as `opts` says up under `auto`, and return its row.
+async fn negotiation_row(tag: &str, opts: StubOpts) -> serde_json::Value {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), tag, opts);
+    h.write_config(&lifecycle_declaration(&stub, None, 10));
+    h.supervisor.reconcile_all().await;
+    srv_row(&h).await
+}
+
+/// The new word, actionable, its detail naming `protocol = "legacy"` (m-b).
+fn assert_negotiation_failure(row: &serde_json::Value) {
+    assert_eq!(row["state"], "failed", "row: {row}");
+    assert_eq!(row["reason"], "protocol_negotiation_failed", "row: {row}");
+    assert_eq!(row["actionable"], true, "row: {row}");
+    let detail = row["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(r#"protocol = "legacy""#),
+        "the detail names the fix: {detail}"
+    );
+}
+
+/// rmcp's `NoCompatibleProtocolVersion`: the server supports no version the
+/// client offers.
+#[tokio::test]
+async fn no_compatible_protocol_version_reads_protocol_negotiation_failed() {
+    let row = negotiation_row(
+        "no-compatible",
+        StubOpts {
+            probe: Probe::AnswerUnsupported,
+            ..StubOpts::default()
+        },
+    )
+    .await;
+    assert_negotiation_failure(&row);
+}
+
+/// rmcp's `ExpectedInitResult`: the probe is answered with a result of
+/// another kind.
+#[tokio::test]
+async fn expected_init_result_reads_protocol_negotiation_failed() {
+    let row = negotiation_row(
+        "expected-init",
+        StubOpts {
+            probe: Probe::AnswerOther,
+            ..StubOpts::default()
+        },
+    )
+    .await;
+    assert_negotiation_failure(&row);
+}
+
+/// rmcp's `LegacyFallbackFailed`: the probe finds the server legacy and the
+/// `initialize` that follows fails.
+#[tokio::test]
+async fn legacy_fallback_failed_reads_protocol_negotiation_failed() {
+    let row = negotiation_row(
+        "fallback-failed",
+        StubOpts {
+            reject_initialize: true,
+            ..StubOpts::default()
+        },
+    )
+    .await;
+    assert_negotiation_failure(&row);
+}
+
+/// A transport that closes while the probe waits for its answer.
+#[tokio::test]
+async fn a_close_during_the_probe_reads_protocol_negotiation_failed() {
+    let row = negotiation_row(
+        "probe-close",
+        StubOpts {
+            probe: Probe::Close,
+            ..StubOpts::default()
+        },
+    )
+    .await;
+    assert_negotiation_failure(&row);
+}
+
+/// The era pin (m-c): a legacy server whose child is killed mid-session is
+/// respawned straight into `initialize`, the era its load negotiated — the
+/// pre-send reconnect does not probe it again (N-MCP-1's one reconnect).
+#[tokio::test]
+async fn a_server_killed_mid_session_is_respawned_into_the_era_its_load_negotiated() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "era-pin", StubOpts::default());
+    h.write_config(&lifecycle_declaration(&stub, None, 10));
+
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let load = stub.methods_of(0);
+    assert_eq!(
+        load.iter().take(2).map(String::as_str).collect::<Vec<_>>(),
+        ["server/discover", "initialize"],
+        "the load probed, found the server legacy and fell back"
+    );
+
+    let client = h.client_of("srv__echo").expect("the entry holds a client");
+    stub.kill_child();
+    assert!(
+        transport_closed(&client, Duration::from_secs(5)).await,
+        "the client must see the child's exit"
+    );
+    let ok = h
+        .registry
+        .execute("srv__echo", &serde_json::json!({}))
+        .await
+        .expect("the pre-send reconnect respawns the child");
+    assert_eq!(ok, "ok");
+    assert_eq!(stub.spawn_count(), 2, "one respawn");
+
+    let respawn = stub.methods_of(1);
+    assert_eq!(
+        respawn.first().map(String::as_str),
+        Some("initialize"),
+        "the respawn opens in the load's era; the server saw {respawn:?}"
+    );
+    assert!(
+        !respawn.iter().any(|m| m == "server/discover"),
+        "the respawn is not probed again; the server saw {respawn:?}"
+    );
+    let initialize = initialize_of(&stub, 1).expect("the respawn's initialize");
+    assert_eq!(initialize["params"]["protocolVersion"], "2025-11-25");
+}
+
+/// P19b: a `2026-07-28` server's tool-list change reaches the registry. Such a
+/// server announces a change only on the `subscriptions/listen` stream the
+/// client opened — the stub, like it, announces nothing with none open — and
+/// the supervisor's §3.7 refresh then registers what it added.
+#[tokio::test]
+async fn a_modern_servers_tool_list_change_reaches_the_registry_through_its_subscription() {
+    let h = Harness::new(1);
+    let stub = stub_server(
+        h.path(),
+        "modern-change",
+        StubOpts {
+            probe: Probe::Answer,
+            notifier: true,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&lifecycle_declaration(&stub, None, 30));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    assert_eq!(srv_row(&h).await["protocol_version"], "2026-07-28");
+
+    // The listen, then the acknowledgment's own `tools/list` (A1-12) beside
+    // the load's, before the server changes anything.
+    let lists = || {
+        stub.methods_of(0)
+            .iter()
+            .filter(|m| m.as_str() == "tools/list")
+            .count()
+    };
+    assert!(
+        eventually(Duration::from_secs(5), || {
+            stub.methods_of(0)
+                .iter()
+                .any(|m| m == "subscriptions/listen")
+                && lists() >= 2
+        })
+        .await,
+        "the client opens the subscription and refreshes on its acknowledgment; the server saw {:?}",
+        stub.methods_of(0)
+    );
+
+    stub.set_tools(&["echo", "added"]);
+    stub.notify();
+    assert!(
+        wait_for_tools(&h, &["echo", "added"]).await,
+        "the change announced on the subscription is refreshed into the registry"
+    );
+    h.supervisor.shutdown_all().await;
+}
+
+/// Everything this thread logs at WARN and above, for a test that asserts a
+/// warning: `#[tokio::test]` runs every task on the test's own thread, so a
+/// thread-local subscriber sees the supervisor's.
+///
+/// Install it only once the harness holds the home-store lock. While it is
+/// the one scoped dispatcher, tracing computes the interest of a callsite
+/// first hit afterwards from the hitting thread's default
+/// (tracing-core-0.1.36 `src/callsite.rs`, `Rebuilder::JustOne`), so another
+/// test's load, running on its own thread with no subscriber, would cache the
+/// warning's callsite as never interesting; under the lock no other test
+/// here reaches `load`, and installing it recomputes every callsite already
+/// hit from the dispatcher list, which holds it.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl LogBuf {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+    }
+}
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBuf;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Run `connect_secs` under `auto` against a modern stub and return the row
+/// and what was logged.
+async fn connect_under_auto(tag: &str, connect_secs: u64) -> (serde_json::Value, String) {
+    let h = Harness::new(1);
+    let logs = LogBuf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+
+    let stub = stub_server(
+        h.path(),
+        tag,
+        StubOpts {
+            probe: Probe::Answer,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&lifecycle_declaration(&stub, None, connect_secs));
+    h.supervisor.reconcile_all().await;
+    (srv_row(&h).await, logs.text())
+}
+
+/// (m-d): a connect timeout of 10 s or less under `auto` is warned about —
+/// never refused — and a modern server still connects; 11 s is not warned.
+#[tokio::test]
+async fn a_ten_second_connect_timeout_under_auto_warns_and_still_connects_a_modern_server() {
+    let (row, logs) = connect_under_auto("warn-ten", 10).await;
+    assert!(
+        logs.contains("connect_timeout_secs is 10 or less under protocol = \"auto\""),
+        "the warning is logged: {logs}"
+    );
+    assert_eq!(row["state"], "enabled", "a warning, never a refusal: {row}");
+    assert_eq!(row["protocol_version"], "2026-07-28", "row: {row}");
+
+    let (row, logs) = connect_under_auto("warn-eleven", 11).await;
+    assert_eq!(row["state"], "enabled", "row: {row}");
+    assert!(
+        !logs.contains("connect_timeout_secs is 10 or less"),
+        "11 s is not warned about: {logs}"
+    );
+}
+
+/// (m-g): the row carries the negotiated version and how long the connect and
+/// the first `tools/list` took, while the server is enabled — and `null` once
+/// it is not.
+#[tokio::test]
+async fn the_row_shows_the_negotiated_version_and_the_connect_and_list_durations() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.path(), "row-fields", StubOpts::default());
+    h.write_config(&lifecycle_declaration(&stub, None, 10));
+
+    h.supervisor.reconcile_all().await;
+
+    let row = srv_row(&h).await;
+    assert_eq!(row["state"], "enabled", "row: {row}");
+    assert_eq!(row["protocol_version"], "2025-11-25", "row: {row}");
+    assert!(
+        row["connect_ms"].is_u64(),
+        "connect_ms is a duration: {row}"
+    );
+    assert!(row["list_ms"].is_u64(), "list_ms is a duration: {row}");
+
+    h.supervisor.disable(&mcp("srv")).await.expect("disable");
+    let row = srv_row(&h).await;
+    assert_eq!(row["state"], "disabled", "row: {row}");
+    for field in ["protocol_version", "connect_ms", "list_ms"] {
+        assert!(
+            row.get(field).is_some_and(serde_json::Value::is_null),
+            "{field} is null when no connection is live: {row}"
+        );
     }
 }

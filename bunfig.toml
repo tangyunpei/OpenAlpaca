@@ -1,0 +1,8 @@
+# Bun reads this file for every install in the repository, from the root and
+# from apps/openalpaca-gui alike: `bun add` and `bun update` resolve to the
+# newest version published at least seven days ago and never to a younger one
+# (plan-rev3 DU-23's seven-day rule as a tool; DU-W6 (b), M44). A frozen
+# install of the committed bun.lock is unaffected.
+[install]
+minimumReleaseAge = 604800 # seven days, in seconds
+minimumReleaseAgeExcludes = []

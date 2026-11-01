@@ -89,6 +89,12 @@ pub struct TaskDispatcher {
     /// The orchestrator's post-turn jobs: a finished run's memory extraction
     /// runs on it, tracked and cancellable (design §6).
     background: Arc<crate::orchestrator::BackgroundJobs>,
+    /// The daemon's shutdown token (`AppState.cancel_token`), set once after
+    /// construction. A run's own token says only whether *that run* was
+    /// cancelled; this one says the process is going away, and a run that
+    /// ends once it is set starts no queued follow-up (Z4-03). Unset — a
+    /// dispatcher no daemon wired — nothing is sealed.
+    shutdown: std::sync::OnceLock<tokio_util::sync::CancellationToken>,
 }
 
 impl TaskDispatcher {
@@ -129,6 +135,7 @@ impl TaskDispatcher {
             user_document,
             memory_service,
             background,
+            shutdown: std::sync::OnceLock::new(),
         }
     }
 
@@ -137,6 +144,17 @@ impl TaskDispatcher {
     pub fn set_followup_runner(&self, runner: Arc<dyn crate::orchestrator::FollowupRunner>) {
         if let Ok(mut guard) = self.followup_runner.write() {
             *guard = Some(runner);
+        }
+    }
+
+    /// Set the daemon's shutdown token (post-construction, like the follow-up
+    /// runner). Once it is cancelled, a run's end claims no queued follow-up.
+    /// Set once: a second call is ignored.
+    pub fn set_shutdown_token(&self, token: tokio_util::sync::CancellationToken) {
+        if self.shutdown.set(token).is_err() {
+            tracing::warn!(
+                "The dispatcher's shutdown token was already set; the new one is ignored"
+            );
         }
     }
 

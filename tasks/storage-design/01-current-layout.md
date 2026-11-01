@@ -102,6 +102,10 @@ A chat turn, a session, a task row, or choosing a project in the app create noth
 ## 4. Outside both stores
 
 - The app's chosen project path, pins and pane widths: the WebView's local storage.
+- *Closed by N-STORE-1 (plan-rev3 §5.4, 2026-10-17): Open's copies now live under
+  `~/.openalpaca/state/cache/open/<file id>/` (swept at boot, removed with their rows by a
+  project's delete) and the CLI's editor buffers under `~/.openalpaca/state/editor/`; the next
+  bullet is the picture as it was read.*
 - OS temp: a copy made when an uploaded file is opened (`openalpaca-open/…`, never removed); CLI
   editor scratch files.
 - OS keychain entries for keys stored by reference.

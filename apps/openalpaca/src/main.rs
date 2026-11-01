@@ -13,6 +13,7 @@
 //! - chat: Chat with the Orchestrator
 //! - sessions: List the conversations a lane holds
 //! - store: Manage projects (list them, re-point a moved one, delete one's data)
+//! - skills: Show the skill catalog and the problems its last scan found (list, info)
 
 mod chat_stream;
 mod client;
@@ -78,6 +79,9 @@ enum Commands {
 
     /// Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt)
     Memory(commands::memory::MemoryArgs),
+
+    /// Show the skill catalog and the problems its last scan found (list, info)
+    Skills(commands::skills::SkillsArgs),
 }
 
 #[tokio::main]
@@ -99,5 +103,6 @@ async fn main() -> Result<()> {
         Commands::Store(args) => commands::store::run(args).await,
         Commands::Persona(args) => commands::persona::run(args).await,
         Commands::Memory(args) => commands::memory::run(args).await,
+        Commands::Skills(args) => commands::skills::run(args).await,
     }
 }

@@ -17,6 +17,56 @@ use super::helpers::acting_folder;
 /// started are killed (R45, `run_bounded`).
 const SHELL_TIMEOUT_SECS: u64 = 300;
 
+/// What the input sanitizer admits in a `shell_execute` command
+/// (`security::sanitizer`, `check_string_safety`: backticks, `$(`, `\n` and
+/// `\r` are refused, everything else passes) — said once, so the description
+/// and the `command` parameter cannot disagree (N-TOOL-1, Z1-05).
+const WHAT_A_COMMAND_MAY_HOLD: &str = "One command line: `;`, `&&`, `||`, pipes and \
+    redirections are allowed; command substitution (`$(…)` or backticks) and line breaks \
+    are refused.";
+
+/// `shell_execute`'s description, stating `timeout_secs` — the limit a call
+/// really runs under — or, with `None`, no figure at all.
+///
+/// The figure belongs to the loop that hands the definition to a model: its
+/// sandbox cuts a call at `max_tool_runtime_secs` ([`state_enforced_timeout`]).
+/// The registered definition states none, so no surface that shows it
+/// without a loop can state a wrong one.
+fn shell_execute_description(timeout_secs: Option<u64>) -> String {
+    let limit = match timeout_secs {
+        Some(1) => "A command still running after 1 second is stopped, with every process \
+            it started."
+            .to_string(),
+        Some(secs) => format!(
+            "A command still running after {secs} seconds is stopped, with every process it \
+             started."
+        ),
+        None => "A command still running at the calling agent's time limit is stopped, with \
+            every process it started."
+            .to_string(),
+    };
+    format!(
+        "Run a shell command and return its output. The command starts in the working folder \
+         — the project, or this conversation's scratch folder — and every command asks first; \
+         an approved command runs as you and can reach files outside that folder. \
+         {WHAT_A_COMMAND_MAY_HOLD} {limit} Output is truncated to 512KB. Use for system \
+         operations, package management, git commands, build tools, and any operations not \
+         covered by other tools."
+    )
+}
+
+/// N-TOOL-1 (Z1-05): state on `shell_execute`'s definition the limit a loop
+/// whose sandbox cuts a tool at `sandbox_secs` really enforces — the
+/// sandbox's cut, or the tool's own [`SHELL_TIMEOUT_SECS`] where that comes
+/// first. Every loop calls it with its policy (`run_agentic_loop_core`); the
+/// other definitions are left as they are.
+pub(crate) fn state_enforced_timeout(tools: &mut [ToolDefinition], sandbox_secs: u64) {
+    let secs = sandbox_secs.min(SHELL_TIMEOUT_SECS);
+    for definition in tools.iter_mut().filter(|d| d.name == "shell_execute") {
+        definition.description = shell_execute_description(Some(secs));
+    }
+}
+
 struct ShellExecuteTool;
 
 impl ShellExecuteTool {
@@ -34,7 +84,7 @@ impl ShellExecuteTool {
         let output = run_bounded(cmd, std::time::Duration::from_secs(SHELL_TIMEOUT_SECS))
             .await
             .map_err(|failure| match failure {
-                RunFailure::TimedOut => format!("Command timed out after {SHELL_TIMEOUT_SECS}s"),
+                RunFailure::TimedOut => timed_out(SHELL_TIMEOUT_SECS),
                 RunFailure::Spawn(e) | RunFailure::Io(e) => {
                     format!("Failed to execute command: {e}")
                 }
@@ -60,18 +110,39 @@ impl ShellExecuteTool {
             }
             Ok(result)
         } else {
-            Err(format!(
+            let code = output.status.code();
+            let mut failure = format!(
                 "Command failed (exit {}):\n{}{}",
-                output.status.code().unwrap_or(-1),
+                code.unwrap_or(-1),
                 stdout,
                 if stderr.is_empty() {
                     String::new()
                 } else {
                     format!("\nSTDERR:\n{}", stderr)
                 }
-            ))
+            );
+            // N-TOOL-4 (Z1-13): the shell's own word for "no such command"
+            // is exit 127 — sharper than the old "not found" anywhere in the
+            // output, which a failing grep could trip.
+            if code == Some(127) {
+                failure.push('\n');
+                failure.push_str(NO_SUCH_COMMAND_HINT);
+            }
+            Err(failure)
         }
     }
+}
+
+/// What a command the shell could not find is told (exit 127; N-TOOL-4).
+const NO_SUCH_COMMAND_HINT: &str =
+    "Hint: check that the command is installed, or give its full path.";
+
+/// The shell's own bound passed (N-TOOL-4): the limit, and what to do.
+fn timed_out(secs: u64) -> String {
+    format!(
+        "Command timed out after {secs}s\n{}",
+        crate::tools::platform::COMMAND_TIMED_OUT_HINT
+    )
 }
 
 #[async_trait]
@@ -118,21 +189,13 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
     RegisteredTool {
         definition: ToolDefinition {
             name: "shell_execute".to_string(),
-            description: "Execute a single shell command and return its output. The command \
-                starts in the working folder — the project, or this conversation's scratch \
-                folder — and every command asks first; an approved command runs as you and can \
-                reach files outside that folder. Subshells ($(), backticks) and embedded \
-                newlines are blocked for security; shell chaining (;, &&, ||) and pipes are \
-                allowed. Timeout: 300 seconds. Output is truncated to 512KB. Use for system \
-                operations, package management, git commands, build tools, and any operations \
-                not covered by other tools."
-                .to_string(),
+            description: shell_execute_description(None),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The shell command to execute (single command only, no chaining)"
+                        "description": format!("The shell command to run. {WHAT_A_COMMAND_MAY_HOLD}")
                     }
                 },
                 "required": ["command"]
@@ -234,7 +297,13 @@ mod tests {
             .unwrap_err();
         let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
         let _kill = KillOnFail(pid);
-        assert_eq!(err, "Tool 'shell_execute' timed out after 1s");
+        // N-TOOL-4: the sandbox, where the limit is enforced, tells a command
+        // it cut what to do — never to raise a `timeout` (N-TOOL-1).
+        assert_eq!(
+            err,
+            "Tool 'shell_execute' timed out after 1s\nHint: that is the most a command may run \
+             here; split the work into smaller commands that each finish sooner."
+        );
         assert!(
             wait_until_gone(pid, GONE_WITHIN).await,
             "the background sleep {pid} outlived the sandbox's timeout"
@@ -372,6 +441,72 @@ mod preview_tests {
         assert!(!marker.exists(), "a denied command never runs");
     }
 
+    // ── N-TOOL-1 (Z1-05): what the definition says about chaining ──
+
+    /// The description and the `command` parameter say the same thing about
+    /// chaining, and it is what the sanitizer admits: `;`, `&&`, `||`, pipes
+    /// and redirections pass, command substitution and line breaks are
+    /// refused. Neither text may forbid what the gate lets through.
+    #[test]
+    fn the_description_and_the_parameter_say_what_the_sanitizer_admits() {
+        use crate::security::sanitizer::InputSanitizer;
+
+        let definition = shell_execute_tool().definition;
+        let parameter = definition.parameters["properties"]["command"]["description"]
+            .as_str()
+            .expect("the command parameter is described")
+            .to_string();
+        for text in [&definition.description, &parameter] {
+            assert!(!text.contains("no chaining"), "forbids what passes: {text}");
+            assert!(
+                !text.contains("single command"),
+                "forbids what passes: {text}"
+            );
+            for named in [
+                "`;`",
+                "`&&`",
+                "`||`",
+                "pipes",
+                "redirections",
+                "`$(…)`",
+                "backticks",
+                "line breaks",
+            ] {
+                assert!(text.contains(named), "{named:?} missing from: {text}");
+            }
+        }
+
+        let admits = |command: &str| {
+            InputSanitizer::sanitize_tool_args(
+                "shell_execute",
+                &serde_json::json!({ "command": command }),
+                &[],
+                &[],
+            )
+            .is_ok()
+        };
+        for command in [
+            "make && make test",
+            "make || true",
+            "cd src; ls",
+            "ls | wc -l",
+            "ls > out.txt 2>&1",
+        ] {
+            assert!(admits(command), "the definitions say {command:?} passes");
+        }
+        for command in [
+            "echo $(id)",
+            "echo `id`",
+            "ls\nrm out.txt",
+            "ls\rrm out.txt",
+        ] {
+            assert!(
+                !admits(command),
+                "the definitions say {command:?} is refused"
+            );
+        }
+    }
+
     // ── R26, R27, R44 (storage design §10): the command's working folder ──
     // `ToolContext`, `BuiltInTool` and `ShellExecuteTool` come in through
     // `use super::*`. `WorkingFolderRefusal` is named in full: `shell_execute.rs`
@@ -416,6 +551,40 @@ mod preview_tests {
         let whole = run(cap).await;
         assert_eq!(whole.len(), cap, "exactly the cap is shown whole");
         assert!(!whole.contains("cut at"));
+    }
+
+    /// N-TOOL-4 (Z1-13): a command the shell cannot find (exit 127) is
+    /// answered with what to do about it, in the tool's own error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_the_shell_cannot_find_is_answered_with_the_hint_to_check_it() {
+        let gp = crate::test_util::GuardedProject::new();
+        let err = ShellExecuteTool
+            .execute_with_context(
+                &command_args("openalpaca-no-such-command-n-tool-4"),
+                &gp.ctx(),
+            )
+            .await
+            .expect_err("no such command");
+        assert!(err.starts_with("Command failed (exit 127):"), "{err}");
+        assert!(
+            err.ends_with("\nHint: check that the command is installed, or give its full path."),
+            "{err}"
+        );
+    }
+
+    /// N-TOOL-4: the shell's own bound — what holds when the sandbox is
+    /// bypassed — tells a command it stopped the same thing the sandbox
+    /// does, and names no `timeout` parameter (N-TOOL-1).
+    #[test]
+    fn the_shells_own_bound_tells_a_command_what_to_do() {
+        let text = super::timed_out(SHELL_TIMEOUT_SECS);
+        assert_eq!(
+            text,
+            "Command timed out after 300s\nHint: that is the most a command may run here; \
+             split the work into smaller commands that each finish sooner."
+        );
+        assert!(!text.to_lowercase().contains("timeout"), "{text}");
     }
 
     #[cfg(unix)]

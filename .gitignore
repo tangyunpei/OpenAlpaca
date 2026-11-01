@@ -5,6 +5,8 @@
 /target/
 debug/
 *.pdb
+# rustc's output for a crate read from stdin (`rustc -`)
+/rust_out
 
 # ============================================
 # Python (scripts/)
@@ -98,6 +100,7 @@ apps/openalpaca-gui/src-tauri/gen/
 *.md
 !README.md
 !CLAUDE.md
+!IMPLEMENTATION_PROGRESS.md
 # The memory invariant fixtures' format description (tasks/memory-redesign, slice 1).
 !crates/openalpaca_storage/tests/fixtures/memory/README.md
 !docs/CLI_Manual.md
@@ -126,7 +129,23 @@ tasks/storage-design/maps/
 tasks/storage-design/panel/
 tasks/storage-design/plan-drafts/
 !tasks/approval-hidden-chars.md
+# The toolchain, dependency and modernization programme (2026-09-25…): the
+# plans and reports are tracked; the evidence archives (patches, logs, tools)
+# stay local — they are 3–20 MB each and reproducible from the reports.
+!tasks/deps-upgrade/
+!tasks/deps-upgrade/*.md
+!tasks/deps-upgrade/reports/
+!tasks/deps-upgrade/reports/*.md
+!tasks/deps-upgrade/baselines/
+!tasks/deps-upgrade/baselines/*/
+!tasks/deps-upgrade/baselines/*/*.md
+# E6's corpus (P30; A-07 (2)): the SKILL.md edge-case fixtures beside its comparators.
+!tasks/deps-upgrade/tools/e6/corpus/*/SKILL.md
+tasks/deps-upgrade/*.tar.gz
+!tasks/deps-upgrade-audit-*.md
 !tasks/pending-decisions.md
+# CLAUDE.md as it stood before the 2026-10-19 shrink (the narrative record of every wave through then).
+!tasks/claude-md-2026-10-19-pre-shrink.md
 !config/agents/*.md
 !config/orchestrator/templates/
 !config/orchestrator/templates/*.md
@@ -136,8 +155,10 @@ tasks/storage-design/plan-drafts/
 # ============================================
 # Agent
 # ============================================
-.claude/
-.claude/*   
+# The directory's files are ignored one by one (not the directory itself) so
+# that the tracked, project-wide settings.json can be re-included below.
+.claude/*
+!.claude/settings.json
 config/.master_key
 config/llm.toml
 config/llm.toml.lock

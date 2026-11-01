@@ -11,6 +11,7 @@ use crate::tools::builtins::annotations_for_builtin;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
+use openalpaca_storage::hash::sha256_hex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -120,7 +121,7 @@ impl BuiltInTool for PersonaUpdateTool {
             }
         };
 
-        let hash = common::sha256(&validated);
+        let hash = sha256_hex(validated.as_bytes());
         let backup = common::backup_if_exists(
             handler.document_path(),
             handler.backup_dir(),

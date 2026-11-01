@@ -1,4 +1,4 @@
-# Storage and project work — design (rev 1.1, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built)
+# Storage and project work — design (rev 1.3, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built; the owner's blanket answer of 2026-10-17 recorded; the freshness sweep's S12 residue in §18)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
@@ -81,10 +81,10 @@ recommended: ST-15…ST-21. Building Stage 1 raised two; the owner answered both
 | # | What |
 |---|---|
 | R7 | **The length rule.** A folder name longer than 200 bytes is cut and always gets the hash. This is ST-4's rule for a name that cannot be used whole. |
-| R30 | **T34 is fixed as its own row said**: the shipped `system_agent` template loses its two confirmation lines. The rule that an explicit list wins stays. A store seeded earlier keeps its old template; the switch-over note says which two lines to delete. |
+| R30 | **T34 is fixed as its own row said**: the shipped `system_agent` template loses its two confirmation lines. The rule that an explicit list wins stays. A store seeded earlier keeps its old template; the switch-over note says which two lines to delete. *For skills, reversed by the owner's B-03, taken 2026-10-17 (PDT; 2026-10-18T01:56Z) by the owner's blanket answer: a skill's list is united with the annotation-derived set and `skill_script:*` tools ask like the shell — not built (§12).* |
 | R29 | **The blanket `../` text filter.** Today any tool argument containing `../` is refused, file content included, so a source file with a relative import cannot be written. Shown as "the filter goes"; narrowed in rev 0.4 — see §0.5. |
-| F3, R23, T35 | **Three findings older than this design.** Every child process inherits the daemon's master key through the environment: fixed in Stage 0 (F3), though a shell command can still read the key file (ST-14). The `send` tool sends any file path it is given: confined in Stage 2 (R23). Extension tools never prompt, and an MCP tool that sends no hint is treated as harmless: recorded as pending decision **T35**, not built here. |
-| R43 | **"Always allow" keeps its scope**: one tool, one subagent. A run-wide allow is not built. |
+| F3, R23, T35 | **Three findings older than this design.** Every child process inherits the daemon's master key through the environment: fixed in Stage 0 (F3), though a shell command can still read the key file (ST-14). The `send` tool sends any file path it is given: confined in Stage 2 (R23). Extension tools never prompt, and an MCP tool that sends no hint is treated as harmless: recorded as pending decision **T35**, not built here. *T35 taken 2026-10-17 (PDT; 2026-10-18T01:56Z) by the owner's blanket answer as option (iv) — §18.* |
+| R43 | **"Always allow" keeps its scope**: one tool, one subagent. A run-wide allow is not built. *Within it, the owner took B-01 and B-16 on 2026-10-17: the card declares what Always allow covers per tool, a dangerous-command catalog always asks, and a prompt's clock starts at the head of its queue — not built (§12).* |
 
 ### 0.4 The owner's fix list (2026-10-04), and where each item lands
 
@@ -637,7 +637,7 @@ only — reading and listing it stay allowed (ST-16; the lead's ruling on F-B2) 
 (ST-9). R33 deleted `is_store_owned_resolved`, `is_soul_path`, `is_user_path` and `is_identity_path`;
 `is_store_owned_path` stays for `workspace_write`'s key check. R45 is `tools::platform::run_bounded`: a new process
 group on unix and `killpg(SIGKILL)` on a timeout or a dropped future — at once, with no grace (the lead's ruling
-R-T23) — and `kill_on_drop` (the direct child only) on Windows; `libc` joined core's unix dependencies (already in
+R-T23; reversed by the owner's B-07 on 2026-10-17, not built — §18) — and `kill_on_drop` (the direct child only) on Windows; `libc` joined core's unix dependencies (already in
 `Cargo.lock`). Both pipes are read to their end before the child is reaped (S1's fix round), each keeping at most the
 512 KB cap plus one byte and draining the rest (R-T28), and a cut output ends with one line saying so
 (`tools/platform.rs:41`, residual X7). A plugin agent's proxied calls race the run's cancellation as the agentic loop's
@@ -650,7 +650,7 @@ its own (R-T19), and a by-product is read only inside its row's own folder in th
 ## 12. Approvals
 
 - **R30.** F1 is the fix for T34. The rule that an explicit `require_confirmation_for` wins stays
-  (`sandbox/mod.rs:754-771`).
+  (`sandbox/mod.rs:754-771`). *For skills it is reversed by the owner's **B-03**, taken 2026-10-17 (PDT; 2026-10-18T01:56Z) by the owner's blanket answer as (1) and (2): a skill's `permissions.confirm.tools` is united with the annotation-derived set on all three skill paths (`security/sandbox/mod.rs:765-775`; `orchestrator/skill/invocation.rs`, `invoke_executor.rs`), and `skill_script:*` tools are annotated like the shell (destructive, open-world) — attended turns ask, and a scheduled skill's unattended runs follow T35's answer. Agent templates keep R30 and R-T35. Taken; not built; its place is plan-rev3 §5.4's B-03 row, after P38, and the decision sheet wants it settled beside T35 and before B3.*
 - **ST-15.** `artifact_write` and `workspace_write` stop prompting: one line each in `annotations_for_builtin`
   (`tools/builtins/mod.rs:602-605`; the test `annotations_for_builtin_destructive_tools_tagged` flips for the two).
   `file_write` and `shell_execute` ask on every call, wherever the file lands: with no project `file_write` saves a
@@ -658,7 +658,7 @@ its own (R-T19), and a by-product is read only inside its row's own folder in th
   (`sandbox/mod.rs:280`).
 - **R34.** The card names the folder a write or a command acts in and, for `file_write`, whether the file lands in
   the project or as a by-product, through the preview hook (`tools/registry/mod.rs:295-306`).
-- **R43.** "Always allow" keeps today's scope: one tool, one subagent.
+- **R43.** "Always allow" keeps today's scope: one tool, one subagent. *Within it, the owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z) took **B-01** as (a) and (b) — the daemon declares on the card what Always allow may mean per tool and every client renders only that (`shell_execute` these exact arguments or none; `file_write` and `file_edit` none or these arguments; extension tools the whole tool), and a dangerous-command catalog, kept as data, makes a matching shell call ask every time, even under an allow; command-prefix rules, (c), are not taken — and **B-16** as (2): a prompt's clock starts when it reaches the head of its run's or lane's queue, a timeout still a denial. Both change the accepted Always-allow contract and its Round G toast; taken; not built; their place is plan-rev3 §5.4's B-01 and B-16 rows, after P38. A run-wide or project-wide persisted allow stays excluded (§6-10 of `tasks/pending-decisions.md`).*
 - **ST-16.** `file_read`, `file_list` and `artifact_read` are read-only and never prompt.
 - An unattended turn refuses a prompting tool at once and says so in the report, as today.
 
@@ -891,7 +891,7 @@ project on each platform, and what it costs. Merging two projects on a re-point 
 tool that does not declare itself harmless prompts — three options (no change; MCP only; MCP and plugins), with the
 consequence that an unattended turn using such a tool is refused. A run-wide "Always allow" (R43). Stage 1's two
 owner questions are answered (§0.2): **T36** keeps the re-point as built, and **ST-23** — a root that no longer leads to
-itself reads missing — is built in Stage 2's S0.
+itself reads missing — is built in Stage 2's S0. *The owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z): **T35 is taken as option (iv)**, the ZCode audit's — an MCP or plugin tool asks unless it declares `read_only_hint == Some(true)` and not `destructive_hint == Some(true)`; its precondition, reading plugin tools' annotations (`crates/openalpaca_plugins/src/manager.rs:1569` drops them), comes first; under it an unattended turn refuses such a tool; it is paired with B-01 (§12) so an extension tool keeps a whole-tool Always allow — taken; not built; its place is plan-rev3 §5.4's B-02 row, after P19, and the decision sheet wants the answer before modernization-plan's M83 and M84 (§6.3 step 14), whose elicitation it shapes. The sandbox research (ST-14) and merging two projects (ST-20) have no recommendation and stay pending. The run-wide allow stays excluded (R43).*
 
 From Stage 0, each found by its review or its live check and left as it is:
 
@@ -908,7 +908,7 @@ From Stage 0, each found by its review or its live check and left as it is:
   session when it is queued (`repository/followup/mod.rs:111-118`): when it runs, a session bound to another project
   is archived and a new one opened (R48), and an unbound one becomes bound to the run's project. Before F4 (NULL) it
   joined the pinned session as it was. The remedy, for later: pin a lead-queued follow-up to `task.session_id`, as
-  `recover_unprocessed_steering` already does (`:265-268`). Recorded beside T18.
+  `recover_unprocessed_steering` already does (`:265-268`). Recorded beside T18. *T18 taken 2026-10-17 (PDT; 2026-10-18T01:56Z) by the owner's blanket answer: keep the shared lane and document it (option (1)), and pin a lead-queued follow-up to `task.session_id` now, not later (option (3), as the ZCode audit moves it) — taken; not built; needs a plan entry.*
 - `wait_for_subagents` can lose a wakeup: the loop checks `all_done()` (`runner/lead_agent/tools.rs:1205`) before it
   creates the `notified()` future it waits on (`:1232`), and `notify_waiters` keeps no permit, so a last completion
   between the two leaves the lead idle until a steering message or the 600 s cap. Older than Stage 0; offered to the
@@ -1028,7 +1028,7 @@ review's finding (written *review R1…R33*, apart from this design's own ruling
 - **The app's Projects list** (S5b): no event announces a project a turn registered, so the list re-reads on mount
   and after the app's own writes; a project root is drawn unescaped there, in the two dialogs and in the CLI (the
   owner's own path, not text a tool, model or extension controls — S5b's recorded choice, review R25); `Delete data…` takes
-  no typed word (the lead's R-S10; T33 stays the owner's question).
+  no typed word (the lead's R-S10; T33 stays the owner's question — taken 2026-10-17 by the owner's blanket answer as no change, no typed word on the GUI's Stop daemon either).
 - **The dialogs** (S5b): `windowFollows` diverges in a subfolder after a cancel; `Use`'s own per-call `onSuccess` is
   dropped on a view switch; a refusal after the dialog closed is silent; a reopened dialog keeps the old project; the
   card header lags briefly after a re-point.
@@ -1049,13 +1049,13 @@ live check.
   `file_write` asks for `file_edit` too. With no list an unattended run's by-product writes now run (ST-15); under a
   list naming them they ask, so an unattended run refuses them (S2). The switch-over note's step 8 says so; nothing
   rewrites a seeded template. `GET /v1/agent-templates` serves the list as written — `[file_write]` — while the
-  effective set also holds `file_edit` (display only; Y's re-review).
+  effective set also holds `file_edit` (display only; Y's re-review). *For a skill's list, B-03 (taken 2026-10-17, §12's R30) unites it with the annotation defaults once built.*
 - **The chat apps' prompts gained the preview** (C6) and nothing else: a connector's `/yes` still answers the oldest
   prompt of a chat, keyed by chat, not sender. A Discord preview line cut between a backslash and the character it
-  escapes leaves that character bare after the continuation indent (Y's re-review).
+  escapes leaves that character bare after the continuation indent (Y's re-review). *The owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z) took the ZCode audit's **B-09** as (2): each connector is bound to one person, and work and `/yes` are accepted only from that principal, any other sender told why — decided with MD-4, which has no recommendation and stays pending, so until MD-4 says otherwise a strict binding also drops non-owner participation in groups; `/yes <id>`, option (3), is not taken. Taken; not built; its place is plan-rev3 §5.4's B-09 row, after P38.*
 - **An edit's card can go stale before the click** (S4b): the card is planned when it is raised and the body plans
   again after the approval, so a file changed in between is edited where the same `old_string` stands then, or
-  refused if it no longer occurs; nothing compares the approved plan with the body's.
+  refused if it no longer occurs; nothing compares the approved plan with the body's. *Closed in design by the owner's **B-08**, taken 2026-10-17 (PDT; 2026-10-18T01:56Z) by the owner's blanket answer as (2): the target's size, mtime and SHA-256 are recorded when the card is planned, recomputed before the write, and a mismatch refuses ("the file changed after you approved; ask again") — a new refusal; read-before-edit, (3), is not taken. Taken; not built; its place is plan-rev3 §5.4's B-08 row, after P38.*
 - **The bytes read and the bytes copied can differ** (S4b): another writer between the plan's read and the pre-edit
   copy leaves the copy holding the newer content, which the edit replaces; nothing is lost, but the edit is not a
   compare-and-swap.
@@ -1072,7 +1072,7 @@ live check.
   its time limit.
 - **The kill is an immediate `SIGKILL`** (the lead's ruling R-T23; the final review's d2-process-3): a command killed
   mid-way may leave its own lock files behind (for example `.git/index.lock`), which the Daemon Manual says. A
-  `SIGTERM` grace with a detached reaper is the idea for later.
+  `SIGTERM` grace with a detached reaper is the idea for later. *Taken now: the owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z) took the ZCode audit's **B-07** as (2), reversing R-T23 — `killpg` SIGTERM, then a detached task that keeps `run_bounded`'s order (both pipes to their end, then wait) sends `killpg` SIGKILL after a 1–1.5 s grace if the child is still unreaped, and reaps it; no signal to enumerated descendant pids, so R45's pid-reuse guarantee holds; Windows stays deferred (DU-33). Taken; not built; its place is plan-rev3 §5.4's B-07 row, after P38.*
 - **No test-build tripwire in `WorkingFolder::ensure`** (S3): an unguarded test that reached a scratch folder would
   make `~/.openalpaca/scratch/<id>`; none does, and the guard audit is the protection, as for `projects::register`.
 - **Between S3.3 and S4a.11 `file_write` had neither R33's rules nor its new root** (the lead's ruling R-T4):
@@ -1127,7 +1127,7 @@ live check.
 - **A turn with no project is offered `file_read` and `file_list` by keyword only** (the live check, (h)): on a scratch
   turn the main loop holds the readers only when the message says `read file`, `open file`, `show file` or `cat `, and
   R28's line names only the tools held — R42, R-T6 and R-T22 as designed. Whether a scratch turn should be offered the
-  readers as a project turn is, is a question for the owner, not a decision: **T37** in `tasks/api-fix-plan.md` §0.
+  readers as a project turn is, is a question for the owner, not a decision: **T37** in `tasks/api-fix-plan.md` §0. *T37 taken 2026-10-17 (PDT; 2026-10-18T01:56Z) by the owner's blanket answer as (2): `offer_file_readers` on every turn with a working folder, both readers confined to the conversation's scratch folder and never asking (ST-16), with a test — taken; not built; needs a plan entry.*
 
 *Results and by-products (S4a, F-A, F-C2, X-R)*
 
@@ -1177,6 +1177,20 @@ live check.
 - **`memory::learning::tests::episodes::an_episode_is_one_active_extracted_other_note_with_the_designs_fields` flaked
   once** (`summariser_calls_today`) in a full core run during the residual pass — code no Stage 2 commit touched — and
   passed in its re-runs and in the gate at `3810d9d8`. To watch.
+
+From the toolchain programme's freshness sweep — its S12 (`252e9c2e`: unicode-normalization 0.1.25 → 0.1.26, the
+tables moved to Unicode 18; `tasks/deps-upgrade/programme-plan.md` §3.2 *FRESHNESS-SWEEP*) — each left as it is.
+Only a name holding a character Unicode 18 assigns is reached:
+
+- **A project whose root holds one of Unicode 18's 37 new combining marks, registered by an earlier build,** is
+  still listed but not found by its root: `store::projects::folder_name` now keeps the mark where it gave a `-`, and
+  `lookup` reads only the plain and the hashed folder name. Registering that root again makes a second project
+  beside the first; nothing is moved or deleted.
+- **A non-ASCII by-product path whose slug changes** — one holding U+209D…U+209F, which now give w, y and z, or one
+  of the 37 marks, now dropped where it gave a separator; 40 code points in all (`store::artifact::slugify`) — is
+  stored under another name, so writing it again with `file_write` starts a second artifact, not its next
+  version. A note whose title holds one of the 40 is renamed to its new slug on its next write; its id prefix
+  finds it either way.
 
 ## 19. What the panel changed (rev 0.1 → 0.2)
 
@@ -1243,13 +1257,48 @@ Three things a beta needs that no stage covers:
   not confined to the project (ST-14); extension tools never ask (T35); learning is below its own targets
   (`tasks/memory-redesign/10-learning-evaluation.md`); a store from before 2026-09-28 is refused and the way through
   is the factory reset.
+  *The owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z) shapes B3 without writing it (B3 stays Claude's to write, docs
+  only):* T35, taken as option (iv) (§18), decides its second line — "extension tools never ask" stays true until (iv) is
+  built, and then reads "an extension tool that does not declare itself read-only asks"; the ZCode audit's B-19, taken
+  as (2), names a local, redacted `openalpaca diag export` there once it is built (its place plan-rev3 §5.4's B-19 row, after P38); and the two lines
+  `tasks/pending-decisions.md` §2 adds (audit A-41) stay limitations under that answer — the app is unsigned and not
+  notarised (*Signing*, taken as (a) for a first beta through the installer), and a daemon the app spawns may lack the
+  terminal's PATH until the shell captures the login environment (*App PATH*, taken as (a) with (c) as its fallback,
+  not built).
 
 Which stages the beta waits for is the owner's call. Stage 0 with B1–B3 is enough for a few testers who know the
 limits; Stage 1 is what keeps every tester's repository clean; Stage 2 is what a tester who expects help with their
 own project needs.
+*Left pending by the owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z):* no recommendation is recorded for which stages the
+beta waits for, so it stays the owner's call (Stages 0–2 are all built).
 
 ## Revision log
 
+- **rev 1.3 (2026-10-31).** The toolchain programme's freshness sweep (`tasks/deps-upgrade/programme-plan.md`
+  rev 1.18): §18 gains two residues of its S12 (`252e9c2e`, unicode-normalization 0.1.26, Unicode 18) — a project
+  whose root holds one of the 37 new combining marks, registered by an earlier build, is listed but not found by its
+  root, and a non-ASCII by-product path whose slug changes starts a second artifact. `tasks/pending-decisions.md`
+  rev 25 lists both among the beta's known limits (§3.2, §3.9). §21 is unchanged: it names no point in the
+  programme for the beta, which the owner's ruling of 2026-10-30 (PDT) places at the end of the whole programme
+  (programme-plan §2, *The beta's scope*), B1–B3 with it.
+- **rev 1.2 (2026-10-17).** The owner's blanket answer of 2026-10-17 (PDT; 2026-10-18T01:56Z): every pending decision
+  taken as its recommendation — 10 rows here; 3 left pending, no recommendation. *"for the decisions all use recommend
+  by Zcode or Recommend options"*: each is taken as its current recommendation, the ZCode audit's where it gave or
+  changed one, and recorded where this design holds it, inline so no line moves above §21. **Taken:** T35 as option
+  (iv), with its precondition and paired with B-01 (§0.3's row, §18's opening, §21's B3 note); T37 as (2) (§18 Stage
+  2); T18 as (1) with (3)'s pin now (§18 Stage 0); and the audit's B-03 (reverses R30 for skills: §0.3's row, §12,
+  §18), B-01 and B-16 (within R43: §0.3's row, §12), B-07 (reverses R-T23: §11's *As built*, §18), B-08 (closes S4b's
+  stale card: §18), B-09 (the connectors' `/yes`, decided with MD-4: §18) and B-19 (named in B3 once built: §21). Each
+  is taken and not built — the audit's rows at the places plan-rev3 §5.4's table gives them (T35 after P19, the rest
+  after P38), T37 and T18's pin needing a plan entry — and the shipped code and this design's rulings are what ships
+  until a commit builds it. **Left pending:** which stages the beta waits for (§21), the sandbox research (ST-14) and
+  merging two projects (ST-20) (§18's opening). §18's Stage 1 line that names T33 notes it taken as no change (its row
+  is api-fix-plan §0's). B-27 (the app's webview storage outside the store) is not recorded here: its work is P38's
+  commit (plan-rev3), and `01-current-layout.md`, which the row cites, is a dated snapshot that holds no question. The
+  settled rules the audit's §6 rows touch here are kept, each option not taken (2026-10-17): §6-06 (ST-14, every
+  command asks), §6-07 (R31/R32's confinement), §6-08 (R45, killed at the timeout), §6-10 (R43, no run-wide or
+  project-wide allow), §6-14 (ST-1 and ST-9, nothing read from a project folder), §6-24 (Stage 2's daemon directory
+  for MCP servers) and §6-26 (one root).
 - **rev 1.1 (2026-10-10).** §18's question from the live check — a turn with no project is offered the
   readers by keyword only — is a pending owner decision now, **T37** in `tasks/api-fix-plan.md` §0 (rev 3.25).
 - **rev 1.0 (2026-10-10).** **Stage 2 built**, from `tasks/storage-design/plan-stage2.md` (approved by the owner on

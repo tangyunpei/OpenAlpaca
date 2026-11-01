@@ -174,6 +174,110 @@ fn mark_failed_sends_the_extension_and_generation_to_the_reaper() {
     assert_eq!(rx.try_recv().unwrap(), (ext, 1));
 }
 
+// ── mark_exited / mark_recovered (N-MCP-1b; design §3.6, §13 Q8) ──────────
+
+/// An enabled record at generation 1 with a reaper registered.
+fn enabled_with_reaper(
+    ext: &ExtensionId,
+) -> (
+    ExtensionLedger,
+    tokio::sync::mpsc::UnboundedReceiver<(ExtensionId, u64)>,
+) {
+    let ledger = ExtensionLedger::new();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    assert!(ledger.on_crash(ExtensionKind::Mcp, tx));
+    ledger.begin(ext, ExtensionState::Enabling, None);
+    ledger.commit(ext, ExtensionState::Enabled);
+    (ledger, rx)
+}
+
+#[test]
+fn an_exit_reads_failed_queues_no_reap_and_the_gate_still_admits_the_call() {
+    let ext = mcp("github");
+    let (ledger, mut reaper) = enabled_with_reaper(&ext);
+
+    assert!(ledger.mark_exited(&ext, 1, "exit status: 3"));
+    assert!(matches!(
+        ledger.state(&ext),
+        Some(ExtensionState::Failed { reason: FailureReason::Crashed, ref detail, .. })
+            if detail == "exit status: 3"
+    ));
+    assert!(reaper.try_recv().is_err(), "an exit is not the reaper's");
+    assert_eq!(ledger.admits_calls(&ext), Some(true));
+    assert!(
+        ledger.check(&ext, "github__x", Some(1), None).is_ok(),
+        "the gate admits the call whose reconnect brings the server back"
+    );
+    assert!(
+        ledger.check(&ext, "github__x", Some(0), None).is_err(),
+        "a stale handle is still refused"
+    );
+    assert!(!ledger.mark_exited(&ext, 1, "again"), "only from Enabled");
+}
+
+#[test]
+fn a_reconnect_returns_an_exit_to_enabled_at_its_own_generation_only() {
+    let ext = mcp("github");
+    let (ledger, _reaper) = enabled_with_reaper(&ext);
+    assert!(!ledger.mark_recovered(&ext, 1), "nothing to recover from");
+    assert!(!ledger.mark_exited(&ext, 2, "stale"), "a stale generation");
+
+    assert!(ledger.mark_exited(&ext, 1, "signal: 9 (SIGKILL)"));
+    assert!(
+        !ledger.mark_recovered(&ext, 2),
+        "another generation's reconnect"
+    );
+    assert!(ledger.mark_recovered(&ext, 1));
+    assert_eq!(ledger.state(&ext), Some(ExtensionState::Enabled));
+    assert!(!ledger.mark_recovered(&ext, 1), "once");
+}
+
+#[test]
+fn reconnects_that_run_out_after_an_exit_make_the_failure_the_reapers() {
+    let ext = mcp("github");
+    let (ledger, mut reaper) = enabled_with_reaper(&ext);
+    assert!(ledger.mark_exited(&ext, 1, "exit status: 1"));
+
+    assert!(ledger.mark_failed(&ext, 1, FailureReason::Crashed, "reconnect exhausted"));
+    assert_eq!(reaper.try_recv().unwrap(), (ext.clone(), 1));
+    assert_eq!(ledger.admits_calls(&ext), Some(false));
+    assert!(ledger.check(&ext, "github__x", Some(1), None).is_err());
+    assert!(
+        !ledger.mark_recovered(&ext, 1),
+        "a reaped failure does not recover by a call"
+    );
+}
+
+#[test]
+fn every_other_transition_out_of_an_exit_ends_its_admission() {
+    let ext = mcp("github");
+    let (ledger, _reaper) = enabled_with_reaper(&ext);
+    assert!(ledger.mark_exited(&ext, 1, "exit status: 0"));
+    assert!(matches!(
+        ledger.begin(
+            &ext,
+            ExtensionState::Disabling,
+            Some(WithdrawalCause::Disable)
+        ),
+        Transition::Took(1)
+    ));
+    assert_eq!(ledger.admits_calls(&ext), Some(false));
+    assert!(
+        !ledger.mark_recovered(&ext, 1),
+        "a disable is not undone by a reconnect"
+    );
+
+    let ext = mcp("retry");
+    let (ledger, _reaper) = enabled_with_reaper(&ext);
+    assert!(ledger.mark_exited(&ext, 1, "exit status: 0"));
+    assert_eq!(
+        ledger.begin(&ext, ExtensionState::Enabling, None),
+        Transition::Took(2),
+        "Retry is still the enable it was"
+    );
+    assert_eq!(ledger.admits_calls(&ext), Some(false));
+}
+
 // ── Drain (design §3.2 T3) ───────────────────────────────────────────────
 
 #[test]
@@ -364,6 +468,11 @@ fn every_state() -> Vec<ExtensionState> {
         },
         ExtensionState::Failed {
             reason: FailureReason::Crashed,
+            detail: "d".into(),
+            since,
+        },
+        ExtensionState::Failed {
+            reason: FailureReason::ProtocolNegotiationFailed,
             detail: "d".into(),
             since,
         },
