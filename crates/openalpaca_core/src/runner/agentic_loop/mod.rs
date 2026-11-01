@@ -25,7 +25,8 @@ use crate::runner::steering::SteeringMsg;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::session_log::{
-    Record, RecordType, command_spill_stub, command_stub_marker, spill_preview, spill_stub,
+    Record, RecordType, command_spill_stub, command_stub_marker, no_output_line, spill_preview,
+    spill_stub,
 };
 use crate::tools::registry::ToolContext;
 use serde_json::{Value, json};
@@ -283,8 +284,12 @@ fn log_spill_event(
 ///
 /// `command` is whether the call ran a command (`ToolRegistry::is_command_tool`):
 /// a command's stub previews its output's head **and** tail (N-TOOL-7).
+///
+/// `tool` is the name the model called, which the line standing in for a
+/// success with nothing to read names (N-TOOL-6).
 fn model_visible_result(
     config: &LoopConfig,
+    tool: &str,
     result_text: &str,
     ok: bool,
     spill_ref: Option<&str>,
@@ -305,7 +310,15 @@ fn model_visible_result(
             command_spill_stub(result_text, config.tool_result_inline_bytes, rel)
         }
         Some(rel) => spill_stub(result_text.len(), &spill_preview(result_text), rel),
-        None => truncate_tool_result_to(result_text.to_string(), config.tool_result_inline_bytes),
+        // N-TOOL-6 (Z1-15): a success with nothing to read — a command that
+        // printed nothing, an MCP result with no content — is a line naming
+        // the tool, never an empty result the model could take for a missing
+        // one. Only here, inline: whitespace that spilled keeps the stub its
+        // file and `read_result` stand behind, and the record keeps the
+        // tool's own output, from which a replay takes the same line.
+        None => no_output_line(tool, result_text).unwrap_or_else(|| {
+            truncate_tool_result_to(result_text.to_string(), config.tool_result_inline_bytes)
+        }),
     }
 }
 
@@ -1324,6 +1337,7 @@ async fn run_agentic_loop_core(
                         // and the head is better than a reference to nothing.
                         let model_text = model_visible_result(
                             config,
+                            &tc.name,
                             result_text,
                             ok,
                             spill_ref.as_deref().filter(|_| emitted),

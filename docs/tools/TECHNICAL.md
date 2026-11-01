@@ -1585,9 +1585,10 @@ The threshold is `LoopConfig.tool_result_inline_bytes`, set from
 
 | Result | Loop has a session log | Loop has none |
 |--------|------------------------|---------------|
-| `Ok`, within the threshold | As is | As is |
+| `Ok`, within the threshold | As is, bar an empty or whitespace-only one (below) | As is, bar an empty or whitespace-only one (below) |
 | `Ok`, over the threshold | **Spilled**: the full text goes to `sessions/<id>/results/`; the model gets the stub below | Cut at the threshold by `truncate_tool_result_to()` |
 | `Err`, over the threshold | Head **and** tail inline (`utils::text::head_tail()`); the full text is still spilled for the log | Head and tail inline |
+| `Ok`, empty or whitespace alone (N-TOOL-6) | Within the threshold, `(<tool> completed with no output)` from `no_output_line()`, the record keeping the tool's own output; over it, spilled like any `Ok` | The same line, at any size |
 
 The chat loop, the lead agent and its subagents run with a session log.  A
 skill invocation does not.
@@ -1613,7 +1614,12 @@ and tail at the budget an error result gets (N-TOOL-7):
 Its `tool_result` record carries `stub: {"form": "head_tail", "budget": <bytes>}`
 (`command_stub_marker()`), since the record keeps only the head's preview: a
 resumed run's replay (`session_log::replay`) rebuilds the same stub from the
-`results/` file, checked against the record's `bytes` and `sha256`.
+`results/` file, checked against the record's `bytes` and `sha256`.  It
+hands an empty success back as the same `no_output_line()`, from the
+record's `name` and output; a whitespace result over the threshold spilled
+and replays as its stub, and one whose record the 64 KB envelope cut
+(`cap_data()`: whitespace whose JSON escaping runs long) replays as the cut
+preview, as any inline result so cut does.
 
 `read_result(result_ref, offset?, limit?)` pages the file back in.  It is a
 **grant, not ambient**: the chat loop offers it when the daemon has a

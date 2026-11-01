@@ -2613,6 +2613,61 @@ fn a_replay_rebuilds_the_rounds_and_their_results() {
     assert!(flagged(&m[3]), "a failure replays flagged: {:?}", m[3]);
 }
 
+/// N-TOOL-6 (Z1-15): a success with nothing to read — empty, or whitespace
+/// alone — was handed the line naming its tool in place of the output its
+/// record keeps, and the line is what comes back; a failure is never the
+/// line, even one with no text.
+#[test]
+fn a_success_with_no_output_is_replayed_as_the_line_the_model_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let calls = [
+        (
+            "tu-1",
+            "shell_execute",
+            serde_json::json!({"command": "mkdir -p out"}),
+        ),
+        ("tu-2", "srv__ping", serde_json::json!({})),
+        ("tu-3", "quiet", serde_json::json!({})),
+    ];
+    seed_records(
+        root,
+        "s1",
+        &[
+            ("session_start", "t1", serde_json::json!({"boot_id": "b1"})),
+            ("round", "t1", round_record(1, "make the folder", &calls)),
+            (
+                "tool_result",
+                "t1",
+                tool_result_record("tu-1", "shell_execute", true, ""),
+            ),
+            (
+                "tool_result",
+                "t1",
+                tool_result_record("tu-2", "srv__ping", true, " \n"),
+            ),
+            (
+                "tool_result",
+                "t1",
+                tool_result_record("tu-3", "quiet", false, ""),
+            ),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    let m = &plan.messages;
+    assert_eq!(m.len(), 4, "the round and its three results: {m:?}");
+    assert_eq!(m[1].content, "(shell_execute completed with no output)");
+    assert_eq!(m[2].content, "(srv__ping completed with no output)");
+    assert_eq!(m[3].content, "", "a failure is never the line");
+    assert_eq!(
+        serde_json::to_value(&m[3]).unwrap()["is_error"],
+        serde_json::json!(true),
+        "and still flagged"
+    );
+}
+
 /// §5.4's two stubs, pinned whole (`tasks/api-fix-plan.md` §5.4, rev 3.31):
 /// the head-only one every tool but a command gets, unchanged, and a
 /// command's (N-TOOL-7, Z1-16), whose preview is its output's head and tail

@@ -3705,6 +3705,7 @@ async fn a_dropped_spill_record_leaves_the_model_an_inline_head_not_a_reference(
 
     let model_text = model_visible_result(
         &config,
+        &call.name,
         &result_text,
         true,
         emitted.then_some(rel.as_str()),
@@ -4795,7 +4796,9 @@ mod tool_error_flag {
 
     /// One loop whose tool answers `answer`: its result, and the tool-result
     /// message the model was handed next.
-    async fn run(answer: Result<&'static str, &'static str>) -> (LoopResult, ChatMessage) {
+    pub(super) async fn run(
+        answer: Result<&'static str, &'static str>,
+    ) -> (LoopResult, ChatMessage) {
         let registry = ToolRegistry::default();
         registry
             .register(RegisteredTool {
@@ -4863,7 +4866,7 @@ mod tool_error_flag {
     }
 
     /// The flag as the message carries it on the wire (absent when false).
-    fn flagged(message: &ChatMessage) -> bool {
+    pub(super) fn flagged(message: &ChatMessage) -> bool {
         serde_json::to_value(message).unwrap()["is_error"] == serde_json::json!(true)
     }
 
@@ -4885,6 +4888,229 @@ mod tool_error_flag {
         assert!(flagged(&message), "a failure is flagged: {message:?}");
         assert_eq!(message.content, "[tool_error] boom");
         assert_eq!(result.last_tool_error.as_deref(), Some("[tool_error] boom"));
+    }
+}
+
+/// N-TOOL-6 (Z1-15): a call that succeeds with nothing to read — a command
+/// that prints nothing, an MCP result with no content — reaches the model as
+/// a line naming the tool, never as an empty result it could take for a
+/// missing one. The log keeps the tool's own output; a replay hands a resumed
+/// run the line the model first read.
+mod no_output {
+    use super::tool_error_flag::{flagged, run};
+    use super::*;
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    #[tokio::test]
+    async fn a_success_with_no_output_reaches_the_model_as_a_line_naming_the_tool() {
+        let (result, message) = run(Ok("")).await;
+        assert_eq!(message.content, "(says completed with no output)");
+        assert!(!flagged(&message), "a success is not flagged: {message:?}");
+        assert_eq!(result.last_tool_error, None, "no tool failed");
+    }
+
+    /// Whitespace alone is nothing to read either (`echo` prints a newline).
+    #[tokio::test]
+    async fn a_success_of_whitespace_alone_reaches_the_model_as_the_same_line() {
+        let (_, message) = run(Ok(" \n\t\r\n")).await;
+        assert_eq!(message.content, "(says completed with no output)");
+        assert!(!flagged(&message), "a success is not flagged: {message:?}");
+    }
+
+    /// Text with whitespace around it is handed over as it came, untrimmed.
+    #[tokio::test]
+    async fn a_success_with_text_is_handed_over_as_it_came() {
+        let (_, message) = run(Ok("\n  done\n")).await;
+        assert_eq!(message.content, "\n  done\n");
+    }
+
+    /// An `Err` is never the line, even one with no text of its own.
+    #[tokio::test]
+    async fn a_failure_with_no_text_is_still_a_failure() {
+        let (result, message) = run(Err("")).await;
+        assert!(flagged(&message), "a failure is flagged: {message:?}");
+        assert_eq!(message.content, "[tool_error] ");
+        assert_eq!(result.last_tool_error.as_deref(), Some("[tool_error] "));
+    }
+
+    /// A tool that succeeds with exactly what it was built with.
+    struct Quiet(String);
+
+    #[async_trait]
+    impl BuiltInTool for Quiet {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// One loop with a session log whose one call, `quiet`, answers `output`
+    /// at the inline threshold `inline_bytes`: what the model was handed,
+    /// the call's `tool_result` record, and what a replay hands a resumed run
+    /// for that call.
+    async fn run_logged(
+        output: String,
+        inline_bytes: usize,
+    ) -> (String, serde_json::Value, String) {
+        let registry = ToolRegistry::default();
+        registry
+            .register(RegisteredTool {
+                definition: openalpaca_llm::ToolDefinition {
+                    name: "quiet".to_string(),
+                    description: "Quiet".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                    input_examples: None,
+                },
+                backend: ToolBackend::BuiltIn(Arc::new(Quiet(output))),
+                provides_capabilities: vec![],
+                exempt_from_timeout: false,
+                annotations: None,
+                version: "test-0.0.0".into(),
+                author: "test".into(),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let policy = SandboxPolicy {
+            agent_id: "code_agent::a1".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let provider = Arc::new(MockRouterProvider::new(vec![
+            Ok(ChatResponse {
+                content: "Checking.".to_string(),
+                tool_calls: vec![openalpaca_llm::ToolCall {
+                    id: "tc_quiet".to_string(),
+                    name: "quiet".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                model: "claude-sonnet-4-20250514".to_string(),
+                usage: Usage::default(),
+                finish_reason: FinishReason::ToolUse,
+                thinking: None,
+                parts: None,
+            }),
+            Ok(ChatResponse {
+                content: "Done.".to_string(),
+                tool_calls: vec![],
+                model: "claude-sonnet-4-20250514".to_string(),
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            }),
+        ]));
+        let router = LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let service = SessionLogService::new(
+            dir.path().to_path_buf(),
+            None,
+            SessionLogLimits::default(),
+            "test".to_string(),
+        );
+        let handle = service.handle_for("sess-quiet");
+        let config = LoopConfig {
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            enable_caching: false,
+            session_log: Some(handle.clone()),
+            tool_result_inline_bytes: inline_bytes,
+            ..Default::default()
+        };
+
+        let result = run_agentic_loop_routed(
+            &router,
+            vec![ChatMessage::user("check it")],
+            vec![],
+            &config,
+            Some(&sandbox),
+            "code_agent::a1",
+            Some(&policy),
+            Some("task-quiet"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        assert!(handle.flush().await);
+
+        let session = dir.path().join("sess-quiet");
+        let record = read_records(&session)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.kind == "tool_result")
+            .expect("the result is narrated")
+            .data;
+        let seen = provider.tool_results_seen();
+        assert_eq!(seen.len(), 1, "one tool result reached the backend");
+        let replay = crate::session_log::replay::rebuild(&session, "task-quiet", 4).unwrap();
+        let replayed: Vec<String> = replay
+            .messages
+            .iter()
+            .filter(|m| m.tool_call_id.as_deref() == Some("tc_quiet"))
+            .map(|m| m.content.clone())
+            .collect();
+        assert_eq!(replayed.len(), 1, "the replay answers the call once");
+        (seen[0].clone(), record, replayed[0].clone())
+    }
+
+    /// The record is the tool's own output, the source of truth for what it
+    /// returned; the line is what the model reads, and a resumed run reads it
+    /// too, byte for byte.
+    #[tokio::test]
+    async fn the_log_keeps_the_empty_output_and_a_replay_hands_back_the_line() {
+        let (seen, record, replayed) = run_logged(String::new(), MAX_TOOL_RESULT_SIZE).await;
+        assert_eq!(seen, "(quiet completed with no output)");
+        assert_eq!(record["ok"], serde_json::json!(true));
+        assert_eq!(
+            record["result"],
+            serde_json::json!(""),
+            "the log keeps what the tool returned: {record}"
+        );
+        assert_eq!(
+            replayed, seen,
+            "a resumed run reads what the model first read"
+        );
+    }
+
+    /// Whitespace over the inline threshold spills like any other result: the
+    /// model gets the stub naming the file, which `read_result` can page, and
+    /// a replay hands the same stub back — the line stands only for a result
+    /// that would sit inline.
+    #[tokio::test]
+    async fn whitespace_over_the_threshold_spills_like_any_result() {
+        let (seen, record, replayed) = run_logged(" \n".repeat(100), 64).await;
+        let rel = record["result"]["spill"]["rel"]
+            .as_str()
+            .unwrap_or_else(|| panic!("200 bytes over a 64-byte threshold spill: {record}"));
+        assert!(
+            seen.starts_with("[result too large: 200 bytes; first 2 KB follow]"),
+            "{seen:?}"
+        );
+        assert!(
+            seen.ends_with(&format!(
+                "[full result: result_ref=file:{rel} — use read_result to page]"
+            )),
+            "{seen:?}"
+        );
+        assert_eq!(replayed, seen, "the replay hands back the same stub");
     }
 }
 

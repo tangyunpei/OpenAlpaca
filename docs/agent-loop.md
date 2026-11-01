@@ -642,15 +642,22 @@ One threshold decides what happens to a large tool result:
 
 | Result | Loop has a session log | Loop has none |
 |---|---|---|
-| At or under the threshold | Inline, unchanged. | Inline, unchanged. |
+| At or under the threshold | Inline, unchanged, bar a success with nothing to read (below). | Inline, unchanged, bar a success with nothing to read (below). |
 | Over it, succeeded | **Spilled**: the whole result is written to the session's `results/` directory, and the model receives a stub — the size, the first 2 KB, and `result_ref=file:results/…` with the instruction to page it with `read_result`. A **command**'s stub (`shell_execute`, a `Command`-backend tool) shows the output's head **and** tail instead, half the threshold each — the `Err` budget — so a long build's summary is in front of the model (`session_log::command_spill_stub`). | Cut inline at the threshold, at a sentence, line or word boundary, with a marker naming how much is shown. |
 | Over it, failed | The model's copy keeps the **head and tail** (half the threshold each), because a compiler or test failure sits at the end. The full bytes are still spilled to the log. | Head and tail, same cut. |
+| Succeeded with nothing to read — empty, or whitespace alone (N-TOOL-6) | At or under the threshold the model receives `(<tool> completed with no output)`, naming the tool it called, so a command that printed nothing or an MCP result with no content is not read as a missing result; over it, the result spills like any other. The record keeps the tool's own output. | The same line, at any size. |
 
 If the spill record could not be handed to the log writer, the model gets
 the inline cut instead of a stub — a stub must never promise a file that
 will not exist. A resumed run's replay restores the stub the model was
 shown: a command's record names its form and budget (`stub`), so its head
-and tail are rebuilt from the `results/` file.
+and tail are rebuilt from the `results/` file. An empty success comes back
+as the line, rebuilt from the record's name and output
+(`session_log::no_output_line`, shared by the loop and the replay), unless
+its record was cut at the 64 KB envelope (whitespace whose JSON escaping
+runs long): like any inline result so cut, it comes back as the cut
+preview. A failure is never the line: its text carries the
+`[tool_error]` mark.
 
 A failed call is the call's own `Err`, never a reading of its text: the
 loop marks the text `[tool_error]` and flags the message (`is_error`). The
