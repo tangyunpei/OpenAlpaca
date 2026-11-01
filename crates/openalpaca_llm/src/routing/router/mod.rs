@@ -552,3 +552,6 @@ mod tests;
 
 #[cfg(all(test, feature = "ollama", feature = "openai"))]
 mod ollama_tests;
+
+#[cfg(all(test, feature = "ollama", feature = "openai"))]
+mod transport_tests;

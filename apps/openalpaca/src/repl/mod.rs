@@ -102,7 +102,10 @@ impl ReplSession {
 
     fn should_reconnect(err: &anyhow::Error) -> bool {
         if let Some(re) = err.downcast_ref::<reqwest::Error>() {
-            return re.is_connect() || re.is_timeout();
+            // A name that does not resolve is as dead as a refused port. reqwest
+            // 0.13.5 reports a failed lookup as a connect error too; `is_dns`
+            // says so without relying on that (M57).
+            return re.is_connect() || re.is_timeout() || re.is_dns();
         }
         let msg = err.to_string().to_lowercase();
         msg.contains("daemon is not running")
@@ -343,5 +346,62 @@ mod sigint_tests {
             stdout.contains(" 1 passed;"),
             "the child ran no test: {stdout}"
         );
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::ReplSession;
+    use std::sync::Arc;
+
+    /// Answers every lookup with "no such name", in-process: the test's
+    /// request never leaves the machine, not even as a DNS query.
+    struct NoSuchName;
+
+    impl reqwest::dns::Resolve for NoSuchName {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::ready(Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such name (test resolver)",
+            ))
+                as Box<dyn std::error::Error + Send + Sync>)))
+        }
+    }
+
+    /// A daemon address that does not resolve is a dead connection like a
+    /// refused one: the REPL reconnects, reading `discovery.json` again (M57).
+    #[tokio::test]
+    async fn an_address_that_does_not_resolve_is_a_reason_to_reconnect() {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(NoSuchName))
+            .build()
+            .unwrap();
+        let err = client
+            .get("http://openalpaca-test.invalid/v1/health")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_dns(), "{err:?}");
+        assert!(ReplSession::should_reconnect(&anyhow::Error::from(err)));
+    }
+
+    /// A refused port, as before.
+    #[tokio::test]
+    async fn a_refused_port_is_a_reason_to_reconnect() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/v1/health"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(ReplSession::should_reconnect(&anyhow::Error::from(err)));
     }
 }

@@ -36,6 +36,28 @@ pub struct MockResponse {
     pub delay: Duration,
     /// The pause between streamed frames.
     pub frame_delay: Duration,
+    /// How the connection ends — [`Ending::Answer`] unless a test asks for a
+    /// transport failure (M57).
+    pub ending: Ending,
+}
+
+/// How a mock connection ends. Every way but [`Self::Answer`] is a transport
+/// failure the client meets for real — the only way a test can show what a
+/// provider makes of one (M57).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// The whole answer, then a clean close.
+    Answer,
+    /// The head, then less body than it promised, then a close: a
+    /// `content-length` 64 bytes past what is written, or a chunked stream
+    /// that never sends its last chunk.
+    CutShort,
+    /// No answer at all: the connection is closed once the request is read.
+    Close,
+    /// No answer, and the close is a reset (`SO_LINGER` 0).
+    Reset,
+    /// An answer that is not HTTP — a line of text — then a close.
+    NotHttp,
 }
 
 impl MockResponse {
@@ -47,6 +69,7 @@ impl MockResponse {
             frames: None,
             delay: Duration::ZERO,
             frame_delay: Duration::ZERO,
+            ending: Ending::Answer,
         }
     }
 
@@ -58,6 +81,7 @@ impl MockResponse {
             frames: None,
             delay: Duration::ZERO,
             frame_delay: Duration::ZERO,
+            ending: Ending::Answer,
         }
     }
 
@@ -78,7 +102,33 @@ impl MockResponse {
             frames: Some(frames),
             delay: Duration::ZERO,
             frame_delay: Duration::from_millis(20),
+            ending: Ending::Answer,
         }
+    }
+
+    /// Close the connection without answering, once the request is read.
+    pub fn hang_up() -> Self {
+        Self::error(200, "").ending(Ending::Close)
+    }
+
+    /// Reset the connection without answering, once the request is read.
+    pub fn reset() -> Self {
+        Self::error(200, "").ending(Ending::Reset)
+    }
+
+    /// Answer with something that is not HTTP, then close.
+    pub fn not_http() -> Self {
+        Self::error(200, "").ending(Ending::NotHttp)
+    }
+
+    /// Send less body than the head promises, then close.
+    pub fn cut_short(self) -> Self {
+        self.ending(Ending::CutShort)
+    }
+
+    fn ending(mut self, ending: Ending) -> Self {
+        self.ending = ending;
+        self
     }
 
     /// Answer only after `delay` — a provider that is thinking, not a dead one.
@@ -138,6 +188,23 @@ impl MockHttpServer {
                     };
                     recorder.lock().await.push(request.clone());
                     let response = handler(&request);
+                    match response.ending {
+                        Ending::Close => {
+                            let _ = socket.shutdown().await;
+                            return;
+                        }
+                        Ending::Reset => {
+                            // Dropped with a zero linger, the socket sends RST.
+                            let _ = socket.set_zero_linger();
+                            return;
+                        }
+                        Ending::NotHttp => {
+                            let _ = socket.write_all(b"hello\r\n\r\n").await;
+                            let _ = socket.shutdown().await;
+                            return;
+                        }
+                        Ending::Answer | Ending::CutShort => {}
+                    }
                     if !response.delay.is_zero() {
                         tokio::time::sleep(response.delay).await;
                     }
@@ -162,15 +229,21 @@ impl MockHttpServer {
                                     tokio::time::sleep(response.frame_delay).await;
                                 }
                             }
-                            let _ = socket.write_all(b"0\r\n\r\n").await;
+                            if response.ending != Ending::CutShort {
+                                let _ = socket.write_all(b"0\r\n\r\n").await;
+                            }
                         }
                         None => {
+                            let promised = match response.ending {
+                                Ending::CutShort => response.body.len() + 64,
+                                _ => response.body.len(),
+                            };
                             let head = format!(
                                 "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
                                 response.status,
                                 reason(response.status),
                                 response.content_type,
-                                response.body.len(),
+                                promised,
                             );
                             let _ = socket.write_all(head.as_bytes()).await;
                             let _ = socket.write_all(response.body.as_bytes()).await;
@@ -266,5 +339,132 @@ fn reason(status: u16) -> &'static str {
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "Status",
+    }
+}
+
+/// A loopback address nothing listens on: bound, read and released, so a
+/// connect to it is refused (M57).
+#[cfg(feature = "openai")]
+pub fn refused_addr() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    listener.local_addr().expect("local addr")
+}
+
+/// `http://127.0.0.1:<port>` for [`refused_addr`] — no trailing slash.
+#[cfg(feature = "openai")]
+pub fn refused_base_url() -> String {
+    format!("http://{}", refused_addr())
+}
+
+/// A client shaped like `providers::build_http_client`'s (L7) — the same
+/// connect timeout, read gap and pool — that no proxy reaches, so a request
+/// to a loopback listener stays on loopback whatever `HTTP_PROXY` says.
+#[cfg(feature = "openai")]
+pub fn loopback_client(request_timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(30).min(request_timeout))
+        .read_timeout(request_timeout)
+        .build()
+        .expect("a test client")
+}
+
+/// A name under `.invalid` (RFC 6761), which no resolver may answer. The
+/// tests never ask one: a client built by [`client_resolving_with`] answers
+/// every name in-process, so not even a DNS query leaves the machine.
+#[cfg(feature = "openai")]
+pub const UNRESOLVABLE_HOST: &str = "openalpaca-test.invalid";
+
+#[cfg(feature = "openai")]
+pub use resolver::{Resolver, client_resolving_with};
+
+/// Only the transport tests use it, and they need the OpenAI-compatible
+/// provider.
+#[cfg(feature = "openai")]
+mod resolver {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[derive(Debug, Clone, Copy)]
+    enum Answer {
+        NoSuchName,
+        Never,
+        To(SocketAddr),
+    }
+
+    /// An in-process DNS resolver that counts its lookups — one per
+    /// connection the client tried to open, so a test can count attempts
+    /// even where nothing listens.
+    #[derive(Debug, Clone)]
+    pub struct Resolver {
+        answer: Answer,
+        lookups: Arc<AtomicUsize>,
+    }
+
+    impl Resolver {
+        fn answering(answer: Answer) -> Self {
+            Self {
+                answer,
+                lookups: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// Every lookup fails at once: the name does not exist.
+        pub fn no_such_name() -> Self {
+            Self::answering(Answer::NoSuchName)
+        }
+
+        /// No lookup ever completes, so the connect phase can only time out.
+        pub fn never() -> Self {
+            Self::answering(Answer::Never)
+        }
+
+        /// Every name resolves to `addr`.
+        pub fn to(addr: SocketAddr) -> Self {
+            Self::answering(Answer::To(addr))
+        }
+
+        /// How many lookups the client has made so far.
+        pub fn lookups(&self) -> usize {
+            self.lookups.load(Ordering::SeqCst)
+        }
+    }
+
+    impl reqwest::dns::Resolve for Resolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            match self.answer {
+                Answer::NoSuchName => Box::pin(std::future::ready(Err(
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "no such name (test resolver)",
+                    )) as Box<dyn std::error::Error + Send + Sync>,
+                ))),
+                Answer::Never => Box::pin(std::future::pending()),
+                Answer::To(addr) => Box::pin(std::future::ready(Ok(
+                    Box::new(std::iter::once(addr)) as reqwest::dns::Addrs,
+                ))),
+            }
+        }
+    }
+
+    /// A client shaped like the router's (L7) — a connect timeout and a read
+    /// gap — whose names `resolver` answers and which no proxy reaches.
+    pub fn client_resolving_with(
+        resolver: &Resolver,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(resolver.clone()))
+            .connect_timeout(connect_timeout)
+            .read_timeout(request_timeout)
+            .build()
+            .expect("a test client")
     }
 }

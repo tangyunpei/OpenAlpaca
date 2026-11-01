@@ -1813,6 +1813,100 @@ async fn test_agentic_loop_routed_completes() {
     );
 }
 
+/// The agentic loop's column of M57's retry table: it retries what
+/// `is_transient` admits and ends at once on what it does not. A request
+/// timeout reaches it from the first call (the router's key layer passes it
+/// on, M57 (a)); a connect timeout or a lost connection only once the key
+/// layer's three tries are spent; a refused port never comes back. Each loop
+/// retry is a round, so `rounds_used` says which layer made the calls. The
+/// errors are stand-ins for the kinds `openalpaca_llm`'s transport tests
+/// produce from real reqwest errors.
+#[tokio::test(start_paused = true)]
+async fn the_loop_retries_a_transient_transport_failure_and_not_a_refused_port() {
+    use openalpaca_llm::error::TransportKind;
+    let failure = |kind: TransportKind| {
+        Err(LlmError::Transport {
+            kind,
+            message: format!("error sending request for url (http://127.0.0.1:1/): {kind:?}"),
+        })
+    };
+    let refused = "LLM error: HTTP error: error sending request for url (http://127.0.0.1:1/): \
+                   ConnectRefused";
+    let answer = Ok(ChatResponse {
+        content: "answered".to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage::default(),
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    });
+
+    // (kind, failed calls before the answer, calls made, rounds used, the
+    // turn's error — `None` for the answer)
+    for (kind, failures, calls, rounds, error) in [
+        (TransportKind::RequestTimeout, 1, 2, 2, None),
+        (TransportKind::ConnectTimeout, 3, 4, 2, None),
+        (TransportKind::ResetOrClosed, 3, 4, 2, None),
+        (TransportKind::ConnectRefused, 1, 1, 0, Some(refused)),
+        // A model that never answers: the loop's three retries spent, the
+        // turn ends in the chain's words, not the provider's.
+        (
+            TransportKind::RequestTimeout,
+            4,
+            4,
+            3,
+            Some("All fallback models failed"),
+        ),
+    ] {
+        let mut responses = vec![failure(kind); failures];
+        responses.push(answer.clone());
+        let provider = Arc::new(MockRouterProvider::new(responses));
+        let router = LlmRouter::single_provider(
+            Arc::clone(&provider) as Arc<dyn LlmProvider>,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        );
+        let config = LoopConfig {
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            enable_caching: false,
+            thinking: None,
+            ..Default::default()
+        };
+
+        let result = run_agentic_loop_routed(
+            &router,
+            vec![ChatMessage::user("hello")],
+            vec![],
+            &config,
+            None,
+            "test",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let made = provider.call_count.load(Ordering::SeqCst);
+        assert_eq!(made, calls, "{kind:?}");
+        assert_eq!(result.rounds_used, rounds, "{kind:?}");
+        match error {
+            None => {
+                assert_eq!(result.finish_reason, LoopFinishReason::Complete, "{kind:?}");
+                assert_eq!(result.final_content, "answered");
+            }
+            Some(text) => assert_eq!(
+                result.finish_reason,
+                LoopFinishReason::Error(text.to_string()),
+                "{kind:?}"
+            ),
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_agentic_loop_routed_publishes_model_access_denied_event() {
     use crate::agent::subagent::AgentConstraints;

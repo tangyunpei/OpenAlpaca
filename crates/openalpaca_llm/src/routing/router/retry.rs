@@ -211,7 +211,10 @@ impl LlmRouter {
                             .await;
                         continue;
                     }
-                    Err(e) if e.is_transient() => {
+                    // A request timeout is transient but not retried here: it
+                    // leaves through the arm below, and the fallback chain and
+                    // the agentic loop take it (M57, (a)).
+                    Err(e) if e.is_retryable_on_key() => {
                         other_outcomes += 1;
                         // Exponential backoff with full jitter
                         let backoff =

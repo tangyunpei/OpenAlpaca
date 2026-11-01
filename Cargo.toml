@@ -88,7 +88,7 @@ openalpaca_wake = { path = "crates/openalpaca_wake" }
 
 # cli
 clap = { version = "4.5.57", features = ["derive"] }
-reqwest = { version = "0.13.2", default-features = false, features = [
+reqwest = { version = "0.13.5", default-features = false, features = [
     "json",
     "rustls",
     "stream",

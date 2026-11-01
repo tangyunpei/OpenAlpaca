@@ -189,7 +189,7 @@ pub(super) fn parse_openai_sse(
                     }
                     Some(Err(e)) => {
                         return Some((
-                            Err(LlmError::Stream(e.to_string())),
+                            Err(LlmError::Stream(crate::providers::transport_message(&e))),
                             (stream, buffer, pending),
                         ));
                     }
