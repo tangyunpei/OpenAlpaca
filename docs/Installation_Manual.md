@@ -55,7 +55,10 @@ from, and the script stops, naming the stale lockfile, when either is not the
 tree's. Regenerate it with `python3.11 -I scripts/release/gen_notices.py`
 (after `bun install --frozen-lockfile`; it needs cargo-about 0.9.2, and prints
 the command that installs it) and commit it with the lockfiles; never edit it
-by hand. It then
+by hand. The generator refuses, writing nothing and naming each, a JavaScript
+package whose licence `deny.toml`'s `[licenses] allow` list does not admit
+(OFL-1.1, the fonts', is admitted for JavaScript alone); CI checks the
+committed file's JavaScript licences the same way. The script then
 installs the GUI's JS dependencies from the frozen lockfile
 (`bun install --frozen-lockfile`), builds the daemon once —
 `apps/openalpaca-gui/scripts/prepare-sidecar.ts --release`, which stages

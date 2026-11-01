@@ -85,8 +85,9 @@ jobs:
       - name: Build
         run: bun run build
 
-  # Seconds long: the scripts' tests, the generated docs' drift check and the
-  # repository-policy guard (B-23), with no network and no cargo.
+  # Seconds long: the scripts' tests, the generated docs' drift check, the
+  # shipped JS packages' licences and the repository-policy guard (B-23), with
+  # no network and no cargo.
   tooling:
     name: Scripts and repository policy
     runs-on: ubuntu-24.04
@@ -109,6 +110,10 @@ jobs:
           python3 -I scripts/tests/test_repo_policy.py
           python3 -I tasks/deps-upgrade/tools/gbase/tests/test_lockdates.py
           python3 -I scripts/tests/test_gen_notices.py
+      # The committed THIRD-PARTY-NOTICES's JavaScript licences against
+      # deny.toml's allow list and OFL-1.1: those two files only, no install.
+      - name: Shipped JS packages' licences
+        run: python3 -I scripts/release/gen_notices.py --check-licences
       # Every cargo call --locked, every action at a full commit SHA with its
       # version comment, every checkout without credentials, no toolchain
       # literal, CARGO_BUILD_BUILD_DIR beside every CARGO_TARGET_DIR, and the

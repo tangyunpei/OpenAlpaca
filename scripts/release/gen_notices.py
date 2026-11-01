@@ -3,7 +3,7 @@
 with its licence text, and the hash of each lockfile it was read from.
 
 Usage:
-  python3.11 -I scripts/release/gen_notices.py [--check] [--root DIR] [--cargo-about EXE]
+  python3.11 -I scripts/release/gen_notices.py [--check | --check-licences] [--root DIR] [--cargo-about EXE]
 
 Writes THIRD-PARTY-NOTICES at the repository root (ROOT, default: this file's
 grandparent's parent). Run it after `bun install --frozen-lockfile`, from a tree whose
@@ -11,7 +11,9 @@ lockfiles are the ones to ship, and commit the file with them: package-macos.sh 
 to package while either hash it records is not the tree's lockfile's. Never edit the file
 by hand. With --check it writes nothing: when a recorded hash is not the tree's
 lockfile's it names that lockfile (exit 1) without regenerating; else it regenerates in
-memory and compares.
+memory and compares. With --check-licences it reads only the committed file's JavaScript
+lines and deny.toml (no install, no cargo-about), as CI's tooling job runs it, and checks
+each package's licence as generation does (below).
 
 What it lists:
   Rust        the crates the daemon (openalpacad), the CLI (openalpaca) and the app
@@ -49,15 +51,32 @@ What it lists:
   covers; everything is sorted and nothing is dated, so the same tree writes the same
   bytes.
 
-Exit: 0 written, or current under --check; 1 stale under --check; 2 a usage error or no
-verdict (a lockfile or node_modules that cannot be read, cargo-about missing, another
-version or failing, a licence id with no vendored text).
+The JavaScript licences: each package's, the SPDX expression its package.json declares,
+must be satisfied by deny.toml's [licenses] allow list (the one cargo-about's `accepted`
+is held to for the Rust half) or by JS_ALSO_ALLOWED below, which is the JavaScript half's
+alone; else generation refuses, before it reads any licence text, as cargo-about's --fail
+refuses a crate, and writes nothing, naming each package, its version and its expression.
+By SPDX's rules (2.3, annex D): A OR B passes when either does, A AND B when both do, AND
+binding before OR and parentheses grouping; `X WITH Y` only when `X WITH Y` itself is
+listed; an id matches in any case, an operator only in capitals, and `+` and LicenseRef-
+ids only as listed; an id is any SPDX idstring, not looked up in SPDX's licence list; a
+missing or unparseable expression is refused, never passed. The Rust lines are not read
+by this check: cargo-about's --fail holds the Rust half at generation, and cargo-deny
+(audit.yml) holds Cargo.lock to the same list.
+
+Exit: 0 written, current under --check, or every JavaScript licence allowed under
+--check-licences; 1 stale under --check, or a JavaScript licence refused under
+--check-licences; 2 nothing written or checked: a usage error, a JavaScript licence
+refused at generation, or no verdict (a lockfile, node_modules, deny.toml or the committed
+file that cannot be read, cargo-about missing, another version or failing, a licence id
+with no vendored text).
 """
 
 import dataclasses
 import functools
 import hashlib
 import importlib.util
+import itertools
 import json
 import pathlib
 import re
@@ -84,6 +103,17 @@ INSTALL = ("cargo install --locked --version %s --features cli --root ~/.cache/o
 
 LICENCE_FILE = re.compile(r"(?i)^(licen[cs]e|copying|copyright|notice)")
 LICENCE_DIR = re.compile(r"(?i)^\.?licen[cs]es$")
+# The licences the JavaScript half may ship beside deny.toml's allow list, each with its
+# reason. Never added to deny.toml, which is the Rust half's policy too.
+JS_ALSO_ALLOWED = {
+    "OFL-1.1": "the two @fontsource fonts (IBM Plex): it lets a font be bundled with software and asks"
+               " that its text go with it, which this file gives",
+}
+JS_TITLE = "JavaScript packages"
+JS_COUNT = re.compile(r"^%s: (\d+)$" % JS_TITLE, re.M)
+PACKAGE_LINE = re.compile(r"^(\S+) (\S+):(?: (.*))?$")
+SPDX_ID = re.compile(r"[A-Za-z0-9.-]+\+?|(?:DocumentRef-[A-Za-z0-9.-]+:)?LicenseRef-[A-Za-z0-9.-]+")
+SPDX_EXCEPTION = re.compile(r"[A-Za-z0-9.-]+")
 HASH_LINE = re.compile(r"^(%s) sha256 ([0-9a-f]{64})$" % "|".join(re.escape(lock) for lock in LOCKS), re.M)
 SPDX_OPERATORS = {"AND", "OR", "WITH"}
 RULE = "=" * 72
@@ -208,15 +238,27 @@ def stale_locks(root: pathlib.Path, text: str) -> list:
 
 
 # ------------------------------------------------------------------ Rust: cargo-about
+def deny_allow(deny_text: str) -> list:
+    """deny.toml's [licenses] allow list (P34's): the licences both halves are held to."""
+    try:
+        licences = tomllib.loads(deny_text).get("licenses")
+    except tomllib.TOMLDecodeError as e:
+        raise NoVerdict("deny.toml is not TOML: %s" % e)
+    allow = licences.get("allow") if isinstance(licences, dict) else None
+    if not isinstance(allow, list) or not all(isinstance(a, str) for a in allow):
+        raise NoVerdict("deny.toml has no [licenses] allow list of licence names")
+    return allow
+
+
 def check_accepted(about_text: str, deny_text: str) -> None:
     """Refuses an about.toml whose `accepted` set is not deny.toml's [licenses] allow set."""
     try:
         accepted = tomllib.loads(about_text).get("accepted")
-        allow = tomllib.loads(deny_text).get("licenses", {}).get("allow")
     except tomllib.TOMLDecodeError as e:
-        raise NoVerdict("%s or deny.toml is not TOML: %s" % (ABOUT_TOML, e))
-    if not isinstance(accepted, list) or not isinstance(allow, list):
-        raise NoVerdict("%s has no `accepted` list, or deny.toml no [licenses] allow list" % ABOUT_TOML)
+        raise NoVerdict("%s is not TOML: %s" % (ABOUT_TOML, e))
+    if not isinstance(accepted, list):
+        raise NoVerdict("%s has no `accepted` list" % ABOUT_TOML)
+    allow = deny_allow(deny_text)
     if set(accepted) != set(allow):
         raise NoVerdict("%s's accepted licences are not deny.toml's allow list: only in %s: %s; only in deny.toml: %s"
                         % (ABOUT_TOML, ABOUT_TOML, sorted(set(accepted) - set(allow)) or "none",
@@ -423,23 +465,31 @@ def installed_dir(root: pathlib.Path, name: str, version: str) -> pathlib.Path:
 
 
 def declared_licence(pkg: pathlib.Path) -> str:
+    """The licence its package.json declares, its spacing collapsed; "" when it names none,
+    which the licence check refuses by name."""
     meta = json.loads(read_text(pkg / "package.json"))
     lic = meta.get("license")
     if isinstance(lic, dict):
         lic = lic.get("type")
     if not lic and isinstance(meta.get("licenses"), list):
         lic = " OR ".join(str(x.get("type", x) if isinstance(x, dict) else x) for x in meta["licenses"])
-    if not lic:
-        raise NoVerdict("%s/package.json names no licence" % pkg)
-    return " ".join(str(lic).split())
+    return " ".join(str(lic).split()) if lic else ""
 
 
-def js_half(root: pathlib.Path, doc: dict, keys: list) -> Half:
-    half = Half()
+def js_half(root: pathlib.Path, doc: dict, keys: list, allowed=None) -> Half:
+    """The packages the keys reach, with their licence texts. Given `allowed`, a package
+    whose licence it does not satisfy is refused before any text is read, so the refusal
+    names the package rather than a standard text it would have been given."""
+    installed = []
     for key in keys:
         name, version = name_version(doc["packages"][key])
         pkg = installed_dir(root, name, version)
-        licence = declared_licence(pkg)
+        installed.append((name, version, declared_licence(pkg), pkg))
+    refused = licence_refusals([p[:3] for p in installed], allowed) if allowed is not None else []
+    if refused:
+        raise NoVerdict(refusal(refused))
+    half = Half()
+    for name, version, licence, pkg in installed:
         half.packages.append((name, version, licence))
         shipped = licence_files(pkg)
         for fname, text in shipped:
@@ -449,6 +499,151 @@ def js_half(root: pathlib.Path, doc: dict, keys: list) -> Half:
                 half.add(spdx_text(root, ident), "%s, the SPDX standard text (substituted)" % ident, (name, version), True)
     half.packages = sorted(set(half.packages), key=package_key)
     return half
+
+
+# ------------------------------------------------------------------ JavaScript: licences
+def js_allowed(deny_text: str) -> list:
+    """The licences a JavaScript package may ship under: deny.toml's allow list and
+    JS_ALSO_ALLOWED."""
+    return deny_allow(deny_text) + sorted(JS_ALSO_ALLOWED)
+
+
+def spdx_parse(expression: str):
+    """An SPDX licence expression (SPDX 2.3, annex D) as a tree: ("id", id), ("with", id,
+    exception), ("and", [tree, ...]) or ("or", [tree, ...]). ValueError when it is none."""
+    tokens = re.findall(r"[()]|[^\s()]+", expression)
+    pos = 0
+
+    def peek():
+        return tokens[pos] if pos < len(tokens) else None
+
+    def take():
+        nonlocal pos
+        if pos == len(tokens):
+            raise ValueError("it ends early")
+        pos += 1
+        return tokens[pos - 1]
+
+    def either():
+        terms = [both()]
+        while peek() == "OR":
+            take()
+            terms.append(both())
+        return terms[0] if len(terms) == 1 else ("or", terms)
+
+    def both():
+        terms = [term()]
+        while peek() == "AND":
+            take()
+            terms.append(term())
+        return terms[0] if len(terms) == 1 else ("and", terms)
+
+    def term():
+        token = take()
+        if token == "(":
+            inner = either()
+            if peek() != ")":
+                raise ValueError("a ( is not closed")
+            take()
+            return inner
+        if token in SPDX_OPERATORS or not SPDX_ID.fullmatch(token):
+            raise ValueError("%r where a licence id or ( was due" % token)
+        if peek() != "WITH":
+            return ("id", token)
+        take()
+        exception = take()
+        if exception in SPDX_OPERATORS or not SPDX_EXCEPTION.fullmatch(exception):
+            raise ValueError("%r where an exception id was due" % exception)
+        return ("with", token, exception)
+
+    try:
+        tree = either()
+    except RecursionError:
+        raise ValueError("it nests too deep") from None
+    if pos != len(tokens):
+        raise ValueError("%r after a whole expression" % tokens[pos])
+    return tree
+
+
+def spdx_satisfied(expression: str, allowed) -> bool:
+    """Whether the allowed licences satisfy an SPDX expression: an id, or `id WITH
+    exception`, when it is listed as written (ids in any case); A OR B when either is;
+    A AND B when both are. ValueError when the expression is none."""
+    listed = {" ".join(a.split()).casefold() for a in allowed}
+
+    def holds(node) -> bool:
+        if node[0] == "id":
+            return node[1].casefold() in listed
+        if node[0] == "with":
+            return ("%s WITH %s" % node[1:]).casefold() in listed
+        return (any if node[0] == "or" else all)(holds(n) for n in node[1])
+    return holds(spdx_parse(expression))
+
+
+def licence_refusals(packages, allowed) -> list:
+    """One line for each (name, version, licence) the allowed licences do not satisfy."""
+    out = []
+    for name, version, licence in packages:
+        if not licence.strip():
+            out.append("%s %s: names no licence" % (name, version))
+            continue
+        try:
+            if spdx_satisfied(licence, allowed):
+                continue
+            why = "not allowed"
+        except ValueError as e:
+            why = "not an SPDX licence expression: %s" % e
+        out.append("%s %s: %s (%s)" % (name, version, licence, why))
+    return out
+
+
+def the_list() -> str:
+    also = " and ".join(sorted(JS_ALSO_ALLOWED))
+    return "deny.toml's [licenses] allow list" + (", with %s for JavaScript alone" % also if also else "")
+
+
+def refusal(refused: list) -> str:
+    return "\n".join(
+        ["%d JavaScript package(s) refused, the licence not admitted by %s:" % (len(refused), the_list())]
+        + ["  " + line for line in refused]
+        + ["Allow a licence by name with its reason (deny.toml's list for both halves, or JS_ALSO_ALLOWED in"
+           " scripts/release/gen_notices.py for JavaScript alone), or keep the package out."])
+
+
+def js_section(text: str) -> list:
+    """The (name, version, licence) lines of a notices file's JavaScript section, as render()
+    writes them. NoVerdict unless the section is there once, each line reads, and their
+    number is the header's count."""
+    lines = text.split("\n")
+    starts = [i for i in range(1, len(lines) - 2)
+              if lines[i] == JS_TITLE and lines[i - 1] == RULE and lines[i + 1] == RULE and not lines[i + 2]]
+    if len(starts) != 1:
+        raise NoVerdict("%s has no single \"%s\" section" % (NOTICES, JS_TITLE))
+    packages = []
+    for line in itertools.takewhile(bool, lines[starts[0] + 3:]):
+        m = PACKAGE_LINE.match(line)
+        if not m:
+            raise NoVerdict("%s: %r, in its %s section, is no `name version: licence` line" % (NOTICES, line, JS_TITLE))
+        packages.append((m.group(1), m.group(2), (m.group(3) or "").strip()))
+    counts = JS_COUNT.findall(header(text))
+    if counts != [str(len(packages))]:
+        raise NoVerdict("%s's %s section lists %d, but its header counts %s"
+                        % (NOTICES, JS_TITLE, len(packages), " and ".join(counts) or "none"))
+    return packages
+
+
+def check_licences(root: pathlib.Path) -> int:
+    """The committed file's JavaScript licences against js_allowed(): 0 all allowed, 1 not."""
+    path = root / NOTICES
+    if not path.is_file():
+        raise NoVerdict("no %s at %s to check; generate it: %s" % (NOTICES, path, REGENERATE))
+    packages = js_section(read_text(path))
+    refused = licence_refusals(packages, js_allowed(read_text(root / "deny.toml")))
+    if refused:
+        print(refusal(refused))
+        return 1
+    print("%s: the %d JavaScript packages' licences are allowed by %s" % (NOTICES, len(packages), the_list()))
+    return 0
 
 
 # ------------------------------------------------------------------ the file
@@ -495,12 +690,12 @@ def render(hashes: list, rust: Half, js: Half) -> str:
         "Rust crates: %d" % len(rust.packages),
         "Rust licence texts: %d" % len(rust.groups),
         "Rust crates given a substituted text: %d" % rust.substituted_count(),
-        "JavaScript packages: %d" % len(js.packages),
+        "%s: %d" % (JS_TITLE, len(js.packages)),
         "JavaScript licence texts: %d" % len(js.groups),
         "JavaScript packages given a substituted text: %d" % js.substituted_count(),
         "",
     ]
-    for title, half in (("Rust crates", rust), ("JavaScript packages", js)):
+    for title, half in (("Rust crates", rust), (JS_TITLE, js)):
         out += [RULE, title, RULE, ""]
         out += ["%s %s: %s" % p for p in half.packages] + [""]
     out += render_texts("Rust crates", rust) + render_texts("JavaScript packages", js)
@@ -514,18 +709,20 @@ def generate(root: pathlib.Path, exe) -> str:
     hashes = hash_lines(root)
     rust = rust_half(root, run_cargo_about(root, find_cargo_about(exe)))
     doc = load_bun_lock(root / "bun.lock")
-    js = js_half(root, doc, bun_closure(doc, GUI_WORKSPACE))
+    js = js_half(root, doc, bun_closure(doc, GUI_WORKSPACE), js_allowed(read_text(root / "deny.toml")))
     if hash_lines(root) != hashes:
         raise NoVerdict("a lockfile changed while the notices were generated; run it again")
     return render(hashes, rust, js)
 
 
 def main(argv: list) -> int:
-    check, root, exe, rest = False, ROOT, None, list(argv[1:])
+    check, licences, root, exe, rest = False, False, ROOT, None, list(argv[1:])
     while rest:
         a = rest.pop(0)
         if a == "--check":
             check = True
+        elif a == "--check-licences":
+            licences = True
         elif a in ("--root", "--cargo-about") and rest:
             v = rest.pop(0)
             if a == "--root":
@@ -535,8 +732,13 @@ def main(argv: list) -> int:
         else:
             sys.stderr.write(__doc__)
             return 2
+    if check and licences:
+        sys.stderr.write(__doc__)
+        return 2
     path = root / NOTICES
     try:
+        if licences:
+            return check_licences(root)
         if check:
             if not path.is_file():
                 print("%s is stale: there is none at %s; generate it: %s" % (NOTICES, path, REGENERATE))

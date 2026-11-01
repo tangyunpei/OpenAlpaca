@@ -7,10 +7,13 @@ Run with either:
   python3.11 -m pytest scripts/tests/test_gen_notices.py
 
 Every case runs on fixtures in a temporary directory: a recorded cargo-about JSON, a small
-bun.lock, a fake node_modules and SPDX texts. None runs cargo-about or bun, and none reads
-the repository's own lockfiles, node_modules or notices, so the file runs offline in CI's
-`tooling` job. The refusal cases source package-macos.sh in bash, as its own comment says
-to, point REPO_ROOT at a fixture tree and call the check; bash and shasum are all they need.
+bun.lock, a fake node_modules and SPDX texts; a generation case runs the generator with a
+stand-in cargo-about, a bash script that prints that JSON. None runs cargo-about or bun,
+and none reads the repository's own lockfiles or node_modules, so the file runs offline
+in CI's `tooling` job. One case reads the repository's committed THIRD-PARTY-NOTICES and
+deny.toml, as CI's licence step does. The refusal cases source package-macos.sh in bash,
+as its own comment says to, point REPO_ROOT at a fixture tree and call the check; bash and
+shasum are all they need.
 """
 
 import hashlib
@@ -102,9 +105,13 @@ def _spdx(root: pathlib.Path) -> pathlib.Path:
     return root
 
 
-def _npm_package(root: pathlib.Path, name: str, version: str, licence: str, files: dict, suffix: str = "") -> None:
+def _npm_package(root: pathlib.Path, name: str, version: str, licence, files: dict, suffix: str = "") -> None:
+    """A package in Bun's isolated layout; `licence` None writes a package.json naming none."""
     d = root / "node_modules" / ".bun" / ("%s@%s%s" % (name.replace("/", "+"), version, suffix)) / "node_modules" / name
-    _write(d / "package.json", json.dumps({"name": name, "version": version, "license": licence}))
+    meta = {"name": name, "version": version}
+    if licence is not None:
+        meta["license"] = licence
+    _write(d / "package.json", json.dumps(meta))
     for fname, text in files.items():
         _write(d / fname, text)
 
@@ -437,6 +444,204 @@ def test_package_macos_refuses_missing_or_unreadable_notices() -> None:
             finally:
                 (root / "THIRD-PARTY-NOTICES").chmod(0o644)
             assert rc == 1 and "Cannot read" in out and "ACCEPTED" not in out, (rc, out)
+
+
+# A cut of deny.toml's [licenses] allow list, as the licence cases read it; OFL-1.1 is not in it.
+ALLOWED = ["Apache-2.0", "Apache-2.0 WITH LLVM-exception", "MIT", "MPL-2.0"]
+DENY = '[licenses]\nallow = ["Apache-2.0", "MIT", "MPL-2.0"]\n'
+
+
+def test_an_spdx_expression_passes_by_or_and_with_and_parentheses() -> None:
+    cases = {
+        "MIT": True, "(MIT)": True, "((MIT))": True, "GPL-3.0-only": False,
+        "Apache-2.0 OR MIT": True, "(MPL-2.0 OR Apache-2.0)": True, "GPL-3.0-only OR MIT": True,
+        "MIT AND Apache-2.0": True, "MIT AND GPL-3.0-only": False,
+        # AND binds tighter than OR; parentheses override that.
+        "MIT OR GPL-3.0-only AND GPL-2.0-only": True, "GPL-3.0-only AND GPL-2.0-only OR MIT": True,
+        "GPL-3.0-only AND (GPL-2.0-only OR MIT)": False, "(MIT OR GPL-3.0-only) AND Apache-2.0": True,
+        "(MIT OR GPL-3.0-only) AND (GPL-2.0-only OR LGPL-2.1-only)": False,
+        # `X WITH Y` passes only when `X WITH Y` itself is listed: X alone does not admit it.
+        "Apache-2.0 WITH LLVM-exception": True, "Apache-2.0  WITH  LLVM-exception": True,
+        "MIT WITH LLVM-exception": False, "Apache-2.0 WITH Classpath-exception-2.0": False,
+        "GPL-2.0-only WITH LLVM-exception OR MIT": True,
+        # An id matches whatever its case (SPDX's annex D.2); an operator only in capitals.
+        "mit": True, "Mit OR GPL-3.0-only": True,
+        # `+` and LicenseRef- are ids like any other: refused unless listed as written.
+        "MIT+": False, "Apache-2.0+": False, "LicenseRef-MIT": False, "DocumentRef-x:LicenseRef-MIT": False,
+        "UNLICENSED": False,
+    }
+    for expression, expected in cases.items():
+        assert gen().spdx_satisfied(expression, ALLOWED) is expected, (expression, expected)
+    assert gen().spdx_satisfied("Apache-2.0", ["Apache-2.0 WITH LLVM-exception"]) is False, "nor X WITH Y admit X"
+    assert gen().spdx_satisfied("MIT+", ALLOWED + ["MIT+"]) is True
+    assert gen().spdx_satisfied("LicenseRef-Fonts AND MIT", ALLOWED + ["LicenseRef-Fonts"]) is True
+
+
+def test_an_expression_that_is_missing_or_not_spdx_is_refused_never_passed() -> None:
+    deep = "(" * 5000 + "MIT" + ")" * 5000  # deeper than Python's recursion limit lets a parser go
+    for expression in ("", "  ", "MIT OR", "OR MIT", "MIT AND AND Apache-2.0", "(MIT", "MIT)", "()",
+                       "MIT Apache-2.0", "MIT or Apache-2.0", "MIT/X11", "MIT, Apache-2.0", "Apache 2.0",
+                       "SEE LICENSE IN LICENSE.md", "MIT WITH", "WITH LLVM-exception",
+                       "(Apache-2.0) WITH LLVM-exception", "MIT++", "a:b", deep):
+        try:
+            verdict = gen().spdx_satisfied(expression, ALLOWED + ["MIT Apache-2.0", "Apache 2.0"])
+        except ValueError:
+            continue
+        raise AssertionError("%r is no SPDX expression, yet got a verdict: %r" % (expression, verdict))
+    refused = gen().licence_refusals([("ok", "1.0.0", "MIT"), ("odd", "2.0.0", "MIT or Apache-2.0"),
+                                      ("none", "3.0.0", ""), ("gpl", "4.0.0", "GPL-3.0-only")], ALLOWED)
+    assert [line.split(":")[0] for line in refused] == ["odd 2.0.0", "none 3.0.0", "gpl 4.0.0"], refused
+    assert "MIT or Apache-2.0" in refused[0] and "SPDX" in refused[0], refused[0]
+    assert "no licence" in refused[1], refused[1]
+    assert "GPL-3.0-only" in refused[2], refused[2]
+    refused = gen().licence_refusals([("deep", "1.0.0", deep)], ALLOWED)
+    assert len(refused) == 1 and refused[0].startswith("deep 1.0.0: (((") and "too deep" in refused[0], refused
+
+
+def test_the_js_allow_list_is_deny_tomls_with_ofl_for_the_fonts() -> None:
+    allowed = gen().js_allowed(DENY)
+    assert sorted(allowed) == ["Apache-2.0", "MIT", "MPL-2.0", "OFL-1.1"], allowed
+    assert gen().licence_refusals([("@fontsource/ibm-plex-sans", "5.3.0", "OFL-1.1")], allowed) == []
+    assert len(gen().licence_refusals([("x", "1.0.0", "CC-BY-4.0")], allowed)) == 1
+    try:
+        gen().js_allowed("[licenses]\n")
+    except gen().NoVerdict as e:
+        assert "allow" in str(e), str(e)
+    else:
+        raise AssertionError("a deny.toml with no allow list gave a JS allow list")
+
+
+def _generation_tree(root: pathlib.Path, licences: dict) -> str:
+    """A tree the generator runs on end to end: both lockfiles, deny.toml and about.toml,
+    the SPDX texts, node_modules holding the bun.lock closure (a, b 2.0.0, c, e) under
+    `licences`, and a stand-in cargo-about printing _about's JSON, whose path it returns."""
+    _spdx(root)
+    _write(root / "Cargo.lock", "version = 4\n")
+    _write(root / "bun.lock", BUN_LOCK)
+    _write(root / "deny.toml", DENY)
+    _write(root / "scripts" / "release" / "about.toml", 'accepted = ["MIT", "Apache-2.0", "MPL-2.0"]\n')
+    for name, version in (("a", "1.0.0"), ("b", "2.0.0"), ("c", "1.0.0"), ("e", "1.0.0")):
+        _npm_package(root, name, version, licences[name], {"LICENSE": "%s's licence\n" % name})
+    about = _write(root / "about.json", json.dumps(_about(root)))
+    exe = _write(root / "cargo-about", '#!/bin/bash\nif [ "$1" = --version ]; then echo "cargo-about %s"; '
+                 'else cat "%s"; fi\n' % (gen().CARGO_ABOUT_VERSION, about))
+    exe.chmod(0o755)
+    return str(exe)
+
+
+def _generate(root: pathlib.Path, exe: str) -> tuple[int, str]:
+    proc = subprocess.run([sys.executable, "-I", str(GEN), "--root", str(root), "--cargo-about", exe],
+                          capture_output=True, text=True)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def _check_licences(root=None) -> tuple[int, str]:
+    cmd = [sys.executable, "-I", str(GEN), "--check-licences"] + (["--root", str(root)] if root else [])
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def test_generation_refuses_a_js_package_the_list_does_not_allow_by_name_and_writes_nothing() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        exe = _generation_tree(root, {"a": "MIT", "b": "(MPL-2.0 OR Apache-2.0)", "c": "OFL-1.1", "e": "GPL-3.0-only"})
+        rc, out = _generate(root, exe)
+        assert rc == 2 and "e 1.0.0: GPL-3.0-only" in out, (rc, out)
+        for allowed in ("a 1.0.0", "b 2.0.0", "c 1.0.0"):
+            assert allowed not in out, (allowed, out)
+        assert not (root / "THIRD-PARTY-NOTICES").exists(), "a refused generation writes nothing"
+
+
+def test_generation_refuses_a_package_that_ships_no_licence_file_by_name_before_reading_a_text() -> None:
+    # A package with no licence file is given the standard text of each id its expression
+    # names; the refusal comes first, so it names the package, not a text no one vendored.
+    for expression in ("GPL-3.0-only", "MIT+", "MIT or Apache-2.0", "SEE LICENSE IN LICENSE.md"):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            exe = _generation_tree(root, {"a": "MIT", "b": "MIT", "c": "MIT", "e": expression})
+            (root / "node_modules" / ".bun" / "e@1.0.0" / "node_modules" / "e" / "LICENSE").unlink()
+            rc, out = _generate(root, exe)
+            assert rc == 2 and ("e 1.0.0: %s (" % expression) in out, (expression, rc, out)
+            assert "standard text" not in out, (expression, out)
+            assert not (root / "THIRD-PARTY-NOTICES").exists(), "a refused generation writes nothing"
+
+
+def test_generation_refuses_a_js_package_that_names_no_licence() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        exe = _generation_tree(root, {"a": "MIT", "b": "MIT", "c": "MIT", "e": None})
+        rc, out = _generate(root, exe)
+        assert rc == 2 and "e 1.0.0" in out and "no licence" in out, (rc, out)
+        assert not (root / "THIRD-PARTY-NOTICES").exists(), "a refused generation writes nothing"
+
+
+def test_generation_accepts_the_fonts_ofl_and_the_file_it_writes_passes_the_licence_check() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        exe = _generation_tree(root, {"a": "MIT", "b": "(MPL-2.0 OR Apache-2.0)", "c": "OFL-1.1", "e": "Apache-2.0 OR MIT"})
+        rc, out = _generate(root, exe)
+        assert rc == 0, (rc, out)
+        text = (root / "THIRD-PARTY-NOTICES").read_text(encoding="utf-8")
+        assert gen().js_section(text) == [("a", "1.0.0", "MIT"), ("b", "2.0.0", "(MPL-2.0 OR Apache-2.0)"),
+                                          ("c", "1.0.0", "OFL-1.1"), ("e", "1.0.0", "Apache-2.0 OR MIT")]
+        rc, out = _check_licences(root)
+        assert rc == 0 and "4 JavaScript packages" in out, (rc, out)
+
+
+def _notices(js: list, rust: list) -> str:
+    rust_half, js_half = gen().Half(), gen().Half()
+    rust_half.packages, js_half.packages = list(rust), list(js)
+    return gen().render(["Cargo.lock sha256 0", "bun.lock sha256 0"], rust_half, js_half)
+
+
+JS = [("@fontsource/ibm-plex-sans", "5.3.0", "OFL-1.1"), ("dompurify", "3.4.17", "(MPL-2.0 OR Apache-2.0)"),
+      ("react", "19.3.1", "MIT")]
+# Rust lines outside the list (B-22's body names 13 such declared expressions): not read.
+RUST = [("lgpl-only", "1.0.0", "LGPL-2.1-or-later"), ("r-efi", "5.3.0", "MIT OR Apache-2.0 OR LGPL-2.1-or-later")]
+
+
+def test_check_licences_reads_the_files_js_lines_alone_and_names_each_refused_package() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root / "deny.toml", DENY)
+        _write(root / "THIRD-PARTY-NOTICES", _notices(JS, RUST))
+        rc, out = _check_licences(root)
+        assert rc == 0 and "3 JavaScript packages" in out and "lgpl-only" not in out, (rc, out)
+        _write(root / "THIRD-PARTY-NOTICES", _notices(JS + [("left-pad", "1.3.0", "WTFPL"), ("nolic", "0.1.0", "")], RUST))
+        rc, out = _check_licences(root)
+        assert rc == 1 and "left-pad 1.3.0: WTFPL" in out and "nolic 0.1.0" in out and "no licence" in out, (rc, out)
+        assert "react" not in out and "dompurify" not in out and "lgpl-only" not in out, out
+
+
+def test_check_licences_gives_no_verdict_on_a_file_it_cannot_read_whole() -> None:
+    whole = _notices(JS, RUST)
+    cases = {  # label: (the file, or None for no file; what the refusal names)
+        "no JavaScript section": (whole.replace("\nJavaScript packages\n", "\nJS packages\n"), "section"),
+        "a line fewer than the header counts": (whole.replace("react 19.3.1: MIT\n", ""), "counts 3"),
+        "a line that is not `name version: licence`": (whole.replace("react 19.3.1: MIT\n", "react: MIT\n"),
+                                                        "'react: MIT'"),
+        "no file": (None, "THIRD-PARTY-NOTICES"),
+    }
+    for label, (text, named) in cases.items():
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            _write(root / "deny.toml", DENY)
+            if text is not None:
+                _write(root / "THIRD-PARTY-NOTICES", text)
+            rc, out = _check_licences(root)
+            assert rc == 2 and out.startswith("gen_notices: ") and named in out, (label, rc, out)
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root / "deny.toml", "[licenses]\n")
+        _write(root / "THIRD-PARTY-NOTICES", whole)
+        rc, out = _check_licences(root)
+        assert rc == 2 and out.startswith("gen_notices: ") and "deny.toml" in out, (rc, out)
+
+
+def test_the_committed_notices_js_licences_pass() -> None:
+    """The repository's own THIRD-PARTY-NOTICES and deny.toml, read as CI's step reads them."""
+    rc, out = _check_licences()
+    assert rc == 0 and "JavaScript packages" in out, (rc, out)
 
 
 def main() -> int:
