@@ -609,7 +609,10 @@ fn tool_calls_of(data: &Value) -> Vec<ToolCall> {
 /// A result that sat inline comes back as itself — bar a success with nothing
 /// to read, whose record keeps the tool's own empty output and which comes
 /// back as the line the loop handed the model in its place
-/// ([`no_output_line`], N-TOOL-6). A **spilled** one comes back
+/// ([`no_output_line`], N-TOOL-6). A record whose spill was never written
+/// (`spill_ref`, beside `spill_error`) keeps only the result's first 2 KB
+/// as its string: that is a preview, not the output, and comes back as
+/// itself, never as the line. A **spilled** one comes back
 /// as the stub the loop handed the model when the call first ran, byte for
 /// byte, because the payload never entered the context the first time and
 /// re-priming must not put it there now: [`spill_stub`] from the record's
@@ -628,7 +631,8 @@ fn tool_calls_of(data: &Value) -> Vec<ToolCall> {
 fn result_text(session_dir: &Path, record: &LoggedRecord, plan: &mut ReplayPlan) -> String {
     match record.data.get("result") {
         Some(Value::String(inline)) => {
-            let ok = record.data.get("ok").and_then(Value::as_bool) == Some(true);
+            let ok = record.data.get("ok").and_then(Value::as_bool) == Some(true)
+                && record.data.get("spill_ref").is_none();
             let tool = record.data.get("name").and_then(Value::as_str);
             tool.filter(|_| ok)
                 .and_then(|tool| no_output_line(tool, inline))

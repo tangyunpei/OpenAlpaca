@@ -4950,10 +4950,12 @@ mod no_output {
     /// One loop with a session log whose one call, `quiet`, answers `output`
     /// at the inline threshold `inline_bytes`: what the model was handed,
     /// the call's `tool_result` record, and what a replay hands a resumed run
-    /// for that call.
+    /// for that call. With `results_unwritable`, a file stands where the
+    /// session's `results/` goes, so a spill's write fails.
     async fn run_logged(
         output: String,
         inline_bytes: usize,
+        results_unwritable: bool,
     ) -> (String, serde_json::Value, String) {
         let registry = ToolRegistry::default();
         registry
@@ -5024,6 +5026,11 @@ mod no_output {
             SessionLogLimits::default(),
             "test".to_string(),
         );
+        if results_unwritable {
+            let session = dir.path().join("sess-quiet");
+            std::fs::create_dir_all(&session).unwrap();
+            std::fs::write(session.join("results"), b"").unwrap();
+        }
         let handle = service.handle_for("sess-quiet");
         let config = LoopConfig {
             model: Some("claude-sonnet-4-20250514".to_string()),
@@ -5076,7 +5083,7 @@ mod no_output {
     /// too, byte for byte.
     #[tokio::test]
     async fn the_log_keeps_the_empty_output_and_a_replay_hands_back_the_line() {
-        let (seen, record, replayed) = run_logged(String::new(), MAX_TOOL_RESULT_SIZE).await;
+        let (seen, record, replayed) = run_logged(String::new(), MAX_TOOL_RESULT_SIZE, false).await;
         assert_eq!(seen, "(quiet completed with no output)");
         assert_eq!(record["ok"], serde_json::json!(true));
         assert_eq!(
@@ -5096,7 +5103,7 @@ mod no_output {
     /// that would sit inline.
     #[tokio::test]
     async fn whitespace_over_the_threshold_spills_like_any_result() {
-        let (seen, record, replayed) = run_logged(" \n".repeat(100), 64).await;
+        let (seen, record, replayed) = run_logged(" \n".repeat(100), 64, false).await;
         let rel = record["result"]["spill"]["rel"]
             .as_str()
             .unwrap_or_else(|| panic!("200 bytes over a 64-byte threshold spill: {record}"));
@@ -5111,6 +5118,31 @@ mod no_output {
             "{seen:?}"
         );
         assert_eq!(replayed, seen, "the replay hands back the same stub");
+    }
+
+    /// A spill whose `results/` write failed keeps only its first 2 KB in the
+    /// record, beside `spill_error`. When those are whitespace with text after
+    /// them, the model was handed the stub, which says there is more, and a
+    /// replay hands back the preview the record kept — never the line, which
+    /// would tell a resumed model the call printed nothing.
+    #[tokio::test]
+    async fn a_failed_spill_is_not_replayed_as_no_output() {
+        let output = format!("{}BUILD OK: 12 targets", "\n".repeat(3000));
+        let (seen, record, replayed) = run_logged(output, 64, true).await;
+        assert!(
+            record["spill_error"].is_string(),
+            "the spill's write failed: {record}"
+        );
+        assert!(
+            seen.starts_with("[result too large: 3020 bytes; first 2 KB follow]"),
+            "{seen:?}"
+        );
+        assert_eq!(
+            record["result"],
+            serde_json::json!("\n".repeat(2048)),
+            "the record keeps the preview"
+        );
+        assert_eq!(replayed, "\n".repeat(2048), "a replay hands it back");
     }
 }
 

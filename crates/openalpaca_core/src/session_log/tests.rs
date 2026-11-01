@@ -2668,6 +2668,57 @@ fn a_success_with_no_output_is_replayed_as_the_line_the_model_read() {
     );
 }
 
+/// A spill whose `results/` write failed (`writer::spill_result`'s `Err`
+/// arm) keeps only the result's first 2 KB, as a plain string beside
+/// `spill_error` and the `spill_ref` it could not honour. That preview is
+/// not the tool's output — text may follow its whitespace, and the model
+/// was handed the spill stub — so it is never read as a success with
+/// nothing to say: it replays as the preview its record kept.
+#[test]
+fn a_failed_spill_whose_preview_is_whitespace_is_not_replayed_as_no_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let calls = [
+        ("tu-1", "quiet", serde_json::json!({})),
+        (
+            "tu-2",
+            "shell_execute",
+            serde_json::json!({"command": "make"}),
+        ),
+    ];
+    let failed_spill = |id: &str, name: &str, preview: &str| {
+        let mut record = tool_result_record(id, name, true, preview);
+        record["spill_error"] = serde_json::json!("No space left on device (os error 28)");
+        record["spill_ref"] = serde_json::json!(format!("results/000003-{id}-{name}.txt"));
+        record
+    };
+    let newlines = "\n".repeat(2048);
+    let spaces = " ".repeat(2048);
+    let mut command = failed_spill("tu-2", "shell_execute", &spaces);
+    command["stub"] = command_stub_marker(32 * 1024);
+    seed_records(
+        root,
+        "s1",
+        &[
+            ("session_start", "t1", serde_json::json!({"boot_id": "b1"})),
+            ("round", "t1", round_record(1, "build it", &calls)),
+            (
+                "tool_result",
+                "t1",
+                failed_spill("tu-1", "quiet", &newlines),
+            ),
+            ("tool_result", "t1", command),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    let m = &plan.messages;
+    assert_eq!(m.len(), 3, "the round and its two results: {m:?}");
+    assert_eq!(m[1].content, newlines, "the preview its record kept");
+    assert_eq!(m[2].content, spaces, "a command's too");
+}
+
 /// §5.4's two stubs, pinned whole (`tasks/api-fix-plan.md` §5.4, rev 3.31):
 /// the head-only one every tool but a command gets, unchanged, and a
 /// command's (N-TOOL-7, Z1-16), whose preview is its output's head and tail

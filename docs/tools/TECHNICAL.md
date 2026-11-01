@@ -1106,6 +1106,11 @@ depends on the registry dropping the last reference.
 - **Non-text content is dropped**: image/audio/resource blocks in tool
   results are replaced with a bracketed placeholder — they are not
   surfaced to the model.
+- **Structured content is dropped**: `serialize_call_result()` reads only
+  the content blocks, so a successful result carrying only
+  `structuredContent` reaches the loop as `""` and the model as
+  `(<server>__<tool> completed with no output)` (N-TOOL-6); M14
+  (programme step 8) serializes it.
 - **MCP resources and prompts are not implemented**: the client has no
   resource or prompt methods at all — it imports tools and nothing else.
   A future phase would add the methods rather than fill in placeholders,
@@ -1617,7 +1622,9 @@ resumed run's replay (`session_log::replay`) rebuilds the same stub from the
 `results/` file, checked against the record's `bytes` and `sha256`.  It
 hands an empty success back as the same `no_output_line()`, from the
 record's `name` and output; a whitespace result over the threshold spilled
-and replays as its stub, and one whose record the 64 KB envelope cut
+and replays as its stub — or, when its `results/` write failed (the
+record's `spill_error`), as the 2 KB preview its record kept, never the
+line — and one whose record the 64 KB envelope cut
 (`cap_data()`: whitespace whose JSON escaping runs long) replays as the cut
 preview, as any inline result so cut does.
 
