@@ -226,4 +226,4 @@ bun run check && bun run test && bun run format:check && bun run build
 - **Resuming an interrupted run** by replay is experimental and off by default (`resume_enabled` in `daemon.toml`).
 - **Costs.** A chat turn is capped at $1. A workflow's lead agent is capped at $3 by its shipped template (`daemon.toml` defaults to $5 where a template sets nothing). There is no overall daily budget; only the small background jobs (memory extraction, summaries, task-output extraction) have daily ceilings.
 - **Releases are unsigned.** The macOS package is not code-signed.
-- **License:** MIT, as declared in `Cargo.toml`.
+- **License:** MIT, as declared in `Cargo.toml`; the text is in [LICENSE](LICENSE).

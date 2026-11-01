@@ -243,6 +243,7 @@ cp -R "$APP_BUNDLE_PATH" "$STAGING_DIR/gui/openalpaca-gui.app"
 cp -R "$REPO_ROOT/scripts/release/templates/config/." "$STAGING_DIR/config/"
 install -m 755 "$REPO_ROOT/scripts/release/install.sh" "$STAGING_DIR/install.sh"
 install -m 755 "$REPO_ROOT/scripts/release/uninstall.sh" "$STAGING_DIR/uninstall.sh"
+install -m 644 "$REPO_ROOT/LICENSE" "$STAGING_DIR/LICENSE"
 install -m 644 "$REPO_ROOT/THIRD-PARTY-NOTICES" "$STAGING_DIR/THIRD-PARTY-NOTICES"
 
 cat >"$STAGING_DIR/manifest.json" <<EOF

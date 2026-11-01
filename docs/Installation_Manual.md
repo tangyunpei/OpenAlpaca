@@ -66,9 +66,9 @@ app bundle, and then checks that the daemon inside the bundle and the
 they differ (an unsigned bundle is assumed: signing changes the bytes). `package-linux.sh` and `package-windows.ps1` follow the same
 sequence (the daemon is read out of the AppImage with `--appimage-extract`, out
 of the MSI with an administrative `msiexec /a` install into a scratch folder),
-but neither checks `THIRD-PARTY-NOTICES` nor puts it at the archive's root
-yet (macOS first): their app bundles carry it through the shared
-`tauri.conf.json`, unchecked, until they gain the check.
+but neither checks `THIRD-PARTY-NOTICES` nor puts it or `LICENSE` at the
+archive's root yet (macOS first): their app bundles carry both through the
+shared `tauri.conf.json`, the notices unchecked, until they gain the check.
 
 Expected output:
 
@@ -84,9 +84,10 @@ Package contents:
 - `install.sh`
 - `uninstall.sh`
 - `manifest.json` — build metadata: `name`, `version`, `target`, `built_at_utc`, `git_sha`
+- `LICENSE` — OpenAlpaca's own licence (MIT)
 - `THIRD-PARTY-NOTICES` — every third-party Rust crate and JavaScript package
-  the release ships, each with its licence text; the app carries the same file
-  in `openalpaca-gui.app/Contents/Resources/`, where an installed app keeps it
+  the release ships, each with its licence text; the app carries both files
+  in `openalpaca-gui.app/Contents/Resources/`, where an installed app keeps them
 
 Note: binaries and the `.app` bundle are **not codesigned and not notarised**.
 macOS Gatekeeper will show "unidentified developer" warnings; the installer

@@ -36,6 +36,7 @@
     ],
     "externalBin": ["bin/openalpacad"],
     "resources": {
+      "../../../LICENSE": "LICENSE",
       "../../../THIRD-PARTY-NOTICES": "THIRD-PARTY-NOTICES"
     }
   }
