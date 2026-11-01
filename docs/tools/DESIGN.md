@@ -31,7 +31,7 @@ MCP server — that an agent may invoke during an agentic loop iteration.
 | 3 | **Extensibility without recompilation** | Users add tools via TOML config files, external MCP servers (`config/mcp.toml`), or out-of-process plugins; no Rust code required. |
 | 4 | **Two governance axes** | **ALLOW** is per agent (which capabilities a template or skill declares). **ENABLE** is per extension (one switch per MCP server and per plugin). Built-in tools are never switched off. |
 | 5 | **No silent degradation** | A tool that is withheld is refused with a message naming the extension that owns it, and the refusal is logged. A skill that lost a required tool is refused rather than run without it. |
-| 6 | **Parallel execution** | All tool calls within a single LLM round execute concurrently via `join_all`. |
+| 6 | **Parallel reads, ordered writes** | Within a single LLM round, consecutive read-only calls execute concurrently via `join_all`; every other call runs alone, in the model's order (N-TOOL-3, 2026-11-01). |
 | 7 | **Runtime registration** | The registry is lock-free and mutable: MCP and plugin tools register and unregister while the daemon runs. Per-request tools live in a per-request copy of the registry. |
 | 8 | **Owner-scoped data isolation** | Tools accessing user-specific data (memory, persona, artifacts) take identity only from a trusted per-invocation `ToolContext`, never from LLM-supplied arguments. |
 
@@ -120,7 +120,7 @@ directory name), never from the free-form `author` string.
 │  run_agentic_loop_routed()                                       │
 │  • Receives LLM response with tool_calls                         │
 │  • Enforces max_tools_per_round budget (overflow calls errored)  │
-│  • Executes tools in parallel via SandboxManager                 │
+│  • Runs tools via SandboxManager: reads together, others alone   │
 │  • Spills or cuts oversized results, feeds them back to the LLM  │
 ├──────────────────────────────────────────────────────────────────┤
 │                     SECURITY SANDBOX                             │
@@ -322,19 +322,27 @@ directory.
 - Non-BuiltIn backends (HTTP, Command, Plugin, MCP) never receive identity;
   the registry discards the context for them.
 
-### 4.5 Parallel Tool Execution
+### 4.5 Grouped Tool Execution
 
-**Decision:** All tool calls in a single LLM response execute concurrently
-via `futures::join_all()`, capped at `max_tools_per_round`; calls beyond
-the cap receive error results instead of executing.
+**Decision:** The tool calls in a single LLM response, capped at
+`max_tools_per_round` (calls beyond the cap receive error results instead
+of executing), run in groups, in the model's order: consecutive calls whose
+tool declares `read_only_hint` (an MCP tool also `idempotent_hint`), and
+the lead's `spawn_subagents_batch`, `check_subagent_status` and
+`wait_for_subagents` whatever they declare, run together via
+`futures::join_all()`; every other call runs alone; the groups run one
+after another (`ToolRegistry::runs_concurrently`; N-TOOL-3, 2026-11-01).
 
 **Rationale:**
 - LLMs often emit multiple independent tool calls (e.g., `web_search` +
-  `file_read`).  Sequential execution would be unnecessarily slow.
-- The security sandbox is stateless per-call (circuit breaker state is
-  shared but accessed atomically via `Mutex`), so parallel execution is safe.
-- The task's cancellation token is raced against `join_all` for responsive
-  cancellation.
+  `file_read`).  Running reads one after another would be needlessly slow.
+- Running every call together was not safe.  The sandbox keeps no state
+  between calls, but the file tools take no lock, and `file_edit` reads
+  the file and writes it with await points between: two edits of one file
+  let through together (an Always allow, `auto_approve`) both read the
+  original, and the later write dropped the earlier edit.
+- The task's cancellation token is raced against the whole round, every
+  group, for responsive cancellation.
 
 ### 4.6 Circuit Breaker Pattern
 

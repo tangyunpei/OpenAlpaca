@@ -4,7 +4,8 @@
 
 OpenAlpaca's agentic loop maps 1-to-1 onto Hermes Research's [10-step
 run_conversation loop](https://hermes-agent.nousresearch.com/docs/developer-guide/agent-loop),
-extended with cost budgets, parallel tool execution, a lead-agent
+extended with cost budgets, grouped tool execution (read-only calls
+together, every other call alone), a lead-agent
 multi-agent topology (subagents spawned singly or in batches), and a
 mid-workflow steering rail. The legacy pipeline/DAG topologies and
 mid-execution replanning were deleted in Routing V2 Phase 5.
@@ -29,7 +30,7 @@ siblings); `cache_markers` lives in the provider layer and carries only
 | 7 | `loop.step.cache_markers` | Apply the three Anthropic `cache_control: ephemeral` markers (system, last tool, last message) | `providers/anthropic/request.rs` |
 | 8 | `loop.step.llm_call` | Dispatch `backend.complete(...)` under `tokio::select!` with the cancel token | step 8 |
 | 9 | `loop.step.response_parse` | Parse the `ChatResponse`; split into tool-call branch or final-text branch | step 9 |
-| 10 | `loop.step.persist_or_tools` | Execute tools (parallel via `join_all`) OR persist final text and return | step 10 |
+| 10 | `loop.step.persist_or_tools` | Execute tools in groups, in the model's order (read-only calls together via `join_all`, every other call alone) OR persist final text and return | step 10 |
 
 Two details of the budget checks:
 
@@ -513,7 +514,7 @@ Hermes step      OpenAlpaca      Notes
 6. ephemeral     Compliant       Flag-gated (spec P0)
 7. cache marks   Compliant       3 Anthropic breakpoints (spec P1)
 8. interrupt     Compliant       tokio::select + CancellationToken
-9a. tools+loop   Compliant       Parallel tool exec
+9a. tools+loop   Compliant       Grouped tool exec (reads in parallel)
 9b. text+return  Compliant       Background memory extraction
 10. persistence  Compliant       Optimistic-lock state_version
 ```
@@ -677,6 +678,21 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   error result. When a sandbox policy sets `max_tool_calls`, calls are
   partitioned into executable vs over-budget, with over-budget calls
   returning stub error results instead of executing.
+- **Calls run in groups** (N-TOOL-3) — a round's executable calls are cut,
+  in the model's order, into groups: consecutive calls whose tool declares
+  `read_only_hint` (an MCP tool also `idempotent_hint`), or that are the
+  lead's `spawn_subagents_batch`, `check_subagent_status` and
+  `wait_for_subagents` whatever they declare, run together under
+  `join_all`; every other call — a write, a command, a plugin's tool, a
+  tool that declares nothing — runs alone
+  (`ToolRegistry::runs_concurrently`). The groups run one after another,
+  so two edits of one file never interleave once each has passed its
+  approval. The results keep the model's order, a cancellation ends the
+  round wherever it is, and each `tool_result` record's `duration_ms` is
+  its group's wall-clock. Since approval prompts are raised inside the call
+  (below), a round's calls that are not read-only raise their cards one at
+  a time; read-only calls a template's or skill's confirm list names can
+  still ask beside each other.
 - **Runtime model-access check** — the router may fall back to a
   different model than requested; after each response the actual
   `response.model` is checked against the agent's constraints via

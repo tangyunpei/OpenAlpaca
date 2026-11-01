@@ -349,6 +349,32 @@ fn tool_extension(sandbox: Option<&SandboxManager>, tool_name: &str) -> Option<V
     }))
 }
 
+/// One call of a round, through the sandbox.
+///
+/// N-TOOL-4 (Z1-13): it yields its text and whether it failed — the call's
+/// own `Err`. The flag decides everything after; the text keeps the
+/// `[tool_error]` marker for the wires that have no error field. A hint is
+/// the failing tool's (or the sandbox's) own words.
+async fn execute_call(
+    sandbox: Option<&SandboxManager>,
+    sandbox_policy: Option<&SandboxPolicy>,
+    tc: &ToolCall,
+    ctx: &ToolContext,
+) -> (String, bool) {
+    if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
+        match sbx.execute_tool(tc, policy, ctx).await {
+            Ok(output) => (output, false),
+            Err(err) => (format_tool_error(&err), true),
+        }
+    } else {
+        let err = format_tool_error(&format!(
+            "tool '{}' not available — sandbox not configured",
+            tc.name
+        ));
+        (err, true)
+    }
+}
+
 /// Return drained-but-unsent steering messages to the inbox on a loop exit
 /// that never delivered them to an LLM call (budget, cancellation, or error
 /// exits), so the cleanup path can convert them to follow-ups.
@@ -1092,6 +1118,20 @@ async fn run_agentic_loop_core(
                     let executable: Vec<_> = executable.into_iter().map(|(_, tc)| tc).collect();
                     let over_budget: Vec<_> = over_budget.into_iter().map(|(_, tc)| tc).collect();
 
+                    // N-TOOL-3 (Z1-01): the round runs in groups, in the
+                    // model's order — consecutive calls the registry lets
+                    // run together (read-only tools, the lead's coordination
+                    // tools) share one; every other call runs alone. Neither
+                    // `file_edit` nor `file_write` takes a lock, so two calls
+                    // past their gate at once (an Always allow, `auto_approve`)
+                    // could read one file before either wrote it. With no
+                    // sandbox there is no registry to ask: each call alone.
+                    let together: Vec<bool> = executable
+                        .iter()
+                        .map(|tc| sandbox.is_some_and(|s| s.registry().runs_concurrently(&tc.name)))
+                        .collect();
+                    let groups = tool_helpers::call_groups(&together);
+
                     persist_span.in_scope(|| {
                         if sandbox.is_none() {
                             tracing::warn!(
@@ -1105,7 +1145,8 @@ async fn run_agentic_loop_core(
                             agent_id = agent_id,
                             round = state.rounds,
                             tools = executable.len(),
-                            "Executing tools in parallel"
+                            groups = groups.len(),
+                            "Executing tools in groups"
                         );
                     });
 
@@ -1147,8 +1188,6 @@ async fn run_agentic_loop_core(
                             }),
                         );
                     }
-                    let tool_started = Instant::now();
-
                     let effective_ctx = effective_ctx;
                     // The **untruncated** output. §5.4 makes the JSONL the
                     // source of truth for tool payloads, so the cut to
@@ -1156,59 +1195,55 @@ async fn run_agentic_loop_core(
                     // that goes into the model's context — never on the copy
                     // the log records. The envelope cap still bounds what
                     // lands inline in the record.
-                    // N-TOOL-4 (Z1-13): each call yields its text and whether
-                    // it failed — the call's own `Err`. The flag decides
-                    // everything below; the text keeps the `[tool_error]`
-                    // marker for the wires that have no error field. A hint
-                    // is the failing tool's (or the sandbox's) own words.
-                    let tool_futures = executable.iter().map(|&tc| {
-                        let ctx_ref = &effective_ctx;
-                        async move {
-                            if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
-                                match sbx.execute_tool(tc, policy, ctx_ref).await {
-                                    Ok(output) => (output, false),
-                                    Err(err) => (format_tool_error(&err), true),
-                                }
-                            } else {
-                                let err = format_tool_error(&format!(
-                                    "tool '{}' not available — sandbox not configured",
-                                    tc.name
-                                ));
-                                (err, true)
-                            }
+                    // The groups run one after another and the calls of one
+                    // under `join_all`, so `results` keeps the model's order.
+                    // Each result carries its group's wall-clock: a group of
+                    // one is its call's own time; the calls of a larger group
+                    // share one, since `join_all` runs them together and
+                    // per-call durations would be fiction.
+                    let round = async {
+                        let mut results = Vec::with_capacity(executable.len());
+                        for group in groups {
+                            let started = Instant::now();
+                            let calls = executable[group].iter().map(|&tc| {
+                                execute_call(sandbox, sandbox_policy, tc, &effective_ctx)
+                            });
+                            let outcomes = futures_util::future::join_all(calls).await;
+                            let duration_ms = started.elapsed().as_millis() as i64;
+                            results.extend(
+                                outcomes
+                                    .into_iter()
+                                    .map(|(text, failed)| (text, failed, duration_ms)),
+                            );
                         }
-                    });
+                        results
+                    };
 
-                    // Race tool execution against cancellation; instrument
-                    // the join_all future so events/spans inside tool
+                    // Race the whole round, every group, against
+                    // cancellation; instrument it so events/spans inside tool
                     // execution nest under persist_or_tools.
                     let results = if let Some(ref token) = cancel_token {
                         tokio::select! {
-                            results = futures_util::future::join_all(tool_futures)
-                                .instrument(persist_span.clone()) => results,
+                            results = round.instrument(persist_span.clone()) => results,
                             _ = token.cancelled() => {
                                 persist_span.in_scope(|| {
                                     tracing::info!(
                                         agent_id = agent_id,
                                         round = state.rounds,
-                                        "Cancelled during parallel tool execution"
+                                        "Cancelled during tool execution"
                                     );
                                 });
                                 return state.result(LoopFinishReason::Cancelled);
                             }
                         }
                     } else {
-                        futures_util::future::join_all(tool_futures)
-                            .instrument(persist_span.clone())
-                            .await
+                        round.instrument(persist_span.clone()).await
                     };
 
-                    // The batch shares one wall-clock: `join_all` runs them
-                    // together, so per-call durations would be fiction.
-                    let batch_duration_ms = tool_started.elapsed().as_millis() as i64;
-
-                    // Collect results in order (join_all preserves input order)
-                    for (tc, (result_text, failed)) in executable.iter().zip(results.iter()) {
+                    // Collect results in the model's order
+                    for (tc, (result_text, failed, duration_ms)) in
+                        executable.iter().zip(results.iter())
+                    {
                         state.tool_calls_made += 1;
                         let ok = !*failed;
                         if !ok {
@@ -1242,7 +1277,7 @@ async fn run_agentic_loop_core(
                             "tool_use_id": tc.id,
                             "name": tc.name,
                             "ok": ok,
-                            "duration_ms": batch_duration_ms,
+                            "duration_ms": duration_ms,
                             // On a refusal this is the S4 string the gate
                             // answered with, which is what makes a
                             // withheld capability auditable per session.

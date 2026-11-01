@@ -3014,3 +3014,97 @@ async fn a_command_tool_that_times_out_takes_the_processes_it_started_with_it() 
         "the command's background sleep {pid} outlived its timeout"
     );
 }
+
+/// N-TOOL-3 (Z1-01): which calls may run beside the other calls of their
+/// round — a tool that declares read-only (an MCP tool also idempotent) and
+/// the lead's three coordination builtins, whatever they declare; every
+/// other call runs alone.
+#[test]
+fn runs_concurrently_admits_read_only_tools_and_the_leads_coordination_tools() {
+    let registry = ToolRegistry::default();
+    let register = |tool: RegisteredTool| registry.register(tool).unwrap();
+    register(make_tool_with_annotations(
+        "reads",
+        vec![],
+        Some(readonly_annotations()),
+    ));
+    register(make_tool_with_annotations(
+        "edits",
+        vec![],
+        Some(destructive_annotations()),
+    ));
+    register(make_tool_with_annotations(
+        "writes_quietly",
+        vec![],
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false),
+        ),
+    ));
+    register(make_tool_with_annotations("declares_nothing", vec![], None));
+    // As the lead registers them: no annotations.
+    for name in [
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
+        "spawn_subagent",
+    ] {
+        register(make_tool(name, "ok"));
+    }
+    let mcp = |name: &str, annotations: Option<openalpaca_mcp::ToolAnnotations>| {
+        let mut tool = mcp_tool(name, "srv", 0);
+        tool.annotations = annotations;
+        tool
+    };
+    register(mcp("srv__reads", Some(readonly_annotations())));
+    register(mcp(
+        "srv__reads_not_idempotent",
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(true)
+                .idempotent(false),
+        ),
+    ));
+    register(mcp(
+        "srv__reads_idempotence_unsaid",
+        Some(openalpaca_mcp::ToolAnnotations::new().read_only(true)),
+    ));
+    register(make_tool_with_backend(
+        "plug::reads",
+        ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+    ));
+
+    for together in [
+        "reads",
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
+        "srv__reads",
+    ] {
+        assert!(
+            registry.runs_concurrently(together),
+            "{together} runs alone"
+        );
+    }
+    for alone in [
+        "edits",
+        "writes_quietly",
+        "declares_nothing",
+        "spawn_subagent",
+        "srv__reads_not_idempotent",
+        "srv__reads_idempotence_unsaid",
+        "plug::reads",
+        "never_registered",
+    ] {
+        assert!(!registry.runs_concurrently(alone), "{alone} runs together");
+    }
+
+    // A coordination tool's name is the lead's builtin only: an extension's
+    // tool registered under it declares nothing, and runs alone.
+    let other = ToolRegistry::default();
+    other
+        .register(mcp_tool("wait_for_subagents", "srv", 0))
+        .unwrap();
+    assert!(!other.runs_concurrently("wait_for_subagents"));
+}

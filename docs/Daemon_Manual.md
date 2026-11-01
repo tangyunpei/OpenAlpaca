@@ -1574,6 +1574,15 @@ a client can always take its prompt down. The timeout defaults to 300 s
 (`execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml`) and is
 fail-closed.
 
+One agent's prompts for calls that are not read-only come one at a time.
+Within a round, such a call runs only once the calls before it have finished,
+so of two such calls that ask, the second prompt appears after the first has
+been answered and its call has run or been refused, and each waits its own
+timeout. Read-only calls in a row still run side by side, so when an agent
+template's or a skill's own list names a read-only tool, two calls of it in
+one round can ask at once. Prompts from different agents — subagents running
+side by side — can still be pending together.
+
 An approval is remembered for the rest of the loop that asked — one chat turn,
 or one agent's run inside a workflow — and no further: `these_args` covers
 later calls of the same tool with the same arguments, `entire_tool` covers

@@ -261,6 +261,16 @@ impl ToolContext {
     }
 }
 
+/// The lead's coordination builtins that run beside the other calls of their
+/// round whatever they declare (N-TOOL-3, Z1-01; [`ToolRegistry::runs_concurrently`]).
+/// They are registered with no annotations. `spawn_subagent` is not among
+/// them: it runs alone, and returns as soon as its run is queued.
+const CONCURRENT_COORDINATION_TOOLS: [&str; 3] = [
+    "spawn_subagents_batch",
+    "check_subagent_status",
+    "wait_for_subagents",
+];
+
 /// Coarse permission tier derived from MCP tool annotations.
 /// Used for introspection and policy decisions; not stored on RegisteredTool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1321,6 +1331,29 @@ impl ToolRegistry {
             None => true,
             Some(ext) => self.extensions.admits_calls(&ext).unwrap_or(true),
         }
+    }
+
+    /// Whether a call of `tool_name` may run beside the other calls of its
+    /// round (N-TOOL-3, Z1-01): a tool that declares `read_only_hint` — an
+    /// MCP tool also `idempotent_hint`, since its server's word is all there
+    /// is to go on — or one of the lead's coordination builtins
+    /// ([`CONCURRENT_COORDINATION_TOOLS`]), whatever they declare. Every
+    /// other call runs alone: a tool that is not read-only, one that declares
+    /// nothing (a plugin's tool, which carries no annotations), and a name
+    /// nothing is registered under.
+    pub(crate) fn runs_concurrently(&self, tool_name: &str) -> bool {
+        self.tools.get(tool_name).is_some_and(|entry| {
+            if matches!(entry.backend, ToolBackend::BuiltIn(_))
+                && CONCURRENT_COORDINATION_TOOLS.contains(&tool_name)
+            {
+                return true;
+            }
+            entry.annotations.as_ref().is_some_and(|declared| {
+                declared.read_only_hint == Some(true)
+                    && (!matches!(entry.backend, ToolBackend::Mcp { .. })
+                        || declared.idempotent_hint == Some(true))
+            })
+        })
     }
 
     /// Whether `tool_name` runs a command: the sanitizer's shell set — the

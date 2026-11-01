@@ -5061,3 +5061,572 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
         "the replay hands back the same stub"
     );
 }
+
+/// N-TOOL-3 (Z1-01): a round's calls run in groups, in the model's order —
+/// consecutive read-only calls together, every other call alone — so two
+/// changes to one file never interleave once each has passed its gate, and
+/// reads still overlap. No test here reads a clock: overlap is a barrier
+/// met or a count of calls in flight.
+mod round_groups {
+    use super::*;
+    use crate::bus::EventBus;
+    use crate::security::confirmation::ApprovalScope;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SNAPSHOTS_DIR, SessionLogLimits, SessionLogService};
+    use crate::test_util::GuardedProject;
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use std::sync::Mutex;
+
+    /// Answers from its script, the last reply repeated, and keeps every
+    /// request it was handed.
+    struct Scripted {
+        replies: Vec<ChatResponse>,
+        seen: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for Scripted {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+            seen.push(request);
+            let index = (seen.len() - 1).min(self.replies.len() - 1);
+            Ok(self.replies[index].clone())
+        }
+    }
+
+    fn call(id: &str, name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments,
+        }
+    }
+
+    /// One round of `calls`, then an answer.
+    fn script(calls: Vec<ToolCall>) -> Vec<ChatResponse> {
+        let round = ChatResponse {
+            content: String::new(),
+            tool_calls: calls,
+            model: "mock-model".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        };
+        let answer = ChatResponse {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+            ..round.clone()
+        };
+        vec![round, answer]
+    }
+
+    fn policy(auto_approve: bool) -> SandboxPolicy {
+        SandboxPolicy {
+            agent_id: "test".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve,
+            unattended: false,
+        }
+    }
+
+    /// A tool named `name`, declaring `annotations`, whose body is `body`.
+    fn tool(
+        name: &str,
+        annotations: Option<openalpaca_mcp::ToolAnnotations>,
+        body: Arc<dyn BuiltInTool>,
+    ) -> RegisteredTool {
+        RegisteredTool {
+            definition: ToolDefinition {
+                name: name.to_string(),
+                description: name.to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(body),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// What a read-only builtin declares.
+    fn reads() -> Option<openalpaca_mcp::ToolAnnotations> {
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(true)
+                .idempotent(true),
+        )
+    }
+
+    /// What a by-product writer declares: not read-only, and never asks.
+    fn writes() -> Option<openalpaca_mcp::ToolAnnotations> {
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false),
+        )
+    }
+
+    /// Counts how many of its calls are in flight at once: each call counts
+    /// itself in, yields to whatever else the round is running, and counts
+    /// itself out. Under one `join_all` every call is in before any is out.
+    #[derive(Default)]
+    struct InFlight {
+        now: AtomicUsize,
+        most: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl BuiltInTool for InFlight {
+        async fn execute(&self, arguments: &Value) -> Result<String, String> {
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            self.now.fetch_sub(1, Ordering::SeqCst);
+            Ok(arguments["n"].to_string())
+        }
+    }
+
+    /// Waits at a barrier for the round's other calls: `Ok` once they are
+    /// all in flight together, `Err` when this call waited alone.
+    struct Meets(tokio::sync::Barrier);
+
+    #[async_trait]
+    impl BuiltInTool for Meets {
+        async fn execute(&self, _arguments: &Value) -> Result<String, String> {
+            tokio::time::timeout(Duration::from_secs(5), self.0.wait())
+                .await
+                .map(|_| "met".to_string())
+                .map_err(|_| "waited alone".to_string())
+        }
+    }
+
+    /// Notes when each call starts and ends in one journal, yielding between
+    /// the two, so calls that run together interleave there.
+    #[derive(Default)]
+    struct Journal(Mutex<Vec<String>>);
+
+    impl Journal {
+        fn note(&self, line: String) {
+            self.0.lock().unwrap_or_else(|p| p.into_inner()).push(line);
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
+    }
+
+    #[async_trait]
+    impl BuiltInTool for Journal {
+        async fn execute(&self, arguments: &Value) -> Result<String, String> {
+            let id = arguments["id"].as_str().unwrap_or_default().to_string();
+            self.note(format!("start {id}"));
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            self.note(format!("end {id}"));
+            Ok(id)
+        }
+    }
+
+    /// Cancels the run, then never finishes: only the cancel ends its call.
+    struct CancelsTheRun(CancellationToken);
+
+    #[async_trait]
+    impl BuiltInTool for CancelsTheRun {
+        async fn execute(&self, _arguments: &Value) -> Result<String, String> {
+            self.0.cancel();
+            std::future::pending().await
+        }
+    }
+
+    /// One loop over `sandbox` whose model makes `calls` in one round: the
+    /// loop's result and every request the model was handed (the second
+    /// carries the round's results).
+    async fn run_in(
+        sandbox: &SandboxManager,
+        policy: &SandboxPolicy,
+        calls: Vec<ToolCall>,
+        config: &LoopConfig,
+        tool_context: Option<&ToolContext>,
+        cancel: Option<CancellationToken>,
+    ) -> (LoopResult, Vec<ChatRequest>) {
+        let provider = Scripted {
+            replies: script(calls),
+            seen: Mutex::new(Vec::new()),
+        };
+        let result = run_agentic_loop(
+            &provider,
+            vec![ChatMessage::user("go")],
+            vec![],
+            config,
+            Some(sandbox),
+            "test",
+            Some(policy),
+            None,
+            cancel,
+            tool_context,
+        )
+        .await;
+        let seen = provider
+            .seen
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner());
+        (result, seen)
+    }
+
+    /// [`run_in`] with a sandbox over `registry` and a plain loop.
+    async fn run(
+        registry: ToolRegistry,
+        policy: &SandboxPolicy,
+        calls: Vec<ToolCall>,
+    ) -> (LoopResult, Vec<ChatRequest>) {
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let config = LoopConfig {
+            enable_caching: false,
+            ..Default::default()
+        };
+        run_in(&sandbox, policy, calls, &config, None, None).await
+    }
+
+    /// The round's results as the model was handed them, in order: the
+    /// call's id, the text, and whether it failed.
+    fn results(request: &ChatRequest) -> Vec<(String, String, bool)> {
+        request
+            .messages
+            .iter()
+            .filter(|m| m.role == openalpaca_llm::Role::Tool)
+            .map(|m| {
+                (
+                    m.tool_call_id.clone().unwrap_or_default(),
+                    m.content.clone(),
+                    m.is_error,
+                )
+            })
+            .collect()
+    }
+
+    /// How the round's edits got past their gate with no card.
+    enum PreApproved {
+        /// The policy's `auto_approve`.
+        AutoApprove,
+        /// An earlier Always allow of `file_edit`, cached for the whole tool.
+        AlwaysAllow,
+    }
+
+    /// Z1-01's case: two `file_edit` calls on one file in one round, each
+    /// let through with no card. Both land, and the second planned on the
+    /// file the first wrote — its pre-edit copy holds the first edit.
+    async fn two_edits_of_one_file(pre_approved: PreApproved) {
+        let gp = GuardedProject::new();
+        std::fs::write(gp.root.join("notes.txt"), "alpha\nbeta\n").unwrap();
+        let sessions = gp.home_root().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let service = SessionLogService::new(
+            sessions,
+            None,
+            SessionLogLimits::default(),
+            "test".to_string(),
+        );
+        let log = service.handle_for("sess-edits");
+
+        let registry = ToolRegistry::default();
+        let file_edit = crate::tools::builtins::builtin_tools(None, None, None)
+            .into_iter()
+            .find(|tool| tool.definition.name == "file_edit")
+            .expect("file_edit is a builtin");
+        registry.register(file_edit).unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let policy = match pre_approved {
+            PreApproved::AutoApprove => policy(true),
+            PreApproved::AlwaysAllow => {
+                sandbox
+                    .approval_cache()
+                    .record("file_edit", 0, ApprovalScope::EntireTool);
+                policy(false)
+            }
+        };
+        // The pre-edit copy goes into the loop's log: the loop hands the
+        // tool its own handle, whatever the context carried.
+        let config = LoopConfig {
+            enable_caching: false,
+            session_log: Some(log.clone()),
+            ..Default::default()
+        };
+        let edit = |id: &str, old: &str, new: &str| {
+            call(
+                id,
+                "file_edit",
+                serde_json::json!({"path": "notes.txt", "old_string": old, "new_string": new}),
+            )
+        };
+        let calls = vec![edit("tc_1", "alpha", "ALPHA"), edit("tc_2", "beta", "BETA")];
+        let (result, seen) = run_in(&sandbox, &policy, calls, &config, Some(&gp.ctx()), None).await;
+        assert!(log.flush().await);
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        let results = results(&seen[1]);
+        let ids: Vec<&str> = results.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(ids, ["tc_1", "tc_2"], "the results keep the model's order");
+        for (id, text, failed) in &results {
+            assert!(
+                !failed && text.starts_with("Edited notes.txt"),
+                "{id}: {text}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(gp.root.join("notes.txt")).unwrap(),
+            "ALPHA\nBETA\n",
+            "both edits landed"
+        );
+        let mut copies: Vec<std::path::PathBuf> =
+            std::fs::read_dir(service.session_dir("sess-edits").join(SNAPSHOTS_DIR))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .collect();
+        copies.sort();
+        let copies: Vec<String> = copies
+            .iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect();
+        assert_eq!(
+            copies,
+            ["alpha\nbeta\n", "ALPHA\nbeta\n"],
+            "the second edit planned on the file the first one wrote"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_edits_of_one_file_in_one_round_both_land_under_auto_approve() {
+        two_edits_of_one_file(PreApproved::AutoApprove).await;
+    }
+
+    #[tokio::test]
+    async fn two_edits_of_one_file_in_one_round_both_land_after_always_allow() {
+        two_edits_of_one_file(PreApproved::AlwaysAllow).await;
+    }
+
+    /// A tool that is not read-only, or declares nothing, runs alone: no two
+    /// such calls are ever in flight together.
+    #[tokio::test]
+    async fn calls_that_are_not_read_only_run_one_at_a_time() {
+        let counter = Arc::new(InFlight::default());
+        let registry = ToolRegistry::default();
+        registry
+            .register(tool("writes", writes(), counter.clone()))
+            .unwrap();
+        registry
+            .register(tool("declares_nothing", None, counter.clone()))
+            .unwrap();
+        let calls = vec![
+            call("tc_1", "writes", serde_json::json!({"n": 1})),
+            call("tc_2", "declares_nothing", serde_json::json!({"n": 2})),
+            call("tc_3", "writes", serde_json::json!({"n": 3})),
+        ];
+        let (result, seen) = run(registry, &policy(false), calls).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        assert_eq!(
+            counter.most.load(Ordering::SeqCst),
+            1,
+            "two calls that are not read-only were in flight together"
+        );
+        let expected: Vec<(String, String, bool)> = [("tc_1", "1"), ("tc_2", "2"), ("tc_3", "3")]
+            .into_iter()
+            .map(|(id, text)| (id.to_string(), text.to_string(), false))
+            .collect();
+        assert_eq!(results(&seen[1]), expected);
+    }
+
+    /// Two read-only calls in one round still run together: each waits for
+    /// the other at a barrier, which one alone would never pass.
+    #[tokio::test]
+    async fn read_only_calls_in_one_round_still_run_together() {
+        let meets = Arc::new(Meets(tokio::sync::Barrier::new(2)));
+        let registry = ToolRegistry::default();
+        registry
+            .register(tool("reads", reads(), meets.clone()))
+            .unwrap();
+        let calls = vec![
+            call("tc_1", "reads", serde_json::json!({})),
+            call("tc_2", "reads", serde_json::json!({})),
+        ];
+        let (result, seen) = run(registry, &policy(false), calls).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        let met: Vec<(String, bool)> = results(&seen[1])
+            .into_iter()
+            .map(|(_, text, failed)| (text, failed))
+            .collect();
+        assert_eq!(
+            met,
+            [("met".to_string(), false), ("met".to_string(), false)]
+        );
+    }
+
+    /// The lead's three coordination tools run together whatever they
+    /// declare — two declare nothing, one declares it is not read-only.
+    #[tokio::test]
+    async fn the_leads_coordination_tools_run_together_whatever_they_declare() {
+        let meets = Arc::new(Meets(tokio::sync::Barrier::new(3)));
+        let registry = ToolRegistry::default();
+        for (name, annotations) in [
+            ("spawn_subagents_batch", None),
+            ("check_subagent_status", None),
+            ("wait_for_subagents", writes()),
+        ] {
+            registry
+                .register(tool(name, annotations, meets.clone()))
+                .unwrap();
+        }
+        let calls = vec![
+            call("tc_1", "spawn_subagents_batch", serde_json::json!({})),
+            call("tc_2", "check_subagent_status", serde_json::json!({})),
+            call("tc_3", "wait_for_subagents", serde_json::json!({})),
+        ];
+        let (result, seen) = run(registry, &policy(false), calls).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        for (id, text, failed) in results(&seen[1]) {
+            assert!(!failed && text == "met", "{id}: {text}");
+        }
+    }
+
+    /// Groups run one after another in the model's order — the two reads
+    /// together, then the write, the read and the write each alone — and
+    /// the results come back in that order.
+    #[tokio::test]
+    async fn a_round_runs_its_groups_one_after_another_in_the_models_order() {
+        let journal = Arc::new(Journal::default());
+        let registry = ToolRegistry::default();
+        registry
+            .register(tool("reads", reads(), journal.clone()))
+            .unwrap();
+        registry
+            .register(tool("writes", writes(), journal.clone()))
+            .unwrap();
+        let calls: Vec<ToolCall> = [
+            ("r1", "reads"),
+            ("r2", "reads"),
+            ("w1", "writes"),
+            ("r3", "reads"),
+            ("w2", "writes"),
+        ]
+        .into_iter()
+        .map(|(id, name)| call(id, name, serde_json::json!({"id": id})))
+        .collect();
+        let (result, seen) = run(registry, &policy(false), calls).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        let lines = journal.lines();
+        assert_eq!(lines.len(), 10, "{lines:?}");
+        let (first, rest) = lines.split_at(4);
+        assert_eq!(
+            first[..2],
+            ["start r1", "start r2"],
+            "the two reads run together: {lines:?}"
+        );
+        let mut ends = first[2..].to_vec();
+        ends.sort();
+        assert_eq!(ends, ["end r1", "end r2"], "{lines:?}");
+        assert_eq!(
+            rest,
+            [
+                "start w1", "end w1", "start r3", "end r3", "start w2", "end w2"
+            ],
+            "each later group starts once the one before it has ended: {lines:?}"
+        );
+        let order: Vec<(String, String)> = results(&seen[1])
+            .into_iter()
+            .map(|(id, text, _)| (id, text))
+            .collect();
+        let expected: Vec<(String, String)> = ["r1", "r2", "w1", "r3", "w2"]
+            .into_iter()
+            .map(|id| (id.to_string(), id.to_string()))
+            .collect();
+        assert_eq!(order, expected, "the results keep the model's order");
+    }
+
+    /// A cancel while a later group runs ends the round as it did the one
+    /// `join_all`: the earlier group has run, and no result reaches a model.
+    #[tokio::test]
+    async fn a_cancel_while_a_later_group_runs_ends_the_round() {
+        let token = CancellationToken::new();
+        let counter = Arc::new(InFlight::default());
+        let registry = ToolRegistry::default();
+        registry
+            .register(tool("writes", writes(), counter.clone()))
+            .unwrap();
+        registry
+            .register(tool(
+                "cancels",
+                writes(),
+                Arc::new(CancelsTheRun(token.clone())),
+            ))
+            .unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let config = LoopConfig {
+            enable_caching: false,
+            ..Default::default()
+        };
+        let calls = vec![
+            call("tc_1", "writes", serde_json::json!({"n": 1})),
+            call("tc_2", "cancels", serde_json::json!({})),
+        ];
+        let (result, seen) =
+            run_in(&sandbox, &policy(false), calls, &config, None, Some(token)).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Cancelled);
+        assert_eq!(result.rounds_used, 1);
+        assert_eq!(seen.len(), 1, "no round's results reached a model");
+        assert_eq!(counter.most.load(Ordering::SeqCst), 1, "the first call ran");
+        assert_eq!(counter.now.load(Ordering::SeqCst), 0, "and ended");
+    }
+}
+
+/// N-TOOL-3 (Z1-01): a round cut into its groups, in the model's order — a
+/// run of calls that may run together is one group, every other call one
+/// of its own.
+#[test]
+fn call_groups_cut_a_round_into_runs_that_go_together_and_single_calls() {
+    /// Each group as its first call and the one after its last.
+    fn cut(together: &[bool]) -> Vec<(usize, usize)> {
+        super::tool_helpers::call_groups(together)
+            .into_iter()
+            .map(|group| (group.start, group.end))
+            .collect()
+    }
+
+    assert!(cut(&[]).is_empty());
+    assert_eq!(cut(&[true]), [(0, 1)]);
+    assert_eq!(cut(&[false]), [(0, 1)]);
+    assert_eq!(cut(&[true, true, true]), [(0, 3)]);
+    assert_eq!(cut(&[false, false]), [(0, 1), (1, 2)]);
+    assert_eq!(
+        cut(&[true, true, false, true, false, false, true, true]),
+        [(0, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 8)]
+    );
+}

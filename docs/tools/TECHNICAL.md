@@ -1549,10 +1549,19 @@ When the LLM response contains tool calls:
    get a `max_tool_calls limit reached` error; overflow beyond the
    per-round cap gets `max tools per round exceeded` — every tool call ID
    receives a tool-result message.
-5. Executable calls run **in parallel** via
-   `futures_util::future::join_all()` (each future calls
-   `SandboxManager::execute_tool(tool_call, policy, ctx)`), raced against
-   the cancellation token.
+5. Executable calls run **in groups**, in the model's order
+   (`tool_helpers::call_groups` over `ToolRegistry::runs_concurrently`;
+   N-TOOL-3, 2026-11-01): consecutive calls whose tool declares
+   `read_only_hint` (an MCP tool also `idempotent_hint`), or that are the
+   lead's `spawn_subagents_batch`, `check_subagent_status` or
+   `wait_for_subagents` as builtins whatever they declare, share a group
+   and run together via `futures_util::future::join_all()`; every other
+   call is a group of one.  The groups run one after another, each call
+   through `execute_call` (which calls
+   `SandboxManager::execute_tool(tool_call, policy, ctx)`), and one
+   `select!` races the whole round against the cancellation token.  With
+   no sandbox every call is a group of one and gets the stub error.  A
+   `tool_result` record's `duration_ms` is its group's wall-clock.
 6. Per result: decide whether it spills, write the `tool_call` /
    `tool_result` records to the session log (stamped with the owning
    extension, when there is one), and compute the model-visible text
