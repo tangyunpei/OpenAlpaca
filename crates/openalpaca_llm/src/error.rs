@@ -182,11 +182,14 @@ impl LlmError {
     ///
     /// Every transient error but a request timeout: a call that spent its
     /// whole `request_timeout` would spend another if repeated against the
-    /// same model, so one `complete` call waits at most one deadline per rung
-    /// of the ladder. The kind also holds a connect the deadline cut short and
-    /// the OS's TCP timeout on an open connection
-    /// ([`TransportKind::RequestTimeout`]); neither is repeated here either. It
-    /// stays transient, so the chain and the loop still take it.
+    /// same model, so a request timeout costs one `complete` call at most one
+    /// deadline per rung of the ladder. A kind retried here costs a wait per
+    /// try, and so can cost more: a rung's three or more 30 s connect
+    /// timeouts outlast a `request_timeout` under 90 s. The kind also holds a
+    /// connect the deadline cut short and the OS's TCP timeout on an open
+    /// connection ([`TransportKind::RequestTimeout`]); neither is repeated
+    /// here either. It stays transient, so the chain and the loop still take
+    /// it.
     pub fn is_retryable_on_key(&self) -> bool {
         !matches!(
             self,
