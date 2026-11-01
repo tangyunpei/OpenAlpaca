@@ -319,11 +319,14 @@ using with an older build is the second case it names. To switch over:
    `~/.openalpaca/config/skills/` aside; start the daemon, which writes the
    four shipped skills into a new `skills/`, and stop it again; move back
    every folder you want to keep but `create-skill` — your own skills, and a
-   shipped one you edited — and start it. A skill the old scripts wrote under
-   `~/.config/openalpaca/skills/` loads once you move its folder into
-   `~/.openalpaca/config/skills/`. A store you already switched over with an
-   earlier build — one this build opens without the message above — keeps
-   that build's `create-skill` too: do this step on it as well.
+   shipped one you edited — and start it. Where the start wrote a folder of
+   the same name — a shipped skill you edited (`code-review`, `commit-message`
+   or `explain-code`), or one of yours named like a shipped skill — delete
+   that new folder first, then move yours back in its place. A skill the old
+   scripts wrote under `~/.config/openalpaca/skills/` loads once you move its
+   folder into `~/.openalpaca/config/skills/`. A store you already switched
+   over with an earlier build — one this build opens without the message
+   above — keeps that build's `create-skill` too: do this step on it as well.
 
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
 there is out of date — it may describe no `projects/` folder, list `skills/`
