@@ -26,7 +26,7 @@ These steps build from source and end with a first reply. To package and install
 
 - **Rust** through [rustup](https://rustup.rs). The repo pins 1.99.1 in `rust-toolchain.toml`; rustup fetches it on the first build.
 - **A model:** [Ollama](https://ollama.com) running locally, or an Anthropic or OpenAI API key.
-- **[Bun](https://bun.sh)** 1.4.3 (the version the root `package.json` pins), only for the desktop app (step 6).
+- **[Bun](https://bun.sh)** 1.4.4 (the version the root `package.json` pins), only for the desktop app (step 6).
 - Linux only: `sudo apt-get install -y pkg-config`. The desktop app also needs `libdbus-1-dev` and [Tauri's system libraries](https://tauri.app/start/prerequisites/).
 
 ### 2. Build
@@ -209,7 +209,7 @@ bun run check && bun run test && bun run format:check && bun run build
 - Advisories (`.github/workflows/audit.yml`), on every pull request, every push to `main` and weekly: cargo-deny checks the crates the workspace resolves to (not every `Cargo.lock` entry) against RustSec, the licence allow list and crates.io as the only source (`deny.toml`); cargo-audit, run by hand from the root, reads the whole lock with the same ignores (`.cargo/audit.toml`); and `bun audit` checks `bun.lock`. The owner answers a red run: a lock refresh, a bump, or an ignore with its reason.
 - To run the daemon in the foreground on the repo's own config, use `OPENALPACA_CONFIG_DIR="$PWD/config" cargo run -p openalpacad`. Export the same variable for the CLI, so `openalpaca config set` edits the same files.
 - `docs/api/` is generated. Run `python3 scripts/gen_api_docs.py`; never edit it by hand.
-- Toolchain: Rust 1.99.1. Frontend: Bun 1.4.3, TypeScript 7, React 19, Vite 8, Tailwind 4, Vitest 5.
+- Toolchain: Rust 1.99.1. Frontend: Bun 1.4.4, TypeScript 7, React 19, Vite 8, Tailwind 4, Vitest 5.
 
 ## Status and limitations
 

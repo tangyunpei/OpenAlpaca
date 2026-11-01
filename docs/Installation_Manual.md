@@ -33,7 +33,7 @@ Linux and Windows have equivalent scripts (`scripts/release/package-linux.sh`,
 On the machine that builds release artifacts, install:
 
 - `cargo` / `rustc`
-- `bun` / `bunx` — Bun 1.4.3, the version the root `package.json`'s `packageManager` field pins
+- `bun` / `bunx` — Bun 1.4.4, the version the root `package.json`'s `packageManager` field pins
 - `tar`, `shasum`, `git`
 - Standard Unix tools: `awk`, `sed`, `date` (present on any macOS machine)
 
