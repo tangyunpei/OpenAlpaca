@@ -167,6 +167,49 @@ impl MockHttpServer {
     where
         F: Fn(&RecordedRequest) -> MockResponse + Send + Sync + 'static,
     {
+        Self::serve(0, handler).await
+    }
+
+    /// Start a server that closes each of its first `count` connections as
+    /// soon as it accepts it, before it reads a byte of the request, and
+    /// answers every later one by `handler`. A handler cannot ask for that
+    /// close: it is called once the request is read.
+    pub async fn start_closing_first<F>(count: usize, handler: F) -> Self
+    where
+        F: Fn(&RecordedRequest) -> MockResponse + Send + Sync + 'static,
+    {
+        Self::serve(count, handler).await
+    }
+
+    /// Start a server that speaks first, as an endpoint that is not an HTTP
+    /// server may: on each connection it writes a line that is not HTTP as
+    /// soon as it accepts it, then closes, before it reads a byte. It reads
+    /// no request, so [`Self::requests`] stays empty.
+    pub async fn start_speaking_first() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let addr = listener.local_addr().expect("local addr");
+        let accept_loop = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = socket.write_all(b"hello\r\n\r\n").await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            seen: Arc::new(Mutex::new(Vec::new())),
+            accept_loop,
+        }
+    }
+
+    async fn serve<F>(unread: usize, handler: F) -> Self
+    where
+        F: Fn(&RecordedRequest) -> MockResponse + Send + Sync + 'static,
+    {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind a loopback port");
@@ -176,10 +219,16 @@ impl MockHttpServer {
         let handler = Arc::new(handler);
 
         let accept_loop = tokio::spawn(async move {
+            let mut accepted = 0usize;
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     break;
                 };
+                if accepted < unread {
+                    accepted += 1;
+                    drop(socket);
+                    continue;
+                }
                 let recorder = Arc::clone(&recorder);
                 let handler = Arc::clone(&handler);
                 tokio::spawn(async move {
@@ -365,6 +414,20 @@ pub fn loopback_client(request_timeout: Duration) -> reqwest::Client {
         .no_proxy()
         .pool_max_idle_per_host(10)
         .pool_idle_timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(30).min(request_timeout))
+        .read_timeout(request_timeout)
+        .build()
+        .expect("a test client")
+}
+
+/// [`loopback_client`] keeping no idle connection, so every request opens a
+/// fresh one: hyper-util sends a request handed back unwritten on a reused
+/// connection again by itself, which would hide what a fresh one does.
+#[cfg(feature = "openai")]
+pub fn unpooled_loopback_client(request_timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(0)
         .connect_timeout(Duration::from_secs(30).min(request_timeout))
         .read_timeout(request_timeout)
         .build()

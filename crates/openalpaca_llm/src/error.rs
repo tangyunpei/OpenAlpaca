@@ -121,9 +121,10 @@ pub enum TransportKind {
     /// The host name did not resolve.
     Dns,
     /// The connection was reset or closed before the answer was whole — no
-    /// answer at all, or a body shorter than it promised. A reset or close
-    /// during the connect phase (the TCP connect, the TLS handshake) is
-    /// [`Self::TlsOrOther`].
+    /// answer at all, or a body shorter than it promised — or closed before
+    /// the request was written (hyper-util hands the request back). A reset
+    /// or close during the connect phase (the TCP connect, the TLS
+    /// handshake) is [`Self::TlsOrOther`].
     ResetOrClosed,
     /// A TLS failure — a reset or close during the handshake among them — an
     /// answer that is not HTTP, or anything else reqwest reports.

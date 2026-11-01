@@ -15,7 +15,7 @@ use crate::LlmProvider;
 use crate::error::{LlmError, TransportKind};
 use crate::test_support::{
     MockHttpServer, MockResponse, Resolver, UNRESOLVABLE_HOST, client_resolving_with,
-    loopback_client, refused_base_url,
+    loopback_client, refused_base_url, unpooled_loopback_client,
 };
 use crate::types::*;
 use futures_util::StreamExt;
@@ -290,6 +290,105 @@ async fn a_connection_reset_before_the_answer_is_transient() {
             server.base_url,
             connection_reset()
         )
+    );
+}
+
+/// The server closes a fresh connection before it reads a byte. On a
+/// multi-thread runtime, the daemon's, the connection can die between
+/// hyper-util's ready check and the dispatch, and hyper hands the request
+/// back unwritten, its cause dropped: "client error (Canceled): operation was
+/// canceled: connection was not ready". A lost connection all the same, and
+/// a request never written is safe to send again. A current-thread runtime
+/// never meets the race, so the test asks for workers and repeats it over
+/// fresh connections.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_connection_closed_before_the_request_is_written_is_transient() {
+    const TRIALS: usize = 200;
+    let server =
+        MockHttpServer::start_closing_first(usize::MAX, |_| MockResponse::not_found()).await;
+    let provider = provider_with(
+        unpooled_loopback_client(REQUEST_TIMEOUT),
+        &server.base_url,
+        REQUEST_TIMEOUT,
+    );
+    let mut seen = std::collections::BTreeMap::<String, usize>::new();
+    let mut misread = 0;
+    for _ in 0..TRIALS {
+        let err = provider.chat(request()).await.unwrap_err();
+        if kind(&err) != Some(TransportKind::ResetOrClosed) || !err.is_retryable_on_key() {
+            misread += 1;
+        }
+        let text = err.to_string().replace(&server.base_url, "U");
+        *seen
+            .entry(format!("{:?} | {text}", kind(&err)))
+            .or_default() += 1;
+    }
+
+    eprintln!("M57 follow-up, a request never written: {seen:#?}");
+    assert_eq!(
+        misread, 0,
+        "{misread} of {TRIALS} not a lost connection retried on the key: {seen:#?}"
+    );
+    assert!(server.requests().await.is_empty(), "no request was read");
+}
+
+/// A server that speaks first — a line that is not HTTP, written as it
+/// accepts, then a close — leaves one of a few texts, which one a race on
+/// the daemon's multi-thread runtime, each read the same way every time. Its
+/// answer read ("received unexpected message from connection", "invalid
+/// HTTP version parsed") is not transient, even under hyper-util's
+/// `Canceled` link, which hands that request back unwritten: only hyper's
+/// texts for a connection already closed ("connection was not ready",
+/// "connection closed") make that link a lost connection. The test pins
+/// that narrowing per error, by its text; which texts a run meets is the
+/// race's, so it counts none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_server_that_speaks_first_is_read_by_the_text_it_leaves() {
+    const TRIALS: usize = 200;
+    const HANDED_BACK: &str = "client error (Canceled): operation was canceled: ";
+    let server = MockHttpServer::start_speaking_first().await;
+    let provider = provider_with(
+        unpooled_loopback_client(REQUEST_TIMEOUT),
+        &server.base_url,
+        REQUEST_TIMEOUT,
+    );
+    let mut seen = std::collections::BTreeMap::<String, usize>::new();
+    let mut misread = Vec::new();
+    for _ in 0..TRIALS {
+        let err = provider.chat(request()).await.unwrap_err();
+        let text = err.to_string().replace(&server.base_url, "U");
+        let lost = if text.ends_with("received unexpected message from connection")
+            || text.ends_with("invalid HTTP version parsed")
+        {
+            Some(false)
+        } else if text.ends_with(&format!("{HANDED_BACK}connection was not ready"))
+            || text.ends_with(&format!("{HANDED_BACK}connection closed"))
+        {
+            Some(true)
+        } else {
+            None
+        };
+        let read_as = (kind(&err), err.is_retryable_on_key());
+        let wanted = lost.map(|lost| {
+            if lost {
+                (Some(TransportKind::ResetOrClosed), true)
+            } else {
+                (Some(TransportKind::TlsOrOther), false)
+            }
+        });
+        if wanted.is_some_and(|wanted| wanted != read_as) {
+            misread.push(format!("{read_as:?} | {text}"));
+        }
+        *seen
+            .entry(format!("{:?} | {text}", kind(&err)))
+            .or_default() += 1;
+    }
+
+    eprintln!("M57 follow-up, a server that speaks first: {seen:#?}");
+    assert!(
+        misread.is_empty(),
+        "{} of {TRIALS} misread: {misread:#?}",
+        misread.len()
     );
 }
 

@@ -16,6 +16,7 @@ use crate::routing::model_registry::ModelInfo;
 use crate::test_support::{
     MockHttpServer, MockResponse, RecordedRequest, Resolver, UNRESOLVABLE_HOST,
     client_resolving_with, loopback_client, refused_addr, refused_base_url,
+    unpooled_loopback_client,
 };
 use std::time::{Duration, Instant};
 
@@ -308,6 +309,48 @@ async fn a_connection_closed_before_the_answer_is_retried_and_then_falls_back() 
     assert_eq!(hits(&server, FALLBACK_1).await, 1);
 }
 
+/// A connection closed before the request is written — on the daemon's
+/// multi-thread runtime, now and then handed back by hyper as "connection
+/// was not ready" — is the same row. The server closes its first three
+/// connections unread, the key layer's three tries (the test above counts
+/// them), and answers the fourth, the fallback's; each round a fresh server
+/// and fresh connections, so the race is run many times.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_connection_closed_before_the_request_is_written_is_retried_and_then_falls_back() {
+    const ROUNDS: usize = 50;
+    let mut ended = std::collections::BTreeMap::<String, usize>::new();
+    for _ in 0..ROUNDS {
+        let server = MockHttpServer::start_closing_first(3, |_| {
+            MockResponse::json(completion_body(FALLBACK_1, "from the fallback"))
+        })
+        .await;
+        let router = router(
+            &server.base_url,
+            unpooled_loopback_client(REQUEST_TIMEOUT),
+            &[PRIMARY, FALLBACK_1],
+            rates(100),
+        );
+
+        match router.complete(request(PRIMARY)).await {
+            Ok(response) => {
+                assert_eq!(response.content, "from the fallback");
+                assert_eq!(server.requests().await.len(), 1, "one request read");
+                assert_eq!(hits(&server, FALLBACK_1).await, 1, "the fallback's");
+            }
+            Err(err) => {
+                let text = err.to_string().replace(&server.base_url, "U");
+                *ended.entry(text).or_default() += 1;
+            }
+        }
+    }
+
+    let count: usize = ended.values().sum();
+    assert_eq!(
+        count, 0,
+        "{count} of {ROUNDS} calls ended without the fallback: {ended:#?}"
+    );
+}
+
 // ── connect timeout: retried on the key, then the chain ─────────────────────
 
 /// A connect phase that never completes: three tries on the key per rung,
@@ -437,6 +480,38 @@ async fn an_answer_that_is_not_http_is_neither_retried_nor_taken_to_the_chain() 
         ),
         "{err}"
     );
+}
+
+/// The same on the daemon's multi-thread runtime: the server reads the whole
+/// request before it answers, so the request is always written and the answer
+/// always fails to parse — never handed back unwritten, never retried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_that_is_not_http_is_not_retried_on_a_multi_thread_runtime() {
+    const ROUNDS: usize = 50;
+    for _ in 0..ROUNDS {
+        let server = MockHttpServer::start(|_| MockResponse::not_http()).await;
+        let router = router(
+            &server.base_url,
+            unpooled_loopback_client(REQUEST_TIMEOUT),
+            &[PRIMARY, FALLBACK_1],
+            rates(100),
+        );
+
+        let err = router.complete(request(PRIMARY)).await.unwrap_err();
+
+        assert_eq!(hits(&server, PRIMARY).await, 1, "one try: {err}");
+        assert_eq!(hits(&server, FALLBACK_1).await, 0, "no chain: {err}");
+        assert!(
+            matches!(
+                &err,
+                LlmRouterError::Llm(e @ LlmError::Transport {
+                    kind: TransportKind::TlsOrOther,
+                    ..
+                }) if !e.is_transient()
+            ),
+            "{err}"
+        );
+    }
 }
 
 // ── the streamed path: every failure returned at once ───────────────────────

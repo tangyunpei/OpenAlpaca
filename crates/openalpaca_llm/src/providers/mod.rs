@@ -95,15 +95,28 @@ fn transport_kind(e: &reqwest::Error) -> crate::error::TransportKind {
     }
     let mut io_kind = None;
     let mut closed_before_answer = false;
+    let mut handed_back = false;
     let mut source = std::error::Error::source(e);
     while let Some(link) = source {
         if let Some(io) = link.downcast_ref::<std::io::Error>() {
             io_kind.get_or_insert(io.kind());
         }
+        let text = link.to_string();
         // hyper's error for a connection closed before the answer carries no
         // OS error, and hyper is not a dependency of this crate, so its own
-        // fixed text is the one place this function reads one.
-        closed_before_answer |= link.to_string() == "connection closed before message completed";
+        // fixed texts are the one place this function reads one.
+        closed_before_answer |= text == "connection closed before message completed";
+        // A request hyper hands back unwritten, the connection gone before it
+        // took the request, carries none either: hyper-util's `Canceled` link
+        // marks every request handed back, and these two texts of hyper's
+        // beneath it say only that the connection had closed. Any other text
+        // there is the connection's own error, read as above.
+        closed_before_answer |= handed_back
+            && matches!(
+                text.as_str(),
+                "connection was not ready" | "connection closed"
+            );
+        handed_back |= text == "client error (Canceled)";
         source = link.source();
     }
     if e.is_connect() {
