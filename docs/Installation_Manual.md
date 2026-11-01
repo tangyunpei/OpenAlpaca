@@ -58,7 +58,11 @@ the command that installs it) and commit it with the lockfiles; never edit it
 by hand. The generator refuses, writing nothing and naming each, a JavaScript
 package whose licence `deny.toml`'s `[licenses] allow` list does not admit
 (OFL-1.1, the fonts', is admitted for JavaScript alone); CI checks the
-committed file's JavaScript licences the same way. The script then
+committed file's JavaScript licences the same way. CI also fails a push to
+`main` or a pull request whose lockfiles are not the ones the committed file
+records, naming the stale one (`gen_notices.py --check-hashes`), so a change
+that moves a lockfile, Dependabot's pull requests among them, commits the
+regenerated file with it. The script then
 installs the GUI's JS dependencies from the frozen lockfile
 (`bun install --frozen-lockfile`), builds the daemon once —
 `apps/openalpaca-gui/scripts/prepare-sidecar.ts --release`, which stages

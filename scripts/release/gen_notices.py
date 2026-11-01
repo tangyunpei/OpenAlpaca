@@ -3,7 +3,8 @@
 with its licence text, and the hash of each lockfile it was read from.
 
 Usage:
-  python3.11 -I scripts/release/gen_notices.py [--check | --check-licences] [--root DIR] [--cargo-about EXE]
+  python3.11 -I scripts/release/gen_notices.py [--check | --check-hashes | --check-licences] [--root DIR]
+                                               [--cargo-about EXE]
 
 Writes THIRD-PARTY-NOTICES at the repository root (ROOT, default: this file's
 grandparent's parent). Run it after `bun install --frozen-lockfile`, from a tree whose
@@ -11,9 +12,14 @@ lockfiles are the ones to ship, and commit the file with them: package-macos.sh 
 to package while either hash it records is not the tree's lockfile's. Never edit the file
 by hand. With --check it writes nothing: when a recorded hash is not the tree's
 lockfile's it names that lockfile (exit 1) without regenerating; else it regenerates in
-memory and compares. With --check-licences it reads only the committed file's JavaScript
-lines and deny.toml (no install, no cargo-about), as CI's tooling job runs it, and checks
-each package's licence as generation does (below).
+memory and compares. With --check-hashes it stops after that first step, reading only the
+committed file's header and the two lockfiles (no install, no cargo-about), as CI's
+tooling job runs it on every push to main and every pull request: it sees a lockfile
+moved without the file regenerated, not a change to anything else the text is generated
+from (node_modules, about.toml, the vendored texts, this file), which --check sees. With
+--check-licences it reads only the committed file's JavaScript lines and deny.toml (no
+install, no cargo-about), as CI's tooling job runs it, and checks each package's licence
+as generation does (below).
 
 What it lists:
   Rust        the crates the daemon (openalpacad), the CLI (openalpaca) and the app
@@ -64,12 +70,12 @@ missing or unparseable expression is refused, never passed. The Rust lines are n
 by this check: cargo-about's --fail holds the Rust half at generation, and cargo-deny
 (audit.yml) holds Cargo.lock to the same list.
 
-Exit: 0 written, current under --check, or every JavaScript licence allowed under
---check-licences; 1 stale under --check, or a JavaScript licence refused under
---check-licences; 2 nothing written or checked: a usage error, a JavaScript licence
-refused at generation, or no verdict (a lockfile, node_modules, deny.toml or the committed
-file that cannot be read, cargo-about missing, another version or failing, a licence id
-with no vendored text).
+Exit: 0 written, current under --check, the tree's hashes recorded under --check-hashes,
+or every JavaScript licence allowed under --check-licences; 1 stale under --check or
+--check-hashes, or a JavaScript licence refused under --check-licences; 2 nothing written
+or checked: a usage error, a JavaScript licence refused at generation, or no verdict (a
+lockfile, node_modules, deny.toml or the committed file that cannot be read, cargo-about
+missing, another version or failing, a licence id with no vendored text).
 """
 
 import dataclasses
@@ -716,11 +722,13 @@ def generate(root: pathlib.Path, exe) -> str:
 
 
 def main(argv: list) -> int:
-    check, licences, root, exe, rest = False, False, ROOT, None, list(argv[1:])
+    check, hashes, licences, root, exe, rest = False, False, False, ROOT, None, list(argv[1:])
     while rest:
         a = rest.pop(0)
         if a == "--check":
             check = True
+        elif a == "--check-hashes":
+            hashes = True
         elif a == "--check-licences":
             licences = True
         elif a in ("--root", "--cargo-about") and rest:
@@ -732,19 +740,22 @@ def main(argv: list) -> int:
         else:
             sys.stderr.write(__doc__)
             return 2
-    if check and licences:
+    if check + hashes + licences > 1:
         sys.stderr.write(__doc__)
         return 2
     path = root / NOTICES
     try:
         if licences:
             return check_licences(root)
-        if check:
+        if check or hashes:
             if not path.is_file():
                 print("%s is stale: there is none at %s; generate it: %s" % (NOTICES, path, REGENERATE))
                 return 1
             current = read_text(path)
             stale = stale_locks(root, current)
+            if not stale and hashes:
+                print("%s records the hashes of the tree's %s and %s" % ((NOTICES,) + LOCKS))
+                return 0
             if not stale:
                 if generate(root, exe) == current:
                     print("%s is current" % NOTICES)

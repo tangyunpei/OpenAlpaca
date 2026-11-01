@@ -399,6 +399,86 @@ def test_check_names_the_stale_lockfile() -> None:
             assert "%s sha256" % other not in out, out
 
 
+def _check_hashes(root: pathlib.Path, *more: str) -> tuple[int, str]:
+    cmd = [sys.executable, "-I", str(GEN), "--check-hashes", "--root", str(root)] + list(more)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def test_check_hashes_reads_the_two_hashes_alone_regenerates_nothing_and_is_a_mode_of_its_own() -> None:
+    """CI's step: the header's hash lines against the tree's lockfiles. The fixture holds no
+    deny.toml, about.toml, node_modules or cargo-about, so --check, which regenerates, has
+    no verdict on it (exit 2): exit 0 here shows nothing else was read."""
+    with tempfile.TemporaryDirectory() as d:
+        root = _tree(pathlib.Path(d))
+        before = (root / "THIRD-PARTY-NOTICES").read_bytes()
+        rc, out = _check(root)
+        assert rc == 2, ("--check regenerates", rc, out)
+        rc, out = _check_hashes(root)
+        assert rc == 0 and "Cargo.lock and bun.lock" in out, (rc, out)
+        assert (root / "THIRD-PARTY-NOTICES").read_bytes() == before, "the check writes nothing"
+        assert sorted(p.name for p in root.iterdir()) == ["Cargo.lock", "THIRD-PARTY-NOTICES", "bun.lock"]
+        for other in ("--check", "--check-licences"):
+            rc, out = _check_hashes(root, other)
+            assert rc == 2 and "Usage" in out, (other, rc, out)
+
+
+def test_check_hashes_names_each_stale_lockfile_and_the_command_that_regenerates_the_file() -> None:
+    for changed in (("Cargo.lock",), ("bun.lock",), ("Cargo.lock", "bun.lock")):
+        with tempfile.TemporaryDirectory() as d:
+            root = _tree(pathlib.Path(d))
+            before = (root / "THIRD-PARTY-NOTICES").read_bytes()
+            for lock in changed:
+                _write(root / lock, "\n", mode="a")
+            rc, out = _check_hashes(root)
+            assert rc == 1 and gen().REGENERATE in out, (changed, rc, out)
+            for lock in ("Cargo.lock", "bun.lock"):
+                named = ("the tree's %s is %s" % (lock, _sha((root / lock).read_bytes()))) in out
+                assert named is (lock in changed), (changed, lock, out)
+            assert (root / "THIRD-PARTY-NOTICES").read_bytes() == before, "the check writes nothing"
+
+
+def test_check_hashes_on_no_notices_file_or_no_lockfile() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = _tree(pathlib.Path(d))
+        (root / "THIRD-PARTY-NOTICES").unlink()
+        rc, out = _check_hashes(root)
+        assert rc == 1 and "THIRD-PARTY-NOTICES is stale: there is none" in out, (rc, out)
+        assert gen().REGENERATE in out and not (root / "THIRD-PARTY-NOTICES").exists(), out
+    for lock in ("Cargo.lock", "bun.lock"):
+        with tempfile.TemporaryDirectory() as d:
+            root = _tree(pathlib.Path(d))
+            (root / lock).unlink()
+            rc, out = _check_hashes(root)
+            assert rc == 2 and out.startswith("gen_notices: cannot read") and lock in out, (lock, rc, out)
+
+
+def test_check_hashes_reads_the_header_lines_packaging_reads() -> None:
+    """The same lines as package-macos.sh's check: before the first rule, at column 0, with
+    single spaces and lowercase hex, once each."""
+    with tempfile.TemporaryDirectory() as d:
+        root = _tree(pathlib.Path(d))
+        cargo, bun = _sha(b"version = 4\n"), _sha(BUN_LOCK.encode())
+        rule = "=" * 72
+        cases = {  # label: (the notices' text, accepted)
+            "current": ("X\n\nCargo.lock sha256 %s\nbun.lock sha256 %s\n%s\nbody\n" % (cargo, bun, rule), True),
+            "a line planted after the rule": ("X\nCargo.lock sha256 %s\nbun.lock sha256 %s\n%s\nCargo.lock sha256 %s\n"
+                                              % (cargo, bun, rule, cargo), True),
+            "after the rule only": ("X\nbun.lock sha256 %s\n%s\nCargo.lock sha256 %s\n" % (bun, rule, cargo), False),
+            "indented": ("X\n  Cargo.lock sha256 %s\nbun.lock sha256 %s\n" % (cargo, bun), False),
+            "tab-separated": ("X\nCargo.lock\tsha256 %s\nbun.lock sha256 %s\n" % (cargo, bun), False),
+            "doubled": ("X\nCargo.lock sha256 %s\nCargo.lock sha256 %s\nbun.lock sha256 %s\n" % (cargo, cargo, bun), False),
+            "CRLF": ("X\nCargo.lock sha256 %s\r\nbun.lock sha256 %s\n" % (cargo, bun), False),
+            "uppercase hex": ("X\nCargo.lock sha256 %s\nbun.lock sha256 %s\n" % (cargo.upper(), bun), False),
+        }
+        for label, (text, accepted) in cases.items():
+            _write(root / "THIRD-PARTY-NOTICES", text)
+            rc, out = _check_hashes(root)
+            packaging, why = _refusal(root)
+            assert (rc == 0) is accepted and (packaging == 0) is accepted, (label, rc, out, packaging, why)
+            assert accepted or (rc == 1 and "Cargo.lock sha256" in out and "bun.lock sha256" not in out), (label, out)
+
+
 def _refusal(root: pathlib.Path) -> tuple[int, str]:
     script = 'source "$1"; REPO_ROOT="$2"; require_current_notices && echo ACCEPTED'
     proc = subprocess.run(["bash", "-c", script, "bash", str(PACKAGE_MACOS), str(root)],
