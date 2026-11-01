@@ -11,7 +11,7 @@ It runs on a local Ollama model with no API key, or on Anthropic and OpenAI mode
 - **Chat** from a terminal or the desktop app. Replies stream as they are written.
 - **Use a local model.** A local Ollama needs no API key and costs nothing.
 - **Hand off bigger jobs.** Ask for a workflow: a lead agent runs it in the background with subagents, then reports back in the chat.
-- **Steer work in flight.** Check, pause, resume, cancel or redirect a running workflow from the same conversation.
+- **Steer work in flight.** Check, cancel or redirect a running workflow from the same conversation.
 - **Work in your project.** In a project an agent reads, lists, writes and edits its files and runs commands there. Each write and each command asks you first, and what it writes is a real file of the project. Drafts and hand-offs are kept as versioned artifacts.
 - **Attach files** to a message.
 - **Keep a memory.** What you ask it to remember, and what it learns from what you say, are Markdown notes on your own disk — searched by keyword, with no model or download, and readable, editable and forgettable in the app, the CLI or any text editor.

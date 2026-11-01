@@ -21,7 +21,9 @@ pub enum Intent {
     TaskQuery { task_id: Option<String> },
     /// A task control command (cancel, pause, resume). A bare command
     /// (no id) carries `task_id: None` and is resolved against the lane's
-    /// active workflows by the handler (Routing V2 Phase 3).
+    /// active workflows by the handler (Routing V2 Phase 3). The handler
+    /// answers `pause` and `resume` with one sentence, changing nothing
+    /// (N-ROUTE-1).
     TaskControl {
         task_id: Option<String>,
         action: String,

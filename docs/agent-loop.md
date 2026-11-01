@@ -281,10 +281,13 @@ everything that survives it to `handle_simple_query` with
 **including while workflows run** (chat-by-default; lanes are never
 captured):
 
-1. **Task ops** — `/status`, `/tasks`, `/cancel|/pause|/resume`. Bare
-   control commands (no task id) resolve against the lane's active
-   workflows (`task_ops.rs::handle_bare_task_control`): exactly one
-   running → act on it; zero → say so; multiple → list ids and ask.
+1. **Task ops** — `/status`, `/tasks`, `/cancel|/pause|/resume`. A bare
+   `/cancel` (no task id) resolves against the lane's active workflows
+   (`task_ops.rs::handle_bare_task_control`): exactly one running → act
+   on it; zero → say so; multiple → list ids and ask. `/pause` and
+   `/resume`, bare or with an id, answer one sentence
+   (`task_ops.rs::PAUSE_UNSUPPORTED`: pause is not supported, `/cancel`
+   stops a run) and change nothing.
 2. **`/steer <msg>`** — deterministic injection into the lane's sole
    running workflow, bypassing the model
    (`task_ops.rs::handle_steer_prefix`; gated on `steering_enabled`).

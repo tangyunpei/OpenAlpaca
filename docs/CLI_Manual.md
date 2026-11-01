@@ -1111,7 +1111,7 @@ A tool on the confirm list suspends the turn and asks before it runs.
 
 #### Slash commands
 
-- The daemon answers these chat-level commands itself, without asking a model: `/status [task_id]`, `/tasks`, `/cancel`/`/pause`/`/resume` (bare forms target the lane's active workflows, or pass an explicit task id), and `/steer <text>` (inject a correction into the running workflow).
+- The daemon answers these chat-level commands itself, without asking a model: `/status [task_id]`, `/tasks`, `/cancel` (the bare form targets the lane's active workflows, or pass an explicit task id), `/pause` and `/resume` (each answers that pause is not supported — `/cancel` stops a run — and changes nothing), and `/steer <text>` (inject a correction into the running workflow).
 - `/<skill>` runs that skill directly, without the main loop choosing it.
 - In the REPL, only the client-side commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`) are handled locally. Every other slash line — the daemon commands here, the [memory commands](#memory-commands), and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt. `/help` lists them and Tab completes them.
 - One-shot mode works too: `openalpaca chat --message "/steer focus on the tests"`.

@@ -3671,25 +3671,204 @@ async fn test_task_query_emits_task_ops_stage() {
     assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
 }
 
+// ── N-ROUTE-1: `/pause` and `/resume` say pause is unsupported ──
+//
+// A paused row never stopped its run: the lead kept spending and its
+// completion overwrote `paused`. So the two chat commands answer one
+// sentence naming `/cancel` and change nothing — no status, no lane, no
+// `TaskUpdated` — whatever the lane holds and whether an id is given.
+
+/// The one sentence, told apart from the task-control JSON a status change
+/// answers with.
+fn assert_pause_unsupported(reply: &str) {
+    assert!(reply.contains("not supported"), "unexpected reply: {reply}");
+    assert!(reply.contains("/cancel"), "unexpected reply: {reply}");
+    assert!(!reply.contains("new_status"), "a status changed: {reply}");
+    assert!(!reply.contains('\n'), "more than one sentence: {reply}");
+}
+
+/// Drain the bus: the `(task_id, status)` of every `TaskUpdated` and the mode
+/// of every `OrchestrationStage`, in the order they came.
+fn task_updates_and_modes(
+    rx: &mut tokio::sync::broadcast::Receiver<SystemEvent>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let (mut updates, mut modes) = (Vec::new(), Vec::new());
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::TaskUpdated {
+                task_id, status, ..
+            } => updates.push((task_id, status)),
+            SystemEvent::OrchestrationStage { mode, .. } => modes.push(mode),
+            _ => {}
+        }
+    }
+    (updates, modes)
+}
+
+/// An orchestrator over `db` whose lane `user1:cli` runs `task-1`, its row and
+/// its registry entry `status`.
+fn orchestrator_with_one_workflow(
+    db: openalpaca_storage::Database,
+    status: TaskStatus,
+) -> Orchestrator {
+    openalpaca_storage::repository::TaskRepository::new(&db)
+        .create(&openalpaca_storage::Task {
+            status,
+            completed_at: None,
+            ..make_test_task()
+        })
+        .unwrap();
+    let ctx = Arc::new(SharedContext::new());
+    ctx.task_registry
+        .register("task-1".to_string(), "Test task".to_string());
+    let entry_status = match status {
+        TaskStatus::Running => crate::context::TaskEntryStatus::Running,
+        TaskStatus::Paused => crate::context::TaskEntryStatus::Paused,
+        other => panic!("not a live status: {other:?}"),
+    };
+    ctx.task_registry.update_status("task-1", entry_status);
+    ctx.register_workflow_for_lane("user1:cli", "task-1");
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    Orchestrator::new(
+        ctx,
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db),
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    )
+}
+
+/// Send `command` to an orchestrator whose lane runs one workflow with a row
+/// at `status`, and check that the sentence came back and that nothing
+/// moved: the row, the registry entry, the bus.
+async fn assert_command_changes_nothing(command: &str, status: TaskStatus) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let orch = orchestrator_with_one_workflow(db, status);
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, command).await;
+
+    assert_pause_unsupported(&reply);
+    let db = orch.db.as_ref().unwrap();
+    let row = openalpaca_storage::repository::TaskRepository::new(db)
+        .get("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, status, "{command} changed the row");
+    assert_eq!(
+        orch.shared_context
+            .task_registry
+            .get("task-1")
+            .unwrap()
+            .status
+            .as_str(),
+        status.as_str(),
+        "{command} changed the registry entry"
+    );
+    let (updates, modes) = task_updates_and_modes(&mut rx);
+    assert!(updates.is_empty(), "{command} published {updates:?}");
+    // Still a task op: answered with no model, and observable as one.
+    assert_eq!(modes, vec!["task_ops".to_string()], "{command}");
+}
+
 #[tokio::test]
-async fn test_bare_pause_resume_resolve_via_lane() {
-    let orch = make_orchestrator();
-    orch.shared_context
-        .task_registry
-        .register("task-1".to_string(), "Runner".to_string());
-    orch.shared_context
-        .task_registry
-        .update_status("task-1", crate::context::TaskEntryStatus::Running);
-    orch.shared_context
-        .register_workflow_for_lane("user1:cli", "task-1");
+async fn bare_pause_on_one_running_workflow_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/pause", TaskStatus::Running).await;
+}
 
-    let reply = send_steer(&orch, "/pause").await;
-    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
-    assert_eq!(json["new_status"], "paused");
+#[tokio::test]
+async fn pause_with_an_id_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/pause task-1", TaskStatus::Running).await;
+}
 
-    let reply = send_steer(&orch, "/resume").await;
+#[tokio::test]
+async fn bare_resume_on_one_running_workflow_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/resume", TaskStatus::Running).await;
+}
+
+#[tokio::test]
+async fn resume_with_an_id_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/resume task-1", TaskStatus::Running).await;
+}
+
+/// A row an earlier build — or the route, which still pauses — left `paused`
+/// is not un-paused from the chat either: its run never stopped, and its
+/// completion writes over `paused` as it always did.
+#[tokio::test]
+async fn resume_on_a_paused_row_answers_the_sentence_and_leaves_it_paused() {
+    for command in ["/resume", "/resume task-1"] {
+        assert_command_changes_nothing(command, TaskStatus::Paused).await;
+    }
+}
+
+/// The bare forms answer before any target is resolved: with no workflow or
+/// with several on the lane, the same sentence — not "No running workflow"
+/// and not "Which task should I pause?".
+#[tokio::test]
+async fn bare_pause_and_resume_answer_the_sentence_with_no_or_several_workflows() {
+    for command in ["/pause", "/resume"] {
+        let orch = make_orchestrator();
+        assert_pause_unsupported(&send_steer(&orch, command).await);
+
+        let orch = make_orchestrator();
+        for id in ["task-1", "task-2"] {
+            orch.shared_context
+                .task_registry
+                .register(id.to_string(), format!("Title {id}"));
+            orch.shared_context
+                .task_registry
+                .update_status(id, crate::context::TaskEntryStatus::Running);
+            orch.shared_context
+                .register_workflow_for_lane("user1:cli", id);
+        }
+        let mut rx = orch.bus.subscribe();
+        assert_pause_unsupported(&send_steer(&orch, command).await);
+        for id in ["task-1", "task-2"] {
+            assert_eq!(
+                orch.shared_context.task_registry.get(id).unwrap().status,
+                crate::context::TaskEntryStatus::Running,
+                "{command} changed {id}"
+            );
+        }
+        let (updates, _) = task_updates_and_modes(&mut rx);
+        assert!(updates.is_empty(), "{command} published {updates:?}");
+    }
+}
+
+/// `/cancel` is untouched: on the same lane it still stops the run, writes
+/// the row and publishes the change.
+#[tokio::test]
+async fn cancel_on_one_running_workflow_still_cancels_and_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let orch = orchestrator_with_one_workflow(db, TaskStatus::Running);
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/cancel").await;
+
     let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
-    assert_eq!(json["new_status"], "running");
+    assert_eq!(json["new_status"], "cancelled");
+    let db = orch.db.as_ref().unwrap();
+    let row = openalpaca_storage::repository::TaskRepository::new(db)
+        .get("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, TaskStatus::Cancelled);
+    let (updates, modes) = task_updates_and_modes(&mut rx);
+    assert_eq!(
+        updates,
+        vec![("task-1".to_string(), "cancelled".to_string())]
+    );
+    assert_eq!(modes, vec!["task_ops".to_string()]);
 }
 
 // ── C4: S4 moment 2 on the legacy `tools.allow` branch (design §6.2 #10) ──
