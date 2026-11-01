@@ -55,9 +55,9 @@ The catalog API supports two scopes with project-overrides-user semantics (`Skil
 | Scope | Path | Priority |
 |-------|------|----------|
 | **Project** | `config/skills/` (relative to config dir) | Higher — overrides User scope |
-| **User** | e.g. `~/.config/openalpaca/skills/` | Lower — fallback |
+| **User** | A directory the caller passes | Lower — fallback |
 
-**In practice, the daemon currently loads only the project scope**: at startup it scans `<config-dir>/skills/` as `Project` scope and does not pass a user directory. Multi-scope discovery is implemented in the catalog but not wired into the daemon.
+**In practice, the daemon currently loads only the project scope**: at startup it scans `<config-dir>/skills/` as `Project` scope and does not pass a user directory. Multi-scope discovery is implemented in the catalog but not wired into the daemon. The shipped `create-skill` writes only there: its scripts take `--scope=project` alone and refuse any other scope, naming that directory.
 
 Skills with `invoke.mode: "disabled"` are skipped during the scan and never enter the catalog.
 

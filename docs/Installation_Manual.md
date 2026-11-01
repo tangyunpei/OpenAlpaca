@@ -308,6 +308,23 @@ using with an older build is the second case it names. To switch over:
    longer ask by default. A skill's `permissions.confirm.tools` list works the
    same way. The templates this build ships carry no such list.
 
+9. **Take this build's `create-skill`, if you use it.**
+   `~/.openalpaca/config/skills/` is also written only when it is absent, so
+   a store an earlier build set up keeps that build's `create-skill`, scripts
+   and all. Asked for a skill in its `user` scope, those scripts wrote it
+   under `~/.config/openalpaca/skills/`, a folder the daemon never reads, and
+   reported success: the skill never loaded. This build's scripts write only
+   to the folder the daemon reads skills from, and refuse any other scope,
+   naming that folder. To take them, stop the daemon and move
+   `~/.openalpaca/config/skills/` aside; start the daemon, which writes the
+   four shipped skills into a new `skills/`, and stop it again; move back
+   every folder you want to keep but `create-skill` — your own skills, and a
+   shipped one you edited — and start it. A skill the old scripts wrote under
+   `~/.config/openalpaca/skills/` loads once you move its folder into
+   `~/.openalpaca/config/skills/`. A store you already switched over with an
+   earlier build — one this build opens without the message above — keeps
+   that build's `create-skill` too: do this step on it as well.
+
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
 there is out of date — it may describe no `projects/` folder, list `skills/`
 and `cache/` entries that never held anything, or call `scratch/` reserved:
@@ -716,7 +733,9 @@ opens — keeps the store as it is, agent templates included: read [Agents work
 in the project](#agents-work-in-the-project) before you start it. Such a store
 may keep a `system_agent.md` with two leftover lines that, since this build,
 would let that agent write and edit your project's files and run commands in
-it without asking; step 7 of the switch-over removes them.
+it without asking; step 7 of the switch-over removes them. It also keeps that
+build's `create-skill`, whose `user` scope wrote skills where the daemon never
+reads them; step 9 says how to take this build's copy.
 
 Upgrade replaces:
 

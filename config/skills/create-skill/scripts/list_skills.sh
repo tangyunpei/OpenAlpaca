@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # list_skills.sh — List existing skills with their slash commands.
 #
-# Usage: list_skills.sh [--scope=project|user|both]
+# Usage: list_skills.sh [--scope=project]
 #
 # Outputs JSON array of {id, name, slash, path}.
 
 set -euo pipefail
 
-# Resolve project root from script location
+# The skills root, from the script's own location: the script is at
+# <config>/skills/create-skill/scripts/, so the root is the skills directory
+# this skill was loaded from, the one directory the daemon reads skills from.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SKILLS_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-SCOPE="both"
+SCOPE="project"
 
 for arg in "$@"; do
   case "$arg" in
@@ -19,6 +21,13 @@ for arg in "$@"; do
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
+
+# One root, so one scope: `user` and `both` listed ~/.config/openalpaca/skills,
+# which nothing reads, as if the daemon loaded the skills there.
+if [[ "$SCOPE" != "project" ]]; then
+  echo "Error: --scope=$SCOPE is refused: the daemon reads skills only from $SKILLS_ROOT (--scope=project, the default)" >&2
+  exit 1
+fi
 
 echo "["
 FIRST=true
@@ -67,13 +76,7 @@ scan_dir() {
   done
 }
 
-if [[ "$SCOPE" == "project" || "$SCOPE" == "both" ]]; then
-  scan_dir "$PROJECT_ROOT/config/skills" "project"
-fi
-
-if [[ "$SCOPE" == "user" || "$SCOPE" == "both" ]]; then
-  scan_dir "$HOME/.config/openalpaca/skills" "user"
-fi
+scan_dir "$SKILLS_ROOT" "project"
 
 echo ""
 echo "]"
