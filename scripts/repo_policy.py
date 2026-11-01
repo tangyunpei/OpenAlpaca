@@ -1,12 +1,13 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """The repository-policy guard (B-23): what the workflows and the gate scripts may not do.
 
 Usage:
-  python3 -I scripts/repo_policy.py [ROOT]
+  python3.11 -I scripts/repo_policy.py [ROOT]
 
 ROOT is the repository root (default: this file's parent's parent). Exit 0 when every
 rule holds; 1 with one line per violation, `path:line: rule: what`; 2 on a usage error,
-a file the guard cannot read, or a ROOT with no .github/workflows. CI's `tooling` job
+a file the guard cannot read (a Cargo.lock that is not TOML, or whose [[package]] is not
+an array of tables, among them), or a ROOT with no .github/workflows. CI's `tooling` job
 runs it; so can anyone, offline.
 
 The rules:
@@ -33,11 +34,10 @@ apps/openalpaca-gui/scripts/. A comment is not a command: `#` lines (and `//`, `
 `*` lines in TypeScript) are skipped.
 """
 
-from __future__ import annotations
-
 import pathlib
 import re
 import sys
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -253,8 +253,25 @@ def ignored_zip_ids(path: pathlib.Path):
 
 
 def locked_zip_majors(lock: pathlib.Path) -> list[str]:
-    text = "\n".join(read(lock)) if lock.is_file() else ""
-    return re.findall(r'(?m)^\[\[package\]\]\nname = "zip"\nversion = "(\d+)\.', text)
+    """The major of every zip Cargo.lock holds, read by tomllib; [] with no Cargo.lock."""
+    if not lock.is_file():
+        return []
+    try:
+        doc = tomllib.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as e:
+        raise Unreadable("%s: %s" % (lock, e))
+    except tomllib.TOMLDecodeError as e:
+        raise Unreadable("%s: not TOML: %s" % (lock, e))
+    packages = doc.get("package", [])
+    if not isinstance(packages, list) or not all(isinstance(p, dict) for p in packages):
+        raise Unreadable("%s: not a Cargo.lock: [[package]] is not an array of tables" % lock)
+    majors = []
+    for p in packages:
+        if p.get("name") == "zip":
+            m = re.match(r"(\d+)\.", str(p.get("version", "")))
+            if m:
+                majors.append(m.group(1))
+    return majors
 
 
 def check_zip8(root, out):

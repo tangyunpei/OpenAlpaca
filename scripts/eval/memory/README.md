@@ -209,7 +209,7 @@ for mode in excerpts index; do
     cargo test -p openalpaca_core --features live-eval \
     --test memory_eval -- --ignored memory_eval --nocapture
 done
-python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D-index.json \
+python3.11 scripts/eval/memory/compare.py /tmp/memory-eval/report-D-index.json \
   /tmp/memory-eval/report-D-excerpts.json
 # Accuracy is compare.py's; the cost side is each report's totals:
 # reader_tokens_in_mean_per_turn / _median_per_turn, reader_rounds_mean_per_turn,
@@ -227,11 +227,11 @@ python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D-index.json \
 # Compare (candidate first, baseline second). The archived baselines were
 # graded by qwen3.8:27b-mtp-q8_0: compare.py refuses a report graded by another
 # judge until one side is re-judged (below), or --allow-judge-mismatch says so.
-python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
+python3.11 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
   scripts/eval/memory/reports/baseline-B-2026-09-24.json
-python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
+python3.11 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
   scripts/eval/memory/reports/baseline-A-2026-09-24.json --margin -10
-python3 scripts/eval/memory/compare.py --self-test   # the judge refusal, the recall-mode printout
+python3.11 scripts/eval/memory/compare.py --self-test   # the judge refusal, the recall-mode printout
 ```
 
 Optional variables:
@@ -585,7 +585,7 @@ for system in K0 K; do
     cargo test -p openalpaca_core --features live-eval \
     --test memory_eval -- --ignored memory_eval --nocapture
 done
-python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-K.json \
+python3.11 scripts/eval/memory/compare.py /tmp/memory-eval/report-K.json \
   /tmp/memory-eval/report-K0.json
 ```
 

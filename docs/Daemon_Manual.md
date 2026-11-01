@@ -3,7 +3,7 @@
 `openalpacad` is the local control plane for OpenAlpaca, serving HTTP APIs, streaming events, orchestration runtime, connectors, and storage.
 
 Related docs:
-- [API Docs index](api/README.md) (generated from source by `python3 scripts/gen_api_docs.py`)
+- [API Docs index](api/README.md) (generated from source by `python3.11 scripts/gen_api_docs.py`)
 - [CLI Manual](CLI_Manual.md)
 - [GUI Manual](GUI_Manual.md)
 - [Agent Loop reference](agent-loop.md) — how one turn or one agent runs: rounds, exits, guards, compaction, steering

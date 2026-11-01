@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Tests for `scripts/repo_policy.py`, the repository-policy guard (B-23).
 
 Run with either:
-  python3 -I scripts/tests/test_repo_policy.py
-  python3 -m pytest scripts/tests/test_repo_policy.py
+  python3.11 -I scripts/tests/test_repo_policy.py
+  python3.11 -m pytest scripts/tests/test_repo_policy.py
 
 Each planted-violation test starts from a small tree the guard passes, plants one
 violation, and asserts the guard fails on it and names its rule; the last test runs the
@@ -11,8 +11,6 @@ guard on this repository, which must pass. The planted toolchain literal and the
 planted unpaired target directory are spelled in two pieces, so that this file — a gate
 script the guard reads — is no violation itself.
 """
-
-from __future__ import annotations
 
 import importlib.util
 import pathlib
@@ -196,6 +194,35 @@ def test_the_zip_ignores_lifted_with_zip_8_gone_pass() -> None:
         rc, out = _run(_tree(pathlib.Path(d), lock=LOCK_WITH_ZIP8.replace('"8.6.0"', '"9.0.2"'),
                              deny='[advisories]\nyanked = "deny"\n# RUSTSEC-2026-0367 lifted\nignore = []\n'))
         assert rc == 0, out
+
+
+def test_a_lock_that_is_not_toml_beside_a_live_zip_ignore_is_no_verdict() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = _tree(pathlib.Path(d), lock='[[package]\nname = "zip"\nversion = "8.6.0"\n')
+        rc, out = _run(root)
+        assert rc == 2, out
+        want = "repo_policy: cannot read %s: not TOML: " % (root.resolve() / "Cargo.lock")
+        assert out.startswith(want) and len(out.splitlines()) == 1, out
+
+
+def test_a_lock_whose_packages_are_not_tables_beside_a_live_zip_ignore_is_no_verdict() -> None:
+    for lock in ("package = 1\n", "package = [1]\n"):
+        with tempfile.TemporaryDirectory() as d:
+            root = _tree(pathlib.Path(d), lock=lock)
+            rc, out = _run(root)
+            assert rc == 2, (lock, out)
+            want = ("repo_policy: cannot read %s: not a Cargo.lock: [[package]] is not an array of tables"
+                    % (root.resolve() / "Cargo.lock"))
+            assert out.strip() == want and len(out.splitlines()) == 1, (lock, out)
+
+
+def test_the_zip_majors_are_read_from_the_lock_and_none_without_one() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        lock = pathlib.Path(d) / "Cargo.lock"
+        assert guard.locked_zip_majors(lock) == [], "a missing Cargo.lock reads as no zip"
+        lock.write_text(LOCK_WITH_ZIP8, encoding="utf-8")
+        majors = guard.locked_zip_majors(lock)
+        assert majors == ["8", "9"], majors
 
 
 def test_a_repository_without_workflows_is_no_verdict() -> None:

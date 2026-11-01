@@ -183,7 +183,7 @@ check "[no index] exit 0, cache-copies index-absent, the three cache checks abse
 # ---- flipped byte --------------------------------------------------------------------------------
 C=$(copy flipped)
 F=$(find "$C/memory" -name '*--*.md' | LC_ALL=C sort | head -n 1)
-python3 -I -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[-2] ^= 1; open(p,"wb").write(bytes(b))' "$F"
+python3.11 -I -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[-2] ^= 1; open(p,"wb").write(bytes(b))' "$F"
 rh flipped --copy "$C" --bins "$BINS"
 check "[flipped] exit 0, verdict fail naming note-mismatch, the doctors still local" \
   eval 'rc_is flipped 0 && grep -q -E "^verdict fail reasons=(.*,)?note-mismatch(,.*)?$" "$X/runs/flipped.out" && has flipped "doctor-tip local" && clean_streams flipped'
