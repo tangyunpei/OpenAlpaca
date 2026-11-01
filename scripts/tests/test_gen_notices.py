@@ -11,9 +11,10 @@ bun.lock, a fake node_modules and SPDX texts; a generation case runs the generat
 stand-in cargo-about, a bash script that prints that JSON. None runs cargo-about or bun,
 and none reads the repository's own lockfiles or node_modules, so the file runs offline
 in CI's `tooling` job. One case reads the repository's committed THIRD-PARTY-NOTICES and
-deny.toml, as CI's licence step does. The refusal cases source package-macos.sh in bash,
-as its own comment says to, point REPO_ROOT at a fixture tree and call the check; bash and
-shasum are all they need.
+deny.toml, as CI's licence step does, and one its vendored texts of Apache-2.0 and the
+LLVM exception. The refusal cases source package-macos.sh in bash, as its own comment
+says to, point REPO_ROOT at a fixture tree and call the check; bash and shasum are all
+they need.
 """
 
 import hashlib
@@ -222,7 +223,7 @@ def test_a_js_package_with_no_licence_file_gets_the_marked_standard_text_of_each
         _npm_package(root, "b", "2.0.0", "MIT OR Apache-2.0", {"LICENSE.spdx": "SPDXVersion: SPDX-2.1\n"})
         _npm_package(root, "c", "1.0.0", "MIT", {"LICENSE": "MIT License\r\n\r\nCopyright (c) A  \r\n"})
         _npm_package(root, "e", "1.0.0", "(MIT)", {"LICENSE": "e's licence\n"})
-        half = gen().js_half(root, doc, gen().bun_closure(doc, "apps/openalpaca-gui"))
+        half = gen().js_half(root, doc, gen().bun_closure(doc, "apps/openalpaca-gui"), ["MIT", "Apache-2.0"])
         assert half.packages == [("a", "1.0.0", "MIT"), ("b", "2.0.0", "MIT OR Apache-2.0"),
                                  ("c", "1.0.0", "MIT"), ("e", "1.0.0", "(MIT)")], half.packages
         substituted = {t: g for t, g in half.groups.items() if g.substituted}
@@ -243,7 +244,7 @@ def test_identical_texts_are_given_once_with_every_package_and_in_sorted_order()
         _npm_package(root, "b", "2.0.0", "MIT", {"LICENSE": "Zeta licence\n"})
         _npm_package(root, "c", "1.0.0", "MIT", {"LICENSE": "MIT License\r\n\r\nCopyright (c) A  \r\n"})
         _npm_package(root, "e", "1.0.0", "MIT", {"LICENSE": "Zeta licence\n", "NOTICE": "Alpha notice\n"})
-        half = gen().js_half(root, doc, gen().bun_closure(doc, "apps/openalpaca-gui"))
+        half = gen().js_half(root, doc, gen().bun_closure(doc, "apps/openalpaca-gui"), ["MIT"])
         assert len(half.groups) == 3, sorted(half.groups)
         a_text = "MIT License\n\nCopyright (c) A\n"
         assert half.groups[a_text].used_by == {("a", "1.0.0"), ("c", "1.0.0")}, half.groups[a_text].used_by
@@ -262,7 +263,7 @@ def test_cargo_about_output_gives_identified_texts_shipped_files_and_substitutio
     with tempfile.TemporaryDirectory() as d:
         root = _spdx(pathlib.Path(d))
         about = _about(root)
-        half = gen().rust_half(root, about)
+        half = gen().rust_half(root, about, ALLOWED)
         assert half.packages == [("bare", "3.0.0", "MIT OR Apache-2.0"), ("id", "1.0.0", "MIT OR Apache-2.0"),
                                  ("ok", "0.2.0", "MIT OR Apache-2.0")], half.packages
         groups = half.groups
@@ -310,7 +311,7 @@ def test_a_text_counts_as_read_only_from_the_crates_own_licence_file() -> None:
                                      ("gp", "2.0.0", "MIT", gp))
             ],
         }
-        groups = gen().rust_half(root, about).groups
+        groups = gen().rust_half(root, about, ALLOWED + ["ISC"]).groups
         assert not any("pub mod der" in t for t in groups), "a source file is never given as a licence text"
         assert groups["MIT License\n\nCopyright (c) Hdr\n"].labels == {"MIT", "LICENSE-MIT as shipped"}, \
             groups["MIT License\n\nCopyright (c) Hdr\n"].labels
@@ -321,15 +322,93 @@ def test_a_text_counts_as_read_only_from_the_crates_own_licence_file() -> None:
         assert groups["See .licenses/ for the inherited texts.\n"].used_by == {("gp", "2.0.0")}
 
 
-def test_a_licence_id_with_no_vendored_text_is_refused_by_name() -> None:
+def test_a_licence_id_with_no_vendored_text_has_none_and_is_no_refusal() -> None:
+    """The owner's ruling of 2026-11-01: a missing licence text never stops the notices.
+    A vendored text is found by its exact name, so a case-insensitive file system reads
+    the same tree as any other."""
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        try:
-            gen().spdx_text(root, "ISC")
-        except gen().NoVerdict as e:
-            assert "ISC" in str(e) and "license-list-data" in str(e), str(e)
-        else:
-            raise AssertionError("an id with no vendored text was accepted")
+        assert gen().spdx_text(root, "ISC") is None, "no spdx directory at all"
+        _spdx(root)
+        assert gen().spdx_text(root, "ISC") is None
+        assert gen().spdx_text(root, "MIT") == MIT_TEXT
+        assert gen().spdx_text(root, "mit") is None, "a vendored text is found by its exact name"
+
+
+def test_a_crate_with_no_licence_file_and_no_vendored_text_is_listed_marked_and_counted() -> None:
+    """The Rust half's path: a crate that ships no licence file, under an id with no
+    vendored text, is listed with its expression and marked, never refused; one with a
+    text substituted for one id and none for another counts in both header lines."""
+    with tempfile.TemporaryDirectory() as d:
+        root = _spdx(pathlib.Path(d))
+        lone = _crate(root, "lone", "1.0.0", {})
+        both = _crate(root, "both", "2.0.0", {})
+        def used(*keys):
+            return [{"crate": {"name": n, "version": v}, "path": None} for (n, v) in keys]
+        about = {
+            "licenses": [
+                {"id": "ISC", "text": "synthesized ISC\n", "source_path": None,
+                 "used_by": used(("lone", "1.0.0"), ("both", "2.0.0"))},
+                {"id": "MIT", "text": "synthesized\n", "source_path": None, "used_by": used(("both", "2.0.0"))},
+            ],
+            "crates": [
+                {"package": {"name": n, "version": v, "license": lic, "manifest_path": m}, "license": lic}
+                for n, v, lic, m in (("lone", "1.0.0", "ISC", lone), ("both", "2.0.0", "MIT AND ISC", both))
+            ],
+        }
+        half = gen().rust_half(root, about, ALLOWED + ["ISC"])
+        assert half.packages == [("both", "2.0.0", "MIT AND ISC"), ("lone", "1.0.0", "ISC")], half.packages
+        assert half.groups[MIT_TEXT].substituted == {("both", "2.0.0")}
+        assert "synthesized ISC\n" not in half.groups, "cargo-about's own fallback text is never written"
+        out = gen().render(["Cargo.lock sha256 0", "bun.lock sha256 0"], half, gen().Half())
+        assert "\nRust crates given a substituted text: 1\n" in out, out
+        assert "\nRust crates missing a licence text: 2\n" in out, out
+        assert "\nJavaScript packages missing a licence text: 0\n" in out, out
+        assert "\nlone 1.0.0: ISC\n" in out and "\nboth 2.0.0: MIT AND ISC\n" in out, out
+        rule = "-" * 72
+        assert ("\n%s\nISC: no licence text available\n"
+                "  both 2.0.0 (ships no licence file; no standard text available)\n"
+                "  lone 1.0.0 (ships no licence file; no standard text available)\n%s\n" % (rule, rule)) in out, out
+        assert "Rust licence texts: 1\n" in out, "a missing text is no licence text"
+
+
+def _ref_crate(root: pathlib.Path, name: str, version: str, licence: str, files: dict) -> dict:
+    """A crate as cargo-about 0.9.2 writes one it names no licence for: in `crates`, in
+    no licence's `used_by` (what it wrote for a scratch crate under an accepted
+    LicenseRef-Foo that ships no licence file)."""
+    return {"package": {"name": name, "version": version, "license": licence,
+                        "manifest_path": _crate(root, name, version, files)}, "license": licence}
+
+
+def test_a_crate_cargo_about_names_no_licence_for_ships_under_its_expression_never_refused() -> None:
+    """The owner's ruling of 2026-11-01 on the Rust half: a crate under an accepted
+    LicenseRef- id is given no licence by cargo-about, which has no text for it. It ships
+    under the ids its expression's allowed branches name: with no licence file it is
+    listed, marked and counted; with one, that file is given as shipped. Only a crate whose
+    expression gives no allowed id is still refused."""
+    with tempfile.TemporaryDirectory() as d:
+        root = _spdx(pathlib.Path(d))
+        accepted = ALLOWED + ["LicenseRef-Foo"]
+        about = {"licenses": [], "crates": [_ref_crate(root, "refonly", "1.0.0", "LicenseRef-Foo", {}),
+                                            _ref_crate(root, "refown", "2.0.0", "LicenseRef-Foo",
+                                                       {"LICENSE": "The Foo licence\n"})]}
+        half = gen().rust_half(root, about, accepted)
+        assert half.packages == [("refonly", "1.0.0", "LicenseRef-Foo"), ("refown", "2.0.0", "LicenseRef-Foo")]
+        assert half.missing == {"LicenseRef-Foo": {("refonly", "1.0.0")}}, half.missing
+        assert half.groups["The Foo licence\n"].used_by == {("refown", "2.0.0")}, half.groups
+        out = gen().render(["Cargo.lock sha256 0", "bun.lock sha256 0"], half, gen().Half())
+        assert "\nRust crates missing a licence text: 1\n" in out, out
+        rule = "-" * 72
+        assert ("\n%s\nLicenseRef-Foo: no licence text available\n"
+                "  refonly 1.0.0 (ships no licence file; no standard text available)\n%s\n" % (rule, rule)) in out, out
+        for licence in ("", "GPL-3.0-only", "MIT or Apache-2.0"):
+            about = {"licenses": [], "crates": [_ref_crate(root, "refonly", "1.0.0", licence, {})]}
+            try:
+                gen().rust_half(root, about, accepted)
+            except gen().NoVerdict as e:
+                assert "cargo-about gave refonly 1.0.0 no licence" in str(e), (licence, str(e))
+            else:
+                raise AssertionError("a crate with no allowed licence, %r, was not refused" % licence)
 
 
 def test_the_accepted_licences_must_be_deny_tomls_allow_list() -> None:
@@ -346,16 +425,17 @@ def test_the_accepted_licences_must_be_deny_tomls_allow_list() -> None:
 def test_the_same_input_renders_the_same_bytes() -> None:
     with tempfile.TemporaryDirectory() as d:
         root = _spdx(pathlib.Path(d))
-        first = gen().render(["Cargo.lock sha256 0", "bun.lock sha256 0"], gen().rust_half(root, _about(root)), gen().Half())
+        first = gen().render(["Cargo.lock sha256 0", "bun.lock sha256 0"], gen().rust_half(root, _about(root), ALLOWED), gen().Half())
         about = _about(root)
         about["licenses"].reverse()
         about["crates"].reverse()
-        second = gen().render(["Cargo.lock sha256 0", "bun.lock sha256 0"], gen().rust_half(root, about), gen().Half())
+        second = gen().render(["Cargo.lock sha256 0", "bun.lock sha256 0"], gen().rust_half(root, about, ALLOWED), gen().Half())
         assert first == second
 
 
-def _check(root: pathlib.Path) -> tuple[int, str]:
-    proc = subprocess.run([sys.executable, "-I", str(GEN), "--check", "--root", str(root)], capture_output=True, text=True)
+def _check(root: pathlib.Path, *more: str) -> tuple[int, str]:
+    cmd = [sys.executable, "-I", str(GEN), "--check", "--root", str(root)] + list(more)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -557,6 +637,31 @@ def test_an_spdx_expression_passes_by_or_and_with_and_parentheses() -> None:
     assert gen().spdx_satisfied("LicenseRef-Fonts AND MIT", ALLOWED + ["LicenseRef-Fonts"]) is True
 
 
+def test_a_package_ships_under_the_ids_of_the_branches_the_list_satisfies() -> None:
+    """What a package with no licence file is given standard texts for: each satisfied
+    alternative of an OR, every term of an AND, X and Y of `X WITH Y`, an id itself; spelled
+    as the list spells them."""
+    cases = {
+        "MIT": ["MIT"], "(MIT)": ["MIT"], "mit": ["MIT"], "GPL-3.0-only": [],
+        "MIT OR GPL-3.0-only": ["MIT"], "GPL-3.0-only OR mit": ["MIT"],
+        "MIT OR Apache-2.0": ["Apache-2.0", "MIT"], "(MPL-2.0 OR Apache-2.0)": ["Apache-2.0", "MPL-2.0"],
+        "MIT AND Apache-2.0": ["Apache-2.0", "MIT"], "MIT AND GPL-3.0-only": [],
+        "MIT OR GPL-3.0-only AND GPL-2.0-only": ["MIT"], "(MIT OR GPL-3.0-only) AND Apache-2.0": ["Apache-2.0", "MIT"],
+        "Apache-2.0 WITH LLVM-exception": ["Apache-2.0", "LLVM-exception"],
+        "apache-2.0 WITH llvm-exception": ["Apache-2.0", "LLVM-exception"],
+        "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT": ["Apache-2.0", "LLVM-exception", "MIT"],
+        "GPL-2.0-only WITH LLVM-exception OR MIT": ["MIT"],
+    }
+    for expression, expected in cases.items():
+        assert gen().spdx_allowed_ids(expression, ALLOWED) == expected, (expression, expected)
+    for expression in ("", "MIT or Apache-2.0", "SEE LICENSE IN LICENSE.md"):
+        try:
+            ids = gen().spdx_allowed_ids(expression, ALLOWED)
+        except ValueError:
+            continue
+        raise AssertionError("%r is no SPDX expression, yet gave ids: %r" % (expression, ids))
+
+
 def test_an_expression_that_is_missing_or_not_spdx_is_refused_never_passed() -> None:
     deep = "(" * 5000 + "MIT" + ")" * 5000  # deeper than Python's recursion limit lets a parser go
     for expression in ("", "  ", "MIT OR", "OR MIT", "MIT AND AND Apache-2.0", "(MIT", "MIT)", "()",
@@ -633,8 +738,8 @@ def test_generation_refuses_a_js_package_the_list_does_not_allow_by_name_and_wri
 
 
 def test_generation_refuses_a_package_that_ships_no_licence_file_by_name_before_reading_a_text() -> None:
-    # A package with no licence file is given the standard text of each id its expression
-    # names; the refusal comes first, so it names the package, not a text no one vendored.
+    # A package with no licence file is given the standard text of each id it ships under;
+    # the refusal comes first, so a licence the list does not allow is refused by name.
     for expression in ("GPL-3.0-only", "MIT+", "MIT or Apache-2.0", "SEE LICENSE IN LICENSE.md"):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
@@ -666,6 +771,107 @@ def test_generation_accepts_the_fonts_ofl_and_the_file_it_writes_passes_the_lice
                                           ("c", "1.0.0", "OFL-1.1"), ("e", "1.0.0", "Apache-2.0 OR MIT")]
         rc, out = _check_licences(root)
         assert rc == 0 and "4 JavaScript packages" in out, (rc, out)
+
+
+def _no_licence_file(root: pathlib.Path, name: str, version: str) -> None:
+    (root / "node_modules" / ".bun" / ("%s@%s" % (name, version)) / "node_modules" / name / "LICENSE").unlink()
+
+
+def test_generation_lists_and_marks_a_package_with_no_licence_file_and_no_vendored_text() -> None:
+    """The owner's ruling of 2026-11-01, "make sure that if a license text of package is
+    missing, it is still fine": OFL-1.1 is allowed, the fixture vendors no text for it, and
+    e ships no licence file. The file is written, e listed with its expression and marked,
+    the header counting it; --check reads it back as current and --check-licences passes it."""
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        exe = _generation_tree(root, {"a": "MIT", "b": "MIT", "c": "MIT", "e": "OFL-1.1"})
+        _no_licence_file(root, "e", "1.0.0")
+        rc, out = _generate(root, exe)
+        assert rc == 0, (rc, out)
+        text = (root / "THIRD-PARTY-NOTICES").read_text(encoding="utf-8")
+        for line in ("Rust crates given a substituted text: 1", "Rust crates missing a licence text: 0",
+                     "JavaScript packages given a substituted text: 0", "JavaScript packages missing a licence text: 1"):
+            assert ("\n%s\n" % line) in gen().header(text) + "\n", (line, gen().header(text))
+        rule = "-" * 72
+        assert ("\n%s\nOFL-1.1: no licence text available\n"
+                "  e 1.0.0 (ships no licence file; no standard text available)\n%s\n" % (rule, rule)) in text, text
+        assert gen().js_section(text) == [("a", "1.0.0", "MIT"), ("b", "2.0.0", "MIT"), ("c", "1.0.0", "MIT"),
+                                          ("e", "1.0.0", "OFL-1.1")]
+        rc, out = _check(root, "--cargo-about", exe)
+        assert rc == 0 and "is current" in out, (rc, out)
+        rc, out = _check_licences(root)
+        assert rc == 0 and "4 JavaScript packages" in out, (rc, out)
+        rc, out = _generate(root, exe)
+        assert rc == 0 and (root / "THIRD-PARTY-NOTICES").read_text(encoding="utf-8") == text, "the same bytes again"
+
+
+def test_generation_gives_a_package_with_no_licence_file_the_text_of_its_allowed_alternative_alone() -> None:
+    """`MIT OR GPL-3.0-only` with no licence file: the package ships under MIT, the
+    alternative the list allows, so MIT's text is substituted and GPL-3.0-only's, which
+    no one vendored, is neither looked for nor missed."""
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        exe = _generation_tree(root, {"a": "MIT", "b": "MIT", "c": "MIT", "e": "MIT OR GPL-3.0-only"})
+        _no_licence_file(root, "e", "1.0.0")
+        rc, out = _generate(root, exe)
+        assert rc == 0, (rc, out)
+        text = (root / "THIRD-PARTY-NOTICES").read_text(encoding="utf-8")
+        assert "\ne 1.0.0: MIT OR GPL-3.0-only\n" in text, text
+        js_texts = text[text.index("Licence texts: JavaScript packages"):]
+        assert "MIT, the SPDX standard text (substituted)\n  e 1.0.0 (ships no licence file)\n" in js_texts, js_texts
+        assert "GPL" not in js_texts and "no licence text available" not in text, js_texts
+        for line in ("JavaScript packages given a substituted text: 1", "JavaScript packages missing a licence text: 0"):
+            assert ("\n%s\n" % line) in text, (line, gen().header(text))
+
+
+def test_apache_with_the_llvm_exception_gets_both_vendored_texts() -> None:
+    """`Apache-2.0 WITH LLVM-exception` with no licence file: Apache-2.0's text and the
+    exception's, both read from the repository's vendored texts."""
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        vendored = SCRIPTS / "release" / "spdx"
+        for ident in ("Apache-2.0", "LLVM-exception"):
+            _write(root / "scripts" / "release" / "spdx" / ("%s.txt" % ident),
+                   (vendored / ("%s.txt" % ident)).read_text(encoding="utf-8"))
+        doc = gen().load_bun_lock(_write(root / "bun.lock", BUN_LOCK))
+        for name, version in (("a", "1.0.0"), ("c", "1.0.0"), ("e", "1.0.0")):
+            _npm_package(root, name, version, "Apache-2.0", {"LICENSE": "%s's licence\n" % name})
+        _npm_package(root, "b", "2.0.0", "Apache-2.0 WITH LLVM-exception", {})
+        half = gen().js_half(root, doc, gen().bun_closure(doc, "apps/openalpaca-gui"), ALLOWED)
+        substituted = {label: text for text, g in half.groups.items() if g.substituted for label in g.labels}
+        assert sorted(substituted) == ["Apache-2.0, the SPDX standard text (substituted)",
+                                       "LLVM-exception, the SPDX standard text (substituted)"], sorted(substituted)
+        exception = substituted["LLVM-exception, the SPDX standard text (substituted)"]
+        assert exception.startswith("---- LLVM Exceptions to the Apache 2.0 License ----\n"), exception[:80]
+        for text in substituted.values():
+            assert half.groups[text].substituted == {("b", "2.0.0")}, half.groups[text].substituted
+
+
+def test_generation_lists_and_marks_a_crate_cargo_about_names_no_licence_for() -> None:
+    """End to end through the stand-in cargo-about: deny.toml and about.toml accept
+    LicenseRef-Foo, and the JSON holds a crate under it that ships no licence file and that
+    no licence names. The file is written, the crate listed and marked, the header counting
+    it, and --check reads it back as current."""
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        exe = _generation_tree(root, {"a": "MIT", "b": "MIT", "c": "MIT", "e": "MIT"})
+        allow = '["Apache-2.0", "MIT", "MPL-2.0", "LicenseRef-Foo"]'
+        _write(root / "deny.toml", "[licenses]\nallow = %s\n" % allow)
+        _write(root / "scripts" / "release" / "about.toml", "accepted = %s\n" % allow)
+        about = _about(root)
+        about["crates"].append(_ref_crate(root, "refonly", "1.0.0", "LicenseRef-Foo", {}))
+        _write(root / "about.json", json.dumps(about))
+        rc, out = _generate(root, exe)
+        assert rc == 0, (rc, out)
+        text = (root / "THIRD-PARTY-NOTICES").read_text(encoding="utf-8")
+        assert "\nrefonly 1.0.0: LicenseRef-Foo\n" in text, text
+        for line in ("Rust crates given a substituted text: 1", "Rust crates missing a licence text: 1"):
+            assert ("\n%s\n" % line) in gen().header(text) + "\n", (line, gen().header(text))
+        rule = "-" * 72
+        assert ("\n%s\nLicenseRef-Foo: no licence text available\n"
+                "  refonly 1.0.0 (ships no licence file; no standard text available)\n%s\n" % (rule, rule)) in text, text
+        rc, out = _check(root, "--cargo-about", exe)
+        assert rc == 0 and "is current" in out, (rc, out)
 
 
 def _notices(js: list, rust: list) -> str:

@@ -18,9 +18,11 @@ Substituted texts: spdx/license-list-data v3.29.0, scripts/release/spdx
 Rust crates: 681
 Rust licence texts: 285
 Rust crates given a substituted text: 56
+Rust crates missing a licence text: 0
 JavaScript packages: 19
 JavaScript licence texts: 18
 JavaScript packages given a substituted text: 1
+JavaScript packages missing a licence text: 0
 
 ========================================================================
 Rust crates

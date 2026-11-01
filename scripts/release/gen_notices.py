@@ -35,7 +35,9 @@ What it lists:
               a text several crates share one crate's path, equal to one of the crate's
               own licence files. For a licence with no such text the crate's own licence
               files are given as shipped, and where the crate ships none, the standard
-              text below. Install it with:
+              text below. A crate cargo-about names no licence for (0.9.2 names no
+              LicenseRef- id it has no file for) is read as a JavaScript package is,
+              by the branches of its expression the list satisfies. Install it with:
                 cargo install --locked --version 0.9.2 --features cli \
                   --root ~/.cache/openalpaca-deps-tools cargo-about
               (no other version is run).
@@ -44,18 +46,27 @@ What it lists:
               dependencies, optionalDependencies and peerDependencies the lock resolves
               (devDependencies never), with every licence file each one ships in
               node_modules; one that ships none gets the standard text of each licence
-              its package.json names. `bun pm licenses` gives no licence text and does
-              not tell a shipped package from a development one, so it is not used.
+              (and exception) it ships under: those of the branches of the expression
+              its package.json declares that the list below satisfies (each allowed
+              alternative of an OR, every term of an AND, both ids of `X WITH Y`).
+              `bun pm licenses` gives no licence text and does not tell a shipped
+              package from a development one, so it is not used.
               What the bundler writes into the bundle itself (Vite's module-preload
               helper and polyfill) is no package of that closure and is not listed.
   Licence files are a package directory's files named LICENSE*, LICENCE*, COPYING*,
   COPYRIGHT* or NOTICE* (any case), and every file in a licence directory there
   (LICENSES/, .licenses/, any case), bar an SPDX document (*.spdx). A standard text is
-  spdx/license-list-data's at tag v3.29.0, vendored under scripts/release/spdx/ for the
-  ids needed (a missing one is refused by name), and marked as substituted. Each text is
-  given once, its lines' trailing whitespace and CRLFs gone, after the packages it
-  covers; everything is sorted and nothing is dated, so the same tree writes the same
-  bytes.
+  spdx/license-list-data's at tag v3.29.0, vendored under scripts/release/spdx/ for every
+  id deny.toml's allow list and JS_ALSO_ALLOWED name, and marked as substituted. A text
+  missing never stops the notices (the owner's ruling of 2026-11-01): for an id with no
+  text vendored (by its exact file name) the package is listed all the same, with its
+  expression, under an entry "<id>: no licence text available" that marks it, and the
+  header counts it. What stops them is a licence missing or not allowed, never its text:
+  a package.json that names none or one the list does not allow (below); cargo-about
+  failing on a crate it finds no licence for or one the list does not satisfy; a crate
+  it names none for whose expression the list does not satisfy. Each text is given once,
+  its lines' trailing whitespace and CRLFs gone, after the packages it covers; everything
+  is sorted and nothing is dated, so the same tree writes the same bytes.
 
 The JavaScript licences: each package's, the SPDX expression its package.json declares,
 must be satisfied by deny.toml's [licenses] allow list (the one cargo-about's `accepted`
@@ -75,7 +86,7 @@ or every JavaScript licence allowed under --check-licences; 1 stale under --chec
 --check-hashes, or a JavaScript licence refused under --check-licences; 2 nothing written
 or checked: a usage error, a JavaScript licence refused at generation, or no verdict (a
 lockfile, node_modules, deny.toml or the committed file that cannot be read, cargo-about
-missing, another version or failing, a licence id with no vendored text).
+missing, another version or failing).
 """
 
 import dataclasses
@@ -141,17 +152,31 @@ class Group:
 
 @dataclasses.dataclass
 class Half:
-    """One ecosystem: its packages as (name, version, licence), and its texts by content."""
+    """One ecosystem: its packages as (name, version, licence), its texts by content, and
+    the ids it has no text for, each with the packages that ship no licence file under it."""
     packages: list = dataclasses.field(default_factory=list)
     groups: dict = dataclasses.field(default_factory=dict)
+    missing: dict = dataclasses.field(default_factory=dict)
 
     def add(self, text: str, label: str, package: tuple, substituted: bool = False) -> None:
         group = self.groups.setdefault(normalize(text), Group())
         group.labels.add(label)
         (group.substituted if substituted else group.used_by).add(package)
 
+    def standard(self, root: pathlib.Path, ident: str, package: tuple) -> None:
+        """For a package that ships no licence file, the standard text of `ident`, marked
+        substituted; with none vendored, the package recorded as missing it, never refused."""
+        text = spdx_text(root, ident)
+        if text is None:
+            self.missing.setdefault(ident, set()).add(package)
+        else:
+            self.add(text, "%s, the SPDX standard text (substituted)" % ident, package, True)
+
     def substituted_count(self) -> int:
         return len(set().union(*(g.substituted for g in self.groups.values())))
+
+    def missing_count(self) -> int:
+        return len(set().union(*self.missing.values()))
 
 
 # ------------------------------------------------------------------ text
@@ -192,17 +217,19 @@ def licence_files(directory: pathlib.Path) -> list:
     return [(name, read_text(p)) for name, p in sorted(found) if not name.lower().endswith(".spdx")]
 
 
-def spdx_ids(expression: str) -> list:
-    """The licence (and exception) ids an SPDX expression names, sorted."""
-    return sorted({t for t in re.findall(r"[A-Za-z0-9.+-]+", expression) if t not in SPDX_OPERATORS})
-
-
-def spdx_text(root: pathlib.Path, ident: str) -> str:
-    path = root / SPDX_DIR / ("%s.txt" % ident)
-    if not path.is_file():
-        raise NoVerdict("no standard text for %s under %s: vendor text/%s.txt from spdx/license-list-data at %s"
-                        % (ident, SPDX_DIR, ident, SPDX_TAG))
-    return read_text(path)
+def spdx_text(root: pathlib.Path, ident: str) -> str | None:
+    """The vendored standard text of a licence or exception id, or None when there is none:
+    found by its exact file name, so a case-insensitive file system reads the tree as any
+    other does."""
+    directory = root / SPDX_DIR
+    try:
+        names = {p.name for p in directory.iterdir()}
+    except FileNotFoundError:
+        names = set()
+    except OSError as e:
+        raise NoVerdict("cannot list %s: %s" % (directory, e))
+    name = "%s.txt" % ident
+    return read_text(directory / name) if name in names else None
 
 
 # ------------------------------------------------------------------ lockfile hashes
@@ -337,29 +364,41 @@ def rust_reading(about: dict) -> tuple:
     return named, read
 
 
-def rust_half(root: pathlib.Path, about: dict) -> Half:
+def rust_half(root: pathlib.Path, about: dict, accepted) -> Half:
     """The crates of cargo-about's JSON and their texts: each licence it read from the
     crate's own licence file; for one it read none for, the crate's own licence files, or
     with none the standard text. cargo-about's own fallback text, a source file's header
-    and every path stay out."""
+    and every path stay out. A crate cargo-about names no licence for (0.9.2 names no
+    LicenseRef- id it has no file for) ships under the ids of the branches of its
+    expression the accepted licences satisfy, as a JavaScript package does; refused only
+    when there are none. Where cargo-about names other ids, what its JSON leaves out is
+    neither given nor marked: the exception of `X WITH Y` (it names X) and a LicenseRef-
+    id beside them."""
     half = Half()
     named, read = rust_reading(about)
     for krate in about.get("crates", []):
         pkg = krate["package"]
         key = (pkg["name"], pkg["version"])
-        half.packages.append((pkg["name"], pkg["version"], " ".join(str(pkg.get("license") or krate.get("license")).split())))
-        if key not in named:
-            raise NoVerdict("cargo-about gave %s %s no licence" % key)
+        licence = " ".join(str(pkg.get("license") or krate.get("license")).split())
+        half.packages.append((pkg["name"], pkg["version"], licence))
+        ids = named.get(key)
+        if ids is None:
+            try:
+                ids = set(spdx_allowed_ids(licence, accepted))
+            except ValueError:
+                ids = set()
+            if not ids:
+                raise NoVerdict("cargo-about gave %s %s no licence" % key)
         for ident, text in read.get(key, []):
             half.add(text, ident, key)
-        unread = named[key] - {ident for ident, _ in read.get(key, [])}
+        unread = ids - {ident for ident, _ in read.get(key, [])}
         if unread:
             shipped = licence_files(pathlib.Path(pkg["manifest_path"]).parent)
             for name, text in shipped:
                 half.add(text, "%s as shipped" % name, key)
             if not shipped:
                 for ident in sorted(unread):
-                    half.add(spdx_text(root, ident), "%s, the SPDX standard text (substituted)" % ident, key, True)
+                    half.standard(root, ident, key)
     half.packages.sort(key=package_key)
     return half
 
@@ -482,16 +521,17 @@ def declared_licence(pkg: pathlib.Path) -> str:
     return " ".join(str(lic).split()) if lic else ""
 
 
-def js_half(root: pathlib.Path, doc: dict, keys: list, allowed=None) -> Half:
-    """The packages the keys reach, with their licence texts. Given `allowed`, a package
-    whose licence it does not satisfy is refused before any text is read, so the refusal
-    names the package rather than a standard text it would have been given."""
+def js_half(root: pathlib.Path, doc: dict, keys: list, allowed) -> Half:
+    """The packages the keys reach, with their licence texts. A package whose licence the
+    allowed licences do not satisfy is refused before any text is read, so the refusal
+    names the package; one that ships no licence file is given the standard text of each
+    id it ships under (spdx_allowed_ids)."""
     installed = []
     for key in keys:
         name, version = name_version(doc["packages"][key])
         pkg = installed_dir(root, name, version)
         installed.append((name, version, declared_licence(pkg), pkg))
-    refused = licence_refusals([p[:3] for p in installed], allowed) if allowed is not None else []
+    refused = licence_refusals([p[:3] for p in installed], allowed)
     if refused:
         raise NoVerdict(refusal(refused))
     half = Half()
@@ -501,8 +541,8 @@ def js_half(root: pathlib.Path, doc: dict, keys: list, allowed=None) -> Half:
         for fname, text in shipped:
             half.add(text, "%s as shipped" % fname, (name, version))
         if not shipped:
-            for ident in spdx_ids(licence):
-                half.add(spdx_text(root, ident), "%s, the SPDX standard text (substituted)" % ident, (name, version), True)
+            for ident in spdx_allowed_ids(licence, allowed):
+                half.standard(root, ident, (name, version))
     half.packages = sorted(set(half.packages), key=package_key)
     return half
 
@@ -575,15 +615,28 @@ def spdx_satisfied(expression: str, allowed) -> bool:
     """Whether the allowed licences satisfy an SPDX expression: an id, or `id WITH
     exception`, when it is listed as written (ids in any case); A OR B when either is;
     A AND B when both are. ValueError when the expression is none."""
-    listed = {" ".join(a.split()).casefold() for a in allowed}
+    return bool(spdx_allowed_ids(expression, allowed))
 
-    def holds(node) -> bool:
-        if node[0] == "id":
-            return node[1].casefold() in listed
-        if node[0] == "with":
-            return ("%s WITH %s" % node[1:]).casefold() in listed
-        return (any if node[0] == "or" else all)(holds(n) for n in node[1])
-    return holds(spdx_parse(expression))
+
+def spdx_allowed_ids(expression: str, allowed) -> list:
+    """The licence and exception ids a package ships under, by the branches of its SPDX
+    expression the allowed licences satisfy (spdx_satisfied's reading): an id itself;
+    `X WITH Y`, X and Y; A AND B, both sides' ids; A OR B, the ids of each side that holds.
+    Spelled as the list spells them and sorted; none when the expression is not satisfied.
+    ValueError when it is no expression."""
+    listed = {" ".join(a.split()).casefold(): " ".join(a.split()) for a in allowed}
+
+    def ids(node):
+        if node[0] in ("id", "with"):
+            written = node[1] if node[0] == "id" else "%s WITH %s" % node[1:]
+            spelled = listed.get(written.casefold())
+            return None if spelled is None else {spelled.split()[0], spelled.split()[-1]}
+        held = [ids(n) for n in node[1]]
+        if node[0] == "and" and None in held:
+            return None
+        held = [h for h in held if h is not None]
+        return set().union(*held) if held else None
+    return sorted(ids(spdx_parse(expression)) or ())
 
 
 def licence_refusals(packages, allowed) -> list:
@@ -672,6 +725,11 @@ def render_texts(title: str, half: Half) -> list:
             mark = " (ships no licence file)" if (name, version) in group.substituted else ""
             out.append("  %s %s%s" % (name, version, mark))
         out += [THIN, "", text.rstrip("\n"), ""]
+    for ident, packages in sorted(half.missing.items()):
+        out += [THIN, "%s: no licence text available" % ident]
+        out += ["  %s %s (ships no licence file; no standard text available)" % p
+                for p in sorted(packages, key=package_key)]
+        out += [THIN, ""]
     return out
 
 
@@ -696,9 +754,11 @@ def render(hashes: list, rust: Half, js: Half) -> str:
         "Rust crates: %d" % len(rust.packages),
         "Rust licence texts: %d" % len(rust.groups),
         "Rust crates given a substituted text: %d" % rust.substituted_count(),
+        "Rust crates missing a licence text: %d" % rust.missing_count(),
         "%s: %d" % (JS_TITLE, len(js.packages)),
         "JavaScript licence texts: %d" % len(js.groups),
         "JavaScript packages given a substituted text: %d" % js.substituted_count(),
+        "JavaScript packages missing a licence text: %d" % js.missing_count(),
         "",
     ]
     for title, half in (("Rust crates", rust), (JS_TITLE, js)):
@@ -713,7 +773,7 @@ def render(hashes: list, rust: Half, js: Half) -> str:
 def generate(root: pathlib.Path, exe) -> str:
     check_accepted(read_text(root / ABOUT_TOML), read_text(root / "deny.toml"))
     hashes = hash_lines(root)
-    rust = rust_half(root, run_cargo_about(root, find_cargo_about(exe)))
+    rust = rust_half(root, run_cargo_about(root, find_cargo_about(exe)), deny_allow(read_text(root / "deny.toml")))
     doc = load_bun_lock(root / "bun.lock")
     js = js_half(root, doc, bun_closure(doc, GUI_WORKSPACE), js_allowed(read_text(root / "deny.toml")))
     if hash_lines(root) != hashes:
