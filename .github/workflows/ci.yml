@@ -108,6 +108,7 @@ jobs:
           python3 -I scripts/tests/test_gen_api_docs.py
           python3 -I scripts/tests/test_repo_policy.py
           python3 -I tasks/deps-upgrade/tools/gbase/tests/test_lockdates.py
+          python3 -I scripts/tests/test_gen_notices.py
       # Every cargo call --locked, every action at a full commit SHA with its
       # version comment, every checkout without credentials, no toolchain
       # literal, CARGO_BUILD_BUILD_DIR beside every CARGO_TARGET_DIR, and the

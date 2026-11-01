@@ -48,7 +48,14 @@ From repository root:
 ./scripts/release/package-macos.sh
 ```
 
-It must run on macOS, and it packages for the host architecture only. It
+It must run on macOS, and it packages for the host architecture only. Before
+it builds anything it checks `THIRD-PARTY-NOTICES` at the repository root: the
+file records the SHA-256 of the `Cargo.lock` and `bun.lock` it was generated
+from, and the script stops, naming the stale lockfile, when either is not the
+tree's. Regenerate it with `python3.11 -I scripts/release/gen_notices.py`
+(after `bun install --frozen-lockfile`; it needs cargo-about 0.9.2, and prints
+the command that installs it) and commit it with the lockfiles; never edit it
+by hand. It then
 installs the GUI's JS dependencies from the frozen lockfile
 (`bun install --frozen-lockfile`), builds the daemon once —
 `apps/openalpaca-gui/scripts/prepare-sidecar.ts --release`, which stages
@@ -58,7 +65,10 @@ app bundle, and then checks that the daemon inside the bundle and the
 `libexec/openalpacad` it packages are byte for byte that one build; it stops if
 they differ (an unsigned bundle is assumed: signing changes the bytes). `package-linux.sh` and `package-windows.ps1` follow the same
 sequence (the daemon is read out of the AppImage with `--appimage-extract`, out
-of the MSI with an administrative `msiexec /a` install into a scratch folder).
+of the MSI with an administrative `msiexec /a` install into a scratch folder),
+but neither checks `THIRD-PARTY-NOTICES` nor puts it at the archive's root
+yet (macOS first): their app bundles carry it through the shared
+`tauri.conf.json`, unchecked, until they gain the check.
 
 Expected output:
 
@@ -74,6 +84,9 @@ Package contents:
 - `install.sh`
 - `uninstall.sh`
 - `manifest.json` — build metadata: `name`, `version`, `target`, `built_at_utc`, `git_sha`
+- `THIRD-PARTY-NOTICES` — every third-party Rust crate and JavaScript package
+  the release ships, each with its licence text; the app carries the same file
+  in `openalpaca-gui.app/Contents/Resources/`, where an installed app keeps it
 
 Note: binaries and the `.app` bundle are **not codesigned and not notarised**.
 macOS Gatekeeper will show "unidentified developer" warnings; the installer
