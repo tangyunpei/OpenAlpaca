@@ -1913,7 +1913,8 @@ pub fn spawn_subagent_tool_definition_from_templates(
         name: "spawn_subagent".to_string(),
         description: format!(
             "Spawn a subagent to work on a specific objective. Spawning is always immediate — \
-             the system automatically queues execution if LLM capacity is limited. Spawn all \
+             it returns a run_id at once, and a subagent spawned past this run's concurrency \
+             bound is queued and starts when a slot frees, as the reply says. Spawn all \
              independent objectives in a single round, then use wait_for_subagents to collect \
              results. Multiple instances of the same agent can run concurrently.\n\n\
              Available agents:\n{}",

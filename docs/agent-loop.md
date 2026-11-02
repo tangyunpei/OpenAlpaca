@@ -152,6 +152,22 @@ the spawn, so a queued subagent's lane reads `running` in the timeline
 (a span has no queued state). A queued subagent that the run's end or a
 `/cancel` reaches never starts.
 
+**A subagent waiting inside the router reads `running`** (N-LLM-1). A
+subagent holding a slot under the lead's bound is `running` — its status
+and its lane — for its whole run, also while a model call of its waits
+inside the router: the lead and its subagents call the model without a
+stream, so each call takes one of the router's permits (`llm.toml`'s
+`[rate_limits] global_concurrency`, 10 by default), then one of its key's
+(`per_key_concurrency`, 8 by default) and its key's RPM and TPM budget,
+waiting for whichever is short or for a rate-limited key's cooldown;
+neither the tracker nor a span has a waiting state. Eight is a full
+batch, more than the bound's six with the lead beside them, so a run
+alone on a one-key install does not wait for its key's permits (the
+default was 5 before N-LLM-1, and a sixth subagent did); other calls on
+the same key, a `[rate_limits]` table setting fewer, or the budgets still
+can. A watched chat turn streams and takes the router's permit alone,
+and a key's too only on its non-streaming fallback (step 8).
+
 **A run spawns at most 48 subagents** (N-LEAD-6). `[execution.lead_agent_defaults]
 max_subagents_per_run` (48: the concurrency bound's 6 times a batch's 8;
 1–1000) bounds how many subagents one run spawns in all — queued, running

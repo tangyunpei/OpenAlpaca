@@ -373,12 +373,13 @@ pub struct RateLimitConfig {
     pub default_tpm: u32,
 
     /// Maximum concurrent requests per key.
-    /// Default: 2.
+    /// Default: 8 — a full batch of subagents, more than the lead's stock
+    /// concurrency bound of six with the lead beside them (N-LLM-1).
     #[serde(default = "default_per_key_concurrency")]
     pub per_key_concurrency: usize,
 
     /// Global maximum concurrent LLM API calls.
-    /// Default: 4.
+    /// Default: 10.
     #[serde(default = "default_global_concurrency")]
     pub global_concurrency: usize,
 
@@ -416,7 +417,7 @@ fn default_tpm() -> u32 {
     40_000
 }
 fn default_per_key_concurrency() -> usize {
-    5
+    8
 }
 fn default_global_concurrency() -> usize {
     10

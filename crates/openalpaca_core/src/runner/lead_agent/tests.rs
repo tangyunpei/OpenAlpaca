@@ -898,6 +898,89 @@ fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
     );
 }
 
+// ── N-LLM-1: what queues a spawn, and the router's per-key default ──
+
+/// N-LLM-1: the description says what N-LEAD-2 built — a spawn returns at
+/// once, and one past the run's concurrency bound is queued — not that the
+/// system follows "LLM capacity".
+#[test]
+fn spawn_subagent_description_says_a_spawn_past_the_concurrency_bound_is_queued() {
+    assert_eq!(
+        spawn_subagent_tool_definition_from_templates(&[]).description,
+        "Spawn a subagent to work on a specific objective. Spawning is always immediate — \
+         it returns a run_id at once, and a subagent spawned past this run's concurrency \
+         bound is queued and starts when a slot frees, as the reply says. Spawn all \
+         independent objectives in a single round, then use wait_for_subagents to collect \
+         results. Multiple instances of the same agent can run concurrently.\n\n\
+         Available agents:\nNo agents available."
+    );
+}
+
+/// N-LLM-1: nothing the lead reads says spawning follows LLM capacity; the
+/// prompt's step 3, its `<tools>` line and both spawn descriptions say a
+/// subagent past the run's concurrency bound is queued.
+#[test]
+fn no_lead_surface_speaks_of_llm_capacity() {
+    let engine = crate::compose::ComposeEngine::new(16);
+    let prompt = build_lead_agent_prompt_from_templates(
+        &engine,
+        "Test persona",
+        &[],
+        200_000,
+        None,
+        None,
+        None,
+        48,
+    );
+    let single = spawn_subagent_tool_definition_from_templates(&[]).description;
+    let batch = spawn_subagents_batch_tool_definition(&[]).description;
+    for (surface, text) in [
+        ("prompt", &prompt),
+        ("spawn_subagent", &single),
+        ("batch", &batch),
+    ] {
+        assert!(
+            !text.to_lowercase().contains("capacity"),
+            "{surface}: {text}"
+        );
+        assert!(
+            text.contains("this run's concurrency bound"),
+            "{surface}: {text}"
+        );
+    }
+    // Step 3 and the `<tools>` line, and the description, in the same words.
+    let queued = "a subagent spawned past this run's concurrency bound is queued and starts \
+                  when a slot frees";
+    assert_eq!(prompt.matches(queued).count(), 2, "{prompt}");
+    assert!(single.contains(queued), "{single}");
+}
+
+/// N-LLM-1: one key admits a full batch of concurrent model calls, so the
+/// subagents a run's stock concurrency bound lets run, and the lead beside
+/// them, do not wait inside the router for one key's permits. A move of the
+/// batch cap or the bound past the router's default fails here.
+#[test]
+fn the_routers_per_key_default_holds_a_full_batch() {
+    let batch = spawn_subagents_batch_tool_definition(&[]);
+    let batch_cap = batch.parameters["properties"]["subagents"]["maxItems"]
+        .as_u64()
+        .unwrap() as usize;
+    let bound = crate::daemon_config::DaemonConfig::default()
+        .execution
+        .lead_agent_defaults
+        .max_concurrent_subagents;
+    let per_key = openalpaca_llm::RateLimitConfig::default().per_key_concurrency;
+    assert_eq!(per_key, 8);
+    assert!(
+        per_key >= batch_cap,
+        "per_key_concurrency ({per_key}) under a full batch ({batch_cap})"
+    );
+    assert!(
+        per_key > bound,
+        "per_key_concurrency ({per_key}) leaves no permit for the lead beside its {bound} subagents"
+    );
+}
+
 #[tokio::test]
 async fn test_check_subagent_status_tool() {
     let tracker = Arc::new(SubagentTracker::new());
@@ -5466,9 +5549,8 @@ impl openalpaca_llm::LlmProvider for GatedWorkers {
 }
 
 /// A router whose every call lands on `provider`, with room for sixteen
-/// concurrent calls on its one key: the router's own per-key bound (five by
-/// default) would otherwise hold a sixth subagent's model call, and that is
-/// not the bound under test.
+/// concurrent calls on its one key, so the router's own per-key bound (eight
+/// by default) is never the bound under test.
 fn roomy_router(provider: Arc<dyn openalpaca_llm::LlmProvider>) -> Arc<LlmRouter> {
     let key_pool = openalpaca_llm::KeyPool::new(
         vec![openalpaca_llm::ApiKey::new(

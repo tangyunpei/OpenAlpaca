@@ -2788,9 +2788,9 @@ fn test_golden_lead_agent_byte_identical() {
          Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
          Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent.\n\
          Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
-         sub-objective to the best agent by skills. Spawning is always immediate — the system \
-         automatically manages execution ordering based on available LLM capacity. Subagents may \
-         be queued if capacity is limited — this is handled automatically and transparently. \
+         sub-objective to the best agent by skills. Spawning is always immediate — each spawn \
+         returns its run_id at once, and a subagent spawned past this run's concurrency bound is \
+         queued and starts when a slot frees, as the spawn's reply says. \
          This run may spawn at most 48 subagents in all, retries included; a spawn past that \
          is refused.\n\
          Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
@@ -2812,9 +2812,10 @@ fn test_golden_lead_agent_byte_identical() {
          - The task requires maintaining context across sequential steps that one agent handles best\n\
          </delegation-criteria>";
     let tool_patterns_text = "<tools>\n\
-         spawn_subagent: Spawning is always immediate — returns a run_id instantly. The system \
-         automatically queues execution if LLM capacity is limited. Spawn all independent \
-         objectives in a single round before waiting — this is the preferred pattern.\n\
+         spawn_subagent: Spawning is always immediate — returns a run_id instantly, and a \
+         subagent spawned past this run's concurrency bound is queued and starts when a slot \
+         frees. Spawn all independent objectives in a single round before waiting — this is the \
+         preferred pattern.\n\
          spawn_subagents_batch: When spawning 3+ independent subagents, use spawn_subagents_batch \
          for parallel spawning instead of individual spawn_subagent calls. This is more efficient \
          and reduces round-trips.\n\
