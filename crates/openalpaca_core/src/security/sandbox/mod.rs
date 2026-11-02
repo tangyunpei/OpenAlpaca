@@ -250,6 +250,9 @@ impl SandboxManager {
     /// Execute a tool call within the sandbox.
     ///
     /// Flow:
+    /// 0. A call whose arguments are a top-level JSON string holding an
+    ///    object is read as that object, once (N-TOOL-8,
+    ///    `decoded_json_string_call`); every step below sees the object
     /// 1. Capability check (deny/allow lists)
     /// 2. Input sanitization (null bytes, command injection, and `../` for a tool whose arguments reach a program — R29)
     /// 3. Confirmation check (fail-closed if tool requires confirmation),
@@ -273,6 +276,13 @@ impl SandboxManager {
         // is what lets the session writer find this call's audit row and add
         // the `log_seq` half to it (R51).
         let session_id = ctx.session_id.as_deref();
+
+        // 0. N-TOOL-8: a JSON string holding an object, read as that object
+        //    here, before the sanitizer, so the sanitizer, the registry's
+        //    schema check, the card, the approval cache and the tool all read
+        //    the one decoded value.
+        let decoded = decoded_json_string_call(tool_call, agent_id);
+        let tool_call = decoded.as_ref().unwrap_or(tool_call);
 
         // 1. Capability check
         if let Err(violation) = CapabilityManager::check_agent_capability(
@@ -812,6 +822,45 @@ impl Drop for OpenPrompt<'_> {
     }
 }
 
+/// The call `tool_call` stands for when its arguments are a top-level JSON
+/// string whose text is a JSON object (N-TOOL-8): the same call with that
+/// object, read once — a string inside it, or a string the text itself
+/// holds, is never read — and one WARN naming the tool and `source`, the
+/// agent the sandbox attributes the call to, never the text. `None` for
+/// anything else: an object, or a string that is not JSON or holds JSON of
+/// another kind, which the registry's schema check refuses as it always did.
+///
+/// A model's string is read so before the sandbox sees the call where its
+/// answer is streamed or OpenAI-compatible (the provider layer's reader,
+/// N-TOOL-5); one that reaches the sandbox as a string comes from a plugin —
+/// a plugin agent's proxied call (`runner/plugin_agent.rs`) or a plugin
+/// skill's tool callback (`SandboxToolCallback`) — or from an
+/// Anthropic-compatible server's non-streamed answer, whose `tool_use`
+/// `input` its parser passes as sent (`providers/anthropic/response.rs`; the
+/// Anthropic API itself sends an object). Read here, before the sanitizer, a
+/// backtick, a line break, `../` or a NUL escaped inside the string is
+/// checked as one sent in an object is; the registry, after the sanitizer,
+/// decodes nothing. Learned from ZCode's input normalisation (a top-level
+/// string decoded before validation, hooks and permission), a design written
+/// fresh.
+fn decoded_json_string_call(tool_call: &ToolCall, source: &str) -> Option<ToolCall> {
+    let serde_json::Value::String(text) = &tool_call.arguments else {
+        return None;
+    };
+    let object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).ok()?;
+    tracing::warn!(
+        tool = %tool_call.name,
+        source = %source,
+        bytes = text.len(),
+        "a tool call's arguments arrived as a JSON string holding an object; \
+         read as that object, once, before the sanitizer"
+    );
+    Some(ToolCall {
+        arguments: serde_json::Value::Object(object),
+        ..tool_call.clone()
+    })
+}
+
 /// A copy of `ctx` with neither person-fact set (design 09 §4.2 rule 1).
 ///
 /// Every context the sandbox hands onward — to a preview hook, to a denial
@@ -866,3 +915,6 @@ mod tests;
 
 #[cfg(test)]
 mod precheck_tests;
+
+#[cfg(test)]
+mod json_string_tests;

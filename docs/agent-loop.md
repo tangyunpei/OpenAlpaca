@@ -749,11 +749,17 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   with the tool's name, the byte length and the problem (never the text),
   and the call is refused by the registry with a sentence naming the
   problem; it never runs with `{}`. A call that breaks its tool's schema is
-  told every problem in one result. Only the provider layer reads a string
-  as an object: the registry decodes nothing, so a JSON string that reaches
-  it by another path (a plugin's proxied call) stays a string, which a
-  schema asking for an object refuses as it always did — the sandbox's
-  sanitizer checked only its outer text.
+  told every problem in one result. A call that reader never read — a
+  plugin agent's proxied call, a plugin skill's tool callback, a `tool_use`
+  in an Anthropic-compatible server's non-streamed answer, whose `input`
+  its parser passes as sent — reaches the sandbox as its producer sent it,
+  and there a top-level JSON string whose text is an object is read as that
+  object, once, with one `warn` naming the tool and the agent it came from
+  (never the text), before the sanitizer: the sanitizer, the schema check,
+  the approval card and the tool all read the object, and a string inside
+  it is never decoded. The registry decodes nothing: a string that still
+  reaches it stays a string, which a schema asking for an object refuses as
+  it always did.
 - **Approval prompts live in the sandbox, not the loop.** A tool on the
   confirm list blocks inside `SandboxManager::execute_tool` until it is
   approved, denied, times out or is withdrawn; the loop only sees the

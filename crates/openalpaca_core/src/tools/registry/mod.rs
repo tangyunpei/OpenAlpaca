@@ -1635,13 +1635,15 @@ fn command_folder(ctx: Option<&ToolContext>) -> Result<PathBuf, String> {
 /// * Then [`validate_tool_arguments`] names every problem it finds.
 ///
 /// Nothing is decoded here. A JSON string whose text is an object is read as
-/// that object where a provider's answer is parsed (`openalpaca_llm`'s
-/// reader), before the sandbox sees the call; one that reaches the registry by
-/// another path — a plugin's proxied call — stays the string it is, refused by
-/// a schema that asks for an object, as it always was. The sanitizer saw only
-/// its outer text, where a backtick, a newline, `../` or a NUL inside it are
-/// still JSON escapes, so reading it here would hand the tool what the
-/// sanitizer never checked (found by review; pinned by
+/// that object where a streamed or OpenAI-compatible answer is parsed
+/// (`openalpaca_llm`'s reader), and one that reaches the sandbox still a
+/// string — a plugin's call, an Anthropic-compatible server's non-streamed
+/// `tool_use` — at the sandbox's entry, before the sanitizer (N-TOOL-8,
+/// `SandboxManager::execute_tool`); one that still reaches the registry as a
+/// string stays the string it is, refused by a schema that asks for an object,
+/// as it always was. Read here, after the sanitizer, it would hand the tool
+/// what the sanitizer never checked: a backtick, a newline, `../` or a NUL
+/// inside it are JSON escapes in its outer text (found by review; pinned by
 /// `a_json_string_cannot_carry_past_the_sanitizer_what_it_refuses_in_an_object`).
 fn check_arguments(
     definition: &ToolDefinition,

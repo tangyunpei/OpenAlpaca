@@ -603,3 +603,114 @@ async fn a_plugin_skills_tool_call_is_cut_at_the_daemons_per_tool_bound() {
         other => panic!("the plugin skill's call ran past the daemon's bound: {other:?}"),
     }
 }
+
+// ── N-TOOL-8: a plugin skill's JSON-string tool call ────────────────────
+
+/// A plugin skill that sends one tool call with `arguments` exactly as given.
+struct SendsArguments {
+    tool: String,
+    arguments: serde_json::Value,
+    outcome: Arc<Mutex<Option<Result<String, String>>>>,
+}
+
+#[async_trait::async_trait]
+impl openalpaca_api::plugin_traits::PluginSkillExecutor for SendsArguments {
+    async fn invoke(
+        &self,
+        _query: &str,
+        _context: &serde_json::Value,
+        tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+    ) -> Result<String, String> {
+        let outcome = tool_executor
+            .execute_tool(&self.tool, &self.arguments)
+            .await;
+        *self.outcome.lock().unwrap() = Some(outcome);
+        Ok("stub finished".to_string())
+    }
+    fn plugin_id(&self) -> &str {
+        "acme"
+    }
+    fn skill_id(&self) -> &str {
+        "acme-search"
+    }
+}
+
+/// A builtin that keeps the arguments it ran on.
+struct KeepsArguments(Arc<Mutex<Vec<serde_json::Value>>>);
+
+#[async_trait::async_trait]
+impl BuiltInTool for KeepsArguments {
+    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
+        self.0.lock().unwrap().push(arguments.clone());
+        Ok("kept".to_string())
+    }
+}
+
+/// A second producer of a JSON-string call beside a plugin agent's proxy:
+/// a plugin skill's tool callback (`SandboxToolCallback`). Its JSON string of
+/// an object is read as that object at the sandbox's entry, and the tool runs
+/// on the object.
+#[tokio::test]
+async fn a_plugin_skills_json_string_tool_call_reaches_the_tool_as_its_object() {
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry(true);
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "keep_args".to_string(),
+                description: "keep_args".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"]
+                }),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(KeepsArguments(kept.clone()))),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: Utc::now(),
+        })
+        .unwrap();
+    let orch = orchestrator_for(Arc::new(registry));
+    let object = serde_json::json!({"q": "hi"});
+    let stub = Arc::new(SendsArguments {
+        tool: "keep_args".to_string(),
+        arguments: serde_json::Value::String(object.to_string()),
+        outcome: Arc::new(Mutex::new(None)),
+    });
+    let mut fm = SkillFrontmatter {
+        name: "acme-search".to_string(),
+        ..Default::default()
+    };
+    fm.tools.allow = vec!["keep_args".to_string()];
+    let doc = skill_doc(fm);
+
+    orch.invoke_plugin_skill(
+        Uuid::new_v4(),
+        "cli",
+        "acme-search",
+        "acme",
+        stub.clone(),
+        "go",
+        "test:cli",
+        None,
+        None,
+        &MemoryScopeContext::new(None),
+        None,
+        &doc,
+        false,
+    )
+    .await
+    .expect("the skill runs");
+
+    assert_eq!(
+        stub.outcome.lock().unwrap().clone(),
+        Some(Ok("kept".to_string()))
+    );
+    assert_eq!(*kept.lock().unwrap(), vec![object]);
+}

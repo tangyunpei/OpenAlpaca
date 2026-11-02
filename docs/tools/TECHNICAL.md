@@ -425,9 +425,12 @@ the stand-in (`UnreadableArguments`) that `openalpaca_llm`'s reader puts in
 place of arguments a provider sent that could not be read — the reader has
 already warned once, with the tool, the byte length and the problem, never the
 text.  The refusal names the problem and the length, and the call never runs
-with `{}`, whatever its schema accepts.  It decodes nothing: only the provider
-layer reads a JSON string as the object it holds, before the sandbox's
-sanitizer; a string that reaches the registry by another path stays a string,
+with `{}`, whatever its schema accepts.  It decodes nothing: the provider
+layer's reader (the stream collector, the OpenAI-compatible parser) reads a
+model's JSON string as the object it holds, and the sandbox's entry one that
+reaches it still a string — a plugin's, or the `input` of a `tool_use` that
+Anthropic's non-streamed parser passes as sent (N-TOOL-8) — both before the
+sandbox's sanitizer; a string that still reaches the registry stays a string,
 because the sanitizer checked only its outer text.  Then
 `validate_tool_arguments()` performs:
 
@@ -1209,6 +1212,10 @@ pub async fn execute_tool(
 
 The agent identity comes from `ctx.agent_id` (falls back to `"unknown"`).
 
+0. `decoded_json_string_call()` — a call whose arguments are a top-level JSON
+   string holding an object is read as that object, once, with one WARN
+   naming the tool and the agent, never the text (N-TOOL-8); a string inside
+   it is never decoded, and every step below reads the object
 1. `CapabilityManager::check_agent_capability()` — deny list, then allow list
 2. `InputSanitizer::sanitize_tool_args_with(.., registry.traversal_rule(name))` — injection/traversal
    checks, the `../` check only for a tool whose arguments reach a program (R29)

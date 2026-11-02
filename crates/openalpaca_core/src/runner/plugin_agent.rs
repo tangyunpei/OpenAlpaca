@@ -775,6 +775,74 @@ mod tests {
         assert_eq!(results[0]["result"], "echo:hi");
     }
 
+    /// N-TOOL-8: a plugin that sends a call's arguments as the JSON string of
+    /// an object has them read as that object at the sandbox's entry, so the
+    /// tool runs on the object — and the log says so in one WARN naming the
+    /// tool and the source (the agent the call came from), never the
+    /// arguments themselves.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_proxied_json_string_call_reaches_the_tool_as_its_object() {
+        let value = "a-value-the-log-never-shows";
+        let text = serde_json::json!({ "q": value }).to_string();
+        let executor = StubExecutor::new(
+            true,
+            vec![
+                (
+                    "tool_request".into(),
+                    String::new(),
+                    vec![serde_json::json!({"tool": "echo", "arguments": text})],
+                ),
+                ("complete".into(), "used the tool".into(), vec![]),
+            ],
+        );
+        let (sandbox, _registry) = make_sandbox();
+        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        // What the spawn path hands the loop: the template's id, which the
+        // sandbox attributes every call to (`lead_agent/tools.rs`).
+        let ctx = ToolContext {
+            agent_id: Some("stub_agent".to_string()),
+            ..Default::default()
+        };
+        let outcome = run_plugin_agent_loop(
+            &exec,
+            "plugin-instance",
+            "task-1",
+            "do the thing",
+            &serde_json::json!({}),
+            &sandbox,
+            &policy(),
+            &ctx,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(outcome.success(), "{outcome:?}");
+        let received = executor.results_received();
+        let results = received[1].as_ref().expect("second step carries results");
+        assert_eq!(results[0]["result"], format!("echo:{value}"));
+        logs_assert(|lines: &[&str]| {
+            let warned: Vec<&&str> = lines
+                .iter()
+                .filter(|line| line.contains("read as that object"))
+                .collect();
+            match warned.as_slice() {
+                [one]
+                    if one.contains("WARN")
+                        && one.contains("tool=echo")
+                        && one.contains("source=stub_agent") =>
+                {
+                    Ok(())
+                }
+                other => Err(format!(
+                    "one WARN naming the tool and the source, got {other:?}"
+                )),
+            }
+        });
+        assert!(!logs_contain(value), "the log shows the arguments");
+    }
+
     #[tokio::test]
     async fn test_denied_tool_result_is_fed_back_not_fatal() {
         // A capability-denied tool must surface the violation to the
