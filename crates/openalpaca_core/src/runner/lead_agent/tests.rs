@@ -874,6 +874,7 @@ fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
         None,
         None,
         None,
+        48,
     );
     assert!(
         prompt.contains(
@@ -1245,6 +1246,7 @@ fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
         None,
         None,
         None,
+        48,
     );
     assert!(
         prompt.contains("spawn_subagents_batch"),
@@ -4153,6 +4155,7 @@ fn the_lead_prompt_carries_the_user_document_exactly_once() {
         Some(&doc),
         Some(1000),
         None,
+        48,
     );
     assert_eq!(prompt.matches("### USER PROFILE ###").count(), 1, "{prompt}");
     assert!(prompt.contains("Name: Alex"), "{prompt}");
@@ -4169,6 +4172,7 @@ fn the_lead_prompt_carries_the_user_document_exactly_once() {
         None,
         None,
         None,
+        48,
     );
     assert_eq!(without.matches("### USER PROFILE ###").count(), 0);
 }
@@ -5506,6 +5510,23 @@ fn spawn_tool_bounded(
     tracker: Arc<SubagentTracker>,
     max_concurrent: usize,
 ) -> SpawnSubagentTool {
+    spawn_tool_under(
+        router,
+        shared,
+        tracker,
+        max_concurrent,
+        DaemonConfig::default(),
+    )
+}
+
+/// [`spawn_tool_bounded`] under `config`.
+fn spawn_tool_under(
+    router: Arc<LlmRouter>,
+    shared: Arc<SharedContext>,
+    tracker: Arc<SubagentTracker>,
+    max_concurrent: usize,
+    config: DaemonConfig,
+) -> SpawnSubagentTool {
     SpawnSubagentTool::new(
         router,
         Arc::new(ToolRegistry::default()),
@@ -5515,7 +5536,7 @@ fn spawn_tool_bounded(
         "task-1".to_string(),
         "user-1".to_string(),
         "test-lead".to_string(),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        Arc::new(ArcSwap::from_pointee(config)),
         None,
         tracker,
         0,
@@ -6262,4 +6283,451 @@ async fn a_subagents_template_timeout_is_not_its_per_tool_bound() {
         "{description}"
     );
     assert!(description.contains("up to 7 seconds"), "{description}");
+}
+
+// ── N-LEAD-6: a run's subagents bounded by a lifetime backstop ──────────
+
+/// What a spawn past the run's bound of `bound` subagents is refused with.
+fn subagent_bound_refusal(bound: usize) -> String {
+    format!(
+        "Maximum subagents per run ({bound}) reached — this run has spawned {bound}, so no \
+         more can be spawned. Collect their results with wait_for_subagents, then complete \
+         what is left directly or report it as not done."
+    )
+}
+
+/// `count` spawns of `worker` through `spawn_subagents_batch`, eight at a
+/// time, each accepted.
+async fn spawn_workers(spawn: &Arc<SpawnSubagentTool>, count: usize) {
+    let batch = SpawnSubagentsBatchTool::new(spawn.clone());
+    let mut spawned = 0;
+    while spawned < count {
+        let size = (count - spawned).min(8);
+        let entries: Vec<serde_json::Value> = (0..size)
+            .map(|n| {
+                let objective = format!("job {}", spawned + n + 1);
+                serde_json::json!({"agent_id": "worker", "objective": objective})
+            })
+            .collect();
+        let reply = batch
+            .execute(&serde_json::json!({"subagents": entries}))
+            .await
+            .unwrap();
+        assert!(
+            reply.starts_with(&format!(
+                "Batch spawn: {size}/{size} subagents spawned successfully."
+            )),
+            "{reply}"
+        );
+        spawned += size;
+    }
+}
+
+/// Every entry the tracker holds, whatever its status.
+fn tracked(tracker: &SubagentTracker) -> usize {
+    let (queued, running, completed, failed) = tracker.status_counts();
+    queued + running + completed + failed
+}
+
+/// **N-LEAD-6.** A run that has spawned 48 subagents — six full batches,
+/// the stock bound — is refused the 49th by `spawn_subagent`, the refusal
+/// naming 48, and nothing is spawned for it: no instance, no tracker entry.
+/// The 48 queue and run as N-LEAD-2 built: six at once under the
+/// concurrency bound, each queued one as a slot frees. Before the fix
+/// nothing bounded the run: the 49th was queued like the rest.
+#[tokio::test(start_paused = true)]
+async fn a_runs_forty_ninth_spawn_is_refused_naming_the_bound_and_the_forty_eight_run() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(spawn_tool_bounded(
+        roomy_router(provider.clone()),
+        shared.clone(),
+        tracker.clone(),
+        6,
+    ));
+
+    spawn_workers(&spawn, 48).await;
+    let instances = shared.agent_registry.list_instances().len();
+    let refused = spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "job 49"}))
+        .await
+        .expect_err("the run's 49th spawn is refused");
+    assert_eq!(refused, subagent_bound_refusal(48));
+    assert_eq!(shared.agent_registry.list_instances().len(), instances);
+    assert_eq!(tracked(&tracker), 48);
+    assert_eq!(spawn.spawn_count(), 48);
+
+    eventually("six running, forty-two queued", || {
+        tracker.status_counts() == (42, 6, 0, 0) && provider.worker_calls() == 6
+    })
+    .await;
+    provider.gate.add_permits(48);
+    eventually("all forty-eight ran", || {
+        tracker.status_counts() == (0, 0, 48, 0) && provider.worker_calls() == 48
+    })
+    .await;
+    assert!(
+        !provider
+            .worker_objectives
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|objective| objective.contains("job 49")),
+        "the refused subagent ran"
+    );
+}
+
+/// **N-LEAD-6.** Inside `spawn_subagents_batch` the bound is met entry by
+/// entry: a run at 44 sends a batch of eight, the first four are spawned and
+/// the last four are each refused naming 48 — the call itself succeeds.
+#[tokio::test(start_paused = true)]
+async fn a_batch_that_reaches_the_bound_spawns_up_to_it_and_refuses_the_rest() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(spawn_tool_bounded(
+        roomy_router(provider.clone()),
+        shared,
+        tracker.clone(),
+        6,
+    ));
+    spawn_workers(&spawn, 44).await;
+
+    let entries: Vec<serde_json::Value> = (45..=52)
+        .map(|n| serde_json::json!({"agent_id": "worker", "objective": format!("job {n}")}))
+        .collect();
+    let reply = SpawnSubagentsBatchTool::new(spawn.clone())
+        .execute(&serde_json::json!({"subagents": entries}))
+        .await
+        .unwrap();
+
+    assert!(
+        reply.starts_with("Batch spawn: 4/8 subagents spawned successfully."),
+        "{reply}"
+    );
+    for entry in 5..=8 {
+        assert!(
+            reply.contains(&format!(
+                "[{entry}] FAILED (worker): {}",
+                subagent_bound_refusal(48)
+            )),
+            "entry {entry}: {reply}"
+        );
+    }
+    assert_eq!(
+        reply.matches("OK: Subagent 'worker' spawned").count(),
+        4,
+        "{reply}"
+    );
+    assert_eq!(tracked(&tracker), 48);
+    assert_eq!(spawn.spawn_count(), 48);
+}
+
+/// **N-LEAD-6.** Spawns racing on separate tasks for a run's last slots:
+/// eight on as many threads, four slots left, admit exactly four and refuse
+/// four naming the bound. The lead's loop does not race them today — a
+/// round's spawns run on one task with no await in the spawn path — so this
+/// pins the case the atomic reservation is for: a spawn moved to another
+/// task, or an await added. The bound is reserved where it is checked, not
+/// read and counted later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn spawns_racing_for_the_last_slots_are_admitted_exactly_up_to_the_bound() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(spawn_tool_bounded(
+        roomy_router(provider.clone()),
+        shared,
+        tracker.clone(),
+        6,
+    ));
+    spawn_workers(&spawn, 44).await;
+
+    let start = Arc::new(tokio::sync::Barrier::new(8));
+    let racers: Vec<_> = (0..8)
+        .map(|n| {
+            let spawn = spawn.clone();
+            let start = start.clone();
+            tokio::spawn(async move {
+                let objective = format!("racer {n}");
+                start.wait().await;
+                spawn
+                    .execute(&serde_json::json!({"agent_id": "worker", "objective": objective}))
+                    .await
+            })
+        })
+        .collect();
+    let (mut accepted, mut refused) = (0, 0);
+    for racer in racers {
+        match racer.await.unwrap() {
+            Ok(_) => accepted += 1,
+            Err(error) => {
+                assert_eq!(error, subagent_bound_refusal(48));
+                refused += 1;
+            }
+        }
+    }
+
+    assert_eq!((accepted, refused), (4, 4));
+    assert_eq!(tracked(&tracker), 48);
+    assert_eq!(spawn.spawn_count(), 48);
+}
+
+/// **N-LEAD-6 with N-LEAD-4.** A resumed run's subagents — rebuilt from its
+/// session log — are this run's, so they count toward its bound: under a
+/// bound of 3, a run resumed with two may spawn one more and is refused the
+/// next, naming 3. The figure the run reports as spawned is still this
+/// attempt's own, 1.
+#[tokio::test(start_paused = true)]
+async fn a_resumed_runs_subagents_count_toward_its_bound() {
+    use crate::session_log::replay::{ReplayedClose, ReplayedSubagent};
+
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.restore(&[
+        ReplayedSubagent {
+            run_id: "worker::aaaaaaaa".to_string(),
+            close: Some(ReplayedClose {
+                state: "done".to_string(),
+                detail: None,
+                answer: "counted the alpacas".to_string(),
+            }),
+        },
+        ReplayedSubagent {
+            run_id: "worker::bbbbbbbb".to_string(),
+            close: None,
+        },
+    ]);
+    let config: DaemonConfig =
+        toml::from_str("[execution.lead_agent_defaults]\nmax_subagents_per_run = 3\n").unwrap();
+    let spawn = spawn_tool_under(roomy_router(provider), shared, tracker.clone(), 6, config);
+
+    spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "weigh the alpacas again"}))
+        .await
+        .unwrap();
+    let refused = spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "shear the alpacas"}))
+        .await
+        .expect_err("the run's fourth subagent is refused");
+
+    assert_eq!(refused, subagent_bound_refusal(3));
+    assert_eq!(tracked(&tracker), 3);
+    assert_eq!(spawn.spawn_count(), 1);
+}
+
+/// **N-LEAD-6.** Only a subagent spawned counts: a spawn refused for another
+/// reason — a template that does not exist — takes no slot, so under a bound
+/// of 3 five such refusals still leave room for three workers, and the
+/// fourth is refused naming 3.
+#[tokio::test(start_paused = true)]
+async fn a_spawn_refused_for_another_reason_takes_no_slot() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let config: DaemonConfig =
+        toml::from_str("[execution.lead_agent_defaults]\nmax_subagents_per_run = 3\n").unwrap();
+    let spawn = spawn_tool_under(roomy_router(provider), shared, tracker.clone(), 6, config);
+
+    for n in 1..=5 {
+        let error = spawn
+            .execute(&serde_json::json!({"agent_id": "ghost", "objective": format!("haunt {n}")}))
+            .await
+            .expect_err("no such template");
+        assert!(error.starts_with("Cannot spawn agent 'ghost'"), "{error}");
+    }
+    for n in 1..=3 {
+        spawn
+            .execute(&serde_json::json!({"agent_id": "worker", "objective": format!("job {n}")}))
+            .await
+            .unwrap_or_else(|error| panic!("worker {n} refused: {error}"));
+    }
+    let refused = spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "job 4"}))
+        .await
+        .expect_err("the run's fourth subagent is refused");
+
+    assert_eq!(refused, subagent_bound_refusal(3));
+    assert_eq!(tracked(&tracker), 3);
+    assert_eq!(spawn.spawn_count(), 3);
+}
+
+/// **N-LEAD-6.** The bound is the run's lifetime, not the subagents still
+/// active: under a bound of 3, three workers spawn and all three finish,
+/// and the fourth is still refused naming 3 — a finished subagent frees a
+/// concurrency slot, never a slot of the run's bound.
+#[tokio::test(start_paused = true)]
+async fn the_bound_counts_finished_subagents_too() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let config: DaemonConfig =
+        toml::from_str("[execution.lead_agent_defaults]\nmax_subagents_per_run = 3\n").unwrap();
+    let spawn = spawn_tool_under(
+        roomy_router(provider.clone()),
+        shared.clone(),
+        tracker.clone(),
+        6,
+        config,
+    );
+
+    for n in 1..=3 {
+        spawn
+            .execute(&serde_json::json!({"agent_id": "worker", "objective": format!("job {n}")}))
+            .await
+            .unwrap_or_else(|error| panic!("worker {n} refused: {error}"));
+    }
+    provider.gate.add_permits(3);
+    eventually("all three finished", || {
+        tracker.status_counts() == (0, 0, 3, 0) && provider.worker_calls() == 3
+    })
+    .await;
+    let instances = shared.agent_registry.list_instances().len();
+    let refused = spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "job 4"}))
+        .await
+        .expect_err("the run's fourth subagent is refused");
+
+    assert_eq!(refused, subagent_bound_refusal(3));
+    assert_eq!(shared.agent_registry.list_instances().len(), instances);
+    assert_eq!(tracked(&tracker), 3);
+    assert_eq!(spawn.spawn_count(), 3);
+}
+
+/// A lead that spawns four workers in one batch, then answers; workers
+/// answer at once. It keeps every request the lead sent.
+struct LeadSpawnsFour {
+    lead_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for LeadSpawnsFour {
+    fn name(&self) -> &str {
+        "lead-spawns-four"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        if !is_lead_request(&request) {
+            return Ok(scripted_response("weighed", vec![]));
+        }
+        let first = tool_results_in(&request) == 0;
+        self.lead_requests
+            .lock()
+            .unwrap()
+            .push(request.messages.as_ref().clone());
+        if !first {
+            return Ok(scripted_response("done", vec![]));
+        }
+        let entries: Vec<serde_json::Value> = (1..=4)
+            .map(|n| {
+                let objective = format!("weigh herd {n}");
+                serde_json::json!({"agent_id": "worker", "objective": objective})
+            })
+            .collect();
+        Ok(scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-batch".to_string(),
+                name: "spawn_subagents_batch".to_string(),
+                arguments: serde_json::json!({"subagents": entries}),
+            }],
+        ))
+    }
+}
+
+/// **N-LEAD-6.** The bound is the owner's figure, read once at the run's
+/// start: under `max_subagents_per_run = 3` the lead's prompt names 3, and a
+/// batch of four spawns three and refuses the fourth naming 3 — the figure
+/// the lead was told is the figure enforced.
+#[tokio::test]
+async fn the_lead_is_told_the_configured_bound_and_refused_at_it() {
+    let provider = Arc::new(LeadSpawnsFour {
+        lead_requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let config: DaemonConfig =
+        toml::from_str("[execution.lead_agent_defaults]\nmax_subagents_per_run = 3\n").unwrap();
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "weigh the four herds",
+        Arc::new(LlmRouter::single_provider(
+            provider.clone(),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        )),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(config)),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        None,
+    )
+    .await;
+
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+    assert_eq!(result.subagents_spawned, 3);
+    let requests = provider.lead_requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "the lead answered after one batch");
+    let system = &requests[0][0];
+    assert_eq!(system.role, openalpaca_llm::Role::System);
+    assert!(
+        system.content.contains(
+            "This run may spawn at most 3 subagents in all, retries included; a spawn past \
+             that is refused."
+        ),
+        "{}",
+        system.content
+    );
+    let results: Vec<&str> = requests[1]
+        .iter()
+        .filter(|m| m.role == openalpaca_llm::Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].starts_with("Batch spawn: 3/4 subagents spawned successfully."),
+        "{}",
+        results[0]
+    );
+    assert!(
+        results[0].contains(&format!(
+            "[4] FAILED (worker): {}",
+            subagent_bound_refusal(3)
+        )),
+        "{}",
+        results[0]
+    );
 }

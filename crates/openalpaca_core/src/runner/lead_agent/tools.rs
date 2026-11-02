@@ -223,8 +223,20 @@ pub struct SpawnSubagentTool {
     created_by: String,
     lead_template_id: String,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
-    /// Tracks how many subagents have been spawned (for observability).
+    /// How many subagents this tool has spawned (the run's report), and the
+    /// slots it holds against `max_subagents_per_run`: a spawn reserves its
+    /// slot here before it registers anything, and gives it back if the
+    /// spawn then fails (N-LEAD-6).
     spawn_count: AtomicUsize,
+    /// N-LEAD-6: the most subagents this run may spawn in all —
+    /// `[execution.lead_agent_defaults] max_subagents_per_run`, read once
+    /// when the run starts, the figure its prompt names.
+    max_subagents_per_run: usize,
+    /// N-LEAD-6: the subagents a resumed run's tracker already holds
+    /// (N-LEAD-4) — this run's, spawned before the daemon stopped, those its
+    /// session log still records — which count toward the bound beside
+    /// `spawn_count`.
+    restored_subagents: usize,
     /// The turn's workspace identity: `workspace_id` scopes memory,
     /// `request_workspace_root` alone places artifacts (R22).
     workspace: MemoryScopeContext,
@@ -306,6 +318,12 @@ impl SpawnSubagentTool {
         unattended: bool,
         conversation_id: Option<String>,
     ) -> Self {
+        let max_subagents_per_run = daemon_config
+            .load()
+            .execution
+            .lead_agent_defaults
+            .max_subagents_per_run;
+        let (queued, running, completed, failed) = tracker.status_counts();
         Self {
             router,
             tool_registry,
@@ -317,6 +335,8 @@ impl SpawnSubagentTool {
             lead_template_id,
             daemon_config,
             spawn_count: AtomicUsize::new(0),
+            max_subagents_per_run,
+            restored_subagents: queued + running + completed + failed,
             subagents_token: cancel_token
                 .as_ref()
                 .map_or_else(CancellationToken::new, CancellationToken::child_token),
@@ -338,6 +358,39 @@ impl SpawnSubagentTool {
 
     pub fn spawn_count(&self) -> usize {
         self.spawn_count.load(Ordering::SeqCst)
+    }
+
+    /// The most subagents this run may spawn in all (N-LEAD-6): what the
+    /// lead's prompt names, so the figure it is told is the one enforced.
+    pub fn max_subagents_per_run(&self) -> usize {
+        self.max_subagents_per_run
+    }
+
+    /// N-LEAD-6: take one of the run's slots, or refuse the spawn naming the
+    /// bound. One atomic step, so the count stays exact however spawns are
+    /// scheduled. Today a round's spawns cannot interleave: `spawn_subagent`
+    /// runs alone, and two `spawn_subagents_batch` calls of one group
+    /// (N-TOOL-3) run under one `join_all` on one task, with no await between
+    /// this reservation and the spawn. A spawn on another task, or an await
+    /// added to the path, would race for the last slot; this keeps it exact.
+    fn reserve_spawn(&self) -> Result<(), String> {
+        let room = self
+            .max_subagents_per_run
+            .saturating_sub(self.restored_subagents);
+        self.spawn_count
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |spawned| {
+                (spawned < room).then_some(spawned + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                let bound = self.max_subagents_per_run;
+                format!(
+                    "Maximum subagents per run ({bound}) reached — this run has spawned \
+                     {bound}, so no more can be spawned. Collect their results with \
+                     wait_for_subagents, then complete what is left directly or report it \
+                     as not done."
+                )
+            })
     }
 
     /// N-LEAD-1: stop every subagent this run left queued or running, once
@@ -427,6 +480,10 @@ impl BuiltInTool for SpawnSubagentTool {
             ));
         }
 
+        // N-LEAD-6: the run's lifetime bound, before anything is registered —
+        // a refused spawn leaves no instance, lane or task behind.
+        self.reserve_spawn()?;
+
         // 3. Spawn a new instance from the agent template
         //    (agent_id is really a template_id — the LLM picks from the template catalog)
         let agent = self
@@ -434,6 +491,8 @@ impl BuiltInTool for SpawnSubagentTool {
             .agent_registry
             .spawn_instance(agent_id, self.task_id.clone())
             .map_err(|e| {
+                // Nothing was spawned: the slot goes back (N-LEAD-6).
+                self.spawn_count.fetch_sub(1, Ordering::SeqCst);
                 // A template a **disabled plugin** used to contribute is
                 // attributed to that plugin rather than reading as an unknown
                 // name (extension design §10 case 5(a)).
@@ -525,8 +584,6 @@ impl BuiltInTool for SpawnSubagentTool {
                     })),
             );
         }
-
-        self.spawn_count.fetch_add(1, Ordering::SeqCst);
 
         // 5. Build SandboxManager for subagent
         let subagent_tool_ctx = ToolContext {

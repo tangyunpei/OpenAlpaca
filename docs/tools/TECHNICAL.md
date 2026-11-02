@@ -856,7 +856,7 @@ why custom TOML tools may not use the four coordination names.
 
 | Tool | Parameters | Notes |
 |------|-----------|-------|
-| `spawn_subagent` | `agent_id`, `objective` (both required) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency bound `max_concurrent_subagents`: past it the subagent is registered `queued`, its `run_id` returned at once, and it starts when a slot frees (N-LEAD-2, 2026-10-17) |
+| `spawn_subagent` | `agent_id`, `objective` (both required) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency bound `max_concurrent_subagents`: past it the subagent is registered `queued`, its `run_id` returned at once, and it starts when a slot frees (N-LEAD-2, 2026-10-17); run bound `max_subagents_per_run` (48): a run's next spawn past it, here or in a batch, is refused before anything is registered, naming the figure, which the lead's prompt states (N-LEAD-6) |
 | `spawn_subagents_batch` | `subagents`: 1–8 × `{agent_id, objective}` | Registered when `execution.lead_agent_defaults.batch_spawn_enabled` (default `true`); more than 8 items is an error |
 | `check_subagent_status` | `subagent_run_id` (required) | `exempt_from_timeout: true` |
 | `wait_for_subagents` | none | Blocks until every spawned subagent finishes, or returns early when the user steers the run. `exempt_from_timeout: true` |
@@ -1862,6 +1862,7 @@ confirmation_timeout_secs = 300
 [execution.lead_agent_defaults]
 batch_spawn_enabled = true     # Enables spawn_subagents_batch
 max_concurrent_subagents = 6
+max_subagents_per_run = 48     # Most subagents one run spawns in all (1-1000)
 max_rounds = 18
 max_tools_per_round = 3
 max_cost = 5

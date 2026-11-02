@@ -152,6 +152,18 @@ the spawn, so a queued subagent's lane reads `running` in the timeline
 (a span has no queued state). A queued subagent that the run's end or a
 `/cancel` reaches never starts.
 
+**A run spawns at most 48 subagents** (N-LEAD-6). `[execution.lead_agent_defaults]
+max_subagents_per_run` (48: the concurrency bound's 6 times a batch's 8;
+1–1000) bounds how many subagents one run spawns in all — queued, running
+and finished, retries and a resumed run's earlier ones (those its session
+log still records) included. The next spawn, by `spawn_subagent` or as an
+entry of `spawn_subagents_batch` (the entries before it are spawned), is
+refused before anything is registered, naming the figure ("Maximum
+subagents per run (48) reached — …"), and the lead's prompt states it. The
+figure is read once, at the run's start, so the one the lead is told is the
+one enforced. A lifetime backstop far above normal use; the concurrency
+bound and the queueing are unchanged.
+
 **Each result reaches the lead once** (N-LEAD-3). `wait_for_subagents`
 returns the subagents it has not reported yet — a finished one's answer as
 its head and its tail, the byte budget shared among those entries alone

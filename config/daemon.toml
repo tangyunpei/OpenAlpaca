@@ -18,6 +18,10 @@ batch_spawn_enabled = true
 max_concurrent_subagents = 6
 max_cost = 5
 max_rounds = 18
+# The most subagents one run spawns in all, retries included: the next is
+# refused, naming it. A runaway backstop far above normal use; 48 is
+# max_concurrent_subagents (6) times a batch's 8. Range 1..=1000.
+max_subagents_per_run = 48
 max_tools_per_round = 3
 
 [execution.artifacts]

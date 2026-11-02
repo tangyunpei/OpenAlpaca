@@ -212,6 +212,11 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "lead_agent_defaults"],
         field: "max_concurrent_subagents",
     },
+    TomlMapping {
+        schema_key: "daemon.execution.lead_max_subagents_per_run",
+        section: &["execution", "lead_agent_defaults"],
+        field: "max_subagents_per_run",
+    },
     // Orchestrator: Routing (Routing V2)
     TomlMapping {
         schema_key: "daemon.orchestrator.routing.steering_enabled",

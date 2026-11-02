@@ -2790,7 +2790,9 @@ fn test_golden_lead_agent_byte_identical() {
          Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
          sub-objective to the best agent by skills. Spawning is always immediate — the system \
          automatically manages execution ordering based on available LLM capacity. Subagents may \
-         be queued if capacity is limited — this is handled automatically and transparently.\n\
+         be queued if capacity is limited — this is handled automatically and transparently. \
+         This run may spawn at most 48 subagents in all, retries included; a spawn past that \
+         is refused.\n\
          Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
          queued ones), or check_subagent_status for individual progress.\n\
          Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
@@ -2870,6 +2872,8 @@ fn test_golden_lead_agent_byte_identical() {
         None,
         None,
         Some(&skills_catalog),
+        // The stock bound on a run's subagents (N-LEAD-6), named in step 3.
+        48,
     );
 
     // ── Byte-identical assertion on system message content. ─────────────

@@ -859,6 +859,7 @@ own deadlines and must not be killed by the per-tool sandbox timeout.
 | `max_tool_calls` | Per agent run / skill invocation | Unset | Agent template frontmatter (`config/agents/*.md`); a skill's `tools.rate_limit.max_calls` |
 | `max_tool_runtime_secs` | Per individual tool, every loop | 120 s; a command's `timeout_secs` up to `max_tool_runtime_ceiling_secs`, 600 s (a `Command`-backend tool also stops at its own TOML `timeout_secs`, whichever comes first) | `[execution.agent_defaults]` (a template's `timeout_seconds` is not read for it) |
 | `confirmation_timeout_secs` | Per confirmation prompt | 300 s | `[execution.agent_defaults]` |
+| `max_subagents_per_run` | Per lead-agent run, every spawn (retries included) | 48 — the next spawn is refused, naming it | `[execution.lead_agent_defaults]` |
 | `max_cost` | Per agent run / per chat turn | $1.00 ($5.00 for a lead-agent workflow) | `daemon.toml`; per template `max_cost_per_task` |
 | `drain_timeout_secs` | In-flight calls at disable/reload | 10 s | `[extensions]` |
 

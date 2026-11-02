@@ -569,6 +569,19 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    ConfigKeyDef {
+        key: "daemon.execution.lead_max_subagents_per_run",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(1000),
+        },
+        default: Some("48"),
+        description: "Most subagents one lead agent run may spawn in all (a runaway backstop)",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Daemon: Execution – Artifacts --
     ConfigKeyDef {
         key: "daemon.execution.artifacts.max_artifact_bytes",

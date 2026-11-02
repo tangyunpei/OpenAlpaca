@@ -481,6 +481,9 @@ pub async fn run_lead_agent(
                 .user_profile_budget,
         ),
         Some(&skills_catalog_block),
+        // N-LEAD-6: the bound the spawn tool read at its construction, so the
+        // prompt names the figure enforced.
+        spawn_tool.max_subagents_per_run(),
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {

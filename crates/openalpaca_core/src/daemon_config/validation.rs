@@ -285,6 +285,12 @@ impl DaemonConfig {
             32,
             "lead_agent_defaults.max_concurrent_subagents",
         );
+        clamp_val(
+            &mut self.execution.lead_agent_defaults.max_subagents_per_run,
+            1,
+            1000,
+            "lead_agent_defaults.max_subagents_per_run",
+        );
         // ── Execution > Skill Defaults ──
         clamp_val(
             &mut self.execution.skill_defaults.max_rounds,

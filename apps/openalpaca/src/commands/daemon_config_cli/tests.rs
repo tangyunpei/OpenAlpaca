@@ -169,3 +169,13 @@ fn test_find_mapping_tool_runtime_ceiling_and_no_lead_tool_runtime() {
     assert_eq!(mapping.field, "max_tool_runtime_ceiling_secs");
     assert!(find_mapping("daemon.execution.lead_max_tool_runtime_secs").is_none());
 }
+
+/// N-LEAD-6: the run's subagent bound has its mapping beside the
+/// concurrency bound's.
+#[test]
+fn test_find_mapping_subagents_per_run() {
+    let mapping = find_mapping("daemon.execution.lead_max_subagents_per_run")
+        .expect("daemon.execution.lead_max_subagents_per_run has a mapping");
+    assert_eq!(mapping.section, &["execution", "lead_agent_defaults"]);
+    assert_eq!(mapping.field, "max_subagents_per_run");
+}

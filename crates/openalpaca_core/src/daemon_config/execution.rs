@@ -69,6 +69,17 @@ pub struct LeadAgentDefaults {
     pub max_cost: f64,
     /// Maximum number of concurrent subagents a single lead agent can have running.
     pub max_concurrent_subagents: usize,
+    /// The most subagents one run may spawn in all (N-LEAD-6) — queued,
+    /// running and finished, retries and a resumed run's earlier ones (those
+    /// its session log still records) included; the next spawn is refused,
+    /// naming this figure, which the lead's prompt states. A lifetime
+    /// backstop far above normal use: each spawn pays an instance, a lane
+    /// and a task, and since N-LEAD-2 a spawn past `max_concurrent_subagents`
+    /// queues instead of waiting. Its default, 48, is
+    /// `max_concurrent_subagents`' (6) times the batch cap
+    /// (`spawn_subagents_batch`, at most 8): re-derived by hand when either
+    /// moves, which `daemon_config`'s tests check.
+    pub max_subagents_per_run: usize,
     /// When true, lead agents get the `spawn_subagents_batch` tool for
     /// spawning multiple subagents in a single tool call. Default: true
     /// (Routing V2 — batch spawn is the parallel fan-out primitive).
@@ -87,6 +98,8 @@ impl Default for LeadAgentDefaults {
             max_tools_per_round: 3,
             max_cost: 5.0,
             max_concurrent_subagents: 6,
+            // 6 × 8: see the field.
+            max_subagents_per_run: 48,
             batch_spawn_enabled: true,
         }
     }

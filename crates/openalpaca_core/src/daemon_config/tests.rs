@@ -905,3 +905,59 @@ fn the_ceiling_defaults_to_600_is_clamped_and_is_never_below_the_bound() {
     assert_eq!(validated(300, 200), (300, 300));
     assert!(logs_contain("raising it to 300"));
 }
+
+// ── N-LEAD-6: a run's subagents bounded by a lifetime backstop ──────────
+
+/// `[execution.lead_agent_defaults] max_subagents_per_run` is 48 unless the
+/// file says otherwise — the concurrency bound's default times the batch
+/// cap (`spawn_subagents_batch` takes at most eight), so a move of either
+/// fails here until the default is re-derived — the shipped file names 48,
+/// and a figure outside 1..=1000 is clamped.
+#[test]
+fn the_subagent_bound_is_the_concurrency_bound_times_the_batch_cap_and_is_clamped() {
+    /// The bound a config read from `text`, validated and written back out,
+    /// carries.
+    fn bound(text: &str) -> Option<i64> {
+        let mut config: DaemonConfig = toml::from_str(text).unwrap();
+        config.validate();
+        let written: toml::Value = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        written["execution"]["lead_agent_defaults"]
+            .get("max_subagents_per_run")
+            .and_then(toml::Value::as_integer)
+    }
+
+    let batch = crate::runner::lead_agent::spawn_subagents_batch_tool_definition(&[]);
+    let batch_cap = batch.parameters["properties"]["subagents"]["maxItems"]
+        .as_i64()
+        .unwrap();
+    let concurrency = DaemonConfig::default()
+        .execution
+        .lead_agent_defaults
+        .max_concurrent_subagents as i64;
+    assert_eq!(
+        bound(""),
+        Some(concurrency * batch_cap),
+        "max_subagents_per_run's default is max_concurrent_subagents' ({concurrency}) \
+         times the batch cap ({batch_cap}): re-derive it"
+    );
+    assert_eq!(bound(""), Some(48));
+    assert_eq!(
+        bound("[execution.lead_agent_defaults]\nmax_rounds = 20\n"),
+        Some(48)
+    );
+    let shipped = include_str!("../../../../config/daemon.toml");
+    assert!(
+        shipped.contains("\nmax_subagents_per_run = 48\n"),
+        "{shipped}"
+    );
+    assert_eq!(bound(shipped), Some(48));
+    for (written, kept) in [(0, 1), (1, 1), (100, 100), (1_000, 1_000), (5_000, 1_000)] {
+        assert_eq!(
+            bound(&format!(
+                "[execution.lead_agent_defaults]\nmax_subagents_per_run = {written}\n"
+            )),
+            Some(kept),
+            "{written}"
+        );
+    }
+}
