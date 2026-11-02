@@ -129,6 +129,8 @@ tasks/storage-design/maps/
 tasks/storage-design/panel/
 tasks/storage-design/plan-drafts/
 !tasks/approval-hidden-chars.md
+# The subagent brief design (SA-DESIGN: SA-1, SA-3, SA-4), programme step 3b.
+!tasks/subagent-brief-design.md
 # The toolchain, dependency and modernization programme (2026-09-25…): the
 # plans and reports are tracked; the evidence archives (patches, logs, tools)
 # stay local — they are 3–20 MB each and reproducible from the reports.
