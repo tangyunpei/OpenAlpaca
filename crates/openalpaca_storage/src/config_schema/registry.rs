@@ -217,7 +217,7 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
             min: Some(100),
             max: Some(20000),
         },
-        default: Some("500"),
+        default: Some("20000"),
         description: "Skill catalog (<available_skills>) budget in characters; over it skills are listed by id only",
         category: "Daemon",
         subcategory: Some("Orchestrator"),

@@ -377,8 +377,9 @@ pub struct PromptBudgetsConfig {
     /// Character budget for the user profile prompt block.
     pub user_profile_budget: usize,
     /// Character budget for the skill lines of `<available_skills>`, the
-    /// catalog the main loop and the lead agent are given (N-SKILL-1). Over
-    /// it, every skill is listed by its id alone — none is dropped.
+    /// catalog the main loop and the lead agent are given (N-SKILL-1);
+    /// 20,000 by default, the top of its range (N-SKILL-5). Over it, every
+    /// skill is listed by its id alone — none is dropped.
     pub skills_catalog_budget: usize,
 }
 
@@ -387,7 +388,7 @@ impl Default for PromptBudgetsConfig {
         Self {
             identity_budget: 300,
             user_profile_budget: 1000,
-            skills_catalog_budget: 500,
+            skills_catalog_budget: 20_000,
         }
     }
 }

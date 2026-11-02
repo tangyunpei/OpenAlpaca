@@ -382,8 +382,8 @@ under `"full"`. The static prompt's `<available_skills>` block names the
 skills `invoke_skill` can run: every available skill (the
 availability-filtered `catalog_summary`) by its id, which is what
 `invoke_skill` resolves, with its `/slash` and its description cut at
-100 characters, within `[orchestrator.prompt_budgets]
-skills_catalog_budget` (500 characters of skill lines); over the budget
+250 characters, within `[orchestrator.prompt_budgets]
+skills_catalog_budget` (20,000 characters of skill lines); over the budget
 every skill is listed by its id alone, and none is dropped
 (`orchestrator/skill/catalog/prompt.rs`). When the lane has active workflows AND steering is
 enabled, `steer_workflow` + `queue_followup` join the surface.

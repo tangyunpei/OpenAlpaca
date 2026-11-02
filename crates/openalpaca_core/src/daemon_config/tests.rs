@@ -731,12 +731,12 @@ fn carry_over_turns_defaults_to_three_and_zero_turns_it_off() {
     assert_eq!(high.orchestrator.memory.carry_over_turns, 20);
 }
 
-/// N-SKILL-1: `[orchestrator.prompt_budgets] skills_catalog_budget` is the
-/// 500 characters `<available_skills>` always had, unless the file says
-/// otherwise; the shipped file names 500; a value outside 100..=20000 is
-/// clamped.
+/// N-SKILL-5: `[orchestrator.prompt_budgets] skills_catalog_budget` is
+/// 20,000 characters, the top of its range, unless the file says otherwise
+/// (N-SKILL-1's was 500); the shipped file names 20000; a value outside
+/// 100..=20000 is clamped.
 #[test]
-fn skills_catalog_budget_defaults_to_five_hundred() {
+fn skills_catalog_budget_defaults_to_twenty_thousand() {
     for config in [
         DaemonConfig::default(),
         toml::from_str("").unwrap(),
@@ -745,7 +745,7 @@ fn skills_catalog_budget_defaults_to_five_hundred() {
     ] {
         assert_eq!(
             config.orchestrator.prompt_budgets.skills_catalog_budget,
-            500
+            20_000
         );
     }
     for (written, kept) in [(0, 100), (2_000, 2_000), (1_000_000, 20_000)] {

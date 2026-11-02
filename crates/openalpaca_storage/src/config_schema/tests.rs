@@ -564,6 +564,19 @@ fn test_the_per_tool_bound_its_ceiling_and_no_lead_bound() {
     assert!(lookup("daemon.execution.lead_max_tool_runtime_secs").is_none());
 }
 
+/// N-SKILL-5: the skill catalog's budget row names the daemon's default,
+/// 20,000 characters — the top of its range, 100–20,000.
+#[test]
+fn test_the_skills_catalog_budget_row_defaults_to_twenty_thousand() {
+    let key = "daemon.orchestrator.skills_catalog_budget";
+    let row = lookup(key).expect("the skill catalog's budget has a registry row");
+    assert_eq!(row.default, Some("20000"));
+    assert!(validate(key, "20000").is_ok());
+    assert!(validate(key, "100").is_ok());
+    assert!(validate(key, "20001").is_err());
+    assert!(validate(key, "99").is_err());
+}
+
 /// N-LEAD-6: the run's subagent bound has a row beside the concurrency
 /// bound's — 48 by default, 1–1000.
 #[test]

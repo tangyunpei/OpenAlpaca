@@ -821,14 +821,18 @@ fn twenty_skills() -> Vec<(String, String)> {
         .collect()
 }
 
-/// Twenty skills overflow the default budget, and every one of them is still
-/// listed — past the budget by its name alone. The parent `break`s at the
-/// first line that does not fit and drops the rest without a word.
+/// Twenty skills overflow a budget of 500 characters (the default before
+/// N-SKILL-5), and every one of them is still listed — past the budget by
+/// its name alone. N-SKILL-1's parent `break`s at the first line that does
+/// not fit and drops the rest without a word. The budget is the daemon
+/// config's.
 #[test]
 fn available_skills_lists_every_skill_names_only_past_the_budget() {
     let skills = twenty_skills();
     let (_tmp, catalog) = scanned_catalog(&skills);
-    let orch = orchestrator_over(catalog, DaemonConfig::default());
+    let mut config = DaemonConfig::default();
+    config.orchestrator.prompt_budgets.skills_catalog_budget = 500;
+    let orch = orchestrator_over(catalog, config);
 
     let block = orch.build_skills_catalog_block();
     let listed = listed_names(&block);
@@ -849,28 +853,30 @@ fn available_skills_lists_every_skill_names_only_past_the_budget() {
     assert!(block.contains("- skill-07 (/skill-07)\n"), "{block}");
 }
 
-/// The budget is `[orchestrator.prompt_budgets] skills_catalog_budget`: one
-/// large enough carries every description.
+/// The budget is `[orchestrator.prompt_budgets] skills_catalog_budget`, and
+/// its default, 20,000 characters (N-SKILL-5), carries every description of
+/// twenty skills — the parent's 500 listed them by name alone.
 #[test]
 fn the_catalog_budget_is_read_from_the_daemon_config() {
     let skills = twenty_skills();
     let (_tmp, catalog) = scanned_catalog(&skills);
-    let mut config = DaemonConfig::default();
+    let config = DaemonConfig::default();
     assert_eq!(
         config.orchestrator.prompt_budgets.skills_catalog_budget,
-        500
+        20_000
     );
-    config.orchestrator.prompt_budgets.skills_catalog_budget = 20_000;
     let orch = orchestrator_over(catalog, config);
 
     let block = orch.build_skills_catalog_block();
     assert_eq!(listed_names(&block).len(), 20, "{block}");
-    assert!(
-        block.contains(
-            "- skill-20 (/skill-20): Does the skill-20 job for the person who asks for it\n"
-        ),
-        "{block}"
-    );
+    for (id, _) in &skills {
+        assert!(
+            block.contains(&format!(
+                "- {id} (/{id}): Does the {id} job for the person who asks for it\n"
+            )),
+            "{block}"
+        );
+    }
 }
 
 /// A skill with no slash command is listed by its id, which is what
