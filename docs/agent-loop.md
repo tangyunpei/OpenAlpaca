@@ -426,7 +426,8 @@ row with no `task_id` gets nothing.
 (`tools/builtins/start_workflow.rs`) enforces `max_workflows_per_lane`
 (tool mode only — never inside `dispatch_lead_agent`), dispatches the
 lead agent detached, records the routing decision **unconditionally**
-(`DispatchDecision` reason `model_tool_call`, not gated on
+(a `dispatch_decisions` row, reason `model_tool_call`, served by
+`GET /v1/orchestrator/decisions`; not gated on
 `dispatch_analysis_enabled`), publishes `WorkflowStarted`, and stores
 the `DispatchOutcome` in a result cell. After the loop the handler reads
 the cell and populates structured `delegation{task_id, title}`
@@ -542,18 +543,18 @@ prompt.
 
 ## Routing Mode Strings
 
-`OrchestrationStage.mode` vocabulary after the Routing V2 default flip
-(`planner_ms` is kept in the event schema and is always 0 in tool mode):
+`OrchestrationStage.mode` vocabulary after the Routing V2 default flip,
+also the `mode` of the turn's `orchestrator_latency` row:
 
 | Status | Mode strings |
 |---|---|
 | **Retired** — deleted with the planner ladder in Phase 5; no longer emitted, but may appear in historical `orchestrator_latency` rows | `two_phase_simple`, `two_phase_complex`, `two_phase_deep_query`, `two_phase_triage_failed`, `planner_simple_query`, `planner_complex_task`, `planner_unknown`, `planner_failed`, `fast_path`, `no_llm` |
-| **New** | `main_loop` (the tool-mode front door), `steered` (the deterministic `/steer ` prefix path), `skill_command` (the deterministic skill tier, both modes), `task_ops` (task queries/control, incl. bare `/cancel` etc.) |
+| **New** | `main_loop` (the tool-mode front door), `steered` (the deterministic `/steer ` prefix path), `skill_command` (the deterministic skill tier, both modes), `task_ops` (task queries/control, incl. bare `/cancel` etc.), `memory_command` (`/remember`, `/forget`, `/memories`), `skill_withdrawn` (a `/slash` naming a skill a disabled plugin provided; the tombstone answer) |
 | **Unchanged** | `bootstrap`, `forced_simple_query`, `social_fast_path` |
 
 There is no `workflow_started` mode string: a turn that starts a
 workflow is `main_loop` with `delegation{task_id, title}` on the
-response and a `DispatchDecision` with reason `model_tool_call`.
+response and a dispatch-decision row with reason `model_tool_call`.
 Model-routed steering (`steer_workflow`) is likewise a `main_loop` turn;
 only the `/steer ` prefix emits `steered`.
 

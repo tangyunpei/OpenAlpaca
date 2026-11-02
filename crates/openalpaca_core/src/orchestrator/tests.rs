@@ -2578,7 +2578,6 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 
     let mut saw_skill_started = false;
-    let mut saw_intent_classified = false;
     let mut stage_mode = None;
     while let Ok(event) = rx.try_recv() {
         match event {
@@ -2586,16 +2585,11 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
                 assert_eq!(skill_id, "Code Review");
                 saw_skill_started = true;
             }
-            SystemEvent::IntentClassified { intent_type, .. } => {
-                assert_eq!(intent_type, "skill_invocation");
-                saw_intent_classified = true;
-            }
             SystemEvent::OrchestrationStage { mode, .. } => stage_mode = Some(mode),
             _ => {}
         }
     }
     assert!(saw_skill_started, "handle_skill_invocation was not reached");
-    assert!(saw_intent_classified, "IntentClassified was not emitted");
     assert_eq!(stage_mode.as_deref(), Some("skill_command"));
 }
 
@@ -2648,21 +2642,19 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
     );
 
     let mut saw_skill_started = false;
-    let mut intent_classified_count = 0;
+    let mut stage_modes = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event {
             SystemEvent::SkillInvocationStarted { .. } => saw_skill_started = true,
-            SystemEvent::IntentClassified { intent_type, .. } => {
-                assert_eq!(intent_type, "skill_invocation");
-                intent_classified_count += 1;
-            }
+            SystemEvent::OrchestrationStage { mode, .. } => stage_modes.push(mode),
             _ => {}
         }
     }
     assert!(saw_skill_started, "handle_skill_invocation was not reached");
     assert_eq!(
-        intent_classified_count, 1,
-        "IntentClassified must be emitted exactly once"
+        stage_modes,
+        vec!["skill_command".to_string()],
+        "the turn is routed once, by the skill tier"
     );
 }
 

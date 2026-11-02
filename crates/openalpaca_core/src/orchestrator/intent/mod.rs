@@ -37,18 +37,6 @@ pub enum Intent {
     MemoryCommand { verb: MemoryVerb, args: String },
 }
 
-impl Intent {
-    pub fn intent_type(&self) -> &'static str {
-        match self {
-            Intent::SimpleQuery { .. } => "simple_query",
-            Intent::TaskQuery { .. } => "task_query",
-            Intent::TaskControl { .. } => "task_control",
-            Intent::SkillInvocation { .. } => "skill_invocation",
-            Intent::MemoryCommand { .. } => "memory_command",
-        }
-    }
-}
-
 /// The three chat memory commands (design 09 §12.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryVerb {

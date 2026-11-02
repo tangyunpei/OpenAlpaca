@@ -430,7 +430,7 @@ Auto-selection requires **all three conditions**:
 2. `invoke.mode == "auto"`
 3. No other skill has already been auto-selected (scores sorted descending; first qualifying skill wins)
 
-An auto-selection emits a `SkillSelected` event with the score and a query preview.
+An auto-selected invocation's score and `was_auto_selected` are recorded in `skill_execution_log` (Section 10).
 
 ### Worked Example: `code-review` Skill
 
@@ -483,8 +483,6 @@ The body is truncated to `context.budget_tokens * 4` characters — **16,000 cha
 --- context: <relative-path> ---
 <file contents>
 ```
-
-When context is injected, a `SkillContextInjected` event is emitted with the byte count.
 
 ### Source Resolution
 
@@ -686,13 +684,10 @@ Skill activity is published on the system event bus:
 
 | Event | When |
 |-------|------|
-| `SkillSelected` | Router auto-selects a skill (includes score + query preview). |
 | `SkillInvocationStarted` | Invocation begins. |
 | `SkillCompleted` / `SkillFailed` | Invocation ends (duration, output preview / error). |
-| `SkillContextInjected` | `context.sources` produced injected context (byte count). |
 | `ContextBudgetComputed` | Token budget breakdown for the invocation's prompt. |
 | `SkillCatalogUpdated` | A skill was hot-reloaded by the file watcher (`action: "reloaded"`), or an edit to it could not be loaded (`"reload_failed"`). |
-| `SkillDiscovered` | A `SKILL.md` was loaded into the catalog (startup scan or reload). |
 
 ### Execution Telemetry
 

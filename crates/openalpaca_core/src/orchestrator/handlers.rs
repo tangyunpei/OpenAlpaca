@@ -100,11 +100,6 @@ impl Orchestrator {
         };
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
-                self.bus.publish(SystemEvent::IntentClassified {
-                    request_id,
-                    intent_type: intent.intent_type().to_string(),
-                    timestamp: Utc::now(),
-                });
                 let result = match intent {
                     Intent::TaskQuery { task_id } => self.handle_task_query(task_id, &owner_id_str),
                     // N-ROUTE-1: /pause and /resume, bare or with an id, answer
@@ -152,11 +147,6 @@ impl Orchestrator {
         // chosen. The command's text is the message as typed, never the
         // model input an attachment turn augments.
         if let Intent::MemoryCommand { verb, args } = &intent {
-            self.bus.publish(SystemEvent::IntentClassified {
-                request_id,
-                intent_type: intent.intent_type().to_string(),
-                timestamp: Utc::now(),
-            });
             let turn = ChatCommandTurn {
                 principal: principal.clone(),
                 source: source.clone(),

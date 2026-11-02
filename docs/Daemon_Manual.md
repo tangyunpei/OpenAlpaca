@@ -1040,13 +1040,13 @@ here — it is confirmed only through the routes below.
 
 **Chat memory commands** (`/remember`, `/forget`, `/memories`). The
 orchestrator answers these itself, in its deterministic tier, with **no model
-involved** — the turn's `IntentClassified` names them `memory_command`. Typed
-by a person on an attended turn of the app's or the CLI's chat (source `gui`
-or `cli`, not `unattended`), such a command is a **user-directed** surface like
-the routes below: it builds its `UserSurface` context from the turn — the
-turn's owner, and the project root the turn's own workspace resolved to — so
-`/remember` records origin `user`. G2 is untouched: no model ever sees the
-command, and the text written is exactly what was typed.
+involved** — the turn's latency row (`GET /v1/orchestrator/latency`) names them
+`memory_command`. Typed by a person on an attended turn of the app's or the
+CLI's chat (source `gui` or `cli`, not `unattended`), such a command is a
+**user-directed** surface like the routes below: it builds its `UserSurface`
+context from the turn — the turn's owner, and the project root the turn's own
+workspace resolved to — so `/remember` records origin `user`. G2 is untouched:
+no model ever sees the command, and the text written is exactly what was typed.
 
 - `/remember [--kind <k>] [--global | --project] <text>` stores a note: the
   title is the first line cut at 80 characters, the body is the whole text,

@@ -167,18 +167,6 @@ impl Orchestrator {
 
         let skill_block = skill_to_prompt_block(&skill_doc);
 
-        // Emit SkillContextInjected when injected_context is present. Moved here
-        // from inside the former PromptBuilder chain; the event contract is
-        // unchanged (request_id, skill_id, context_bytes, timestamp).
-        if !injected_context.is_empty() {
-            self.bus.publish(SystemEvent::SkillContextInjected {
-                request_id,
-                skill_id: skill_name.to_string(),
-                context_bytes: injected_context.len(),
-                timestamp: Utc::now(),
-            });
-        }
-
         // Resolve tools via capability model, falling back to legacy name-based matching.
         // Intent-suggested tools are intentionally NOT merged here to maintain
         // skill-level tool isolation (P1-1 security fix).

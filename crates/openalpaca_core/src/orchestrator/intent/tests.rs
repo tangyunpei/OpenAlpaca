@@ -270,15 +270,6 @@ fn create_test_skill_dir(
     dir
 }
 
-#[test]
-fn test_skill_invocation_intent_type() {
-    let intent = Intent::SkillInvocation {
-        skill_name: "Test".to_string(),
-        query: "test query".to_string(),
-    };
-    assert_eq!(intent.intent_type(), "skill_invocation");
-}
-
 // --- parse_with_skills_and_router tests ---
 
 fn make_router_test_catalog() -> (TempDir, SkillCatalog) {
@@ -829,14 +820,6 @@ fn task_commands_still_parse_beside_the_memory_commands() {
     assert_eq!(
         parser().parse("/tasks"),
         Intent::TaskQuery { task_id: None }
-    );
-}
-
-#[test]
-fn memory_command_intent_type() {
-    assert_eq!(
-        memory(MemoryVerb::Forget, "x").intent_type(),
-        "memory_command"
     );
 }
 

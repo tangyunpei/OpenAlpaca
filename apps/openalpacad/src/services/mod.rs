@@ -281,10 +281,9 @@ pub async fn initialize_services(
     let skill_router = {
         let sd = &daemon_config.load().execution.skill_defaults;
         Arc::new(
-            openalpaca_core::orchestrator::skill_router::SkillRouter::new_with_bus(
+            openalpaca_core::orchestrator::skill_router::SkillRouter::new(
                 sd.router_auto_select_threshold,
                 sd.router_suggest_threshold,
-                bus.clone(),
             ),
         )
     };
