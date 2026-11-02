@@ -1,7 +1,15 @@
 [execution.agent_defaults]
 max_cost = 1
 max_rounds = 15
-max_tool_runtime_secs = 60
+# The per-tool bound every loop reads — the main loop, the lead, every subagent
+# and both skill tiers (a template's `timeout_seconds` does not move it): a
+# tool call still running after it is cut, a command with every process it
+# started. Range 1..=600.
+max_tool_runtime_secs = 120
+# The most a call's own `timeout_secs` may ask for, on `shell_execute` and the
+# command tools: a larger figure runs under this one, never refused. Never
+# below max_tool_runtime_secs (raised to it). Range 1..=3600.
+max_tool_runtime_ceiling_secs = 600
 max_tools_per_round = 5
 confirmation_timeout_secs = 300
 
@@ -10,7 +18,6 @@ batch_spawn_enabled = true
 max_concurrent_subagents = 6
 max_cost = 5
 max_rounds = 18
-max_tool_runtime_secs = 300
 max_tools_per_round = 3
 
 [execution.artifacts]

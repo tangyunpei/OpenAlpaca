@@ -724,14 +724,23 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   `Error`.
 - **Per-call time limit** — the sandbox cuts a tool call (all but the few
   exempt ones) at its policy's `max_tool_runtime_secs`, and a command it
-  cuts is killed with every process it started. A chat turn's limit is
-  `[execution.agent_defaults] max_tool_runtime_secs` (60 s), read per
-  turn; a lead's and a subagent's is their template's `timeout_seconds`,
-  60 s when it sets none (`SandboxPolicy::from_constraints`). The loop
-  writes its policy's figure into `shell_execute`'s definition before the
-  first request — or the shell's own 300 s, where that comes first — so
-  the model is told the limit it really runs under; the registered
-  definition names none.
+  cuts is killed with every process it started. Every loop's limit is
+  `[execution.agent_defaults] max_tool_runtime_secs` (120 s) — a chat
+  turn's read per turn, the lead's at its run's start, a subagent's at its
+  spawn, both skill tiers' per invocation; a template's `timeout_seconds`
+  is not a tool's limit (N-TOOL-1b). A call to `shell_execute` or a
+  `Command`-backend tool may send `timeout_secs`: the sandbox cuts it at
+  that figure, a larger one at `max_tool_runtime_ceiling_secs` (600 s) —
+  clamped, never refused. A `Command`-backend tool is also killed at its
+  author's own `timeout_secs` (its TOML's, 30 s by default), whichever
+  comes first, so no call's figure runs it longer than that. A command
+  the sandbox cuts below the most it may run — the ceiling, or that
+  tool's own figure where smaller — is told it may ask for more, naming
+  that most. The loop writes both figures into `shell_execute`'s
+  definition before the first request, so the model is told the limits
+  it really runs under; the registered definition names none, and the
+  shell's own bound (3600 s, the ceiling's highest setting) never comes
+  first.
 - **A tool call's arguments are read, never guessed.** The provider layer
   reads them with one reader (`openalpaca_llm`'s stream collector and the
   OpenAI-compatible response parser): nothing or `null` is `{}`, a JSON

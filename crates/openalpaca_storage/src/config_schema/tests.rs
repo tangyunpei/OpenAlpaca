@@ -106,7 +106,9 @@ fn test_daemon_keys_in_category() {
     // conversation summaries' `learning.episode_max_per_day` (§13.3) came
     // and went: a summary is projected with no call (design 11 §8, CQ-2) —
     // plus the carry-over's `carry_over_turns` (design 11 §8, CQ-5), plus
-    // the skill catalog's `skills_catalog_budget` (N-SKILL-1).
+    // the skill catalog's `skills_catalog_budget` (N-SKILL-1) — and the
+    // per-tool bound's ceiling in place of the lead's retired bound
+    // (N-TOOL-1b).
     assert_eq!(keys.len(), 50);
     for gone in [
         "daemon.orchestrator.extract_every_n_turns",
@@ -545,4 +547,19 @@ fn test_validate_key_for_provider_dispatches() {
 
     // unknown → always Ok
     assert!(validate_key_for_provider("unknown_provider", "anything").is_ok());
+}
+
+/// N-TOOL-1b (B-11): the per-tool bound is 120 s by default, its ceiling has
+/// a row (1–3600 s, 600 by default), and the lead's retired bound has none.
+#[test]
+fn test_the_per_tool_bound_its_ceiling_and_no_lead_bound() {
+    let bound = lookup("daemon.execution.max_tool_runtime_secs").unwrap();
+    assert_eq!(bound.default, Some("120"));
+    let ceiling = lookup("daemon.execution.max_tool_runtime_ceiling_secs")
+        .expect("the ceiling has a registry row");
+    assert_eq!(ceiling.default, Some("600"));
+    assert!(validate("daemon.execution.max_tool_runtime_ceiling_secs", "3600").is_ok());
+    assert!(validate("daemon.execution.max_tool_runtime_ceiling_secs", "3601").is_err());
+    assert!(validate("daemon.execution.max_tool_runtime_ceiling_secs", "0").is_err());
+    assert!(lookup("daemon.execution.lead_max_tool_runtime_secs").is_none());
 }

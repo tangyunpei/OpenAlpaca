@@ -318,6 +318,7 @@ async fn test_sandbox_execution() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -394,6 +395,7 @@ async fn test_sandbox_denied_tool() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -575,6 +577,7 @@ async fn test_cancellation_during_tool_execution() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -663,6 +666,7 @@ async fn a_run_cancelled_while_a_prompt_waits_withdraws_the_prompt_and_says_so()
         require_confirmation_for: vec!["search".to_string()],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         // Far longer than the test: only the cancellation can end this wait.
@@ -3151,6 +3155,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -3339,6 +3344,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -3526,6 +3532,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -3776,6 +3783,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -4517,8 +4525,11 @@ async fn a_loop_without_a_guard_ships_whatever_the_model_said() {
 
 /// N-TOOL-1 (Z1-05): what a loop tells the model about a tool's time limit is
 /// the limit its sandbox enforces — `shell_execute`'s definition states the
-/// figure, and a call cut at it is told what to do instead of to raise a
-/// `timeout` parameter that does not exist.
+/// figure, and a call cut at it is told what to do. N-TOOL-1b (B-11): the
+/// definition also states the ceiling a call's `timeout_secs` is clamped to,
+/// and a command cut below that ceiling is told it may ask for more — B-11's
+/// deferral of a model-settable timeout, which these tests pinned as "no
+/// such parameter", taken.
 mod stated_tool_timeout {
     use super::*;
     use crate::bus::EventBus;
@@ -4570,7 +4581,7 @@ mod stated_tool_timeout {
         }
     }
 
-    fn policy(max_tool_runtime_secs: u64) -> SandboxPolicy {
+    fn policy(max_tool_runtime_secs: u64, max_tool_runtime_ceiling_secs: u64) -> SandboxPolicy {
         SandboxPolicy {
             agent_id: "test".to_string(),
             allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
@@ -4578,6 +4589,7 @@ mod stated_tool_timeout {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -4594,10 +4606,12 @@ mod stated_tool_timeout {
             .expect("shell_execute is a builtin")
     }
 
-    /// Run one loop whose sandbox cuts a tool at `secs`, with `tool` on its
-    /// surface, and return every request the model was handed.
+    /// Run one loop whose sandbox cuts a tool at `secs`, or at a command's
+    /// `timeout_secs` up to `ceiling`, with `tool` on its surface, and return
+    /// every request the model was handed.
     async fn requests(
         secs: u64,
+        ceiling: u64,
         tool: RegisteredTool,
         replies: Vec<ChatResponse>,
     ) -> Vec<ChatRequest> {
@@ -4620,7 +4634,7 @@ mod stated_tool_timeout {
             &config,
             Some(&sandbox),
             "test",
-            Some(&policy(secs)),
+            Some(&policy(secs, ceiling)),
             None,
             None,
             None,
@@ -4645,26 +4659,46 @@ mod stated_tool_timeout {
 
     #[tokio::test]
     async fn the_shell_definition_states_the_timeout_the_loops_sandbox_enforces() {
-        let seen = requests(45, shell(), vec![reply(vec![])]).await;
+        let seen = requests(45, 600, shell(), vec![reply(vec![])]).await;
         let description = shell_description(&seen[0]);
         assert!(
-            description.contains("still running after 45 seconds is stopped"),
+            description.contains(
+                "still running after 45 seconds is stopped, with every process it started; set \
+                 timeout_secs to let one run up to 600 seconds."
+            ),
             "{description}"
         );
         assert!(!description.contains("300"), "{description}");
     }
 
-    /// A sandbox that allows longer than the tool's own bound does not move
-    /// it: the command is still stopped at 300 s, and that is what is stated.
+    /// N-TOOL-1b: the shell's own bound — 300 s before — yields to every
+    /// ceiling, so a loop that allows longer states what it allows.
     #[tokio::test]
-    async fn a_sandbox_longer_than_the_shells_own_bound_states_the_shells() {
-        let seen = requests(900, shell(), vec![reply(vec![])]).await;
+    async fn a_bound_past_the_shells_old_300_is_stated_as_enforced() {
+        let seen = requests(450, 900, shell(), vec![reply(vec![])]).await;
         let description = shell_description(&seen[0]);
         assert!(
-            description.contains("still running after 300 seconds is stopped"),
+            description.contains("still running after 450 seconds is stopped"),
             "{description}"
         );
-        assert!(!description.contains("900"), "{description}");
+        assert!(description.contains("up to 900 seconds"), "{description}");
+        assert!(!description.contains("300"), "{description}");
+    }
+
+    /// A loop whose ceiling is its bound offers no more: the definition says
+    /// so, and names no larger figure.
+    #[tokio::test]
+    async fn a_bound_at_the_ceiling_is_stated_as_the_most() {
+        let seen = requests(60, 60, shell(), vec![reply(vec![])]).await;
+        let description = shell_description(&seen[0]);
+        assert!(
+            description.contains(
+                "still running after 60 seconds is stopped, with every process it started — \
+                 the most a command may run here."
+            ),
+            "{description}"
+        );
+        assert!(!description.contains("up to"), "{description}");
     }
 
     /// The registered definition, which reaches a model only through a loop,
@@ -4690,10 +4724,10 @@ mod stated_tool_timeout {
         }
     }
 
-    /// A call cut at the sandbox's limit is told the limit and what to do —
-    /// never to raise a `timeout` parameter, which no tool here takes.
-    #[tokio::test]
-    async fn a_timed_out_command_is_told_its_limit_and_no_timeout_parameter() {
+    /// What the model was shown for one `shell_execute` call sending
+    /// `arguments` to a command that hangs, in a loop cutting at `secs` with
+    /// `ceiling`.
+    async fn hanging_command(secs: u64, ceiling: u64, arguments: serde_json::Value) -> String {
         let hangs = RegisteredTool {
             backend: ToolBackend::BuiltIn(Arc::new(Hangs)),
             annotations: None,
@@ -4702,25 +4736,51 @@ mod stated_tool_timeout {
         let call = openalpaca_llm::ToolCall {
             id: "tc_slow".to_string(),
             name: "shell_execute".to_string(),
-            arguments: serde_json::json!({"command": "make"}),
+            arguments,
         };
-        let seen = requests(1, hangs, vec![reply(vec![call]), reply(vec![])]).await;
-        let result = seen[1]
+        let seen = requests(secs, ceiling, hangs, vec![reply(vec![call]), reply(vec![])]).await;
+        seen[1]
             .messages
             .iter()
             .find(|m| m.role == openalpaca_llm::Role::Tool)
             .expect("the cut call's result reached the model")
             .content
-            .clone();
-        assert!(result.contains("timed out after 1s"), "{result}");
+            .clone()
+    }
+
+    /// N-TOOL-1b: a command cut below the ceiling is told its limit, and that
+    /// its `timeout_secs` may ask for up to the ceiling.
+    #[tokio::test]
+    async fn a_command_cut_below_the_ceiling_is_told_it_may_ask_for_more() {
+        let result = hanging_command(1, 600, serde_json::json!({"command": "make"})).await;
         assert!(
-            result.contains("Hint:"),
-            "a cut command is told what to do: {result}"
+            result.ends_with(
+                "timed out after 1s\nHint: a command may run up to 600 seconds here — call it \
+                 again with a larger timeout_secs, or split the work into smaller commands that \
+                 each finish sooner."
+            ),
+            "{result}"
         );
+    }
+
+    /// A command cut at the ceiling is told that is the most it may run, and
+    /// is not sent after a larger `timeout_secs`.
+    #[tokio::test]
+    async fn a_command_cut_at_the_ceiling_is_told_that_is_the_most() {
+        let result = hanging_command(
+            1,
+            2,
+            serde_json::json!({"command": "make", "timeout_secs": 3600}),
+        )
+        .await;
         assert!(
-            !result.to_lowercase().contains("timeout"),
-            "no `timeout` parameter exists to raise: {result}"
+            result.ends_with(
+                "timed out after 2s\nHint: that is the most a command may run here; split the \
+                 work into smaller commands that each finish sooner."
+            ),
+            "{result}"
         );
+        assert!(!result.contains("timeout_secs"), "{result}");
     }
 }
 
@@ -4826,6 +4886,7 @@ mod tool_error_flag {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 60,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -4984,6 +5045,7 @@ mod no_output {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 60,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -5203,6 +5265,7 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -5395,6 +5458,7 @@ mod round_groups {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 60,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,

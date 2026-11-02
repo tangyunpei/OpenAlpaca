@@ -77,6 +77,7 @@ fn asking_for(tool: &str) -> SandboxPolicy {
         require_confirmation_for: vec![tool.to_string()],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: Some(2),

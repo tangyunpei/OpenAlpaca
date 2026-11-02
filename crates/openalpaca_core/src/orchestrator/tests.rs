@@ -4026,6 +4026,8 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
         true,
         crate::daemon_config::CircuitBreakerConfig::default(),
         30,
+        120,
+        600,
     );
     let mut rx = bus.subscribe();
     let _ = nested
@@ -4277,6 +4279,8 @@ fn nested_executor(
         true,
         crate::daemon_config::CircuitBreakerConfig::default(),
         30,
+        120,
+        600,
     )
 }
 
@@ -10982,4 +10986,98 @@ mod memory_store_on_a_turn_with_no_project {
         );
         assert!(!scene.home_store.join("projects").exists());
     }
+}
+
+// ── N-TOOL-1b (B-11): the file-skill tier's per-tool bound ──────────────
+
+/// A file skill's tool calls are cut at `[execution.agent_defaults]
+/// max_tool_runtime_secs` (1 s here) — the bound every loop reads — and its
+/// `shell_execute` definition states that figure and the configured ceiling
+/// (7 s here, not the default 600).
+#[tokio::test]
+async fn the_skill_tier_cuts_a_tool_at_the_daemons_per_tool_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("builder");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: "Builder"
+description: "Builds things"
+tools:
+  allow:
+    - shell_execute
+---
+
+## Instructions
+
+Build it.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    let registry = Arc::new(ToolRegistry::default());
+    registry.register(crate::test_util::slow_shell()).unwrap();
+    let provider = crate::test_util::CallsOneTool::new(
+        "shell_execute",
+        serde_json::json!({"command": "make"}),
+    );
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    ));
+    let bus = EventBus::default();
+    let gate = make_security_gate_with_registry(&bus, registry.clone());
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(
+            crate::test_util::daemon_config_with_agent_defaults(
+                "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 7",
+            ),
+        )),
+    );
+
+    orch.handle_skill_invocation(
+        Uuid::new_v4(),
+        "cli",
+        "Builder",
+        "build it",
+        "test:cli",
+        None,
+        &ConversationContext::default(),
+        None,
+        &crate::memory::scope_context::MemoryScopeContext::new(None),
+        None,
+        false,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .expect("the skill runs");
+
+    let result = provider.tool_result();
+    assert!(
+        result.contains("Tool 'shell_execute' timed out after 1s"),
+        "the skill's call ran past the daemon's bound: {result:?}"
+    );
+    let description = provider.description_of("shell_execute");
+    assert!(
+        description.contains("still running after 1 second is stopped"),
+        "{description}"
+    );
+    assert!(description.contains("up to 7 seconds"), "{description}");
 }

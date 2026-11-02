@@ -267,7 +267,11 @@ fn annotations_for_builtin_by_product_writers_never_prompt() {
     for tool in builtin_tools(None, None, None) {
         registry.register(tool).unwrap();
     }
-    let policy = SandboxPolicy::from_constraints("writing_agent", &AgentConstraints::default());
+    let policy = SandboxPolicy::from_constraints(
+        "writing_agent",
+        &AgentConstraints::default(),
+        &crate::daemon_config::AgentDefaults::default(),
+    );
     let set = effective_confirmation_set(&policy, &registry);
     for name in ["artifact_write", "workspace_write"] {
         assert!(!set.contains(&name.to_string()), "{name} asks; the set is {set:?}");
@@ -315,6 +319,7 @@ async fn reading_tools_raise_no_card_under_a_broker() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: Some(1),
@@ -476,6 +481,7 @@ async fn file_list_and_artifact_read_run_with_no_approval_card() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 30,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: Some(300),
@@ -1430,6 +1436,7 @@ mod read_result {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 30,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -1481,6 +1488,7 @@ mod read_result {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 30,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,

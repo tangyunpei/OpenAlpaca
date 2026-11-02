@@ -3509,11 +3509,29 @@ async fn spawn_and_finish(
     shared: Arc<SharedContext>,
     agent_id: &str,
 ) -> Vec<String> {
+    spawn_and_finish_under(
+        scripted_router(provider),
+        registry,
+        shared,
+        agent_id,
+        DaemonConfig::default(),
+    )
+    .await
+}
+
+/// [`spawn_and_finish`], over any router and under `config`.
+async fn spawn_and_finish_under(
+    router: Arc<LlmRouter>,
+    registry: Arc<ToolRegistry>,
+    shared: Arc<SharedContext>,
+    agent_id: &str,
+    config: DaemonConfig,
+) -> Vec<String> {
     let bus = EventBus::new(256);
     let mut rx = bus.subscribe();
     let tracker = Arc::new(SubagentTracker::new());
     let spawn_tool = SpawnSubagentTool::new(
-        scripted_router(provider),
+        router,
         registry,
         shared,
         bus,
@@ -3521,7 +3539,7 @@ async fn spawn_and_finish(
         "task-1".to_string(),
         "user-1".to_string(),
         "test-lead".to_string(),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        Arc::new(ArcSwap::from_pointee(config)),
         None,
         tracker.clone(),
         0,
@@ -6128,4 +6146,120 @@ fn a_subagent_failure_says_a_retry_will_not_help_only_where_it_cannot() {
             format!("Agent 'researcher' could not finish: {transient}")
         );
     }
+}
+
+// ── N-TOOL-1b (B-11): a template's `timeout_seconds` is not the per-tool bound ──
+
+/// A plugin's tool still running at test scale (`test_util::SLOW_TOOL_RUNS`).
+struct SlowPluginExec;
+
+#[async_trait]
+impl openalpaca_api::plugin_traits::PluginToolExecutor for SlowPluginExec {
+    async fn execute(
+        &self,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        tokio::time::sleep(crate::test_util::SLOW_TOOL_RUNS).await;
+        Ok("finished".to_string())
+    }
+
+    fn plugin_id(&self) -> &str {
+        "plug"
+    }
+}
+
+/// The lead's template says `timeout_seconds: 600`; its tool calls are cut at
+/// `[execution.agent_defaults] max_tool_runtime_secs` (1 s here), not at 600.
+/// The lead holds no command tool, and its cut binds every tool it calls: a
+/// plugin's stands in.
+#[tokio::test]
+async fn a_leads_template_timeout_is_not_its_per_tool_bound() {
+    let registry = Arc::new(ToolRegistry::default());
+    register_extension_tool(
+        &registry,
+        "plug::slow",
+        crate::tools::registry::ToolBackend::Plugin(Arc::new(SlowPluginExec)),
+    );
+    let mut lead = lead_subagent();
+    lead.constraints.timeout_seconds = Some(600);
+    let provider = ScriptedProvider::new(vec![
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-1".to_string(),
+                name: "plug::slow".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+        ),
+        scripted_response("done", vec![]),
+    ]);
+    let config = crate::test_util::daemon_config_with_agent_defaults("max_tool_runtime_secs = 1");
+
+    let result = run_lead_as(
+        &lead,
+        provider.clone(),
+        registry,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(config)),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    let results = tool_results_seen(&provider, 1);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].contains("Tool 'plug::slow' timed out after 1s"),
+        "the lead's call ran past the daemon's bound: {:?}",
+        results[0]
+    );
+}
+
+/// A subagent's template says `timeout_seconds: 600`; its command is cut at
+/// `[execution.agent_defaults] max_tool_runtime_secs` (1 s here), not at 600,
+/// and its `shell_execute` definition states that figure and the configured
+/// ceiling (7 s here, not the default 600).
+#[tokio::test]
+async fn a_subagents_template_timeout_is_not_its_per_tool_bound() {
+    let shared = Arc::new(SharedContext::new());
+    let mut template = crate::test_util::template_from_agent(&crate::test_util::make_agent(
+        "builder",
+        vec!["shell_execute"],
+    ));
+    template.frontmatter.timeout_seconds = Some(600);
+    assert!(shared.agent_registry.register_template(template));
+    let registry = Arc::new(ToolRegistry::default());
+    registry.register(crate::test_util::slow_shell()).unwrap();
+    let provider = crate::test_util::CallsOneTool::new(
+        "shell_execute",
+        serde_json::json!({"command": "make"}),
+    );
+    let router = Arc::new(LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    ));
+    let config = crate::test_util::daemon_config_with_agent_defaults(
+        "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 7",
+    );
+
+    let violations = spawn_and_finish_under(router, registry, shared, "builder", config).await;
+
+    let result = provider.tool_result();
+    assert!(
+        result.contains("Tool 'shell_execute' timed out after 1s"),
+        "the subagent's command ran past the daemon's bound: {result:?} \
+         (violations: {violations:?})"
+    );
+    let description = provider.description_of("shell_execute");
+    assert!(
+        description.contains("still running after 1 second is stopped"),
+        "{description}"
+    );
+    assert!(description.contains("up to 7 seconds"), "{description}");
 }

@@ -2681,6 +2681,7 @@ async fn auto_approve_cannot_undo_the_extension_gate_on_either_arm() {
         require_confirmation_for: vec!["github__create_issue".to_string()],
         max_tool_calls: None,
         max_tool_runtime_secs: 30,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,

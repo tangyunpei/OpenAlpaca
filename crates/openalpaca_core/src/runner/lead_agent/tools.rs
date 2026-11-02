@@ -776,7 +776,13 @@ impl BuiltInTool for SpawnSubagentTool {
             + memory_turn.as_ref().map_or(0, |m| m.token_estimate());
         let budget_tools_tokens = crate::runner::estimate_tools_tokens(&tools);
 
-        let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
+        // N-TOOL-1b: the per-tool bound is the daemon's, not the template's
+        // `timeout_seconds`.
+        let mut sandbox_policy = SandboxPolicy::from_constraints(
+            &instance_id,
+            &agent.constraints,
+            &self.daemon_config.load().execution.agent_defaults,
+        );
         // The template grants capabilities; the sandbox is asked about tool
         // names. `tools` is what those capabilities resolved to (step 6), so
         // the allow list admits exactly that surface — otherwise a researcher

@@ -790,3 +790,118 @@ fn episode_max_per_day_is_gone_and_a_stale_key_is_ignored() {
     let shipped = include_str!("../../../../config/daemon.toml");
     assert!(!shipped.contains("episode_max_per_day"), "{shipped}");
 }
+
+// ── N-TOOL-1b (B-11): one per-tool bound for every loop ─────────────────
+
+/// Every loop cuts a tool at `[execution.agent_defaults]
+/// max_tool_runtime_secs`, 120 s unless the owner sets it.
+#[test]
+fn the_per_tool_bound_defaults_to_120_seconds() {
+    assert_eq!(
+        DaemonConfig::default()
+            .execution
+            .agent_defaults
+            .max_tool_runtime_secs,
+        120
+    );
+    let config: DaemonConfig =
+        toml::from_str("[execution.agent_defaults]\nmax_rounds = 9\n").unwrap();
+    assert_eq!(config.execution.agent_defaults.max_tool_runtime_secs, 120);
+}
+
+/// `[execution.lead_agent_defaults] max_tool_runtime_secs` reached no policy
+/// and is gone: a hand-edited `daemon.toml` still carrying it loads, says so
+/// once at boot naming the key, and nothing reads it — the per-tool bound is
+/// `agent_defaults`', and a write of the config does not carry it back.
+#[tracing_test::traced_test]
+#[test]
+fn a_daemon_toml_still_naming_the_leads_tool_runtime_warns_once_and_nothing_reads_it() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("daemon.toml");
+    std::fs::write(
+        &path,
+        r#"
+[execution.lead_agent_defaults]
+max_rounds = 20
+max_tool_runtime_secs = 900
+"#,
+    )
+    .unwrap();
+
+    let config = load_daemon_config(&path);
+
+    logs_assert(|lines: &[&str]| {
+        let named: Vec<&&str> = lines
+            .iter()
+            .filter(|line| line.contains("execution.lead_agent_defaults.max_tool_runtime_secs"))
+            .collect();
+        match named.as_slice() {
+            [one] if one.contains("WARN") => Ok(()),
+            other => Err(format!("one WARN naming the key, got {other:?}")),
+        }
+    });
+    let written: toml::Value = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert!(
+        written["execution"]["lead_agent_defaults"]
+            .get("max_tool_runtime_secs")
+            .is_none(),
+        "the lead's key is still a field: {written:?}"
+    );
+    assert_eq!(config.execution.lead_agent_defaults.max_rounds, 20);
+    assert_eq!(config.execution.agent_defaults.max_tool_runtime_secs, 120);
+}
+
+/// The shipped `config/daemon.toml` states the bound and its ceiling, and no
+/// longer names the lead's key.
+#[test]
+fn the_shipped_daemon_toml_states_the_per_tool_bound_and_its_ceiling() {
+    let shipped = include_str!("../../../../config/daemon.toml");
+    assert!(
+        shipped.contains("\nmax_tool_runtime_secs = 120\n"),
+        "{shipped}"
+    );
+    assert!(
+        shipped.contains("\nmax_tool_runtime_ceiling_secs = 600\n"),
+        "{shipped}"
+    );
+    let table: toml::Value = toml::from_str(shipped).unwrap();
+    assert!(
+        table["execution"]["lead_agent_defaults"]
+            .get("max_tool_runtime_secs")
+            .is_none(),
+        "{shipped}"
+    );
+    let config: DaemonConfig = toml::from_str(shipped).unwrap();
+    assert_eq!(config.execution.agent_defaults.max_tool_runtime_secs, 120);
+}
+
+/// The ceiling a call's `timeout_secs` is clamped to: 600 s by default,
+/// clamped to 1–3600, and never below the bound — a ceiling under it is
+/// raised to it, with a WARN.
+#[tracing_test::traced_test]
+#[test]
+fn the_ceiling_defaults_to_600_is_clamped_and_is_never_below_the_bound() {
+    /// The bound and the ceiling `validate` leaves of `bound` and `ceiling`.
+    fn validated(bound: u64, ceiling: u64) -> (u64, u64) {
+        let mut config = DaemonConfig::default();
+        let tools = &mut config.execution.agent_defaults;
+        tools.max_tool_runtime_secs = bound;
+        tools.max_tool_runtime_ceiling_secs = ceiling;
+        config.validate();
+        let tools = &config.execution.agent_defaults;
+        (
+            tools.max_tool_runtime_secs,
+            tools.max_tool_runtime_ceiling_secs,
+        )
+    }
+
+    let defaults = DaemonConfig::default().execution.agent_defaults;
+    assert_eq!(defaults.max_tool_runtime_ceiling_secs, 600);
+    assert_eq!(validated(120, 600), (120, 600));
+    assert_eq!(validated(1, 0), (1, 1));
+    assert_eq!(MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS, 3600);
+    assert_eq!(validated(120, 5000), (120, 3600));
+    assert!(!logs_contain("raising it to"));
+    assert_eq!(validated(300, 200), (300, 300));
+    assert!(logs_contain("raising it to 300"));
+}

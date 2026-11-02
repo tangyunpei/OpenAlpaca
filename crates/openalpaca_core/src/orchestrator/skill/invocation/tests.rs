@@ -537,3 +537,69 @@ async fn a_plugin_skills_tool_calls_carry_the_turns_conversation() {
     let ctx = seen.lock().unwrap().clone().expect("the tool ran");
     assert_eq!(ctx.conversation_id.as_deref(), Some(session.id.as_str()));
 }
+
+// ── N-TOOL-1b (B-11): a plugin skill's per-tool bound ───────────────────
+
+/// A plugin skill's proxied tool calls are cut at `[execution.agent_defaults]
+/// max_tool_runtime_secs` (1 s here), the bound every loop reads.
+#[tokio::test]
+async fn a_plugin_skills_tool_call_is_cut_at_the_daemons_per_tool_bound() {
+    let registry = registry(true);
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "slow_tool".to_string(),
+                description: "slow_tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(crate::test_util::Sleeps)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: Utc::now(),
+        })
+        .unwrap();
+    let registry = Arc::new(registry);
+    let bus = EventBus::default();
+    let sandbox = Arc::new(SandboxManager::with_defaults(registry.clone(), bus.clone()));
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        crate::middleware::prompt::SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        Arc::new(SecurityGate::new(sandbox)),
+        registry,
+        None,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(
+            crate::test_util::daemon_config_with_agent_defaults("max_tool_runtime_secs = 1"),
+        )),
+    );
+    let stub = Arc::new(StubPluginSkill {
+        tool: "slow_tool".to_string(),
+        invoked: Arc::new(AtomicBool::new(false)),
+        outcome: Arc::new(Mutex::new(None)),
+    });
+    let mut fm = SkillFrontmatter {
+        name: "acme-search".to_string(),
+        ..Default::default()
+    };
+    fm.tools.allow = vec!["slow_tool".to_string()];
+
+    run_plugin_skill(&orch, fm, stub.clone())
+        .await
+        .expect("the skill runs");
+
+    let outcome = stub.outcome.lock().unwrap().clone();
+    match outcome {
+        Some(Err(err)) => assert!(err.contains("Tool 'slow_tool' timed out after 1s"), "{err}"),
+        other => panic!("the plugin skill's call ran past the daemon's bound: {other:?}"),
+    }
+}

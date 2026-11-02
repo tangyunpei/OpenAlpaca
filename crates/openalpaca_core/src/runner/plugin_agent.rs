@@ -663,6 +663,7 @@ mod tests {
                 allowed_capabilities: vec!["echo".to_string()],
                 ..Default::default()
             },
+            &crate::daemon_config::AgentDefaults::default(),
         )
     }
 
@@ -905,18 +906,19 @@ mod tests {
         Arc::new(sandbox)
     }
 
-    /// A plugin template granting `shell_execute`, its per-tool timeout far
-    /// past every bound these tests wait, so only the cancel can end the call.
+    /// A plugin template granting `shell_execute`, its per-tool bound — the
+    /// daemon's default, 120 s (N-TOOL-1b) — far past every bound these
+    /// tests wait, so only the cancel can end the call.
     #[cfg(unix)]
     fn shell_policy(auto_approve: bool) -> SandboxPolicy {
         let mut policy = SandboxPolicy::from_constraints(
             "plugin-instance",
             &crate::agent::subagent::AgentConstraints {
                 allowed_capabilities: vec!["shell_execute".to_string()],
-                timeout_seconds: Some(120),
                 auto_approve,
                 ..Default::default()
             },
+            &crate::daemon_config::AgentDefaults::default(),
         );
         policy.confirmation_timeout_secs = Some(300);
         policy

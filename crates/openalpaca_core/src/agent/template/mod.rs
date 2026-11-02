@@ -65,7 +65,9 @@ pub struct AgentTemplateFrontmatter {
     pub fallback_models: Vec<String>,
     /// Maximum tool calls per task.
     pub max_tool_calls: Option<u32>,
-    /// Task timeout in seconds.
+    /// Task timeout in seconds — a budget nothing enforces yet: no tool
+    /// call's limit is it (that is `[execution.agent_defaults]
+    /// max_tool_runtime_secs`, N-TOOL-1b).
     pub timeout_seconds: Option<u64>,
     /// Maximum cost per task in USD.
     pub max_cost_per_task: Option<f64>,

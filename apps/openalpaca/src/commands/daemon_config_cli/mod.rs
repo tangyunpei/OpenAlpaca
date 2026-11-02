@@ -196,16 +196,16 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "agent_defaults"],
         field: "max_tool_runtime_secs",
     },
+    TomlMapping {
+        schema_key: "daemon.execution.max_tool_runtime_ceiling_secs",
+        section: &["execution", "agent_defaults"],
+        field: "max_tool_runtime_ceiling_secs",
+    },
     // Execution: Lead Agent Defaults (cont.)
     TomlMapping {
         schema_key: "daemon.execution.lead_max_tools_per_round",
         section: &["execution", "lead_agent_defaults"],
         field: "max_tools_per_round",
-    },
-    TomlMapping {
-        schema_key: "daemon.execution.lead_max_tool_runtime_secs",
-        section: &["execution", "lead_agent_defaults"],
-        field: "max_tool_runtime_secs",
     },
     TomlMapping {
         schema_key: "daemon.execution.lead_max_concurrent_subagents",

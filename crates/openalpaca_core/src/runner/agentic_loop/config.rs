@@ -19,10 +19,13 @@ pub type StreamCallback = Arc<dyn Fn(&StreamEvent) + Send + Sync>;
 ///
 /// `Clone` is implemented manually because `StreamCallback` (`Arc<dyn Fn>`)
 /// implements `Clone` but not `Debug`.
+///
+/// It carries no per-tool time bound: that is the sandbox policy's alone
+/// (`SandboxPolicy::max_tool_runtime_secs`, N-TOOL-1b), the one number a loop
+/// cuts at and states.
 pub struct LoopConfig {
     pub max_rounds: usize,
     pub max_tools_per_round: usize,
-    pub max_tool_runtime: Duration,
     pub max_cost: f64,
     /// Override model for this loop (used by LlmRouter).
     pub model: Option<String>,
@@ -113,7 +116,6 @@ impl Clone for LoopConfig {
         Self {
             max_rounds: self.max_rounds,
             max_tools_per_round: self.max_tools_per_round,
-            max_tool_runtime: self.max_tool_runtime,
             max_cost: self.max_cost,
             model: self.model.clone(),
             fallback_models: self.fallback_models.clone(),
@@ -176,7 +178,6 @@ impl Default for LoopConfig {
         Self {
             max_rounds: 15,
             max_tools_per_round: 5,
-            max_tool_runtime: Duration::from_secs(60),
             max_cost: 1.00,
             model: None,
             fallback_models: Vec::new(),
@@ -213,7 +214,6 @@ impl LoopConfig {
     pub fn from_defaults(
         max_rounds: usize,
         max_tools_per_round: usize,
-        max_tool_runtime_secs: u64,
         max_cost: f64,
         agent: &crate::agent::subagent::SubAgent,
     ) -> Self {
@@ -243,12 +243,6 @@ impl LoopConfig {
         Self {
             max_rounds: agent.constraints.max_rounds.unwrap_or(max_rounds),
             max_tools_per_round,
-            max_tool_runtime: Duration::from_secs(
-                agent
-                    .constraints
-                    .timeout_seconds
-                    .unwrap_or(max_tool_runtime_secs),
-            ),
             max_cost: agent.constraints.max_cost_per_task.unwrap_or(max_cost),
             model,
             fallback_models: agent.llm_config.fallback_models.clone(),
@@ -300,7 +294,6 @@ impl LoopConfig {
         Self::from_defaults(
             defaults.max_rounds,
             defaults.max_tools_per_round,
-            defaults.max_tool_runtime_secs,
             defaults.max_cost,
             agent,
         )
@@ -314,7 +307,6 @@ impl LoopConfig {
         Self::from_defaults(
             defaults.max_rounds,
             defaults.max_tools_per_round,
-            defaults.max_tool_runtime_secs,
             defaults.max_cost,
             agent,
         )

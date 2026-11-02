@@ -690,7 +690,7 @@ All of these are registered in the shared `ToolRegistry` at daemon startup.
 | `artifact_write` | `name`, `kind`, `content` (required); `note`, `summary`, `metadata` | `artifact_write` | `kind` ∈ `markdown`, `code`, `terminal`, `table`, `plan`, `image`, `html`, `binary`; versioned; max `max_artifact_bytes` (10 MB); store chosen from `request_workspace_root`, else the home store; needs a database |
 | `read_result` | `result_ref` (required), `offset`, `limit` | `read_result` | Reads only inside the calling session's `results/`; page 8 KB default, 64 KB max; needs `ToolContext.session_id` |
 | `artifact_read` | `artifact_id` (required); `offset`, `limit` | `read_result` | A by-product of the turn's owner, of the turn's project or of none; pages like `read_result` (8 KB default, 64 KB max); refuses a result file in the project, another project's by-product, and `image` or `binary` kinds; needs a database |
-| `shell_execute` | `command` (required) | `shell_execute` | Starts in the working folder (a scratch folder is made at first use); the sandbox's per-tool timeout (`max_tool_runtime_secs`, 60 s by default) ends it first, and a 300 s timeout of its own holds when the sandbox is bypassed — on either, or when the call's future is dropped, `run_bounded` kills its process group (unix; the direct child on Windows); output cap 512 KB per stream, a cut stream ending with a line that says so; injection patterns blocked by the sanitizer, and `../` allowed (R29: a builtin's arguments are exempt); destructive — every command asks, its card naming the folder |
+| `shell_execute` | `command` (required), `timeout_secs` | `shell_execute` | Starts in the working folder (a scratch folder is made at first use); the sandbox's per-tool timeout (`max_tool_runtime_secs`, 120 s by default, or the call's `timeout_secs` clamped to `max_tool_runtime_ceiling_secs`, 600 s) ends it first, and a timeout of its own at the ceiling's highest setting, 3600 s, holds when the sandbox is bypassed — on either, or when the call's future is dropped, `run_bounded` kills its process group (unix; the direct child on Windows); output cap 512 KB per stream, a cut stream ending with a line that says so; injection patterns blocked by the sanitizer, and `../` allowed (R29: a builtin's arguments are exempt); destructive — every command asks, its card naming the folder |
 | `memory_search` | `query` (required, 1–512 chars); `kind`, `scope`, `limit` (1–50, default 10), `detail` (`index` default, or `snippets`), `date_from`, `date_to` (RFC 3339 or `YYYY-MM-DD`, inclusive), `order_by` (`relevance` default, `newest`, `oldest`), `historical`, `as_of` | `memory_read` | Lexical only (index schema 5, design 09 §6.5): every term against a `unicode61` FTS5 table as a word or a word's beginning (a prefix query when its last token has ≥ 3 characters or is a number after another token, `10:30` finding `10:30am`; when that query fills its cap, each such term again as a whole word in the header and in the body), every term of ≥ 3 characters against a trigram table over titles, aliases and tags, and a term carrying a character of a script `unicode61` cannot split into words (CJK, Thai and the other scripts written without spaces; Devanagari, Tamil and the other scripts built with vowel signs — `query::is_unsegmented`) against a trigram table over those scripts' bodies; a bounded substring scan for a 1–2 character query, no model; `match` names `term`, `prefix`, `trigram`, `phrase`, `title`, `alias` or `fact_key`; filters (status, supersession, tombstones, same-`fact_key` losers, validity, the date bounds) before the limit; every hit re-read and re-hashed. `index` answers one row per note — `id`, `date`, `kind`, `scope`, `status`, `title`, `reason`, `size`, `conflict` — and no body; `snippets` answers cited excerpts by heading and line range with `freshness`, `conflict`, `valid_from`, `valid_to`; both with `partial` and `index_state` |
 | `memory_read` | `ids` (required, 1–10 distinct note ids); `expected_revision`, `section` (single id only) | `memory_read` | One entry per id in the order asked, each with provenance, the bodies sharing 32 KiB (a short one is never cut to make room); an id no note of the caller has answers `{id, error: "not_found"}` in its place; the old `id` argument is `invalid_input`; the service re-checks owner and scope |
 | `memory_timeline` | exactly one of `anchor` (a note id), `query`, `date`; `before`, `after` (0–20, default 5) | `memory_read` | The notes dated around the anchor, in date order, as `memory_search` index rows whose `reason` is `before`, `anchor` or `after`; superseded, archived and ended notes are listed and marked, candidates never |
@@ -1254,7 +1254,8 @@ pub struct SandboxPolicy {
     pub denied_capabilities: Vec<String>,
     pub require_confirmation_for: Vec<String>,
     pub max_tool_calls: Option<u32>,
-    pub max_tool_runtime_secs: u64,
+    pub max_tool_runtime_secs: u64,               // the per-tool bound
+    pub max_tool_runtime_ceiling_secs: u64,       // the most a timeout_secs gets
     pub stream_id: Option<String>,                // SSE confirmation routing
     pub lane_key: Option<String>,                 // connector confirmation routing
     pub confirmation_timeout_secs: Option<u64>,   // default 300
@@ -1263,11 +1264,16 @@ pub struct SandboxPolicy {
 }
 ```
 
-`SandboxPolicy::from_constraints(agent_id, &AgentConstraints)` builds a
-policy from an agent template's constraints
-(`max_tool_runtime_secs` defaults to 60 when the template sets no
-timeout; `unattended` starts `false` and is set by the caller that knows
-where the work came from).  The daemon's
+`SandboxPolicy::from_constraints(agent_id, &AgentConstraints, &AgentDefaults)`
+builds a policy from an agent template's constraints, its per-tool bound
+and ceiling from the daemon's `[execution.agent_defaults]` — a template's
+`timeout_seconds` is not read (N-TOOL-1b); `unattended` starts `false` and
+is set by the caller that knows where the work came from.
+`SandboxPolicy::runtime_secs_for` is the sandbox's cut for one call: a
+`shell_execute` or `Command`-backend call's `timeout_secs` (a whole number
+above 0) clamped to the ceiling, else `max_tool_runtime_secs`; a
+`Command`-backend tool's own `timeout_secs` (its TOML's) still kills it
+first where smaller.  The daemon's
 `security.auto_approve_confirmations` config flag forces
 `auto_approve = true` globally.  `auto_approve` is read before
 `unattended`.
@@ -1535,7 +1541,7 @@ When `sandbox` is `None`, tool calls return stub results with a warning —
 a misconfiguration guard, not a supported mode.
 
 `LoopConfig` fields that matter to tools: `max_tools_per_round`,
-`max_tool_runtime`, `initial_tool_choice`, `session_log` (enables the
+`initial_tool_choice`, `session_log` (enables the
 result spill), `tool_result_inline_bytes`, `span_id`, `event_bus`.
 `LoopResult.last_tool_error` keeps the last tool error (capped) for the
 runtime's no-answer line.
@@ -1676,7 +1682,8 @@ the failure is known — the loop adds none:
 | `file_write` | the system refuses the write (`PermissionDenied`), on the file or on a folder it makes above it | check the file's permissions, or write it under another path |
 | `web_fetch` | HTTP 404 | use web_search to find the correct URL first |
 | `web_fetch` | the request or the body read ran out of time | the URL may be unreachable; try a different source |
-| `shell_execute`, `Command` tools | cut at the sandbox's limit, or the shell's own 300 s | that is the most a command may run here; split the work into smaller commands that each finish sooner (`tools::platform::COMMAND_TIMED_OUT_HINT`) |
+| `shell_execute`, `Command` tools | cut by the sandbox below the most it may run — the ceiling, or a `Command` tool's own `timeout_secs` where smaller | a command may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller commands that each finish sooner (`tools::platform::command_timed_out_hint`) |
+| `shell_execute`, `Command` tools | cut by the sandbox at that most, or by the shell's own 3600 s | that is the most a command may run here; split the work into smaller commands that each finish sooner (`tools::platform::COMMAND_TIMED_OUT_HINT`) |
 | `shell_execute` | exit 127 | check that the command is installed, or give its full path |
 
 ---
@@ -1840,7 +1847,8 @@ beside it is the code default.
 [execution.agent_defaults]
 max_rounds = 15                # Max LLM loop iterations per agent
 max_tools_per_round = 5        # Max tool calls executed per LLM round
-max_tool_runtime_secs = 60     # Per-tool sandbox timeout
+max_tool_runtime_secs = 120    # Per-tool sandbox timeout, every loop
+max_tool_runtime_ceiling_secs = 600  # Most a command's timeout_secs gets
 max_cost = 1                   # Max API cost per agent run / chat turn (USD)
 confirmation_timeout_secs = 300
 
@@ -1849,7 +1857,6 @@ batch_spawn_enabled = true     # Enables spawn_subagents_batch
 max_concurrent_subagents = 6
 max_rounds = 18
 max_tools_per_round = 3
-max_tool_runtime_secs = 300
 max_cost = 5
 
 [execution.skill_defaults]     # not in the shipped file; code defaults:
@@ -1895,7 +1902,9 @@ Markdown files with YAML frontmatter.  Tool access is declared via
 `capabilities` / `denied_capabilities` (see
 [Section 4](#4-capability-based-tool-resolution)); execution constraints
 (`max_tool_calls`, `timeout_seconds`, `max_cost_per_task`, `max_rounds`,
-`require_confirmation_for`) are also frontmatter fields.  On first boot an
+`require_confirmation_for`) are also frontmatter fields; `timeout_seconds`
+names the task's time budget and nothing enforces it (no tool's limit is
+it since N-TOOL-1b).  On first boot an
 installed daemon seeds this directory with the nine shipped templates.
 
 ### Custom Tool TOML

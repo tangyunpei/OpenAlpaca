@@ -429,7 +429,13 @@ pub async fn run_lead_agent(
     if let Some(ref broker) = confirmation_broker {
         sandbox.set_confirmation_broker(broker.clone());
     }
-    let mut sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
+    // N-TOOL-1b: the lead's per-tool bound is the daemon's, read at the run's
+    // start; its template's `timeout_seconds` is not a tool's bound.
+    let mut sandbox_policy = SandboxPolicy::from_constraints(
+        &lead_agent.id,
+        &lead_agent.constraints,
+        &daemon_config.load().execution.agent_defaults,
+    );
     sandbox_policy.confirmation_timeout_secs = Some(
         daemon_config
             .load()

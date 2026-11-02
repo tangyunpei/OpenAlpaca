@@ -1371,6 +1371,20 @@ impl ToolRegistry {
                 .is_some_and(|entry| matches!(entry.backend, ToolBackend::Command { .. }))
     }
 
+    /// A `Command`-backend tool's own `timeout_secs` — its author's, from its
+    /// TOML (1–300 s, 30 by default) — which `execute_command` kills it at
+    /// whatever the sandbox allows; `None` for every other tool,
+    /// `shell_execute` among them. The sandbox's hint names the smaller of
+    /// it and the ceiling (N-TOOL-1b), the most such a call can run.
+    pub(crate) fn command_backend_timeout_secs(&self, tool_name: &str) -> Option<u64> {
+        self.tools
+            .get(tool_name)
+            .and_then(|entry| match entry.backend {
+                ToolBackend::Command { timeout_secs, .. } => Some(timeout_secs),
+                _ => None,
+            })
+    }
+
     /// Return the names of tools that use command backends (i.e., execute via shell).
     /// These should be treated like shell tools for injection sanitization.
     pub fn command_backend_tool_names(&self) -> Vec<String> {

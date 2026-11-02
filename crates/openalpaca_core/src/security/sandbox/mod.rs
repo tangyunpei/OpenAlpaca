@@ -5,7 +5,7 @@
 
 use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
-use crate::daemon_config::CircuitBreakerConfig;
+use crate::daemon_config::{AgentDefaults, CircuitBreakerConfig};
 use crate::events::SystemEvent;
 use crate::security::capabilities::{Allowlist, CapabilityManager};
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
@@ -39,7 +39,13 @@ pub struct SandboxPolicy {
     pub denied_capabilities: Vec<String>,
     pub require_confirmation_for: Vec<String>,
     pub max_tool_calls: Option<u32>,
+    /// The per-tool bound (N-TOOL-1b, B-11): `[execution.agent_defaults]
+    /// max_tool_runtime_secs` on every loop. A call that runs a command may
+    /// ask for another figure ([`Self::runtime_secs_for`]).
     pub max_tool_runtime_secs: u64,
+    /// The most such a call may ask for: `[execution.agent_defaults]
+    /// max_tool_runtime_ceiling_secs`.
+    pub max_tool_runtime_ceiling_secs: u64,
     /// SSE stream ID for routing confirmation prompts to the active chat stream.
     pub stream_id: Option<String>,
     /// Lane key for routing confirmation prompts to connectors (e.g. Telegram).
@@ -65,15 +71,23 @@ pub struct SandboxPolicy {
 }
 
 impl SandboxPolicy {
-    /// Build a SandboxPolicy from agent constraints.
-    pub fn from_constraints(agent_id: &str, constraints: &AgentConstraints) -> Self {
+    /// Build a SandboxPolicy from agent constraints, its per-tool bound and
+    /// ceiling from `tools` — the daemon's `[execution.agent_defaults]`, the
+    /// one bound every loop reads (N-TOOL-1b). A template's `timeout_seconds`
+    /// is not read: it names the task's budget, not a tool's.
+    pub fn from_constraints(
+        agent_id: &str,
+        constraints: &AgentConstraints,
+        tools: &AgentDefaults,
+    ) -> Self {
         Self {
             agent_id: agent_id.to_string(),
             allowed_capabilities: Allowlist::from_agent_constraints(constraints),
             denied_capabilities: constraints.denied_capabilities.clone(),
             require_confirmation_for: constraints.require_confirmation_for.clone(),
             max_tool_calls: constraints.max_tool_calls,
-            max_tool_runtime_secs: constraints.timeout_seconds.unwrap_or(60),
+            max_tool_runtime_secs: tools.max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs: tools.max_tool_runtime_ceiling_secs,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -81,6 +95,26 @@ impl SandboxPolicy {
             // Set by the caller that knows where the work came from; an agent
             // template says nothing about it.
             unattended: false,
+        }
+    }
+
+    /// The seconds the sandbox lets one call run (N-TOOL-1b, B-11): the
+    /// per-tool bound, or — for a call that runs a command (`runs_a_command`:
+    /// `ToolRegistry::is_command_tool`) and sends a `timeout_secs` of 1 or
+    /// more — that figure, clamped to the ceiling: a larger one runs under
+    /// the ceiling, never refused, and a smaller one under itself. A
+    /// `timeout_secs` that is not a whole number of seconds above 0 asks for
+    /// nothing; another tool's is its own argument. A `Command`-backend
+    /// tool's own `timeout_secs` (its TOML's) still stops it first where
+    /// that is smaller (`execute_command`).
+    pub fn runtime_secs_for(&self, arguments: &serde_json::Value, runs_a_command: bool) -> u64 {
+        let asked = arguments
+            .get("timeout_secs")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|secs| *secs > 0);
+        match asked {
+            Some(secs) if runs_a_command => secs.min(self.max_tool_runtime_ceiling_secs),
+            _ => self.max_tool_runtime_secs,
         }
     }
 
@@ -557,11 +591,15 @@ impl SandboxManager {
             owned
         };
 
+        // N-TOOL-1b: the sandbox's cut for this call — the policy's bound, or
+        // a command's own `timeout_secs` clamped to the ceiling.
+        let runs_a_command = self.registry.is_command_tool(&tool_call.name);
+        let runtime_secs = policy.runtime_secs_for(&tool_call.arguments, runs_a_command);
         let start = std::time::Instant::now();
         let result = if is_exempt {
             Ok(registry.execute_with_context(&tool_name, &arguments, &ctx_owned).await)
         } else {
-            let timeout = Duration::from_secs(policy.max_tool_runtime_secs);
+            let timeout = Duration::from_secs(runtime_secs);
             tokio::time::timeout(timeout, async move {
                 registry.execute_with_context(&tool_name, &arguments, &ctx_owned).await
             })
@@ -595,10 +633,7 @@ impl SandboxManager {
                 Err(err)
             }
             Err(_timeout) => {
-                let reason = format!(
-                    "Tool '{}' timed out after {}s",
-                    tool_call.name, policy.max_tool_runtime_secs
-                );
+                let reason = format!("Tool '{}' timed out after {runtime_secs}s", tool_call.name);
                 self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
                 // Timeouts are transient — record for circuit breaker
                 self.circuit_breaker
@@ -606,10 +641,19 @@ impl SandboxManager {
                 // N-TOOL-4 (Z1-13): the limit is enforced here, so a command
                 // cut at it is told what to do here — the hint is this
                 // message's own, not a guess the loop makes from its words.
-                if self.registry.is_command_tool(&tool_call.name) {
+                // Below the most it may run it names `timeout_secs`
+                // (N-TOOL-1b): the ceiling, or a `Command`-backend tool's own
+                // `timeout_secs` where that is smaller — the backend kills it
+                // there whatever a call asks.
+                if runs_a_command {
+                    let ceiling = policy.max_tool_runtime_ceiling_secs;
+                    let most_secs = self
+                        .registry
+                        .command_backend_timeout_secs(&tool_call.name)
+                        .map_or(ceiling, |own| own.min(ceiling));
                     return Err(format!(
                         "{reason}\n{}",
-                        crate::tools::platform::COMMAND_TIMED_OUT_HINT
+                        crate::tools::platform::command_timed_out_hint(runtime_secs, most_secs)
                     ));
                 }
                 Err(reason)

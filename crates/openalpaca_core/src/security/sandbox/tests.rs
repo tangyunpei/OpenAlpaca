@@ -74,6 +74,7 @@ fn make_policy(agent_id: &str) -> SandboxPolicy {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -1861,4 +1862,173 @@ fn an_explicit_confirmation_list_naming_file_write_also_asks_for_file_edit() {
     );
     assert_eq!(set(&["file_read"]), ["file_read"]);
     assert_eq!(set(&["shell_execute"]), ["shell_execute"]);
+}
+
+// ── N-TOOL-1b (B-11): one per-tool bound, a model-settable timeout_secs ──
+
+fn bounded(max_tool_runtime_secs: u64, max_tool_runtime_ceiling_secs: u64) -> SandboxPolicy {
+    SandboxPolicy {
+        max_tool_runtime_secs,
+        max_tool_runtime_ceiling_secs,
+        ..make_policy("agent1")
+    }
+}
+
+/// A template's `timeout_seconds` is the task's budget, not a tool's: the
+/// policy built from a template's constraints takes the daemon's bound and
+/// ceiling, whatever the template says.
+#[test]
+fn a_policy_from_a_template_takes_the_daemons_bound_not_its_timeout_seconds() {
+    let constraints = AgentConstraints {
+        timeout_seconds: Some(600),
+        ..Default::default()
+    };
+    let policy = SandboxPolicy::from_constraints(
+        "builder-1",
+        &constraints,
+        &crate::daemon_config::AgentDefaults::default(),
+    );
+    assert_eq!(policy.max_tool_runtime_secs, 120);
+    assert_eq!(policy.max_tool_runtime_ceiling_secs, 600);
+}
+
+/// A command's `timeout_secs` is clamped to the ceiling, never refused; a
+/// smaller one is its own bound; nothing usable asks for nothing; a tool
+/// that runs no command keeps the bound whatever its arguments hold.
+#[test]
+fn a_commands_timeout_secs_is_its_bound_up_to_the_ceiling() {
+    let policy = bounded(120, 600);
+    let asks = |arguments: serde_json::Value| policy.runtime_secs_for(&arguments, true);
+    assert_eq!(asks(serde_json::json!({"command": "make"})), 120);
+    assert_eq!(asks(serde_json::json!({"timeout_secs": 3600})), 600);
+    assert_eq!(asks(serde_json::json!({"timeout_secs": 600})), 600);
+    assert_eq!(asks(serde_json::json!({"timeout_secs": 300})), 300);
+    assert_eq!(asks(serde_json::json!({"timeout_secs": 5})), 5);
+    for nothing in [
+        serde_json::json!({"timeout_secs": 0}),
+        serde_json::json!({"timeout_secs": -5}),
+        serde_json::json!({"timeout_secs": 2.5}),
+        serde_json::json!({"timeout_secs": "300"}),
+        serde_json::json!({"timeout_secs": null}),
+        serde_json::json!("not an object"),
+    ] {
+        assert_eq!(asks(nothing.clone()), 120, "{nothing}");
+    }
+    assert_eq!(
+        policy.runtime_secs_for(&serde_json::json!({"timeout_secs": 300}), false),
+        120,
+        "a tool that runs no command keeps the bound"
+    );
+}
+
+/// Through the sandbox: a tool that runs no command is cut at the bound,
+/// whatever `timeout_secs` it was sent, and is not told about one.
+#[tokio::test]
+async fn a_tool_that_runs_no_command_is_cut_at_the_bound_whatever_it_asks() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "slow_tool".to_string(),
+                description: "slow_tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(crate::test_util::Sleeps)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let call = ToolCall {
+        id: "tc_slow".to_string(),
+        name: "slow_tool".to_string(),
+        arguments: serde_json::json!({"timeout_secs": 2}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(1, 600), &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Tool 'slow_tool' timed out after 1s");
+}
+
+/// A `Command`-backend tool running `sleep <seconds>`, its author's own
+/// `timeout_secs` (its TOML's) `own_secs`.
+fn sleeping_command_tool(seconds: &str, own_secs: u64) -> ToolRegistry {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "slow_cmd".to_string(),
+                description: "slow_cmd".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Command {
+                command: "sleep".to_string(),
+                args_template: Some(seconds.to_string()),
+                timeout_secs: own_secs,
+            },
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    registry
+}
+
+/// A `Command`-backend tool is also stopped at its author's own
+/// `timeout_secs`, whatever a call asks: one the sandbox cuts below that is
+/// told that figure — the most it can run — and not the ceiling, so the
+/// retry the hint invites can really run that long.
+#[tokio::test]
+async fn a_command_tool_cut_below_its_own_limit_is_told_that_limit_not_the_ceiling() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("5", 3)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(1, 10), &gp.ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "Tool 'slow_cmd' timed out after 1s\nHint: a command may run up to 3 seconds here — \
+         call it again with a larger timeout_secs, or split the work into smaller commands \
+         that each finish sooner."
+    );
+}
+
+/// The no-change half (an owner's decision): a call's `timeout_secs` moves
+/// the sandbox's cut, not the tool author's — asking for the 10 s ceiling,
+/// a `Command`-backend tool whose own `timeout_secs` is 2 is killed at 2 s
+/// by its backend.
+#[tokio::test]
+async fn a_command_tools_own_timeout_still_stops_it_whatever_a_call_asks() {
+    let gp = crate::test_util::GuardedProject::new();
+    let sandbox =
+        SandboxManager::with_defaults(Arc::new(sleeping_command_tool("4", 2)), EventBus::default());
+    let call = ToolCall {
+        id: "tc_cmd".to_string(),
+        name: "slow_cmd".to_string(),
+        arguments: serde_json::json!({"timeout_secs": 10}),
+    };
+    let err = sandbox
+        .execute_tool(&call, &bounded(5, 10), &gp.ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Command timed out after 2s");
 }

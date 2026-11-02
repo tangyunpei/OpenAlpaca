@@ -425,7 +425,11 @@ fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
     }
 
     let agent = doc.to_subagent("system_agent::t34", "task-1");
-    let policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+    let policy = SandboxPolicy::from_constraints(
+        &agent.id,
+        &agent.constraints,
+        &crate::daemon_config::AgentDefaults::default(),
+    );
     let set = effective_confirmation_set(&policy, &registry);
 
     for name in ["shell_execute", "file_write", "file_edit"] {
@@ -491,7 +495,11 @@ fn file_edit_comes_with_the_file_write_capability_in_every_shipped_template() {
             "{id}: file_edit on {names:?}"
         );
 
-        let mut policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+        let mut policy = SandboxPolicy::from_constraints(
+            &agent.id,
+            &agent.constraints,
+            &crate::daemon_config::AgentDefaults::default(),
+        );
         policy.admit_tool_surface(&surface);
         assert_eq!(
             CapabilityManager::check_agent_capability(

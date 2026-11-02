@@ -11,13 +11,30 @@ pub struct ExecutionConfig {
     pub artifacts: ArtifactsConfig,
 }
 
+/// The highest `max_tool_runtime_ceiling_secs` may be set to (N-TOOL-1b): the
+/// range the retired `[execution.lead_agent_defaults] max_tool_runtime_secs`
+/// had, so no figure an owner could configure before is out of reach.
+/// `shell_execute`'s own bound is this, so the sandbox's cut — at most the
+/// ceiling — always comes first.
+pub const MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS: u64 = 3600;
+
 /// Fallback defaults for regular agents (when agent TOML `[constraints]` are absent).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentDefaults {
     pub max_rounds: usize,
     pub max_tools_per_round: usize,
+    /// The per-tool bound every loop reads (N-TOOL-1b, B-11) — the main
+    /// loop, the lead, every subagent and both skill tiers: a tool call still
+    /// running after this many seconds is cut (and a command killed with
+    /// what it started, R45). A template's `timeout_seconds` does not move
+    /// it.
     pub max_tool_runtime_secs: u64,
+    /// The most a call's own `timeout_secs` may ask for, on `shell_execute`
+    /// and the `Command`-backend tools: a larger figure is clamped to this,
+    /// never refused. Never below `max_tool_runtime_secs` (`validate` raises
+    /// it to that).
+    pub max_tool_runtime_ceiling_secs: u64,
     pub max_cost: f64,
     /// Timeout for interactive tool confirmation prompts (seconds).
     #[serde(default = "default_confirmation_timeout")]
@@ -33,20 +50,22 @@ impl Default for AgentDefaults {
         Self {
             max_rounds: 15,
             max_tools_per_round: 5,
-            max_tool_runtime_secs: 60,
+            max_tool_runtime_secs: 120,
+            max_tool_runtime_ceiling_secs: 600,
             max_cost: 1.00,
             confirmation_timeout_secs: default_confirmation_timeout(),
         }
     }
 }
 
-/// Fallback defaults for lead/orchestrating agents.
+/// Fallback defaults for lead/orchestrating agents. The lead's per-tool bound
+/// is `AgentDefaults`' (N-TOOL-1b): this table's `max_tool_runtime_secs`
+/// reached no policy and is gone, warned about at boot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LeadAgentDefaults {
     pub max_rounds: usize,
     pub max_tools_per_round: usize,
-    pub max_tool_runtime_secs: u64,
     pub max_cost: f64,
     /// Maximum number of concurrent subagents a single lead agent can have running.
     pub max_concurrent_subagents: usize,
@@ -66,7 +85,6 @@ impl Default for LeadAgentDefaults {
         Self {
             max_rounds: 18,
             max_tools_per_round: 3,
-            max_tool_runtime_secs: 300,
             max_cost: 5.0,
             max_concurrent_subagents: 6,
             batch_spawn_enabled: true,
