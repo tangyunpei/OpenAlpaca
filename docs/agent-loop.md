@@ -180,6 +180,31 @@ figure is read once, at the run's start, so the one the lead is told is the
 one enforced. A lifetime backstop far above normal use; the concurrency
 bound and the queueing are unchanged.
 
+**A subagent's objective is its brief** (SA-2). The lead's prompt
+(`<workflow>` step 2) and both spawn tools — their descriptions and their
+`objective` parameter — say to write each objective as a self-contained
+brief: the goal, the inputs it needs, the constraints, and what to return
+and where, since a subagent is given neither the user's request nor the
+lead's conversation. A file-based template's subagent gets it as the user
+turn it answers — while the request fits, the last message, after any
+memory block or working-folder line — and again as a second system
+message: the context package's task description
+(`ContextManager::distill`), which Layer 3 routes there because the spawn
+site does not drop it. Anthropic's request joins that copy to the system
+text, OpenAI and Ollama send it as a second system message, and every
+compaction tier keeps it, as it keeps `messages[..2]`; the composed system
+prompt itself holds neither. The subagent's window bounds the brief twice:
+the copy is distilled into at most 40% of it (`SUB_AGENT_CONTEXT_RATIO`),
+past which it is cut and marked `[...truncated]`, and Layer 5's trim
+(`TRIM_THRESHOLD`, 75%) drops the user turn, the request's only non-system
+message, which a brief counted twice reaches at about 37.5% — on an
+8,192-token model, a brief of 12,800 characters arrives as the system copy
+alone. The span row and the lane's `subagent_open` record keep the
+objective's first 500 characters, and two log lines a preview (80 bytes;
+50 characters) — records only. A plugin-backed template's executor is
+handed it after the composed system prompt, as `Objective: …` in its
+instructions, and as its context's `objective`.
+
 **Each result reaches the lead once** (N-LEAD-3). `wait_for_subagents`
 returns the subagents it has not reported yet — a finished one's answer as
 its head and its tail, the byte budget shared among those entries alone

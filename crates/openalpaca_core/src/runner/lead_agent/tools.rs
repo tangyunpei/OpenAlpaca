@@ -1293,6 +1293,17 @@ impl BuiltInTool for SpawnSubagentsBatchTool {
     }
 }
 
+/// The `objective` parameter's description on both spawn tools (SA-2): an
+/// objective is the subagent's brief — the user turn it answers — so the
+/// parameter says what a brief holds. It names no length: the subagent's
+/// window bounds a brief (`ContextManager::distill`, Layer 5's trim), by a
+/// figure the lead is not told.
+const OBJECTIVE_DESCRIPTION: &str = "A self-contained brief for the subagent: the goal (what to \
+     achieve, and why); the inputs it needs (facts, file paths, workspace keys, earlier \
+     results); the constraints (scope, limits, what not to do); and what to return and where \
+     (what its answer must hold, and any file or workspace key it is to write). The subagent \
+     is given neither the user's request nor this conversation, only this brief.";
+
 /// Tool definition for `spawn_subagents_batch`.
 pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> ToolDefinition {
     let agent_descriptions: Vec<String> = templates
@@ -1317,10 +1328,11 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
         name: "spawn_subagents_batch".to_string(),
         description: format!(
             "Spawn multiple subagents in a single call (1-8). More efficient than calling \
-             spawn_subagent repeatedly. Each entry specifies an agent_id and objective. \
-             Every entry returns its run_id at once; up to this run's concurrency bound they \
-             run in parallel, and the rest are queued and start as slots free. Use \
-             wait_for_subagents to collect results.\n\nAvailable agents:\n{}",
+             spawn_subagent repeatedly. Each entry specifies an agent_id and an objective, \
+             written as a self-contained brief: the goal, the inputs it needs, the constraints, \
+             and what to return and where. Every entry returns its run_id at once; up to this \
+             run's concurrency bound they run in parallel, and the rest are queued and start as \
+             slots free. Use wait_for_subagents to collect results.\n\nAvailable agents:\n{}",
             agents_list
         ),
         parameters: serde_json::json!({
@@ -1337,7 +1349,7 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
                             },
                             "objective": {
                                 "type": "string",
-                                "description": "A clear, specific objective for this subagent"
+                                "description": OBJECTIVE_DESCRIPTION
                             }
                         },
                         "required": ["agent_id", "objective"]
@@ -1912,11 +1924,13 @@ pub fn spawn_subagent_tool_definition_from_templates(
     ToolDefinition {
         name: "spawn_subagent".to_string(),
         description: format!(
-            "Spawn a subagent to work on a specific objective. Spawning is always immediate — \
-             it returns a run_id at once, and a subagent spawned past this run's concurrency \
-             bound is queued and starts when a slot frees, as the reply says. Spawn all \
-             independent objectives in a single round, then use wait_for_subagents to collect \
-             results. Multiple instances of the same agent can run concurrently.\n\n\
+            "Spawn a subagent to work on a specific objective, written as a self-contained \
+             brief: the goal, the inputs it needs, the constraints, and what to return and \
+             where. Spawning is always immediate — it returns a run_id at once, and a subagent \
+             spawned past this run's concurrency bound is queued and starts when a slot frees, \
+             as the reply says. Spawn all independent objectives in a single round, then use \
+             wait_for_subagents to collect results. Multiple instances of the same agent can \
+             run concurrently.\n\n\
              Available agents:\n{}",
             agents_list
         ),
@@ -1929,7 +1943,7 @@ pub fn spawn_subagent_tool_definition_from_templates(
                 },
                 "objective": {
                     "type": "string",
-                    "description": "A clear, specific objective for the subagent to accomplish"
+                    "description": OBJECTIVE_DESCRIPTION
                 }
             },
             "required": ["agent_id", "objective"]

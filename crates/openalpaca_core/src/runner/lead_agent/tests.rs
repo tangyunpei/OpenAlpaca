@@ -907,11 +907,13 @@ fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
 fn spawn_subagent_description_says_a_spawn_past_the_concurrency_bound_is_queued() {
     assert_eq!(
         spawn_subagent_tool_definition_from_templates(&[]).description,
-        "Spawn a subagent to work on a specific objective. Spawning is always immediate — \
-         it returns a run_id at once, and a subagent spawned past this run's concurrency \
-         bound is queued and starts when a slot frees, as the reply says. Spawn all \
-         independent objectives in a single round, then use wait_for_subagents to collect \
-         results. Multiple instances of the same agent can run concurrently.\n\n\
+        "Spawn a subagent to work on a specific objective, written as a self-contained brief: \
+         the goal, the inputs it needs, the constraints, and what to return and where. \
+         Spawning is always immediate — it returns a run_id at once, and a subagent spawned \
+         past this run's concurrency bound is queued and starts when a slot frees, as the \
+         reply says. Spawn all independent objectives in a single round, then use \
+         wait_for_subagents to collect results. Multiple instances of the same agent can run \
+         concurrently.\n\n\
          Available agents:\nNo agents available."
     );
 }
@@ -978,6 +980,270 @@ fn the_routers_per_key_default_holds_a_full_batch() {
     assert!(
         per_key > bound,
         "per_key_concurrency ({per_key}) leaves no permit for the lead beside its {bound} subagents"
+    );
+}
+
+// ── SA-2: the objective is a self-contained brief ────────────────────
+
+/// What both spawn tools say an `objective` holds (SA-2).
+const OBJECTIVE_PARAMETER: &str = "A self-contained brief for the subagent: the goal (what to \
+     achieve, and why); the inputs it needs (facts, file paths, workspace keys, earlier \
+     results); the constraints (scope, limits, what not to do); and what to return and where \
+     (what its answer must hold, and any file or workspace key it is to write). The subagent \
+     is given neither the user's request nor this conversation, only this brief.";
+
+/// SA-2: the batch's description, pinned whole, says each objective is a
+/// brief, and both tools' `objective` parameters say what a brief holds.
+#[test]
+fn the_batch_description_and_both_objective_parameters_say_what_a_brief_holds() {
+    let single = spawn_subagent_tool_definition_from_templates(&[]);
+    let batch = spawn_subagents_batch_tool_definition(&[]);
+    assert_eq!(
+        batch.description,
+        "Spawn multiple subagents in a single call (1-8). More efficient than calling \
+         spawn_subagent repeatedly. Each entry specifies an agent_id and an objective, \
+         written as a self-contained brief: the goal, the inputs it needs, the constraints, \
+         and what to return and where. Every entry returns its run_id at once; up to this \
+         run's concurrency bound they run in parallel, and the rest are queued and start as \
+         slots free. Use wait_for_subagents to collect results.\n\n\
+         Available agents:\nNo agents available."
+    );
+    assert_eq!(
+        single.parameters["properties"]["objective"]["description"],
+        OBJECTIVE_PARAMETER
+    );
+    let entry = &batch.parameters["properties"]["subagents"]["items"];
+    assert_eq!(
+        entry["properties"]["objective"]["description"],
+        OBJECTIVE_PARAMETER
+    );
+}
+
+/// SA-2: the lead prompt and both spawn tools — their descriptions and their
+/// `objective` parameters — name the brief's four parts in the same words,
+/// and the prompt and the parameters say why it must stand on its own.
+#[test]
+fn every_lead_surface_says_the_objective_is_a_self_contained_brief() {
+    let engine = crate::compose::ComposeEngine::new(16);
+    let prompt = build_lead_agent_prompt_from_templates(
+        &engine,
+        "Test persona",
+        &[],
+        200_000,
+        None,
+        None,
+        None,
+        48,
+    );
+    let single = spawn_subagent_tool_definition_from_templates(&[]);
+    let batch = spawn_subagents_batch_tool_definition(&[]);
+    let parameter = |def: &ToolDefinition, pointer: &str| {
+        def.parameters
+            .pointer(pointer)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let single_objective = parameter(&single, "/properties/objective/description");
+    let batch_objective = parameter(
+        &batch,
+        "/properties/subagents/items/properties/objective/description",
+    );
+    let surfaces = [
+        ("prompt", prompt.as_str(), true),
+        ("spawn_subagent", single.description.as_str(), false),
+        ("batch", batch.description.as_str(), false),
+        ("spawn_subagent objective", single_objective.as_str(), true),
+        ("batch objective", batch_objective.as_str(), true),
+    ];
+    for (surface, text, says_why) in surfaces {
+        for part in [
+            "self-contained brief",
+            "the goal",
+            "the inputs it needs",
+            "the constraints",
+            "what to return and where",
+        ] {
+            assert!(text.contains(part), "{surface} lacks {part:?}: {text}");
+        }
+        if says_why {
+            assert!(
+                text.contains("given neither the user's request nor this conversation"),
+                "{surface}: {text}"
+            );
+        }
+    }
+}
+
+/// A brief of exactly `chars` characters, its head and its tail tagged `tag`.
+fn sa2_brief(tag: &str, chars: usize) -> String {
+    let head = format!("BRIEF-{tag}-HEAD goal: weigh every alpaca. ");
+    let tail = format!(" return the weights to the lead. BRIEF-{tag}-TAIL");
+    let fill = chars - head.chars().count() - tail.chars().count();
+    let body: String = "inputs: the herd in the lower field; constraints: no shearing. "
+        .chars()
+        .cycle()
+        .take(fill)
+        .collect();
+    let text = format!("{head}{body}{tail}");
+    assert_eq!(text.chars().count(), chars);
+    text
+}
+
+/// SA-2's characterization, true before and after it: a file-based (LLM)
+/// template's subagent at the default window is given a 4,000-character
+/// objective whole as the user turn it answers — the last message, after any
+/// memory block or working-folder line — by `spawn_subagent` and by an entry
+/// of `spawn_subagents_batch` alike; the 500-character span and
+/// `subagent_open` record and the log lines' previews are records only. The
+/// composed system prompt, `messages[0]`, holds none of it; but the context
+/// package's task description (`ContextManager::distill`) reaches Layer 3,
+/// which routes it to a second system message, `messages[1]`, a whole copy —
+/// the spawn site does not drop it as `build_subagent_minimal`'s doc asks.
+/// Anthropic's request joins it to the system text, and every compaction tier
+/// keeps `messages[..2]`, so it is the copy that survives a compaction. A
+/// change that drops the section turns this test, deliberately. What bounds a
+/// longer brief is the next test's. (A plugin-backed template's executor is
+/// handed the objective after the system prompt instead,
+/// `test_spawn_subagent_executes_plugin_backed_template`.)
+#[tokio::test]
+async fn a_file_based_subagent_gets_a_long_brief_whole_as_its_turn_and_a_system_copy() {
+    let (single_brief, batch_brief) = (sa2_brief("SINGLE", 4_000), sa2_brief("BATCH", 4_000));
+
+    let provider = ScriptedProvider::new(vec![
+        scripted_response("done", vec![]),
+        scripted_response("done", vec![]),
+    ]);
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(spawn_tool_bounded(
+        scripted_router(provider.clone()),
+        shared,
+        tracker.clone(),
+        6,
+    ));
+    spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": single_brief}))
+        .await
+        .unwrap();
+    SpawnSubagentsBatchTool::new(spawn.clone())
+        .execute(&serde_json::json!({
+            "subagents": [{"agent_id": "worker", "objective": batch_brief}]
+        }))
+        .await
+        .unwrap();
+    eventually("both subagents finished", || tracker.all_done()).await;
+
+    let requests = provider.seen_messages.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "one model call per subagent");
+    for (tag, brief) in [("SINGLE", &single_brief), ("BATCH", &batch_brief)] {
+        let head = format!("BRIEF-{tag}-HEAD");
+        let messages = requests
+            .iter()
+            .find(|m| m.iter().any(|m| m.content.contains(&head)))
+            .unwrap_or_else(|| panic!("no subagent was given the {tag} brief"));
+        let turn = messages.last().unwrap();
+        assert_eq!(turn.role, openalpaca_llm::Role::User, "{tag}");
+        assert_eq!(
+            &turn.content, brief,
+            "{tag}: the brief whole, as the user turn"
+        );
+        let system = &messages[0];
+        assert_eq!(system.role, openalpaca_llm::Role::System, "{tag}");
+        assert!(
+            !system.content.contains(&head)
+                && !system.content.contains(&format!("BRIEF-{tag}-TAIL")),
+            "{tag}: the brief reached the composed system prompt"
+        );
+        let copy = &messages[1];
+        assert_eq!(copy.role, openalpaca_llm::Role::System, "{tag}");
+        assert_eq!(
+            &copy.content, brief,
+            "{tag}: the task description's copy, whole"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.content.contains(&head))
+                .count(),
+            2,
+            "{tag}: the brief is given twice, the copy and the user turn"
+        );
+    }
+}
+
+/// SA-2's bounds, true before and after it: nothing cuts a brief on its way
+/// to a file-based template's subagent, but the subagent's window bounds it
+/// twice. The task description's copy is distilled into at most 40% of the
+/// window (`ContextManager::distill`, `SUB_AGENT_CONTEXT_RATIO`), past which
+/// it is cut and marked `[...truncated]`; and Layer 5's trim
+/// (`assembly::compose`, `TRIM_THRESHOLD`) drops the oldest non-system
+/// message while the request is over 75% of the window — the user turn, the
+/// only one — which a brief, counted twice, reaches at about 37.5%. On an
+/// 8,192-token model (M5's local case) a 12,800-character brief (3,200
+/// tokens, within the copy's 3,276) reaches the subagent as its system copy
+/// alone, with no user turn, and a 20,000-character one as that copy cut to
+/// its first 13,104 characters. A change that keeps the user turn or drops
+/// the copy turns this test, deliberately: both are the owner's decisions.
+#[tokio::test]
+async fn a_brief_past_its_share_of_a_small_window_loses_its_user_turn_then_its_tail() {
+    let (mid, long) = (sa2_brief("MID", 12_800), sa2_brief("LONG", 20_000));
+    let provider = ScriptedProvider::new(vec![
+        scripted_response("done", vec![]),
+        scripted_response("done", vec![]),
+    ]);
+    let router = scripted_router(provider.clone());
+    let mut info = router
+        .model_registry()
+        .get_model_info("claude-sonnet-4-20250514")
+        .unwrap();
+    info.context_window = 8_192;
+    router
+        .model_registry()
+        .register("claude-sonnet-4-20250514".to_string(), info);
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = spawn_tool_bounded(router, shared, tracker.clone(), 6);
+    for brief in [&mid, &long] {
+        spawn
+            .execute(&serde_json::json!({"agent_id": "worker", "objective": brief}))
+            .await
+            .unwrap();
+    }
+    eventually("both subagents finished", || tracker.all_done()).await;
+
+    let requests = provider.seen_messages.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "one model call per subagent");
+    let given = |tag: &str| {
+        let head = format!("BRIEF-{tag}-HEAD");
+        requests
+            .iter()
+            .find(|m| m.iter().any(|m| m.content.contains(&head)))
+            .unwrap_or_else(|| panic!("no subagent was given the {tag} brief"))
+            .clone()
+    };
+    for tag in ["MID", "LONG"] {
+        let messages = given(tag);
+        assert_eq!(messages.len(), 2, "{tag}: the system prompt and the copy");
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.role == openalpaca_llm::Role::System),
+            "{tag}: no user turn"
+        );
+        assert!(
+            !messages[0].content.contains(&format!("BRIEF-{tag}-HEAD")),
+            "{tag}: the brief reached the composed system prompt"
+        );
+    }
+    assert_eq!(given("MID")[1].content, mid, "the copy whole, within 40%");
+    // 40% of 8,192 tokens is 3,276, at four characters a token.
+    assert_eq!(
+        given("LONG")[1].content,
+        format!("{}\n[...truncated]", &long[..13_104]),
+        "the copy cut at 40% of the window, its tail gone"
     );
 }
 

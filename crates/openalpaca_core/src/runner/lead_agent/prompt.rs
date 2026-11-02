@@ -129,9 +129,9 @@ pub fn build_lead_agent_prompt_from_templates(
 
     // ── The 8 lead-agent raw blocks in canonical registration order. ──────
     // String constants copied verbatim from the pre-migration
-    // PromptBuilder chain, but for what step 3 and the `<tools>` line say
-    // queues a spawn (N-LLM-1) and step 3's last sentence (N-LEAD-6); the
-    // exact bytes are load-bearing.
+    // PromptBuilder chain, but for step 2's brief (SA-2), what step 3 and
+    // the `<tools>` line say queues a spawn (N-LLM-1) and step 3's last
+    // sentence (N-LEAD-6); the exact bytes are load-bearing.
     let role_text = "<role>\n\
          You are a Lead Agent orchestrating a complex task. You are responsible for analyzing \
          the user's request, decomposing it into sub-objectives, delegating work to specialized \
@@ -142,7 +142,10 @@ pub fn build_lead_agent_prompt_from_templates(
     let workflow_text = format!(
         "<workflow>\n\
          Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
-         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
+         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
+         constraints, and what to return and where — since a subagent is given neither the \
+         user's request nor this conversation, only its brief.\n\
          Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
          sub-objective to the best agent by skills. Spawning is always immediate — each spawn \
          returns its run_id at once, and a subagent spawned past this run's concurrency bound is \

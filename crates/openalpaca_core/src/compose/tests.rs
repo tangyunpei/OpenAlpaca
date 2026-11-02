@@ -2786,7 +2786,10 @@ fn test_golden_lead_agent_byte_identical() {
          </role>";
     let workflow_text = "<workflow>\n\
          Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
-         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
+         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
+         constraints, and what to return and where — since a subagent is given neither the \
+         user's request nor this conversation, only its brief.\n\
          Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
          sub-objective to the best agent by skills. Spawning is always immediate — each spawn \
          returns its run_id at once, and a subagent spawned past this run's concurrency bound is \
