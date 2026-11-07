@@ -36,7 +36,8 @@ APACHE_TEXT = "Apache License\nVersion 2.0, January 2004\n"
 # A bun.lock in Bun's text form (JSON with trailing commas): the app's workspace depends on
 # `a`; `a` depends on `b` in a version nested under it (`a/b`) while the hoisted `b` is
 # another's; `a/b` optionally depends on `c`; `a` has an optional peer `e` the lock holds
-# and an optional peer `f` it does not. `d` and `x` are reached only from devDependencies.
+# and an optional peer `f` it does not. `d`, `x` and `vite` are reached only from
+# devDependencies; `vite` is the one bundled tool (gen_notices.BUNDLED_TOOLS).
 BUN_LOCK = """\
 {
   "lockfileVersion": 1,
@@ -51,6 +52,7 @@ BUN_LOCK = """\
       },
       "devDependencies": {
         "d": "1.0.0",
+        "vite": "8.3.5",
       },
     },
   },
@@ -62,8 +64,32 @@ BUN_LOCK = """\
     "d": ["d@1.0.0", "", { "dependencies": { "x": "^1.0.0" } }, "sha512-d"],
     "e": ["e@1.0.0", "", {}, "sha512-e"],
     "x": ["x@1.0.0", "", {}, "sha512-x"],
+    "vite": ["vite@8.3.5", "", {}, "sha512-v"],
   },
 }
+"""
+
+# vite's LICENSE.md in its own form: its MIT notice, then the sections on the dependencies
+# vite bundles into its own build, which are not code it writes into the app's bundle.
+VITE_NOTICE = """\
+# Vite core license
+Vite is released under the MIT license:
+
+MIT License
+
+Copyright (c) 2019-present, VoidZero Inc. and Vite contributors
+
+Permission is hereby granted.
+
+"""
+VITE_LICENCE = VITE_NOTICE + """\
+# Licenses of bundled dependencies
+The published Vite artifact additionally contains code with the following licenses:
+BSD-2-Clause, CC0-1.0, ISC, MIT
+
+# Bundled dependencies:
+## picomatch
+Picomatch's own licence
 """
 
 
@@ -115,6 +141,21 @@ def _npm_package(root: pathlib.Path, name: str, version: str, licence, files: di
     _write(d / "package.json", json.dumps(meta))
     for fname, text in files.items():
         _write(d / fname, text)
+
+
+def _vite(root: pathlib.Path, licence="MIT", files=None) -> None:
+    """vite 8.3.5 installed as Bun installs it (a peer-hash suffix on its directory), with
+    vite's LICENSE.md unless `files` says otherwise."""
+    _npm_package(root, "vite", "8.3.5", licence, {"LICENSE.md": VITE_LICENCE} if files is None else files,
+                 suffix="+9f9b3119fbf6d926")
+
+
+def _bundled_line(text: str, name: str, version: str) -> list:
+    """The lines of the licence texts beside a package that call it a build tool whose
+    runtime code the app's bundle carries."""
+    prefix = "  %s %s (" % (name, version)
+    return [line for line in text.split("\n")
+            if line.startswith(prefix) and "build tool" in line and "bundle carries" in line]
 
 
 def _crate(root: pathlib.Path, name: str, version: str, files: dict) -> str:
@@ -699,7 +740,8 @@ def test_the_js_allow_list_is_deny_tomls_with_ofl_for_the_fonts() -> None:
 def _generation_tree(root: pathlib.Path, licences: dict) -> str:
     """A tree the generator runs on end to end: both lockfiles, deny.toml and about.toml,
     the SPDX texts, node_modules holding the bun.lock closure (a, b 2.0.0, c, e) under
-    `licences`, and a stand-in cargo-about printing _about's JSON, whose path it returns."""
+    `licences` and vite 8.3.5, the bundled tool, under MIT, and a stand-in cargo-about
+    printing _about's JSON, whose path it returns."""
     _spdx(root)
     _write(root / "Cargo.lock", "version = 4\n")
     _write(root / "bun.lock", BUN_LOCK)
@@ -707,6 +749,7 @@ def _generation_tree(root: pathlib.Path, licences: dict) -> str:
     _write(root / "scripts" / "release" / "about.toml", 'accepted = ["MIT", "Apache-2.0", "MPL-2.0"]\n')
     for name, version in (("a", "1.0.0"), ("b", "2.0.0"), ("c", "1.0.0"), ("e", "1.0.0")):
         _npm_package(root, name, version, licences[name], {"LICENSE": "%s's licence\n" % name})
+    _vite(root)
     about = _write(root / "about.json", json.dumps(_about(root)))
     exe = _write(root / "cargo-about", '#!/bin/bash\nif [ "$1" = --version ]; then echo "cargo-about %s"; '
                  'else cat "%s"; fi\n' % (gen().CARGO_ABOUT_VERSION, about))
@@ -768,9 +811,104 @@ def test_generation_accepts_the_fonts_ofl_and_the_file_it_writes_passes_the_lice
         assert rc == 0, (rc, out)
         text = (root / "THIRD-PARTY-NOTICES").read_text(encoding="utf-8")
         assert gen().js_section(text) == [("a", "1.0.0", "MIT"), ("b", "2.0.0", "(MPL-2.0 OR Apache-2.0)"),
-                                          ("c", "1.0.0", "OFL-1.1"), ("e", "1.0.0", "Apache-2.0 OR MIT")]
+                                          ("c", "1.0.0", "OFL-1.1"), ("e", "1.0.0", "Apache-2.0 OR MIT"),
+                                          ("vite", "8.3.5", "MIT")]
         rc, out = _check_licences(root)
-        assert rc == 0 and "4 JavaScript packages" in out, (rc, out)
+        assert rc == 0 and "5 JavaScript packages" in out, (rc, out)
+
+
+def test_generation_lists_vite_as_a_bundled_tool_with_its_own_notice_and_check_reads_it_back() -> None:
+    """End to end: vite, a devDependency, is listed at the version bun.lock holds, given the
+    part of its LICENSE.md before the bundled dependencies' sections, the bundled-tool line
+    beside it, and counted; --check reads the file back as current."""
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        exe = _generation_tree(root, {"a": "MIT", "b": "MIT", "c": "MIT", "e": "MIT"})
+        rc, out = _generate(root, exe)
+        assert rc == 0, (rc, out)
+        text = (root / "THIRD-PARTY-NOTICES").read_text(encoding="utf-8")
+        assert "\nJavaScript packages: 5\n" in gen().header(text) + "\n", gen().header(text)
+        assert "\nvite 8.3.5: MIT\n" in text, text
+        js_texts = text[text.index("Licence texts: JavaScript packages"):]
+        assert gen().normalize(VITE_NOTICE) in js_texts, js_texts
+        assert "additionally contains" not in text and "Picomatch" not in text, js_texts
+        assert _bundled_line(text, "vite", "8.3.5"), js_texts
+        rc, out = _check(root, "--cargo-about", exe)
+        assert rc == 0 and "is current" in out, (rc, out)
+
+
+def _bundled_half(root: pathlib.Path, tools=None):
+    """The JavaScript half of the fixture lock's closure (each package under MIT, with a
+    licence file) and its bundled tools: gen_notices.BUNDLED_TOOLS unless `tools` is given."""
+    doc = gen().load_bun_lock(_write(root / "bun.lock", BUN_LOCK))
+    for name, version in (("a", "1.0.0"), ("b", "2.0.0"), ("c", "1.0.0"), ("e", "1.0.0")):
+        _npm_package(root, name, version, "MIT", {"LICENSE": "%s's licence\n" % name})
+    bundled = gen().bundled_keys(doc, "apps/openalpaca-gui", gen().BUNDLED_TOOLS if tools is None else tools)
+    return gen().js_half(root, doc, gen().bun_closure(doc, "apps/openalpaca-gui"), ALLOWED, bundled)
+
+
+def test_a_bundled_tool_outside_the_closure_is_listed_at_its_lock_version_with_its_notice_and_the_line() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = _spdx(pathlib.Path(d))
+        _vite(root)
+        # Another vite installed beside it (an older install's): the lock's version is read.
+        _npm_package(root, "vite", "8.3.4", "ISC", {"LICENSE.md": "an older vite\n"}, suffix="+9f9b3119fbf6d926")
+        half = _bundled_half(root)
+        assert half.packages == [("a", "1.0.0", "MIT"), ("b", "2.0.0", "MIT"), ("c", "1.0.0", "MIT"),
+                                 ("e", "1.0.0", "MIT"), ("vite", "8.3.5", "MIT")], half.packages
+        out = gen().render(["Cargo.lock sha256 0", "bun.lock sha256 0"], gen().Half(), half)
+        assert "\nJavaScript packages: 5\n" in gen().header(out) + "\n", gen().header(out)
+        assert "vite" in gen().header(out), "the header names the bundled tool"
+        notice = gen().normalize(VITE_NOTICE)
+        assert [t for t, g in half.groups.items() if ("vite", "8.3.5") in g.used_by] == [notice], half.groups
+        assert notice in out and "additionally contains" not in out and "Picomatch" not in out, out
+        assert "older" not in out, "the other installed vite is not read"
+        assert _bundled_line(out, "vite", "8.3.5"), out
+        assert not _bundled_line(out, "a", "1.0.0"), "a shipped package carries no bundled-tool line"
+
+
+def test_a_bundled_tool_whose_licence_the_list_does_not_allow_is_refused_by_name() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = _spdx(pathlib.Path(d))
+        _vite(root, licence="GPL-3.0-only")
+        try:
+            _bundled_half(root)
+        except gen().NoVerdict as e:
+            assert "vite 8.3.5: GPL-3.0-only" in str(e) and "a 1.0.0" not in str(e), str(e)
+        else:
+            raise AssertionError("a bundled tool under GPL-3.0-only was listed")
+
+
+def test_a_bundled_tool_the_lock_does_not_hold_is_refused_by_name() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = _spdx(pathlib.Path(d))
+        _vite(root)
+        tools = dict(gen().BUNDLED_TOOLS, nothere=gen().BUNDLED_TOOLS["vite"])
+        try:
+            _bundled_half(root, tools)
+        except gen().NoVerdict as e:
+            assert "nothere" in str(e) and "bun.lock" in str(e), str(e)
+        else:
+            raise AssertionError("a bundled tool bun.lock does not hold was listed")
+
+
+def test_a_bundled_tools_licence_file_missing_or_without_its_cut_line_is_no_verdict() -> None:
+    # The tool's own notice is read from the file it names, cut where that file's own form
+    # says; a file gone or a form that changed is named, never guessed or substituted (a
+    # standard text would drop the tool's copyright line).
+    for label, files in (("no cut line", {"LICENSE.md": VITE_LICENCE.replace("# Licenses of bundled dependencies",
+                                                                             "# Bundled")}),
+                         ("no file", {"LICENSE": VITE_NOTICE})):
+        with tempfile.TemporaryDirectory() as d:
+            root = _spdx(pathlib.Path(d))
+            _vite(root, files=files)
+            try:
+                _bundled_half(root)
+            except gen().NoVerdict as e:
+                assert "vite 8.3.5" in str(e) and "LICENSE.md" in str(e), (label, str(e))
+                assert "# Licenses of bundled dependencies" in str(e), (label, str(e))
+            else:
+                raise AssertionError("%s: vite was listed without its own notice" % label)
 
 
 def _no_licence_file(root: pathlib.Path, name: str, version: str) -> None:
@@ -796,11 +934,11 @@ def test_generation_lists_and_marks_a_package_with_no_licence_file_and_no_vendor
         assert ("\n%s\nOFL-1.1: no licence text available\n"
                 "  e 1.0.0 (ships no licence file; no standard text available)\n%s\n" % (rule, rule)) in text, text
         assert gen().js_section(text) == [("a", "1.0.0", "MIT"), ("b", "2.0.0", "MIT"), ("c", "1.0.0", "MIT"),
-                                          ("e", "1.0.0", "OFL-1.1")]
+                                          ("e", "1.0.0", "OFL-1.1"), ("vite", "8.3.5", "MIT")]
         rc, out = _check(root, "--cargo-about", exe)
         assert rc == 0 and "is current" in out, (rc, out)
         rc, out = _check_licences(root)
-        assert rc == 0 and "4 JavaScript packages" in out, (rc, out)
+        assert rc == 0 and "5 JavaScript packages" in out, (rc, out)
         rc, out = _generate(root, exe)
         assert rc == 0 and (root / "THIRD-PARTY-NOTICES").read_text(encoding="utf-8") == text, "the same bytes again"
 

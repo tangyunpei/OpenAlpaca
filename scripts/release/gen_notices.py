@@ -51,8 +51,20 @@ What it lists:
               alternative of an OR, every term of an AND, both ids of `X WITH Y`).
               `bun pm licenses` gives no licence text and does not tell a shipped
               package from a development one, so it is not used.
-              What the bundler writes into the bundle itself (Vite's module-preload
-              helper and polyfill) is no package of that closure and is not listed.
+  Bundled     the build tools whose own runtime code the bundler writes into the app's
+  tools       bundle (BUNDLED_TOOLS: vite, whose module-preload polyfill and preload
+              helper the bundle carries): devDependencies, so no package of that
+              closure. Each is read at the version bun.lock resolves the workspace's
+              name to (a tool the lock does not hold is no verdict), its licence checked
+              as a shipped package's (below), and listed among the JavaScript packages,
+              counted with them; its text is its own notice, the lines of the licence
+              file it names before the line it names (vite's LICENSE.md before "# Licenses
+              of bundled dependencies": what follows covers what vite bundles into its
+              own build, not code it writes into ours), given beside a line calling it a
+              build tool whose runtime code the bundle carries. That file gone, or that
+              line not in it once, is no verdict, never a substituted text, which would
+              drop the tool's own copyright line. A bundled tool the closure holds too is
+              listed once, as the shipped package it is.
   Licence files are a package directory's files named LICENSE*, LICENCE*, COPYING*,
   COPYRIGHT* or NOTICE* (any case), and every file in a licence directory there
   (LICENSES/, .licenses/, any case), bar an SPDX document (*.spdx). A standard text is
@@ -85,8 +97,9 @@ Exit: 0 written, current under --check, the tree's hashes recorded under --check
 or every JavaScript licence allowed under --check-licences; 1 stale under --check or
 --check-hashes, or a JavaScript licence refused under --check-licences; 2 nothing written
 or checked: a usage error, a JavaScript licence refused at generation, or no verdict (a
-lockfile, node_modules, deny.toml or the committed file that cannot be read, cargo-about
-missing, another version or failing).
+lockfile, node_modules, deny.toml or the committed file that cannot be read, a bundled
+tool bun.lock does not hold or whose notice cannot be read as BUNDLED_TOOLS says,
+cargo-about missing, another version or failing).
 """
 
 import dataclasses
@@ -141,6 +154,25 @@ class NoVerdict(Exception):
     pass
 
 
+@dataclasses.dataclass(frozen=True)
+class BundledTool:
+    """A build tool whose own runtime code the bundler writes into the app's bundle: what of
+    it the bundle carries, the licence file its notice is read from, and the line of that
+    file its own notice ends before (what follows covers what the tool bundles into its own
+    build, not code it writes into ours)."""
+    carries: str
+    licence_file: str
+    ends_before: str
+
+
+# The bundled tools (B-22's (d), taken 2026-11-06): devDependencies, so no package of the
+# JavaScript closure, whose runtime code the app's bundle carries all the same.
+BUNDLED_TOOLS = {
+    "vite": BundledTool(carries="its module-preload polyfill and preload helper", licence_file="LICENSE.md",
+                        ends_before="# Licenses of bundled dependencies"),
+}
+
+
 @dataclasses.dataclass
 class Group:
     """One licence text: what it is, and the packages it covers (substituted: given the
@@ -152,11 +184,13 @@ class Group:
 
 @dataclasses.dataclass
 class Half:
-    """One ecosystem: its packages as (name, version, licence), its texts by content, and
-    the ids it has no text for, each with the packages that ship no licence file under it."""
+    """One ecosystem: its packages as (name, version, licence), its texts by content, the
+    ids it has no text for, each with the packages that ship no licence file under it, and
+    its bundled tools, (name, version): BundledTool."""
     packages: list = dataclasses.field(default_factory=list)
     groups: dict = dataclasses.field(default_factory=dict)
     missing: dict = dataclasses.field(default_factory=dict)
+    bundled: dict = dataclasses.field(default_factory=dict)
 
     def add(self, text: str, label: str, package: tuple, substituted: bool = False) -> None:
         group = self.groups.setdefault(normalize(text), Group())
@@ -521,22 +555,60 @@ def declared_licence(pkg: pathlib.Path) -> str:
     return " ".join(str(lic).split()) if lic else ""
 
 
-def js_half(root: pathlib.Path, doc: dict, keys: list, allowed) -> Half:
-    """The packages the keys reach, with their licence texts. A package whose licence the
-    allowed licences do not satisfy is refused before any text is read, so the refusal
-    names the package; one that ships no licence file is given the standard text of each
-    id it ships under (spdx_allowed_ids)."""
+def bundled_keys(doc: dict, workspace: str, tools: dict) -> dict:
+    """{bun.lock key: BundledTool} for each bundled tool, at the version the workspace's
+    name for it resolves to; one the lock does not hold is no verdict, named."""
+    ws = doc["workspaces"].get(workspace)
+    if not isinstance(ws, dict):
+        raise NoVerdict("bun.lock has no workspace %s" % workspace)
+    out = {}
+    for name in sorted(tools):
+        key = resolve(doc["packages"], [ws.get("name", workspace)], name)
+        if key is None:
+            raise NoVerdict("bun.lock holds no %s, a bundled tool (BUNDLED_TOOLS in scripts/release/gen_notices.py)"
+                            % name)
+        out[key] = tools[name]
+    return out
+
+
+def bundled_notice(pkg: pathlib.Path, name: str, version: str, tool: BundledTool) -> str:
+    """A bundled tool's own notice: the lines of its licence file before `ends_before`,
+    which must be in it once. The file gone or its form changed is no verdict, never a
+    substituted text, which would drop the tool's own copyright line."""
+    where = "%s %s, a bundled tool, has no %s whose own notice ends before \"%s\"" % (
+        name, version, tool.licence_file, tool.ends_before)
+    if tool.licence_file not in {p.name for p in listing(pkg)}:
+        raise NoVerdict("%s: it ships no such file; read its licence files again and update BUNDLED_TOOLS" % where)
+    lines = normalize(read_text(pkg / tool.licence_file)).split("\n")
+    if lines.count(tool.ends_before) != 1 or not "".join(lines[:lines.index(tool.ends_before)]).strip():
+        raise NoVerdict("%s: that line is not in it once after a notice; read the file again and update "
+                        "BUNDLED_TOOLS" % where)
+    return "\n".join(lines[:lines.index(tool.ends_before)])
+
+
+def js_half(root: pathlib.Path, doc: dict, keys: list, allowed, bundled=None) -> Half:
+    """The packages the keys reach and the bundled tools (bundled_keys) they do not, with
+    their licence texts. A package or tool whose licence the allowed licences do not
+    satisfy is refused before any text is read, so the refusal names it; a package that
+    ships no licence file is given the standard text of each id it ships under
+    (spdx_allowed_ids); a bundled tool its own notice (bundled_notice)."""
+    tools = {key: tool for key, tool in (bundled or {}).items() if key not in keys}
     installed = []
-    for key in keys:
+    for key in list(keys) + sorted(tools):
         name, version = name_version(doc["packages"][key])
         pkg = installed_dir(root, name, version)
-        installed.append((name, version, declared_licence(pkg), pkg))
+        installed.append((name, version, declared_licence(pkg), pkg, tools.get(key)))
     refused = licence_refusals([p[:3] for p in installed], allowed)
     if refused:
         raise NoVerdict(refusal(refused))
     half = Half()
-    for name, version, licence, pkg in installed:
+    for name, version, licence, pkg, tool in installed:
         half.packages.append((name, version, licence))
+        if tool is not None:
+            half.bundled[(name, version)] = tool
+            half.add(bundled_notice(pkg, name, version, tool),
+                     "%s as shipped, the lines before \"%s\"" % (tool.licence_file, tool.ends_before), (name, version))
+            continue
         shipped = licence_files(pkg)
         for fname, text in shipped:
             half.add(text, "%s as shipped" % fname, (name, version))
@@ -722,7 +794,9 @@ def render_texts(title: str, half: Half) -> list:
     for text, group in sorted(half.groups.items(), key=order):
         out += [THIN, "; ".join(sorted(group.labels))]
         for name, version in sorted(group.used_by | group.substituted, key=lambda p: package_key(p)):
-            mark = " (ships no licence file)" if (name, version) in group.substituted else ""
+            tool = half.bundled.get((name, version))
+            mark = (" (ships no licence file)" if (name, version) in group.substituted
+                    else " (a build tool: the app's bundle carries %s)" % tool.carries if tool else "")
             out.append("  %s %s%s" % (name, version, mark))
         out += [THIN, "", text.rstrip("\n"), ""]
     for ident, packages in sorted(half.missing.items()):
@@ -739,8 +813,9 @@ def render(hashes: list, rust: Half, js: Half) -> str:
         "",
         "The OpenAlpaca release carries the third-party software listed here: the",
         "Rust crates its daemon (openalpacad), CLI (openalpaca) and app",
-        "(openalpaca_gui) link, and the JavaScript packages its app's frontend",
-        "ships. Each licence text is given once, after the packages it covers.",
+        "(openalpaca_gui) link, the JavaScript packages its app's frontend ships,",
+        "and the build tools whose runtime code that frontend carries. Each",
+        "licence text is given once, after the packages it covers.",
         "",
         "Generated by scripts/release/gen_notices.py; do not edit by hand.",
         "scripts/release/package-macos.sh refuses to package while a hash below",
@@ -749,6 +824,7 @@ def render(hashes: list, rust: Half, js: Half) -> str:
     ] + list(hashes) + [
         "Rust crates: cargo-about %s, %s" % (CARGO_ABOUT_VERSION, ABOUT_TOML),
         "JavaScript packages: %s's dependencies, closed over bun.lock" % GUI_WORKSPACE,
+        "JavaScript bundled tools: %s" % (", ".join(sorted(name for name, _ in js.bundled)) or "none"),
         "Substituted texts: spdx/license-list-data %s, %s" % (SPDX_TAG, SPDX_DIR),
         "",
         "Rust crates: %d" % len(rust.packages),
@@ -775,7 +851,8 @@ def generate(root: pathlib.Path, exe) -> str:
     hashes = hash_lines(root)
     rust = rust_half(root, run_cargo_about(root, find_cargo_about(exe)), deny_allow(read_text(root / "deny.toml")))
     doc = load_bun_lock(root / "bun.lock")
-    js = js_half(root, doc, bun_closure(doc, GUI_WORKSPACE), js_allowed(read_text(root / "deny.toml")))
+    js = js_half(root, doc, bun_closure(doc, GUI_WORKSPACE), js_allowed(read_text(root / "deny.toml")),
+                 bundled_keys(doc, GUI_WORKSPACE, BUNDLED_TOOLS))
     if hash_lines(root) != hashes:
         raise NoVerdict("a lockfile changed while the notices were generated; run it again")
     return render(hashes, rust, js)

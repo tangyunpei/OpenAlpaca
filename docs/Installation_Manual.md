@@ -55,9 +55,14 @@ from, and the script stops, naming the stale lockfile, when either is not the
 tree's. Regenerate it with `python3.11 -I scripts/release/gen_notices.py`
 (after `bun install --frozen-lockfile`; it needs cargo-about 0.9.2, and prints
 the command that installs it) and commit it with the lockfiles; never edit it
-by hand. The generator refuses, writing nothing and naming each, a JavaScript
-package whose licence `deny.toml`'s `[licenses] allow` list does not admit
-(OFL-1.1, the fonts', is admitted for JavaScript alone); CI checks the
+by hand. Beside the packages the app's frontend ships, it lists as bundled
+tools the build tools whose own runtime code the frontend's bundle carries
+though they are devDependencies (`BUNDLED_TOOLS` in the generator: vite, whose
+module-preload polyfill and preload helper the bundle carries), each with its
+own licence notice. The generator refuses, writing nothing and naming each, a
+JavaScript package or bundled tool whose licence `deny.toml`'s
+`[licenses] allow` list does not admit (OFL-1.1, the fonts', is admitted for
+JavaScript alone); CI checks the
 committed file's JavaScript licences the same way. CI also fails a push to
 `main` or a pull request whose lockfiles are not the ones the committed file
 records, naming the stale one (`gen_notices.py --check-hashes`), so a change
@@ -93,7 +98,8 @@ Package contents:
 - `manifest.json` — build metadata: `name`, `version`, `target`, `built_at_utc`, `git_sha`
 - `LICENSE` — OpenAlpaca's own licence (MIT)
 - `THIRD-PARTY-NOTICES` — every third-party Rust crate and JavaScript package
-  the release ships, each with its licence text; the app carries both files
+  the release ships, and each build tool whose runtime code its app's bundle
+  carries, each with its licence text; the app carries both files
   in `openalpaca-gui.app/Contents/Resources/`, where an installed app keeps them
 
 Note: binaries and the `.app` bundle are **not codesigned and not notarised**.
