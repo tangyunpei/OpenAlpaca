@@ -548,7 +548,6 @@ capabilities:
 denied_capabilities:
   - "web_access"
 max_tool_calls: 50
-timeout_seconds: 600
 ---
 ```
 
@@ -1913,8 +1912,9 @@ Markdown files with YAML frontmatter.  Tool access is declared via
 [Section 4](#4-capability-based-tool-resolution)); execution constraints
 (`max_tool_calls`, `timeout_seconds`, `max_cost_per_task`, `max_rounds`,
 `require_confirmation_for`) are also frontmatter fields; `timeout_seconds`
-names the task's time budget and nothing enforces it (no tool's limit is
-it since N-TOOL-1b).  On first boot an
+is accepted, names the task's time budget, and nothing enforces it (no
+tool's limit is it since N-TOOL-1b), so the shipped templates no longer
+set it.  On first boot an
 installed daemon seeds this directory with the nine shipped templates.
 
 ### Custom Tool TOML

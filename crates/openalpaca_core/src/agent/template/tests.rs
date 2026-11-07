@@ -651,6 +651,61 @@ fn all_nine_templates_name_memory_read() {
     assert!(seen >= 9, "every shipped template was checked, not {seen}");
 }
 
+/// TEMPLATE-TIMEOUT: nothing enforces a template's `timeout_seconds` since
+/// N-TOOL-1b (every loop's per-tool bound is `[execution.agent_defaults]
+/// max_tool_runtime_secs`), so no shipped template sets one — read from the
+/// file's frontmatter lines, not only from what the parser keeps.
+#[test]
+fn no_shipped_template_sets_timeout_seconds() {
+    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
+    let mut seen = 0;
+    let mut setting = Vec::new();
+    for entry in std::fs::read_dir(&agents).expect("the shipped templates are in the checkout") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_agent_markdown(&body)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        let in_frontmatter = body
+            .lines()
+            .skip_while(|line| line.trim() != "---")
+            .skip(1)
+            .take_while(|line| line.trim() != "---")
+            .any(|line| line.trim_start().starts_with("timeout_seconds:"));
+        if in_frontmatter || doc.frontmatter.timeout_seconds.is_some() {
+            setting.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+        seen += 1;
+    }
+    setting.sort();
+    assert!(
+        setting.is_empty(),
+        "shipped templates still set timeout_seconds: {setting:?}"
+    );
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
+/// TEMPLATE-TIMEOUT: the key's declarations stay, so a person's own template
+/// that still sets `timeout_seconds` parses and loads — accepted, carried to
+/// the subagent's constraints, and enforced by nothing.
+#[test]
+fn a_template_that_sets_timeout_seconds_still_parses_and_loads() {
+    assert!(VALID_AGENT.contains("\ntimeout_seconds: 600\n"));
+    let doc = parse_agent_markdown(VALID_AGENT).expect("should parse");
+    assert_eq!(doc.frontmatter.timeout_seconds, Some(600));
+
+    let registry = crate::agent::AgentRegistry::new();
+    assert!(registry.register_template(doc.clone()));
+    let loaded = registry
+        .get_template("code_agent")
+        .expect("the template is in the catalog");
+    assert_eq!(loaded.frontmatter.timeout_seconds, Some(600));
+    let agent = loaded.to_subagent("a1", "task-1");
+    assert_eq!(agent.constraints.timeout_seconds, Some(600));
+}
+
 /// Design 09 §5 (LQ3): the owner's installed `config/agents/` is never
 /// re-seeded, so an internal template that does not name `memory_read` is
 /// granted it on the way to a subagent — in its capabilities, which tool

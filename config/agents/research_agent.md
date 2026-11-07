@@ -18,7 +18,6 @@ model: "claude-sonnet-4-6"
 fallback_models:
   - "claude-opus-4-6"
 max_tool_calls: 12
-timeout_seconds: 180
 max_cost_per_task: 0.35
 max_rounds: 8
 ---
