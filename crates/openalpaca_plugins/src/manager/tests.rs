@@ -2899,6 +2899,70 @@ mcp_compatible = true
         );
     }
 
+    /// **The `HandleHeld` unwind leaves the live load's refusal listed**
+    /// (subagent design §2.4 L-1): when the live load of the plugin was
+    /// itself refused the id, a second attempt refused at E5 recorded
+    /// nothing, so it takes nothing back. The unwind used to forget every
+    /// refusal of the plugin's, and the holder's row stopped naming a
+    /// plugin that is still on until its next load.
+    #[tokio::test]
+    async fn a_refused_publish_leaves_the_live_loads_refusal_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"writing_agent"}"#).unwrap();
+        let h = Harness::new(tmp.path());
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        load_running_stub(&h, "echo-test").await;
+        let not_used = |h: &Harness| h.agents.provenance("writing_agent").unwrap().not_used;
+        assert_eq!(not_used(&h), refused_by("echo-test"), "listed at load");
+
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir, CHANNEL_DEFAULT_TIMEOUT).unwrap();
+        let generation = h.manager.ledger.generation(&ext("echo-test")).unwrap();
+        let bridge = Arc::new(PluginAgentBridge::new(
+            "echo-test".to_string(),
+            "writing_agent".to_string(),
+            intruder.channel.clone(),
+            generation,
+            Arc::clone(&h.manager.ledger),
+        ));
+        let discovered = Discovered {
+            tools: Vec::new(),
+            connector: None,
+            provider: None,
+            models: Vec::new(),
+            skill: None,
+            agent: Some(build_agent_template_from_info(
+                &serde_json::json!({"id": "writing_agent"}),
+                "echo-test",
+                bridge,
+            )),
+        };
+
+        let err = h
+            .manager
+            .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
+            .await
+            .expect_err("E5 published over a live handle");
+        assert!(
+            matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test"),
+            "expected HandleHeld, got {err:?}"
+        );
+
+        assert_eq!(
+            not_used(&h),
+            refused_by("echo-test"),
+            "the refused attempt took back the live load's refusal"
+        );
+    }
+
     /// **A reload over an unreadable store leaves the row alone** (design §3.2:
     /// "Nothing is ever left in `Enabling`/`Disabling` because of a disk
     /// error").

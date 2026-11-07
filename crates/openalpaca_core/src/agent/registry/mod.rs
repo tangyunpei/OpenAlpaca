@@ -108,6 +108,18 @@ pub struct NotUsed {
     pub plugin: Option<String>,
 }
 
+/// What `register_template_reporting` did with a template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registration {
+    /// It went into its layer.
+    Registered,
+    /// Another layer holds the id. `recorded` is whether this call listed
+    /// a plugin as refused the id (`plugin_refused`): false for a template
+    /// that is not a plugin's, and for a plugin listed already — by a load
+    /// of it that is still live, which a later attempt must not take back.
+    Refused { recorded: bool },
+}
+
 /// Where a resolved template comes from, as `AgentRegistry::provenance`
 /// answers it. `AgentSource` keeps its one meaning, where execution runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,16 +450,26 @@ impl AgentRegistry {
     /// A plugin's template (`AgentSource::Plugin`) goes into the plugin
     /// layer, any other into the file layer with no path.
     pub fn register_template(&self, template: AgentTemplate) -> bool {
+        self.register_template_reporting(template) == Registration::Registered
+    }
+
+    /// `register_template`, saying whether a refusal recorded a plugin as
+    /// refused the id: the plugin manager's unwind of a load it gives up
+    /// takes back only a refusal that load recorded
+    /// (`forget_plugin_refusal`).
+    pub fn register_template_reporting(&self, template: AgentTemplate) -> Registration {
         let mut templates = self.lock_templates();
         let id = template.frontmatter.id.clone();
         if templates.holds(&id) {
+            let mut recorded = false;
             if let AgentSource::Plugin { plugin_id, .. } = &template.source {
                 let refused = templates.refused.entry(id).or_default();
                 if !refused.contains(plugin_id) {
                     refused.push(plugin_id.clone());
+                    recorded = true;
                 }
             }
-            return false;
+            return Registration::Refused { recorded };
         }
         // A template that came back invalidates its own tombstone.
         self.lock_template_tombstones().remove(&id);
@@ -457,7 +479,7 @@ impl AgentRegistry {
             templates.file.insert(template, None);
         }
         templates.resolve();
-        true
+        Registration::Registered
     }
 
     /// Replace the file layer whole: an id the new layer does not hold
@@ -734,6 +756,19 @@ impl AgentRegistry {
             plugins.retain(|plugin| plugin != plugin_id);
             !plugins.is_empty()
         });
+    }
+
+    /// Forget that this plugin was refused this one id, leaving its other
+    /// refusals listed: the plugin manager calls it when it unwinds a load
+    /// whose refusal of the id `register_template_reporting` recorded.
+    pub fn forget_plugin_refusal(&self, template_id: &str, plugin_id: &str) {
+        let mut templates = self.lock_templates();
+        if let Some(plugins) = templates.refused.get_mut(template_id) {
+            plugins.retain(|plugin| plugin != plugin_id);
+            if plugins.is_empty() {
+                templates.refused.remove(template_id);
+            }
+        }
     }
 
     /// The plugin a withdrawn template belonged to, if one is recorded.

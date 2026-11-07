@@ -984,3 +984,58 @@ fn a_refused_plugin_template_is_listed_plugin_refused() {
             .is_empty()
     );
 }
+
+/// L-1: a refusal says whether it recorded the plugin, and only the first
+/// does; `forget_plugin_refusal` takes back one plugin's refusal of one id
+/// and leaves every other listed (the plugin manager's `HandleHeld` unwind).
+#[test]
+fn a_refusal_reports_whether_it_recorded_and_is_forgotten_alone() {
+    let registry = AgentRegistry::new();
+    registry.set_bundled_layer(crate::bundled::bundled_templates());
+    let refused = |plugin: &str| NotUsed {
+        layer: TemplateLayer::Plugin,
+        path: None,
+        reason: NotUsedReason::PluginRefused,
+        plugin: Some(plugin.to_string()),
+    };
+    let not_used = |id: &str| registry.provenance(id).unwrap().not_used;
+
+    assert_eq!(
+        registry.register_template_reporting(plugin_template("general_agent", "acme")),
+        Registration::Refused { recorded: true }
+    );
+    assert_eq!(
+        registry.register_template_reporting(plugin_template("general_agent", "acme")),
+        Registration::Refused { recorded: false },
+        "a plugin listed already is not recorded again"
+    );
+    assert_eq!(
+        registry.register_template_reporting(plugin_template("general_agent", "zeta")),
+        Registration::Refused { recorded: true }
+    );
+    assert_eq!(
+        registry.register_template_reporting(plugin_template("code_agent", "acme")),
+        Registration::Refused { recorded: true }
+    );
+    assert_eq!(
+        registry.register_template_reporting(make_template("code_agent", vec![], false)),
+        Registration::Refused { recorded: false },
+        "only a plugin's template is listed as refused"
+    );
+    assert_eq!(
+        registry.register_template_reporting(plugin_template("fresh_agent", "acme")),
+        Registration::Registered
+    );
+
+    registry.forget_plugin_refusal("general_agent", "acme");
+    assert_eq!(not_used("general_agent"), [refused("zeta")]);
+    assert_eq!(not_used("code_agent"), [refused("acme")]);
+
+    registry.forget_plugin_refusal("general_agent", "zeta");
+    assert!(not_used("general_agent").is_empty());
+    assert_eq!(
+        registry.register_template_reporting(plugin_template("general_agent", "acme")),
+        Registration::Refused { recorded: true },
+        "a forgotten refusal is recorded again"
+    );
+}

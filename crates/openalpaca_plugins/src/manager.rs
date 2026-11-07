@@ -39,7 +39,7 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::{debug, error, info, warn};
 
-use openalpaca_core::agent::registry::AgentRegistry;
+use openalpaca_core::agent::registry::{AgentRegistry, Registration};
 use openalpaca_core::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::daemon_config::DaemonConfig;
@@ -1511,24 +1511,35 @@ impl PluginManager {
         }
 
         let mut registered_agents = Vec::new();
+        // The id whose refusal this attempt recorded (`plugin_refused`), the
+        // one refusal its `HandleHeld` unwind may take back: one the
+        // plugin's live load recorded stays listed while that load does.
+        let mut recorded_refusal = None;
         if let (Some(registry), Some(template)) = (self.agent_registry.as_ref(), discovered.agent) {
             let agent_id = template.frontmatter.id.clone();
-            // `register_template` refuses an id another template holds by
-            // answering `false`. N-PLUG-6: that answer is honoured — the id is
-            // recorded as this plugin's only when it registered, so T2 can
-            // never take a template the plugin never had (a plugin answering
-            // `agent/info` with `writing_agent` used to delete the shipped
-            // one at its next disable). What a plugin may claim over a live
-            // incumbent is the skip rule, B-05, not this.
-            if registry.register_template(template) {
-                info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
-                registered_agents.push(agent_id);
-            } else {
-                warn!(
-                    plugin = %id,
-                    agent = %agent_id,
-                    "another template already holds this id; the plugin's agent template is not registered"
-                );
+            // `register_template_reporting` refuses an id another template
+            // holds (`Registration::Refused`). N-PLUG-6: that answer is
+            // honoured — the id is recorded as this plugin's only when it
+            // registered, so T2 can never take a template the plugin never
+            // had (a plugin answering `agent/info` with `writing_agent` used
+            // to delete the shipped one at its next disable). What a plugin
+            // may claim over a live incumbent is the skip rule, B-05, not
+            // this.
+            match registry.register_template_reporting(template) {
+                Registration::Registered => {
+                    info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
+                    registered_agents.push(agent_id);
+                }
+                Registration::Refused { recorded } => {
+                    warn!(
+                        plugin = %id,
+                        agent = %agent_id,
+                        "another template already holds this id; the plugin's agent template is not registered"
+                    );
+                    if recorded {
+                        recorded_refusal = Some(agent_id);
+                    }
+                }
             }
         }
 
@@ -1578,7 +1589,9 @@ impl PluginManager {
                 for agent_id in &registered_agents {
                     registry.remove_template(agent_id);
                 }
-                registry.forget_plugin_refusals(&id);
+                if let Some(agent_id) = &recorded_refusal {
+                    registry.forget_plugin_refusal(agent_id, &id);
+                }
             }
             shutdown_child(&id, process, None).await;
             return Err(PluginError::HandleHeld(id));
