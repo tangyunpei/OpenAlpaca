@@ -1147,6 +1147,8 @@ plugin system (`crates/openalpaca_plugins`) registers plugin-provided
 tools into the shared registry when the plugin loads:
 
 - name `<plugin>::<tool>`, where `<plugin>` is the plugin's directory name;
+  a call reaches the plugin as `tools/call` under the bare `<tool>` it
+  listed, and a failure reads `plugin <plugin>::<tool>: …`;
 - `author = "plugin:<id>"`, `version` from the manifest, no annotations,
   `exempt_from_timeout = false`;
 - `provides_capabilities` = the manifest's `capabilities.provides` — the

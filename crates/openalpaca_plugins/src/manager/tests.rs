@@ -598,6 +598,120 @@ mcp_compatible = true
         assert!(gated.contains("previous load"), "{gated}");
     }
 
+    /// The committed stub at `tests/fixtures/named-plugin/`: one process that
+    /// lists an `echo` tool and answers `tools/call` only for that name (a
+    /// JSON-RPC error naming any other), and leads a process group of its own.
+    fn named_stub_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/named-plugin")
+    }
+
+    /// Lay the named stub out under `root` as the plugin its manifest names.
+    fn install_named_stub(root: &Path) -> PathBuf {
+        let dir = root.join("named-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        // fs::copy carries the mode across on Unix, so the entry stays executable.
+        for file in ["named-server.py", "plugin.toml"] {
+            std::fs::copy(named_stub_dir().join(file), dir.join(file)).unwrap();
+        }
+        dir
+    }
+
+    /// SIGKILL to a stub's whole process group when this guard drops, so a
+    /// test that fails before its teardown leaves nothing behind. The stub
+    /// leads its group, so its pid is the group's id; one already gone
+    /// answers ESRCH, which `kill` reports and the guard ignores.
+    struct KillGroupOnDrop(u32);
+
+    impl Drop for KillGroupOnDrop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("kill -9 -- -{} 2>/dev/null", self.0))
+                .status();
+        }
+    }
+
+    /// Bring the named stub up and hand back its pid under the group guard.
+    async fn load_named_stub(h: &Harness) -> (u32, KillGroupOnDrop) {
+        load_running_stub_with_caps(h, "named-test", &["testing"]).await;
+        let pid = h.child_pid("named-test").await;
+        (pid, KillGroupOnDrop(pid))
+    }
+
+    /// Disable the named stub and assert its child is gone (T4 awaits the
+    /// child's `wait()`, so the pid really is gone, not a zombie).
+    async fn tear_down_named_stub(h: &Harness, pid: u32) {
+        h.manager.disable(&ext("named-test")).await.unwrap();
+        assert!(
+            !pid_alive(pid),
+            "the named stub {pid} outlived its teardown"
+        );
+    }
+
+    /// **A plugin tool is called by the name it listed.** The registry holds
+    /// the tool as `<plugin>::<tool>` and hands that name to the plugin's
+    /// executor; the plugin listed `echo` and must be asked for `echo`. The
+    /// committed echo stub ignores the name, which is how sending the
+    /// namespaced one went unseen.
+    #[tokio::test]
+    async fn a_plugin_tool_is_called_by_the_name_it_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "by its own name"}),
+            )
+            .await;
+        assert_eq!(
+            answer.as_deref(),
+            Ok("echo: by its own name"),
+            "the plugin was not asked for the tool by the name it listed"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A failed plugin call names the tool once**: `plugin <plugin>::<tool>:
+    /// …`, never `<plugin>::<plugin>::<tool>`. The error is the plugin's own
+    /// (a JSON-RPC error while the plugin is `Enabled`), so the wording is
+    /// the proxy's fallback, not a ledger refusal.
+    #[tokio::test]
+    async fn a_failed_plugin_call_names_the_tool_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let error = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "x", "fail": true}),
+            )
+            .await
+            .expect_err("the stub answers fail = true with a JSON-RPC error");
+        assert!(
+            error.starts_with("plugin named-test::echo: "),
+            "the failure does not name the tool once: {error}"
+        );
+        assert!(
+            !error.contains("named-test::named-test::"),
+            "the failure doubles the plugin's prefix: {error}"
+        );
+        assert!(
+            error.contains("echo was asked to fail"),
+            "the error is not the listed tool's own: {error}"
+        );
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
     /// **Redundant enable registers no second capability provider** (design
     /// §3.3 E0). Enable on `Enabled` is a CAS failure, never a reload.
     #[tokio::test]

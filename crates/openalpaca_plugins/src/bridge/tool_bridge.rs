@@ -10,8 +10,10 @@ use crate::stdio_channel::StdioChannel;
 
 /// Proxies tool calls to a plugin process via [`StdioChannel`].
 ///
-/// Sends a `tools/call` JSON-RPC request with the bare tool name and arguments,
-/// then parses the MCP response format, concatenating all text content items.
+/// Sends a `tools/call` JSON-RPC request with the tool's name as the plugin
+/// listed it and the arguments, then parses the MCP response format,
+/// concatenating all text content items. The registry hands over its own
+/// name, `<plugin>::<tool>`; the plugin never sees that prefix.
 ///
 /// It carries the **load's generation** (extension design §3.0 Fact 3): a deep
 /// registry snapshot taken before a disable → re-enable still holds this proxy
@@ -44,8 +46,15 @@ impl PluginToolProxy {
 #[async_trait]
 impl PluginToolExecutor for PluginToolProxy {
     async fn execute(&self, tool_name: &str, arguments: &Value) -> Result<String, String> {
+        // The name the plugin listed: the registry's, less this plugin's own
+        // `<plugin>::` (the prefix `discover_tools` gave it). A name without
+        // it is already bare.
+        let listed = tool_name
+            .strip_prefix(self.plugin_id.as_str())
+            .and_then(|rest| rest.strip_prefix("::"))
+            .unwrap_or(tool_name);
         let params = serde_json::json!({
-            "name": tool_name,
+            "name": listed,
             "arguments": arguments,
         });
 
@@ -64,7 +73,10 @@ impl PluginToolExecutor for PluginToolProxy {
                 // Fallback: return stringified result
                 Ok(result.to_string())
             }
-            Err(e) => Err(self.load.describe_failure(tool_name, Some(tool_name), &e)),
+            // `describe_failure` puts the plugin's name before the subject,
+            // so the subject is the listed name; a refusal keeps the
+            // registry's, the name the model called.
+            Err(e) => Err(self.load.describe_failure(listed, Some(tool_name), &e)),
         }
     }
 

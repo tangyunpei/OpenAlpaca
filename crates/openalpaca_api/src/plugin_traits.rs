@@ -7,7 +7,10 @@ use serde_json::Value;
 #[async_trait]
 pub trait PluginToolExecutor: Send + Sync {
     /// Execute a tool by name with JSON arguments.
-    /// The tool_name is the bare name (without plugin namespace prefix).
+    ///
+    /// `tool_name` is the name the tool is registered under,
+    /// `<plugin>::<tool>` (the registry's `Plugin` arm passes its own); the
+    /// implementor sends its plugin the bare `<tool>` the plugin listed.
     async fn execute(&self, tool_name: &str, arguments: &Value) -> Result<String, String>;
 
     /// The plugin this executor belongs to.
