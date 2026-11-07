@@ -265,9 +265,11 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
     );
 }
 
-/// L9. An install with no agent templates at all is the shape a packaged
-/// daemon really had, and it never clears on its own — so it must not be
-/// reported as the one thing that does.
+/// L9, S-5. A catalog with no template that can be spawned never clears on
+/// its own — so it must not be reported as the one thing that does. With
+/// the bundle always registered it is reached only through files that
+/// withhold the built-in templates (or a registry built empty, as here), so
+/// the message no longer says a first boot seeds them.
 #[test]
 fn test_dispatch_lead_agent_says_no_templates_are_installed() {
     let dispatcher = setup(vec![]);
@@ -285,8 +287,14 @@ fn test_dispatch_lead_agent_says_no_templates_are_installed() {
 
     let err = result.unwrap_err();
     assert!(
-        err.contains("No agent templates are installed") && err.contains("config/agents"),
-        "the message must name the cause and where the fix goes: {err}"
+        err.contains("No agent template can act as Lead Agent")
+            && err.contains("config/agents")
+            && err.contains("daemon.log"),
+        "the message must name the cause, where the fix goes and where to read more: {err}"
+    );
+    assert!(
+        !err.contains("seeds"),
+        "no first boot seeds the templates any more (S-5): {err}"
     );
     assert!(
         !err.contains("busy"),
@@ -360,6 +368,47 @@ fn a_borrowed_lead_is_the_first_template_by_id() {
     assert_eq!(dispatch_one(&dispatcher, "First"), "lead_agent");
     assert_eq!(dispatch_one(&dispatcher, "Second"), "worker_b");
     assert_eq!(dispatch_one(&dispatcher, "Third"), "worker_b");
+}
+
+/// G-1 from C3: with the seeded `lead_agent.md` an unedited copy, set aside
+/// (subagent design §2.2), the bundled `lead_agent` is under the person's
+/// own `orchestration` template, which leads though `lead_agent` sorts
+/// first by id.
+#[test]
+fn a_persons_own_lead_is_chosen_before_the_bundled_lead() {
+    use crate::agent::file_layer::{LoadMode, rescan_file_layer};
+    use crate::bundled::{BUNDLED_AGENTS, bundled_templates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().canonicalize().unwrap());
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let seeded = BUNDLED_AGENTS
+        .iter()
+        .find(|file| file.path == "agents/lead_agent.md")
+        .unwrap();
+    std::fs::write(agents.join("lead_agent.md"), seeded.contents).unwrap();
+    std::fs::write(
+        agents.join("my_lead.md"),
+        "---\nid: my_lead\nname: Mine\ndescription: leads my way\nsingleton: true\n\
+         capabilities:\n  - \"orchestration\"\n---\n\n## Persona\n\nLeads.\n",
+    )
+    .unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup(vec![]);
+    let registry = &dispatcher.shared_context.agent_registry;
+    registry.set_bundled_layer(bundled_templates());
+    rescan_file_layer(
+        &agents,
+        LoadMode::Start,
+        registry,
+        &crate::tools::ToolRegistry::default(),
+        &db,
+    )
+    .unwrap();
+
+    assert_eq!(dispatch_one(&dispatcher, "First"), "my_lead");
+    assert_eq!(dispatch_one(&dispatcher, "Second"), "lead_agent");
 }
 
 /// …and the capacity case still reads as capacity.

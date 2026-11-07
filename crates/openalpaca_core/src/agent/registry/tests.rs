@@ -946,3 +946,41 @@ fn a_plugin_withdrawal_under_a_file_template_leaves_no_tombstone() {
         Some(TemplateLayer::File)
     );
 }
+
+/// L-1, P-2 (§7 O-4 (a)): a plugin's template naming a bundled id is
+/// refused, and the refusal is listed on the holder's row — the plugin and
+/// the reason — until the plugin is withdrawn.
+#[test]
+fn a_refused_plugin_template_is_listed_plugin_refused() {
+    let registry = AgentRegistry::new();
+    registry.set_bundled_layer(crate::bundled::bundled_templates());
+
+    assert!(!registry.register_template(plugin_template("general_agent", "acme")));
+    assert!(!registry.register_template(plugin_template("general_agent", "acme")));
+
+    let provenance = registry.provenance("general_agent").unwrap();
+    assert_eq!(provenance.layer, TemplateLayer::Bundled);
+    assert_eq!(
+        provenance.not_used,
+        [NotUsed {
+            layer: TemplateLayer::Plugin,
+            path: None,
+            reason: NotUsedReason::PluginRefused,
+            plugin: Some("acme".to_string()),
+        }],
+        "listed once, however often the plugin asks"
+    );
+    assert!(matches!(
+        registry.get_template("general_agent").unwrap().source,
+        AgentSource::Internal
+    ));
+
+    registry.forget_plugin_refusals("acme");
+    assert!(
+        registry
+            .provenance("general_agent")
+            .unwrap()
+            .not_used
+            .is_empty()
+    );
+}

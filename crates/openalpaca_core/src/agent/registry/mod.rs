@@ -10,6 +10,7 @@
 
 use super::subagent::{AgentStatus, SubAgent};
 use super::template::{AgentSource, AgentTemplate};
+use crate::bundled::ShippedCopy;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
@@ -66,6 +67,28 @@ pub enum NotUsedReason {
     /// The file does not parse, and a file that parses holds the id it
     /// names (L-4: a broken file withholds only an id nothing else holds).
     DoesNotParse,
+    /// The file is byte-identical to a version OpenAlpaca shipped, so it is
+    /// set aside — not read, not touched — and the bundled template of its
+    /// id runs (subagent design §2.2 V-1).
+    UneditedCopy(ShippedCopy),
+    /// The bundled template of the id, under a file of the person's.
+    Overridden,
+    /// A plugin's template of the id, refused at registration because
+    /// another layer holds the id (N-PLUG-6; §2.3 P-2).
+    PluginRefused,
+}
+
+impl NotUsedReason {
+    /// The word the template listing carries (R-1).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Duplicate => "duplicate",
+            Self::DoesNotParse => "does_not_parse",
+            Self::UneditedCopy(_) => "unedited_copy",
+            Self::Overridden => "overridden",
+            Self::PluginRefused => "plugin_refused",
+        }
+    }
 }
 
 /// A definition of a template's id that the resolved view does not use.
@@ -74,6 +97,8 @@ pub struct NotUsed {
     pub layer: TemplateLayer,
     pub path: Option<PathBuf>,
     pub reason: NotUsedReason,
+    /// The plugin, for a `PluginRefused` entry.
+    pub plugin: Option<String>,
 }
 
 /// Where a resolved template comes from, as `AgentRegistry::provenance`
@@ -86,6 +111,16 @@ pub struct TemplateProvenance {
     pub not_used: Vec<NotUsed>,
     pub state: TemplateState,
     pub warnings: Vec<String>,
+}
+
+impl TemplateProvenance {
+    /// Whether a file of the person's stands over the bundled template of
+    /// its id.
+    pub fn overrides_bundled(&self) -> bool {
+        self.not_used
+            .iter()
+            .any(|entry| entry.reason == NotUsedReason::Overridden)
+    }
 }
 
 /// What the file layer holds under an id: a template, or a file that
@@ -101,6 +136,8 @@ struct FileTemplate {
     held: FileHeld,
     path: Option<PathBuf>,
     not_used: Vec<NotUsed>,
+    /// What the rescan found worth saying about the file (W-1).
+    warnings: Vec<String>,
 }
 
 impl FileTemplate {
@@ -117,6 +154,9 @@ impl FileTemplate {
 #[derive(Default)]
 pub struct FileLayer {
     templates: HashMap<String, FileTemplate>,
+    /// The unedited copies set aside, by the bundled id each would hide
+    /// (V-1): listed on that id's row, whichever layer it resolves from.
+    set_aside: HashMap<String, Vec<NotUsed>>,
 }
 
 impl FileLayer {
@@ -159,7 +199,44 @@ impl FileLayer {
                 layer: TemplateLayer::File,
                 path: Some(path),
                 reason,
+                plugin: None,
             });
+        }
+    }
+
+    /// Record a file set aside as an unedited copy of a shipped version of
+    /// the bundled template `id` (V-1). The layer does not hold `id` for it.
+    pub fn set_aside(&mut self, id: &str, path: PathBuf, copy: ShippedCopy) {
+        self.set_aside
+            .entry(id.to_string())
+            .or_default()
+            .push(NotUsed {
+                layer: TemplateLayer::File,
+                path: Some(path),
+                reason: NotUsedReason::UneditedCopy(copy),
+                plugin: None,
+            });
+    }
+
+    /// The files set aside, as `(id, path, copy)`, in no particular order.
+    pub fn set_aside_files(&self) -> impl Iterator<Item = (&str, &Path, ShippedCopy)> {
+        self.set_aside.iter().flat_map(|(id, entries)| {
+            entries
+                .iter()
+                .filter_map(move |entry| match (&entry.path, entry.reason) {
+                    (Some(path), NotUsedReason::UneditedCopy(copy)) => {
+                        Some((id.as_str(), path.as_path(), copy))
+                    }
+                    _ => None,
+                })
+        })
+    }
+
+    /// Add a warning to the file that holds `id` (W-1). Ignored when the
+    /// layer does not hold the id.
+    pub fn warn(&mut self, id: &str, warning: String) {
+        if let Some(entry) = self.templates.get_mut(id) {
+            entry.warnings.push(warning);
         }
     }
 
@@ -171,6 +248,7 @@ impl FileLayer {
                     held,
                     path,
                     not_used: Vec::new(),
+                    warnings: Vec::new(),
                 });
                 true
             }
@@ -184,6 +262,10 @@ struct TemplateLayers {
     bundled: HashMap<String, AgentTemplate>,
     file: FileLayer,
     plugin: HashMap<String, AgentTemplate>,
+    /// The plugins whose template of an id `register_template` refused
+    /// because another layer held it, by id (L-1): listed on the holder's
+    /// row until the plugin is withdrawn.
+    refused: HashMap<String, Vec<String>>,
     /// What every reader sees: recomputed by `resolve` after each change
     /// to a layer, never written by itself.
     resolved: HashMap<String, AgentTemplate>,
@@ -343,6 +425,12 @@ impl AgentRegistry {
         let mut templates = self.lock_templates();
         let id = template.frontmatter.id.clone();
         if templates.holds(&id) {
+            if let AgentSource::Plugin { plugin_id, .. } = &template.source {
+                let refused = templates.refused.entry(id).or_default();
+                if !refused.contains(plugin_id) {
+                    refused.push(plugin_id.clone());
+                }
+            }
             return false;
         }
         // A template that came back invalidates its own tombstone.
@@ -366,8 +454,8 @@ impl AgentRegistry {
         templates.resolve();
     }
 
-    /// Replace the bundled layer. Of two templates with one id the first
-    /// is kept.
+    /// Replace the bundled layer, then make the idle instances follow it
+    /// (L-1a). Of two templates with one id the first is kept.
     pub fn set_bundled_layer(&self, bundled: Vec<AgentTemplate>) {
         let mut layer = HashMap::new();
         for template in bundled {
@@ -375,18 +463,51 @@ impl AgentRegistry {
                 .entry(template.frontmatter.id.clone())
                 .or_insert(template);
         }
-        let mut templates = self.lock_templates();
-        self.forget_tombstones(layer.keys());
-        templates.bundled = layer;
-        templates.resolve();
+        {
+            let mut templates = self.lock_templates();
+            self.forget_tombstones(layer.keys());
+            templates.bundled = layer;
+            templates.resolve();
+        }
+        self.sync_template_instances();
+    }
+
+    /// Whether the bundled layer holds `template_id`, whatever stands over
+    /// it.
+    pub fn is_bundled(&self, template_id: &str) -> bool {
+        self.lock_templates().bundled.contains_key(template_id)
+    }
+
+    /// How many templates the bundled layer holds.
+    pub fn bundled_count(&self) -> usize {
+        self.lock_templates().bundled.len()
+    }
+
+    /// The ids a file withholds (L-4), sorted: in no list of templates, but
+    /// on the template listing's rows (R-1).
+    pub fn withheld_ids(&self) -> Vec<String> {
+        let templates = self.lock_templates();
+        let mut ids: Vec<String> = templates
+            .file
+            .templates
+            .iter()
+            .filter(|(_, entry)| matches!(entry.held, FileHeld::Withheld { .. }))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// Where the template resolved under `template_id` comes from, or None
     /// when no layer holds the id.
+    ///
+    /// `not_used` lists, after the file layer's own entries (duplicates,
+    /// broken files), the bundled template a file overrides, the unedited
+    /// copies set aside for the id (V-1) and the plugins refused it (P-2).
     pub fn provenance(&self, template_id: &str) -> Option<TemplateProvenance> {
         let templates = self.lock_templates();
-        if let Some(entry) = templates.file.templates.get(template_id) {
-            let (state, warnings) = match (&entry.held, &entry.path) {
+        let mut provenance = if let Some(entry) = templates.file.templates.get(template_id) {
+            let (state, mut warnings) = match (&entry.held, &entry.path) {
                 (FileHeld::Withheld { reason }, Some(path)) => (
                     TemplateState::Withheld {
                         path: path.clone(),
@@ -396,22 +517,46 @@ impl AgentRegistry {
                 ),
                 _ => (TemplateState::Ready, Vec::new()),
             };
-            return Some(TemplateProvenance {
+            warnings.extend(entry.warnings.iter().cloned());
+            let mut not_used = entry.not_used.clone();
+            if templates.bundled.contains_key(template_id) {
+                not_used.push(NotUsed {
+                    layer: TemplateLayer::Bundled,
+                    path: None,
+                    reason: NotUsedReason::Overridden,
+                    plugin: None,
+                });
+            }
+            TemplateProvenance {
                 layer: TemplateLayer::File,
                 path: entry.path.clone(),
-                not_used: entry.not_used.clone(),
+                not_used,
                 state,
                 warnings,
+            }
+        } else {
+            TemplateProvenance {
+                layer: templates.layer_of(template_id)?,
+                path: None,
+                not_used: Vec::new(),
+                state: TemplateState::Ready,
+                warnings: Vec::new(),
+            }
+        };
+        if let Some(set_aside) = templates.file.set_aside.get(template_id) {
+            let mut set_aside = set_aside.clone();
+            set_aside.sort_by(|a, b| a.path.cmp(&b.path));
+            provenance.not_used.extend(set_aside);
+        }
+        for plugin in templates.refused.get(template_id).into_iter().flatten() {
+            provenance.not_used.push(NotUsed {
+                layer: TemplateLayer::Plugin,
+                path: None,
+                reason: NotUsedReason::PluginRefused,
+                plugin: Some(plugin.clone()),
             });
         }
-        let layer = templates.layer_of(template_id)?;
-        Some(TemplateProvenance {
-            layer,
-            path: None,
-            not_used: Vec::new(),
-            state: TemplateState::Ready,
-            warnings: Vec::new(),
-        })
+        Some(provenance)
     }
 
     /// Get a template by id.
@@ -520,10 +665,22 @@ impl AgentRegistry {
     /// `spawn_subagent` that a template was *"withdrawn with plugin 'x'"* for a
     /// plugin that no longer existed.
     pub fn clear_plugin_tombstones(&self, plugin_id: &str) -> usize {
+        self.forget_plugin_refusals(plugin_id);
         let mut tombstones = self.lock_template_tombstones();
         let before = tombstones.len();
         tombstones.retain(|_, owner| owner != plugin_id);
         before - tombstones.len()
+    }
+
+    /// Forget that this plugin's templates were refused (L-1's
+    /// `plugin_refused`): the plugin manager calls it when it withdraws the
+    /// plugin, so a disabled plugin is no longer listed on a holder's row.
+    pub fn forget_plugin_refusals(&self, plugin_id: &str) {
+        let mut templates = self.lock_templates();
+        templates.refused.retain(|_, plugins| {
+            plugins.retain(|plugin| plugin != plugin_id);
+            !plugins.is_empty()
+        });
     }
 
     /// The plugin a withdrawn template belonged to, if one is recorded.
@@ -692,7 +849,7 @@ impl AgentRegistry {
     }
 
     /// Make the idle instances follow the resolved catalog (L-1a). Called
-    /// after every resolved change — the file layer's rescan, and from C3
+    /// after every resolved change — the file layer's rescan and
     /// `set_bundled_layer`.
     ///
     /// Each resolved file or bundled template has an idle instance under its

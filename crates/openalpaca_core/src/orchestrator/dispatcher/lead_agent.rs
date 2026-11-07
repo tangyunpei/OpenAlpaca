@@ -35,16 +35,17 @@ pub(crate) enum RowWrite {
 /// Why no lead agent could be spawned (L9).
 ///
 /// Two very different facts wore one sentence. "All agents are busy" is a
-/// capacity problem that clears on its own; an install with **no agent
-/// templates at all** — which is what a packaged daemon had before the daemon
-/// started seeding them — never clears, and the owner reading "busy" has no
+/// capacity problem that clears on its own; a catalog with **no template
+/// that can be spawned** never clears, and the owner reading "busy" has no
 /// reason to go looking at a directory. The registry knows which it is, so it
-/// is asked.
+/// is asked. With the bundled templates always registered (subagent design
+/// §2.5 S-5), an empty catalog means files in `config/agents` withhold them,
+/// which the start's log names.
 pub(crate) fn no_lead_agent_message(no_templates: bool) -> String {
     if no_templates {
-        "No agent templates are installed, so nothing can act as Lead Agent. \
-         Put one carrying the `orchestration` capability in the daemon's \
-         `config/agents` directory — a first boot seeds the shipped set there."
+        "No agent template can act as Lead Agent: none can be spawned. A file in \
+         the daemon's `config/agents` directory may withhold a built-in template \
+         (one that does not parse) — `state/logs/daemon.log` names each such file."
             .to_string()
     } else {
         "No agents available to act as Lead Agent. All agents are busy.".to_string()

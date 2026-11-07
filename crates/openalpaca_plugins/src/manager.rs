@@ -1043,6 +1043,9 @@ impl PluginManager {
                 registry.remove_plugin_template(agent_id, id);
                 debug!(plugin = id, agent = %agent_id, "unregistered plugin agent template");
             }
+            // A template it was refused is no longer listed on the holder's
+            // row (`plugin_refused`, subagent design §2.4 L-1).
+            registry.forget_plugin_refusals(id);
         }
 
         // 4. connector + provider.
@@ -1575,6 +1578,7 @@ impl PluginManager {
                 for agent_id in &registered_agents {
                     registry.remove_template(agent_id);
                 }
+                registry.forget_plugin_refusals(&id);
             }
             shutdown_child(&id, process, None).await;
             return Err(PluginError::HandleHeld(id));

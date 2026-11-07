@@ -10,6 +10,7 @@
 ## Modules
 
 - `agent` (crates/openalpaca_core/src/agent/mod.rs)
+- `bundled` (crates/openalpaca_core/src/bundled/mod.rs)
 - `bus` (crates/openalpaca_core/src/bus.rs)
 - `chat` (crates/openalpaca_core/src/chat/mod.rs)
 - `compose` (crates/openalpaca_core/src/compose/mod.rs)

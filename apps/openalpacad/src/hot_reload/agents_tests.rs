@@ -25,7 +25,7 @@ fn a_watcher_reload_rescans_and_withholds_an_unknown_capability() {
     let db = Database::open(&dir.path().join("test.db")).unwrap();
     let registry = AgentRegistry::new();
     let tool_registry = ToolRegistry::default();
-    rescan_file_layer(&agents, LoadMode::Start, &registry, &[], &db).unwrap();
+    rescan_file_layer(&agents, LoadMode::Start, &registry, &tool_registry, &db).unwrap();
 
     std::fs::remove_file(agents.join("reader.md")).unwrap();
     std::fs::write(

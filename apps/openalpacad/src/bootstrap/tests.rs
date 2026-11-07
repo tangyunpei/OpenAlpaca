@@ -392,24 +392,23 @@ fn an_interrupted_run_is_announced_on_its_session() {
 /// A packaged daemon's config directory holds only what it seeds. Before L9
 /// that was three files, and `GET /v1/agents` answered `[]` on a live install:
 /// no template could act as Lead Agent, and no skill could be invoked.
+///
+/// Since the bundle (subagent design §2.5 S-1) the templates come from the
+/// binary at every start, so a first boot writes none: `agents/` is created
+/// empty, for the person's own and overriding files, while `skills/` and
+/// `tools/` are seeded as before.
 #[test]
-fn a_first_boot_seeds_the_agents_skills_and_tools_it_carries() {
+fn a_first_boot_creates_an_empty_agents_directory_and_writes_no_template() {
     let tmp = make_temp_dir("openalpaca-seed-content");
     let dir = tmp.path();
 
     seed_default_configs(dir);
 
-    assert!(dir.join("agents").join("lead_agent.md").exists());
-    let lead = std::fs::read_to_string(dir.join("agents").join("lead_agent.md"))
-        .expect("read the seeded lead template");
-    assert!(
-        lead.contains("orchestration"),
-        "the seeded lead template must carry the capability the dispatcher looks for"
-    );
+    assert!(dir.join("agents").is_dir(), "agents/ is created");
     assert_eq!(
         std::fs::read_dir(dir.join("agents")).unwrap().count(),
-        9,
-        "all nine shipped templates land"
+        0,
+        "and no template is written into it"
     );
 
     assert!(dir.join("skills").join("code-review").join("SKILL.md").exists());

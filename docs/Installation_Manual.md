@@ -266,11 +266,16 @@ using with an older build is the second case it names. To switch over:
    Settings → Persona, keep the lines you want as standing instructions, and
    delete the rest. Nothing moves them into memory notes for you.
 
-7. **Check `agents/system_agent.md`.** `~/.openalpaca/config/agents/` survives
-   the reset too, and the daemon writes that directory only when it is absent,
-   so a store an earlier build set up keeps the `system_agent.md` that build
-   wrote. As earlier builds shipped it, that file ends its frontmatter with two
-   lines that switch the agent's approval prompts off: `file_delete` is not
+7. **Check `agents/system_agent.md`, if you edited it.** `~/.openalpaca/config/agents/`
+   survives the reset too, so a store an earlier build set up keeps the
+   `system_agent.md` that build wrote. A copy you never edited needs nothing:
+   this build's agent templates are built in, and a file byte-identical to a
+   version an earlier build shipped — or to one on which this step was done
+   exactly as written here — is not read; the built-in template runs, and
+   `state/logs/daemon.log` and the template listing (`GET /v1/agent-templates`)
+   name the file as not used. The step stands for a copy you edited otherwise,
+   which is read as yours. As earlier builds shipped it, that file ends its
+   frontmatter with two lines that switch the agent's approval prompts off: `file_delete` is not
    the name of any tool, and a template's own `require_confirmation_for` list
    replaces the default — every tool marked destructive asks first — instead
    of adding to it, so with those two lines the agent's `shell_execute`,
@@ -287,15 +292,20 @@ using with an older build is the second case it names. To switch over:
    A running daemon reads the change on its own (`state/logs/daemon.log` says
    `Agent template hot-reloaded`); `openalpaca daemon restart`, or `Stop
    daemon…` then `Start daemon` in the app's Settings → Connection, does the
-   same. A file that does not have the two lines needs nothing. A template of
+   same. While an edited copy keeps the two lines, `daemon.log` warns at each
+   start that its `require_confirmation_for` names `"file_delete"`, which is
+   no tool. A file that does not have the two lines needs nothing. A template of
    your own that names real tools in `require_confirmation_for` is unaffected:
    an explicit list still wins. A store you already switched over with an
    earlier build — one this build opens without the message above — keeps
    that build's `system_agent.md` too: do this step on it as well.
 
-8. **Give `agents/writing_agent.md` its `file_read` line.** The shipped
-   writing agent now reads the files it is asked to work on, and a store an
-   earlier build set up keeps the template that build wrote, without it. Open
+8. **Give `agents/writing_agent.md` its `file_read` line, if you edited it.**
+   The shipped writing agent now reads the files it is asked to work on, and
+   a store an earlier build set up keeps the template that build wrote,
+   without it. As in step 7, a copy you never edited — or one on which this
+   step was done exactly as written — is not read, and the built-in template,
+   which has the line, runs. In a copy you edited otherwise, open
    `~/.openalpaca/config/agents/writing_agent.md` and add one line under
    `capabilities:`:
 
@@ -361,6 +371,17 @@ not follow that advice — it deletes the new store. A build from before
 and run its migrations 5 to 42 on it, so never run one against a store this
 build created. To go back, stop this build and run the older one against the
 copy you kept in step 1.
+
+Two things differ going back to a build from before the built-in agent
+templates (2026-11). A store *first* started by this build has an empty
+`agents/`: an earlier build skips a directory that exists, finds no template
+and answers "No agent templates are installed…"; delete the empty `agents/`
+folder, and that build's next start writes its templates there. And an
+unedited copy this build lists as not used is still the earlier build's only
+copy: delete it under this build and the earlier one does without it
+(`lead_agent.md` deleted, it has no lead agent). The cure is the same: stop
+the daemon, move `agents/` aside, and let the earlier build's next start
+write it again.
 
 ### Projects live in the home store
 
@@ -502,12 +523,23 @@ when none is running.
 ### What the first boot writes
 
 A first boot writes the content the daemon carries in its own binary into
-`~/.openalpaca/config`: `llm.toml`, `daemon.toml`, `mcp.toml`, the nine agent
-templates (`agents/`), the skills (`skills/`) and the tool config (`tools/`).
-The rule is per directory: a directory that already exists is left
-alone entirely, even one you emptied on purpose, and inside a directory being
-filled an existing file is never overwritten. Without the templates the first
-workflow request has no lead agent to run and says so.
+`~/.openalpaca/config`: `llm.toml`, `daemon.toml`, `mcp.toml`, the skills
+(`skills/`) and the tool config (`tools/`). The rule is per directory: a
+directory that already exists is left alone entirely, even one you emptied on
+purpose, and inside a directory being filled an existing file is never
+overwritten.
+
+The nine agent templates are built in: the daemon registers them from its
+binary at every start and writes none of them. It creates `agents/` empty,
+when absent, for templates of your own and for overrides: a file there whose
+`id:` is a built-in template's replaces that template, and deleting it brings
+the built-in one back, without a restart. A file byte-identical to a version
+OpenAlpaca shipped — a copy an earlier build wrote, or one copied from the
+repository's `config/agents/` — is not read and not touched: the built-in
+template runs, so its later fixes reach you. To keep such a copy's text on
+purpose, change any byte of it (a comment line will do); it is then yours.
+At each start `state/logs/daemon.log` says how many templates are built in,
+which files override one and which copies are not read.
 
 It also creates the persona documents in `~/.openalpaca/config/orchestrator/`
 — `SOUL.md`, `USER.md`, `IDENTITY.md` and `BOOTSTRAP.md` — and the memory
@@ -750,13 +782,22 @@ instead of starting on it. Follow [Switching to the Markdown Memory
 Build](#switching-to-the-markdown-memory-build) before you start it.
 
 An upgrade from an earlier build made since that re-baseline — one this build
-opens — keeps the store as it is, agent templates included: read [Agents work
-in the project](#agents-work-in-the-project) before you start it. Such a store
-may keep a `system_agent.md` with two leftover lines that, since this build,
-would let that agent write and edit your project's files and run commands in
-it without asking; step 7 of the switch-over removes them. It also keeps that
-build's `create-skill`, whose `user` scope wrote skills where the daemon never
-reads them; step 9 says how to take this build's copy.
+opens — keeps the store as it is: read [Agents work in the
+project](#agents-work-in-the-project) before you start it. Nothing under
+`config/` is written, moved or deleted. The agent templates an earlier build
+wrote into `agents/` stay on disk, but one you never edited is no longer read:
+the built-in template runs, its later fixes with it — `system_agent` asks
+again before its shell commands and file writes, `writing_agent` reads files —
+with no hand step. A shipped template you deleted from `agents/` runs again,
+from the binary; a file of its `id` there overrides it. A template you edited
+still overrides the built-in one; if it is a `system_agent.md` that keeps two
+leftover lines which would let that agent write and edit your project's files
+and run commands in it without asking, step 7 of the switch-over removes them,
+and `daemon.log` warns about them meanwhile. Where you had deleted a shipped
+template and a plugin's template of the same id filled it, the built-in
+template runs again and the plugin's is listed as refused. The store also
+keeps that build's `create-skill`, whose `user` scope wrote skills where the
+daemon never reads them; step 9 says how to take this build's copy.
 
 Upgrade replaces:
 

@@ -17,6 +17,7 @@ struct Fixture {
     agents: PathBuf,
     db: Database,
     registry: AgentRegistry,
+    tools: ToolRegistry,
 }
 
 impl Fixture {
@@ -32,6 +33,7 @@ impl Fixture {
             agents,
             db,
             registry: AgentRegistry::new(),
+            tools: ToolRegistry::default(),
         }
     }
 
@@ -42,7 +44,7 @@ impl Fixture {
     }
 
     fn rescan(&self, mode: LoadMode) -> Result<(), String> {
-        rescan_file_layer(&self.agents, mode, &self.registry, &known(), &self.db)
+        rescan_file_layer(&self.agents, mode, &self.registry, &self.tools, &self.db)
     }
 
     fn ids(&self) -> Vec<String> {
@@ -52,10 +54,6 @@ impl Fixture {
             .map(|t| t.frontmatter.id)
             .collect()
     }
-}
-
-fn known() -> Vec<String> {
-    vec!["annotation:readonly".to_string()]
 }
 
 fn template(id: &str, model: &str) -> String {

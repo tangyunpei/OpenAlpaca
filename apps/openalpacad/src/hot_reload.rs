@@ -612,12 +612,11 @@ pub(crate) fn reload_agent_templates(
     tool_registry: &openalpaca_core::tools::ToolRegistry,
     db: &openalpaca_storage::Database,
 ) {
-    let known = tool_registry.known_virtual_capabilities();
     if let Err(e) = openalpaca_core::agent::file_layer::rescan_file_layer(
         agents_dir,
         openalpaca_core::agent::file_layer::LoadMode::Reload,
         registry,
-        &known,
+        tool_registry,
         db,
     ) {
         warn!("Agent templates reload failed: {e}");

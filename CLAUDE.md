@@ -26,24 +26,24 @@ This file is loaded into every session and every subagent, so it stays under 50 
 
 | Document | Role |
 |---|---|
-| `tasks/deps-upgrade/programme-plan.md` | The programme's plan of record (`plan-rev3.md` and `modernization-plan.md` are frozen history whose citations stay valid). Read it after `tasks/deps-upgrade/README.md`. |
-| `IMPLEMENTATION_PROGRESS.md` | The programme's progress dashboard: each task's part and phase, what was implemented with a link to its requirement, its status (Complete, In progress, Not started), its evidence and what stays open. Every landing updates its row in the same commit. |
-| `tasks/api-fix-plan.md` | What shipped, every owner decision in §0, and in §12 the residue the whole-branch review refuted. Read §12 before re-raising any of those four. |
-| `tasks/pending-decisions.md` | The one record of what waits on the owner, what is taken and not built, what a beta tester meets, and (§6) what a settled rule excludes. Close an item there and in its source, with the commit that applies it. |
-| `tasks/extension-enable-design.md` | Design of record for per-extension enable/disable (N5, ADR-030). Read it before touching the ledger, the supervisors, the gate or the extension routes. |
-| `tasks/research/claude-code-design-lessons.md` | Claude Code prior-art study; its §6 tensions were owner decisions, taken on 2026-10-17. |
-| `tasks/research/zcode-audit-2026-10-17.md` | ZCode prior-art audit: §4 amends the programme, §5 informs the pending decisions, §6 lists what a settled rule here excludes. Read it before borrowing from ZCode. |
-| `tasks/gui-api-requirements.md` | The 23-gap brief the plan answered; `lib/unavailable.ts` is the live list of what is still unserved. |
-| `tasks/bug-main-loop-cost-lockout.md` | The main-loop cost lockout, fixed (Phase 0 A5): `LoopState.last_cost` is baselined from `agent_cost()` before round 0. |
+| `tasks/deps-upgrade/programme-plan.md` | The programme's plan of record (`plan-rev3.md` and `modernization-plan.md` are frozen; their citations stay valid). Read it after `tasks/deps-upgrade/README.md`. |
+| `IMPLEMENTATION_PROGRESS.md` | The programme's dashboard: per task its part, phase, what was built (linked to its requirement), status (Complete, In progress, Not started), evidence and what stays open; every landing updates its row in the same commit. |
+| `tasks/api-fix-plan.md` | What shipped, every owner decision in §0, and in §12 the residue the whole-branch review refuted. Read §12 before re-raising those four. |
+| `tasks/pending-decisions.md` | The one record of what waits on the owner, what is taken and not built, what a beta tester meets, and (§6) what a settled rule excludes; close an item there and in its source, with its commit. |
+| `tasks/extension-enable-design.md` | Design of record for per-extension enable/disable (N5, ADR-030); read it before touching the ledger, supervisors, gate or extension routes. |
+| `tasks/research/claude-code-design-lessons.md` | Claude Code prior-art study; §6's tensions taken 2026-10-17. |
+| `tasks/research/zcode-audit-2026-10-17.md` | ZCode prior-art audit: §4 amends the programme, §5 informs pending decisions, §6 lists what a settled rule excludes; read it before borrowing from ZCode. |
+| `tasks/gui-api-requirements.md` | The 23-gap brief; `lib/unavailable.ts` lists what is still unserved. |
+| `tasks/bug-main-loop-cost-lockout.md` | The main-loop cost lockout (A5), fixed: `last_cost` baselined before round 0. |
 | `tasks/memory-redesign/` | `README.md` (reading order), `03-design.md` (MD-1…MD-16; §7a the frozen contracts), `04-implementation-plan.md`, `09-learning-design.md` (Learning v2), `08-evaluation-report.md`, `10-learning-evaluation.md`. Read 03 §7a and §7c and the 09 revision-log entry of the slice concerned before touching `memory_files`, `memory_index`, `memory::service` or `memory::learning`. |
 | `tasks/memory-redesign/11-continuity-design.md`, `12-continuity-evaluation.md` | The conversation working state and its carry-over (CQ-1…CQ-11), and its evaluation. Read the slice's revision-log entry before touching `orchestrator/working_state.rs`, the history layer's blocks or the close. |
-| `tasks/store-revision/design.md` | SQ-1 (the schema version is the migration file's number; a pre-squash database is refused, never upgraded) and SQ-2 (four compatibility paths removed); §1.4 is the refusal text of record. |
+| `tasks/store-revision/design.md` | SQ-1 (schema version = the migration file's number; a pre-squash database refused, never upgraded), SQ-2 (four compatibility paths removed); §1.4 the refusal text of record. |
 | `tasks/storage-design/design.md` | Everything under `~/.openalpaca/`: ST-1…ST-23 (§0.1), projects (Part I), the agents' working folder (Part II), the residue (§18), the beta gate (§21); `plan-stage0.md`…`plan-stage2.md` and `stage0-live-report.md`…`stage2-live-report.md` beside it. Read it before changing the store, a project's life or the file tools. |
 | `tasks/approval-hidden-chars.md` | Spec of record for hidden characters on approval surfaces (A1–A32, the accepted residue, the `<U+XXXX>` form). Read it before changing what an approval surface shows. |
 | `tasks/lessons.md` | Correction log. Read at session start; append after any correction. |
 | `tasks/todo.md` | The active chunk's plan and review (untracked, local). |
-| `tasks/claude-md-2026-10-19-pre-shrink.md` | This file before the 2026-10-19 shrink, with every wave's narrative. Read it for a rule's history. |
-| Obsidian KB `~/Valuts/Main/Projects/OpenAlpaca/` | The owner's; no further work goes there (ADR-050 is its last entry). |
+| `tasks/claude-md-2026-10-19-pre-shrink.md` | This file before the 2026-10-19 shrink: every wave's narrative, a rule's history. |
+| Obsidian KB `~/Valuts/Main/Projects/OpenAlpaca/` | The owner's; no further work there (ADR-050 its last). |
 
 ## Build & Development
 ```bash
@@ -110,12 +110,12 @@ crates/
 config/
   daemon.toml           # Execution limits, server settings, memory/cost budgets
   mcp.toml              # MCP server declarations + connect/reconnect defaults
-  agents/               # Agent template definitions (markdown with YAML frontmatter)
+  agents/               # Built-in agent templates (markdown with YAML frontmatter)
   orchestrator/         # templates/ only — live persona docs are generated at first run
   skills/               # Skill definitions (SKILL.md files)
   tools/                # Tool configuration
 ```
-`config/llm.toml` is not checked in: the daemon seeds it on first start from `scripts/release/templates/config/llm.toml` (`apps/openalpacad/src/bootstrap/config.rs`, `seed_default_configs`), the persona docs from `config/orchestrator/templates/*_temp.md`, and `config/agents/`, `config/skills/` and `config/tools/` per directory (`bootstrap/content.rs`): a directory that exists is skipped whole, even an emptied one, and an existing file is never overwritten.
+`config/llm.toml` is not checked in: the daemon seeds it on first start from `scripts/release/templates/config/llm.toml` (`apps/openalpacad/src/bootstrap/config.rs`, `seed_default_configs`), the persona docs from `config/orchestrator/templates/*_temp.md`, and `config/skills/` and `config/tools/` per directory (`bootstrap/content.rs`): a directory that exists is skipped whole, even an emptied one, and an existing file is never overwritten. Agent templates are built in (`openalpaca_core::bundled`); `config/agents/` starts empty, a file there overrides its `id`'s template, an unedited shipped copy (`shipped_versions.txt`, append-only) is set aside.
 
 ### Dependency Graph
 ```
@@ -266,7 +266,7 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 | Plugin system | `crates/openalpaca_plugins/src/` |
 | Skill catalog | `crates/openalpaca_core/src/orchestrator/skill/catalog/` (`read_skill_md`); `routes/skills.rs` |
 | Security gate | `crates/openalpaca_core/src/security/` |
-| Agent definitions | `crates/openalpaca_core/src/agent/` |
+| Agent definitions | `crates/openalpaca_core/src/agent/`; built-in templates `bundled/` |
 | Daemon routes | `apps/openalpacad/src/routes/` |
 | CLI commands | `apps/openalpaca/src/commands/` (`confirmations.rs`, `chat_stream/mod.rs`); `apps/openalpaca/src/unattended.rs` |
 | GUI (Tauri) | `apps/openalpaca-gui/src-tauri/`, `apps/openalpaca-gui/src/` (`lib/api/`, `lib/unavailable.ts`); specs `DESIGN_SPEC.md`, `API_MAP.md` |

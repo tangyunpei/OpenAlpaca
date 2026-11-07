@@ -157,7 +157,7 @@ Config is plain files. The daemon reloads most of them when they change. Edit th
 | `llm.toml` | Providers, keys (encrypted), default model, fallback chains. Created on first start; git-ignored in the repo. |
 | `daemon.toml` | Execution limits, cost caps, routing, sessions, uploads, security, server settings. The repo's `config/daemon.toml` is the full reference; a fresh install gets a shorter file and built-in defaults. |
 | `mcp.toml` | MCP server declarations and each server's on/off switch. |
-| `agents/*.md` | Agent templates: YAML frontmatter (model, capabilities, limits) plus a persona. Nine ship. |
+| `agents/*.md` | Agent templates: YAML frontmatter (model, capabilities, limits) plus a persona. Nine are built in; a file here of the same `id` overrides one. |
 | `skills/*/SKILL.md` | Skills. Four ship: `code-review`, `commit-message`, `create-skill`, `explain-code`. |
 | `orchestrator/*.md` | The assistant's persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`), created on first start. `USER.md` is yours to edit (`openalpaca persona edit user`, or Settings → Persona); nothing writes learned facts into it. |
 

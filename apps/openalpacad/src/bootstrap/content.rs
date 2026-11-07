@@ -1,5 +1,5 @@
-//! First-boot content: the agent templates, skills and tool config the daemon
-//! carries in its own binary (L9).
+//! First-boot content: the skills and tool config the daemon carries in its
+//! own binary (L9), and the empty `agents/` the person's own templates go in.
 //!
 //! `seed_default_configs` has always written `llm.toml`, `daemon.toml` and
 //! `mcp.toml` on a first boot, and the release packager stages exactly those
@@ -15,6 +15,12 @@
 //! over a file that exists. A directory the owner has curated — even down to
 //! zero files — is theirs; the daemon fills a gap, it does not restore a
 //! default.
+//!
+//! The agent templates are no longer seeded (subagent design §2.5 S-1): they
+//! are a bundled layer the daemon registers from its binary at every start
+//! (`openalpaca_core::bundled`), and `agents/` is created empty, when absent,
+//! for the person's own and overriding files. A seeded copy an earlier build
+//! wrote stays where it is; an unedited one is set aside at load.
 
 use std::path::Path;
 use tracing::{info, warn};
@@ -44,20 +50,6 @@ macro_rules! seed {
     };
 }
 
-/// The nine shipped agent templates. Without at least one carrying the
-/// `orchestration` capability nothing can act as Lead Agent.
-const AGENTS: &[SeedFile] = &[
-    seed!("agents/code_agent.md"),
-    seed!("agents/explore_agent.md"),
-    seed!("agents/general_agent.md"),
-    seed!("agents/lead_agent.md"),
-    seed!("agents/planning_agent.md"),
-    seed!("agents/research_agent.md"),
-    seed!("agents/review_agent.md"),
-    seed!("agents/system_agent.md"),
-    seed!("agents/writing_agent.md"),
-];
-
 /// The four shipped skills. `create-skill` carries helper scripts, which have
 /// to land executable or the skill cannot run them.
 const SKILLS: &[SeedFile] = &[
@@ -77,11 +69,6 @@ const TOOLS: &[SeedFile] = &[seed!("tools/example.toml")];
 
 const SEED_DIRS: &[SeedDir] = &[
     SeedDir {
-        name: "agents",
-        label: "agent template",
-        files: AGENTS,
-    },
-    SeedDir {
         name: "skills",
         label: "skill",
         files: SKILLS,
@@ -93,13 +80,29 @@ const SEED_DIRS: &[SeedDir] = &[
     },
 ];
 
-/// Seed `config/agents`, `config/skills` and `config/tools` when they are
-/// absent.
+/// The directories created empty when absent, and never filled: `agents/`
+/// holds the person's own templates and their overrides of the bundled ones
+/// (S-1). Created so the watcher has the path from the first start (L-6) and
+/// the template routes a place to write.
+const EMPTY_DIRS: &[&str] = &["agents"];
+
+/// Create `config/agents` empty, and seed `config/skills` and `config/tools`,
+/// when they are absent.
 ///
 /// Called from [`super::seed_default_configs`], before anything reads them.
-/// Each directory is decided on its own: an install that has agents but no
-/// skills gets skills.
+/// Each directory is decided on its own: an install that has skills but no
+/// tools gets tools.
 pub(super) fn seed_default_content(config_dir: &Path) {
+    for name in EMPTY_DIRS {
+        let root = config_dir.join(name);
+        if root.exists() {
+            continue;
+        }
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            warn!("Failed to create {}: {e}", root.display());
+        }
+    }
+
     for dir in SEED_DIRS {
         let root = config_dir.join(dir.name);
         if root.exists() {
@@ -154,40 +157,3 @@ fn make_executable_if_script(path: &Path) {
 
 #[cfg(not(unix))]
 fn make_executable_if_script(_path: &Path) {}
-
-#[cfg(test)]
-mod tests {
-    use super::AGENTS;
-    use openalpaca_core::orchestrator::MAIN_LOOP_AGENT_ID;
-
-    /// **T4.** The main loop's tool calls are attributed to `orchestrator`, so
-    /// that a confirmation card can name who is asking instead of reading
-    /// "unknown is blocked on this". That only works while the name belongs to
-    /// nobody else: a shipped template with the same id would make the
-    /// capability log ambiguous and would make the GUI call a real agent by
-    /// the assistant's name. The templates are embedded here, so this is where
-    /// the collision would be caught.
-    #[test]
-    fn no_shipped_agent_template_claims_the_main_loop_s_id() {
-        let mut ids = Vec::new();
-        for file in AGENTS {
-            let id = file
-                .contents
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("id:"))
-                .map(|value| value.trim().trim_matches('"').to_string())
-                .unwrap_or_else(|| panic!("{} has no `id:` in its frontmatter", file.path));
-            ids.push(id);
-        }
-
-        assert_eq!(ids.len(), 9, "the nine shipped templates: {ids:?}");
-        assert!(
-            !ids.iter().any(|id| id == MAIN_LOOP_AGENT_ID),
-            "`{MAIN_LOOP_AGENT_ID}` is the main loop's own id and must not \
-             also be a template's: {ids:?}"
-        );
-        // And it is a name, not the absence of one.
-        assert_ne!(MAIN_LOOP_AGENT_ID, "unknown");
-        assert!(!MAIN_LOOP_AGENT_ID.is_empty());
-    }
-}
