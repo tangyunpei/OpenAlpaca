@@ -560,7 +560,7 @@ bookkeeping. `DELETE /v1/sessions/{id}` takes the transcript with the rows:
 | `POST /v1/tasks` | Create a run. Takes `unattended`. |
 | `GET /v1/tasks/{id}` | One run. |
 | `GET /v1/tasks/{id}/timeline` | One lane per spawned subagent (label, template, state, start and end). This is where a run's agents are reported. |
-| `POST /v1/tasks/{id}/action` | `cancel`, `pause`, `resume` or `start`. Takes an optional `unattended`. |
+| `POST /v1/tasks/{id}/action` | `cancel`, `resume` or `start`. Takes an optional `unattended`. `pause` is refused until a later design: `409` with `{"error": "<the chat's /pause sentence>"}`, and nothing moves (no status, no `TaskUpdated`). `resume` still un-pauses a row an earlier build left `paused`. |
 | `POST /v1/tasks/{id}/steer` | Push a message into the run's steering inbox. `404` on a run that is not yours. |
 | `POST /v1/tasks/{id}/rerun` | Answers `201` with a **new** id, copied from a finished run's goal. Takes an optional `unattended`. |
 | `GET\|POST /v1/lanes/{lane_key}/followups` | Read or add to a lane's follow-up queue. The `POST` takes `unattended`. |
@@ -1202,7 +1202,7 @@ Every chat message (any source: GUI, CLI, connectors) is routed by the orchestra
 
 1. **Deterministic commands** (no LLM call):
    - `/status` / `/tasks` — task summary; `/status <task_id>` for one task.
-   - `/cancel` — stops a run. The bare form (no id) resolves against the lane's active workflows; an explicit id (`/cancel <id>`) targets that task. `/pause` and `/resume`, bare or with an id, answer one sentence — pause is not supported, `/cancel` stops a run — and change nothing.
+   - `/cancel` — stops a run. The bare form (no id) resolves against the lane's active workflows; an explicit id (`/cancel <id>`) targets that task. `/pause` and `/resume`, bare or with an id, answer one sentence — pause is not supported, `/cancel` stops a run — and change nothing. Pause is refused on every surface until a later design: the action route's `pause` answers `409` with the same sentence, `openalpaca tasks pause` prints it, and the GUI offers no Pause.
    - `/steer <text>` — inject a steering message into the lane's running workflow (guaranteed delivery, bypasses the model; requires `orchestrator.routing.steering_enabled`, default on).
    - `/remember`, `/forget`, `/memories` — the chat memory commands (see [Memory](#memory), *Chat memory commands*): matched before any skill — a slash command or the router's pick — and before the task commands above, which the three words cannot be confused with; the command word in any case and followed by a space or nothing (`/remembering` is not one). Only on an attended turn of the app's or the CLI's chat; every other turn is answered with a fixed sentence and changes nothing. Their names are reserved: a skill claiming one as its slash command, an alias or its id is not reached by that slash, and the skill loader logs one `WARN` naming it.
    - `/<skill> [args]` — invoke a skill by slash command, alias, or skill ID (directory name); skills can also be selected by the weighted skill router.

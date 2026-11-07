@@ -7,7 +7,7 @@
 //! - config: Manage system configuration
 //! - gui: Manage GUI process
 //! - connector: Manage platform connectors
-//! - tasks: Manage tasks (list, status, create, cancel, pause, resume)
+//! - tasks: Manage tasks (list, status, create, cancel, resume; pause refused)
 //! - agents: Manage agents (list, status, config, create, remove)
 //! - llm: Manage LLM settings, keys, and usage
 //! - chat: Chat with the Orchestrator
@@ -50,7 +50,7 @@ enum Commands {
     /// Manage platform connectors (Telegram, etc.)
     Connector(commands::connector::ConnectorArgs),
 
-    /// Manage tasks (list, status, create, cancel, pause, resume)
+    /// Manage tasks (list, status, create, cancel, resume; pause refused)
     Tasks(commands::tasks::TasksArgs),
 
     /// Manage agents (list, status, config, create, remove)

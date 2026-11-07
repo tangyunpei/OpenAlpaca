@@ -754,12 +754,15 @@ action group or, for a finished run, a terminal banner, then three cards:
 Every card distinguishes "nothing happened" from "the read failed" and says
 which.
 
-**Run controls.** Eight, none of them decorative: `Cancel`, `Pause`, `Resume`
-and `Start now` (all `POST /v1/tasks/{id}/action`), `Re-run`
+**Run controls.** Seven, none of them decorative: `Cancel`, `Resume` and
+`Start now` (all `POST /v1/tasks/{id}/action`), `Re-run`
 (`POST /v1/tasks/{id}/rerun` — a *new* id, with `source_task_id` recording what
 it was copied from), `Steer` and `Queue follow-up` (which aim the composer, as
 above), and `Jump to chat`. Which subset a run shows follows its state: a live
 run gets the transitions, a finished one gets the terminal banner with `Re-run`.
+There is no `Pause`: the daemon refuses pause on every surface until a later
+design (a pause never stopped a run's work), so a running run's card starts
+with `Steer`; `Resume` stays for a run an earlier build left paused.
 
 Two of them can be *disabled*, which is different from missing:
 

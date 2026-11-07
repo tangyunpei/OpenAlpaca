@@ -340,7 +340,13 @@ captured):
    on it; zero → say so; multiple → list ids and ask. `/pause` and
    `/resume`, bare or with an id, answer one sentence
    (`task_ops.rs::PAUSE_UNSUPPORTED`: pause is not supported, `/cancel`
-   stops a run) and change nothing.
+   stops a run) and change nothing. Every other surface refuses pause
+   too, until a later design: `POST /v1/tasks/{id}/action`'s `pause`
+   answers `409` with the same sentence before `apply_task_action`,
+   `openalpaca tasks pause` prints it without a request, and the Work
+   view offers no Pause — a pause never stopped a run (its work went on
+   and its completion wrote over `paused`). The route's `resume` still
+   un-pauses a row an earlier build left `paused`.
 2. **`/steer <msg>`** — deterministic injection into the lane's sole
    running workflow, bypassing the model
    (`task_ops.rs::handle_steer_prefix`; gated on `steering_enabled`).

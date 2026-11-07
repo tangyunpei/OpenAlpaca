@@ -225,7 +225,7 @@ openalpaca tasks status <task_id> [--format table|json]
 openalpaca tasks log <task_id> [--limit <n>]
 openalpaca tasks create [description] [--priority <n>]
 openalpaca tasks cancel <task_id>
-openalpaca tasks pause <task_id>
+openalpaca tasks pause <task_id>    # not supported: prints the refusal, exits 1 (Notes)
 openalpaca tasks resume <task_id>
 openalpaca tasks confirmations list [--format table|json]
 openalpaca tasks confirmations watch
@@ -242,6 +242,7 @@ Notes:
 - `log` prints one line per event of the run: time, event, `[agent]` and the event's detail. An approval prompt's rows (`tool_confirmation_requested`, `tool_confirmation_resolved`) name a tool and an agent that can come from a third party, so the agent is shown with every hidden character as `<U+XXXX>` and a detail printed as JSON writes them with JSON's own `\u` escapes — never raw.
 - `status` prints the task and, under `Lanes:`, one line per subagent it spawned. With `--format json` the subagents are the `lanes` array; `lanes_error` is present when the timeline could not be read, so an empty array is never mistaken for "spawned nothing".
 - Every command that takes a `<task_id>` needs the **full** id; the daemon does not match a prefix. The `list` table shortens it, so copy it from `openalpaca tasks list --format json`.
+- `pause` is **not supported** until a later design: it prints the sentence the chat's `/pause` answers ("Pause and resume are not supported — a workflow runs until it finishes or /cancel stops it.") on stderr and exits 1, without reaching the daemon, so it answers with no daemon running. A pause never stopped a run — its work went on and its completion wrote over `paused` — so the daemon refuses it on every surface (`POST /v1/tasks/{id}/action`, the chat, the GUI). `cancel` stops a run; `resume` still works (below).
 
 #### Creating a task
 
@@ -254,7 +255,7 @@ Notes:
 
 `resume` is one word over two verbs:
 
-- On a **paused** run it is the plain transition back to running.
+- On a **paused** run — one an earlier build paused — it is the plain transition back to running, so no run is left stuck.
 - On an **interrupted** run it is *replay resume* — **experimental, and off by default**. The daemon rebuilds the run's loop history from its session log (the lead's rounds and their tool results) and continues it under the same id, telling the model not to repeat side-effecting calls it already made. The run's subagents come back too: one that finished is known again with its whole answer, kept beside the log, and one the stop interrupted is reported as interrupted, so the lead can collect the first and spawn the second again. Nothing recorded is re-executed.
 - Turn replay resume on with `resume_enabled = true` under `[orchestrator.routing]` in `daemon.toml`. Until then an interrupted run answers `RESUME_DISABLED`.
 - The other way to redo an interrupted run is a re-run: the GUI's `Re-run` button, or `POST /v1/tasks/{id}/rerun` directly. The CLI has no `rerun` verb yet.

@@ -1,5 +1,8 @@
 //! Tasks command — list, status, log, create, cancel, pause, resume
 //!
+//! `pause` is refused here, before any request, until a later design
+//! (PAUSE-OFF): the daemon's route refuses it too.
+//!
 //! `resume` is one word over two verbs, exactly as the daemon route is: it
 //! un-pauses a paused run, and — when the daemon has §5.6c's experimental
 //! replay resume enabled — continues an `interrupted` one from the history
@@ -69,7 +72,8 @@ pub enum TasksCommands {
         /// Task ID
         task_id: String,
     },
-    /// Pause a running task
+    /// Not supported until a later design: says so and exits 1 without
+    /// reaching the daemon. Cancel stops a run
     Pause {
         /// Task ID
         task_id: String,
@@ -263,7 +267,7 @@ pub async fn run(args: TasksArgs) -> Result<()> {
             priority,
         } => create_task(description, priority).await,
         TasksCommands::Cancel { task_id } => task_action(&task_id, "cancel").await,
-        TasksCommands::Pause { task_id } => task_action(&task_id, "pause").await,
+        TasksCommands::Pause { .. } => pause_refused(),
         TasksCommands::Resume { task_id } => task_action(&task_id, "resume").await,
         TasksCommands::Confirmations { command } => {
             crate::commands::confirmations::run(command).await
@@ -566,6 +570,14 @@ async fn task_action(task_id: &str, action: &str) -> Result<()> {
     Ok(())
 }
 
+/// `openalpaca tasks pause` (PAUSE-OFF): the daemon refuses `pause` until a
+/// later design, so the verb says so itself, before any daemon is reached —
+/// it answers with none running. The sentence is the chat's and the route's
+/// own; `main` prints it on stderr and exits 1.
+fn pause_refused() -> Result<()> {
+    anyhow::bail!(openalpaca_core::orchestrator::PAUSE_UNSUPPORTED)
+}
+
 /// The one line an action prints, split out so its shape is testable without
 /// a daemon.
 ///
@@ -596,6 +608,33 @@ fn action_line(task_id: &str, result: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PAUSE-OFF: `openalpaca tasks pause` answers the chat's and the route's
+    /// sentence itself and reaches no daemon. The sandbox holds no discovery
+    /// file, so a verb that tried to connect would fail "Daemon is not
+    /// running" instead; `main` prints the error on stderr and exits 1.
+    #[test]
+    fn pause_is_refused_with_the_sentence_and_no_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+
+        let err = runtime
+            .block_on(run(TasksArgs {
+                command: TasksCommands::Pause {
+                    task_id: "task-1".to_string(),
+                },
+            }))
+            .expect_err("pause is refused");
+
+        assert_eq!(
+            err.to_string(),
+            openalpaca_core::orchestrator::PAUSE_UNSUPPORTED
+        );
+    }
 
     /// `colored` decides by tty at first use; pin it off so a table row's
     /// cells can be read literally.
