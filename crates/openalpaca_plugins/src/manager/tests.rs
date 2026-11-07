@@ -1365,6 +1365,52 @@ mcp_compatible = true
         );
     }
 
+    /// The holder's row names a plugin refused its id (`plugin_refused`).
+    fn refused_by(plugin: &str) -> Vec<openalpaca_core::agent::registry::NotUsed> {
+        use openalpaca_core::agent::registry::{NotUsed, NotUsedReason, TemplateLayer};
+        vec![NotUsed {
+            layer: TemplateLayer::Plugin,
+            path: None,
+            reason: NotUsedReason::PluginRefused,
+            plugin: Some(plugin.to_string()),
+        }]
+    }
+
+    /// **A disabled plugin is no longer listed `plugin_refused` on the
+    /// holder's row** (subagent design §2.4 L-1). The refusal is recorded at
+    /// the plugin's load; T2 forgets it, so `GET /v1/agent-templates` does
+    /// not go on naming a plugin that is off, and a re-enable records it
+    /// again.
+    #[tokio::test]
+    async fn a_disabled_plugin_is_no_longer_listed_as_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"writing_agent"}"#).unwrap();
+        let h = Harness::new(tmp.path());
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        let not_used = |h: &Harness| h.agents.provenance("writing_agent").unwrap().not_used;
+
+        load_running_stub(&h, "echo-test").await;
+        assert_eq!(not_used(&h), refused_by("echo-test"), "listed at load");
+
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+        assert!(
+            not_used(&h).is_empty(),
+            "a disabled plugin is still listed as refused: {:?}",
+            not_used(&h)
+        );
+
+        h.manager.enable(&ext("echo-test")).await.unwrap();
+        assert_eq!(not_used(&h), refused_by("echo-test"), "listed again");
+    }
+
     /// Lay out a file skill directory, as `config/skills/<dir>/SKILL.md`.
     fn file_skill(root: &Path, dir: &str, name: &str) -> PathBuf {
         let skill = root.join(dir);
@@ -2796,6 +2842,61 @@ mcp_compatible = true
         assert_eq!(h.provider_handle("echo-test").await, live_handle);
         assert!(h.has_tool("echo-test::echo"));
         assert_eq!(h.stub_caps(), 1);
+    }
+
+    /// **The `HandleHeld` unwind takes back the refusal its attempt
+    /// recorded** (subagent design §2.4 L-1): an attempt refused at E5 whose
+    /// agent template was refused an id at E4 leaves no `plugin_refused`
+    /// entry on the holder's row.
+    #[tokio::test]
+    async fn a_refused_publish_leaves_no_plugin_refused_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        load_running_stub(&h, "echo-test").await;
+
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir, CHANNEL_DEFAULT_TIMEOUT).unwrap();
+        let generation = h.manager.ledger.generation(&ext("echo-test")).unwrap();
+        let bridge = Arc::new(PluginAgentBridge::new(
+            "echo-test".to_string(),
+            "writing_agent".to_string(),
+            intruder.channel.clone(),
+            generation,
+            Arc::clone(&h.manager.ledger),
+        ));
+        let discovered = Discovered {
+            tools: Vec::new(),
+            connector: None,
+            provider: None,
+            models: Vec::new(),
+            skill: None,
+            agent: Some(build_agent_template_from_info(
+                &serde_json::json!({"id": "writing_agent"}),
+                "echo-test",
+                bridge,
+            )),
+        };
+
+        let err = h
+            .manager
+            .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
+            .await
+            .expect_err("E5 published over a live handle");
+        assert!(
+            matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test"),
+            "expected HandleHeld, got {err:?}"
+        );
+
+        let not_used = h.agents.provenance("writing_agent").unwrap().not_used;
+        assert!(
+            not_used.is_empty(),
+            "the refused attempt left its refusal listed: {not_used:?}"
+        );
     }
 
     /// **A reload over an unreadable store leaves the row alone** (design §3.2:
