@@ -12,6 +12,15 @@ use std::time::Duration;
 /// Default context compression threshold (fraction of max_context_tokens).
 pub(super) const DEFAULT_CONTEXT_THRESHOLD: f64 = 0.6;
 
+/// The longest one streamed round may run when the routed provider needs a
+/// key: ten minutes ([`LoopConfig::max_stream_duration`]'s default).
+pub(super) const KEYED_STREAM_ROUND: Duration = Duration::from_secs(600);
+
+/// The longest one streamed round may run when the routed provider needs no
+/// key — a local model, which may run up to an hour (LOCAL-CALL-HOUR):
+/// [`LoopConfig::max_keyless_stream_duration`]'s default.
+pub(super) const KEYLESS_STREAM_ROUND: Duration = Duration::from_secs(3600);
+
 /// Optional callback for streaming events (UI progress, logging).
 pub type StreamCallback = Arc<dyn Fn(&StreamEvent) + Send + Sync>;
 
@@ -56,10 +65,16 @@ pub struct LoopConfig {
     /// streaming first, forwarding each event to this callback, then falls
     /// back to non-streaming on failure.
     pub stream_callback: Option<StreamCallback>,
-    /// Maximum wall-clock duration for streaming collection.
-    /// If `collect_stream()` exceeds this, it is cancelled and the loop
-    /// falls back to non-streaming. Default: 10 minutes.
+    /// Maximum wall-clock duration for streaming collection when the routed
+    /// provider needs a key. If `collect_stream()` exceeds this, it is
+    /// cancelled and the loop falls back to non-streaming. Default: 10
+    /// minutes.
     pub max_stream_duration: Duration,
+    /// The same bound when the routed provider needs no key
+    /// (`LlmProvider::requires_key` false: Ollama), read from the stream the
+    /// router hands back (`RoutedStream::requires_key`). Default: an hour —
+    /// a call to a local model may run that long (LOCAL-CALL-HOUR).
+    pub max_keyless_stream_duration: Duration,
     /// What compaction's working-state writer is called with (design 11
     /// §3.1, CQ-3): `[orchestrator.costs] summary_model` (`None` the
     /// router's default), its daily ceiling, the line cut and the block's
@@ -128,6 +143,7 @@ impl Clone for LoopConfig {
             thinking: self.thinking.clone(),
             stream_callback: self.stream_callback.clone(),
             max_stream_duration: self.max_stream_duration,
+            max_keyless_stream_duration: self.max_keyless_stream_duration,
             writer: self.writer.clone(),
             working_state: self.working_state.clone(),
             working_state_cursor: self.working_state_cursor.clone(),
@@ -156,6 +172,10 @@ impl std::fmt::Debug for LoopConfig {
             .field("thinking", &self.thinking)
             .field("stream_callback", &self.stream_callback.is_some())
             .field("max_stream_duration", &self.max_stream_duration)
+            .field(
+                "max_keyless_stream_duration",
+                &self.max_keyless_stream_duration,
+            )
             .field("writer", &self.writer)
             .field("working_state", &self.working_state.is_some())
             .field("working_state_cursor", &self.working_state_cursor)
@@ -189,7 +209,8 @@ impl Default for LoopConfig {
             enable_caching: true,
             thinking: None,
             stream_callback: None,
-            max_stream_duration: Duration::from_secs(600),
+            max_stream_duration: KEYED_STREAM_ROUND,
+            max_keyless_stream_duration: KEYLESS_STREAM_ROUND,
             writer: WriterConfig::default(),
             working_state: None,
             working_state_cursor: None,
@@ -254,7 +275,8 @@ impl LoopConfig {
             enable_caching: true,
             thinking: None,
             stream_callback: None,
-            max_stream_duration: Duration::from_secs(600),
+            max_stream_duration: KEYED_STREAM_ROUND,
+            max_keyless_stream_duration: KEYLESS_STREAM_ROUND,
             writer: WriterConfig::default(),
             working_state: None,
             working_state_cursor: None,

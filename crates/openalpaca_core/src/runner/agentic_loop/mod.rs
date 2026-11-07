@@ -930,6 +930,7 @@ async fn run_agentic_loop_core(
                     config.thinking.clone(),
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
+                    config.max_keyless_stream_duration,
                     context_management.clone(),
                     ephemeral_notice.clone(),
                 ).instrument(llm_call_span.clone()) => result,
@@ -954,6 +955,7 @@ async fn run_agentic_loop_core(
                     config.thinking.clone(),
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
+                    config.max_keyless_stream_duration,
                     context_management.clone(),
                     ephemeral_notice.clone(),
                 )

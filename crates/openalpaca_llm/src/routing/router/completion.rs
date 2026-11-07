@@ -96,6 +96,7 @@ impl LlmRouter {
                 Ok(stream) => {
                     return Ok(RoutedStream {
                         model: model.to_string(),
+                        requires_key: entry.provider.requires_key(),
                         stream: Box::pin(crate::streaming::PermitStream::new(stream, permit)),
                     });
                 }

@@ -664,7 +664,7 @@ All in `~/.openalpaca/config/llm.toml`:
 |---|---|---|
 | `[providers.ollama] default_model` | `""` | Empty means "whatever is installed" — the router picks a discovered model, preferring a tools-capable one. Name a tag to pin it. |
 | `[providers.ollama] default_max_tokens` | `8192` | The output ceiling for one answer (the cloud default is 4096). A request that names its own `max_tokens` still wins. |
-| `[providers.ollama] request_timeout_secs` | `600` | Wall clock for one **non-streaming** call to this provider. |
+| `[providers.ollama] request_timeout_secs` | `3600` | Wall clock for one **non-streaming** call to this provider: a call to a local model may run up to an hour. An install seeded before this build keeps `600` (see [Upgrade](#upgrade)). |
 | `[timeouts] llm_request_timeout_secs` | `120` | The same budget for any provider that sets no override. |
 
 You should not need a `[models]` row at all — discovery fills the catalogue —
@@ -685,12 +685,12 @@ other bounds sit over a stream, and whichever trips first wins:
 | Bound | Value | Configurable |
 |---|---|---|
 | No chunk from the provider | 90 s | No — `STREAM_IDLE_TIMEOUT` in `crates/openalpaca_llm/src/streaming.rs` |
-| Gap between HTTP reads | `request_timeout_secs` (600 s for the seeded Ollama) | Yes |
-| One whole streamed round | 10 minutes | No — `max_stream_duration` in `crates/openalpaca_core/src/runner/agentic_loop/config.rs` |
+| Gap between HTTP reads | `request_timeout_secs` (3,600 s for the seeded Ollama) | Yes |
+| One whole streamed round | An hour for a provider that needs no key (Ollama); 10 minutes for any other | No — `max_keyless_stream_duration` and `max_stream_duration` in `crates/openalpaca_core/src/runner/agentic_loop/config.rs` |
 
 The HTTP layer also bounds the connect phase at 30 s. When any of these trips
 the turn is not lost: the loop logs it and retries the round **without**
-streaming, where the per-provider total (600 s for the seeded Ollama) applies
+streaming, where the per-provider total (3,600 s for the seeded Ollama) applies
 from the start.
 
 In practice the 90 s is the one that fires. A model that is still loading into
@@ -729,6 +729,19 @@ Re-run installer with a newer artifact:
 Upgrade keeps:
 
 - `~/.openalpaca` data and config
+
+A written `llm.toml` is yours and no build rewrites it, so an install seeded
+before this build keeps `request_timeout_secs = 600` under
+`[providers.ollama]`: a non-streaming call to a local model is still cut at ten
+minutes there. To let it run up to an hour, as a new install does, set it by
+hand:
+
+```toml
+[providers.ollama]
+request_timeout_secs = 3600
+```
+
+A streamed round to a local model is allowed the hour either way.
 
 An upgrade from any build before the schema re-baseline of 2026-09-28 is the one
 exception — a pre-redesign build at schema 42 as well as an earlier

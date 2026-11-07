@@ -50,6 +50,13 @@ pub struct RouterRequest {
 pub struct RoutedStream {
     /// The ladder's effective model: what answered, not what was asked for.
     pub model: String,
+    /// Whether the provider serving the stream needs a key
+    /// ([`LlmProvider::requires_key`]): `false` for a local model, whose
+    /// streamed round the agentic loop allows an hour where it allows any
+    /// other ten minutes (LOCAL-CALL-HOUR).
+    ///
+    /// [`LlmProvider::requires_key`]: crate::LlmProvider::requires_key
+    pub requires_key: bool,
     pub stream: ChatStream,
 }
 

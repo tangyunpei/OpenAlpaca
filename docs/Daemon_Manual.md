@@ -355,7 +355,7 @@ shipped `lead_agent` template sets `3.0`). At price `0` none of the caps bite.
 | Key | Default | Scope |
 |---|---|---|
 | `[timeouts] llm_request_timeout_secs` | 120 | Wall clock for one **non-streaming** LLM call, any provider that sets no override. Clamped to 1…86400 s with a `WARN`. |
-| `[providers.<name>] request_timeout_secs` | unset | Per-provider override of the above. The seeded template sets **600** for Ollama. |
+| `[providers.<name>] request_timeout_secs` | unset | Per-provider override of the above. The seeded template sets **3600** for Ollama: a call to a local model may run up to an hour. |
 | `[providers.<name>] default_max_tokens` | 4096 (8192 for the seeded Ollama) | Output ceiling for one answer; a request-level `max_tokens` still wins. |
 
 The HTTP client carries **no total deadline**: it bounds the connect (30 s,
@@ -371,15 +371,15 @@ fires:
 | Bound | Value | Where | What happens |
 |---|---|---|---|
 | Idle between SSE chunks | **90 s**, not configurable | `STREAM_IDLE_TIMEOUT`, `crates/openalpaca_llm/src/streaming.rs` | The stream errors, the loop logs it and **retries the turn without streaming**. |
-| Streaming wall clock | 600 s, not configurable | `LoopConfig::max_stream_duration` | Same fallback: the collection is cancelled and the turn is retried non-streaming. |
-| HTTP read gap | `request_timeout_secs` (600 s for the seeded Ollama, else `[timeouts] llm_request_timeout_secs`) | `build_http_client` | The request fails at the transport. |
+| Streaming wall clock | 600 s, or 3,600 s when the provider serving the round needs no key (Ollama); not configurable | `LoopConfig::max_stream_duration`, `LoopConfig::max_keyless_stream_duration` | Same fallback: the collection is cancelled and the turn is retried non-streaming. |
+| HTTP read gap | `request_timeout_secs` (3,600 s for the seeded Ollama, else `[timeouts] llm_request_timeout_secs`) | `build_http_client` | The request fails at the transport. |
 
 The first is by far the tightest, so on a local model it is the one that fires,
 and the symptom is a turn that stalls and then answers un-streamed rather than
 one that fails. The case that reaches it in practice is a model still being
 loaded into memory: warm the tag once before a long run. The read timeout at
-600 s is ten minutes of silence and is effectively unreachable while the loop
-is the consumer.
+3,600 s for the seeded Ollama is an hour of silence and is effectively
+unreachable while the loop is the consumer.
 
 Streaming for Ollama is real (the provider forwards to the OpenAI-compatible
 streaming client), and every OpenAI-compatible base is asked for

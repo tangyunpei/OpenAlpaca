@@ -4130,6 +4130,210 @@ async fn a_substituted_model_is_reported_on_the_streaming_path() {
     );
 }
 
+// ── LOCAL-CALL-HOUR: a streamed round to a local model may run an hour ──
+
+/// A model that keeps generating: its stream sends one `TextDelta` a second
+/// and never ends, so only the loop's round bound stops it. Asked without
+/// streaming, it answers at once. `needs_key` is what the provider says of
+/// itself (`LlmProvider::requires_key`) — `false` is a local model's.
+struct EndlessStreamProvider {
+    needs_key: bool,
+    unstreamed_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmProvider for EndlessStreamProvider {
+    fn name(&self) -> &str {
+        "endless-stream"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn requires_key(&self) -> bool {
+        self.needs_key
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.unstreamed_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ChatResponse {
+            content: "answered unstreamed".to_string(),
+            tool_calls: vec![],
+            model: request.model.clone().unwrap_or_default(),
+            usage: Usage {
+                input_tokens: 4,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+
+    async fn chat_streaming(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatStream, LlmError> {
+        Ok(Box::pin(futures_util::stream::unfold((), |()| async {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            Some((
+                Ok(openalpaca_llm::StreamEvent::TextDelta {
+                    text: "tick ".to_string(),
+                }),
+                (),
+            ))
+        })))
+    }
+}
+
+const LOCAL_MODEL: &str = "local-model";
+
+/// A router serving `provider` the way the boot builder serves each kind: a
+/// provider that needs no key as Ollama with an empty key pool (its calls go
+/// through the keyless slot), one that needs a key with a key of its own.
+fn endless_stream_router(provider: Arc<EndlessStreamProvider>) -> (LlmRouter, &'static str) {
+    if provider.needs_key {
+        let router = LlmRouter::single_provider(
+            provider,
+            ProviderType::Anthropic,
+            EFFECTIVE_MODEL.to_string(),
+        );
+        return (router, EFFECTIVE_MODEL);
+    }
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        ProviderType::Ollama,
+        openalpaca_llm::ProviderEntry {
+            provider,
+            key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(
+                openalpaca_llm::KeyPool::new(vec![], openalpaca_llm::SelectionStrategy::RoundRobin),
+            )),
+        },
+    );
+    let registry = openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new());
+    registry.register(
+        LOCAL_MODEL.to_string(),
+        openalpaca_llm::ModelInfo {
+            provider: ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 32_768,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
+        },
+    );
+    let router = LlmRouter::new(
+        providers,
+        registry,
+        std::collections::HashMap::new(),
+        Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::with_defaults(),
+        )),
+        LOCAL_MODEL.to_string(),
+    );
+    (router, LOCAL_MODEL)
+}
+
+/// One streamed turn against a model that never stops, under the two round
+/// bounds at test scale: 2 s for a provider that needs a key, 6 s for one
+/// that needs none. Returns the result, the time the turn took, how many
+/// stream events the watcher saw, and how many unstreamed calls were made.
+async fn an_endless_streamed_turn(needs_key: bool) -> (LoopResult, Duration, usize, usize) {
+    let provider = Arc::new(EndlessStreamProvider {
+        needs_key,
+        unstreamed_calls: AtomicUsize::new(0),
+    });
+    let (router, model) = endless_stream_router(Arc::clone(&provider));
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&seen);
+    let config = LoopConfig {
+        model: Some(model.to_string()),
+        stream_callback: Some(Arc::new(move |_event: &openalpaca_llm::StreamEvent| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })),
+        max_stream_duration: Duration::from_secs(2),
+        max_keyless_stream_duration: Duration::from_secs(6),
+        ..Default::default()
+    };
+
+    let started = tokio::time::Instant::now();
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("write until you are stopped")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let took = started.elapsed();
+    (
+        result,
+        took,
+        seen.load(Ordering::SeqCst),
+        provider.unstreamed_calls.load(Ordering::SeqCst),
+    )
+}
+
+/// **LOCAL-CALL-HOUR.** A streamed round to a provider that needs no key
+/// runs past the keyed bound and is dropped at its own (an hour in
+/// production), then answered by the non-streaming call. Before the change
+/// every streamed round was dropped at `max_stream_duration`, local or not.
+#[tokio::test(start_paused = true)]
+async fn a_streamed_round_to_a_keyless_provider_runs_to_its_own_bound() {
+    let (result, took, events, unstreamed) = an_endless_streamed_turn(false).await;
+
+    assert!(
+        took >= Duration::from_secs(6) && took < Duration::from_secs(7),
+        "dropped at the keyless bound, not the keyed one: took {took:?}"
+    );
+    assert!(
+        (5..=6).contains(&events),
+        "the stream ran past the keyed bound's two events: {events}"
+    );
+    assert_eq!(
+        unstreamed, 1,
+        "then the round is asked again without streaming"
+    );
+    assert_eq!(result.final_content, "answered unstreamed");
+    assert_eq!(result.model_used.as_deref(), Some(LOCAL_MODEL));
+}
+
+/// And a provider that needs a key keeps today's bound: its round is dropped
+/// at `max_stream_duration` and answered by the non-streaming call.
+#[tokio::test(start_paused = true)]
+async fn a_streamed_round_to_a_keyed_provider_is_dropped_at_the_keyed_bound() {
+    let (result, took, events, unstreamed) = an_endless_streamed_turn(true).await;
+
+    assert!(
+        took >= Duration::from_secs(2) && took < Duration::from_secs(3),
+        "dropped at the keyed bound: took {took:?}"
+    );
+    assert!((1..=2).contains(&events), "{events}");
+    assert_eq!(
+        unstreamed, 1,
+        "then the round is asked again without streaming"
+    );
+    assert_eq!(result.final_content, "answered unstreamed");
+}
+
 // ── V3: a turn that reaches no answer says why ───────────────────────
 
 fn result_with(finish_reason: LoopFinishReason, content: &str) -> LoopResult {

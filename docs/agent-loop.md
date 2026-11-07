@@ -308,12 +308,16 @@ non-streaming call** — same round, no extra round charged — when:
 - the streaming request itself fails;
 - collecting the stream fails, which includes 90 s of silence between
   chunks (`STREAM_IDLE_TIMEOUT`, `openalpaca_llm/src/streaming.rs`);
-- the collection outlives `LoopConfig.max_stream_duration` (600 s).
+- the collection outlives `LoopConfig.max_stream_duration` (600 s),
+  or `LoopConfig.max_keyless_stream_duration` (3,600 s) when the
+  provider serving the round needs no key — a local model, whose call
+  may run up to an hour. The loop reads which from the stream the
+  router hands back (`RoutedStream::requires_key`).
 
-`complete_streaming` returns `RoutedStream { model, stream }`. A stream
-carries no model id of its own, and the router is the only code that
-knows which rung of its fallback ladder it settled on, so the loop takes
-`.stream` and reports `.model`. That id is what reaches
+`complete_streaming` returns `RoutedStream { model, requires_key,
+stream }`. A stream carries no model id of its own, and the router is
+the only code that knows which rung of its fallback ladder it settled
+on, so the loop takes `.stream` and reports `.model`. That id is what reaches
 `LoopResult.model_used`, the cost tracker, the usage row and the SSE
 `done` frame — the model that answered, not the model that was asked
 for.

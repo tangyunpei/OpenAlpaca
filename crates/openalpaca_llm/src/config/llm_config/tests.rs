@@ -142,7 +142,11 @@ fn the_seeded_template_describes_a_discoverable_ollama() {
         "empty means 'whatever is installed', not a tag nobody pulled"
     );
     assert_eq!(ollama.default_max_tokens, Some(8192));
-    assert_eq!(ollama.request_timeout_secs, Some(600));
+    assert_eq!(
+        ollama.request_timeout_secs,
+        Some(3600),
+        "a call to a local model may run up to an hour (LOCAL-CALL-HOUR)"
+    );
     assert!(
         config.models.is_none(),
         "discovery writes the catalogue; the owner writes no [models] rows"
@@ -155,7 +159,7 @@ fn the_seeded_template_describes_a_discoverable_ollama() {
     let runtime = LlmRuntimeConfig::from(&config);
     assert_eq!(
         runtime.request_timeout_for("ollama"),
-        std::time::Duration::from_secs(600),
+        std::time::Duration::from_secs(3600),
         "the local provider's own budget"
     );
     assert_eq!(
@@ -182,8 +186,8 @@ fn the_request_timeout_defaults_to_two_minutes() {
 }
 
 /// `[timeouts]` moves every provider; `[providers.<name>] request_timeout_secs`
-/// moves one — a local model that generates for ten minutes without the cloud
-/// providers waiting that long for a dead socket.
+/// moves one — a local model that generates for an hour without the cloud
+/// providers waiting that long for a dead socket. An hour is inside the clamp.
 #[test]
 fn a_per_provider_timeout_outranks_the_global_one() {
     let config: LlmRouterConfig = toml::from_str(
@@ -195,7 +199,7 @@ llm_request_timeout_secs = 45
 
 [providers.ollama]
 enabled = true
-request_timeout_secs = 600
+request_timeout_secs = 3600
 "#,
     )
     .unwrap();
@@ -203,7 +207,7 @@ request_timeout_secs = 600
 
     assert_eq!(
         runtime.request_timeout_for("ollama"),
-        std::time::Duration::from_secs(600),
+        std::time::Duration::from_secs(3600),
         "the provider's own value wins"
     );
     assert_eq!(

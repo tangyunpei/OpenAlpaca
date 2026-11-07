@@ -34,10 +34,13 @@ default_model = ""
 # reasoning model spends tokens thinking before it answers, so this is more
 # generous than the cloud default of 4096.
 default_max_tokens = 8192
-# How long one non-streaming call to this provider may take. A large model on a
-# laptop answers in minutes, not seconds. A streamed call is not bound by this:
-# it is cut only if the tokens stop coming.
-request_timeout_secs = 600
+# How long one non-streaming call to this provider may take: a call to a local
+# model may run up to an hour. A large model on a laptop answers in minutes, not
+# seconds, and a long task may keep it generating far longer. It also bounds the
+# gap between a stream's HTTP reads. A streamed round to a local model is
+# allowed an hour whatever this says, and is cut sooner only if the tokens stop
+# coming.
+request_timeout_secs = 3600
 
 [web_search]
 api_key = ""

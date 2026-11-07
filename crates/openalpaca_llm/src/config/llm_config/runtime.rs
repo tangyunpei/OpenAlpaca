@@ -34,7 +34,9 @@ pub struct TimeoutsConfig {
     /// (default 120 — what the client was hard-coded to). A streamed call is
     /// not bounded by it: the HTTP layer bounds the connect and the idle gap
     /// between chunks, and the wall clock belongs to the loop's
-    /// `max_stream_duration` (L7). `[providers.<name>] request_timeout_secs`
+    /// `max_stream_duration`, or `max_keyless_stream_duration` for a
+    /// provider that needs no key (L7, LOCAL-CALL-HOUR).
+    /// `[providers.<name>] request_timeout_secs`
     /// overrides it for one provider — a local model generating at 20 tok/s
     /// needs minutes where a cloud call needs seconds.
     #[serde(default = "default_llm_request_timeout")]

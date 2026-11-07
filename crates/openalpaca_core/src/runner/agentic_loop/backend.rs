@@ -30,6 +30,9 @@ impl<'a> LlmBackend<'a> {
     ///
     /// When `stream_callback` is `Some` and the backend is Router, attempts
     /// streaming first. On streaming failure, falls back to non-streaming.
+    /// A streamed round is bounded by `max_stream_duration`, or by
+    /// `max_keyless_stream_duration` when the provider serving it needs no
+    /// key (a local model, LOCAL-CALL-HOUR); past it, the same fallback.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn complete(
         &self,
@@ -42,6 +45,7 @@ impl<'a> LlmBackend<'a> {
         thinking: Option<ThinkingConfig>,
         stream_callback: Option<&StreamCallback>,
         max_stream_duration: Duration,
+        max_keyless_stream_duration: Duration,
         context_management: Option<ContextManagement>,
         ephemeral_system_notice: Option<String>,
     ) -> Result<ChatResponse, LlmRouterError> {
@@ -98,8 +102,16 @@ impl<'a> LlmBackend<'a> {
                             // Anthropic default and priced it against that
                             // model's rates two statements below.
                             let model_str = routed.model;
+                            // The router knows which provider serves the
+                            // round; a local one may run up to an hour.
+                            let requires_key = routed.requires_key;
+                            let round_bound = if requires_key {
+                                max_stream_duration
+                            } else {
+                                max_keyless_stream_duration
+                            };
                             match tokio::time::timeout(
-                                max_stream_duration,
+                                round_bound,
                                 openalpaca_llm::collect_stream(
                                     Box::pin(forwarding_stream),
                                     model_str,
@@ -125,7 +137,8 @@ impl<'a> LlmBackend<'a> {
                                 }
                                 Err(_elapsed) => {
                                     tracing::warn!(
-                                        max_stream_duration_secs = max_stream_duration.as_secs(),
+                                        stream_round_bound_secs = round_bound.as_secs(),
+                                        requires_key,
                                         "Stream wall-clock deadline exceeded, falling back to non-streaming"
                                     );
                                 }

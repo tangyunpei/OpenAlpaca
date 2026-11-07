@@ -15,7 +15,8 @@ mod utf8;
 ///
 /// A non-streaming call carries `request_timeout` as its own per-request
 /// deadline (`RequestBuilder::timeout`), and a streamed one is bounded above by
-/// the agentic loop's `max_stream_duration`.
+/// the agentic loop's `max_stream_duration` (`max_keyless_stream_duration` for
+/// a provider that needs no key).
 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
 pub fn build_http_client(request_timeout: std::time::Duration) -> reqwest::Client {
     /// The longest a TCP+TLS handshake may take before the endpoint counts as
