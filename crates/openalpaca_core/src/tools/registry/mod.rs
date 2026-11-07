@@ -191,6 +191,16 @@ pub struct ToolContext {
     /// same discipline, only on the context the sandbox hands a tool's
     /// [`BuiltInTool::on_confirmation_denied`] hook. `None` everywhere else.
     pub human_denial: Option<HumanDenial>,
+    /// The seconds this call's own `timeout_secs` asked for, clamped to the
+    /// ceiling — the figure the sandbox cuts it at (CMD-TIMEOUT,
+    /// `SandboxPolicy::asked_runtime_secs`). Set by
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// alone, under the discipline of the approval fact: `None` on a context
+    /// a caller built with it set, on an exempt call and on one that asked
+    /// nothing. A `Command`-backend tool reads it: where it is set, the
+    /// sandbox's cut is the call's one clock, and the tool's own
+    /// `timeout_secs` — its default — stands back.
+    pub asked_runtime_secs: Option<u64>,
 }
 
 /// The fact that a person approved one call on its confirmation card
@@ -798,8 +808,8 @@ impl ToolRegistry {
             guard: _guard,
         } = self.admit(tool_name, arguments, ctx)?;
 
-        // A command tool reads the context for its working folder (R26);
-        // these two do not.
+        // A command tool reads the context for its working folder (R26) and
+        // the figure its call asked for (CMD-TIMEOUT); these two do not.
         if ctx.is_some() && matches!(backend, ToolBackend::Http { .. } | ToolBackend::Plugin(_)) {
             tracing::trace!(
                 tool_name,
@@ -827,8 +837,29 @@ impl ToolRegistry {
                 args_template,
                 timeout_secs,
             } => {
-                execute_command(command, args_template.as_deref(), *timeout_secs, arguments, ctx)
-                    .await
+                // CMD-TIMEOUT: the author's `timeout_secs` is the call's
+                // default. A call that asked for its own figure runs under the
+                // sandbox's cut at it — one clock, which kills the command's
+                // process group when it drops the call (R45) — so the
+                // backend's own stands back to the ceiling's highest setting,
+                // as `shell_execute`'s does, and never comes first below that
+                // highest setting: two clocks at one figure would race, and
+                // the backend's words, with no hint, could win. With the
+                // ceiling at 3600 s and a call asking that much the two
+                // coincide, and the sandbox's, armed first, all but always
+                // wins.
+                let timeout_secs = match ctx.and_then(|c| c.asked_runtime_secs) {
+                    Some(_) => crate::daemon_config::MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS,
+                    None => *timeout_secs,
+                };
+                execute_command(
+                    command,
+                    args_template.as_deref(),
+                    timeout_secs,
+                    arguments,
+                    ctx,
+                )
+                .await
             }
             ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
             ToolBackend::Mcp {
@@ -1371,20 +1402,6 @@ impl ToolRegistry {
                 .is_some_and(|entry| matches!(entry.backend, ToolBackend::Command { .. }))
     }
 
-    /// A `Command`-backend tool's own `timeout_secs` — its author's, from its
-    /// TOML (1–300 s, 30 by default) — which `execute_command` kills it at
-    /// whatever the sandbox allows; `None` for every other tool,
-    /// `shell_execute` among them. The sandbox's hint names the smaller of
-    /// it and the ceiling (N-TOOL-1b), the most such a call can run.
-    pub(crate) fn command_backend_timeout_secs(&self, tool_name: &str) -> Option<u64> {
-        self.tools
-            .get(tool_name)
-            .and_then(|entry| match entry.backend {
-                ToolBackend::Command { timeout_secs, .. } => Some(timeout_secs),
-                _ => None,
-            })
-    }
-
     /// Return the names of tools that use command backends (i.e., execute via shell).
     /// These should be treated like shell tools for injection sanitization.
     pub fn command_backend_tool_names(&self) -> Vec<String> {
@@ -1545,6 +1562,8 @@ async fn execute_http(
 /// (storage design §10, R26): the template's placeholders are substituted
 /// and checked first — a missing argument is named as such whatever the
 /// context — then the folder is resolved, and a call with none is refused.
+/// It is killed after `timeout_secs`: its author's, or — under a call's own
+/// figure the sandbox cuts it at — the ceiling's highest setting (CMD-TIMEOUT).
 async fn execute_command(
     command: &str,
     args_template: Option<&str>,

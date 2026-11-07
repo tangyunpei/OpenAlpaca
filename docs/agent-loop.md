@@ -795,20 +795,22 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   larger one at `max_tool_runtime_ceiling_secs` (600 s) — clamped, never
   refused. The sandbox's figure is an outer bound: a tool with a clock of
   its own stops at whichever comes first, with its own error, not the
-  sandbox's. A `Command`-backend tool is killed at its author's own
-  `timeout_secs` (its TOML's, 30 s by default), so no call's figure runs
-  it longer than that; an `Http`-backend tool's request stops at its
-  TOML's `timeout_secs` (30 s by default); an MCP tool at its server's
-  `request_timeout_secs` (`config/mcp.toml`, 30 s by default); a plugin
-  tool's wait for its plugin's answer at 60 s, which no key sets ("timeout
-  waiting for plugin response"); a builtin at a deadline of its own,
-  `web_fetch`'s among them. A command the sandbox cuts below the most it
-  may run — the ceiling, or that tool's own figure where smaller — is told
-  it may ask for more, naming that most. The loop writes both figures into
-  `shell_execute`'s definition before the first request, so the model is
-  told the limits it really runs under; the registered definition names
-  none, and the shell's own bound (3600 s, the ceiling's highest setting)
-  never comes first.
+  sandbox's. A `Command`-backend tool's author's own `timeout_secs` (its
+  TOML's, 30 s by default) is its calls' default up to the per-tool bound:
+  a call that sends none is killed there where that figure is below
+  `max_tool_runtime_secs` (120 s), else cut at the bound first, and one
+  that sends `timeout_secs` lifts it, running under the sandbox's figure
+  alone (CMD-TIMEOUT); an `Http`-backend tool's
+  request stops at its TOML's `timeout_secs` (30 s by default); an MCP
+  tool at its server's `request_timeout_secs` (`config/mcp.toml`, 30 s by
+  default); a plugin tool's wait for its plugin's answer at 60 s, which no
+  key sets ("timeout waiting for plugin response"); a builtin at a
+  deadline of its own, `web_fetch`'s among them. A command the sandbox
+  cuts below the most it may run — the ceiling — is told it may ask for
+  more, naming it. The loop writes both figures into `shell_execute`'s
+  definition before the first request, so the model is told the limits it
+  really runs under; the registered definition names none, and the shell's
+  own bound (3600 s, the ceiling's highest setting) never comes first.
 - **A tool call's arguments are read, never guessed.** The provider layer
   reads them with one reader (`openalpaca_llm`'s stream collector and the
   OpenAI-compatible response parser): nothing or `null` is `{}`, a JSON

@@ -41,7 +41,7 @@ pub struct SandboxPolicy {
     pub max_tool_calls: Option<u32>,
     /// The per-tool bound (N-TOOL-1b, B-11): `[execution.agent_defaults]
     /// max_tool_runtime_secs` on every loop. A call that runs a command may
-    /// ask for another figure ([`Self::runtime_secs_for`]).
+    /// ask for another figure ([`Self::asked_runtime_secs`]).
     pub max_tool_runtime_secs: u64,
     /// The most such a call may ask for: `[execution.agent_defaults]
     /// max_tool_runtime_ceiling_secs`.
@@ -98,24 +98,37 @@ impl SandboxPolicy {
         }
     }
 
-    /// The seconds the sandbox lets one call run (N-TOOL-1b, B-11): the
-    /// per-tool bound, or — for a call that runs a command (`runs_a_command`:
-    /// `ToolRegistry::is_command_tool`) and sends a `timeout_secs` of 1 or
-    /// more — that figure, clamped to the ceiling: a larger one runs under
-    /// the ceiling, never refused, and a smaller one under itself. A
-    /// `timeout_secs` that is not a whole number of seconds above 0 asks for
-    /// nothing; another tool's is its own argument. A `Command`-backend
-    /// tool's own `timeout_secs` (its TOML's) still stops it first where
-    /// that is smaller (`execute_command`).
+    /// The seconds the sandbox lets one call run (N-TOOL-1b, B-11): what the
+    /// call asked for ([`Self::asked_runtime_secs`]), else the per-tool
+    /// bound.
     pub fn runtime_secs_for(&self, arguments: &serde_json::Value, runs_a_command: bool) -> u64 {
-        let asked = arguments
+        self.asked_runtime_secs(arguments, runs_a_command)
+            .unwrap_or(self.max_tool_runtime_secs)
+    }
+
+    /// What a call that runs a command (`runs_a_command`:
+    /// `ToolRegistry::is_command_tool`) asked for with a `timeout_secs` of 1
+    /// or more: that figure, clamped to the ceiling — a larger one runs under
+    /// the ceiling, never refused, and a smaller one under itself. `None`
+    /// for a `timeout_secs` that is not a whole number of seconds above 0,
+    /// and for every tool that runs no command, whose `timeout_secs` is its
+    /// own argument. A `Command`-backend tool's call that asked runs under
+    /// this figure alone; one that asked nothing, under its author's own
+    /// `timeout_secs` (its TOML's) too, its default (CMD-TIMEOUT,
+    /// `ToolContext::asked_runtime_secs`).
+    pub fn asked_runtime_secs(
+        &self,
+        arguments: &serde_json::Value,
+        runs_a_command: bool,
+    ) -> Option<u64> {
+        if !runs_a_command {
+            return None;
+        }
+        arguments
             .get("timeout_secs")
             .and_then(serde_json::Value::as_u64)
-            .filter(|secs| *secs > 0);
-        match asked {
-            Some(secs) if runs_a_command => secs.min(self.max_tool_runtime_ceiling_secs),
-            _ => self.max_tool_runtime_secs,
-        }
+            .filter(|secs| *secs > 0)
+            .map(|secs| secs.min(self.max_tool_runtime_ceiling_secs))
     }
 
     /// Admit the tools this loop was handed.
@@ -578,6 +591,12 @@ impl SandboxManager {
         // to the per-tool sandbox timeout.
         let is_exempt = self.registry.is_exempt_from_timeout(&tool_call.name);
 
+        // N-TOOL-1b: the sandbox's cut for this call — the policy's bound, or
+        // a command's own `timeout_secs` clamped to the ceiling.
+        let runs_a_command = self.registry.is_command_tool(&tool_call.name);
+        let asked_secs = policy.asked_runtime_secs(&tool_call.arguments, runs_a_command);
+        let runtime_secs = policy.runtime_secs_for(&tool_call.arguments, runs_a_command);
+
         let registry = self.registry.clone();
         let tool_name = tool_call.name.clone();
         let arguments = tool_call.arguments.clone();
@@ -592,19 +611,21 @@ impl SandboxManager {
         // It is also where the approval fact is written, **always** (design
         // 09 §4.2 rule 1): the sandbox's own answer from step 3 or nothing, so
         // a context a caller built with the field set arrives with `None`.
+        //
+        // So is the figure a call asked for (CMD-TIMEOUT), under the same
+        // discipline: set here, where this sandbox cuts the call at it, and
+        // `None` on every other path, so a `Command`-backend tool stands its
+        // own clock back only for a cut that is really there.
         let ctx_owned = {
             let mut owned = disciplined(ctx);
             if owned.event_bus.is_none() {
                 owned.event_bus = Some(self.bus.clone());
             }
             owned.human_approval = human_approval;
+            owned.asked_runtime_secs = asked_secs.filter(|_| !is_exempt);
             owned
         };
 
-        // N-TOOL-1b: the sandbox's cut for this call — the policy's bound, or
-        // a command's own `timeout_secs` clamped to the ceiling.
-        let runs_a_command = self.registry.is_command_tool(&tool_call.name);
-        let runtime_secs = policy.runtime_secs_for(&tool_call.arguments, runs_a_command);
         let start = std::time::Instant::now();
         let result = if is_exempt {
             Ok(registry.execute_with_context(&tool_name, &arguments, &ctx_owned).await)
@@ -652,18 +673,16 @@ impl SandboxManager {
                 // cut at it is told what to do here — the hint is this
                 // message's own, not a guess the loop makes from its words.
                 // Below the most it may run it names `timeout_secs`
-                // (N-TOOL-1b): the ceiling, or a `Command`-backend tool's own
-                // `timeout_secs` where that is smaller — the backend kills it
-                // there whatever a call asks.
+                // (N-TOOL-1b): the ceiling, for a `Command`-backend tool as
+                // for `shell_execute` — a call's figure lifts the tool's own
+                // (CMD-TIMEOUT).
                 if runs_a_command {
-                    let ceiling = policy.max_tool_runtime_ceiling_secs;
-                    let most_secs = self
-                        .registry
-                        .command_backend_timeout_secs(&tool_call.name)
-                        .map_or(ceiling, |own| own.min(ceiling));
                     return Err(format!(
                         "{reason}\n{}",
-                        crate::tools::platform::command_timed_out_hint(runtime_secs, most_secs)
+                        crate::tools::platform::command_timed_out_hint(
+                            runtime_secs,
+                            policy.max_tool_runtime_ceiling_secs,
+                        )
                     ));
                 }
                 Err(reason)
@@ -861,15 +880,17 @@ fn decoded_json_string_call(tool_call: &ToolCall, source: &str) -> Option<ToolCa
     })
 }
 
-/// A copy of `ctx` with neither person-fact set (design 09 §4.2 rule 1).
+/// A copy of `ctx` with neither person-fact set (design 09 §4.2 rule 1),
+/// nor the figure a call asked for (CMD-TIMEOUT).
 ///
 /// Every context the sandbox hands onward — to a preview hook, to a denial
 /// hook, to the tool itself — starts from this, and only the sandbox then
-/// adds the one fact it made. A caller cannot pass one through.
+/// adds the facts it made. A caller cannot pass one through.
 fn disciplined(ctx: &ToolContext) -> ToolContext {
     let mut out = ctx.clone();
     out.human_approval = None;
     out.human_denial = None;
+    out.asked_runtime_secs = None;
     out
 }
 

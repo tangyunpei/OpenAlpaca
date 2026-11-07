@@ -277,7 +277,8 @@ pub enum ToolBackend {
     Command {
         command: String,                      // Binary name
         args_template: Option<String>,        // Args with {param} placeholders
-        timeout_secs: u64,                    // 1-300
+        timeout_secs: u64,                    // 1-300, its calls' default; a call's
+                                              // timeout_secs lifts it to the ceiling
     },
     Plugin(Arc<dyn openalpaca_api::plugin_traits::PluginToolExecutor>),
     Mcp {
@@ -926,7 +927,10 @@ description = "Search query"
 type = "http"                    # or "command"
 url = "https://api.example.com/search?q={query}"
 method = "GET"                   # default: GET
-timeout_secs = 30                # default: 30, range: 1-300
+timeout_secs = 30                # default: 30, range: 1-300; a command
+                                 # tool's is its calls' default, which a
+                                 # call's own timeout_secs may lift up to
+                                 # max_tool_runtime_ceiling_secs (600)
 
 # Optional: MCP-style annotation hints (feed confirmation defaults and
 # annotation:* capabilities)
@@ -971,7 +975,9 @@ pub enum ToolBackendConfig {
 ```
 
 Load-time validation: non-empty name; HTTP URLs must start with
-`http://`/`https://`; `timeout_secs` must be in `[1, 300]`; any
+`http://`/`https://`; `timeout_secs` must be in `[1, 300]` (a `command`
+tool's is its calls' default, which a call may lift up to
+`[execution.agent_defaults] max_tool_runtime_ceiling_secs`); any
 `annotation:`-prefixed entry in `provides_capabilities` must be one of the
 8 known annotation capability names.  One invalid tool rejects its whole
 file.
@@ -1279,9 +1285,12 @@ and ceiling from the daemon's `[execution.agent_defaults]` — a template's
 is set by the caller that knows where the work came from.
 `SandboxPolicy::runtime_secs_for` is the sandbox's cut for one call: a
 `shell_execute` or `Command`-backend call's `timeout_secs` (a whole number
-above 0) clamped to the ceiling, else `max_tool_runtime_secs`; a
-`Command`-backend tool's own `timeout_secs` (its TOML's) still kills it
-first where smaller.  The daemon's
+above 0) clamped to the ceiling (`SandboxPolicy::asked_runtime_secs`), else
+`max_tool_runtime_secs`. A `Command`-backend tool's own `timeout_secs` (its
+TOML's) is its calls' default: it still kills a call that asked for nothing
+where smaller, and stands back for one that asked, which the sandbox alone
+cuts (CMD-TIMEOUT; the figure reaches the backend as
+`ToolContext::asked_runtime_secs`).  The daemon's
 `security.auto_approve_confirmations` config flag forces
 `auto_approve = true` globally.  `auto_approve` is read before
 `unattended`.
@@ -1690,7 +1699,7 @@ the failure is known — the loop adds none:
 | `file_write` | the system refuses the write (`PermissionDenied`), on the file or on a folder it makes above it | check the file's permissions, or write it under another path |
 | `web_fetch` | HTTP 404 | use web_search to find the correct URL first |
 | `web_fetch` | the request or the body read ran out of time | the URL may be unreachable; try a different source |
-| `shell_execute`, `Command` tools | cut by the sandbox below the most it may run — the ceiling, or a `Command` tool's own `timeout_secs` where smaller | a command may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller commands that each finish sooner (`tools::platform::command_timed_out_hint`) |
+| `shell_execute`, `Command` tools | cut by the sandbox below the most it may run — the ceiling | a command may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller commands that each finish sooner (`tools::platform::command_timed_out_hint`) |
 | `shell_execute`, `Command` tools | cut by the sandbox at that most, or by the shell's own 3600 s | that is the most a command may run here; split the work into smaller commands that each finish sooner (`tools::platform::COMMAND_TIMED_OUT_HINT`) |
 | `shell_execute` | exit 127 | check that the command is installed, or give its full path |
 
