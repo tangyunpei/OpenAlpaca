@@ -166,7 +166,9 @@ fn every_per_request_lead_tool_says_its_arguments_reach_no_program() {
                 1.0,
             ))),
             provides_capabilities: vec![],
-            exempt_from_timeout: false,
+            exempt_from_timeout: crate::tools::builtins::builtin_is_exempt_from_timeout(
+                "invoke_skill",
+            ),
             annotations: None,
             version: "test-0.0.0".into(),
             author: "builtin".into(),
@@ -2330,6 +2332,8 @@ struct ScriptedProvider {
     responses: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
     seen_tool_names: std::sync::Mutex<Vec<Vec<String>>>,
     seen_messages: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+    /// A call (by its index) answered only after a pause.
+    delays: std::sync::Mutex<std::collections::HashMap<usize, std::time::Duration>>,
 }
 
 impl ScriptedProvider {
@@ -2338,7 +2342,13 @@ impl ScriptedProvider {
             responses: std::sync::Mutex::new(responses.into()),
             seen_tool_names: std::sync::Mutex::new(Vec::new()),
             seen_messages: std::sync::Mutex::new(Vec::new()),
+            delays: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Call `call` (0-based) answers after `by`.
+    fn delay_call(&self, call: usize, by: std::time::Duration) {
+        self.delays.lock().unwrap().insert(call, by);
     }
 
     fn tool_names(&self, call: usize) -> Vec<String> {
@@ -2387,19 +2397,26 @@ impl openalpaca_llm::LlmProvider for ScriptedProvider {
         &self,
         request: openalpaca_llm::ChatRequest,
     ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
-        self.seen_tool_names
-            .lock()
-            .unwrap()
-            .push(request.tools.iter().map(|t| t.name.clone()).collect());
+        let call = {
+            let mut seen = self.seen_tool_names.lock().unwrap();
+            seen.push(request.tools.iter().map(|t| t.name.clone()).collect());
+            seen.len() - 1
+        };
         self.seen_messages
             .lock()
             .unwrap()
             .push(request.messages.as_ref().clone());
-        self.responses
+        let response = self
+            .responses
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or_else(|| openalpaca_llm::LlmError::Http("script exhausted".to_string()))
+            .ok_or_else(|| openalpaca_llm::LlmError::Http("script exhausted".to_string()));
+        let delay = self.delays.lock().unwrap().get(&call).copied();
+        if let Some(by) = delay {
+            tokio::time::sleep(by).await;
+        }
+        response
     }
 }
 
@@ -2995,6 +3012,64 @@ async fn test_invoke_skill_through_lead_path_runs_fixture_skill() {
         }
     }
     assert!(completed, "missing SkillCompleted event for the nested skill");
+}
+
+/// SKILL-NO-CUT: a skill the lead invokes is not cut at the per-tool bound
+/// (1 s here) — its own loop bounds it. Its model answers after 2 s, and
+/// its answer reaches the lead as the tool's result.
+#[tokio::test]
+async fn a_skill_the_lead_invokes_runs_past_the_per_tool_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = fixture_skill_catalog(&tmp);
+    let provider = ScriptedProvider::new(vec![
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-1".to_string(),
+                name: "invoke_skill".to_string(),
+                arguments: serde_json::json!({"skill": "echo-skill", "query": "say hi"}),
+            }],
+        ),
+        scripted_response("nested skill output", vec![]),
+        scripted_response("lead done", vec![]),
+    ]);
+    provider.delay_call(1, std::time::Duration::from_secs(2));
+
+    let result = run_lead_for_test(
+        provider.clone(),
+        Arc::new(ToolRegistry::default()),
+        catalog,
+        Arc::new(ArcSwap::from_pointee(
+            crate::test_util::daemon_config_with_agent_defaults("max_tool_runtime_secs = 1"),
+        )),
+        EventBus::new(256),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    assert_eq!(
+        provider.calls(),
+        3,
+        "lead round, nested skill round, lead round"
+    );
+    let messages = provider.seen_messages.lock().unwrap();
+    assert!(
+        !messages[2]
+            .iter()
+            .any(|m| m.content.contains("timed out after")),
+        "the skill was cut: {:?}",
+        messages[2].last()
+    );
+    assert!(
+        messages[2]
+            .iter()
+            .any(|m| m.content.contains("nested skill output")),
+        "lead round 2 should carry the skill's answer as a tool result"
+    );
 }
 
 // ── Session event log (§5.5) ────────────────────────────────────────

@@ -836,7 +836,7 @@ caller lists them, and the caller's allow list is built from that same list.
 | `memory_search`, `memory_read`, `memory_list`, `memory_timeline` | see 6.1 (definitions only; the backends are shared) | When registered |
 | `read_result` | see 6.1 (definition only) | With a session log **and** a database |
 | every `<server>__<tool>` / `<plugin>::<tool>` | — | When its extension is enabled (`extension_tool_defs()`) |
-| `invoke_skill` | `skill`, `query` (both required) | With an LLM router |
+| `invoke_skill` | `skill`, `query` (both required) | With an LLM router. `exempt_from_timeout: true` (`builtins::builtin_is_exempt_from_timeout`): the skill's own loop bounds it |
 | `steer_workflow` | `task_id`, `message` (both required) | Lane has an active workflow **and** `steering_enabled` |
 | `queue_followup` | `description` (required) | Same condition |
 
@@ -862,7 +862,7 @@ why custom TOML tools may not use the four coordination names.
 | `wait_for_subagents` | none | Blocks until every spawned subagent finishes, or returns early when the user steers the run. `exempt_from_timeout: true` |
 | `post_update` | `message` (required) | Posts a progress note to the lane. Only when `steering_enabled` |
 | `queue_followup` | `description` (required) | Queues work to start after the run. Only when `steering_enabled` |
-| `invoke_skill` | `skill`, `query` | Same tool as the chat loop's |
+| `invoke_skill` | `skill`, `query` | Same tool as the chat loop's, `exempt_from_timeout: true` |
 
 The lead's surface also lists the workspace tools, `memory_search`,
 `memory_read` and `memory_timeline`, every
@@ -1864,7 +1864,7 @@ beside it is the code default.
 [execution.agent_defaults]
 max_rounds = 15                # Max LLM loop iterations per agent
 max_tools_per_round = 5        # Max tool calls executed per LLM round
-max_tool_runtime_secs = 120    # Per-tool sandbox timeout, every loop
+max_tool_runtime_secs = 120    # Per-tool sandbox timeout, every loop; exempt tools: §7
 max_tool_runtime_ceiling_secs = 600  # Most a command's timeout_secs gets
 max_cost = 1                   # Max API cost per agent run / chat turn (USD)
 confirmation_timeout_secs = 300

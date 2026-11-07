@@ -84,7 +84,7 @@ impl MainLoopToolSet {
                 definition: definition.clone(),
                 backend: crate::tools::registry::ToolBackend::BuiltIn(backend.clone()),
                 provides_capabilities: vec![],
-                exempt_from_timeout: false,
+                exempt_from_timeout: super::builtin_is_exempt_from_timeout(&definition.name),
                 annotations: super::annotations_for_builtin(&definition.name),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 author: "builtin".to_string(),
@@ -1014,6 +1014,139 @@ mod tests {
         let per_request = (*registry).clone();
         set.register_into(&per_request);
         assert!(per_request.get("invoke_skill").is_some());
+    }
+
+    /// SKILL-NO-CUT: `invoke_skill` is registered exempt from the per-tool
+    /// time limit — a skill is bounded by its own loop — and the turn's
+    /// other per-request tools keep the limit.
+    #[test]
+    fn invoke_skill_is_registered_exempt_from_the_per_tool_time_limit() {
+        let (shared, dispatcher, bus, registry) = setup();
+        let set = build_with(
+            shared,
+            dispatcher,
+            bus,
+            &registry,
+            &routing(true),
+            None,
+            "user1:cli",
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            Some(stub_router()),
+            None,
+        );
+        let per_request = (*registry).clone();
+        set.register_into(&per_request);
+        assert!(per_request.is_exempt_from_timeout("invoke_skill"));
+        for name in ["start_workflow", "task_status"] {
+            assert!(per_request.get(name).is_some(), "{name}");
+            assert!(!per_request.is_exempt_from_timeout(name), "{name}");
+        }
+    }
+
+    /// A provider whose every answer comes after `self.0`.
+    struct AnswersAfter(std::time::Duration);
+
+    #[async_trait::async_trait]
+    impl openalpaca_llm::LlmProvider for AnswersAfter {
+        fn name(&self) -> &str {
+            "answers-after"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn chat(
+            &self,
+            _request: openalpaca_llm::ChatRequest,
+        ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+            tokio::time::sleep(self.0).await;
+            Ok(openalpaca_llm::ChatResponse {
+                content: "skill output".to_string(),
+                tool_calls: vec![],
+                model: "claude-sonnet-4-20250514".to_string(),
+                usage: openalpaca_llm::Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+                finish_reason: openalpaca_llm::FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// SKILL-NO-CUT, through the sandbox at a test-scale bound (1 s): a
+    /// skill the turn invokes, its model answering after 2 s, returns its
+    /// answer, not "Tool 'invoke_skill' timed out after 1s".
+    #[tokio::test]
+    async fn a_skill_the_turn_invokes_runs_past_the_per_tool_bound() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("slow-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: \"Slow Skill\"\ndescription: \"Takes its time\"\n---\nAnswer.\n",
+        )
+        .unwrap();
+        let catalog = Arc::new(SkillCatalog::new());
+        catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+        let router = Arc::new(LlmRouter::single_provider(
+            Arc::new(AnswersAfter(std::time::Duration::from_secs(2))),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        ));
+        let (shared, dispatcher, bus, registry) = setup();
+        let set = main_loop_tool_set(
+            dispatcher,
+            shared,
+            bus.clone(),
+            &routing(true),
+            None,
+            None,
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            catalog,
+            Some(router),
+            1.0,
+            &registry,
+            "user1:cli",
+            &ToolContext {
+                owner_id: Some("user1".to_string()),
+                lane_key: Some("user1:cli".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+        let per_request = (*registry).clone();
+        set.register_into(&per_request);
+        let sandbox =
+            crate::security::sandbox::SandboxManager::with_defaults(Arc::new(per_request), bus);
+        let policy = crate::security::sandbox::SandboxPolicy {
+            agent_id: "orchestrator".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 1,
+            max_tool_runtime_ceiling_secs: 600,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tc_skill".to_string(),
+            name: "invoke_skill".to_string(),
+            arguments: serde_json::json!({"skill": "slow-skill", "query": "go"}),
+        };
+
+        let out = sandbox
+            .execute_tool(&call, &policy, &ToolContext::default())
+            .await;
+
+        assert_eq!(out, Ok("skill output".to_string()));
     }
 
     /// Design 09 §4.1 (ruling LR13): `memory_confirm` is on the surface of an

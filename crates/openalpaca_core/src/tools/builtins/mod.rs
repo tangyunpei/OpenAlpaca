@@ -660,6 +660,18 @@ pub fn approval_is_per_call(name: &str) -> bool {
     name == "memory_confirm"
 }
 
+/// Whether the sandbox leaves this per-request builtin uncut by the
+/// per-tool time limit (`exempt_from_timeout`): true only for
+/// `invoke_skill` (SKILL-NO-CUT, the owner's answer of 2026-11-06).
+///
+/// A skill is bounded by its own loop — its rounds, its cost cap, and each
+/// of its tools under the per-tool limit — as the nested tier's
+/// `invoke_skill:<id>` calls are. Static per tool name, like every
+/// annotation; read by each place that registers the tool.
+pub(crate) fn builtin_is_exempt_from_timeout(name: &str) -> bool {
+    name == "invoke_skill"
+}
+
 fn read_only_annotations() -> openalpaca_mcp::ToolAnnotations {
     openalpaca_mcp::ToolAnnotations::new()
         .destructive(false)

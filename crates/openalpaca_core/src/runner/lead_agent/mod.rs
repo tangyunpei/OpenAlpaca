@@ -376,12 +376,17 @@ pub async fn run_lead_agent(
         wait_for_subagents_tool_definition(),
     );
     // invoke_skill is per-request like the coordination tools — inject its
-    // backend into the per-request registry, never the global one.
+    // backend into the per-request registry, never the global one. Exempt
+    // from the per-tool time limit, as the main loop registers it
+    // (SKILL-NO-CUT): the skill's own loop bounds it.
+    let invoke_skill_def = crate::tools::builtins::invoke_skill_tool_definition();
     if let Err(e) = lead_registry.register(crate::tools::registry::RegisteredTool {
-        definition: crate::tools::builtins::invoke_skill_tool_definition(),
+        exempt_from_timeout: crate::tools::builtins::builtin_is_exempt_from_timeout(
+            &invoke_skill_def.name,
+        ),
+        definition: invoke_skill_def,
         backend: crate::tools::registry::ToolBackend::BuiltIn(invoke_skill_tool),
         provides_capabilities: vec![],
-        exempt_from_timeout: false,
         annotations: None,
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),

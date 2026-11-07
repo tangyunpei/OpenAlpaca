@@ -784,7 +784,13 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   `Error`.
 - **Per-call time limit** — the sandbox cuts a tool call (all but the few
   exempt ones) at its policy's `max_tool_runtime_secs`, and a command it
-  cuts is killed with every process it started. Every loop's limit is
+  cuts is killed with every process it started. The exempt ones bound
+  themselves: the lead's `check_subagent_status` and `wait_for_subagents`
+  by deadlines of their own, and a skill — `invoke_skill`, from the main
+  loop or the lead, as a skill's nested `invoke_skill:<id>` — by its own
+  loop: its rounds, its cost cap, and each of its tools under the limit
+  (SKILL-NO-CUT); a lead's cancelled run still drops it mid-call. Every
+  loop's limit is
   `[execution.agent_defaults] max_tool_runtime_secs` (120 s) — a chat
   turn's read per turn, the lead's at its run's start, a subagent's at its
   spawn, both skill tiers' per invocation. A template's `timeout_seconds`
