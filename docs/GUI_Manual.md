@@ -1412,6 +1412,24 @@ separately, which instances are running right now (`GET /v1/agent-instances`).
 A template with no completed run in the window says so in words, because
 `0 runs` reads like a metric that failed to load.
 
+Each row's chip says where the template comes from: **Built in** (shipped
+inside the daemon), **Yours** (a file in `~/.openalpaca/config/agents`),
+**Yours · replaces built-in** (your file over the built-in template of the
+same `id`) or **Plugin ·** and the plugin's id (`Plugin · <id>`). A file
+holding an `id:` that does not parse, or that, edited while the daemon runs,
+names a capability the daemon does not know, withholds that id — nothing of
+it runs — and the row reads **Withheld**, "Withheld by …" with the file's
+path, and the daemon's error under it, which says which of the two it is.
+Under a row, a muted line names each definition of the `id` that is not used:
+the built-in template under your file; an unedited copy in `config/agents` of
+the built-in template as this build or an earlier one shipped it, or a copy
+as the Installation Manual's step 7 or 8 left it (set aside, so the built-in
+template runs — "An earlier build's unedited copy, …, is not used"); a second
+file of the same `id`; a file of the `id` that does not parse; or a plugin's
+template refused the `id`. A warning the daemon has about the file — a
+`require_confirmation_for` entry that names no tool — is shown under the row
+too, in amber.
+
 A template a file in `~/.openalpaca/config/agents` switches off — a file
 holding its `id:` and `disabled: true` — is listed with a **Switched off**
 chip and the file's path ("Switched off by …"), and its switch is drawn off.

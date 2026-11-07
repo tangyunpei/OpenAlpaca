@@ -228,3 +228,114 @@ fn a_hidden_character_is_printed_escaped() {
     assert!(text.contains("x<U+200B>/SKILL.md"), "{text}");
     assert!(!text.contains('\u{1b}'), "{text:?}");
 }
+
+/// What the daemon serves for a store whose `config/skills/code-review/` is
+/// the person's own folder over the built-in skill, beside a built-in skill
+/// nothing overrides and one whose config folder is an unedited copy of an
+/// earlier shipped version, set aside (subagent design §2.7 R-2).
+const PROVENANCE: &str = r#"[
+  {"id": "code-review", "name": "Code Review", "description": "Review code",
+   "source": "file", "origin": null, "requires_capabilities": [],
+   "triggers": {"slash": "review", "keywords": []}, "schedule": null,
+   "invocations_today": 0, "version": null, "author": "file:project",
+   "overrides_bundled": true,
+   "not_used": [{"source": "bundled", "path": "/store/state/cache/bundled-skills/code-review",
+                 "plugin": null, "reason": "overridden", "version": null, "edit": null}]},
+  {"id": "create-skill", "name": "Create Skill", "description": "Create a skill",
+   "source": "file", "origin": null, "requires_capabilities": [],
+   "triggers": {"slash": "create-skill", "keywords": []}, "schedule": null,
+   "invocations_today": 2, "version": null, "author": "file:bundled",
+   "overrides_bundled": false,
+   "not_used": [{"source": "file", "path": "/store/config/skills/create-skill",
+                 "plugin": null, "reason": "unedited_copy", "version": "earlier", "edit": null}]},
+  {"id": "daily-digest", "name": "Daily Digest", "description": "A digest",
+   "source": "file", "origin": null, "requires_capabilities": [],
+   "triggers": {"slash": null, "keywords": []}, "schedule": null,
+   "invocations_today": 0, "version": null, "author": "file:project",
+   "overrides_bundled": false, "not_used": []}
+]"#;
+
+/// R-3: the SOURCE column says `file:bundled` for a built-in skill and
+/// `file:override` for a config folder over one (the route's
+/// `file:project` with `overrides_bundled: true`), each whole in the
+/// 16-character column; a folder of the person's own that overrides
+/// nothing stays `file:project`.
+#[test]
+fn skills_list_shows_file_bundled_and_overrides() {
+    plain();
+    let skills: Vec<SkillRow> = serde_json::from_str(PROVENANCE).unwrap();
+    let lines = list_lines(&skills, &[]);
+    for row in [
+        "code-review              /review          file:override    0     Review code",
+        "create-skill             /create-skill    file:bundled     2     Create a skill",
+        "daily-digest             -                file:project     0     A digest",
+    ] {
+        assert!(lines.iter().any(|l| l == row), "{row:?} in {lines:#?}");
+    }
+}
+
+/// R-3: `info` prints the override in full and one line per definition of
+/// the key that is not used — the built-in skill under the person's folder,
+/// a folder set aside as an unedited copy — while `source` keeps the
+/// route's word.
+#[test]
+fn skills_info_prints_the_override_and_each_not_used_line() {
+    plain();
+    let skills: Vec<SkillRow> = serde_json::from_str(PROVENANCE).unwrap();
+
+    let review = info_lines(&lookup(&skills, &[], "code-review"), "code-review")
+        .unwrap()
+        .join("\n");
+    assert!(review.contains("  source:      file:project"), "{review}");
+    assert!(
+        review.contains("  overrides:   the bundled skill code-review"),
+        "{review}"
+    );
+    assert!(
+        review.contains(
+            "  not used:    the bundled skill, /store/state/cache/bundled-skills/code-review \
+             (this skill's folder overrides it)"
+        ),
+        "{review}"
+    );
+
+    let create = info_lines(&lookup(&skills, &[], "create-skill"), "create-skill")
+        .unwrap()
+        .join("\n");
+    assert!(create.contains("  source:      file:bundled"), "{create}");
+    assert!(!create.contains("overrides:"), "{create}");
+    assert!(
+        create.contains(
+            "  not used:    /store/config/skills/create-skill \
+             (an unedited copy of a version an earlier build shipped)"
+        ),
+        "{create}"
+    );
+
+    let digest = info_lines(&lookup(&skills, &[], "daily-digest"), "daily-digest")
+        .unwrap()
+        .join("\n");
+    assert!(!digest.contains("overrides:"), "{digest}");
+    assert!(!digest.contains("not used:"), "{digest}");
+}
+
+/// A not-used entry's path is the daemon's string: a hidden character in
+/// it is printed as `<U+XXXX>`, never raw.
+#[test]
+fn a_hidden_character_in_a_not_used_path_is_printed_escaped() {
+    plain();
+    let skills: Vec<SkillRow> = serde_json::from_str(&PROVENANCE.replace(
+        "/store/config/skills/create-skill",
+        "/store/config/skills/create\u{202E}-skill\u{200B}",
+    ))
+    .unwrap();
+    let text = info_lines(&lookup(&skills, &[], "create-skill"), "create-skill")
+        .unwrap()
+        .join("\n");
+    assert!(
+        text.contains("/store/config/skills/create<U+202E>-skill<U+200B>"),
+        "{text}"
+    );
+    assert!(!text.contains('\u{202E}'), "{text:?}");
+    assert!(!text.contains('\u{200B}'), "{text:?}");
+}

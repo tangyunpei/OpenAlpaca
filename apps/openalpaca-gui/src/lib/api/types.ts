@@ -758,6 +758,49 @@ export interface AgentTemplate {
    * it off — else null (a built-in or a plugin's template).
    */
   path?: string | null;
+  /**
+   * Where the template comes from (subagent design §2.7 R-1): built into
+   * the daemon, a file in `config/agents`, or a plugin. This and the four
+   * fields after it are absent from a daemon older than them, which the
+   * row reads as nothing to say.
+   */
+  source?: "bundled" | "file" | "plugin";
+  /** The plugin's id for a plugin's template, else null. */
+  plugin?: string | null;
+  /** A file of the person's stands over the built-in template of this id. */
+  overrides_bundled?: boolean;
+  /** Every definition of this id that does not run. */
+  not_used?: NotUsedEntry[];
+  /**
+   * What the daemon found worth saying about the file: why it is withheld,
+   * a confirmation list naming no tool (W-1).
+   */
+  warnings?: string[];
+}
+
+/**
+ * A definition of a template's or a skill's id that does not run (subagent
+ * design §2.7 R-1, R-2): the built-in one under a file of the person's, an
+ * earlier build's unedited copy set aside, a second file of the id, a file
+ * that does not parse, or a plugin's template refused the id.
+ */
+export interface NotUsedEntry {
+  source: "bundled" | "file" | "plugin";
+  path: string | null;
+  plugin: string | null;
+  reason:
+    | "unedited_copy"
+    | "overridden"
+    | "duplicate"
+    | "does_not_parse"
+    | "plugin_refused";
+  /** For an unedited copy: this build's version or an earlier one. */
+  version: "current" | "earlier" | null;
+  /**
+   * For an unedited copy the Installation Manual's step 7 or 8 made (the
+   * project's own edit, counted as unedited — V-2a).
+   */
+  edit: "manual_step_7" | "manual_step_8" | null;
 }
 
 export interface AgentInstance {
@@ -1075,8 +1118,21 @@ export interface SkillCatalogEntry {
   invocations_today: number;
   /** `null` when the frontmatter omits it — never an invented number. */
   version: string | null;
-  /** `plugin:<id>`, `file:project` or `file:user`. */
+  /**
+   * `plugin:<id>`, `file:bundled` (built into the daemon), `file:project`
+   * (a folder in `config/skills`) or `file:user`.
+   */
   author: string;
+  /**
+   * A folder in `config/skills` runs over the built-in skill of this id
+   * (subagent design §2.7 R-2). Absent from a daemon older than it.
+   */
+  overrides_bundled?: boolean;
+  /**
+   * The definitions of this id that do not run: the built-in skill under
+   * such a folder (`overridden`), or a folder set aside as an unedited copy.
+   */
+  not_used?: NotUsedEntry[];
 }
 
 /**

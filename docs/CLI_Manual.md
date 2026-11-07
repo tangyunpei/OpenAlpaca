@@ -971,9 +971,10 @@ Notes:
 
 ### `skills`
 
-The skills the daemon loaded from `config/skills/`, and every problem its last
-scan of that directory found, through `GET /v1/skills` and
-`GET /v1/skills/diagnostics`. Both are reads: a skill has no on/off switch.
+The skills the daemon loaded — the ones built into it and those in
+`config/skills/` — and every problem its last scan of that directory found,
+through `GET /v1/skills` and `GET /v1/skills/diagnostics`. Both are reads: a
+skill has no on/off switch.
 
 ```bash
 openalpaca skills list                 # the catalog, then the problems
@@ -1001,6 +1002,17 @@ Notes:
   `stale_shipped_file` (a folder overriding a built-in skill runs a file an
   earlier build shipped, which the built-in skill has since changed),
   warnings. Each line gives the file and the daemon's message.
+- The SOURCE column says where each skill comes from: `file:bundled` (built
+  into the daemon), `file:project` (a folder in `config/skills/`),
+  `file:override` (a folder there that overrides the built-in skill of the
+  same id — the route's `file:project` with `overrides_bundled: true`) or
+  `plugin:<id>`. `info` keeps the route's word on its `source:` line, adds
+  `overrides:   the bundled skill <id>` for an override, and a `not used:`
+  line for each definition of the id that does not run: the built-in skill
+  under your folder, or a folder set aside because it is an unedited copy of
+  a version OpenAlpaca shipped (the built-in skill runs in its place). With
+  `--format json` each skill carries the route's `overrides_bundled` and
+  `not_used` as they are.
 - `info` on a skill the daemon skipped says it is not loaded and shows why; a
   name that is neither a loaded skill nor in the problems is an error.
 - The scan runs when the daemon starts, and a skill's problems are re-read when

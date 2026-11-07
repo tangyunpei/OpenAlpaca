@@ -272,17 +272,18 @@ using with an older build is the second case it names. To switch over:
    this build's agent templates are built in, and a file byte-identical to a
    version an earlier build shipped — or to one on which this step was done
    exactly as written here — is not read; the built-in template runs, and
-   `state/logs/daemon.log` and the template listing (`GET /v1/agent-templates`)
-   name the file as not used. The step stands for a copy you edited otherwise,
-   which is read as yours. As earlier builds shipped it, that file ends its
-   frontmatter with two lines that switch the agent's approval prompts off: `file_delete` is not
-   the name of any tool, and a template's own `require_confirmation_for` list
-   replaces the default — every tool marked destructive asks first — instead
-   of adding to it, so with those two lines the agent's `shell_execute`,
-   `file_write` and `file_edit` run with no approval card. Since this build
-   those act on the project's own files: in a project conversation that agent
-   would replace and edit the project's files and run commands in its folder
-   without asking you. Open the file and delete exactly these two lines:
+   `state/logs/daemon.log` and the template listing (`GET /v1/agent-templates`,
+   and Settings → Agents in the app) name the file as not used. The step stands
+   for a copy you edited otherwise, which is read as yours. As earlier builds
+   shipped it, that file ends its frontmatter with two lines that switch the
+   agent's approval prompts off: `file_delete` is not the name of any tool, and
+   a template's own `require_confirmation_for` list replaces the default — every
+   tool marked destructive asks first — instead of adding to it, so with those
+   two lines the agent's `shell_execute`, `file_write` and `file_edit` run with
+   no approval card. Since this build those act on the project's own files: in a
+   project conversation that agent would replace and edit the project's files
+   and run commands in its folder without asking you. Open the file and delete
+   exactly these two lines:
 
    ```yaml
    require_confirmation_for:
@@ -334,10 +335,10 @@ using with an older build is the second case it names. To switch over:
    (a `.DS_Store` aside, and a file missing is allowed); this build's
    `create-skill` runs, writing new skills only into
    `~/.openalpaca/config/skills/` and refusing any other scope, naming that
-   folder; `GET /v1/skills` names the copy as not used, and
-   `state/logs/daemon.log` counts the copies set aside at each start, naming
-   each one that is an earlier version. The same holds for an
-   unedited `code-review`, `commit-message` or `explain-code`. A
+   folder; `GET /v1/skills` (and `openalpaca skills info create-skill`)
+   names the copy as not used, and `state/logs/daemon.log` counts the copies set
+   aside at each start, naming each one that is an earlier version. The same
+   holds for an unedited `code-review`, `commit-message` or `explain-code`. A
    `create-skill` you edited is yours and runs instead of the built-in one;
    if it still holds the old scripts, `GET /v1/skills/diagnostics` (and
    `openalpaca skills list`) names each one as the version an earlier build

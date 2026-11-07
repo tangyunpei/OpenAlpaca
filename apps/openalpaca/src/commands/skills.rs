@@ -14,6 +14,13 @@
 //! and the problems found in its file, including a skill that was skipped and
 //! so is not in the catalog.
 //!
+//! Where a skill comes from (subagent design §2.7 R-3): the SOURCE column
+//! shows the route's `author` — `file:bundled` for a skill built into the
+//! daemon, `file:project` for a folder in the config directory — and
+//! `file:override` for a folder that overrides a built-in skill (the route's
+//! `file:project` with `overrides_bundled`); `info` names the skill a folder
+//! overrides and every definition of the key that is not used.
+//!
 //! Both are reads; there is no per-skill switch to write (S1). Every string
 //! the daemon serves is printed with its hidden characters escaped, since a
 //! plugin's skill carries the plugin's own text.
@@ -69,6 +76,73 @@ pub struct SkillRow {
     pub version: Option<String>,
     #[serde(default)]
     pub author: String,
+    /// A folder in the config directory runs over the built-in skill of
+    /// this key (R-2).
+    #[serde(default)]
+    pub overrides_bundled: bool,
+    /// The definitions of this key that do not run (R-2).
+    #[serde(default)]
+    pub not_used: Vec<NotUsedRow>,
+}
+
+/// One entry of a skill row's `not_used`: the built-in skill under a folder
+/// that overrides it, or a folder set aside as an unedited copy of a version
+/// OpenAlpaca shipped (the bundled skill runs in its place).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotUsedRow {
+    /// `bundled` or `file`.
+    pub source: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub plugin: Option<String>,
+    /// `overridden` or `unedited_copy`.
+    pub reason: String,
+    /// For an unedited copy: `current` or `earlier`.
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub edit: Option<String>,
+}
+
+impl SkillRow {
+    /// The SOURCE column's word: `file:override` for a config folder over a
+    /// built-in skill, chosen to fit the column; else the route's `author`.
+    fn source_word(&self) -> &str {
+        if self.overrides_bundled && self.author == "file:project" {
+            "file:override"
+        } else {
+            &self.author
+        }
+    }
+}
+
+impl NotUsedRow {
+    /// What `skills info` says of it, after `not used:`.
+    fn describe(&self) -> String {
+        let path = self.path.as_deref().map(shown);
+        match (self.reason.as_str(), path) {
+            ("overridden", Some(path)) => {
+                format!("the bundled skill, {path} (this skill's folder overrides it)")
+            }
+            ("overridden", None) => "the bundled skill (this skill's folder overrides it)".into(),
+            ("unedited_copy", path) => {
+                let copy = match self.version.as_deref() {
+                    Some("current") => "an unedited copy of the version this build ships",
+                    _ => "an unedited copy of a version an earlier build shipped",
+                };
+                match path {
+                    Some(path) => format!("{path} ({copy})"),
+                    None => copy.to_string(),
+                }
+            }
+            (reason, path) => format!(
+                "{} ({})",
+                path.unwrap_or_else(|| shown(&self.source)),
+                shown(reason)
+            ),
+        }
+    }
 }
 
 /// How a skill fires: its slash command (without the `/`) and its keywords.
@@ -119,7 +193,7 @@ impl TableRow for SkillRow {
             "{:<24} {:<16} {:<16} {:<5} {}",
             truncate(&shown(&self.id), 24),
             truncate(&shown(&slash), 16),
-            truncate(&shown(&self.author), 16),
+            truncate(&shown(self.source_word()), 16),
             self.invocations_today,
             truncate(&shown(&self.description), 44),
         )
@@ -273,6 +347,12 @@ pub(crate) fn info_lines(found: &Found<'_>, wanted: &str) -> Result<Vec<String>>
                     .unwrap_or_else(|| "-".to_string())
             ));
             lines.push(format!("  source:      {}", shown(&s.author)));
+            if s.overrides_bundled {
+                lines.push(format!("  overrides:   the bundled skill {}", shown(&s.id)));
+            }
+            for entry in &s.not_used {
+                lines.push(format!("  not used:    {}", entry.describe()));
+            }
             lines.push(format!(
                 "  version:     {}",
                 s.version

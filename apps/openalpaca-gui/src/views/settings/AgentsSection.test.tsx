@@ -210,3 +210,165 @@ describe("AgentsSection switched-off templates (§7 O-1 (b), C3a)", () => {
     expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
   });
 });
+
+describe("AgentsSection sources and copies not used (§2.7 R-4, C5)", () => {
+  /**
+   * A template built into the daemon reads "Built in", and every definition
+   * of its id that does not run — here an earlier build's unedited copy in
+   * `config/agents`, set aside so the built-in one runs — gets a line of its
+   * own under the row.
+   */
+  it("shows the built-in chip and each not-used copy", () => {
+    const copy = "/Users/x/.openalpaca/config/agents/system_agent.md";
+    state.templates = [
+      template({
+        id: "system_agent",
+        name: "System",
+        source: "bundled",
+        plugin: null,
+        path: null,
+        overrides_bundled: false,
+        state: "ready",
+        not_used: [
+          {
+            source: "file",
+            path: copy,
+            plugin: null,
+            reason: "unedited_copy",
+            version: "earlier",
+            edit: null,
+          },
+        ],
+        warnings: [],
+      }),
+    ];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText("Built in")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `An earlier build's unedited copy, ${copy}, is not used`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^Yours/)).toBeNull();
+  });
+
+  /** A file of the person's: "Yours", or over a built-in one, says so. */
+  it("tells the person's own template from one that replaces a built-in", () => {
+    state.templates = [
+      template({
+        id: "my_agent",
+        name: "Mine",
+        source: "file",
+        path: "/Users/x/.openalpaca/config/agents/my_agent.md",
+        overrides_bundled: false,
+        state: "ready",
+        not_used: [],
+        warnings: [],
+      }),
+      template({
+        id: "review_agent",
+        name: "Review",
+        source: "file",
+        path: "/Users/x/.openalpaca/config/agents/review_agent.md",
+        overrides_bundled: true,
+        state: "ready",
+        not_used: [
+          {
+            source: "bundled",
+            path: null,
+            plugin: null,
+            reason: "overridden",
+            version: null,
+            edit: null,
+          },
+        ],
+        warnings: [],
+      }),
+    ];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText("Yours")).toBeInTheDocument();
+    expect(screen.getByText("Yours · replaces built-in")).toBeInTheDocument();
+    expect(
+      screen.getByText("The built-in template is not used"),
+    ).toBeInTheDocument();
+  });
+
+  /** A plugin's template names its plugin, and a refused one is listed. */
+  it("shows a plugin template's chip with its id", () => {
+    state.templates = [
+      template({
+        id: "notion_writer",
+        name: "Notion writer",
+        source: "plugin",
+        plugin: "notion",
+        path: null,
+        overrides_bundled: false,
+        state: "ready",
+        not_used: [
+          {
+            source: "plugin",
+            path: null,
+            plugin: "other-notes",
+            reason: "plugin_refused",
+            version: null,
+            edit: null,
+          },
+        ],
+        warnings: [],
+      }),
+    ];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText("Plugin · notion")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The template the plugin other-notes offers for this id is not used",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * A file that holds the id and does not parse withholds it (L-4): the row
+   * reads "Withheld", names the file, and shows the daemon's error.
+   */
+  it("shows a withheld template's file and error", () => {
+    const path = "/Users/x/.openalpaca/config/agents/writing_agent.md";
+    const error = `${path} does not parse (missing field \`name\`)`;
+    state.templates = [
+      template({
+        id: "writing_agent",
+        name: "writing_agent",
+        description: "",
+        source: "file",
+        path,
+        overrides_bundled: false,
+        state: "withheld",
+        not_used: [],
+        warnings: [error],
+      }),
+    ];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText("Withheld")).toBeInTheDocument();
+    expect(screen.getByText(`Withheld by ${path}`)).toBeInTheDocument();
+    expect(screen.getByText(error)).toBeInTheDocument();
+  });
+
+  /** A daemon older than the fields: no chip, no line, the row as before. */
+  it("draws no source chip for a row without a source", () => {
+    state.templates = [template()];
+
+    render(<AgentsSection />);
+
+    for (const chip of ["Built in", "Yours", "Withheld"]) {
+      expect(screen.queryByText(chip)).toBeNull();
+    }
+    expect(screen.queryByText(/not used/)).toBeNull();
+  });
+});
