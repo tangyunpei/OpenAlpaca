@@ -4,7 +4,11 @@
 # Usage: check_exists.sh --id=<skill-id> [--scope=project]
 #
 # Outputs JSON: {"exists": true, "path": "..."} for a skill of the id in the
-# skills root; {"exists": false, "bundled": true, "path": "..."} when only a
+# skills root; {"exists": true, "bundled": true, "path": "..."} when a
+# built-in skill holds the id too — the folder is then either the person's
+# override or an unedited copy an earlier build seeded, which the daemon
+# sets aside (not read; the built-in skill runs) and this script cannot tell
+# apart; {"exists": false, "bundled": true, "path": "..."} when only a
 # built-in skill holds the id, so a new one there overrides it; else
 # {"exists": false, "path": "..."}. The path is always where a skill of the id
 # is (or would be written) in the skills root.
@@ -55,7 +59,9 @@ fi
 
 SKILL_PATH="$SKILLS_ROOT/$SKILL_ID/SKILL.md"
 
-if [[ -f "$SKILL_PATH" ]]; then
+if [[ -f "$SKILL_PATH" && -n "$BUNDLED_ROOT" && -f "$BUNDLED_ROOT/$SKILL_ID/SKILL.md" ]]; then
+  echo "{\"exists\": true, \"bundled\": true, \"path\": \"$SKILL_PATH\"}"
+elif [[ -f "$SKILL_PATH" ]]; then
   echo "{\"exists\": true, \"path\": \"$SKILL_PATH\"}"
 elif [[ -n "$BUNDLED_ROOT" && -f "$BUNDLED_ROOT/$SKILL_ID/SKILL.md" ]]; then
   echo "{\"exists\": false, \"bundled\": true, \"path\": \"$SKILL_PATH\"}"

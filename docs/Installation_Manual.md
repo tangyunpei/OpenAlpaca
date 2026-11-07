@@ -392,10 +392,11 @@ one does without it (`lead_agent.md` gone, it borrows another template as
 its lead — `code_agent` on a stock store; `create-skill/` gone, it has no
 `create-skill`). The cure is the same: stop the daemon, move `agents/` (or
 `skills/`) aside, and let the earlier build's next start write it again. That
-build ignores `~/.openalpaca/state/cache/bundled-skills/`. A file that switches a template off (`disabled: true`, see
-*Upgrade*) means nothing to an earlier build: it skips the line, so a full
-template that says it runs as your template, and the two-line form is
-skipped with a warning that it has no `name`.
+build ignores `~/.openalpaca/state/cache/bundled-skills/`. A file that
+switches a template off (`disabled: true`, see *Upgrade*) means nothing to
+an earlier build: it skips the line, so a full template that says it runs
+as your template, and the two-line form is skipped with a warning that it
+has no `name`.
 
 ### Projects live in the home store
 

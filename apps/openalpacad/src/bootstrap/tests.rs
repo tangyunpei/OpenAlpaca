@@ -883,4 +883,61 @@ mod create_skill {
             )
         );
     }
+
+    /// §1.2's skills row 1 as K-6 meets it: on a store an earlier build
+    /// seeded, a built-in id's folder in `config/skills` is an unedited copy
+    /// the daemon sets aside — not read, the built-in skill runs. The
+    /// checker answered `exists` alone, as for a skill of the person's, and
+    /// the scaffolder refused the id with no way on. Now the checker says a
+    /// built-in skill holds the id too, and the refusal says the folder may
+    /// be such a copy and names `openalpaca skills tidy --apply`; it still
+    /// writes nothing. `82022776`'s `create-skill` is the seeded copy.
+    #[test]
+    fn a_seeded_copy_of_a_built_in_skill_is_said_to_be_one_and_scaffold_names_tidy() {
+        let install = ScratchInstall::new("config", Leg::Pack);
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/openalpaca_core/src/bundled/fixtures/82022776/skills/create-skill");
+        let seeded = install.skills_root().join("create-skill");
+        for name in [
+            "SKILL.md",
+            "scripts/check_exists.sh",
+            "scripts/list_skills.sh",
+            "scripts/scaffold.sh",
+            "scripts/write_skill_md.sh",
+        ] {
+            let target = seeded.join(name);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(fixture.join(name), &target).unwrap();
+        }
+        assert!(
+            matches!(
+                openalpaca_core::bundled::classify_skill_dir("create-skill", &seeded),
+                Some(openalpaca_core::bundled::SkillFolder::UneditedCopy(_))
+            ),
+            "the fixture is no longer an unedited copy"
+        );
+
+        let out = install.run("check_exists.sh", &["--id=create-skill"]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert_eq!(
+            text(&out.stdout).trim(),
+            format!(
+                "{{\"exists\": true, \"bundled\": true, \"path\": \"{}\"}}",
+                seeded.join("SKILL.md").display()
+            )
+        );
+
+        let before = tree_of(&install.root);
+        let out = install.run("scaffold.sh", &["--id=create-skill"]);
+        assert!(!out.status.success(), "scaffold.sh wrote over the copy");
+        let stderr = text(&out.stderr);
+        for needle in [
+            seeded.join("SKILL.md").display().to_string(),
+            "built-in skill".to_string(),
+            "openalpaca skills tidy --apply".to_string(),
+        ] {
+            assert!(stderr.contains(&needle), "{needle:?} not in {stderr:?}");
+        }
+        assert_eq!(before, tree_of(&install.root), "the refusal wrote");
+    }
 }

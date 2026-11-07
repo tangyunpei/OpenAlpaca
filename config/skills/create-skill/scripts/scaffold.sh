@@ -23,6 +23,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_ROOT="${OPENALPACA_SKILLS_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
+# The built-in skills, which a skill of the same id overrides: where the daemon
+# says they are (OPENALPACA_BUNDLED_SKILLS_DIR), else, run by hand, this
+# script's own skills directory when that is not SKILLS_ROOT. None when the
+# two are one.
+OWN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BUNDLED_ROOT="${OPENALPACA_BUNDLED_SKILLS_DIR:-$OWN_ROOT}"
+if [[ "$BUNDLED_ROOT" == "$SKILLS_ROOT" ]]; then
+  BUNDLED_ROOT=""
+fi
+
 SKILL_ID=""
 SCOPE="project"
 DIRS=""
@@ -67,9 +77,15 @@ esac
 
 SKILL_DIR="$SKILLS_ROOT/$SKILL_ID"
 
-# Check for existing skill
+# Check for existing skill. When a built-in skill holds the id too, the
+# folder may be an unedited copy an earlier build seeded, which the daemon
+# sets aside (not read; the built-in skill runs): say so, and the two ways on.
 if [[ -f "$SKILL_DIR/SKILL.md" ]]; then
-  echo "Error: skill '$SKILL_ID' already exists at $SKILL_DIR/SKILL.md" >&2
+  if [[ -n "$BUNDLED_ROOT" && -f "$BUNDLED_ROOT/$SKILL_ID/SKILL.md" ]]; then
+    echo "Error: skill '$SKILL_ID' already exists at $SKILL_DIR/SKILL.md, and a built-in skill has this id too. If that folder is an unedited copy an earlier build seeded, this build does not read it (openalpaca skills tidy lists it): move it aside with openalpaca skills tidy --apply and run this again, or edit that folder to make it your own override of the built-in skill" >&2
+  else
+    echo "Error: skill '$SKILL_ID' already exists at $SKILL_DIR/SKILL.md" >&2
+  fi
   exit 1
 fi
 
