@@ -325,7 +325,7 @@ impl Drop for KillOnFail {
 }
 
 /// How long an R45 test waits for a killed process to be gone. The kill is
-/// immediate, but the system reaps an orphan asynchronously, and a loaded CI
+/// immediate, but the system reaps an orphan asynchronously, and a loaded
 /// machine is slow.
 #[cfg(unix)]
 pub(crate) const GONE_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);

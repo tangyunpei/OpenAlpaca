@@ -8,7 +8,7 @@
 //! start, and liveness is `kill -0` on those pids.
 //!
 //! The server is a POSIX `sh` script rather than a Node or Python one so the
-//! suite needs nothing a developer's or CI's machine does not already have.
+//! suite needs nothing a developer's machine does not already have.
 //! Its one program beyond `sh` and its utilities is `perl` — in macOS's base
 //! system, and essential on Debian and Ubuntu — for the `setpgrp` that `sh`
 //! cannot do: each server leads its own process group, so a stub's teardown
