@@ -633,3 +633,155 @@ fn a_plugin_removal_takes_its_own_template_and_tombstones_it() {
     assert!(reg.get_template("reader").is_none());
     assert_eq!(reg.template_tombstone("reader").as_deref(), Some("notion"));
 }
+
+// ── Subagent design C1: the layers, resolved on read ──────────────────────
+
+/// A file path as the file layer records it.
+fn config_path(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from("/config/agents").join(name)
+}
+
+/// The file layer is replaced whole (subagent design §2.4 L-1), so an id no
+/// file holds any more leaves the catalog: what lets a rescan see a file
+/// deleted, renamed or given a new id. Only the file layer is replaced.
+#[test]
+fn replace_file_layer_drops_an_id_no_file_holds() {
+    let reg = AgentRegistry::new();
+    assert!(reg.register_template(make_template("old_agent", vec![], false)));
+    assert!(reg.register_template(plugin_template("reader", "notion")));
+
+    let mut layer = FileLayer::new();
+    assert!(layer.insert(
+        make_template("new_agent", vec![], false),
+        Some(config_path("new_agent.md"))
+    ));
+    reg.replace_file_layer(layer);
+
+    assert!(reg.get_template("old_agent").is_none(), "no file holds it");
+    assert!(reg.spawn_instance("old_agent", "t1".into()).is_err());
+    assert!(reg.get_template("new_agent").is_some());
+    assert!(
+        reg.get_template("reader").is_some(),
+        "a plugin's template is in the plugin layer, which is not replaced"
+    );
+    assert_eq!(reg.template_count(), 2);
+}
+
+/// `register_template` keeps its signature and places a template by its
+/// `AgentSource`: a plugin's in the plugin layer, any other in the file
+/// layer, with no path (subagent design §2.4 L-1).
+#[test]
+fn register_template_places_a_plugin_template_in_the_plugin_layer() {
+    let reg = AgentRegistry::new();
+    assert!(reg.register_template(plugin_template("reader", "notion")));
+    assert!(reg.register_template(make_template("writer", vec![], false)));
+
+    let layer_of = |id: &str| reg.provenance(id).map(|p| p.layer);
+    assert_eq!(layer_of("reader"), Some(TemplateLayer::Plugin));
+    assert_eq!(layer_of("writer"), Some(TemplateLayer::File));
+
+    reg.replace_file_layer(FileLayer::new());
+    assert_eq!(layer_of("writer"), None, "the file layer went whole");
+    assert_eq!(layer_of("reader"), Some(TemplateLayer::Plugin));
+
+    // A plugin load's rollback removes the template it registered.
+    assert!(reg.remove_template("reader"));
+    assert_eq!(layer_of("reader"), None);
+}
+
+/// `provenance` says which layer a resolved template comes from and the file
+/// it was read from; it names nothing for an id no layer holds.
+#[test]
+fn provenance_names_the_layer_and_path() {
+    let reg = AgentRegistry::new();
+    let mut layer = FileLayer::new();
+    assert!(layer.insert(
+        make_template("code_agent", vec!["file_read"], false),
+        Some(config_path("code.md"))
+    ));
+    reg.replace_file_layer(layer);
+    assert!(reg.register_template(make_template("own_agent", vec![], false)));
+    assert!(reg.register_template(plugin_template("reader", "notion")));
+
+    let code = reg.provenance("code_agent").expect("a file template");
+    assert_eq!(code.layer, TemplateLayer::File);
+    assert_eq!(code.path, Some(config_path("code.md")));
+    assert_eq!(code.state, TemplateState::Ready);
+    assert!(code.not_used.is_empty());
+    assert!(code.warnings.is_empty());
+
+    let own = reg.provenance("own_agent").expect("registered, no file");
+    assert_eq!((own.layer, own.path), (TemplateLayer::File, None));
+
+    let reader = reg.provenance("reader").expect("a plugin template");
+    assert_eq!((reader.layer, reader.path), (TemplateLayer::Plugin, None));
+
+    assert!(reg.provenance("missing").is_none());
+}
+
+/// The file layer resolves over the bundled one, and the bundled template is
+/// back as soon as no file holds its id; nothing removes it, and no plugin
+/// template takes its id (subagent design §2.3, §2.4 L-1).
+#[test]
+fn the_file_layer_resolves_over_the_bundled_layer_which_nothing_removes() {
+    let reg = AgentRegistry::new();
+    let mut bundled = make_template("general_agent", vec!["file_read"], false);
+    bundled.frontmatter.description = "bundled".to_string();
+    reg.set_bundled_layer(vec![bundled]);
+    assert_eq!(
+        reg.provenance("general_agent").map(|p| p.layer),
+        Some(TemplateLayer::Bundled)
+    );
+
+    let mut edited = make_template("general_agent", vec!["file_read"], false);
+    edited.frontmatter.description = "edited".to_string();
+    let mut layer = FileLayer::new();
+    assert!(layer.insert(edited, Some(config_path("general_agent.md"))));
+    reg.replace_file_layer(layer);
+    let resolved = reg.get_template("general_agent").expect("resolved");
+    assert_eq!(resolved.frontmatter.description, "edited");
+    assert_eq!(reg.template_count(), 1, "one id, two layers");
+
+    reg.replace_file_layer(FileLayer::new());
+    let resolved = reg.get_template("general_agent").expect("resolved");
+    assert_eq!(resolved.frontmatter.description, "bundled");
+
+    assert!(!reg.remove_template("general_agent"), "never bundled");
+    assert!(!reg.register_template(plugin_template("general_agent", "notion")));
+    assert!(!reg.remove_plugin_template("general_agent", "notion"));
+    assert_eq!(
+        reg.provenance("general_agent").map(|p| p.layer),
+        Some(TemplateLayer::Bundled)
+    );
+}
+
+/// A file layer that brings back an id a plugin's withdrawal tombstoned
+/// clears that tombstone, as `register_template` does for a template that
+/// came back.
+#[test]
+fn a_file_layer_bringing_back_a_withdrawn_id_clears_its_tombstone() {
+    let reg = AgentRegistry::new();
+    assert!(reg.register_template(plugin_template("reader", "notion")));
+    assert!(reg.remove_plugin_template("reader", "notion"));
+    assert_eq!(reg.template_tombstone("reader").as_deref(), Some("notion"));
+
+    let mut layer = FileLayer::new();
+    assert!(layer.insert(
+        make_template("reader", vec![], false),
+        Some(config_path("reader.md"))
+    ));
+    assert!(
+        !layer.insert(
+            make_template("reader", vec!["web_fetch"], false),
+            Some(config_path("reader2.md"))
+        ),
+        "the first file of an id holds it"
+    );
+    reg.replace_file_layer(layer);
+
+    assert!(reg.template_tombstone("reader").is_none());
+    assert_eq!(
+        reg.provenance("reader").and_then(|p| p.path),
+        Some(config_path("reader.md"))
+    );
+}

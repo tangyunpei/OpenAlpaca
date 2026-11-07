@@ -3,10 +3,16 @@
 //! Templates define agent capabilities and are loaded at startup.
 //! Instances are ephemeral runtime objects spawned from templates on demand.
 //! Singleton templates (e.g. lead_agent) enforce max 1 active instance.
+//!
+//! Templates are kept in three layers — bundled, file, plugin — and every
+//! reader sees one resolved view of them (subagent design §2.4 L-1,
+//! `tasks/subagent-brief-design.md`).
 
 use super::subagent::{AgentStatus, SubAgent};
 use super::template::{AgentSource, AgentTemplate};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// Outcome of a `destroy_instance()` call, allowing callers to emit
@@ -21,6 +27,116 @@ pub enum DestroyOutcome {
     NotFound,
 }
 
+/// The layer a template comes from (subagent design §2.4 L-1).
+///
+/// The resolved view takes each id from the file layer, else the bundled
+/// one, else the plugin one: a person's file overrides the built-in
+/// template of its id, and a plugin's template fills only an id no other
+/// layer holds (`register_template` refuses it otherwise).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateLayer {
+    /// The templates the binary carries.
+    Bundled,
+    /// The templates read from the config directory's `agents/`.
+    File,
+    /// The templates plugins contribute.
+    Plugin,
+}
+
+/// Whether a resolved template can be spawned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateState {
+    Ready,
+}
+
+/// A definition of a template's id that the resolved view does not use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotUsed {
+    pub layer: TemplateLayer,
+    pub path: Option<PathBuf>,
+}
+
+/// Where a resolved template comes from, as `AgentRegistry::provenance`
+/// answers it. `AgentSource` keeps its one meaning, where execution runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateProvenance {
+    pub layer: TemplateLayer,
+    /// The file a file-layer template was read from, when one is known.
+    pub path: Option<PathBuf>,
+    pub not_used: Vec<NotUsed>,
+    pub state: TemplateState,
+    pub warnings: Vec<String>,
+}
+
+/// A template of the file layer, with the file it was read from.
+struct FileTemplate {
+    template: AgentTemplate,
+    path: Option<PathBuf>,
+}
+
+/// The file layer, built whole and handed to
+/// `AgentRegistry::replace_file_layer`.
+#[derive(Default)]
+pub struct FileLayer {
+    templates: HashMap<String, FileTemplate>,
+}
+
+impl FileLayer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a template read from `path`. Returns false, leaving the layer
+    /// as it was, when a template of the same id is already in it: the
+    /// first one added holds the id.
+    pub fn insert(&mut self, template: AgentTemplate, path: Option<PathBuf>) -> bool {
+        match self.templates.entry(template.frontmatter.id.clone()) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(slot) => {
+                slot.insert(FileTemplate { template, path });
+                true
+            }
+        }
+    }
+}
+
+/// The three layers and the view resolved from them, under one mutex.
+#[derive(Default)]
+struct TemplateLayers {
+    bundled: HashMap<String, AgentTemplate>,
+    file: FileLayer,
+    plugin: HashMap<String, AgentTemplate>,
+    /// What every reader sees: recomputed by `resolve` after each change
+    /// to a layer, never written by itself.
+    resolved: HashMap<String, AgentTemplate>,
+}
+
+impl TemplateLayers {
+    /// Recompute the resolved view: each id from the file layer, else the
+    /// bundled one, else the plugin one. The one map is refilled, not
+    /// replaced, so it keeps its hasher and a listing's order stays as
+    /// steady across changes as the one map's was.
+    fn resolve(&mut self) {
+        self.resolved.clear();
+        self.resolved.extend(
+            self.plugin
+                .iter()
+                .map(|(id, template)| (id.clone(), template.clone())),
+        );
+        self.resolved.extend(
+            self.bundled
+                .iter()
+                .map(|(id, template)| (id.clone(), template.clone())),
+        );
+        self.resolved.extend(
+            self.file
+                .templates
+                .iter()
+                .map(|(id, entry)| (id.clone(), entry.template.clone())),
+        );
+    }
+}
+
 /// Internal wrapper that pairs a SubAgent instance with its config version
 /// for optimistic locking on config updates.
 struct RegisteredAgent {
@@ -31,11 +147,12 @@ struct RegisteredAgent {
 
 /// Registry for tracking agent templates and runtime instances.
 ///
-/// Templates are immutable blueprints loaded at startup.
+/// Templates are immutable blueprints, kept by layer and resolved on read.
 /// Instances are spawned on demand and destroyed when tasks complete.
 pub struct AgentRegistry {
-    /// Agent templates keyed by template_id (e.g. "code_agent").
-    templates: Mutex<HashMap<String, AgentTemplate>>,
+    /// Agent templates by layer, each keyed by template_id (e.g.
+    /// "code_agent"), and the resolved view every reader sees.
+    templates: Mutex<TemplateLayers>,
     /// Active agent instances keyed by instance_id (e.g. "code_agent::a1b2c3d4").
     instances: Mutex<HashMap<String, RegisteredAgent>>,
     /// Templates withdrawn with a plugin: `template_id → plugin_id`
@@ -48,7 +165,7 @@ pub struct AgentRegistry {
 impl AgentRegistry {
     pub fn new() -> Self {
         Self {
-            templates: Mutex::new(HashMap::new()),
+            templates: Mutex::new(TemplateLayers::default()),
             instances: Mutex::new(HashMap::new()),
             template_tombstones: Mutex::new(HashMap::new()),
         }
@@ -56,7 +173,7 @@ impl AgentRegistry {
 
     // ── Lock helpers ─────────────────────────────────────────────────
 
-    fn lock_templates(&self) -> std::sync::MutexGuard<'_, HashMap<String, AgentTemplate>> {
+    fn lock_templates(&self) -> std::sync::MutexGuard<'_, TemplateLayers> {
         match self.templates.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -79,32 +196,92 @@ impl AgentRegistry {
     // ── Template methods ─────────────────────────────────────────────
 
     /// Register an agent template. Returns false if a template with the
-    /// same id already exists.
+    /// same id already exists in any layer.
+    ///
+    /// A plugin's template (`AgentSource::Plugin`) goes into the plugin
+    /// layer, any other into the file layer with no path.
     pub fn register_template(&self, template: AgentTemplate) -> bool {
         let mut templates = self.lock_templates();
         let id = template.frontmatter.id.clone();
-        if templates.contains_key(&id) {
+        if templates.resolved.contains_key(&id) {
             return false;
         }
         // A template that came back invalidates its own tombstone.
         self.lock_template_tombstones().remove(&id);
-        templates.insert(id, template);
+        if matches!(template.source, AgentSource::Plugin { .. }) {
+            templates.plugin.insert(id, template);
+        } else {
+            let entry = FileTemplate {
+                template,
+                path: None,
+            };
+            templates.file.templates.insert(id, entry);
+        }
+        templates.resolve();
         true
+    }
+
+    /// Replace the file layer whole: an id the new layer does not hold
+    /// leaves it, and the bundled template of that id, if any, is resolved
+    /// again.
+    pub fn replace_file_layer(&self, layer: FileLayer) {
+        let mut templates = self.lock_templates();
+        self.forget_tombstones(layer.templates.keys());
+        templates.file = layer;
+        templates.resolve();
+    }
+
+    /// Replace the bundled layer. Of two templates with one id the first
+    /// is kept.
+    pub fn set_bundled_layer(&self, bundled: Vec<AgentTemplate>) {
+        let mut layer = HashMap::new();
+        for template in bundled {
+            layer
+                .entry(template.frontmatter.id.clone())
+                .or_insert(template);
+        }
+        let mut templates = self.lock_templates();
+        self.forget_tombstones(layer.keys());
+        templates.bundled = layer;
+        templates.resolve();
+    }
+
+    /// Where the template resolved under `template_id` comes from, or None
+    /// when no layer holds the id.
+    pub fn provenance(&self, template_id: &str) -> Option<TemplateProvenance> {
+        let templates = self.lock_templates();
+        let (layer, path) = if let Some(entry) = templates.file.templates.get(template_id) {
+            (TemplateLayer::File, entry.path.clone())
+        } else if templates.bundled.contains_key(template_id) {
+            (TemplateLayer::Bundled, None)
+        } else if templates.plugin.contains_key(template_id) {
+            (TemplateLayer::Plugin, None)
+        } else {
+            return None;
+        };
+        Some(TemplateProvenance {
+            layer,
+            path,
+            not_used: Vec::new(),
+            state: TemplateState::Ready,
+            warnings: Vec::new(),
+        })
     }
 
     /// Get a template by id.
     pub fn get_template(&self, template_id: &str) -> Option<AgentTemplate> {
-        self.lock_templates().get(template_id).cloned()
+        self.lock_templates().resolved.get(template_id).cloned()
     }
 
     /// List all registered templates.
     pub fn list_templates(&self) -> Vec<AgentTemplate> {
-        self.lock_templates().values().cloned().collect()
+        self.lock_templates().resolved.values().cloned().collect()
     }
 
     /// Find templates that have a given capability.
     pub fn find_templates_by_capability(&self, capability_name: &str) -> Vec<AgentTemplate> {
         self.lock_templates()
+            .resolved
             .values()
             .filter(|t| t.frontmatter.capabilities.iter().any(|s| s == capability_name))
             .cloned()
@@ -113,12 +290,20 @@ impl AgentRegistry {
 
     /// Number of registered templates.
     pub fn template_count(&self) -> usize {
-        self.lock_templates().len()
+        self.lock_templates().resolved.len()
     }
 
-    /// Remove a template by id. Returns true if it existed.
+    /// Remove a template by id from the file layer, else from the plugin
+    /// layer. Returns true if one was removed. A bundled template is never
+    /// removed.
     pub fn remove_template(&self, template_id: &str) -> bool {
-        self.lock_templates().remove(template_id).is_some()
+        let mut templates = self.lock_templates();
+        let removed = templates.file.templates.remove(template_id).is_some()
+            || templates.plugin.remove(template_id).is_some();
+        if removed {
+            templates.resolve();
+        }
+        removed
     }
 
     /// Remove a plugin's template and leave a tombstone behind
@@ -135,13 +320,17 @@ impl AgentRegistry {
     pub fn remove_plugin_template(&self, template_id: &str, plugin_id: &str) -> bool {
         let removed = {
             let mut templates = self.lock_templates();
-            let owned = templates.get(template_id).is_some_and(|template| {
+            let owned = templates.plugin.get(template_id).is_some_and(|template| {
                 matches!(
                     &template.source,
                     AgentSource::Plugin { plugin_id: owner, .. } if owner == plugin_id
                 )
             });
-            owned && templates.remove(template_id).is_some()
+            let removed = owned && templates.plugin.remove(template_id).is_some();
+            if removed {
+                templates.resolve();
+            }
+            removed
         };
         if removed {
             self.lock_template_tombstones()
@@ -176,6 +365,15 @@ impl AgentRegistry {
         self.lock_template_tombstones().get(template_id).cloned()
     }
 
+    /// Drop the tombstones of ids a layer now holds: a template that came
+    /// back invalidates its own tombstone, as in `register_template`.
+    fn forget_tombstones<'a>(&self, ids: impl Iterator<Item = &'a String>) {
+        let mut tombstones = self.lock_template_tombstones();
+        for id in ids {
+            tombstones.remove(id);
+        }
+    }
+
     fn lock_template_tombstones(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
         match self.template_tombstones.lock() {
             Ok(guard) => guard,
@@ -202,6 +400,7 @@ impl AgentRegistry {
         let (is_singleton, template_clone) = {
             let templates = self.lock_templates();
             let template = templates
+                .resolved
                 .get(template_id)
                 .ok_or_else(|| format!("template '{}' not found", template_id))?;
             (template.frontmatter.singleton, template.clone())
