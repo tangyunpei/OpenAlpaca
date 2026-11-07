@@ -62,12 +62,11 @@ module-preload polyfill and preload helper the bundle carries), each with its
 own licence notice. The generator refuses, writing nothing and naming each, a
 JavaScript package or bundled tool whose licence `deny.toml`'s
 `[licenses] allow` list does not admit (OFL-1.1, the fonts', is admitted for
-JavaScript alone); CI checks the
-committed file's JavaScript licences the same way. CI also fails a push to
-`main` or a pull request whose lockfiles are not the ones the committed file
-records, naming the stale one (`gen_notices.py --check-hashes`), so a change
-that moves a lockfile, Dependabot's pull requests among them, commits the
-regenerated file with it. The script then
+JavaScript alone); `gen_notices.py --check-licences` checks the committed
+file's JavaScript licences the same way, and `gen_notices.py --check-hashes`
+names a lockfile that is not the one the committed file records, so a change
+that moves a lockfile commits the regenerated file with it. Both are local
+gates: there is no remote CI. The script then
 installs the GUI's JS dependencies from the frozen lockfile
 (`bun install --frozen-lockfile`), builds the daemon once —
 `apps/openalpaca-gui/scripts/prepare-sidecar.ts --release`, which stages
@@ -803,9 +802,10 @@ the platform's data-directory convention.
 
 ### Windows
 
-**Status: experimental.** CI tests the two installer scripts and the packaging
-script's hash helpers on Windows, but
-never builds or runs the binaries there, and the CLI's daemon start/stop code
+**Status: experimental.** The Pester tests of the two installer scripts and
+the packaging script's hash helpers are run by hand on a Windows machine
+(`Invoke-Pester -Path scripts/release/tests`, on Pester 6.2.0); nothing
+builds or runs the binaries there, and the CLI's daemon start/stop code
 is written against Unix signals. Expect `package-windows.ps1` to fail at the
 build step until that is ported.
 

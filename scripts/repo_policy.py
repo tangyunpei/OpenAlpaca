@@ -5,10 +5,12 @@ Usage:
   python3.11 -I scripts/repo_policy.py [ROOT]
 
 ROOT is the repository root (default: this file's parent's parent). Exit 0 when every
-rule holds; 1 with one line per violation, `path:line: rule: what`; 2 on a usage error,
-a file the guard cannot read (a Cargo.lock that is not TOML, or whose [[package]] is not
-an array of tables, among them), or a ROOT with no .github/workflows. CI's `tooling` job
-runs it; so can anyone, offline.
+rule holds; 1 with one line per violation, `path:line: rule: what`; 2 on a usage error
+(a ROOT that is not a directory among them) or a file the guard cannot read (a Cargo.lock
+that is not TOML, or whose [[package]] is not an array of tables, among them). There is
+no remote CI (the owner, 2026-11-06): it is a local gate, run offline. A ROOT with no
+.github/workflows has zero workflows to check; the workflow rules stay for any workflow
+a later commit adds.
 
 The rules:
   locked     every `cargo build`, `test`, `clippy` and `check` a workflow runs, whatever
@@ -367,8 +369,8 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(__doc__)
         return 2
     root = pathlib.Path(argv[1]).resolve() if len(argv) == 2 else ROOT
-    if not (root / ".github" / "workflows").is_dir():
-        sys.stderr.write("repo_policy: %s has no .github/workflows\n" % root)
+    if not root.is_dir():
+        sys.stderr.write("repo_policy: %s is not a directory\n" % root)
         return 2
     try:
         found = check(root)

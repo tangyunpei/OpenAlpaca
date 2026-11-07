@@ -48,12 +48,12 @@ This file is loaded into every session and every subagent, so it stays under 50 
 ## Build & Development
 ```bash
 # Full workspace
-cargo build                      # debug build — every member but the Tauri shell (default-members = CI's selection)
-cargo build --workspace --exclude openalpaca_gui   # the same set, spelled out (what CI runs)
+cargo build                      # debug build — every member but the Tauri shell (default-members = the gate set)
+cargo build --workspace --exclude openalpaca_gui   # the same set, spelled out
 cargo build --release            # release build
 cargo test                       # run every test but the shell's (the daemon's tests spawn processes; ~5.5 min)
-cargo test --workspace --exclude openalpaca_gui    # the same set, spelled out (what CI runs)
-cargo clippy                     # lint (CI adds --all-targets)
+cargo test --workspace --exclude openalpaca_gui    # the same set, spelled out
+cargo clippy                     # lint (the gate adds --all-targets)
 
 # Individual crates
 cargo build -p openalpaca_core
@@ -69,16 +69,16 @@ cd apps/openalpaca-gui
 bun install                      # install JS deps
 bun run tauri dev                # dev mode (hot-reload frontend + Rust rebuild)
 bun run dev                      # frontend-only dev server
-bun run check                    # tsc --noEmit on both tsconfigs (CI gate)
-bun run test                     # vitest (CI gate)
-bun run format:check             # prettier (CI gate) — `bun run format` fixes
-bun run build                    # production frontend build (CI gate)
+bun run check                    # tsc --noEmit on both tsconfigs (gate)
+bun run test                     # vitest (gate)
+bun run format:check             # prettier (gate) — `bun run format` fixes
+bun run build                    # production frontend build (gate)
 bun run prepare:sidecar          # stage the daemon as the Tauri sidecar: Tauri's profile and triple in its hooks, by hand dev on the host (or prepare:sidecar:release)
 ```
 
 **Build hygiene** (`tasks/deps-upgrade/modernization-plan.md` §1):
 - **One invocation set, one toolchain.** Build, test and clippy with `--workspace --exclude openalpaca_gui` (what `default-members` selects): every other selection compiles the shared crates again into its own copy, and another toolchain (`cargo +<version> …`) builds in a worktree with its own `CARGO_TARGET_DIR`.
-- **`cargo clean` at a threshold** the owner chooses (a cold CI-set build: about 44 s). Since M63 the intermediates live in the build-dir `~/.cargo/build/<workspace hash>/` (root `.cargo/config.toml`, `[build] build-dir`) and the final artifacts in `target/<profile>/`; `cargo clean` removes both. Nothing prunes either by itself, and no hook, cron or agent rule may delete them unasked.
+- **`cargo clean` at a threshold** the owner chooses (a cold gate-set build: about 44 s). Since M63 the intermediates live in the build-dir `~/.cargo/build/<workspace hash>/` (root `.cargo/config.toml`, `[build] build-dir`) and the final artifacts in `target/<profile>/`; `cargo clean` removes both. Nothing prunes either by itself, and no hook, cron or agent rule may delete them unasked.
 - **The Tauri shell builds in `target/gui`** (`apps/openalpaca-gui/src-tauri/.cargo/config.toml`), since tauri-build copies the staged sidecar into its target dir, overwriting the daemon a shared one holds; its build-dir is the same `target/gui`, and from the root `cargo check -p openalpaca_gui` runs with `CARGO_TARGET_DIR=target/gui CARGO_BUILD_BUILD_DIR=target/gui`.
 - **Every `CARGO_TARGET_DIR` is paired with `CARGO_BUILD_BUILD_DIR`** (M63, MF-5): a scratch build sets both under its scratch root, or its intermediates land in `~/.cargo/build`, where deleting the scratch root never reaches.
 - **`CARGO_INCREMENTAL=0`** comes from `.claude/settings.json` (tracked) for every agent session; export `CARGO_INCREMENTAL=1` in a session that iterates on one crate.
@@ -86,7 +86,7 @@ bun run prepare:sidecar          # stage the daemon as the Tauri sidecar: Tauri'
 Toolchain: Rust 1.99.1 (edition 2024, resolver v3), pinned in `rust-toolchain.toml`; the workspace `rust-version` is 1.99.
 Frontend: TypeScript 7.0.2, React 19.3, Tailwind 4.3, Vite 8, Vitest 5, Bun 1.4.4 (pinned by the root `package.json`'s `packageManager`; the packaging scripts refuse another). The shell is Tauri 2.12 (`tauri = "~2.12"`, `tauri-build = "~2.7"`, `tauri-plugin-dialog` exact, each paired with its `@tauri-apps/*` package).
 
-CI (`.github/workflows/ci.yml`): the toolchain from `rust-toolchain.toml`; `cargo build|test|clippy --locked --workspace --exclude openalpaca_gui` (clippy also `--all-targets`); the four `bun run` gates under the pinned Bun; and a `windows-latest` job running only `Invoke-Pester -Path scripts/release/tests` on Pester 6.2.0 exactly. A `tooling` job (`.python-version`'s Python 3.11): the scripts' tests, `gen_api_docs.py --check`, `gen_notices.py --check-hashes|--check-licences` and the policy guard `scripts/repo_policy.py`. `audit.yml` (also weekly; the owner answers it): cargo-deny on `deny.toml`, `bun audit`. Every action is pinned by full SHA, with `persist-credentials: false`, `permissions: contents: read`. **CI compiles nothing under `src-tauri`**: `cargo check -p openalpaca_gui` by hand is that crate's only gate.
+No remote CI (the owner, 2026-11-06): every gate is local — the commands above `--locked`, the scripts' tests, `gen_api_docs.py --check`, `gen_notices.py --check-hashes|--check-licences`, `scripts/repo_policy.py`, cargo-deny on `deny.toml` and cargo-audit from `~/.cache/openalpaca-deps-tools/bin`, `bun audit` (the owner answers a finding), and `Invoke-Pester -Path scripts/release/tests` (Pester 6.2.0) by hand on Windows. Nothing builds or tests on Linux or Windows; `cargo check -p openalpaca_gui` by hand is the shell's only gate.
 
 Browser preview: `.claude/launch.json` defines `openalpaca-gui` (Vite on :1420) — use it, not a hand-started dev server.
 `docs/api/` (`python3.11 scripts/gen_api_docs.py`) and `THIRD-PARTY-NOTICES` (`scripts/release/gen_notices.py`; packaging refuses it stale) are generated — `--check` reports drift; never hand-edit them.
@@ -305,7 +305,7 @@ Manuals: `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_Manual.md`, `Install
 - `.gitignore` ignores `*.md`: whitelist a new doc with a `!path` line in the block headed `# Markdown Documentation (Except Manuals)` or `# UI rework reference docs` (cite the headers, never line numbers); `git check-ignore -q <file>` exits 0 while it is still ignored.
 - A test enabling Ollama points at a mock (`MockOllama`, `MockHttpServer`) or `http://127.0.0.1:1/v1`: discovery needs no key, so `http://localhost:11434/v1` reaches the machine's own models.
 - `bun run check` is not `bun run build` (`tsc -b` rejects what `tsc --noEmit` passes): run all four GUI gates.
-- **Under Bun the Tauri CLI cannot see the JS packages:** the Tauri pair stays on one major.minor by hand — the narrowed requirements (the plugin `=` its JS twin), Dependabot's three ignores, each move one commit through both locks; a crate-only plugin patch is a Rust-only commit that says so.
+- **Under Bun the Tauri CLI cannot see the JS packages:** the Tauri pair stays on one major.minor by hand — the narrowed requirements (the plugin `=` its JS twin), each move one commit through both locks; a crate-only plugin patch is a Rust-only commit that says so.
 - **Never `{:?}` a digest** (on sha2 0.11 it prints the byte array): every one goes through `openalpaca_storage::hash::sha256_hex` or `lower_hex`, the spelling stored names and rows depend on.
 - **SKILL.md frontmatter: serde-saphyr set as close to serde_yaml 0.9 as its options go** (`middleware/skill/mod.rs`, `yaml_options()`, its tests; non-finite floats differ); `emit_comments: false` keeps a run of 33+ comment lines readable (C1).
 - macOS BSD `sed`: no `\b`, and `-i` needs `''`; use `perl -pi -e` or Python, and assert each anchor matches exactly once.

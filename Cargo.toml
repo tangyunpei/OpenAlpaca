@@ -12,7 +12,7 @@ members = [
     "apps/openalpaca",
     "apps/openalpaca-gui/src-tauri",
 ]
-# A bare `cargo build` / `cargo test` / `cargo clippy` selects what CI selects:
+# A bare `cargo build` / `cargo test` / `cargo clippy` selects the gate set:
 # every member but the Tauri shell (`--workspace --exclude openalpaca_gui`), so
 # the bare and the explicit form share one set of artifacts in target/ instead
 # of compiling the shared crates twice with different feature sets. The shell

@@ -13,13 +13,12 @@ to package while either hash it records is not the tree's lockfile's. Never edit
 by hand. With --check it writes nothing: when a recorded hash is not the tree's
 lockfile's it names that lockfile (exit 1) without regenerating; else it regenerates in
 memory and compares. With --check-hashes it stops after that first step, reading only the
-committed file's header and the two lockfiles (no install, no cargo-about), as CI's
-tooling job runs it on every push to main and every pull request: it sees a lockfile
-moved without the file regenerated, not a change to anything else the text is generated
-from (node_modules, about.toml, the vendored texts, this file), which --check sees. With
---check-licences it reads only the committed file's JavaScript lines and deny.toml (no
-install, no cargo-about), as CI's tooling job runs it, and checks each package's licence
-as generation does (below).
+committed file's header and the two lockfiles (no install, no cargo-about), the local
+gate a lock-moving commit runs: it sees a lockfile moved without the file regenerated,
+not a change to anything else the text is generated from (node_modules, about.toml, the
+vendored texts, this file), which --check sees. With --check-licences it reads only the
+committed file's JavaScript lines and deny.toml (no install, no cargo-about), a local
+gate too, and checks each package's licence as generation does (below).
 
 What it lists:
   Rust        the crates the daemon (openalpacad), the CLI (openalpaca) and the app
@@ -90,8 +89,8 @@ binding before OR and parentheses grouping; `X WITH Y` only when `X WITH Y` itse
 listed; an id matches in any case, an operator only in capitals, and `+` and LicenseRef-
 ids only as listed; an id is any SPDX idstring, not looked up in SPDX's licence list; a
 missing or unparseable expression is refused, never passed. The Rust lines are not read
-by this check: cargo-about's --fail holds the Rust half at generation, and cargo-deny
-(audit.yml) holds Cargo.lock to the same list.
+by this check: cargo-about's --fail holds the Rust half at generation, and cargo-deny,
+run by hand on deny.toml, holds Cargo.lock to the same list.
 
 Exit: 0 written, current under --check, the tree's hashes recorded under --check-hashes,
 or every JavaScript licence allowed under --check-licences; 1 stale under --check or

@@ -41,7 +41,7 @@ a dev build for this machine) and then the Vite dev server on port 1420, per
 Tauri bridge is absent there, so the connection commands fail and the directory
 picker in Settings → Extensions silently falls back to its text field.
 
-The four CI gates for this app:
+The four gates for this app, run locally:
 
 ```bash
 bun run check          # tsc --noEmit on both tsconfigs

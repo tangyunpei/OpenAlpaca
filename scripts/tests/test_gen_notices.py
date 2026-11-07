@@ -9,9 +9,9 @@ Run with either:
 Every case runs on fixtures in a temporary directory: a recorded cargo-about JSON, a small
 bun.lock, a fake node_modules and SPDX texts; a generation case runs the generator with a
 stand-in cargo-about, a bash script that prints that JSON. None runs cargo-about or bun,
-and none reads the repository's own lockfiles or node_modules, so the file runs offline
-in CI's `tooling` job. One case reads the repository's committed THIRD-PARTY-NOTICES and
-deny.toml, as CI's licence step does, and one its vendored texts of Apache-2.0 and the
+and none reads the repository's own lockfiles or node_modules, so the file runs offline,
+a local gate. One case reads the repository's committed THIRD-PARTY-NOTICES and
+deny.toml, as `--check-licences` does, and one its vendored texts of Apache-2.0 and the
 LLVM exception. The refusal cases source package-macos.sh in bash, as its own comment
 says to, point REPO_ROOT at a fixture tree and call the check; bash and shasum are all
 they need.
@@ -527,7 +527,7 @@ def _check_hashes(root: pathlib.Path, *more: str) -> tuple[int, str]:
 
 
 def test_check_hashes_reads_the_two_hashes_alone_regenerates_nothing_and_is_a_mode_of_its_own() -> None:
-    """CI's step: the header's hash lines against the tree's lockfiles. The fixture holds no
+    """The local gate: the header's hash lines against the tree's lockfiles. The fixture holds no
     deny.toml, about.toml, node_modules or cargo-about, so --check, which regenerates, has
     no verdict on it (exit 2): exit 0 here shows nothing else was read."""
     with tempfile.TemporaryDirectory() as d:
@@ -1063,7 +1063,7 @@ def test_check_licences_gives_no_verdict_on_a_file_it_cannot_read_whole() -> Non
 
 
 def test_the_committed_notices_js_licences_pass() -> None:
-    """The repository's own THIRD-PARTY-NOTICES and deny.toml, read as CI's step reads them."""
+    """The repository's own THIRD-PARTY-NOTICES and deny.toml, read as the local gate reads them."""
     rc, out = _check_licences()
     assert rc == 0 and "JavaScript packages" in out, (rc, out)
 

@@ -100,10 +100,11 @@ def _load_guard():
 guard = _load_guard()
 
 
-def _tree(root: pathlib.Path, workflow: str = GOOD_WORKFLOW, script: str = GOOD_SCRIPT,
+def _tree(root: pathlib.Path, workflow: str | None = GOOD_WORKFLOW, script: str = GOOD_SCRIPT,
           lock: str = LOCK_WITH_ZIP8, deny: str = DENY, pin: str | None = "3.11\n") -> pathlib.Path:
-    (root / ".github" / "workflows").mkdir(parents=True)
-    (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
+    if workflow is not None:  # None: no .github at all
+        (root / ".github" / "workflows").mkdir(parents=True)
+        (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
     (root / "scripts").mkdir()
     (root / "scripts" / "gate.sh").write_text(script, encoding="utf-8")
     (root / "Cargo.lock").write_text(lock, encoding="utf-8")
@@ -346,10 +347,19 @@ def test_the_zip_majors_are_read_from_the_lock_and_none_without_one() -> None:
         assert majors == ["8", "9"], majors
 
 
-def test_a_repository_without_workflows_is_no_verdict() -> None:
+def test_a_repository_without_workflows_checks_its_gate_scripts() -> None:
+    # no remote CI (the owner, 2026-11-06): zero workflows is a tree to check, not a usage error
     with tempfile.TemporaryDirectory() as d:
-        rc, out = _run(pathlib.Path(d))
-        assert rc == 2, out
+        rc, out = _run(_tree(pathlib.Path(d), workflow=None))
+        assert rc == 0, out
+        assert "0 workflow(s), 1 gate script(s), 0 violation(s)" in out, out
+    _planted("toolchain", workflow=None, script=GOOD_SCRIPT + "cargo " + "+" + "1.99.0 test --workspace\n")
+
+
+def test_a_root_that_is_not_a_directory_is_no_verdict() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(pathlib.Path(d) / "missing")
+        assert rc == 2 and "is not a directory" in out, out
 
 
 def test_this_repository_passes() -> None:

@@ -70,9 +70,9 @@ To skip the build during development, `OPENALPACA_SIDECAR_REUSE=1 bun run tauri 
 
 Run it by hand with `bun run prepare:sidecar` (dev, for the host) or `bun run prepare:sidecar:release`; `--target <triple>` builds for another triple — cargo writes `<target dir>/<triple>/<profile>/openalpacad`, staged as `openalpacad-<triple>` — and the hook of `tauri build --target <triple>` does the same. `tauri.conf.json` declares `bundle.externalBin: ["bin/openalpacad"]`, so the daemon ships inside the app bundle.
 
-### Before you push: the four CI gates
+### Before you push: the four gates
 
-The `gui` job in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs these four, in this order. Run all four locally.
+There is no remote CI: run these four locally, in this order.
 
 ```bash
 bun run check

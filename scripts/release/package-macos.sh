@@ -122,9 +122,9 @@ require_current_notices() {
 # builds nothing. It turns on `set -euo pipefail` in the sourcing shell, and a
 # failing lookup's `die` exits that shell, an interactive one included: source
 # it inside `bash -c`. scripts/tests/test_gen_notices.py drives
-# require_current_notices through this seam in CI's tooling job; the
-# packaging legs themselves stay deferred (DU-33), unlike the Windows
-# scripts' -DotSourceOnly, which Pester drives in CI.
+# require_current_notices through this seam; the packaging legs themselves
+# stay deferred (DU-33), unlike the Windows scripts' -DotSourceOnly, which
+# Pester drives, run by hand on Windows.
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 [[ "$(uname -s)" == "Darwin" ]] || die "package-macos.sh must run on macOS."
