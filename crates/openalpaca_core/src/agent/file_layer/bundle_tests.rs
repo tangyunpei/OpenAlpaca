@@ -396,8 +396,8 @@ fn a_confirmation_list_naming_no_tool_is_warned() {
     );
     let provenance = store.registry.provenance("system_agent").unwrap();
     assert_eq!(provenance.layer, TemplateLayer::File);
-    assert_eq!(provenance.warnings, [warning.clone()]);
     assert!(logs_contain(&warning));
+    assert_eq!(provenance.warnings, [warning]);
     assert_eq!(
         store
             .registry
