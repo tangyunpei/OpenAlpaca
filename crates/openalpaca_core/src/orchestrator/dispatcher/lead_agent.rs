@@ -253,7 +253,11 @@ impl TaskDispatcher {
         // template — each list in one order (G-1): the person's files, then
         // the bundled templates, then plugins', each by id, so the same lead
         // is chosen from start to start and a borrowed lead is the first
-        // template that can be spawned.
+        // template that can be spawned. The fallback tries the default
+        // subagent last (SA-1, subagent design §3.1 A-4): a lead borrowed
+        // from it — an edited `general_agent.md` is a file, so first by
+        // layer — would leave its run no default to spawn, so it leads only
+        // when no other template can.
         let lead_agent = {
             let templates = self
                 .shared_context
@@ -271,8 +275,17 @@ impl TaskDispatcher {
                 }
             }
             if spawned.is_none() {
-                // Fallback: try spawning from any available template
-                for t in self.shared_context.agent_registry.list_templates_by_layer() {
+                // Fallback: try spawning from any available template,
+                // `general_agent` last.
+                let (default, others): (Vec<_>, Vec<_>) = self
+                    .shared_context
+                    .agent_registry
+                    .list_templates_by_layer()
+                    .into_iter()
+                    .partition(|t| {
+                        t.frontmatter.id == crate::runner::lead_agent::DEFAULT_SUBAGENT_TEMPLATE
+                    });
+                for t in others.iter().chain(&default) {
                     if let Ok(agent) = self
                         .shared_context
                         .agent_registry

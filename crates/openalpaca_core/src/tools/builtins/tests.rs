@@ -1776,6 +1776,16 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
         steer_workflow_tool_definition(),
         task_status_tool_definition(),
     ]);
+    // SA-1 (subagent design §4.7 M-9): the lead's two spawn definitions —
+    // `agent_id` optional, so left out of `required` — stay non-strict.
+    let spawns = [
+        crate::runner::lead_agent::spawn_subagent_tool_definition_from_templates(&[]),
+        crate::runner::lead_agent::spawn_subagents_batch_tool_definition(&[]),
+    ];
+    for def in &spawns {
+        assert_eq!(def.strict, None, "{} is pinned non-strict", def.name);
+    }
+    definitions.extend(spawns);
 
     let mut kept = Vec::new();
     let mut marked = 0;

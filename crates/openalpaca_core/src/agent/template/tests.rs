@@ -642,6 +642,296 @@ fn all_nine_templates_name_memory_read() {
     assert!(seen >= 9, "every shipped template was checked, not {seen}");
 }
 
+/// SA-1 (subagent design §3.3): the nine templates become capability
+/// profiles — their `description` and `## Persona` change — and everything
+/// else each grants or bounds stays as it was: the capabilities and denials
+/// (so `read_result`, `memory_read` and `writing_agent`'s `file_read` stay),
+/// `singleton`, the caps, `temperature` (parsed and sent nowhere, the
+/// owner's open item), `verbosity`, `require_confirmation_for`, the name and
+/// the icon. A table of the values before SA-1, checked against the bundled
+/// bytes. The `model:` lines are pinned too: SA-3's commit (C8), not SA-1's,
+/// moves them.
+#[test]
+fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
+    struct Kept {
+        id: &'static str,
+        name: &'static str,
+        icon: Option<&'static str>,
+        singleton: bool,
+        capabilities: &'static [&'static str],
+        denied: &'static [&'static str],
+        temperature: f32,
+        verbosity: &'static str,
+        max_tool_calls: Option<u32>,
+        max_cost_per_task: Option<f64>,
+        max_rounds: Option<usize>,
+        model: &'static str,
+        fallback_models: &'static [&'static str],
+    }
+    const SONNET: &str = "claude-sonnet-4-6";
+    const HAIKU: &str = "claude-haiku-4-5-20251001";
+    const OPUS: &[&str] = &["claude-opus-4-6"];
+    let table = [
+        Kept {
+            id: "code_agent",
+            name: "Code Agent",
+            icon: Some("code"),
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "file_write",
+                "artifact_write",
+                "shell_execute",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["web_access"],
+            temperature: 0.3,
+            verbosity: "detailed",
+            max_tool_calls: Some(50),
+            max_cost_per_task: Some(3.0),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "explore_agent",
+            name: "Explore Agent",
+            icon: Some("eye"),
+            singleton: false,
+            capabilities: &["file_read", "memory_read", "workspace_read", "read_result"],
+            denied: &["file_write", "shell_execute", "web_access"],
+            temperature: 0.2,
+            verbosity: "concise",
+            max_tool_calls: Some(40),
+            max_cost_per_task: Some(0.25),
+            max_rounds: None,
+            model: HAIKU,
+            fallback_models: &[SONNET],
+        },
+        Kept {
+            id: "general_agent",
+            name: "General Purpose Agent",
+            icon: Some("swiss_knife"),
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "file_write",
+                "artifact_write",
+                "shell_execute",
+                "web_access",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "messaging",
+                "read_result",
+            ],
+            denied: &["persona_write"],
+            temperature: 0.4,
+            verbosity: "detailed",
+            max_tool_calls: Some(50),
+            max_cost_per_task: Some(5.0),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "lead_agent",
+            name: "Lead Agent",
+            icon: Some("brain"),
+            singleton: true,
+            capabilities: &[
+                "orchestration",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "artifact_write",
+                "read_result",
+            ],
+            denied: &[],
+            temperature: 0.3,
+            verbosity: "detailed",
+            max_tool_calls: Some(50),
+            max_cost_per_task: Some(3.0),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "planning_agent",
+            name: "Planning Agent",
+            icon: Some("clipboard"),
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "web_access",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["file_write", "shell_execute"],
+            temperature: 0.5,
+            verbosity: "detailed",
+            max_tool_calls: Some(30),
+            max_cost_per_task: Some(1.5),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "research_agent",
+            name: "Research Agent",
+            icon: Some("magnifying_glass"),
+            singleton: false,
+            capabilities: &[
+                "web_access",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["shell_execute", "file_write"],
+            temperature: 0.3,
+            verbosity: "detailed",
+            max_tool_calls: Some(12),
+            max_cost_per_task: Some(0.35),
+            max_rounds: Some(8),
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "review_agent",
+            name: "Review Agent",
+            icon: Some("magnifying_glass_tilted"),
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "shell_execute",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["file_write", "web_access"],
+            temperature: 0.2,
+            verbosity: "detailed",
+            max_tool_calls: Some(40),
+            max_cost_per_task: Some(1.0),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "system_agent",
+            name: "System Agent",
+            icon: None,
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "file_write",
+                "artifact_write",
+                "shell_execute",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["web_access"],
+            temperature: 0.2,
+            verbosity: "concise",
+            max_tool_calls: Some(30),
+            max_cost_per_task: None,
+            max_rounds: None,
+            model: HAIKU,
+            fallback_models: &[],
+        },
+        Kept {
+            id: "writing_agent",
+            name: "Writing Agent",
+            icon: None,
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "file_write",
+                "artifact_write",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["shell_execute", "web_access"],
+            temperature: 0.7,
+            verbosity: "detailed",
+            max_tool_calls: Some(10),
+            max_cost_per_task: None,
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: &[],
+        },
+    ];
+    let mut shipped: Vec<AgentTemplate> = crate::bundled::BUNDLED_AGENTS
+        .iter()
+        .map(|file| {
+            parse_agent_markdown(file.contents)
+                .unwrap_or_else(|e| panic!("{} does not parse: {e}", file.path))
+        })
+        .collect();
+    shipped.sort_by(|a, b| a.frontmatter.id.cmp(&b.frontmatter.id));
+    let ids: Vec<&str> = shipped.iter().map(|t| t.frontmatter.id.as_str()).collect();
+    let expected: Vec<&str> = table.iter().map(|k| k.id).collect();
+    assert_eq!(ids, expected, "all nine stay, none added (A-5)");
+    let strings = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for (template, kept) in shipped.iter().zip(&table) {
+        let fm = &template.frontmatter;
+        let id = kept.id;
+        assert_eq!(fm.name, kept.name, "{id}");
+        assert_eq!(fm.icon.as_deref(), kept.icon, "{id}");
+        assert_eq!(fm.singleton, kept.singleton, "{id}");
+        assert_eq!(fm.capabilities, strings(kept.capabilities), "{id}");
+        assert_eq!(fm.denied_capabilities, strings(kept.denied), "{id}");
+        assert_eq!(fm.temperature, kept.temperature, "{id}");
+        assert_eq!(fm.verbosity, kept.verbosity, "{id}");
+        assert_eq!(fm.max_tool_calls, kept.max_tool_calls, "{id}");
+        assert_eq!(fm.max_cost_per_task, kept.max_cost_per_task, "{id}");
+        assert_eq!(fm.max_rounds, kept.max_rounds, "{id}");
+        assert_eq!(fm.timeout_seconds, None, "{id}");
+        assert!(fm.require_confirmation_for.is_empty(), "{id}");
+        assert_eq!(fm.model.as_deref(), Some(kept.model), "{id}");
+        assert_eq!(fm.fallback_models, strings(kept.fallback_models), "{id}");
+    }
+}
+
+/// SA-1 (subagent design §3.3, A-6): a shipped template's persona says how
+/// to work in one `## Persona` section of at most 400 bytes — its
+/// description says what the profile can do, and neither restates the tool
+/// list. Measured on the section the subagent is sent (`extract_persona`).
+#[test]
+fn every_shipped_persona_is_at_most_400_bytes() {
+    let mut long = Vec::new();
+    let mut seen = 0;
+    for file in crate::bundled::BUNDLED_AGENTS {
+        let doc = parse_agent_markdown(file.contents)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", file.path));
+        assert_eq!(
+            doc.sections.keys().collect::<Vec<_>>(),
+            ["Persona"],
+            "{}: one ## Persona section",
+            file.path
+        );
+        let persona = extract_persona(&doc);
+        assert!(!persona.trim().is_empty(), "{}", file.path);
+        if persona.len() > 400 {
+            long.push(format!("{} ({} bytes)", file.path, persona.len()));
+        }
+        seen += 1;
+    }
+    assert!(long.is_empty(), "personas past 400 bytes: {long:?}");
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
 /// TEMPLATE-TIMEOUT: nothing enforces a template's `timeout_seconds` since
 /// N-TOOL-1b (every loop's per-tool bound is `[execution.agent_defaults]
 /// max_tool_runtime_secs`), so no shipped template sets one — read from the

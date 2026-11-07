@@ -193,14 +193,14 @@ fn an_earlier_builds_unedited_writing_agent_gives_way_to_one_that_reads_files() 
 }
 
 /// V-2b: a store seeded before TEMPLATE-TIMEOUT holds `9b1ea1d3`'s
-/// `lead_agent.md` (an earlier version), one first started after it
-/// `e9f15916`'s (the current one): both are set aside and the bundled lead
-/// runs.
+/// `lead_agent.md`, one first started after it `e9f15916`'s: both are set
+/// aside and the bundled lead runs. Both are earlier versions since SA-1
+/// (C6) changed the template; `e9f15916`'s was the current one until then.
 #[test]
 fn a_copy_seeded_on_either_side_of_template_timeout_is_set_aside() {
     for (text, version) in [
         (LEAD_AGENT_9B1EA1D3, ShippedVersion::Earlier),
-        (LEAD_AGENT_E9F15916, ShippedVersion::Current),
+        (LEAD_AGENT_E9F15916, ShippedVersion::Earlier),
     ] {
         let store = Store::new();
         let path = store.write("lead_agent.md", text);

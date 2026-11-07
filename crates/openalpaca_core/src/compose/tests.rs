@@ -2882,96 +2882,67 @@ fn test_golden_dag_node_byte_identical() {
     assert_eq!(second_to_last.content, task_description);
 }
 
-/// Phase 6 Commit 3 — Lead Agent (build_lead_agent_prompt_from_templates) golden fixture.
-///
-/// Asserts byte-identical system message content between:
-///   (a) the pre-migration `PromptBuilder` chain, its eight raw blocks spelled
-///       out here, and
-///   (b) the **real** `build_lead_agent_prompt_from_templates`, which carries
-///       the same blocks through `ComposeEngine::compose(ComposeRequest::LeadAgent{...})`
-///       with `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
-///       `DynamicContextMode::Skip` + `HistoryMode::Skip`.
-///
-/// Until the S6text review's M4 the second half re-built those blocks here
-/// and composed them itself, so the test compared two copies it owned and
-/// never called the builder: a change to the lead's prompt passed it. It now
-/// calls the builder, so any change to the lead's system prompt fails here
-/// until the reference below is changed with it.
-///
-/// `build_lead_agent_prompt_from_templates` returns ONLY the system prompt
-/// string; `run_lead_agent` then concatenates `format_tool_guidance` + the
-/// connector, extension and workflow-contract suffixes inline before building
-/// the message vec — none of them is part of this fixture. No user document
-/// is passed, so no profile block is carried. A skill catalog is (N-SKILL-1),
-/// and it is carried as the last raw block.
-#[test]
-fn test_golden_lead_agent_byte_identical() {
+/// A worker template for the lead goldens: only what `<agents>` reads is set.
+fn golden_worker(
+    id: &str,
+    name: &str,
+    description: &str,
+    capabilities: &[&str],
+) -> crate::agent::template::AgentTemplate {
     use crate::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
+    AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            icon: None,
+            singleton: false,
+            capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+            denied_capabilities: vec![],
+            temperature: 0.5,
+            verbosity: "normal".to_string(),
+            model: None,
+            fallback_models: vec![],
+            max_tool_calls: None,
+            timeout_seconds: None,
+            max_cost_per_task: None,
+            max_rounds: None,
+            require_confirmation_for: vec![],
+        },
+        body: String::new(),
+        sections: std::collections::HashMap::new(),
+        source: AgentSource::default(),
+    }
+}
+
+/// The lead golden's reference and the real builder's output, for
+/// `templates` and the two blocks that differ between the two forms of
+/// step 3 (subagent design §3.2): `<workflow>` and `<failure-recovery>`.
+///
+/// The reference is the pre-migration `PromptBuilder` chain, its raw blocks
+/// spelled out here; the builder carries the same blocks through
+/// `ComposeEngine::compose(ComposeRequest::LeadAgent{...})` with
+/// `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
+/// `DynamicContextMode::Skip` + `HistoryMode::Skip`.
+fn golden_lead_prompts(
+    templates: &[crate::agent::template::AgentTemplate],
+    workflow_text: &str,
+    failure_recovery_text: &str,
+) -> (String, String) {
     use crate::prompt::PromptBuilder;
     use crate::prompt_ctx::SectionPriority;
     use crate::runner::lead_agent::build_lead_agent_prompt_from_templates;
-    use std::collections::HashMap;
 
     // ── Canned Lead Agent scene: the builder's arguments, as `run_lead_agent`
     //    passes them with no user document. ──
     let base_persona = "I am a Lead Agent persona for the golden test.";
     let model_window: usize = 200_000;
 
-    // Two worker-agent templates so `<agents>` block is non-empty.
-    let templates = vec![
-        AgentTemplate {
-            frontmatter: AgentTemplateFrontmatter {
-                id: "researcher".to_string(),
-                name: "Researcher".to_string(),
-                description: "Does research and fact-finding.".to_string(),
-                icon: None,
-                singleton: false,
-                capabilities: vec!["web_search".to_string(), "read_docs".to_string()],
-                denied_capabilities: vec![],
-                temperature: 0.5,
-                verbosity: "normal".to_string(),
-                model: None,
-                fallback_models: vec![],
-                max_tool_calls: None,
-                timeout_seconds: None,
-                max_cost_per_task: None,
-                max_rounds: None,
-                require_confirmation_for: vec![],
-            },
-            body: String::new(),
-            sections: HashMap::new(),
-            source: AgentSource::default(),
-        },
-        AgentTemplate {
-            frontmatter: AgentTemplateFrontmatter {
-                id: "coder".to_string(),
-                name: "Coder".to_string(),
-                description: "Writes production Rust.".to_string(),
-                icon: None,
-                singleton: false,
-                capabilities: vec![],
-                denied_capabilities: vec![],
-                temperature: 0.5,
-                verbosity: "normal".to_string(),
-                model: None,
-                fallback_models: vec![],
-                max_tool_calls: None,
-                timeout_seconds: None,
-                max_cost_per_task: None,
-                max_rounds: None,
-                require_confirmation_for: vec![],
-            },
-            body: String::new(),
-            sections: HashMap::new(),
-            source: AgentSource::default(),
-        },
-    ];
-
     // ── Pre-migration reference: PromptBuilder chain at prompt.rs:41-135. ──
     // Rebuild the `<agents>` block the same way `build_lead_agent_prompt_from_templates`
     // does — including the `capabilities=[...]` rendering.
     let mut agents_block = String::from("<agents>\n");
-    for t in &templates {
+    for t in templates {
         let fm = &t.frontmatter;
         let capabilities_str = if fm.capabilities.is_empty() {
             "none".to_string()
@@ -3001,31 +2972,11 @@ fn test_golden_lead_agent_byte_identical() {
     // writes them — the reference the real builder is held to below.
     let role_text = "<role>\n\
          You are a Lead Agent orchestrating a complex task. You are responsible for analyzing \
-         the user's request, decomposing it into sub-objectives, delegating work to specialized \
+         the user's request, decomposing it into sub-objectives, delegating work to \
          subagents, and synthesizing their results into a final response.\n\
          Do not attempt to perform specialized work (coding, research, analysis) yourself when \
          a suitable subagent is available. Your value is in orchestration and synthesis.\n\
          </role>";
-    let workflow_text = "<workflow>\n\
-         Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
-         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
-         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
-         constraints, and what to return and where — since a subagent is given neither the \
-         user's request nor this conversation, only its brief.\n\
-         Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
-         sub-objective to the best agent by skills. Spawning is always immediate — each spawn \
-         returns its run_id at once, and a subagent spawned past this run's concurrency bound is \
-         queued and starts when a slot frees, as the spawn's reply says. \
-         This run may spawn at most 48 subagents in all, retries included; a spawn past that \
-         is refused.\n\
-         Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
-         queued ones), or check_subagent_status for individual progress.\n\
-         Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
-         retry with an adjusted objective or a different agent — unless its failure says a \
-         retry will not help.\n\
-         Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
-         that directly addresses the user's original request.\n\
-         </workflow>";
     let delegation_text = "<delegation-criteria>\n\
          Spawn subagents when:\n\
          - Tasks can run in parallel (e.g., research + implementation are independent)\n\
@@ -3057,14 +3008,6 @@ fn test_golden_lead_agent_byte_identical() {
          workspace_read / workspace_write: Share context between subagents. Write setup data before spawning; \
          read results after completion.\n\
          </tools>";
-    let failure_recovery_text = "<failure-recovery>\n\
-         If a subagent fails:\n\
-         1. Read the error message to understand the failure type.\n\
-         2. If the objective was too broad, split it into smaller sub-objectives and retry.\n\
-         3. If the agent lacked the right skills, try a different agent.\n\
-         4. If repeated failures occur, complete that sub-objective directly yourself.\n\
-         5. Never silently drop a failed sub-objective — always report what succeeded and what did not.\n\
-         </failure-recovery>";
     let output_expectations_text = "<output>\n\
          Your final response must directly address the user's original request. \
          Synthesize all subagent results into a single coherent answer. \
@@ -3093,7 +3036,7 @@ fn test_golden_lead_agent_byte_identical() {
     let got = build_lead_agent_prompt_from_templates(
         &engine,
         base_persona,
-        &templates,
+        templates,
         model_window,
         None,
         None,
@@ -3101,8 +3044,155 @@ fn test_golden_lead_agent_byte_identical() {
         // The stock bound on a run's subagents (N-LEAD-6), named in step 3.
         48,
     );
+    (got, expected_system)
+}
+
+/// Phase 6 Commit 3 — Lead Agent (build_lead_agent_prompt_from_templates) golden fixture.
+///
+/// Asserts byte-identical system message content between the pre-migration
+/// `PromptBuilder` chain, its raw blocks spelled out, and the **real**
+/// `build_lead_agent_prompt_from_templates` (`golden_lead_prompts`).
+///
+/// Until the S6text review's M4 the second half re-built those blocks here
+/// and composed them itself, so the test compared two copies it owned and
+/// never called the builder: a change to the lead's prompt passed it. It now
+/// calls the builder, so any change to the lead's system prompt fails here
+/// until the reference below is changed with it.
+///
+/// `build_lead_agent_prompt_from_templates` returns ONLY the system prompt
+/// string; `run_lead_agent` then concatenates `format_tool_guidance` + the
+/// connector, extension and workflow-contract suffixes inline before building
+/// the message vec — none of them is part of this fixture. No user document
+/// is passed, so no profile block is carried. A skill catalog is (N-SKILL-1),
+/// and it is carried as the last raw block.
+///
+/// SA-1 (subagent design §3.2): the workers include `general_agent`, so step
+/// 3 gives work to it by default, with the `explore_agent` and
+/// `system_agent` clauses both workers bring; the workers are sorted by id,
+/// as `run_lead_agent` hands them over (G-2).
+#[test]
+fn test_golden_lead_agent_byte_identical() {
+    let templates = vec![
+        golden_worker("coder", "Coder", "Writes production Rust.", &[]),
+        golden_worker(
+            "explore_agent",
+            "Explore Agent",
+            "Read-only and cheap.",
+            &["file_read", "memory_read"],
+        ),
+        golden_worker(
+            "general_agent",
+            "General Purpose Agent",
+            "The default subagent.",
+            &["file_read", "file_write", "shell_execute", "web_access"],
+        ),
+        golden_worker(
+            "researcher",
+            "Researcher",
+            "Does research and fact-finding.",
+            &["web_search", "read_docs"],
+        ),
+        golden_worker(
+            "system_agent",
+            "System Agent",
+            "This machine's files and commands.",
+            &["file_read", "file_write", "shell_execute"],
+        ),
+    ];
+    let workflow_text = "<workflow>\n\
+         Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
+         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
+         constraints, and what to return and where — since a subagent is given neither the \
+         user's request nor this conversation, only its brief.\n\
+         Step 3: Spawn ALL subagents for independent objectives in a single round. Give each \
+         sub-objective to general_agent — the default when you leave agent_id out — unless its \
+         brief needs fewer powers: explore_agent only reads files and memory. Name another \
+         agent from <agents> only when its capabilities fit the brief better; system_agent \
+         works on this machine's files and commands, without the web. Spawning is always \
+         immediate — each spawn returns its run_id at once, and a subagent spawned past this \
+         run's concurrency bound is queued and starts when a slot frees, as the spawn's reply \
+         says. This run may spawn at most 48 subagents in all, retries included; a spawn past \
+         that is refused.\n\
+         Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
+         queued ones), or check_subagent_status for individual progress.\n\
+         Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
+         retry with an adjusted objective or a different agent — unless its failure says a \
+         retry will not help.\n\
+         Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
+         that directly addresses the user's original request.\n\
+         </workflow>";
+    let failure_recovery_text = "<failure-recovery>\n\
+         If a subagent fails:\n\
+         1. Read the error message to understand the failure type.\n\
+         2. If the objective was too broad, split it into smaller sub-objectives and retry.\n\
+         3. If a subagent lacked a power its brief needed, give the brief to an agent whose \
+         capabilities include it — usually general_agent.\n\
+         4. If repeated failures occur, complete that sub-objective directly yourself.\n\
+         5. Never silently drop a failed sub-objective — always report what succeeded and what did not.\n\
+         </failure-recovery>";
+
+    let (got, expected_system) =
+        golden_lead_prompts(&templates, workflow_text, failure_recovery_text);
 
     // ── Byte-identical assertion on system message content. ─────────────
+    assert_eq!(
+        got, expected_system,
+        "Lead Agent system prompt mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+        got, expected_system
+    );
+}
+
+/// SA-1 (subagent design §3.2), the second form of step 3: when
+/// `general_agent` is not among the lead's `<agents>` — the lead is
+/// `general_agent` itself (A-4 (i)), or it is withheld or switched off — step
+/// 3 has the lead name an agent for each sub-objective and says `agent_id`
+/// is required, so the prompt never offers a default the spawn tool
+/// refuses; `<failure-recovery>` names no default either.
+#[test]
+fn test_golden_lead_agent_without_general_agent_byte_identical() {
+    let templates = vec![
+        golden_worker("coder", "Coder", "Writes production Rust.", &[]),
+        golden_worker(
+            "researcher",
+            "Researcher",
+            "Does research and fact-finding.",
+            &["web_search", "read_docs"],
+        ),
+    ];
+    let workflow_text = "<workflow>\n\
+         Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
+         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
+         constraints, and what to return and where — since a subagent is given neither the \
+         user's request nor this conversation, only its brief.\n\
+         Step 3: Spawn ALL subagents for independent objectives in a single round. Name an \
+         agent from <agents> for each sub-objective by the powers its brief needs; agent_id is \
+         required in this run. Spawning is always immediate — each spawn returns its run_id at \
+         once, and a subagent spawned past this run's concurrency bound is queued and starts \
+         when a slot frees, as the spawn's reply says. This run may spawn at most 48 subagents \
+         in all, retries included; a spawn past that is refused.\n\
+         Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
+         queued ones), or check_subagent_status for individual progress.\n\
+         Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
+         retry with an adjusted objective or a different agent — unless its failure says a \
+         retry will not help.\n\
+         Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
+         that directly addresses the user's original request.\n\
+         </workflow>";
+    let failure_recovery_text = "<failure-recovery>\n\
+         If a subagent fails:\n\
+         1. Read the error message to understand the failure type.\n\
+         2. If the objective was too broad, split it into smaller sub-objectives and retry.\n\
+         3. If a subagent lacked a power its brief needed, give the brief to an agent whose \
+         capabilities include it.\n\
+         4. If repeated failures occur, complete that sub-objective directly yourself.\n\
+         5. Never silently drop a failed sub-objective — always report what succeeded and what did not.\n\
+         </failure-recovery>";
+
+    let (got, expected_system) =
+        golden_lead_prompts(&templates, workflow_text, failure_recovery_text);
+
     assert_eq!(
         got, expected_system,
         "Lead Agent system prompt mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",

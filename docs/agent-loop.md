@@ -135,6 +135,29 @@ lead: its `<agents>` block and both spawn descriptions are built from the
 resolved list, which leaves it out, and a spawn naming it is refused
 with the file's path.
 
+**`general_agent` is the default subagent** (SA-1). `spawn_subagent`'s
+`agent_id` is optional: absent, `null` or empty, the spawn runs
+`general_agent` (`DEFAULT_SUBAGENT_TEMPLATE`, `runner/lead_agent/tools.rs`)
+— the guards run on that id, the run id, span and `subagent_open` record
+name it, the record carries `agent_id_defaulted: true` (`false` when the
+lead named its agent), and the reply says "(the default: no agent_id
+given)". An omitted `agent_id` is refused, with the agents the lead can
+name sorted by id, when the default is the run's own lead or no template
+of the id resolves (a file withholds it or switches it off, or nothing
+holds it) — never a silent pick of another. The shipped specialists are
+capability profiles: each description says what it can do, which is what
+the lead chooses by, and each persona how to work. The lead's
+`<workflow>` step 3 gives each sub-objective to `general_agent` unless its
+brief needs fewer powers (`explore_agent` only reads files and memory),
+and names `system_agent` by what it is, each clause only when that
+template is offered; with `general_agent` not among the lead's `<agents>`,
+step 3 says to name an agent for each and that `agent_id` is required. A
+borrowed lead — the dispatcher's fallback, when every `orchestration`
+template is busy — tries `general_agent` last. Each `spawn_subagents_batch`
+entry goes to `spawn_subagent` whole, and one that cannot spawn (no
+objective, an unknown or withheld agent) is its own `[n] FAILED (…)` line
+while the entries around it are spawned and their run ids returned.
+
 Subagents can be plugin-backed: when the spawned template's source is
 `AgentSource::Plugin` (contributed by a plugin manifest), the spawn path
 skips the internal loop entirely and `runner/plugin_agent.rs` drives the

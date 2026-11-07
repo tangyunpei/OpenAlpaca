@@ -996,6 +996,8 @@ const OBJECTIVE_PARAMETER: &str = "A self-contained brief for the subagent: the 
 
 /// SA-2: the batch's description, pinned whole, says each objective is a
 /// brief, and both tools' `objective` parameters say what a brief holds.
+/// Since SA-1 it says an entry's agent_id may be left out and a bad entry
+/// fails alone (subagent design §3.1 A-1, A-2).
 #[test]
 fn the_batch_description_and_both_objective_parameters_say_what_a_brief_holds() {
     let single = spawn_subagent_tool_definition_from_templates(&[]);
@@ -1003,11 +1005,12 @@ fn the_batch_description_and_both_objective_parameters_say_what_a_brief_holds() 
     assert_eq!(
         batch.description,
         "Spawn multiple subagents in a single call (1-8). More efficient than calling \
-         spawn_subagent repeatedly. Each entry specifies an agent_id and an objective, \
-         written as a self-contained brief: the goal, the inputs it needs, the constraints, \
-         and what to return and where. Every entry returns its run_id at once; up to this \
-         run's concurrency bound they run in parallel, and the rest are queued and start as \
-         slots free. Use wait_for_subagents to collect results.\n\n\
+         spawn_subagent repeatedly. Each entry gives an objective, written as a \
+         self-contained brief: the goal, the inputs it needs, the constraints, and what to \
+         return and where; its agent_id may be left out for general_agent, the default. An \
+         entry that cannot be spawned fails alone. Every entry returns its run_id at once; \
+         up to this run's concurrency bound they run in parallel, and the rest are queued \
+         and start as slots free. Use wait_for_subagents to collect results.\n\n\
          Available agents:\nNo agents available."
     );
     assert_eq!(
@@ -7349,4 +7352,467 @@ async fn the_lead_is_told_the_configured_bound_and_refused_at_it() {
         "{}",
         results[0]
     );
+}
+
+// ── SA-1: general_agent is the default subagent ──────────────────────
+
+/// `SpawnSubagentTool` as [`spawn_tool_bounded`] builds it, but run by the
+/// lead `lead`, with the run's session log registered when one is given.
+fn sa1_spawn_tool(
+    shared: Arc<SharedContext>,
+    tracker: Arc<SubagentTracker>,
+    lead: &str,
+) -> SpawnSubagentTool {
+    SpawnSubagentTool::new(
+        roomy_router(GatedWorkers::new()),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        lead.to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker,
+        0,
+        6,
+        MemoryScopeContext::global_only(),
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
+        None,
+    )
+}
+
+/// A context holding the file-sourced workers `ids`.
+fn sa1_shared(ids: &[&str]) -> Arc<SharedContext> {
+    let shared = Arc::new(SharedContext::new());
+    for id in ids {
+        register_worker_template(&shared, id, vec![], vec![]);
+    }
+    shared
+}
+
+/// The run ids a spawn's reply names, in order.
+fn run_ids_in(reply: &str) -> Vec<String> {
+    reply
+        .split("(run_id: '")
+        .skip(1)
+        .map(|rest| rest.split('\'').next().unwrap().to_string())
+        .collect()
+}
+
+/// **A-1, A-3.** A spawn with no `agent_id` spawns `general_agent`: its run
+/// id, its lane's `subagent_open` record and the reply name the template
+/// that runs, the record says it was the default, and the reply says why.
+/// A spawn naming its agent records that it did. Before SA-1 an absent
+/// `agent_id` was refused, "Missing required parameter: agent_id".
+#[tokio::test(start_paused = true)]
+async fn an_omitted_agent_id_spawns_general_agent() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let shared = sa1_shared(&["code_agent", "general_agent"]);
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-lead");
+    shared.register_task_session_log("task-1", handle.clone());
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = sa1_spawn_tool(shared, tracker.clone(), "lead_agent");
+
+    let reply = spawn
+        .execute(&serde_json::json!({"objective": "Find the config loader."}))
+        .await
+        .expect("an omitted agent_id spawns the default");
+    let ids = run_ids_in(&reply);
+    assert_eq!(ids.len(), 1, "{reply}");
+    assert!(ids[0].starts_with("general_agent::"), "{reply}");
+    assert!(
+        reply.starts_with(&format!(
+            "Subagent 'general_agent' (the default: no agent_id given) spawned (run_id: '{}'), ",
+            ids[0]
+        )),
+        "{reply}"
+    );
+    assert!(tracker.get(&ids[0]).is_some());
+
+    let named = spawn
+        .execute(&serde_json::json!({"agent_id": "code_agent", "objective": "Fix it."}))
+        .await
+        .unwrap();
+    assert!(
+        named.starts_with("Subagent 'code_agent' spawned (run_id: '"),
+        "{named}"
+    );
+
+    assert!(handle.flush().await);
+    let records = read_records(&dir.path().join("sess-lead")).unwrap();
+    let opens: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == "subagent_open")
+        .collect();
+    assert_eq!(opens.len(), 2, "two lanes opened");
+    assert_eq!(opens[0].data["template"], "general_agent");
+    assert_eq!(opens[0].data["run_id"], ids[0].as_str());
+    assert_eq!(opens[0].data["agent_id_defaulted"], true);
+    assert_eq!(opens[1].data["template"], "code_agent");
+    assert_eq!(opens[1].data["agent_id_defaulted"], false);
+}
+
+/// **A-1.** `null` and an empty string read as an omitted `agent_id`.
+#[tokio::test(start_paused = true)]
+async fn a_null_agent_id_spawns_general_agent() {
+    let shared = sa1_shared(&["code_agent", "general_agent"]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = sa1_spawn_tool(shared, tracker, "lead_agent");
+
+    for agent_id in [serde_json::Value::Null, serde_json::json!("")] {
+        let reply = spawn
+            .execute(&serde_json::json!({"agent_id": agent_id, "objective": "Read it."}))
+            .await
+            .unwrap_or_else(|e| panic!("agent_id {agent_id} is the default: {e}"));
+        assert!(
+            reply.starts_with(
+                "Subagent 'general_agent' (the default: no agent_id given) spawned (run_id: \
+                 'general_agent::"
+            ),
+            "{reply}"
+        );
+    }
+}
+
+/// **A-2.** A batch item with no `agent_id` spawns `general_agent`, beside
+/// one that names its agent.
+#[tokio::test(start_paused = true)]
+async fn a_batch_item_without_agent_id_spawns_general_agent() {
+    let shared = sa1_shared(&["code_agent", "general_agent"]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(sa1_spawn_tool(shared, tracker.clone(), "lead_agent"));
+
+    let reply = SpawnSubagentsBatchTool::new(spawn)
+        .execute(&serde_json::json!({"subagents": [
+            {"objective": "Survey the tests."},
+            {"agent_id": "code_agent", "objective": "Fix the test."},
+        ]}))
+        .await
+        .expect("the batch is answered");
+
+    assert!(
+        reply.starts_with("Batch spawn: 2/2 subagents spawned successfully."),
+        "{reply}"
+    );
+    assert!(
+        reply.contains(
+            "[1] OK: Subagent 'general_agent' (the default: no agent_id given) spawned (run_id: \
+             'general_agent::"
+        ),
+        "{reply}"
+    );
+    assert!(
+        reply.contains("[2] OK: Subagent 'code_agent' spawned (run_id: 'code_agent::"),
+        "{reply}"
+    );
+    assert_eq!(tracked(&tracker), 2);
+}
+
+/// **A-2.** A bad item fails alone: an item with no `objective` is that
+/// item's `FAILED` line, and the items before and after it are spawned and
+/// their run ids reach the lead. Before SA-1 the item ended the whole call
+/// with an `Err` after the items before it had been spawned, so their run
+/// ids never reached the lead.
+#[tokio::test(start_paused = true)]
+async fn a_batch_item_without_objective_fails_alone_and_the_batch_goes_on() {
+    let shared = sa1_shared(&["code_agent", "general_agent"]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(sa1_spawn_tool(shared, tracker.clone(), "lead_agent"));
+
+    let reply = SpawnSubagentsBatchTool::new(spawn)
+        .execute(&serde_json::json!({"subagents": [
+            {"agent_id": "code_agent", "objective": "First."},
+            {"agent_id": "code_agent"},
+            {"objective": "Third."},
+            {},
+        ]}))
+        .await
+        .expect("a bad item does not fail the batch");
+
+    assert!(
+        reply.starts_with("Batch spawn: 2/4 subagents spawned successfully."),
+        "{reply}"
+    );
+    assert!(
+        reply.contains("[2] FAILED (code_agent): Missing required parameter: objective"),
+        "{reply}"
+    );
+    assert!(
+        reply.contains("[4] FAILED (general_agent): Missing required parameter: objective"),
+        "{reply}"
+    );
+    let ids = run_ids_in(&reply);
+    assert_eq!(ids.len(), 2, "{reply}");
+    assert!(ids[0].starts_with("code_agent::"), "{reply}");
+    assert!(ids[1].starts_with("general_agent::"), "{reply}");
+    for id in &ids {
+        assert!(tracker.get(id).is_some(), "{id} is tracked");
+    }
+    assert_eq!(
+        tracked(&tracker),
+        2,
+        "every spawned subagent is in the reply"
+    );
+}
+
+/// **A-4 (i).** A lead that is itself `general_agent` — a borrowed lead
+/// when every other template is busy — is refused the default with the
+/// agents it can name, sorted by id; nothing is spawned. Naming its own
+/// template is still refused as a self-spawn.
+#[tokio::test(start_paused = true)]
+async fn a_lead_that_is_general_agent_is_refused_the_default_with_the_available_agents() {
+    let shared = sa1_shared(&["general_agent", "explore_agent", "code_agent"]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = sa1_spawn_tool(shared.clone(), tracker.clone(), "general_agent");
+
+    let refused = spawn
+        .execute(&serde_json::json!({"objective": "Do it."}))
+        .await
+        .expect_err("the default is this run's lead");
+    assert_eq!(
+        refused,
+        "agent_id is required here: the default agent 'general_agent' is this run's lead. \
+         Available agents: code_agent, explore_agent."
+    );
+    let named = spawn
+        .execute(&serde_json::json!({"agent_id": "general_agent", "objective": "Do it."}))
+        .await
+        .expect_err("a self-spawn");
+    assert_eq!(
+        named,
+        "Agent 'general_agent' cannot spawn itself — would cause infinite recursion"
+    );
+    assert!(shared.agent_registry.list_instances().is_empty());
+    assert_eq!(tracked(&tracker), 0);
+    assert_eq!(spawn.spawn_count(), 0);
+}
+
+/// The bundled templates under a file layer of `files` (name, bytes), as a
+/// start loads them.
+fn sa1_bundled_with_files(dir: &std::path::Path, files: &[(&str, &str)]) -> Arc<SharedContext> {
+    use crate::agent::file_layer::{LoadMode, rescan_file_layer};
+
+    let agents = dir.join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    for (name, contents) in files {
+        std::fs::write(agents.join(name), contents).unwrap();
+    }
+    let db = openalpaca_storage::Database::open(&dir.join("test.db")).unwrap();
+    let shared = Arc::new(SharedContext::new());
+    shared
+        .agent_registry
+        .set_bundled_layer(crate::bundled::bundled_templates());
+    rescan_file_layer(
+        &agents,
+        LoadMode::Start,
+        &shared.agent_registry,
+        &ToolRegistry::default(),
+        &db,
+    )
+    .unwrap();
+    shared
+}
+
+/// The agents a stock store's `lead_agent` may name.
+const SA1_STOCK_WORKERS: &str = "code_agent, explore_agent, planning_agent, research_agent, \
+     review_agent, system_agent, writing_agent";
+
+/// **A-4 (ii).** With `general_agent` withheld — a file holding its id does
+/// not parse (§2.4 L-4) — an omitted `agent_id` is refused naming the file
+/// and why, with the agents available; never a silent pick of another.
+#[tokio::test(start_paused = true)]
+async fn an_omitted_agent_id_with_general_agent_withheld_lists_the_agents() {
+    use crate::agent::registry::TemplateState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().canonicalize().unwrap());
+    let shared = sa1_bundled_with_files(
+        dir.path(),
+        &[(
+            "general_agent.md",
+            "---\nid: general_agent\nname: Mine\n---\n",
+        )],
+    );
+    let TemplateState::Withheld { path, reason } = shared
+        .agent_registry
+        .provenance("general_agent")
+        .unwrap()
+        .state
+    else {
+        panic!("general_agent is withheld");
+    };
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = sa1_spawn_tool(shared.clone(), tracker.clone(), "lead_agent");
+
+    let refused = spawn
+        .execute(&serde_json::json!({"objective": "Do it."}))
+        .await
+        .expect_err("the default is withheld");
+    assert_eq!(
+        refused,
+        format!(
+            "No agent_id was given and the default, general_agent, is withheld: {} {reason}. \
+             Available agents: {SA1_STOCK_WORKERS}.",
+            path.display()
+        )
+    );
+    assert_eq!(tracked(&tracker), 0);
+    assert_eq!(spawn.spawn_count(), 0);
+}
+
+/// **A-4 (ii).** With `general_agent` switched off by a file saying
+/// `disabled: true` (§2.4 L-4a), an omitted `agent_id` is refused naming
+/// the file, with the agents available.
+#[tokio::test(start_paused = true)]
+async fn an_omitted_agent_id_with_general_agent_switched_off_lists_the_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().canonicalize().unwrap());
+    let shared = sa1_bundled_with_files(
+        dir.path(),
+        &[(
+            "general_agent.md",
+            "---\nid: general_agent\ndisabled: true\n---\n",
+        )],
+    );
+    let path = shared
+        .agent_registry
+        .provenance("general_agent")
+        .unwrap()
+        .path
+        .unwrap();
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = sa1_spawn_tool(shared, tracker.clone(), "lead_agent");
+
+    let refused = spawn
+        .execute(&serde_json::json!({"objective": "Do it."}))
+        .await
+        .expect_err("the default is switched off");
+    assert_eq!(
+        refused,
+        format!(
+            "No agent_id was given and the default, general_agent, is switched off by {}. \
+             Available agents: {SA1_STOCK_WORKERS}.",
+            path.display()
+        )
+    );
+    assert_eq!(tracked(&tracker), 0);
+}
+
+/// **A-4.** Where no layer holds `general_agent` at all, an omitted
+/// `agent_id` is refused the same way, saying it is not installed.
+#[tokio::test(start_paused = true)]
+async fn an_omitted_agent_id_with_no_general_agent_lists_the_agents() {
+    let shared = sa1_shared(&["review_agent", "code_agent"]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = sa1_spawn_tool(shared, tracker.clone(), "lead_agent");
+
+    let refused = spawn
+        .execute(&serde_json::json!({"objective": "Do it."}))
+        .await
+        .expect_err("no default to spawn");
+    assert_eq!(
+        refused,
+        "No agent_id was given and the default, general_agent, is not installed. \
+         Available agents: code_agent, review_agent."
+    );
+    assert_eq!(tracked(&tracker), 0);
+}
+
+/// **A-1, A-2, M-9.** Both spawn definitions require only the objective;
+/// `agent_id` says what leaving it out does, and the batch's item mirrors
+/// the single tool's properties. Both stay non-strict.
+#[test]
+fn both_spawn_definitions_require_only_the_objective() {
+    let single = spawn_subagent_tool_definition_from_templates(&[]);
+    let batch = spawn_subagents_batch_tool_definition(&[]);
+    let item = &batch.parameters["properties"]["subagents"]["items"];
+    for (name, schema) in [("spawn_subagent", &single.parameters), ("batch item", item)] {
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["objective"]),
+            "{name}"
+        );
+        assert_eq!(
+            schema["properties"]["agent_id"]["description"],
+            "The agent template to spawn. Omit it for general_agent, the default.",
+            "{name}"
+        );
+    }
+    assert_eq!(item["properties"], single.parameters["properties"]);
+    assert_eq!(single.strict, None);
+    assert_eq!(batch.strict, None);
+}
+
+/// **§3.2.** Step 3's `explore_agent` and `system_agent` clauses are there
+/// only when the lead is offered that template: the prompt never names an
+/// agent its `<agents>` block leaves out.
+#[test]
+fn step_3_names_explore_and_system_agent_only_when_they_are_offered() {
+    let engine = crate::compose::ComposeEngine::new(16);
+    let prompt_for = |ids: &[&str]| {
+        let templates: Vec<AgentTemplate> = ids
+            .iter()
+            .map(|id| {
+                crate::test_util::template_from_agent(&crate::test_util::make_agent(id, vec![]))
+            })
+            .collect();
+        build_lead_agent_prompt_from_templates(
+            &engine, "Lead.", &templates, 200_000, None, None, None, 48,
+        )
+    };
+    let opening = "Give each sub-objective to general_agent — the default when you leave \
+         agent_id out — unless its brief needs fewer powers";
+
+    let alone = prompt_for(&["general_agent"]);
+    assert!(
+        alone.contains(&format!(
+            "{opening}. Name another agent from <agents> only when its capabilities fit the \
+             brief better. Spawning is always immediate"
+        )),
+        "{alone}"
+    );
+    let with_explore = prompt_for(&["explore_agent", "general_agent"]);
+    assert!(
+        with_explore.contains(&format!(
+            "{opening}: explore_agent only reads files and memory. Name another agent from \
+             <agents> only when its capabilities fit the brief better. Spawning"
+        )),
+        "{with_explore}"
+    );
+    let with_system = prompt_for(&["general_agent", "system_agent"]);
+    assert!(
+        with_system.contains(&format!(
+            "{opening}. Name another agent from <agents> only when its capabilities fit the \
+             brief better; system_agent works on this machine's files and commands, without \
+             the web. Spawning"
+        )),
+        "{with_system}"
+    );
+    for prompt in [&alone, &with_explore, &with_system] {
+        assert!(!prompt.contains("agent_id is required"), "{prompt}");
+        assert!(prompt.contains("— usually general_agent.\n"), "{prompt}");
+    }
+    let without = prompt_for(&["explore_agent", "system_agent"]);
+    assert!(
+        without.contains(
+            "Name an agent from <agents> for each sub-objective by the powers its brief \
+             needs; agent_id is required in this run."
+        ),
+        "{without}"
+    );
+    assert!(!without.contains("general_agent"), "{without}");
 }

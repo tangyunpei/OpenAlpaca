@@ -252,8 +252,9 @@ fn every_fixture_is_a_shipped_version() {
     );
 }
 
-/// V-2b: both sides of TEMPLATE-TIMEOUT are shipped versions; the side this
-/// build carries is the current one.
+/// V-2b: both sides of TEMPLATE-TIMEOUT are shipped versions — earlier
+/// ones both since SA-1 (C6) gave `lead_agent.md` its new description and
+/// persona; `e9f15916`'s side was the current one until then.
 #[test]
 fn both_sides_of_template_timeout_classify_as_shipped() {
     assert_eq!(
@@ -266,7 +267,7 @@ fn both_sides_of_template_timeout_classify_as_shipped() {
     assert_eq!(
         classify_agent_file(test_support::LEAD_AGENT_E9F15916.as_bytes()),
         Some(ShippedCopy {
-            version: ShippedVersion::Current,
+            version: ShippedVersion::Earlier,
             edit: None
         })
     );

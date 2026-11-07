@@ -451,6 +451,54 @@ fn switching_off_lead_agent_alone_still_borrows_a_lead() {
     assert_eq!(dispatch_one(&dispatcher, "First"), "code_agent");
 }
 
+/// G-1's fallback tries `general_agent` last (SA-1, subagent design §3.1
+/// A-4): an edited `general_agent.md` is a file of the person's, so first in
+/// the fallback's order, and before this a second concurrent workflow —
+/// `lead_agent` busy — borrowed it as lead, so every default spawn of that
+/// run was refused as a self-spawn. The borrowed lead is now the next
+/// template, `code_agent`, and `general_agent` stays spawnable.
+#[test]
+fn the_fallback_lead_tries_general_agent_last() {
+    use crate::agent::file_layer::{LoadMode, rescan_file_layer};
+    use crate::agent::registry::TemplateLayer;
+    use crate::bundled::{BUNDLED_AGENTS, bundled_templates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().canonicalize().unwrap());
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let shipped = BUNDLED_AGENTS
+        .iter()
+        .find(|file| file.path == "agents/general_agent.md")
+        .unwrap();
+    std::fs::write(
+        agents.join("general_agent.md"),
+        format!("{}\nMy own line: an edit.\n", shipped.contents),
+    )
+    .unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup(vec![]);
+    let registry = &dispatcher.shared_context.agent_registry;
+    registry.set_bundled_layer(bundled_templates());
+    rescan_file_layer(
+        &agents,
+        LoadMode::Start,
+        registry,
+        &crate::tools::ToolRegistry::default(),
+        &db,
+    )
+    .unwrap();
+    assert_eq!(
+        registry.provenance("general_agent").unwrap().layer,
+        TemplateLayer::File,
+        "the edited copy is the person's file"
+    );
+
+    assert_eq!(dispatch_one(&dispatcher, "First"), "lead_agent");
+    assert_eq!(dispatch_one(&dispatcher, "Second"), "code_agent");
+    assert_eq!(dispatch_one(&dispatcher, "Third"), "code_agent");
+}
+
 /// …and the capacity case still reads as capacity.
 #[test]
 fn test_dispatch_lead_agent_fails_when_the_only_lead_is_busy() {

@@ -1,7 +1,7 @@
 ---
 id: "system_agent"
 name: "System Agent"
-description: "System operations agent for file management, directory organization, environment setup, and infrastructure tasks. Use for non-coding file operations like moving/renaming files, managing directories, configuring environments, and running system administration commands. For coding tasks, use code_agent instead."
+description: "This machine's files, folders and commands: reads, writes and edits files and runs shell commands. No web access."
 capabilities:
   - "file_read"
   - "file_write"
@@ -22,7 +22,5 @@ max_tool_calls: 30
 
 ## Persona
 
-You are a system operations assistant. Your job is to manage files, organize
-directories, configure environments, and run system administration commands.
-Be precise and careful — always verify paths before operating on them, and
-confirm destructive operations before executing.
+You manage files, folders and the environment with the file tools and the
+shell. Check every path before you act on it.

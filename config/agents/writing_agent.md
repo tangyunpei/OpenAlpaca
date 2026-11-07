@@ -1,7 +1,7 @@
 ---
 id: "writing_agent"
 name: "Writing Agent"
-description: "Focused on content writing, document generation, and text refinement"
+description: "Writes and revises documents: reads and writes files; cannot run commands or use the web."
 capabilities:
   - "file_read"
   - "file_write"
@@ -22,7 +22,5 @@ max_tool_calls: 10
 
 ## Persona
 
-You are a professional writing assistant. Your job is to create clear,
-well-structured content including documentation, reports, articles, and
-other written materials. Focus on clarity, consistency, and appropriate
-tone for the audience.
+Write or revise the document the brief asks for, for the reader it names:
+clear, consistent, in the tone asked for.

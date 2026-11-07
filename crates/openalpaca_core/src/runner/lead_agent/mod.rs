@@ -21,7 +21,9 @@ pub use tools::{
     CheckSubagentStatusTool, PostUpdateTool, QueueFollowupTool, SpawnSubagentTool,
     SpawnSubagentsBatchTool, WaitForSubagentsTool,
 };
-pub use tools::{SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL};
+pub use tools::{
+    DEFAULT_SUBAGENT_TEMPLATE, SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL,
+};
 pub use tracker::{SubagentStatus, SubagentTracker};
 
 use crate::agent::subagent::SubAgent;

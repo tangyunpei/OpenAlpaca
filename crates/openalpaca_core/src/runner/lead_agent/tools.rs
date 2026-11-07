@@ -1,5 +1,6 @@
 use super::guard::AgentBusyGuard;
 use super::tracker::{SubagentStatus, SubagentTracker};
+use crate::agent::registry::TemplateState;
 use crate::agent::template::{AgentSource, AgentTemplate};
 use crate::bus::EventBus;
 use crate::compose::{
@@ -207,6 +208,15 @@ impl Drop for SubagentLane {
 /// Depth 0 = top-level lead agent, depth 1 = its direct subagents, etc.
 const MAX_SUBAGENT_DEPTH: u32 = 3;
 
+/// The template a spawn with no `agent_id` runs (SA-1, subagent design §3.1
+/// A-1): the default subagent, as Claude Code's `general-purpose` is when
+/// `subagent_type` is left out. Absent, `null` or empty reads as this.
+pub const DEFAULT_SUBAGENT_TEMPLATE: &str = "general_agent";
+
+/// `spawn_subagent`'s `agent_id` parameter, on both spawn tools (A-1).
+const AGENT_ID_DESCRIPTION: &str =
+    "The agent template to spawn. Omit it for general_agent, the default.";
+
 // ── SpawnSubagentTool ────────────────────────────────────────────────
 
 /// Built-in tool that allows the Lead Agent to spawn a subagent.
@@ -393,6 +403,58 @@ impl SpawnSubagentTool {
             })
     }
 
+    /// SA-1 (subagent design §3.1 A-4): whether a spawn with no `agent_id`
+    /// can run the default, [`DEFAULT_SUBAGENT_TEMPLATE`]. It cannot when it
+    /// is this run's lead (a borrowed lead: G-1 tries `general_agent` last,
+    /// so only when no other template could lead), or when no template of
+    /// the id resolves — a file withholds it (L-4) or switches it off
+    /// (L-4a), or nothing holds it. Each is refused naming why, with the
+    /// agents this lead can name, sorted by id, so the lead can retry with
+    /// one; never a silent pick of another template.
+    fn check_default_spawnable(&self) -> Result<(), String> {
+        let registry = &self.shared_context.agent_registry;
+        let available = || {
+            let ids: Vec<String> = registry
+                .list_templates()
+                .into_iter()
+                .map(|t| t.frontmatter.id)
+                .filter(|id| *id != self.lead_template_id)
+                .collect();
+            if ids.is_empty() {
+                "none".to_string()
+            } else {
+                ids.join(", ")
+            }
+        };
+        if self.lead_template_id == DEFAULT_SUBAGENT_TEMPLATE {
+            return Err(format!(
+                "agent_id is required here: the default agent '{DEFAULT_SUBAGENT_TEMPLATE}' is \
+                 this run's lead. Available agents: {}.",
+                available()
+            ));
+        }
+        if registry.get_template(DEFAULT_SUBAGENT_TEMPLATE).is_some() {
+            return Ok(());
+        }
+        let why = match registry
+            .provenance(DEFAULT_SUBAGENT_TEMPLATE)
+            .map(|p| p.state)
+        {
+            Some(TemplateState::Withheld { path, reason }) => {
+                format!("withheld: {} {reason}", path.display())
+            }
+            Some(TemplateState::Disabled { path }) => {
+                format!("switched off by {}", path.display())
+            }
+            Some(TemplateState::Ready) | None => "not installed".to_string(),
+        };
+        Err(format!(
+            "No agent_id was given and the default, {DEFAULT_SUBAGENT_TEMPLATE}, is {why}. \
+             Available agents: {}.",
+            available()
+        ))
+    }
+
     /// N-LEAD-1: stop every subagent this run left queued or running, once
     /// the lead's loop has returned, and return their run ids.
     ///
@@ -441,11 +503,23 @@ async fn join_every_run(runs: &mut tokio::task::JoinSet<()>) {
 #[async_trait]
 impl BuiltInTool for SpawnSubagentTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
-        // 1. Parse arguments
-        let agent_id = arguments
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Missing required parameter: agent_id".to_string())?;
+        // 1. Parse arguments. An absent, `null` or empty `agent_id` is the
+        // default subagent (SA-1, A-1); every guard below runs on the id it
+        // resolved to, and the records name that id (A-3).
+        let (agent_id, defaulted) = match arguments.get("agent_id") {
+            None | Some(serde_json::Value::Null) => (DEFAULT_SUBAGENT_TEMPLATE, true),
+            Some(serde_json::Value::String(id)) if id.trim().is_empty() => {
+                (DEFAULT_SUBAGENT_TEMPLATE, true)
+            }
+            Some(serde_json::Value::String(id)) => (id.as_str(), false),
+            Some(_) => {
+                return Err(
+                    "agent_id must be a string naming an agent template, or left out for \
+                     general_agent"
+                        .to_string(),
+                );
+            }
+        };
         let objective = arguments
             .get("objective")
             .and_then(|v| v.as_str())
@@ -463,6 +537,12 @@ impl BuiltInTool for SpawnSubagentTool {
             task_id = %self.task_id,
             "Lead agent spawning subagent"
         );
+
+        // A-4: a default that cannot be used is refused with the agents this
+        // lead can name — never a silent pick of another template.
+        if defaulted {
+            self.check_default_spawnable()?;
+        }
 
         // 2. Prevent recursion: direct self-spawning and depth limit
         if agent_id == self.lead_template_id {
@@ -567,6 +647,10 @@ impl BuiltInTool for SpawnSubagentTool {
                     .with_data(serde_json::json!({
                         "span_id": node_id,
                         "template": agent_id,
+                        // A-3: whether the lead left `agent_id` out, so the
+                        // record tells "chose it" from "left it to the
+                        // default".
+                        "agent_id_defaulted": defaulted,
                         "label": span_label,
                         "role": "subagent",
                         "run_id": run_id,
@@ -1235,10 +1319,15 @@ impl BuiltInTool for SpawnSubagentTool {
         } else {
             "starting now".to_string()
         };
+        let default_note = if defaulted {
+            " (the default: no agent_id given)"
+        } else {
+            ""
+        };
         Ok(format!(
-            "Subagent '{agent_id}' spawned (run_id: '{run_id}'), {start}. Spawn more subagents \
-             if needed, then call `wait_for_subagents` to collect all results, or \
-             `check_subagent_status` with this run_id to check individually."
+            "Subagent '{agent_id}'{default_note} spawned (run_id: '{run_id}'), {start}. Spawn \
+             more subagents if needed, then call `wait_for_subagents` to collect all results, \
+             or `check_subagent_status` with this run_id to check individually."
         ))
     }
 }
@@ -1280,22 +1369,23 @@ impl BuiltInTool for SpawnSubagentsBatchTool {
         let mut results = Vec::with_capacity(subagents.len());
         let mut success_count = 0usize;
 
+        // SA-1 (subagent design §3.1 A-2): each item goes to
+        // `spawn_subagent` whole, which reads it as it reads its own
+        // arguments, and an item that cannot spawn — a missing objective
+        // among them — is that item's FAILED line while the batch goes on, so
+        // the run ids of the items around it still reach the lead. The
+        // line names the agent_id as sent: a non-string one, which
+        // `spawn_subagent` refuses, by its JSON text, never as the default.
         for (i, entry) in subagents.iter().enumerate() {
-            let agent_id = entry
-                .get("agent_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("subagents[{}]: missing agent_id", i))?;
-            let objective = entry
-                .get("objective")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("subagents[{}]: missing objective", i))?;
+            let agent_id = match entry.get("agent_id") {
+                Some(serde_json::Value::String(id)) if !id.trim().is_empty() => id.clone(),
+                None | Some(serde_json::Value::Null | serde_json::Value::String(_)) => {
+                    DEFAULT_SUBAGENT_TEMPLATE.to_string()
+                }
+                Some(other) => other.to_string(),
+            };
 
-            let single_args = serde_json::json!({
-                "agent_id": agent_id,
-                "objective": objective,
-            });
-
-            match self.inner.execute(&single_args).await {
+            match self.inner.execute(entry).await {
                 Ok(msg) => {
                     success_count += 1;
                     results.push(format!("[{}] OK: {}", i + 1, msg));
@@ -1351,11 +1441,13 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
         name: "spawn_subagents_batch".to_string(),
         description: format!(
             "Spawn multiple subagents in a single call (1-8). More efficient than calling \
-             spawn_subagent repeatedly. Each entry specifies an agent_id and an objective, \
-             written as a self-contained brief: the goal, the inputs it needs, the constraints, \
-             and what to return and where. Every entry returns its run_id at once; up to this \
-             run's concurrency bound they run in parallel, and the rest are queued and start as \
-             slots free. Use wait_for_subagents to collect results.\n\nAvailable agents:\n{}",
+             spawn_subagent repeatedly. Each entry gives an objective, written as a \
+             self-contained brief: the goal, the inputs it needs, the constraints, and what to \
+             return and where; its agent_id may be left out for general_agent, the default. An \
+             entry that cannot be spawned fails alone. Every entry returns its run_id at once; \
+             up to this run's concurrency bound they run in parallel, and the rest are queued \
+             and start as slots free. Use wait_for_subagents to collect results.\n\n\
+             Available agents:\n{}",
             agents_list
         ),
         parameters: serde_json::json!({
@@ -1368,14 +1460,14 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
                         "properties": {
                             "agent_id": {
                                 "type": "string",
-                                "description": "The ID of the agent template to spawn"
+                                "description": AGENT_ID_DESCRIPTION
                             },
                             "objective": {
                                 "type": "string",
                                 "description": OBJECTIVE_DESCRIPTION
                             }
                         },
-                        "required": ["agent_id", "objective"]
+                        "required": ["objective"]
                     },
                     "minItems": 1,
                     "maxItems": 8,
@@ -1962,14 +2054,14 @@ pub fn spawn_subagent_tool_definition_from_templates(
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "The ID of the agent template to spawn (must be from the available agents list)"
+                    "description": AGENT_ID_DESCRIPTION
                 },
                 "objective": {
                     "type": "string",
                     "description": OBJECTIVE_DESCRIPTION
                 }
             },
-            "required": ["agent_id", "objective"]
+            "required": ["objective"]
         }),
         strict: None,
         input_examples: None,
