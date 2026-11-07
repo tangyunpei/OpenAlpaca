@@ -379,7 +379,8 @@ and answers "No agent templates are installed…"; delete the empty `agents/`
 folder, and that build's next start writes its templates there. And an
 unedited copy this build lists as not used is still the earlier build's only
 copy: delete it under this build and the earlier one does without it
-(`lead_agent.md` deleted, it has no lead agent). The cure is the same: stop
+(`lead_agent.md` deleted, it borrows another template as its lead —
+`code_agent` on a stock store). The cure is the same: stop
 the daemon, move `agents/` aside, and let the earlier build's next start
 write it again. A file that switches a template off (`disabled: true`, see
 *Upgrade*) means nothing to an earlier build: it skips the line, so a full
