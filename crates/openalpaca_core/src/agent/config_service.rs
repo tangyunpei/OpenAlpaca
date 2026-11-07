@@ -6,7 +6,7 @@ use super::config::AgentConfigFile;
 use super::registry::AgentRegistry;
 use super::template::{self, AgentTemplate, render_agent_markdown};
 use openalpaca_storage::{AgentMetrics, Database, SubAgentRepository};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Service for managing agent configurations with Write-Ahead persistence.
@@ -23,6 +23,12 @@ impl AgentConfigService {
             config_dir,
             db,
         }
+    }
+
+    /// The `agents/` directory the template files are written in — the one
+    /// the file layer's rescan reads (subagent design §2.4 L-3).
+    pub fn agents_dir(&self) -> &Path {
+        &self.config_dir
     }
 
     /// Get agent config and its version from the in-memory registry.
@@ -155,42 +161,25 @@ impl AgentConfigService {
         self.registry.list_templates()
     }
 
-    /// Create a template from an `AgentTemplate`.
-    ///
-    /// Write-Ahead: Markdown file → template catalog → legacy instance → DB.
+    /// Create a template from an `AgentTemplate`: its Markdown file is
+    /// written, and nothing else. The caller rescans the file layer
+    /// (`agent::file_layer::rescan_file_layer`), which puts it in the
+    /// catalog, writes its `agent` row and registers its idle instance
+    /// (subagent design §2.10 T-1).
     pub fn create_template(&self, template: AgentTemplate) -> Result<String, String> {
         let template_id = template.frontmatter.id.clone();
 
-        // Check not already registered
-        if self.registry.get_template(&template_id).is_some() {
+        // Check not already held, a withheld file included
+        if self.registry.provenance(&template_id).is_some() {
             return Err(format!("Template '{}' already exists", template_id));
         }
 
-        // 1. Write Markdown to disk (Write-Ahead)
         std::fs::create_dir_all(&self.config_dir)
             .map_err(|e| format!("Failed to create config dir: {e}"))?;
         let md_content = render_agent_markdown(&template);
         let md_path = self.config_dir.join(format!("{template_id}.md"));
         std::fs::write(&md_path, &md_content)
             .map_err(|e| format!("Failed to write template: {e}"))?;
-
-        // 2. Register in template catalog
-        self.registry.register_template(template.clone());
-
-        // 3. Register as legacy instance for backward compat
-        let mut idle_agent = template.to_subagent(&template_id, "");
-        idle_agent.status = super::AgentStatus::Idle;
-        idle_agent.current_task = None;
-        self.registry.register(idle_agent);
-
-        // 4. Persist to DB + init metrics
-        let config = AgentConfigFile::from_template(&template);
-        let storage_config = config.into_storage_config();
-        let repo = SubAgentRepository::new(&self.db);
-        let _ = repo.upsert(&storage_config);
-        if let Ok(None) = repo.get_metrics(&template_id) {
-            let _ = repo.upsert_metrics(&AgentMetrics::new_empty(&template_id));
-        }
 
         Ok(template_id)
     }
@@ -214,12 +203,14 @@ impl AgentConfigService {
         self.create_template(template)
     }
 
-    /// Update an existing template.
-    ///
-    /// Write-Ahead: Markdown file → template catalog → legacy instance → DB.
+    /// Update an existing template: its Markdown file is rewritten, and
+    /// nothing else. The caller rescans the file layer, which puts the new
+    /// definition in the catalog, its `agent` row and its idle instance — the
+    /// singleton lead's included (subagent design §2.10 T-1, §2.4 L-1a).
     pub fn update_template(&self, id: &str, template: AgentTemplate) -> Result<(), String> {
-        // Verify template exists
-        if self.registry.get_template(id).is_none() {
+        // Verify template exists (a withheld file's id included: rewriting
+        // it is how a route fixes it)
+        if self.registry.provenance(id).is_none() {
             return Err(format!("Template '{}' not found", id));
         }
 
@@ -231,37 +222,23 @@ impl AgentConfigService {
             ));
         }
 
-        // 1. Write Markdown to disk (Write-Ahead)
         let md_content = render_agent_markdown(&template);
         let md_path = self.config_dir.join(format!("{id}.md"));
         std::fs::write(&md_path, &md_content)
             .map_err(|e| format!("Failed to write template: {e}"))?;
 
-        // 2. Re-register template (replaces old one)
-        self.registry.register_template(template.clone());
-
-        // 3. Update legacy instance via config bridge
-        let config = AgentConfigFile::from_template(&template);
-        let subagent = config.clone().into_subagent();
-        // Use update_config with version 0 to force-update (no optimistic locking for templates)
-        if let Ok((_agent, version)) = self.registry.get_with_version(id).ok_or(()) {
-            let _ = self.registry.update_config(id, subagent, version);
-        }
-
-        // 4. Persist to DB
-        let storage_config = config.into_storage_config();
-        let repo = SubAgentRepository::new(&self.db);
-        let _ = repo.upsert(&storage_config);
-
         Ok(())
     }
 
-    /// Delete (archive) a template.
+    /// Delete (archive) a template: its Markdown file moves to
+    /// `.archived/` and its `agent` row reads `archived`. The caller rescans
+    /// the file layer, which takes the template and its idle instance out
+    /// of the catalog.
     ///
     /// Fails if any busy instances are currently spawned from this template.
     pub fn delete_template(&self, id: &str) -> Result<(), String> {
-        // Check template exists
-        if self.registry.get_template(id).is_none() {
+        // Check template exists (a withheld file's id included)
+        if self.registry.provenance(id).is_none() {
             return Err(format!("Template '{}' not found", id));
         }
 
@@ -302,11 +279,7 @@ impl AgentConfigService {
             let _ = std::fs::rename(&toml_path, &archive_path);
         }
 
-        // 2. Remove from template catalog + instance registry
-        self.registry.remove_template(id);
-        self.registry.remove(id);
-
-        // 3. Update DB status to archived
+        // 2. Update DB status to archived
         let repo = SubAgentRepository::new(&self.db);
         let _ = repo.update_status(id, "archived", None);
 

@@ -133,7 +133,9 @@ pub async fn run_lead_agent(
         "Lead agent starting execution"
     );
 
-    // 1. List worker agent templates (all templates except the lead itself)
+    // 1. List worker agent templates (all templates except the lead itself),
+    // sorted by id (G-2): the `<agents>` block and both spawn descriptions
+    // read the same from run to run.
     let all_templates = shared_context.agent_registry.list_templates();
     let worker_templates: Vec<AgentTemplate> = all_templates
         .into_iter()

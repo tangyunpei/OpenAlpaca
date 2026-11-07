@@ -28,8 +28,11 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 
+use openalpaca_core::agent::file_layer::{LoadMode, rescan_file_layer};
+use openalpaca_core::agent::{AgentConfigFile, AgentConfigService, AgentRegistry, AgentTemplate};
 use openalpaca_core::events::SystemEvent;
-use openalpaca_storage::{SubAgentConfig, SubAgentRepository, SubagentSpanRepository};
+use openalpaca_core::tools::ToolRegistry;
+use openalpaca_storage::{Database, SubAgentConfig, SubAgentRepository, SubagentSpanRepository};
 
 use super::agents_types::*;
 use super::api_error;
@@ -52,6 +55,65 @@ fn resolve_window(
         "30d" => Ok(("30d", Some(now - Duration::days(30)))),
         "all" => Ok(("all", None)),
         other => Err(other.to_string()),
+    }
+}
+
+/// The three template handlers' one path (subagent design §2.10 T-1's
+/// catalog half): `AgentConfigService` writes or archives the file, then
+/// the file layer is rescanned, so the change is in the catalog — and in
+/// the singleton lead's idle instance (L-1a) — when the call returns. The
+/// watcher's event for the same write rescans again and changes nothing.
+struct TemplateRoute<'a> {
+    service: &'a AgentConfigService,
+    registry: &'a AgentRegistry,
+    tool_registry: &'a ToolRegistry,
+    db: &'a Database,
+}
+
+impl<'a> TemplateRoute<'a> {
+    fn of(state: &'a AppState) -> Self {
+        Self {
+            service: &state.agent_config_service,
+            registry: &state.gateway.shared_context.agent_registry,
+            tool_registry: &state.tool_registry,
+            db: &state.db,
+        }
+    }
+
+    fn create(&self, config: AgentConfigFile) -> Result<String, String> {
+        let created = self.service.create_template_from_toml_config(config);
+        if created.is_ok() {
+            self.rescan();
+        }
+        created
+    }
+
+    fn update(&self, id: &str, template: AgentTemplate) -> Result<(), String> {
+        let updated = self.service.update_template(id, template);
+        if updated.is_ok() {
+            self.rescan();
+        }
+        updated
+    }
+
+    fn delete(&self, id: &str) -> Result<(), String> {
+        let deleted = self.service.delete_template(id);
+        if deleted.is_ok() {
+            self.rescan();
+        }
+        deleted
+    }
+
+    /// `LoadMode::Reload`: a written file naming an unknown `annotation:`
+    /// capability is withheld at once (and still stops the next start).
+    fn rescan(&self) {
+        let known = self.tool_registry.known_virtual_capabilities();
+        let agents_dir = self.service.agents_dir();
+        if let Err(e) =
+            rescan_file_layer(agents_dir, LoadMode::Reload, self.registry, &known, self.db)
+        {
+            tracing::warn!("Agent templates rescan after a route's write failed: {e}");
+        }
     }
 }
 
@@ -497,9 +559,7 @@ pub async fn create_template_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateTemplateRequest>,
 ) -> impl IntoResponse {
-    let service = &state.agent_config_service;
-
-    match service.create_template_from_toml_config(body.config) {
+    match TemplateRoute::of(&state).create(body.config) {
         Ok(template_id) => {
             let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
                 agent_id: template_id.clone(),
@@ -530,11 +590,9 @@ pub async fn update_template_handler(
     Path(id): Path<String>,
     Json(body): Json<UpdateTemplateRequest>,
 ) -> impl IntoResponse {
-    let service = &state.agent_config_service;
-
     // Convert JSON config to AgentTemplate
     let template = body.config.into_template();
-    match service.update_template(&id, template) {
+    match TemplateRoute::of(&state).update(&id, template) {
         Ok(()) => {
             let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
                 agent_id: id.clone(),
@@ -564,9 +622,7 @@ pub async fn delete_template_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let service = &state.agent_config_service;
-
-    match service.delete_template(&id) {
+    match TemplateRoute::of(&state).delete(&id) {
         Ok(()) => {
             let _ = state.gateway.bus.publish(SystemEvent::AgentConfigChanged {
                 agent_id: id.clone(),
@@ -655,5 +711,128 @@ mod tests {
     fn an_unknown_window_is_rejected_with_its_own_token() {
         assert_eq!(resolve_window(Some("90d"), now()), Err("90d".to_string()));
         assert_eq!(resolve_window(Some(""), now()), Err(String::new()));
+    }
+
+    // ── The template routes' catalog half (T-1, L-3) ─────────────────
+    //
+    // Driven over `TemplateRoute`, what the three handlers call: an
+    // `AppState` is not constructible in a unit test. Every file lives in a
+    // temporary directory.
+
+    use crate::test_util::HomeStoreGuard;
+    use openalpaca_core::agent::file_layer::{LoadMode, rescan_file_layer};
+    use openalpaca_core::agent::template::parse_agent_markdown;
+    use openalpaca_core::agent::{AgentConfigService, AgentRegistry};
+    use openalpaca_core::tools::ToolRegistry;
+    use openalpaca_storage::Database;
+
+    struct Templates {
+        // Declared first, so it drops first.
+        _guard: HomeStoreGuard,
+        dir: tempfile::TempDir,
+        registry: Arc<AgentRegistry>,
+        service: AgentConfigService,
+        tool_registry: ToolRegistry,
+        db: Database,
+    }
+
+    impl Templates {
+        fn new(files: &[(&str, String)]) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let agents = dir.path().join("agents");
+            std::fs::create_dir_all(&agents).unwrap();
+            for (name, contents) in files {
+                std::fs::write(agents.join(name), contents).unwrap();
+            }
+            let guard = HomeStoreGuard::set(&dir.path().canonicalize().unwrap().join("home"));
+            let db = Database::open(&dir.path().join("test.db")).unwrap();
+            let registry = Arc::new(AgentRegistry::new());
+            let service = AgentConfigService::new(registry.clone(), agents.clone(), db.clone());
+            rescan_file_layer(&agents, LoadMode::Start, &registry, &[], &db).unwrap();
+            Self {
+                _guard: guard,
+                dir,
+                registry,
+                service,
+                tool_registry: ToolRegistry::default(),
+                db,
+            }
+        }
+
+        fn route(&self) -> TemplateRoute<'_> {
+            TemplateRoute {
+                service: &self.service,
+                registry: &self.registry,
+                tool_registry: &self.tool_registry,
+                db: &self.db,
+            }
+        }
+
+        fn agents(&self) -> std::path::PathBuf {
+            self.dir.path().join("agents")
+        }
+    }
+
+    fn lead(model: &str) -> String {
+        format!(
+            "---\nid: lead_agent\nname: Lead\ndescription: leads\nsingleton: true\n\
+             model: {model}\ncapabilities:\n  - \"orchestration\"\n---\n\n## Persona\n\nLeads.\n"
+        )
+    }
+
+    /// T-1: `PUT /v1/agent-templates/{id}` is in the catalog when it returns,
+    /// the singleton lead's next run included — no longer only once the
+    /// watcher has run, and never for a lead whose instance had gone.
+    #[test]
+    fn put_agent_template_is_in_the_catalog_when_it_returns() {
+        let t = Templates::new(&[("lead_agent.md", lead("model-a"))]);
+        let ran = t
+            .registry
+            .spawn_instance("lead_agent", "t1".to_string())
+            .unwrap();
+        t.registry.destroy_instance(&ran.id);
+
+        let edited = parse_agent_markdown(&lead("model-b")).unwrap();
+        t.route().update("lead_agent", edited).unwrap();
+
+        let template = t.registry.get_template("lead_agent").unwrap();
+        assert_eq!(template.frontmatter.model.as_deref(), Some("model-b"));
+        let next = t
+            .registry
+            .spawn_instance("lead_agent", "t2".to_string())
+            .unwrap();
+        assert_eq!(next.llm_config.model.as_deref(), Some("model-b"));
+        let on_disk = std::fs::read_to_string(t.agents().join("lead_agent.md")).unwrap();
+        assert!(on_disk.contains("model: \"model-b\""), "{on_disk}");
+    }
+
+    /// T-2's present form: `DELETE /v1/agent-templates/{id}` archives the
+    /// file, and the template, its idle instance and its row's status follow
+    /// when the call returns.
+    #[test]
+    fn deleting_a_template_through_the_route_archives_it_and_leaves_the_catalog() {
+        let reader = lead("model-a")
+            .replace("id: lead_agent", "id: reader")
+            .replace("singleton: true", "singleton: false");
+        let t = Templates::new(&[("reader.md", reader), ("lead_agent.md", lead("m"))]);
+        assert!(t.registry.get_with_version("reader").is_some());
+
+        t.route().delete("reader").unwrap();
+
+        assert!(!t.agents().join("reader.md").exists());
+        let archived: Vec<String> = std::fs::read_dir(t.agents().join(".archived"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(archived.len(), 1);
+        assert!(archived[0].starts_with("reader.") && archived[0].ends_with(".md"));
+        assert!(t.registry.get_template("reader").is_none());
+        assert!(t.registry.get_with_version("reader").is_none());
+        let row = SubAgentRepository::new(&t.db)
+            .get("reader")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "archived");
+        assert!(t.registry.get_template("lead_agent").is_some());
     }
 }

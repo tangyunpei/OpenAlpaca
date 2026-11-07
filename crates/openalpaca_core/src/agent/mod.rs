@@ -1,5 +1,6 @@
 pub mod config;
 pub mod config_service;
+pub mod file_layer;
 pub mod registry;
 pub mod subagent;
 pub mod template;

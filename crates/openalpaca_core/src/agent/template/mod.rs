@@ -391,6 +391,21 @@ pub fn parse_agent_markdown(input: &str) -> Result<AgentTemplate, AgentParseErro
     })
 }
 
+/// The id a template file names, read leniently from its raw text for a
+/// file that does not parse (subagent design §2.4 L-4): the frontmatter's
+/// `id:` line by the parser's own quoting rule, whatever else is wrong with
+/// the file. None when the text opens no frontmatter or names no id.
+pub fn lenient_template_id(input: &str) -> Option<String> {
+    let mut lines = input.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    lines
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| line.trim().strip_prefix("id:").map(strip_outer_quotes))
+        .filter(|id| !id.is_empty())
+}
+
 /// Render an `AgentTemplate` back to valid Markdown with YAML frontmatter.
 ///
 /// Designed to round-trip: `parse_agent_markdown(render_agent_markdown(t))`

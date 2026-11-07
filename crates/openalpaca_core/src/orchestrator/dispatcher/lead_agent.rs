@@ -248,7 +248,11 @@ impl TaskDispatcher {
         let resuming = resume.is_some();
 
         // Spawn a lead agent instance from the singleton template.
-        // Prefer templates with "orchestration" capability, fall back to any template.
+        // Prefer templates with "orchestration" capability, fall back to any
+        // template — each list in one order (G-1): the person's files, then
+        // the bundled templates, then plugins', each by id, so the same lead
+        // is chosen from start to start and a borrowed lead is the first
+        // template that can be spawned.
         let lead_agent = {
             let templates = self
                 .shared_context
@@ -267,7 +271,7 @@ impl TaskDispatcher {
             }
             if spawned.is_none() {
                 // Fallback: try spawning from any available template
-                for t in self.shared_context.agent_registry.list_templates() {
+                for t in self.shared_context.agent_registry.list_templates_by_layer() {
                     if let Ok(agent) = self
                         .shared_context
                         .agent_registry

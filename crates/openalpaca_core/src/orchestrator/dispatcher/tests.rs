@@ -294,6 +294,74 @@ fn test_dispatch_lead_agent_says_no_templates_are_installed() {
     );
 }
 
+/// Dispatch one workflow and answer the template its lead was spawned from.
+fn dispatch_one(dispatcher: &TaskDispatcher, title: &str) -> String {
+    let task_id = dispatcher
+        .dispatch_lead_agent(
+            title,
+            title.to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .expect("a lead is spawned")
+        .task_id;
+    dispatcher
+        .shared_context
+        .agent_registry
+        .list_instances()
+        .into_iter()
+        .find(|a| a.current_task.as_deref() == Some(task_id.as_str()))
+        .expect("the run's lead holds the task")
+        .template_id
+}
+
+/// G-1: the `orchestration` templates are tried in one order, by id — no
+/// longer the map's — so of twelve singleton leads the first by id leads,
+/// and while it is busy the next one does.
+#[test]
+fn orchestration_templates_are_tried_in_id_order() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let ids = [
+        "lead_k", "lead_c", "lead_h", "lead_a", "lead_l", "lead_e", "lead_b", "lead_j", "lead_f",
+        "lead_d", "lead_i", "lead_g",
+    ];
+    let dispatcher = setup(
+        ids.iter()
+            .map(|id| make_agent(id, vec!["orchestration"]))
+            .collect(),
+    );
+
+    assert_eq!(dispatch_one(&dispatcher, "First"), "lead_a");
+    assert_eq!(dispatch_one(&dispatcher, "Second"), "lead_b");
+    assert_eq!(dispatch_one(&dispatcher, "Third"), "lead_c");
+}
+
+/// G-1's fallback: with every `orchestration` template busy, the lead is
+/// borrowed from the first template by id that can be spawned — no longer
+/// any template the map gave first.
+#[test]
+fn a_borrowed_lead_is_the_first_template_by_id() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let mut agents = vec![make_agent("lead_agent", vec!["orchestration"])];
+    for id in [
+        "worker_k", "worker_c", "worker_h", "worker_e", "worker_b", "worker_j", "worker_f",
+        "worker_d", "worker_i", "worker_g",
+    ] {
+        agents.push(make_agent(id, vec!["web_search"]));
+    }
+    let dispatcher = setup(agents);
+
+    assert_eq!(dispatch_one(&dispatcher, "First"), "lead_agent");
+    assert_eq!(dispatch_one(&dispatcher, "Second"), "worker_b");
+    assert_eq!(dispatch_one(&dispatcher, "Third"), "worker_b");
+}
+
 /// …and the capacity case still reads as capacity.
 #[test]
 fn test_dispatch_lead_agent_fails_when_the_only_lead_is_busy() {

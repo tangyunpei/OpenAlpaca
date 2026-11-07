@@ -785,3 +785,164 @@ fn a_file_layer_bringing_back_a_withdrawn_id_clears_its_tombstone() {
         Some(config_path("reader.md"))
     );
 }
+
+// ── C2: one order ───────────────────────────────────────────────
+
+/// L-1: the lists have one order. Twenty ids registered out of order come
+/// back sorted, whatever the map's hasher made of them, so the lead's
+/// `<agents>` block and both spawn descriptions read the same from start to
+/// start.
+#[test]
+fn list_templates_is_sorted_by_id() {
+    let reg = AgentRegistry::new();
+    let mut ids: Vec<String> = (0..20)
+        .map(|i| format!("template_{:02}", (i * 7) % 20))
+        .collect();
+    for id in &ids {
+        assert!(reg.register_template(make_template(id, vec!["web_search"], false)));
+    }
+    ids.sort();
+
+    let listed: Vec<String> = reg
+        .list_templates()
+        .into_iter()
+        .map(|t| t.frontmatter.id)
+        .collect();
+    assert_eq!(listed, ids);
+    let found: Vec<String> = reg
+        .find_templates_by_capability("web_search")
+        .into_iter()
+        .map(|t| t.frontmatter.id)
+        .collect();
+    assert_eq!(found, ids, "one layer: by id");
+}
+
+/// G-1: `find_templates_by_capability` tries the person's files, then the
+/// bundled layer, then plugins, each by id — the order the lead is chosen in.
+#[test]
+fn find_templates_by_capability_orders_file_then_bundled_then_plugin() {
+    let reg = AgentRegistry::new();
+    reg.set_bundled_layer(vec![
+        make_template("lead_b", vec!["orchestration"], true),
+        make_template("lead_a", vec!["orchestration"], true),
+    ]);
+    let mut layer = FileLayer::new();
+    layer.insert(
+        make_template("my_lead_z", vec!["orchestration"], true),
+        Some(config_path("my_lead_z.md")),
+    );
+    layer.insert(
+        make_template("my_lead_y", vec!["orchestration"], true),
+        Some(config_path("my_lead_y.md")),
+    );
+    reg.replace_file_layer(layer);
+    assert!(reg.register_template(AgentTemplate {
+        frontmatter: make_template("aa_plugin_lead", vec!["orchestration"], true).frontmatter,
+        ..plugin_template("aa_plugin_lead", "notion")
+    }));
+
+    let ids: Vec<String> = reg
+        .find_templates_by_capability("orchestration")
+        .into_iter()
+        .map(|t| t.frontmatter.id)
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "my_lead_y",
+            "my_lead_z",
+            "lead_a",
+            "lead_b",
+            "aa_plugin_lead"
+        ]
+    );
+    let all: Vec<String> = reg
+        .list_templates_by_layer()
+        .into_iter()
+        .map(|t| t.frontmatter.id)
+        .collect();
+    assert_eq!(all, ids);
+}
+
+/// L-4: an id the file layer withholds is out of every list, refused at a
+/// spawn with the file's reason, and still held: a plugin cannot take it.
+#[test]
+fn a_withheld_id_is_refused_and_still_held() {
+    let reg = AgentRegistry::new();
+    let mut layer = FileLayer::new();
+    assert!(layer.withhold(
+        "reader".to_string(),
+        config_path("reader.md"),
+        "does not parse (Missing YAML frontmatter)".to_string(),
+    ));
+    reg.replace_file_layer(layer);
+
+    assert!(reg.list_templates().is_empty());
+    assert!(reg.get_template("reader").is_none());
+    assert!(!reg.register_template(plugin_template("reader", "notion")));
+    assert_eq!(
+        reg.spawn_instance("reader", "t1".to_string()).unwrap_err(),
+        format!(
+            "template 'reader' is withheld: {} does not parse (Missing YAML frontmatter); \
+             fix it, or remove it",
+            config_path("reader.md").display()
+        )
+    );
+
+    // With a bundled template under it, the refusal says what removing the
+    // file brings back.
+    reg.set_bundled_layer(vec![make_template("reader", vec![], false)]);
+    assert!(
+        reg.spawn_instance("reader", "t2".to_string())
+            .unwrap_err()
+            .ends_with("fix it, or remove it to use the bundled template")
+    );
+}
+
+/// The plugin manager's rollback is `remove_template`'s one caller from C2:
+/// with a file over the id it registered, the rollback takes the plugin's
+/// template, not the person's file (C1's hand-off).
+#[test]
+fn remove_template_takes_a_plugins_template_before_a_files() {
+    let reg = AgentRegistry::new();
+    assert!(reg.register_template(plugin_template("reader", "notion")));
+    let mut layer = FileLayer::new();
+    layer.insert(
+        make_template("reader", vec!["file_read"], false),
+        Some(config_path("reader.md")),
+    );
+    reg.replace_file_layer(layer);
+
+    assert!(reg.remove_template("reader"));
+
+    let provenance = reg.provenance("reader").expect("the file still holds it");
+    assert_eq!(provenance.layer, TemplateLayer::File);
+    reg.replace_file_layer(FileLayer::new());
+    assert!(
+        reg.get_template("reader").is_none(),
+        "nothing left under it"
+    );
+}
+
+/// A plugin's template withdrawn while a file of the person's holds its id
+/// leaves no tombstone: the id still resolves, and a spawn of it that fails
+/// for another reason must not name the plugin (C1's hand-off).
+#[test]
+fn a_plugin_withdrawal_under_a_file_template_leaves_no_tombstone() {
+    let reg = AgentRegistry::new();
+    assert!(reg.register_template(plugin_template("reader", "notion")));
+    let mut layer = FileLayer::new();
+    layer.insert(
+        make_template("reader", vec!["file_read"], false),
+        Some(config_path("reader.md")),
+    );
+    reg.replace_file_layer(layer);
+
+    assert!(reg.remove_plugin_template("reader", "notion"));
+
+    assert!(reg.template_tombstone("reader").is_none());
+    assert_eq!(
+        reg.provenance("reader").map(|p| p.layer),
+        Some(TemplateLayer::File)
+    );
+}

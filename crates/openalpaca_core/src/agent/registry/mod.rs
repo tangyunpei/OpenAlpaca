@@ -12,7 +12,7 @@ use super::subagent::{AgentStatus, SubAgent};
 use super::template::{AgentSource, AgentTemplate};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Outcome of a `destroy_instance()` call, allowing callers to emit
@@ -47,6 +47,25 @@ pub enum TemplateLayer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateState {
     Ready,
+    /// A file holds the id but cannot be used (L-4): it does not parse, or
+    /// a hot reload found it naming an unknown capability. The id leaves
+    /// every list, a spawn of it is refused naming the file, and no other
+    /// layer's template of the id stands in. `reason` reads after the path:
+    /// "does not parse (…)".
+    Withheld {
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+/// Why a definition of an id is not used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotUsedReason {
+    /// Another file claims the same id and comes first by file name.
+    Duplicate,
+    /// The file does not parse, and a file that parses holds the id it
+    /// names (L-4: a broken file withholds only an id nothing else holds).
+    DoesNotParse,
 }
 
 /// A definition of a template's id that the resolved view does not use.
@@ -54,6 +73,7 @@ pub enum TemplateState {
 pub struct NotUsed {
     pub layer: TemplateLayer,
     pub path: Option<PathBuf>,
+    pub reason: NotUsedReason,
 }
 
 /// Where a resolved template comes from, as `AgentRegistry::provenance`
@@ -68,10 +88,28 @@ pub struct TemplateProvenance {
     pub warnings: Vec<String>,
 }
 
-/// A template of the file layer, with the file it was read from.
+/// What the file layer holds under an id: a template, or a file that
+/// cannot be used (L-4).
+enum FileHeld {
+    Template(Box<AgentTemplate>),
+    Withheld { reason: String },
+}
+
+/// An id of the file layer, with the file it was read from and the other
+/// files of the same id it does not use.
 struct FileTemplate {
-    template: AgentTemplate,
+    held: FileHeld,
     path: Option<PathBuf>,
+    not_used: Vec<NotUsed>,
+}
+
+impl FileTemplate {
+    fn template(&self) -> Option<&AgentTemplate> {
+        match &self.held {
+            FileHeld::Template(template) => Some(template),
+            FileHeld::Withheld { .. } => None,
+        }
+    }
 }
 
 /// The file layer, built whole and handed to
@@ -87,13 +125,53 @@ impl FileLayer {
     }
 
     /// Add a template read from `path`. Returns false, leaving the layer
-    /// as it was, when a template of the same id is already in it: the
-    /// first one added holds the id.
+    /// as it was, when the id is already in it: the first one added holds
+    /// the id.
     pub fn insert(&mut self, template: AgentTemplate, path: Option<PathBuf>) -> bool {
-        match self.templates.entry(template.frontmatter.id.clone()) {
+        let id = template.frontmatter.id.clone();
+        self.hold(id, path, FileHeld::Template(Box::new(template)))
+    }
+
+    /// Hold `id` for a file that cannot be used, `reason` saying why after
+    /// its path ("does not parse (…)"). Returns false, as `insert` does,
+    /// when the id is already in the layer.
+    pub fn withhold(&mut self, id: String, path: PathBuf, reason: String) -> bool {
+        self.hold(id, Some(path), FileHeld::Withheld { reason })
+    }
+
+    /// Whether the layer holds `id`, usable or withheld.
+    pub fn holds(&self, id: &str) -> bool {
+        self.templates.contains_key(id)
+    }
+
+    /// The file that holds `id`, when one is known.
+    pub fn path_of(&self, id: &str) -> Option<&Path> {
+        self.templates
+            .get(id)
+            .and_then(|entry| entry.path.as_deref())
+    }
+
+    /// Record a file of `id` that the layer does not use. Ignored when the
+    /// layer does not hold the id.
+    pub fn note_not_used(&mut self, id: &str, path: PathBuf, reason: NotUsedReason) {
+        if let Some(entry) = self.templates.get_mut(id) {
+            entry.not_used.push(NotUsed {
+                layer: TemplateLayer::File,
+                path: Some(path),
+                reason,
+            });
+        }
+    }
+
+    fn hold(&mut self, id: String, path: Option<PathBuf>, held: FileHeld) -> bool {
+        match self.templates.entry(id) {
             Entry::Occupied(_) => false,
             Entry::Vacant(slot) => {
-                slot.insert(FileTemplate { template, path });
+                slot.insert(FileTemplate {
+                    held,
+                    path,
+                    not_used: Vec::new(),
+                });
                 true
             }
         }
@@ -113,9 +191,8 @@ struct TemplateLayers {
 
 impl TemplateLayers {
     /// Recompute the resolved view: each id from the file layer, else the
-    /// bundled one, else the plugin one. The one map is refilled, not
-    /// replaced, so it keeps its hasher and a listing's order stays as
-    /// steady across changes as the one map's was.
+    /// bundled one, else the plugin one. An id the file layer withholds is
+    /// in no layer's view: nothing stands in for the person's file (L-4).
     fn resolve(&mut self) {
         self.resolved.clear();
         self.resolved.extend(
@@ -128,13 +205,66 @@ impl TemplateLayers {
                 .iter()
                 .map(|(id, template)| (id.clone(), template.clone())),
         );
-        self.resolved.extend(
-            self.file
-                .templates
-                .iter()
-                .map(|(id, entry)| (id.clone(), entry.template.clone())),
-        );
+        for (id, entry) in &self.file.templates {
+            match entry.template() {
+                Some(template) => {
+                    self.resolved.insert(id.clone(), template.clone());
+                }
+                None => {
+                    self.resolved.remove(id);
+                }
+            }
+        }
     }
+
+    /// Whether any layer holds `id`, a withheld file's included.
+    fn holds(&self, id: &str) -> bool {
+        self.resolved.contains_key(id) || self.file.holds(id)
+    }
+
+    /// The layer the resolved template of `id` comes from.
+    fn layer_of(&self, id: &str) -> Option<TemplateLayer> {
+        if self.file.holds(id) {
+            Some(TemplateLayer::File)
+        } else if self.bundled.contains_key(id) {
+            Some(TemplateLayer::Bundled)
+        } else if self.plugin.contains_key(id) {
+            Some(TemplateLayer::Plugin)
+        } else {
+            None
+        }
+    }
+
+    /// The resolved templates in L-1's order: the file layer's, then the
+    /// bundled layer's, then the plugins', each by id.
+    fn by_layer(&self) -> Vec<AgentTemplate> {
+        let rank = |id: &str| match self.layer_of(id) {
+            Some(TemplateLayer::File) => 0,
+            Some(TemplateLayer::Bundled) => 1,
+            _ => 2,
+        };
+        let mut templates: Vec<&AgentTemplate> = self.resolved.values().collect();
+        templates.sort_by(|a, b| {
+            let (a, b) = (&a.frontmatter.id, &b.frontmatter.id);
+            rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+        });
+        templates.into_iter().cloned().collect()
+    }
+}
+
+/// Whether two templates say the same thing: a resync of an idle instance
+/// built from an equal template would change nothing but its version.
+pub(crate) fn same_definition(a: &AgentTemplate, b: &AgentTemplate) -> bool {
+    a.frontmatter == b.frontmatter && a.body == b.body && a.sections == b.sections
+}
+
+/// The idle instance a template's id answers to between runs (L-1a).
+fn idle_instance(template: &AgentTemplate) -> SubAgent {
+    let id = &template.frontmatter.id;
+    let mut agent = template.to_subagent(id, "");
+    agent.status = AgentStatus::Idle;
+    agent.current_task = None;
+    agent
 }
 
 /// Internal wrapper that pairs a SubAgent instance with its config version
@@ -160,6 +290,13 @@ pub struct AgentRegistry {
     /// answers *"provided by plugin 'x', which is disabled"* rather than the
     /// bare "template not found". The live map stays scrubbed exactly as today.
     template_tombstones: Mutex<HashMap<String, String>>,
+    /// The idle instances `sync_template_instances` materialised, by
+    /// instance id, each with the template it was last built from (L-1a).
+    /// An instance not in it — a legacy `.toml` agent's — is never removed.
+    synced: Mutex<HashMap<String, AgentTemplate>>,
+    /// Held by `agent::file_layer::rescan_file_layer` from its read of the
+    /// directory to its instance sync, so one rescan runs at a time (L-3).
+    rescan: Mutex<()>,
 }
 
 impl AgentRegistry {
@@ -168,6 +305,8 @@ impl AgentRegistry {
             templates: Mutex::new(TemplateLayers::default()),
             instances: Mutex::new(HashMap::new()),
             template_tombstones: Mutex::new(HashMap::new()),
+            synced: Mutex::new(HashMap::new()),
+            rescan: Mutex::new(()),
         }
     }
 
@@ -195,15 +334,15 @@ impl AgentRegistry {
 
     // ── Template methods ─────────────────────────────────────────────
 
-    /// Register an agent template. Returns false if a template with the
-    /// same id already exists in any layer.
+    /// Register an agent template. Returns false if any layer already holds
+    /// the id, a withheld file included.
     ///
     /// A plugin's template (`AgentSource::Plugin`) goes into the plugin
     /// layer, any other into the file layer with no path.
     pub fn register_template(&self, template: AgentTemplate) -> bool {
         let mut templates = self.lock_templates();
         let id = template.frontmatter.id.clone();
-        if templates.resolved.contains_key(&id) {
+        if templates.holds(&id) {
             return false;
         }
         // A template that came back invalidates its own tombstone.
@@ -211,11 +350,7 @@ impl AgentRegistry {
         if matches!(template.source, AgentSource::Plugin { .. }) {
             templates.plugin.insert(id, template);
         } else {
-            let entry = FileTemplate {
-                template,
-                path: None,
-            };
-            templates.file.templates.insert(id, entry);
+            templates.file.insert(template, None);
         }
         templates.resolve();
         true
@@ -250,18 +385,29 @@ impl AgentRegistry {
     /// when no layer holds the id.
     pub fn provenance(&self, template_id: &str) -> Option<TemplateProvenance> {
         let templates = self.lock_templates();
-        let (layer, path) = if let Some(entry) = templates.file.templates.get(template_id) {
-            (TemplateLayer::File, entry.path.clone())
-        } else if templates.bundled.contains_key(template_id) {
-            (TemplateLayer::Bundled, None)
-        } else if templates.plugin.contains_key(template_id) {
-            (TemplateLayer::Plugin, None)
-        } else {
-            return None;
-        };
+        if let Some(entry) = templates.file.templates.get(template_id) {
+            let (state, warnings) = match (&entry.held, &entry.path) {
+                (FileHeld::Withheld { reason }, Some(path)) => (
+                    TemplateState::Withheld {
+                        path: path.clone(),
+                        reason: reason.clone(),
+                    },
+                    vec![format!("{} {reason}", path.display())],
+                ),
+                _ => (TemplateState::Ready, Vec::new()),
+            };
+            return Some(TemplateProvenance {
+                layer: TemplateLayer::File,
+                path: entry.path.clone(),
+                not_used: entry.not_used.clone(),
+                state,
+                warnings,
+            });
+        }
+        let layer = templates.layer_of(template_id)?;
         Some(TemplateProvenance {
             layer,
-            path,
+            path: None,
             not_used: Vec::new(),
             state: TemplateState::Ready,
             warnings: Vec::new(),
@@ -273,18 +419,29 @@ impl AgentRegistry {
         self.lock_templates().resolved.get(template_id).cloned()
     }
 
-    /// List all registered templates.
+    /// List all resolved templates, sorted by id (L-1): the lead's
+    /// `<agents>` block and both spawn descriptions read the same from start
+    /// to start.
     pub fn list_templates(&self) -> Vec<AgentTemplate> {
-        self.lock_templates().resolved.values().cloned().collect()
+        let mut templates: Vec<AgentTemplate> =
+            self.lock_templates().resolved.values().cloned().collect();
+        templates.sort_by(|a, b| a.frontmatter.id.cmp(&b.frontmatter.id));
+        templates
     }
 
-    /// Find templates that have a given capability.
+    /// List all resolved templates in the order a lead is chosen in (G-1):
+    /// the person's files, then the bundled layer, then plugins, each by id.
+    pub fn list_templates_by_layer(&self) -> Vec<AgentTemplate> {
+        self.lock_templates().by_layer()
+    }
+
+    /// Find templates that have a given capability, in
+    /// `list_templates_by_layer`'s order.
     pub fn find_templates_by_capability(&self, capability_name: &str) -> Vec<AgentTemplate> {
         self.lock_templates()
-            .resolved
-            .values()
+            .by_layer()
+            .into_iter()
             .filter(|t| t.frontmatter.capabilities.iter().any(|s| s == capability_name))
-            .cloned()
             .collect()
     }
 
@@ -293,13 +450,19 @@ impl AgentRegistry {
         self.lock_templates().resolved.len()
     }
 
-    /// Remove a template by id from the file layer, else from the plugin
+    /// Remove a template by id from the plugin layer, else from the file
     /// layer. Returns true if one was removed. A bundled template is never
     /// removed.
+    ///
+    /// The plugin layer first: its one caller is the plugin manager's
+    /// rollback of a template it has just registered, and a file of the
+    /// person's over the same id — a rescan may have put one there
+    /// meanwhile — is not the plugin's to take. The file layer is otherwise
+    /// replaced whole by its rescan (L-3).
     pub fn remove_template(&self, template_id: &str) -> bool {
         let mut templates = self.lock_templates();
-        let removed = templates.file.templates.remove(template_id).is_some()
-            || templates.plugin.remove(template_id).is_some();
+        let removed = templates.plugin.remove(template_id).is_some()
+            || templates.file.templates.remove(template_id).is_some();
         if removed {
             templates.resolve();
         }
@@ -316,9 +479,12 @@ impl AgentRegistry {
     /// the shipped template by id. A template another source holds is not
     /// this plugin's to take, and no tombstone is written for it: a
     /// tombstone records a withdrawal that happened, and attributing a live
-    /// incumbent's id to the plugin would mislead a later miss.
+    /// incumbent's id to the plugin would mislead a later miss. For the same
+    /// reason a withdrawal leaves no tombstone when another layer still
+    /// holds the id — a person's file over it (a spawn of that template
+    /// failing for another reason must not name the plugin).
     pub fn remove_plugin_template(&self, template_id: &str, plugin_id: &str) -> bool {
-        let removed = {
+        let (removed, still_held) = {
             let mut templates = self.lock_templates();
             let owned = templates.plugin.get(template_id).is_some_and(|template| {
                 matches!(
@@ -330,9 +496,9 @@ impl AgentRegistry {
             if removed {
                 templates.resolve();
             }
-            removed
+            (removed, templates.holds(template_id))
         };
-        if removed {
+        if removed && !still_held {
             self.lock_template_tombstones()
                 .insert(template_id.to_string(), plugin_id.to_string());
         } else {
@@ -399,10 +565,26 @@ impl AgentRegistry {
         // before acquiring instances, to avoid holding both locks simultaneously.
         let (is_singleton, template_clone) = {
             let templates = self.lock_templates();
-            let template = templates
-                .resolved
-                .get(template_id)
-                .ok_or_else(|| format!("template '{}' not found", template_id))?;
+            let Some(template) = templates.resolved.get(template_id) else {
+                return Err(match templates.file.templates.get(template_id) {
+                    Some(FileTemplate {
+                        held: FileHeld::Withheld { reason },
+                        path: Some(path),
+                        ..
+                    }) => {
+                        let under = if templates.bundled.contains_key(template_id) {
+                            " to use the bundled template"
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "template '{template_id}' is withheld: {} {reason}; fix it, or remove it{under}",
+                            path.display()
+                        )
+                    }
+                    _ => format!("template '{}' not found", template_id),
+                });
+            };
             (template.frontmatter.singleton, template.clone())
         }; // templates lock dropped here
 
@@ -507,6 +689,94 @@ impl AgentRegistry {
             .values()
             .filter(|r| r.agent.template_id == template_id)
             .count()
+    }
+
+    /// Make the idle instances follow the resolved catalog (L-1a). Called
+    /// after every resolved change — the file layer's rescan, and from C3
+    /// `set_bundled_layer`.
+    ///
+    /// Each resolved file or bundled template has an idle instance under its
+    /// id — the one the singleton lead is claimed from, `GET
+    /// /v1/agents/{id}/config` reads and `?skill=` filters: an idle one built
+    /// from another definition is rebuilt, a missing one registered, a busy
+    /// one left alone and rebuilt at the next change, as hot reload always
+    /// did. The idle instance of an id that left the catalog goes. Only the
+    /// instances this method materialised are ever removed, so a legacy
+    /// `.toml` agent stays; a plugin's template gets none, as before.
+    pub fn sync_template_instances(&self) {
+        let wanted: HashMap<String, AgentTemplate> = {
+            let templates = self.lock_templates();
+            templates
+                .resolved
+                .iter()
+                .filter(|(id, _)| templates.layer_of(id) != Some(TemplateLayer::Plugin))
+                .map(|(id, template)| (id.clone(), template.clone()))
+                .collect()
+        };
+        let mut instances = self.lock_instances();
+        let mut synced = self.lock_synced();
+
+        for (id, template) in &wanted {
+            match instances.get_mut(id) {
+                None => {
+                    instances.insert(
+                        id.clone(),
+                        RegisteredAgent {
+                            agent: idle_instance(template),
+                            config_version: 0,
+                            is_singleton: false,
+                        },
+                    );
+                    synced.insert(id.clone(), template.clone());
+                }
+                Some(entry) if entry.agent.status.is_available() => {
+                    let current = synced
+                        .get(id)
+                        .is_some_and(|built| same_definition(built, template));
+                    if !current {
+                        entry.agent = idle_instance(template);
+                        entry.config_version += 1;
+                        synced.insert(id.clone(), template.clone());
+                    }
+                }
+                Some(_) => {} // busy: the next change rebuilds it
+            }
+        }
+
+        synced.retain(|id, _| {
+            if wanted.contains_key(id) {
+                return true;
+            }
+            match instances.get(id) {
+                Some(entry) if !entry.agent.status.is_available() => true,
+                Some(_) => {
+                    instances.remove(id);
+                    false
+                }
+                None => false,
+            }
+        });
+    }
+
+    /// The file layer's rescan lock: see `rescan`.
+    pub(crate) fn lock_rescan(&self) -> std::sync::MutexGuard<'_, ()> {
+        match self.rescan.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("AgentRegistry rescan mutex poisoned — recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn lock_synced(&self) -> std::sync::MutexGuard<'_, HashMap<String, AgentTemplate>> {
+        match self.synced.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!("AgentRegistry synced-instances mutex poisoned — recovering");
+                poisoned.into_inner()
+            }
+        }
     }
 
     // ── Backward-compatible methods ──────────────────────────────────
