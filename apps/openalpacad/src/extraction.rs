@@ -484,6 +484,52 @@ mod tests {
         );
     }
 
+    /// A compound file (the container of an `.xls`) whose directory stream
+    /// is 100 bytes, short of one 128-byte entry: a 512-byte header naming
+    /// sector 0 its FAT and sector 1 its directory, the FAT, and the file's
+    /// end 100 bytes into sector 1. calamine 0.37 panicked slicing the short
+    /// entry (RUSTSEC-2026-0436); 0.38 drops it, finds no root entry and
+    /// refuses the file.
+    #[test]
+    fn an_xls_whose_directory_is_short_of_one_entry_is_refused_without_a_panic() {
+        const ENDOFCHAIN: u32 = 0xFFFF_FFFE;
+        const FATSECT: u32 = 0xFFFF_FFFD;
+        fn put(buf: &mut [u8], at: usize, bytes: &[u8]) {
+            buf[at..at + bytes.len()].copy_from_slice(bytes);
+        }
+        let mut header = [0u8; 512];
+        put(&mut header, 0, b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1");
+        put(&mut header, 24, &0x003E_u16.to_le_bytes()); // minor version
+        put(&mut header, 26, &3_u16.to_le_bytes()); // major version
+        put(&mut header, 28, &0xFFFE_u16.to_le_bytes()); // byte order
+        put(&mut header, 30, &9_u16.to_le_bytes()); // 512-byte sectors
+        put(&mut header, 32, &6_u16.to_le_bytes()); // 64-byte mini sectors
+        put(&mut header, 44, &1_u32.to_le_bytes()); // one FAT sector
+        put(&mut header, 48, &1_u32.to_le_bytes()); // directory: sector 1
+        put(&mut header, 56, &4096_u32.to_le_bytes()); // mini stream cutoff
+        put(&mut header, 60, &ENDOFCHAIN.to_le_bytes()); // no mini FAT
+        put(&mut header, 68, &ENDOFCHAIN.to_le_bytes()); // no DIFAT sector
+        // The header's DIFAT lists the FAT, sector 0, and is free after it.
+        header[76..].fill(0xFF);
+        put(&mut header, 76, &0_u32.to_le_bytes());
+        let mut fat = [0xFF_u8; 512];
+        put(&mut fat, 0, &FATSECT.to_le_bytes());
+        put(&mut fat, 4, &ENDOFCHAIN.to_le_bytes());
+        let mut directory = [0u8; 100];
+        for (i, unit) in "Root Entry".encode_utf16().enumerate() {
+            put(&mut directory, 2 * i, &unit.to_le_bytes());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short-directory.xls");
+        std::fs::write(&path, [&header[..], &fat, &directory].concat()).unwrap();
+        let (text, error) = extract_text(path.to_str().unwrap(), "application/vnd.ms-excel", 10000);
+        assert_eq!(text, None);
+        assert_eq!(
+            error.as_deref(),
+            Some("Spreadsheet open failed: Xls error: Cfb error: Empty Root directory")
+        );
+    }
+
     #[test]
     fn test_extract_text_image_returns_empty() {
         let (text, error) = extract_text("/dev/null", "image/png", 10000);
