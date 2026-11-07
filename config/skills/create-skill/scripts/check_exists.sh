@@ -3,15 +3,32 @@
 #
 # Usage: check_exists.sh --id=<skill-id> [--scope=project]
 #
-# Outputs JSON: {"exists": true/false, "path": "..."}
+# Outputs JSON: {"exists": true, "path": "..."} for a skill of the id in the
+# skills root; {"exists": false, "bundled": true, "path": "..."} when only a
+# built-in skill holds the id, so a new one there overrides it; else
+# {"exists": false, "path": "..."}. The path is always where a skill of the id
+# is (or would be written) in the skills root.
 
 set -euo pipefail
 
-# The skills root, from the script's own location: the script is at
-# <config>/skills/create-skill/scripts/, so the root is the skills directory
-# this skill was loaded from, the one directory the daemon reads skills from.
+# The skills root, the one directory the daemon reads skills from: the daemon
+# names it in OPENALPACA_SKILLS_DIR (<config>/skills) when it runs a skill
+# script, since the built-in create-skill runs from its own copy under
+# state/cache/bundled-skills/. Run by hand, the script finds it from its own
+# location: at <config>/skills/create-skill/scripts/, the root is the skills
+# directory this skill was loaded from.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SKILLS_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SKILLS_ROOT="${OPENALPACA_SKILLS_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+
+# The built-in skills, which a skill of the same id overrides: where the daemon
+# says they are (OPENALPACA_BUNDLED_SKILLS_DIR), else, run by hand, this
+# script's own skills directory when that is not SKILLS_ROOT. None when the
+# two are one.
+OWN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BUNDLED_ROOT="${OPENALPACA_BUNDLED_SKILLS_DIR:-$OWN_ROOT}"
+if [[ "$BUNDLED_ROOT" == "$SKILLS_ROOT" ]]; then
+  BUNDLED_ROOT=""
+fi
 
 SKILL_ID=""
 SCOPE="project"
@@ -40,6 +57,8 @@ SKILL_PATH="$SKILLS_ROOT/$SKILL_ID/SKILL.md"
 
 if [[ -f "$SKILL_PATH" ]]; then
   echo "{\"exists\": true, \"path\": \"$SKILL_PATH\"}"
+elif [[ -n "$BUNDLED_ROOT" && -f "$BUNDLED_ROOT/$SKILL_ID/SKILL.md" ]]; then
+  echo "{\"exists\": false, \"bundled\": true, \"path\": \"$SKILL_PATH\"}"
 else
   echo "{\"exists\": false, \"path\": \"$SKILL_PATH\"}"
 fi

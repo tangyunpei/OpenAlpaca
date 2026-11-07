@@ -3,15 +3,30 @@
 #
 # Usage: list_skills.sh [--scope=project]
 #
-# Outputs JSON array of {id, name, slash, path}.
+# Outputs JSON array of {id, name, slash, source, path}: the skills root's
+# skills ("source": "config"), then the built-in ones ("source": "bundled"),
+# which a skill of the same id in the skills root overrides.
 
 set -euo pipefail
 
-# The skills root, from the script's own location: the script is at
-# <config>/skills/create-skill/scripts/, so the root is the skills directory
-# this skill was loaded from, the one directory the daemon reads skills from.
+# The skills root, the one directory the daemon reads skills from: the daemon
+# names it in OPENALPACA_SKILLS_DIR (<config>/skills) when it runs a skill
+# script, since the built-in create-skill runs from its own copy under
+# state/cache/bundled-skills/. Run by hand, the script finds it from its own
+# location: at <config>/skills/create-skill/scripts/, the root is the skills
+# directory this skill was loaded from.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SKILLS_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SKILLS_ROOT="${OPENALPACA_SKILLS_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+
+# The built-in skills, which a skill of the same id overrides: where the daemon
+# says they are (OPENALPACA_BUNDLED_SKILLS_DIR), else, run by hand, this
+# script's own skills directory when that is not SKILLS_ROOT. None when the
+# two are one.
+OWN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BUNDLED_ROOT="${OPENALPACA_BUNDLED_SKILLS_DIR:-$OWN_ROOT}"
+if [[ "$BUNDLED_ROOT" == "$SKILLS_ROOT" ]]; then
+  BUNDLED_ROOT=""
+fi
 
 SCOPE="project"
 
@@ -34,7 +49,7 @@ FIRST=true
 
 scan_dir() {
   local dir="$1"
-  local scope_label="$2"
+  local source_label="$2"
   if [[ ! -d "$dir" ]]; then return; fi
 
   for skill_dir in "$dir"/*/; do
@@ -72,11 +87,14 @@ scan_dir() {
     else
       echo ","
     fi
-    echo -n "  {\"id\": \"$skill_id\", \"name\": \"$name\", \"slash\": \"$slash\", \"scope\": \"$scope_label\", \"path\": \"$skill_dir\"}"
+    echo -n "  {\"id\": \"$skill_id\", \"name\": \"$name\", \"slash\": \"$slash\", \"source\": \"$source_label\", \"path\": \"$skill_dir\"}"
   done
 }
 
-scan_dir "$SKILLS_ROOT" "project"
+scan_dir "$SKILLS_ROOT" "config"
+if [[ -n "$BUNDLED_ROOT" ]]; then
+  scan_dir "$BUNDLED_ROOT" "bundled"
+fi
 
 echo ""
 echo "]"

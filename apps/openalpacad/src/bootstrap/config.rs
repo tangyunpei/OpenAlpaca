@@ -77,10 +77,10 @@ const DEFAULT_MCP_TOML: &str =
 /// launching the daemon before `install.sh` runs) gets working defaults
 /// instead of an empty config directory.
 ///
-/// The three files below, and then the content directories — `skills/` and
-/// `tools/` seeded (L9), `agents/` created empty (subagent design §2.5 S-1;
-/// [`super::content::seed_default_content`]). Same rule for all of them: write
-/// only what is absent.
+/// The three files below, and then the content directories — `tools/`
+/// seeded (L9), `agents/` and `skills/` created empty (subagent design §2.5
+/// S-1; [`super::content::seed_default_content`]). Same rule for all of them:
+/// write only what is absent.
 pub fn seed_default_configs(config_dir: &Path) {
     if let Err(e) = std::fs::create_dir_all(config_dir) {
         warn!("Cannot create config dir {}: {e}", config_dir.display());

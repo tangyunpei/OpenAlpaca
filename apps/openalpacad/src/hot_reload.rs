@@ -547,6 +547,11 @@ async fn handle_mcp_config_change(ctx: &FileWatcherContext) {
     );
 }
 
+/// A change under `skills/` reloads its folder, which the catalog classifies
+/// again and resolves over the bundled layer (subagent design §2.4 L-5): a
+/// deleted override brings the bundled skill back, a folder edited out of
+/// being an unedited copy overrides it, and a deleted unedited copy changes
+/// nothing.
 async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
     // Determine which skill folder changed
     if let Ok(relative) = changed_path.strip_prefix(&ctx.skills_dir)

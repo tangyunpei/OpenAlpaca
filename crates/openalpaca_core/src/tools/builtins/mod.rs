@@ -518,19 +518,46 @@ pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
 // ScriptToolBuiltIn
 // ---------------------------------------------------------------------------
 
+/// The skills roots a skill script is told by name (subagent design §2.6
+/// K-5), from the catalog that resolved its skill
+/// (`SkillCatalog::skill_roots`): a script run from the built-in pack under
+/// `state/cache/bundled-skills/` cannot find the config directory by its own
+/// location, and the daemon, never the model, names where a skill is
+/// written.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillRoots {
+    /// `<config>/skills`, where a script that writes skills writes —
+    /// `OPENALPACA_SKILLS_DIR`. None for a catalog that read no config
+    /// directory (a test's).
+    pub config: Option<PathBuf>,
+    /// The built-in skills' pack, where a script that lists skills finds
+    /// them — `OPENALPACA_BUNDLED_SKILLS_DIR`. None when no pack was written
+    /// (K-4).
+    pub bundled: Option<PathBuf>,
+}
+
+/// The variable naming the config directory's `skills/` to a skill script.
+pub const SKILLS_DIR_ENV: &str = "OPENALPACA_SKILLS_DIR";
+/// The variable naming the built-in skills' pack to a skill script.
+pub const BUNDLED_SKILLS_DIR_ENV: &str = "OPENALPACA_BUNDLED_SKILLS_DIR";
+
 /// A skill-bundled script tool wrapped as a BuiltInTool.
 pub struct ScriptToolBuiltIn {
     script_path: PathBuf,
     interpreter: Option<String>,
     timeout_secs: u64,
     skill_dir: PathBuf,
+    roots: SkillRoots,
 }
 
 impl ScriptToolBuiltIn {
-    /// Create with path-traversal validation.
+    /// Create with path-traversal validation. `roots` reach the script as
+    /// [`SKILLS_DIR_ENV`] and [`BUNDLED_SKILLS_DIR_ENV`], each set only when
+    /// known.
     pub fn new(
         skill_dir: &std::path::Path,
         cfg: &crate::middleware::skill::ScriptConfig,
+        roots: SkillRoots,
     ) -> Result<Self, String> {
         let script_path = skill_dir.join("scripts").join(&cfg.file);
         let canonical = script_path.canonicalize().map_err(|e| {
@@ -550,6 +577,7 @@ impl ScriptToolBuiltIn {
             interpreter: cfg.interpreter.clone(),
             timeout_secs: cfg.timeout_secs,
             skill_dir: skill_dir.to_path_buf(),
+            roots,
         })
     }
 
@@ -582,6 +610,18 @@ impl BuiltInTool for ScriptToolBuiltIn {
         };
         cmd.args(&args);
         cmd.current_dir(&self.skill_dir);
+        // K-5: where skills are written, and where the built-in ones are.
+        // Never inherited from the daemon's own environment: a root not
+        // known here is removed, so the script's own fallback applies.
+        for (name, root) in [
+            (SKILLS_DIR_ENV, &self.roots.config),
+            (BUNDLED_SKILLS_DIR_ENV, &self.roots.bundled),
+        ] {
+            match root {
+                Some(root) => cmd.env(name, root),
+                None => cmd.env_remove(name),
+            };
+        }
 
         // R45 (storage design §11): killed with the processes it started
         // when its time runs out or its call is dropped.

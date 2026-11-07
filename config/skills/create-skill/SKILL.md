@@ -67,7 +67,8 @@ scripts:
     name: check_exists
     description: >
       Check if a skill ID already exists. Returns JSON with "exists" (boolean)
-      and "path" fields.
+      and "path" fields, and "bundled": true when only a built-in skill holds
+      the ID (a new skill of that ID would override the built-in one).
     parameters:
       type: object
       properties:
@@ -83,8 +84,10 @@ scripts:
   - file: list_skills.sh
     name: list_skills
     description: >
-      List all existing skills with their IDs, names, slash commands, and paths.
-      Returns a JSON array. Use this to check for slash command conflicts.
+      List all existing skills with their IDs, names, slash commands, sources
+      ("config" for the config directory's, "bundled" for the built-in ones)
+      and paths. Returns a JSON array. Use this to check for slash command
+      conflicts.
     parameters:
       type: object
       properties:
@@ -213,6 +216,7 @@ Collect the three required pieces of information:
      - Must NOT be a reserved name: `config`, `test`, `tests`, `example`, `examples`, `template`, `templates`, `assets`. If reserved, say: "'{id}' is a reserved directory name and cannot be used as a skill ID."
      - Must NOT be `remember`, `forget` or `memories`: those are the chat memory commands, which the daemon answers itself, so a skill with that ID would never be reached by its slash command. If so, say: "'{id}' is reserved for a chat memory command and cannot be used as a skill ID."
    - Use `skill_script:check_exists` to verify the ID is not already taken.
+   - If it answers `"bundled": true`, the ID is a built-in skill's: a new skill with that ID overrides the built-in one, which then no longer runs. Say so and ask the user to confirm before going on, or to choose another ID.
 
 2. **Name** (human-readable)
    - Ask: "What is the human-readable name for this skill? (e.g., 'Code Review', 'Summarize PR')"
@@ -328,6 +332,7 @@ If the user chose `mode: auto`, collect the following. If `mode: manual`, skip t
 ### Error Handling
 
 - **Duplicate skill ID**: `skill_script:check_exists` returns `{"exists": true}`. Inform the user and ask them to choose a different ID or confirm overwrite.
+- **A built-in skill's ID**: `skill_script:check_exists` returns `{"exists": false, "bundled": true}`. The new skill would override the built-in one; ask the user first.
 - **Invalid characters in ID**: Reject immediately with the validation message. Suggest a corrected kebab-case version.
 - **Empty name or description**: Re-prompt: "Name/description is required and cannot be empty."
 - **Invalid permission level**: Show the three valid options and re-prompt.

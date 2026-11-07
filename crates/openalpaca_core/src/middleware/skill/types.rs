@@ -15,6 +15,10 @@ pub enum SkillScope {
     /// passes to `SkillCatalog::scan_multi_scope`. No daemon path passes one:
     /// the daemon reads `<config>/skills` only, as `Project`.
     User,
+    /// A skill OpenAlpaca ships, from the binary, run from the pack the
+    /// daemon writes into `state/cache/bundled-skills/` (subagent design §2.1
+    /// B-4). A folder of the config directory's `skills/` overrides it.
+    Bundled,
 }
 
 // ---------------------------------------------------------------------------

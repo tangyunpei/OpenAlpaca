@@ -27,11 +27,14 @@
 
 set -euo pipefail
 
-# The skills root, from the script's own location: the script is at
-# <config>/skills/create-skill/scripts/, so the root is the skills directory
-# this skill was loaded from, the one directory the daemon reads skills from.
+# The skills root, the one directory the daemon reads skills from: the daemon
+# names it in OPENALPACA_SKILLS_DIR (<config>/skills) when it runs a skill
+# script, since the built-in create-skill runs from its own copy under
+# state/cache/bundled-skills/. Run by hand, the script finds it from its own
+# location: at <config>/skills/create-skill/scripts/, the root is the skills
+# directory this skill was loaded from.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SKILLS_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SKILLS_ROOT="${OPENALPACA_SKILLS_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
 # Defaults
 SKILL_ID=""

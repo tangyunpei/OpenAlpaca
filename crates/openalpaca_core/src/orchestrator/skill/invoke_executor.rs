@@ -339,8 +339,9 @@ impl SkillInvocationToolExecutor {
 
             // Register script tools (file-based skills only)
             if let Some(ref skill_dir) = entry.skill_dir {
+                let roots = self.catalog.skill_roots();
                 for cfg in &skill_doc.frontmatter.scripts {
-                    let tool = ScriptToolBuiltIn::new(skill_dir, cfg)?;
+                    let tool = ScriptToolBuiltIn::new(skill_dir, cfg, roots.clone())?;
                     cloned.register(RegisteredTool {
                         definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
                         backend: ToolBackend::BuiltIn(Arc::new(tool)),

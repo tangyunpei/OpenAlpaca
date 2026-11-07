@@ -1095,7 +1095,8 @@ export interface SkillDiagnostic {
     | "slash_conflict"
     | "unknown_key"
     | "too_large"
-    | "no_tools";
+    | "no_tools"
+    | "stale_shipped_file";
   severity: "error" | "warning";
   path: string;
   /** The directory's name, lowercased — `null` for the skills directory itself. */

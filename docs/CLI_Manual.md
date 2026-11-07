@@ -996,8 +996,11 @@ Notes:
   `requires_capabilities` leaves the skill with no tools), `deprecated_field`,
   `id_mismatch` (the frontmatter's `id` is not the directory's name, which is
   the id), `slash_conflict` (two skills claim one slash command; the one
-  named answers it) and `no_tools` (no `requires_capabilities`, `tools.allow`,
-  `scripts` or `depends_on`: the skill runs with no tools), warnings. Each line gives the file and the daemon's message.
+  named answers it), `no_tools` (no `requires_capabilities`, `tools.allow`,
+  `scripts` or `depends_on`: the skill runs with no tools) and
+  `stale_shipped_file` (a folder overriding a built-in skill runs a file an
+  earlier build shipped, which the built-in skill has since changed),
+  warnings. Each line gives the file and the daemon's message.
 - `info` on a skill the daemon skipped says it is not loaded and shows why; a
   name that is neither a loaded skill nor in the problems is an error.
 - The scan runs when the daemon starts, and a skill's problems are re-read when

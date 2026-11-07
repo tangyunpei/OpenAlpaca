@@ -810,8 +810,9 @@ impl Orchestrator {
             let registry = if needs_clone {
                 let cloned = (*self.tool_registry).clone();
                 if let Some(ref skill_dir) = entry.skill_dir {
+                    let roots = self.skill_catalog.skill_roots();
                     for cfg in &skill_doc.frontmatter.scripts {
-                        let tool = ScriptToolBuiltIn::new(skill_dir, cfg)?;
+                        let tool = ScriptToolBuiltIn::new(skill_dir, cfg, roots.clone())?;
                         cloned.register(RegisteredTool {
                             definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
                             backend: ToolBackend::BuiltIn(Arc::new(tool)),

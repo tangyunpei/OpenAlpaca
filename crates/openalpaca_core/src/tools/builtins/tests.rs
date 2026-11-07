@@ -1941,9 +1941,64 @@ fn a_skill_script_says_its_arguments_reach_a_program() {
             interpreter: Some("sh".to_string()),
             timeout_secs: 5,
         },
+        SkillRoots::default(),
     )
     .unwrap();
     assert!(script.arguments_reach_a_program());
+}
+
+/// Subagent design §2.6 K-5: a skill script is told the config directory's
+/// `skills/` and the built-in skills' pack by name — the built-in
+/// `create-skill` runs from the pack, where its own location says nothing of
+/// where skills are written — and a root not known is not set at all.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_skill_script_sees_both_skills_roots_in_its_environment() {
+    let skill = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(skill.path().join("scripts")).unwrap();
+    std::fs::write(
+        skill.path().join("scripts/roots.sh"),
+        "printf '%s|%s' \"${OPENALPACA_SKILLS_DIR-unset}\" \"${OPENALPACA_BUNDLED_SKILLS_DIR-unset}\"\n",
+    )
+    .unwrap();
+    let cfg = crate::middleware::skill::ScriptConfig {
+        file: "roots.sh".to_string(),
+        name: "roots".to_string(),
+        description: "Prints the roots".to_string(),
+        parameters: serde_json::json!({"type": "object"}),
+        interpreter: Some("sh".to_string()),
+        timeout_secs: 5,
+    };
+    let config = skill.path().join("config/skills");
+    let pack = skill.path().join("state/cache/bundled-skills");
+
+    let both = ScriptToolBuiltIn::new(
+        skill.path(),
+        &cfg,
+        SkillRoots {
+            config: Some(config.clone()),
+            bundled: Some(pack.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        both.execute(&serde_json::json!({})).await.unwrap(),
+        format!("{}|{}", config.display(), pack.display())
+    );
+
+    let config_only = ScriptToolBuiltIn::new(
+        skill.path(),
+        &cfg,
+        SkillRoots {
+            config: Some(config.clone()),
+            bundled: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        config_only.execute(&serde_json::json!({})).await.unwrap(),
+        format!("{}|unset", config.display())
+    );
 }
 
 // --- R45: a skill script is killed with what it started (storage design §11) ---
@@ -1974,6 +2029,7 @@ async fn a_skill_script_that_times_out_takes_the_processes_it_started_with_it() 
             interpreter: Some("sh".to_string()),
             timeout_secs: 1,
         },
+        SkillRoots::default(),
     )
     .unwrap();
     let pidfile = skill.path().join("pid");

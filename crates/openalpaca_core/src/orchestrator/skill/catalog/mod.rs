@@ -9,12 +9,25 @@
 //! Skills are keyed by their **directory name** (the skill ID). The catalog
 //! supports multi-scope discovery: project-level skills can override user-level
 //! skills with the same ID.
+//!
+//! **Layers** (subagent design §2.4 L-2, `tasks/subagent-brief-design.md`):
+//! the daemon's catalog keeps the skills OpenAlpaca ships — the bundled layer,
+//! run from the pack under `state/cache/bundled-skills/` — apart from what the
+//! config directory's `skills/` holds under each key, and resolves the two on
+//! every change: a folder of the person's overrides the bundled skill of its
+//! key; one that is an unedited copy of a shipped version is set aside, so the
+//! bundled skill runs; one that says `invoke.mode: disabled`, or does not
+//! parse, holds its key with nothing runnable, never the bundled skill in its
+//! place. A plugin's skill goes over both, as it goes over a file skill today
+//! (§2.3 P-3, until B-05).
 
+use crate::bundled::{self, ShippedVersion, SkillFolder};
 use crate::middleware::skill::{
     SkillDocument, SkillFrontmatter, SkillParseError, SkillScope, parse_skill_frontmatter,
     parse_skill_markdown,
 };
 use crate::orchestrator::intent::is_reserved_slash_name;
+use crate::tools::builtins::SkillRoots;
 use openalpaca_storage::resolve_skill_key;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -75,6 +88,56 @@ pub struct SkillSummary {
 /// Cached catalog summary.
 type CatalogSummaryCache = RwLock<Option<Vec<SkillSummary>>>;
 
+/// What the config directory's `skills/` holds under a key (L-2).
+#[derive(Debug, Clone)]
+enum ConfigSkill {
+    /// The folder loaded. Kept, so it is back on its key when a plugin's
+    /// skill that went over it goes.
+    Loaded(Box<SkillEntry>),
+    /// Its `SKILL.md` says `invoke.mode: disabled`: nothing runs under the
+    /// key, so a bundled skill of it is hidden.
+    Disabled,
+    /// Its `SKILL.md` cannot be read or parsed: nothing runs under the key —
+    /// never the bundled skill in its place (L-4) — until it is fixed.
+    Withheld,
+    /// An unedited copy of a shipped version (V-5): set aside — not read,
+    /// not touched — and the bundled skill runs.
+    SetAside {
+        folder: PathBuf,
+        version: ShippedVersion,
+    },
+}
+
+/// One entry of a skill row's `not_used` (subagent design §2.7 R-2, as R-1):
+/// a definition of the key that is not the one in effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillNotUsed {
+    /// `"bundled"` for the built-in skill under an override, `"file"` for a
+    /// set-aside folder.
+    pub source: &'static str,
+    /// The folder, or the pack's folder of the bundled skill.
+    pub path: Option<PathBuf>,
+    /// `"unedited_copy"` or `"overridden"`.
+    pub reason: &'static str,
+    /// For an unedited copy, which shipped version it is.
+    pub version: Option<ShippedVersion>,
+}
+
+/// Where the skill in effect under a key comes from beyond its scope (R-2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillProvenance {
+    /// A config folder runs over the bundled skill of its key.
+    pub overrides_bundled: bool,
+    pub not_used: Vec<SkillNotUsed>,
+}
+
+/// What a parse of one folder's `SKILL.md` gave.
+enum Parsed {
+    Entry(Box<SkillEntry>),
+    /// `invoke.mode: disabled`, with the frontmatter's name.
+    Disabled(String),
+}
+
 /// What a plugin used to contribute, kept after T2 withdrew it so `/slash` and
 /// `invoke_skill` can answer *"skill 'x' is provided by plugin 'notion', which
 /// is disabled"* instead of *"unknown skill"* plus a dump of every catalog name
@@ -115,6 +178,17 @@ pub struct SkillCatalog {
     /// by the slash command and aliases captured before `remove` scrubbed the
     /// indices (design §10 case 5(a)).
     tombstones: RwLock<HashMap<String, SkillTombstone>>,
+    /// The bundled layer, by key: the shipped skills, pointing into the pack
+    /// (L-2). Empty until [`Self::set_bundled_layer`], and when no pack could
+    /// be written (K-4).
+    bundled: RwLock<HashMap<String, SkillEntry>>,
+    /// The pack the bundled skills run from (K-3, K-5).
+    pack_root: RwLock<Option<PathBuf>>,
+    /// The config directory's `skills/`, once [`Self::scan_config_layer`] read
+    /// it (K-5).
+    config_dir: RwLock<Option<PathBuf>>,
+    /// What that directory holds under each key it read (L-2).
+    config_layer: RwLock<HashMap<String, ConfigSkill>>,
 }
 
 impl Default for SkillCatalog {
@@ -133,6 +207,10 @@ impl SkillCatalog {
             cached_summary: RwLock::new(None),
             availability_oracle: RwLock::new(None),
             tombstones: RwLock::new(HashMap::new()),
+            bundled: RwLock::new(HashMap::new()),
+            pack_root: RwLock::new(None),
+            config_dir: RwLock::new(None),
+            config_layer: RwLock::new(HashMap::new()),
         }
     }
 
@@ -216,6 +294,11 @@ impl SkillCatalog {
                 );
             }
         }
+        // The key is live again when a config or bundled skill of it was
+        // under the plugin's: no tombstone answers for what now runs.
+        if let Some(live) = self.get_by_id(&key) {
+            self.clear_tombstones(&key, &claimed_commands(&live.frontmatter));
+        }
     }
 
     /// Take a plugin's own entry off the catalog: the one under the exact
@@ -265,6 +348,9 @@ impl SkillCatalog {
             }
         }
         self.invalidate_summary_cache();
+        // What the plugin's skill went over runs again: the config folder's,
+        // else the bundled skill (L-2).
+        self.resolve_key(&key);
         Some(removed)
     }
 
@@ -316,8 +402,20 @@ impl SkillCatalog {
     /// Returns the count of skills successfully loaded.
     ///
     /// What the scan finds replaces what the last scan of `dir` found
-    /// ([`SkillCatalog::diagnostics`], N-SKILL-2).
+    /// ([`SkillCatalog::diagnostics`], N-SKILL-2). No layer is consulted: the
+    /// daemon reads its config directory with [`Self::scan_config_layer`].
     pub fn scan_directory(&self, dir: &Path, scope: SkillScope) -> usize {
+        let count = self.scan_folders(dir, |skill_md, child_path| {
+            self.load_entry(skill_md, child_path, scope)
+        });
+        self.note_slash_conflicts();
+        count
+    }
+
+    /// Each direct child directory of `dir` holding a `SKILL.md`, handed to
+    /// `load`; the count of those it took. `dir`'s earlier diagnostics go
+    /// first, and a directory that cannot be read is one.
+    fn scan_folders(&self, dir: &Path, load: impl Fn(&Path, &Path) -> Result<(), String>) -> usize {
         self.forget_diagnostics_under(dir);
         let read_dir = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
@@ -344,15 +442,13 @@ impl SkillCatalog {
                 continue;
             }
 
-            match self.load_entry(&skill_md, &child_path, scope) {
+            match load(&skill_md, &child_path) {
                 Ok(()) => count += 1,
                 Err(e) => {
                     tracing::warn!("SkillCatalog: failed to load {}: {}", skill_md.display(), e);
                 }
             }
         }
-
-        self.note_slash_conflicts();
         count
     }
 
@@ -376,13 +472,33 @@ impl SkillCatalog {
         total
     }
 
-    /// Load a single SKILL.md entry (Level 1 — frontmatter only).
+    /// Load a single SKILL.md entry (Level 1 — frontmatter only) and put it
+    /// on its key, over whatever was there.
     fn load_entry(
         &self,
         skill_md: &Path,
         skill_dir: &Path,
         scope: SkillScope,
     ) -> Result<(), String> {
+        let key = skill_key(skill_dir)?;
+        match self.parse_entry(skill_md, skill_dir, scope)? {
+            Parsed::Entry(entry) => self.insert_live(&key, *entry),
+            Parsed::Disabled(name) => {
+                tracing::info!("SkillCatalog: skipping disabled skill '{name}'");
+            }
+        }
+        Ok(())
+    }
+
+    /// Read and parse a folder's SKILL.md (Level 1 — frontmatter only),
+    /// noting each problem as a diagnostic (N-SKILL-2); nothing is put in the
+    /// catalog.
+    fn parse_entry(
+        &self,
+        skill_md: &Path,
+        skill_dir: &Path,
+        scope: SkillScope,
+    ) -> Result<Parsed, String> {
         let dir_name = skill_dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -425,11 +541,7 @@ impl SkillCatalog {
 
         // Validation: invoke.mode == "disabled" => skip
         if frontmatter.invoke.mode == "disabled" {
-            tracing::info!(
-                "SkillCatalog: skipping disabled skill '{}'",
-                frontmatter.name
-            );
-            return Ok(());
+            return Ok(Parsed::Disabled(frontmatter.name));
         }
 
         // A skill with no tools at all — often a misspelt
@@ -455,14 +567,19 @@ impl SkillCatalog {
 
         warn_reserved_slash_claims(&key, &frontmatter);
 
-        let entry = SkillEntry {
+        Ok(Parsed::Entry(Box::new(SkillEntry {
             frontmatter,
             skill_md_path: Some(skill_md.to_path_buf()),
             skill_dir: Some(skill_dir.to_path_buf()),
             scope,
             source: SkillSource::FileBased,
-        };
+        })))
+    }
 
+    /// Put `entry` on `key`, over whatever was there, with its slash command
+    /// and aliases indexed and its tombstones dropped.
+    fn insert_live(&self, key: &str, entry: SkillEntry) {
+        let key = key.to_string();
         // Collect old index data and insert entry under entries lock,
         // then release entries lock before acquiring index locks to avoid deadlock.
         let (old_slash_cmd, old_aliases, new_slash_cmd, new_aliases) = {
@@ -470,7 +587,7 @@ impl SkillCatalog {
                 Ok(g) => g,
                 Err(_) => {
                     tracing::error!(skill = %key, "Failed to acquire entries write lock — skill not loaded");
-                    return Err("entries lock poisoned".to_string());
+                    return;
                 }
             };
 
@@ -535,7 +652,6 @@ impl SkillCatalog {
         }
 
         self.invalidate_summary_cache();
-        Ok(())
     }
 
     /// Remove command_index and alias_index entries for a skill's frontmatter data.
@@ -554,6 +670,389 @@ impl SkillCatalog {
                 alias_idx.remove(&alias_lower);
             }
         }
+    }
+
+    // ── Layers: bundled and the config directory (subagent design §2.4) ──
+
+    /// Set the bundled layer (L-2): the shipped skills, run from `pack_root`,
+    /// each on its key unless the config directory holds the key. Called at
+    /// start, before [`Self::scan_config_layer`].
+    pub fn set_bundled_layer(&self, pack_root: &Path, entries: Vec<(String, SkillEntry)>) {
+        if let Ok(mut root) = self.pack_root.write() {
+            *root = Some(pack_root.to_path_buf());
+        }
+        let keys: Vec<String> = entries.iter().map(|(key, _)| key.clone()).collect();
+        if let Ok(mut bundled) = self.bundled.write() {
+            *bundled = entries.into_iter().collect();
+        }
+        for key in keys {
+            self.resolve_key(&key);
+        }
+    }
+
+    /// Write the bundled skills' pack into `pack_root` and set the bundled
+    /// layer from it (K-2); the number of bundled skills. A pack that cannot
+    /// be written leaves the layer empty, with one `WARN` naming the folder
+    /// and the error (K-4): running no bundled skill and saying so beats
+    /// running a half-written one.
+    pub fn load_bundled_layer(&self, pack_root: &Path) -> usize {
+        match bundled::write_skill_pack(pack_root) {
+            Ok(()) => {
+                let entries = bundled::bundled_skill_entries(pack_root);
+                let count = entries.len();
+                self.set_bundled_layer(pack_root, entries);
+                count
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "SkillCatalog: the built-in skills could not be written to {}: {e}; no built-in skill is loaded",
+                    pack_root.display()
+                );
+                0
+            }
+        }
+    }
+
+    /// Read the config directory's `skills/` as the layer over the bundled
+    /// one (L-2): each folder is loaded, set aside as an unedited copy of a
+    /// shipped version (V-5), or holds its key with nothing runnable
+    /// (`invoke.mode: disabled`, or a `SKILL.md` that does not parse). The
+    /// number of folders loaded. What the scan finds replaces what the last
+    /// scan of `dir` found.
+    pub fn scan_config_layer(&self, dir: &Path) -> usize {
+        if let Ok(mut config) = self.config_dir.write() {
+            *config = Some(dir.to_path_buf());
+        }
+        self.scan_folders(dir, |_, child_path| self.apply_config_folder(child_path));
+        self.note_slash_conflicts();
+        self.config_layer
+            .read()
+            .map(|layer| {
+                layer
+                    .values()
+                    .filter(|slot| matches!(slot, ConfigSkill::Loaded(_)))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Re-read one folder of the config directory and resolve its key: what
+    /// [`Self::scan_config_layer`] does for each, and a hot reload for one
+    /// (L-5).
+    fn apply_config_folder(&self, skill_dir: &Path) -> Result<(), String> {
+        let key = skill_key(skill_dir)?;
+        let skill_md = skill_dir.join("SKILL.md");
+        if !skill_md.exists() {
+            self.set_config_slot(&key, None);
+            if self
+                .get_by_id(&key)
+                .is_some_and(|live| live.skill_dir.as_deref() == Some(skill_dir))
+            {
+                self.remove_live(&key);
+            }
+            self.resolve_key(&key);
+            tracing::info!("SkillCatalog: removed skill from {}", skill_dir.display());
+            return Ok(());
+        }
+
+        let bundled_here = self.bundled_entry(&key).is_some();
+        if bundled_here {
+            match bundled::classify_skill_dir(&key, skill_dir) {
+                Some(SkillFolder::UneditedCopy(version)) => {
+                    self.set_config_slot(
+                        &key,
+                        Some(ConfigSkill::SetAside {
+                            folder: skill_dir.to_path_buf(),
+                            version,
+                        }),
+                    );
+                    self.resolve_key(&key);
+                    return Ok(());
+                }
+                Some(SkillFolder::Yours { stale }) => {
+                    for relative in stale {
+                        let file = skill_dir.join(&relative);
+                        let problem = SkillParseError::StaleShippedFile {
+                            file: file.display().to_string(),
+                            skill: key.clone(),
+                        };
+                        tracing::warn!("SkillCatalog: skill '{key}': {problem}");
+                        self.note_diagnostic(&problem, &file, Some(&key));
+                    }
+                }
+                None => {}
+            }
+        }
+
+        match self.parse_entry(&skill_md, skill_dir, SkillScope::Project) {
+            Ok(Parsed::Entry(entry)) => {
+                self.set_config_slot(&key, Some(ConfigSkill::Loaded(entry.clone())));
+                self.insert_live(&key, *entry);
+                Ok(())
+            }
+            Ok(Parsed::Disabled(name)) => {
+                if bundled_here {
+                    tracing::info!(
+                        "SkillCatalog: skill '{key}' is disabled by {}; the bundled one is not loaded",
+                        skill_md.display()
+                    );
+                } else {
+                    tracing::info!("SkillCatalog: skipping disabled skill '{name}'");
+                }
+                self.set_config_slot(&key, Some(ConfigSkill::Disabled));
+                self.resolve_key(&key);
+                Ok(())
+            }
+            Err(e) => {
+                // A hot edit that no longer parses leaves the loaded entry
+                // listed, failing to run until the file is fixed
+                // (N-SKILL-2); a folder that never loaded holds its key.
+                let loaded = self
+                    .config_layer
+                    .read()
+                    .is_ok_and(|layer| matches!(layer.get(&key), Some(ConfigSkill::Loaded(_))));
+                if !loaded {
+                    self.set_config_slot(&key, Some(ConfigSkill::Withheld));
+                    self.resolve_key(&key);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn set_config_slot(&self, key: &str, slot: Option<ConfigSkill>) {
+        if let Ok(mut layer) = self.config_layer.write() {
+            match slot {
+                Some(slot) => {
+                    layer.insert(key.to_string(), slot);
+                }
+                None => {
+                    layer.remove(key);
+                }
+            }
+        }
+    }
+
+    fn bundled_entry(&self, key: &str) -> Option<SkillEntry> {
+        self.bundled.read().ok()?.get(key).cloned()
+    }
+
+    /// Whether `skill_dir` is a folder of the config directory's `skills/`.
+    fn is_config_folder(&self, skill_dir: Option<&Path>) -> bool {
+        let Some(parent) = skill_dir.and_then(Path::parent) else {
+            return false;
+        };
+        self.config_dir
+            .read()
+            .is_ok_and(|config| config.as_deref() == Some(parent))
+    }
+
+    /// Put on `key` what the layers say runs there (L-2): the config
+    /// directory's loaded folder; else — unless a config folder holds the key
+    /// with nothing runnable — the bundled skill. A plugin's skill on the key
+    /// stays (P-3: it goes over both, as over a file skill today), and so
+    /// does one some other scan loaded.
+    fn resolve_key(&self, key: &str) {
+        let live = self.get_by_id(key);
+        if let Some(live) = &live
+            && live.scope != SkillScope::Bundled
+            && !self.is_config_folder(live.skill_dir.as_deref())
+        {
+            return;
+        }
+        let slot = self
+            .config_layer
+            .read()
+            .ok()
+            .and_then(|layer| layer.get(key).cloned());
+        let wanted = match slot {
+            Some(ConfigSkill::Loaded(entry)) => Some(*entry),
+            Some(ConfigSkill::Disabled | ConfigSkill::Withheld) => None,
+            Some(ConfigSkill::SetAside { .. }) | None => self.bundled_entry(key),
+        };
+        match wanted {
+            Some(entry) => self.insert_live(key, entry),
+            None if live.is_some() => self.remove_live(key),
+            None => {}
+        }
+    }
+
+    /// Take `key`'s entry off the catalog, with its index entries.
+    fn remove_live(&self, key: &str) {
+        let removed = self
+            .entries
+            .write()
+            .ok()
+            .and_then(|mut entries| entries.remove(key));
+        if let Some(entry) = removed {
+            self.remove_index_entries(
+                entry.frontmatter.effective_slash_command().as_deref(),
+                &entry.frontmatter.invoke.aliases,
+            );
+        }
+        self.invalidate_summary_cache();
+    }
+
+    /// What runs under `key` beyond its scope (R-2): whether a config folder
+    /// overrides the bundled skill, and what is not used — the bundled skill
+    /// under an override, a folder set aside as an unedited copy.
+    pub fn provenance(&self, key: &str) -> SkillProvenance {
+        let key = key.to_lowercase();
+        let mut provenance = SkillProvenance::default();
+        let live = self.get_by_id(&key);
+        let slot = self
+            .config_layer
+            .read()
+            .ok()
+            .and_then(|layer| layer.get(&key).cloned());
+        if let Some(ConfigSkill::SetAside { folder, version }) = slot {
+            provenance.not_used.push(SkillNotUsed {
+                source: "file",
+                path: Some(folder),
+                reason: "unedited_copy",
+                version: Some(version),
+            });
+        }
+        if let (Some(live), Some(bundled)) = (live, self.bundled_entry(&key))
+            && live.scope == SkillScope::Project
+            && matches!(live.source, SkillSource::FileBased)
+            && self.is_config_folder(live.skill_dir.as_deref())
+        {
+            provenance.overrides_bundled = true;
+            provenance.not_used.push(SkillNotUsed {
+                source: "bundled",
+                path: bundled.skill_dir,
+                reason: "overridden",
+                version: None,
+            });
+        }
+        provenance
+    }
+
+    /// The roots a skill script is told (K-5): the config directory's
+    /// `skills/` and the pack, each when known.
+    pub fn skill_roots(&self) -> SkillRoots {
+        SkillRoots {
+            config: self.config_dir.read().ok().and_then(|dir| dir.clone()),
+            bundled: if self.bundled.read().is_ok_and(|b| !b.is_empty()) {
+                self.pack_root.read().ok().and_then(|root| root.clone())
+            } else {
+                None
+            },
+        }
+    }
+
+    /// §1.3's start line for skills, `INFO`: the bundled skills and where
+    /// they run from, the folders read from the config directory and the
+    /// keys they override, and the unedited copies set aside.
+    pub fn start_summary(&self) -> String {
+        let bundled = self.bundled.read().map(|b| b.len()).unwrap_or(0);
+        let pack = self.pack_root.read().ok().and_then(|root| root.clone());
+        let config = self.config_dir.read().ok().and_then(|dir| dir.clone());
+        let mut read = 0usize;
+        let mut overriding = Vec::new();
+        let mut set_aside = 0usize;
+        let mut earlier = Vec::new();
+        if let Ok(layer) = self.config_layer.read() {
+            for (key, slot) in layer.iter() {
+                match slot {
+                    ConfigSkill::Loaded(_) => {
+                        read += 1;
+                        if self.provenance(key).overrides_bundled {
+                            overriding.push(key.clone());
+                        }
+                    }
+                    ConfigSkill::SetAside { version, .. } => {
+                        set_aside += 1;
+                        if *version == ShippedVersion::Earlier {
+                            earlier.push(key.clone());
+                        }
+                    }
+                    ConfigSkill::Disabled | ConfigSkill::Withheld => {}
+                }
+            }
+        }
+        overriding.sort();
+        earlier.sort();
+        let bundled = match (&pack, bundled) {
+            (Some(pack), n) if n > 0 => format!("{n} bundled (run from {})", pack.display()),
+            (_, n) => format!("{n} bundled"),
+        };
+        let from = config
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| "no config directory".to_string());
+        let overrides = match overriding.len() {
+            0 => String::new(),
+            k if k == read && k == 1 => {
+                format!(", overriding a bundled skill ({})", overriding.join(", "))
+            }
+            k if k == read => format!(
+                ", each overriding a bundled skill ({})",
+                overriding.join(", ")
+            ),
+            k => format!(
+                ", {k} of them overriding a bundled skill ({})",
+                overriding.join(", ")
+            ),
+        };
+        let copies = match set_aside {
+            0 => "no unedited copy of a shipped version set aside".to_string(),
+            1 => "1 unedited copy of a shipped version set aside, not read".to_string(),
+            m => format!("{m} unedited copies of shipped versions set aside, not read"),
+        };
+        let earlier = match (set_aside, earlier.len()) {
+            (_, 0) => String::new(),
+            (1, _) => format!(" (an earlier version: {})", earlier.join(", ")),
+            (_, 1) => format!(" (1 of them an earlier version: {})", earlier.join(", ")),
+            (_, e) => format!(" ({e} of them earlier versions: {})", earlier.join(", ")),
+        };
+        format!("Skills: {bundled}; {read} from {from}{overrides}; {copies}{earlier}")
+    }
+
+    /// The per-override lines of §1.3, `INFO`, one per config folder that
+    /// runs over a bundled skill, sorted by key.
+    pub fn override_lines(&self) -> Vec<String> {
+        let mut lines: Vec<(String, String)> = Vec::new();
+        if let Ok(layer) = self.config_layer.read() {
+            for (key, slot) in layer.iter() {
+                if let ConfigSkill::Loaded(entry) = slot
+                    && self.provenance(key).overrides_bundled
+                    && let Some(dir) = &entry.skill_dir
+                {
+                    lines.push((
+                        key.clone(),
+                        format!("Skill {} overrides the bundled skill {key}", dir.display()),
+                    ));
+                }
+            }
+        }
+        lines.sort();
+        lines.into_iter().map(|(_, line)| line).collect()
+    }
+
+    /// K-3: before a bundled skill's folder is read, its pack is there — a
+    /// person may delete `state/cache/bundled-skills/` while the daemon runs
+    /// (it is regenerable). Rewritten whole, as at start.
+    fn ensure_pack_for(&self, entry: &SkillEntry) -> Result<(), String> {
+        if entry.scope != SkillScope::Bundled
+            || entry.skill_md_path.as_deref().is_some_and(Path::exists)
+        {
+            return Ok(());
+        }
+        let Some(root) = self.pack_root.read().ok().and_then(|root| root.clone()) else {
+            return Ok(());
+        };
+        bundled::write_skill_pack(&root).map_err(|e| {
+            format!(
+                "The built-in skills could not be written again to {}: {e}",
+                root.display()
+            )
+        })?;
+        tracing::info!(
+            "SkillCatalog: the built-in skills were written again to {}",
+            root.display()
+        );
+        Ok(())
     }
 
     /// Look up a skill by ID (directory name) or by frontmatter name (case-insensitive).
@@ -713,6 +1212,10 @@ impl SkillCatalog {
             .get(name)
             .ok_or_else(|| format!("Skill '{}' not found in catalog", name))?;
 
+        // Its scripts and context files are read from the same folder, after
+        // this call, by both invocation paths.
+        self.ensure_pack_for(&entry)?;
+
         if entry.skill_md_path.is_none() {
             // Plugin skill — return synthetic document
             return Ok(SkillDocument {
@@ -869,16 +1372,27 @@ impl SkillCatalog {
     /// listed with its warnings, but the skill does not run: every invocation
     /// reads the file again ([`load_full`](Self::load_full)) and fails with
     /// the file's error until the file is fixed.
+    ///
+    /// A folder of the config directory the daemon read
+    /// ([`Self::scan_config_layer`]) is re-classified and its key resolved
+    /// (L-5): a deleted override brings the bundled skill back, and a deleted
+    /// unedited copy changes nothing.
     pub fn reload_skill(&self, skill_dir: &Path) -> Result<(), String> {
         let skill_md = skill_dir.join("SKILL.md");
         let earlier = self.take_diagnostics_under(skill_dir);
-        let result = self.reload_skill_in(skill_dir, &skill_md);
+        let result = if self.is_config_folder(Some(skill_dir)) {
+            self.apply_config_folder(skill_dir)
+        } else {
+            self.reload_skill_in(skill_dir, &skill_md)
+        };
         if result.is_err() && self.loads_from(skill_dir) {
             // What was found in the entry still listed still describes it;
-            // slash conflicts are recomputed below.
+            // slash conflicts are recomputed below, and a config folder's
+            // stale shipped files were noted again from disk (W-2).
             let kept = earlier.into_iter().filter(|d| {
                 d.severity == SkillDiagnosticSeverity::Warning
                     && d.code != SkillDiagnosticCode::SlashConflict
+                    && d.code != SkillDiagnosticCode::StaleShippedFile
             });
             if let Ok(mut found) = self.diagnostics.write() {
                 found.extend(kept);
@@ -898,15 +1412,21 @@ impl SkillCatalog {
     }
 
     fn reload_skill_in(&self, skill_dir: &Path, skill_md: &Path) -> Result<(), String> {
-        // Determine the scope of the existing entry (default to Project)
+        // The scope of the existing entry, when it was loaded from the same
+        // directory (L-2a): a folder over another directory's skill of its
+        // key — a bundled one, say — is not that skill's scope. Else Project.
         let existing_scope = skill_dir
             .file_name()
             .and_then(|n| n.to_str())
             .and_then(|dir_name| {
-                self.entries
-                    .read()
-                    .ok()
-                    .and_then(|guard| guard.get(&dir_name.to_lowercase()).map(|e| e.scope))
+                self.entries.read().ok().and_then(|guard| {
+                    guard
+                        .get(&dir_name.to_lowercase())
+                        .filter(|e| {
+                            e.skill_dir.as_deref().and_then(Path::parent) == skill_dir.parent()
+                        })
+                        .map(|e| e.scope)
+                })
             })
             .unwrap_or(SkillScope::Project);
 
@@ -1220,6 +1740,9 @@ mod diagnostics_tests;
 #[cfg(test)]
 mod plugin_removal_tests;
 
+#[cfg(test)]
+mod bundle_tests;
+
 /// `<available_skills>`: the one renderer of the catalog for a prompt.
 mod prompt;
 pub use prompt::{AVAILABLE_SKILLS_DESCRIPTION_CHARS, SkillsAudience, render_available_skills};
@@ -1230,6 +1753,26 @@ use diagnostics::read_skill_md;
 pub use diagnostics::{
     MAX_SKILL_MD_BYTES, SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity,
 };
+
+/// A skill folder's key: its name, lowercased.
+fn skill_key(skill_dir: &Path) -> Result<String, String> {
+    skill_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_lowercase)
+        .ok_or_else(|| "invalid directory name".to_string())
+}
+
+/// The slash command and aliases a skill claims, without their `/`,
+/// lowercased — the keys its tombstones would be under.
+fn claimed_commands(frontmatter: &SkillFrontmatter) -> Vec<String> {
+    frontmatter
+        .effective_slash_command()
+        .into_iter()
+        .chain(frontmatter.invoke.aliases.iter().cloned())
+        .map(|c| c.strip_prefix('/').unwrap_or(&c).to_lowercase())
+        .collect()
+}
 
 /// Design 09 §12.3: the slash names a skill claims — its slash command, its
 /// aliases and its id (the `/{skill_id}` fallback of

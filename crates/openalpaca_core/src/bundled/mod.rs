@@ -1,7 +1,7 @@
-//! The bundled layer: the agent templates OpenAlpaca ships, carried in the
-//! binary (subagent design §2.1 B-1, `tasks/subagent-brief-design.md`), and
-//! the shipped-versions list that tells an earlier build's unedited copy
-//! from a person's edit (§2.2).
+//! The bundled layer: the agent templates and skills OpenAlpaca ships,
+//! carried in the binary (subagent design §2.1 B-1,
+//! `tasks/subagent-brief-design.md`), and the shipped-versions list that
+//! tells an earlier build's unedited copy from a person's edit (§2.2).
 //!
 //! The templates are registered from these bytes at every start; nothing is
 //! written into `config/agents/`. A file there overrides the bundled template
@@ -9,10 +9,21 @@
 //! (an earlier build seeded it, or a person copied the repository's
 //! `config/`), in which case it is set aside at load: not read, not touched,
 //! listed as not used, and the bundled template runs (V-1).
+//!
+//! A skill is read from files at every invocation — its scripts run from
+//! its folder — so the skills are written, whole, into the machine's
+//! `state/cache/bundled-skills/` at each start ([`write_skill_pack`], §2.6
+//! K-2) and run from there; nothing is written into `config/skills/`. A
+//! folder there named like a bundled skill overrides it, unless every file
+//! in it is a version OpenAlpaca shipped at its path
+//! ([`classify_skill_dir`], V-5).
 
 use crate::agent::template::{AgentTemplate, parse_agent_markdown};
+use crate::middleware::skill::{SkillScope, parse_skill_frontmatter};
+use crate::orchestrator::skill_catalog::{SkillEntry, SkillSource};
 use openalpaca_storage::hash::sha256_hex;
-use std::sync::LazyLock;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 /// One embedded file: its path relative to `config/`, `/`-separated, and
 /// its bytes as committed.
@@ -43,6 +54,20 @@ pub const BUNDLED_AGENTS: &[BundledFile] = &[
     bundled!("agents/review_agent.md"),
     bundled!("agents/system_agent.md"),
     bundled!("agents/writing_agent.md"),
+];
+
+/// The four shipped skills, each a folder under `skills/`. Their source is
+/// the repository's `config/skills/` (B-2), as for the templates.
+/// `create-skill` carries helper scripts, which the pack writes executable.
+pub const BUNDLED_SKILLS: &[BundledFile] = &[
+    bundled!("skills/code-review/SKILL.md"),
+    bundled!("skills/commit-message/SKILL.md"),
+    bundled!("skills/create-skill/SKILL.md"),
+    bundled!("skills/create-skill/scripts/check_exists.sh"),
+    bundled!("skills/create-skill/scripts/list_skills.sh"),
+    bundled!("skills/create-skill/scripts/scaffold.sh"),
+    bundled!("skills/create-skill/scripts/write_skill_md.sh"),
+    bundled!("skills/explain-code/SKILL.md"),
 ];
 
 /// Every version OpenAlpaca shipped of each bundled path, one line each:
@@ -156,6 +181,252 @@ pub fn classify_agent_file(bytes: &[u8]) -> Option<ShippedCopy> {
             version: ShippedVersion::Earlier,
             edit: line.edit,
         })
+}
+
+/// The bundled skills' keys — each one's folder name under `skills/` — in
+/// path order.
+pub fn bundled_skill_keys() -> impl Iterator<Item = &'static str> {
+    BUNDLED_SKILLS
+        .iter()
+        .filter_map(|file| file.path.strip_prefix("skills/")?.strip_suffix("/SKILL.md"))
+}
+
+/// Whether `key` (a folder name, lowercased) is a bundled skill's.
+pub fn is_bundled_skill(key: &str) -> bool {
+    bundled_skill_keys().any(|bundled| bundled == key)
+}
+
+/// The bundled skills as catalog entries, read from the binary's bytes and
+/// pointing into the pack at `pack_root`, where they run from
+/// ([`write_skill_pack`]). Scope [`SkillScope::Bundled`]. A bundled
+/// `SKILL.md` that does not parse is left out with an `ERROR` —
+/// `bundled::tests` refuses such a build.
+pub fn bundled_skill_entries(pack_root: &Path) -> Vec<(String, SkillEntry)> {
+    BUNDLED_SKILLS
+        .iter()
+        .filter_map(|file| {
+            let key = file
+                .path
+                .strip_prefix("skills/")?
+                .strip_suffix("/SKILL.md")?;
+            match parse_skill_frontmatter(file.contents) {
+                Ok(frontmatter) => {
+                    let skill_dir = pack_root.join(key);
+                    Some((
+                        key.to_string(),
+                        SkillEntry {
+                            frontmatter,
+                            skill_md_path: Some(skill_dir.join("SKILL.md")),
+                            skill_dir: Some(skill_dir),
+                            scope: SkillScope::Bundled,
+                            source: SkillSource::FileBased,
+                        },
+                    ))
+                }
+                Err(e) => {
+                    tracing::error!("The bundled skill {} does not parse: {e}", file.path);
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// One writer of the pack at a time: the start and a skill's ensure-on-use
+/// (K-3) may meet.
+static PACK_LOCK: Mutex<()> = Mutex::new(());
+
+/// Write the bundled skills, whole, into `root` (subagent design §2.6 K-2):
+/// into `<root>.new/` first — files `0444`, `.sh` files `0555`, directories
+/// `0755` on unix, saying "not for editing" — then the old `root` removed and
+/// the new one renamed into place. A `<root>.new/` a crash left is removed
+/// first. One daemon holds a store (`openalpacad.lock`) and no skill runs
+/// before the catalog is built, so no reader is on an older pack; a hand
+/// edit inside it never outlives a restart.
+pub fn write_skill_pack(root: &Path) -> std::io::Result<()> {
+    let _one_writer = PACK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let name = root.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} names no folder", root.display()),
+        )
+    })?;
+    let mut new_name = name.to_os_string();
+    new_name.push(".new");
+    let staging = root.with_file_name(new_name);
+    if std::fs::symlink_metadata(&staging).is_ok() {
+        remove_entry(&staging)?;
+    }
+    if let Some(parent) = staging.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::create_dir(&staging)?;
+    set_mode(&staging, 0o755)?;
+    for file in BUNDLED_SKILLS {
+        let Some(relative) = file.path.strip_prefix("skills/") else {
+            continue;
+        };
+        let mut dir = staging.clone();
+        for part in Path::new(relative)
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+        {
+            dir.push(part);
+            if !dir.is_dir() {
+                std::fs::create_dir(&dir)?;
+                set_mode(&dir, 0o755)?;
+            }
+        }
+        let target = staging.join(relative);
+        std::fs::write(&target, file.contents)?;
+        let script = target.extension().and_then(|e| e.to_str()) == Some("sh");
+        set_mode(&target, if script { 0o555 } else { 0o444 })?;
+    }
+    if std::fs::symlink_metadata(root).is_ok() {
+        remove_entry(root)?;
+    }
+    std::fs::rename(&staging, root)
+}
+
+/// Remove a file, a link (never what it leads to) or a folder and all in it.
+fn remove_entry(path: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(path)?.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// Elsewhere no mode is set, and scripts do not run, as before (DU-33,
+/// macOS first).
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// What a folder under `<config>/skills/` named like a bundled skill is
+/// (subagent design §2.2 V-5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillFolder {
+    /// Every regular file in it is byte-identical to a version shipped at its
+    /// path, so it is set aside and the bundled skill runs. `Current` when
+    /// each is this build's version, else `Earlier`. A file missing is
+    /// allowed: an unedited copy of a skill the bundle later gave a file is
+    /// still one.
+    UneditedCopy(ShippedVersion),
+    /// The person's — a file edited, or added where no build shipped one —
+    /// so it overrides the bundled skill. `stale` names, relative to the
+    /// folder and `/`-separated, each file still an earlier shipped version
+    /// of its path that the bundle has since changed: the override runs the
+    /// old file (W-2).
+    Yours { stale: Vec<String> },
+}
+
+/// Classify `<config>/skills/<key>/` against the shipped versions (V-5),
+/// or None when `key` is no bundled skill's (V-6: only a folder that would
+/// hide a bundled skill is set aside). Every regular file under the folder
+/// counts, recursively, by its bytes as on disk — modes ignored, a
+/// `.DS_Store` ignored (Finder writes one into a folder merely opened); a
+/// link, or anything that is neither a file nor a folder, makes the folder
+/// the person's, as does a file that cannot be read. The rule errs only
+/// towards "yours". The caller has seen the folder's `SKILL.md`.
+pub fn classify_skill_dir(key: &str, dir: &Path) -> Option<SkillFolder> {
+    classify_skill_dir_against(BUNDLED_SKILLS, key, dir)
+}
+
+/// [`classify_skill_dir`] against `bundle`, the current versions — the
+/// binary's, or a test's.
+pub(crate) fn classify_skill_dir_against(
+    bundle: &[BundledFile],
+    key: &str,
+    dir: &Path,
+) -> Option<SkillFolder> {
+    if !is_bundled_skill(key) {
+        return None;
+    }
+    let mut files = Vec::new();
+    if !regular_files(dir, dir, &mut files) {
+        return Some(SkillFolder::Yours { stale: Vec::new() });
+    }
+    files.sort();
+    let mut edited = false;
+    let mut earlier = false;
+    let mut stale = Vec::new();
+    for (relative, path) in files {
+        let shipped_path = format!("skills/{key}/{relative}");
+        let Ok(bytes) = std::fs::read(&path) else {
+            edited = true;
+            continue;
+        };
+        let hash = sha256_hex(&bytes);
+        let current = bundle
+            .iter()
+            .find(|file| file.path == shipped_path)
+            .map(|file| sha256_hex(file.contents.as_bytes()));
+        if current.as_deref() == Some(hash.as_str()) {
+            continue;
+        }
+        if shipped_lines().any(|line| line.hash == hash && line.path == shipped_path) {
+            earlier = true;
+            if current.is_some() {
+                stale.push(relative);
+            }
+        } else {
+            edited = true;
+        }
+    }
+    Some(if edited {
+        SkillFolder::Yours { stale }
+    } else if earlier {
+        SkillFolder::UneditedCopy(ShippedVersion::Earlier)
+    } else {
+        SkillFolder::UneditedCopy(ShippedVersion::Current)
+    })
+}
+
+/// Every regular file under `dir`, with its path relative to `root`
+/// (`/`-separated), `.DS_Store` left out. False at the first entry that is a
+/// link or neither a file nor a folder, or a folder that cannot be read.
+fn regular_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> bool {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in read_dir {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            return false;
+        };
+        if meta.is_dir() {
+            if !regular_files(root, &path, out) {
+                return false;
+            }
+        } else if meta.is_file() {
+            if entry.file_name() == ".DS_Store" {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                return false;
+            };
+            let relative: Vec<String> = relative
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            out.push((relative.join("/"), path));
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

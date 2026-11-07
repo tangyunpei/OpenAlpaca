@@ -135,12 +135,21 @@ fn listed(hash: &str, path: &str, edit: Option<ManualEdit>) -> bool {
 #[test]
 fn every_bundled_file_is_a_shipped_version() {
     let mut missing = Vec::new();
-    for file in BUNDLED_AGENTS {
+    for file in BUNDLED_AGENTS.iter().chain(BUNDLED_SKILLS) {
         let hash = sha256_hex(file.contents.as_bytes());
         if !listed(&hash, file.path, None) {
             missing.push(format!("{hash} {}", file.path));
         }
+    }
+    for file in BUNDLED_AGENTS {
         parse_agent_markdown(file.contents)
+            .unwrap_or_else(|e| panic!("the bundled {} does not parse: {e}", file.path));
+    }
+    for file in BUNDLED_SKILLS
+        .iter()
+        .filter(|f| f.path.ends_with("/SKILL.md"))
+    {
+        crate::middleware::skill::parse_skill_markdown(file.contents)
             .unwrap_or_else(|e| panic!("the bundled {} does not parse: {e}", file.path));
     }
     assert!(
@@ -150,6 +159,10 @@ fn every_bundled_file_is_a_shipped_version() {
         missing.join("\n")
     );
     assert_eq!(bundled_templates().len(), BUNDLED_AGENTS.len());
+    assert_eq!(
+        bundled_skill_entries(Path::new("/pack")).len(),
+        bundled_skill_keys().count()
+    );
 }
 
 /// V-3: the list is append-only. Every line of the floor is still there,
@@ -289,4 +302,151 @@ fn no_shipped_agent_template_claims_the_main_loop_s_id() {
     // And it is a name, not the absence of one.
     assert_ne!(MAIN_LOOP_AGENT_ID, "unknown");
     assert!(!MAIN_LOOP_AGENT_ID.is_empty());
+}
+
+// ── The skill pack (§2.6 K-2) ────────────────────────────────────────────
+
+/// Every file and folder under `root`, each with its mode, relative and
+/// `/`-separated.
+#[cfg(unix)]
+fn modes_under(root: &Path) -> Vec<(String, u32)> {
+    use std::os::unix::fs::PermissionsExt;
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u32)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, meta.permissions().mode() & 0o777));
+            if meta.is_dir() {
+                walk(root, &path, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// K-2: the pack is the bundle, whole, at each start — a file a person put
+/// in it, or edited, does not outlive the next write — and its modes say
+/// "not for editing": files 0444, scripts 0555, folders 0755.
+#[cfg(unix)]
+#[test]
+fn the_pack_is_rewritten_whole_at_each_start_and_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
+    let pack = dir.path().join("state/cache/bundled-skills");
+
+    write_skill_pack(&pack).unwrap();
+    // A hand edit and a stray file inside the pack.
+    let skill_md = pack.join("code-review/SKILL.md");
+    std::fs::set_permissions(&skill_md, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(&skill_md, "edited").unwrap();
+    std::fs::write(pack.join("code-review/notes.txt"), "mine").unwrap();
+    write_skill_pack(&pack).unwrap();
+
+    let mut expected: Vec<(String, u32)> = Vec::new();
+    for file in BUNDLED_SKILLS {
+        let rel = file.path.strip_prefix("skills/").unwrap();
+        let mode = if rel.ends_with(".sh") { 0o555 } else { 0o444 };
+        expected.push((rel.to_string(), mode));
+        assert_eq!(
+            std::fs::read_to_string(pack.join(rel)).unwrap(),
+            file.contents,
+            "{rel} is the bundle's"
+        );
+    }
+    for folder in [
+        "code-review",
+        "commit-message",
+        "create-skill",
+        "create-skill/scripts",
+        "explain-code",
+    ] {
+        expected.push((folder.to_string(), 0o755));
+    }
+    expected.sort();
+    assert_eq!(modes_under(&pack), expected);
+    assert_eq!(
+        std::fs::read_dir(pack.parent().unwrap()).unwrap().count(),
+        1,
+        "nothing beside the pack is left"
+    );
+}
+
+/// K-2: a `bundled-skills.new/` a crash left — even a read-only one — is
+/// removed before the next write, and never mistaken for the pack.
+#[cfg(unix)]
+#[test]
+fn a_leftover_new_pack_directory_is_removed_at_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
+    let cache = dir.path().join("state/cache");
+    let leftover = cache.join("bundled-skills.new/half-written");
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("SKILL.md"), "half").unwrap();
+    std::fs::set_permissions(
+        leftover.join("SKILL.md"),
+        std::fs::Permissions::from_mode(0o444),
+    )
+    .unwrap();
+
+    write_skill_pack(&cache.join("bundled-skills")).unwrap();
+
+    let mut names: Vec<String> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["bundled-skills"]);
+    assert!(!cache.join("bundled-skills/half-written").exists());
+}
+
+/// V-5 against a bundle that gained a file: an unedited copy of an earlier
+/// version that lacks it is still an unedited copy, and so is a copy of the
+/// current version missing one of its files.
+#[test]
+fn a_skill_folder_missing_a_shipped_file_is_still_an_unedited_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().join("home"));
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/bundled/fixtures/82022776/skills/create-skill");
+    let mut gained: Vec<BundledFile> = BUNDLED_SKILLS
+        .iter()
+        .map(|f| BundledFile {
+            path: f.path,
+            contents: f.contents,
+        })
+        .collect();
+    gained.push(BundledFile {
+        path: "skills/create-skill/scripts/fifth.sh",
+        contents: "#!/bin/sh\n",
+    });
+    assert_eq!(
+        classify_skill_dir_against(&gained, "create-skill", &fixture),
+        Some(SkillFolder::UneditedCopy(ShippedVersion::Earlier))
+    );
+
+    let copy = dir.path().join("create-skill");
+    for file in BUNDLED_SKILLS
+        .iter()
+        .filter(|f| f.path.starts_with("skills/create-skill/"))
+    {
+        let target = copy.join(file.path.strip_prefix("skills/create-skill/").unwrap());
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, file.contents).unwrap();
+    }
+    std::fs::remove_file(copy.join("scripts/check_exists.sh")).unwrap();
+    assert_eq!(
+        classify_skill_dir("create-skill", &copy),
+        Some(SkillFolder::UneditedCopy(ShippedVersion::Current))
+    );
+    assert_eq!(classify_skill_dir("my-skill", &copy), None, "V-6");
 }

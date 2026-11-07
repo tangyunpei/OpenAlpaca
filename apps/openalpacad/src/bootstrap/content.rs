@@ -1,5 +1,6 @@
-//! First-boot content: the skills and tool config the daemon carries in its
-//! own binary (L9), and the empty `agents/` the person's own templates go in.
+//! First-boot content: the tool config the daemon carries in its own binary
+//! (L9), and the empty `agents/` and `skills/` the person's own templates and
+//! skills go in.
 //!
 //! `seed_default_configs` has always written `llm.toml`, `daemon.toml` and
 //! `mcp.toml` on a first boot, and the release packager stages exactly those
@@ -16,11 +17,13 @@
 //! zero files — is theirs; the daemon fills a gap, it does not restore a
 //! default.
 //!
-//! The agent templates are no longer seeded (subagent design §2.5 S-1): they
-//! are a bundled layer the daemon registers from its binary at every start
-//! (`openalpaca_core::bundled`), and `agents/` is created empty, when absent,
-//! for the person's own and overriding files. A seeded copy an earlier build
-//! wrote stays where it is; an unedited one is set aside at load.
+//! The agent templates and the skills are no longer seeded (subagent design
+//! §2.5 S-1): they are a bundled layer the daemon takes from its binary at
+//! every start (`openalpaca_core::bundled`) — the skills written into
+//! `state/cache/bundled-skills/`, where they run — and `agents/` and
+//! `skills/` are created empty, when absent, for the person's own and
+//! overriding files. A seeded copy an earlier build wrote stays where it is;
+//! an unedited one is set aside at load.
 
 use std::path::Path;
 use tracing::{info, warn};
@@ -50,43 +53,24 @@ macro_rules! seed {
     };
 }
 
-/// The four shipped skills. `create-skill` carries helper scripts, which have
-/// to land executable or the skill cannot run them.
-const SKILLS: &[SeedFile] = &[
-    seed!("skills/code-review/SKILL.md"),
-    seed!("skills/commit-message/SKILL.md"),
-    seed!("skills/create-skill/SKILL.md"),
-    seed!("skills/create-skill/scripts/check_exists.sh"),
-    seed!("skills/create-skill/scripts/list_skills.sh"),
-    seed!("skills/create-skill/scripts/scaffold.sh"),
-    seed!("skills/create-skill/scripts/write_skill_md.sh"),
-    seed!("skills/explain-code/SKILL.md"),
-];
-
 /// The custom-tool example. Fully commented, like `mcp.toml`: it is the
 /// documentation of the format as much as it is a file.
 const TOOLS: &[SeedFile] = &[seed!("tools/example.toml")];
 
-const SEED_DIRS: &[SeedDir] = &[
-    SeedDir {
-        name: "skills",
-        label: "skill",
-        files: SKILLS,
-    },
-    SeedDir {
-        name: "tools",
-        label: "tool config",
-        files: TOOLS,
-    },
-];
+const SEED_DIRS: &[SeedDir] = &[SeedDir {
+    name: "tools",
+    label: "tool config",
+    files: TOOLS,
+}];
 
 /// The directories created empty when absent, and never filled: `agents/`
-/// holds the person's own templates and their overrides of the bundled ones
-/// (S-1). Created so the watcher has the path from the first start (L-6) and
-/// the template routes a place to write.
-const EMPTY_DIRS: &[&str] = &["agents"];
+/// and `skills/` hold the person's own templates and skills and their
+/// overrides of the bundled ones (S-1). Created so the watcher has the paths
+/// from the first start (L-6), the template routes a place to write, and
+/// `create-skill` the directory it writes into.
+const EMPTY_DIRS: &[&str] = &["agents", "skills"];
 
-/// Create `config/agents` empty, and seed `config/skills` and `config/tools`,
+/// Create `config/agents` and `config/skills` empty, and seed `config/tools`,
 /// when they are absent.
 ///
 /// Called from [`super::seed_default_configs`], before anything reads them.
@@ -124,10 +108,7 @@ pub(super) fn seed_default_content(config_dir: &Path) {
                 continue;
             }
             match std::fs::write(&target, file.contents) {
-                Ok(()) => {
-                    make_executable_if_script(&target);
-                    written += 1;
-                }
+                Ok(()) => written += 1,
                 Err(e) => warn!("Failed to seed {}: {e}", target.display()),
             }
         }
@@ -141,19 +122,3 @@ pub(super) fn seed_default_content(config_dir: &Path) {
         }
     }
 }
-
-/// A skill's helper scripts are executed, so they land with the mode git
-/// records for them. `include_str!` carries bytes, never permissions.
-#[cfg(unix)]
-fn make_executable_if_script(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    if path.extension().and_then(|e| e.to_str()) != Some("sh") {
-        return;
-    }
-    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)) {
-        warn!("Seeded {} but could not make it executable: {e}", path.display());
-    }
-}
-
-#[cfg(not(unix))]
-fn make_executable_if_script(_path: &Path) {}

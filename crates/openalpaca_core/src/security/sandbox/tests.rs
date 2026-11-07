@@ -1759,6 +1759,7 @@ fn traversal_sandbox(skill_dir: &std::path::Path) -> SandboxManager {
             interpreter: Some("sh".to_string()),
             timeout_secs: 5,
         },
+        crate::tools::builtins::SkillRoots::default(),
     )
     .unwrap();
     registry

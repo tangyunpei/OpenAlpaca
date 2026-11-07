@@ -323,25 +323,31 @@ using with an older build is the second case it names. To switch over:
    longer ask by default. A skill's `permissions.confirm.tools` list works the
    same way. The templates this build ships carry no such list.
 
-9. **Take this build's `create-skill`, if you use it.**
-   `~/.openalpaca/config/skills/` is also written only when it is absent, so
-   a store an earlier build set up keeps that build's `create-skill`, scripts
-   and all. Asked for a skill in its `user` scope, those scripts wrote it
-   under `~/.config/openalpaca/skills/`, a folder the daemon never reads, and
-   reported success: the skill never loaded. This build's scripts write only
-   to the folder the daemon reads skills from, and refuse any other scope,
-   naming that folder. To take them, stop the daemon and move
-   `~/.openalpaca/config/skills/` aside; start the daemon, which writes the
-   four shipped skills into a new `skills/`, and stop it again; move back
-   every folder you want to keep but `create-skill` — your own skills, and a
-   shipped one you edited — and start it. Where the start wrote a folder of
-   the same name — a shipped skill you edited (`code-review`, `commit-message`
-   or `explain-code`), or one of yours named like a shipped skill — delete
-   that new folder first, then move yours back in its place. A skill the old
-   scripts wrote under `~/.config/openalpaca/skills/` loads once you move its
-   folder into `~/.openalpaca/config/skills/`. A store you already switched
-   over with an earlier build — one this build opens without the message
-   above — keeps that build's `create-skill` too: do this step on it as well.
+9. **Check `create-skill`, if you edited it.**
+   `~/.openalpaca/config/skills/` survives the reset too, so a store an
+   earlier build set up keeps that build's `create-skill`, scripts and all.
+   Asked for a skill in its `user` scope, those scripts wrote it under
+   `~/.config/openalpaca/skills/`, a folder the daemon never reads, and
+   reported success: the skill never loaded. A copy you never edited needs
+   nothing: this build's skills are built in, and a skill folder whose every
+   file is byte-identical to a version an earlier build shipped is not read
+   (a `.DS_Store` aside, and a file missing is allowed); this build's
+   `create-skill` runs, writing new skills only into
+   `~/.openalpaca/config/skills/` and refusing any other scope, naming that
+   folder; `GET /v1/skills` names the copy as not used, and
+   `state/logs/daemon.log` counts the copies set aside at each start, naming
+   each one that is an earlier version. The same holds for an
+   unedited `code-review`, `commit-message` or `explain-code`. A
+   `create-skill` you edited is yours and runs instead of the built-in one;
+   if it still holds the old scripts, `GET /v1/skills/diagnostics` (and
+   `openalpaca skills list`) names each one as the version an earlier build
+   shipped, which this override runs. To take this build's, move your
+   `create-skill` folder out of `~/.openalpaca/config/skills/`: the built-in
+   one runs at once. A skill the old scripts wrote under
+   `~/.config/openalpaca/skills/` loads once you move its folder into
+   `~/.openalpaca/config/skills/`. A store you already switched over with an
+   earlier build — one this build opens without the message above — is the
+   same.
 
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
 there is out of date — it may describe no `projects/` folder, list `skills/`
@@ -373,16 +379,18 @@ build created. To go back, stop this build and run the older one against the
 copy you kept in step 1.
 
 Two things differ going back to a build from before the built-in agent
-templates (2026-11). A store *first* started by this build has an empty
-`agents/`: an earlier build skips a directory that exists, finds no template
-and answers "No agent templates are installed…"; delete the empty `agents/`
-folder, and that build's next start writes its templates there. And an
-unedited copy this build lists as not used is still the earlier build's only
-copy: delete it under this build and the earlier one does without it
-(`lead_agent.md` deleted, it borrows another template as its lead —
-`code_agent` on a stock store). The cure is the same: stop
-the daemon, move `agents/` aside, and let the earlier build's next start
-write it again. A file that switches a template off (`disabled: true`, see
+templates and skills (2026-11). A store *first* started by this build has an
+empty `agents/` and an empty `skills/`: an earlier build skips a directory
+that exists, finds no template and answers "No agent templates are
+installed…", and has no skills; delete the empty `agents/` and `skills/`
+folders, and that build's next start writes its templates and skills there.
+And an unedited copy this build lists as not used is still the earlier
+build's only copy: delete it under this build and the earlier one does
+without it (`lead_agent.md` deleted, it borrows another template as its lead
+— `code_agent` on a stock store; `create-skill/` deleted, it has no
+`create-skill`). The cure is the same: stop the daemon, move `agents/` (or
+`skills/`) aside, and let the earlier build's next start write it again. That
+build ignores `~/.openalpaca/state/cache/bundled-skills/`. A file that switches a template off (`disabled: true`, see
 *Upgrade*) means nothing to an earlier build: it skips the line, so a full
 template that says it runs as your template, and the two-line form is
 skipped with a warning that it has no `name`.
@@ -527,11 +535,23 @@ when none is running.
 ### What the first boot writes
 
 A first boot writes the content the daemon carries in its own binary into
-`~/.openalpaca/config`: `llm.toml`, `daemon.toml`, `mcp.toml`, the skills
-(`skills/`) and the tool config (`tools/`). The rule is per directory: a
-directory that already exists is left alone entirely, even one you emptied on
-purpose, and inside a directory being filled an existing file is never
-overwritten.
+`~/.openalpaca/config`: `llm.toml`, `daemon.toml`, `mcp.toml` and the tool
+config (`tools/`). The rule is per directory: a directory that already exists
+is left alone entirely, even one you emptied on purpose, and inside a
+directory being filled an existing file is never overwritten.
+
+The four skills are built in too. At every start the daemon writes them,
+whole, into `~/.openalpaca/state/cache/bundled-skills/` — the machine's
+folder, rewritten each time, its files read-only — and runs them from there;
+it writes none into `config/`. It creates `skills/` empty, when absent, for
+skills of your own, the ones `create-skill` writes, and overrides: a folder
+there named like a built-in skill runs instead of it, and deleting the folder
+brings the built-in one back, without a restart. A folder whose every file is
+byte-identical to a version OpenAlpaca shipped is not read and not touched,
+as for the templates below; a `.DS_Store` does not count, and a file missing
+from it is allowed. Change or add a file and the folder is yours. A folder
+of yours whose `SKILL.md` says `invoke.mode: disabled` switches the built-in
+skill of its name off.
 
 The nine agent templates are built in: the daemon registers them from its
 binary at every start and writes none of them. It creates `agents/` empty,
@@ -542,8 +562,8 @@ OpenAlpaca shipped — a copy an earlier build wrote, or one copied from the
 repository's `config/agents/` — is not read and not touched: the built-in
 template runs, so its later fixes reach you. To keep such a copy's text on
 purpose, change any byte of it (a comment line will do); it is then yours.
-At each start `state/logs/daemon.log` says how many templates are built in,
-which files override one and which copies are not read.
+At each start `state/logs/daemon.log` says how many templates and skills are
+built in, which files and folders override one and which copies are not read.
 
 It also creates the persona documents in `~/.openalpaca/config/orchestrator/`
 — `SOUL.md`, `USER.md`, `IDENTITY.md` and `BOOTSTRAP.md` — and the memory
@@ -799,9 +819,14 @@ leftover lines which would let that agent write and edit your project's files
 and run commands in it without asking, step 7 of the switch-over removes them,
 and `daemon.log` warns about them meanwhile. Where you had deleted a shipped
 template and a plugin's template of the same id filled it, the built-in
-template runs again and the plugin's is listed as refused. The store also
-keeps that build's `create-skill`, whose `user` scope wrote skills where the
-daemon never reads them; step 9 says how to take this build's copy.
+template runs again and the plugin's is listed as refused. The skills are
+the same: an unedited skill folder an earlier build wrote into `skills/` is
+no longer read, and this build's skill runs — `create-skill` among them,
+whose earlier scripts wrote `user`-scope skills where the daemon never reads
+them; this build's writes into `config/skills/` with no hand step. A skill
+folder you edited still overrides the built-in one, and the diagnostics name
+any script in it an earlier build shipped (step 9). A plugin's skill of the
+same name still goes over both, as it went over a file skill before.
 
 An emptied `agents/` no longer means "no templates". To switch a built-in
 template off, put a file in `agents/` holding its `id:` and
