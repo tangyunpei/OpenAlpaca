@@ -278,7 +278,7 @@ Skills can bundle executable scripts in a `scripts/` directory and expose them a
 | `scripts[].description` | `String` | — (required) | Human-readable description shown in the tool definition. |
 | `scripts[].parameters` | JSON Schema | `{"type": "object", "properties": {}}` | JSON Schema describing the tool's input parameters. |
 | `scripts[].interpreter` | `Option<String>` | `None` | Interpreter to run the script (e.g., `"python3"`, `"node"`). If omitted, the script is executed directly — it must be executable (`chmod +x`) with a shebang. |
-| `scripts[].timeout_secs` | `u64` | `30` | Maximum execution time in seconds before the script is killed. |
+| `scripts[].timeout_secs` | `u64` | `30` | Maximum execution time in seconds before the script is killed. The sandbox also ends every tool call at `[execution.agent_defaults] max_tool_runtime_secs` in `config/daemon.toml` (120 by default), and a script may not ask for more, so set this below that bound: at or above it, the sandbox's cut comes first. |
 
 A missing required field (`file`, `name`, or `description`) is a YAML parse error that prevents the **whole skill** from loading.
 
@@ -851,7 +851,7 @@ scripts:                           # Scripts in <skill-dir>/scripts/ exposed as 
           enum: [express, fastapi, actix, rails]
           description: "API framework to target"
       required: [directory]
-    timeout_secs: 120              # 2 minutes for large codebases
+    timeout_secs: 110              # under the sandbox's 120 s per-tool bound
   - file: check_deps.py            # Python script with explicit interpreter
     name: check_dependencies
     description: "Check project dependencies against known vulnerability databases"
@@ -1109,6 +1109,9 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 
 **"Script timed out after Ns"**
 - The script exceeded its `timeout_secs` (default 30). Increase the timeout in the `scripts:` declaration or optimize the script.
+
+**"Tool 'skill_script:X' timed out after 120s"**
+- The sandbox's per-tool bound, `[execution.agent_defaults] max_tool_runtime_secs` (120 by default), ended the call before the script's own `timeout_secs`. A script cannot ask for more, so a `timeout_secs` above the bound changes nothing: raise `max_tool_runtime_secs` in `config/daemon.toml` (it applies to every tool call), or make the script faster.
 
 **"Script failed (exit N): ..."**
 - Non-zero exit status; the first 500 characters of stderr are included. Debug manually: `cd config/skills/<id> && ./scripts/<file> --key=value`.
