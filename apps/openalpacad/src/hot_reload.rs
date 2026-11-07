@@ -551,14 +551,13 @@ async fn handle_mcp_config_change(ctx: &FileWatcherContext) {
 /// again and resolves over the bundled layer (subagent design §2.4 L-5): a
 /// deleted override brings the bundled skill back, a folder edited out of
 /// being an unedited copy overrides it, and a deleted unedited copy changes
-/// nothing.
+/// nothing. A change under `skills/.archived/` reloads nothing (D-3).
 async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
-    // Determine which skill folder changed
-    if let Ok(relative) = changed_path.strip_prefix(&ctx.skills_dir)
-        && let Some(skill_folder) = relative.components().next()
-    {
-        let skill_dir = ctx.skills_dir.join(skill_folder);
-        let skill_name = skill_folder.as_os_str().to_string_lossy().to_string();
+    if let Some(skill_dir) = changed_skill_folder(&ctx.skills_dir, changed_path) {
+        let skill_name = skill_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
         let action = match ctx.skill_catalog.reload_skill(&skill_dir) {
             Ok(()) => {
                 info!("Skill hot-reloaded: {}", skill_dir.display());
@@ -589,6 +588,20 @@ async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {
                 timestamp: chrono::Utc::now(),
             });
     }
+}
+
+/// The skill folder a change under `skills_dir` belongs to: the first
+/// component under it. None for `skills_dir` itself and for anything under
+/// `.archived/`, where `openalpaca skills tidy --apply` moves the unedited
+/// copies it tidies: nothing there is a skill (subagent design §2.12 D-3),
+/// so the move's own event reloads no folder named like the archive.
+fn changed_skill_folder(skills_dir: &Path, changed_path: &Path) -> Option<PathBuf> {
+    let relative = changed_path.strip_prefix(skills_dir).ok()?;
+    let skill_folder = relative.components().next()?;
+    if skill_folder.as_os_str() == ".archived" {
+        return None;
+    }
+    Some(skills_dir.join(skill_folder))
 }
 
 async fn handle_agents_change(ctx: &FileWatcherContext, changed_path: &Path) {
@@ -633,6 +646,9 @@ mod llm_dedup_tests;
 
 #[cfg(test)]
 mod agents_tests;
+
+#[cfg(test)]
+mod skills_tests;
 
 /// Spawn soul hot-reload subscriber via EventBus (agent-initiated updates).
 ///

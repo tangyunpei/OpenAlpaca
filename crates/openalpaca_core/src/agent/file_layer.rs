@@ -138,9 +138,7 @@ pub fn rescan_file_layer(
     let mut set_aside = Vec::new();
     let mut files_read = Vec::new();
     for file in files {
-        if let (Some(copy), Some(id)) = (file.copy, file.id())
-            && registry.is_bundled(&id)
-        {
+        if let Some((id, copy)) = set_aside_as(&file, |id| registry.is_bundled(id)) {
             layer.set_aside(&id, file.path.clone(), copy);
             set_aside.push((file.path, copy));
             continue;
@@ -447,6 +445,34 @@ fn confirmation_warnings(
             )
         })
         .collect()
+}
+
+/// The id `file` would be set aside under, and what copy it is: a file
+/// byte-identical to a version OpenAlpaca shipped, naming an id
+/// `is_bundled` holds (V-1, V-4, V-6).
+fn set_aside_as(file: &Read, is_bundled: impl Fn(&str) -> bool) -> Option<(String, ShippedCopy)> {
+    let copy = file.copy?;
+    let id = file.id()?;
+    is_bundled(&id).then_some((id, copy))
+}
+
+/// The top-level `.md` files of `agents_dir` that [`rescan_file_layer`]
+/// sets aside against this build's bundled templates, in file-name order,
+/// each with the copy it is — what `openalpaca agents tidy` lists and moves
+/// (subagent design §2.12 D-2). Reads only; a directory that does not exist
+/// holds none.
+pub fn set_aside_copies(agents_dir: &Path) -> std::io::Result<Vec<(PathBuf, ShippedCopy)>> {
+    let bundled: Vec<String> = crate::bundled::bundled_templates()
+        .into_iter()
+        .map(|template| template.frontmatter.id)
+        .collect();
+    Ok(read_template_files(agents_dir)?
+        .into_iter()
+        .filter_map(|file| {
+            let (_, copy) = set_aside_as(&file, |id| bundled.iter().any(|b| b == id))?;
+            Some((file.path, copy))
+        })
+        .collect())
 }
 
 /// Every top-level `.md` in `agents_dir`, read and parsed, in file-name

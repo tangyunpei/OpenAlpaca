@@ -341,6 +341,38 @@ pub fn classify_skill_dir(key: &str, dir: &Path) -> Option<SkillFolder> {
     classify_skill_dir_against(BUNDLED_SKILLS, key, dir)
 }
 
+/// The folders of `skills_dir` the skill catalog sets aside as unedited
+/// copies (V-5) — each a child folder holding a `SKILL.md`, its key its
+/// name lowercased, as the catalog reads it — in file-name order, with the
+/// version each is: what `openalpaca skills tidy` lists and moves (subagent
+/// design §2.12 D-2). Reads only; a directory that does not exist holds
+/// none.
+pub fn set_aside_skill_folders(
+    skills_dir: &Path,
+) -> std::io::Result<Vec<(PathBuf, ShippedVersion)>> {
+    let entries = match std::fs::read_dir(skills_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut folders: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join("SKILL.md").exists())
+        .collect();
+    folders.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    Ok(folders
+        .into_iter()
+        .filter_map(|folder| {
+            let key = folder.file_name()?.to_str()?.to_lowercase();
+            match classify_skill_dir(&key, &folder)? {
+                SkillFolder::UneditedCopy(version) => Some((folder, version)),
+                SkillFolder::Yours { .. } => None,
+            }
+        })
+        .collect())
+}
+
 /// [`classify_skill_dir`] against `bundle`, the current versions — the
 /// binary's, or a test's.
 pub(crate) fn classify_skill_dir_against(

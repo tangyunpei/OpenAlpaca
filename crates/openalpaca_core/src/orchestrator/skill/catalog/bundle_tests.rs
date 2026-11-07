@@ -606,3 +606,48 @@ fn a_plugin_skill_over_a_bundled_key_gives_it_back_when_it_goes() {
     assert!(store.runs_bundled("code-review"));
     assert!(store.catalog.tombstone("code-review").is_none());
 }
+
+/// §2.12 D-2: what `openalpaca skills tidy` lists is what the catalog sets
+/// aside — in file-name order — and not an override, nor a folder of the
+/// person's own.
+#[test]
+fn set_aside_skill_folders_names_exactly_what_the_catalog_sets_aside() {
+    let store = Store::new();
+    let current = store.copy_current("code-review");
+    let earlier = store.seed_82022776_create_skill();
+    edit_skill_md(&store.copy_current("explain-code"));
+    std::fs::create_dir_all(store.skills.join("daily-digest")).unwrap();
+    std::fs::write(
+        store.skills.join("daily-digest/SKILL.md"),
+        "---\nname: daily-digest\ndescription: A digest\n---\nDigest.\n",
+    )
+    .unwrap();
+    store.start();
+
+    assert_eq!(
+        bundled::set_aside_skill_folders(&store.skills).unwrap(),
+        [
+            (current.clone(), ShippedVersion::Current),
+            (earlier.clone(), ShippedVersion::Earlier)
+        ]
+    );
+    for (key, folder, version) in [
+        ("code-review", current, ShippedVersion::Current),
+        ("create-skill", earlier, ShippedVersion::Earlier),
+    ] {
+        assert_eq!(
+            store.catalog.provenance(key).not_used,
+            vec![SkillNotUsed {
+                source: "file",
+                path: Some(folder),
+                reason: "unedited_copy",
+                version: Some(version),
+            }]
+        );
+    }
+    assert!(
+        bundled::set_aside_skill_folders(&store.skills.join("absent"))
+            .unwrap()
+            .is_empty()
+    );
+}

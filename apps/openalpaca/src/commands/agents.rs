@@ -1,11 +1,14 @@
-//! Agents command — list, status, config, pause, resume, set, create, remove
+//! Agents command — list, status, config, pause, resume, set, create, remove, tidy
 
 use anyhow::{Result, bail};
+use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
+use super::tidy;
 use crate::client::DaemonClient;
 use crate::output::{OutputFormat, TableRow, print_list, status_color, truncate};
 
@@ -74,6 +77,12 @@ pub enum AgentsCommands {
     Remove {
         /// Agent ID
         agent_id: String,
+    },
+    /// List the unedited copies of shipped templates in config/agents; --apply moves them to .archived
+    Tidy {
+        /// Move them (without it, nothing moves)
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -194,7 +203,25 @@ pub async fn run(args: AgentsArgs) -> Result<()> {
             }
         }
         AgentsCommands::Remove { agent_id } => remove_agent(&agent_id).await,
+        AgentsCommands::Tidy { apply } => {
+            let (config_dir, daemon) = tidy::target()?;
+            for line in tidy_lines(&config_dir, daemon.as_ref(), apply, Utc::now()).await? {
+                println!("{line}");
+            }
+            Ok(())
+        }
     }
+}
+
+/// What `agents tidy` prints for `config_dir`'s `agents/`, having moved
+/// what it moved (subagent design §2.12; [`tidy`] says how).
+pub(crate) async fn tidy_lines(
+    config_dir: &Path,
+    daemon: Option<&DaemonClient>,
+    apply: bool,
+    now: DateTime<Utc>,
+) -> Result<Vec<String>> {
+    tidy::tidy_lines(tidy::Kind::Agents, config_dir, daemon, apply, now).await
 }
 
 async fn list_agents(status: Option<String>, format: OutputFormat) -> Result<()> {
@@ -514,3 +541,6 @@ async fn remove_agent(agent_id: &str) -> Result<()> {
     println!("{} Agent {} -> {}", "✓".green(), agent_id, status);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

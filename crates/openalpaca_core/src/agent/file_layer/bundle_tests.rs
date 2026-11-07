@@ -514,3 +514,57 @@ fn the_start_log_names_every_set_aside_copy_and_override() {
         )
     );
 }
+
+/// §2.12 D-2: what `openalpaca agents tidy` lists is what the rescan sets
+/// aside — by one rule, in file-name order — and nothing else: not an
+/// edited copy, not the person's own template, not a file switching an id
+/// off.
+#[test]
+fn set_aside_copies_names_exactly_what_the_rescan_sets_aside() {
+    let store = Store::new();
+    let renamed = store.write("my lead.md", bundled("agents/lead_agent.md"));
+    let step_7 = store.write("system_agent.md", &step_7(SYSTEM_AGENT_2BC29A80));
+    store.write(
+        "code_agent.md",
+        &format!("{}\nKeep it short.\n", bundled("agents/code_agent.md")),
+    );
+    store.write(
+        "reader.md",
+        "---\nid: reader\nname: Reader\ndescription: reads\n---\nRead.\n",
+    );
+    store.write(
+        "research_agent.md",
+        "---\nid: research_agent\ndisabled: true\n---\n",
+    );
+    store.rescan(LoadMode::Start);
+
+    let current = ShippedCopy {
+        version: ShippedVersion::Current,
+        edit: None,
+    };
+    let earlier = ShippedCopy {
+        version: ShippedVersion::Earlier,
+        edit: Some(ManualEdit::Step7),
+    };
+    assert_eq!(
+        set_aside_copies(&store.agents).unwrap(),
+        [(renamed.clone(), current), (step_7.clone(), earlier)]
+    );
+    assert_eq!(
+        store.not_used("lead_agent"),
+        [set_aside(&renamed, ShippedVersion::Current, None)]
+    );
+    assert_eq!(
+        store.not_used("system_agent"),
+        [set_aside(
+            &step_7,
+            ShippedVersion::Earlier,
+            Some(ManualEdit::Step7)
+        )]
+    );
+    assert!(
+        set_aside_copies(&store.agents.join("absent"))
+            .unwrap()
+            .is_empty()
+    );
+}

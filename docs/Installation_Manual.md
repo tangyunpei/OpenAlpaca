@@ -386,9 +386,10 @@ that exists, finds no template and answers "No agent templates are
 installed…", and has no skills; delete the empty `agents/` and `skills/`
 folders, and that build's next start writes its templates and skills there.
 And an unedited copy this build lists as not used is still the earlier
-build's only copy: delete it under this build and the earlier one does
-without it (`lead_agent.md` deleted, it borrows another template as its lead
-— `code_agent` on a stock store; `create-skill/` deleted, it has no
+build's only copy: delete it under this build, or move it with
+`openalpaca agents tidy --apply` or `skills tidy --apply`, and the earlier
+one does without it (`lead_agent.md` gone, it borrows another template as
+its lead — `code_agent` on a stock store; `create-skill/` gone, it has no
 `create-skill`). The cure is the same: stop the daemon, move `agents/` (or
 `skills/`) aside, and let the earlier build's next start write it again. That
 build ignores `~/.openalpaca/state/cache/bundled-skills/`. A file that switches a template off (`disabled: true`, see
@@ -828,6 +829,16 @@ them; this build's writes into `config/skills/` with no hand step. A skill
 folder you edited still overrides the built-in one, and the diagnostics name
 any script in it an earlier build shipped (step 9). A plugin's skill of the
 same name still goes over both, as it went over a file skill before.
+
+The unedited copies stay where they are until you move them, and nothing
+moves them for you. `openalpaca agents tidy` and `openalpaca skills tidy`
+list them — each file or folder, whether it is this build's version or an
+earlier one, and where it would go — and move nothing; run either again
+with `--apply` to move them into `agents/.archived/` or `skills/.archived/`,
+where this build never reads them ([CLI Manual →
+`agents`](CLI_Manual.md#agents)). A running daemon is asked first, and a
+copy it still reads is left. Leave them if you may go back to an earlier
+build (*Keep the builds apart*).
 
 An emptied `agents/` no longer means "no templates". To switch a built-in
 template off, put a file in `agents/` holding its `id:` and

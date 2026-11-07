@@ -24,12 +24,19 @@
 //! Both are reads; there is no per-skill switch to write (S1). Every string
 //! the daemon serves is printed with its hidden characters escaped, since a
 //! plugin's skill carries the plugin's own text.
+//!
+//! `openalpaca skills tidy` lists the folders in `config/skills/` that are
+//! unedited copies of shipped skills, set aside and not read, and with
+//! `--apply` moves them to `skills/.archived/` (subagent design §2.12;
+//! `commands::tidy` says how). It reads the files itself, so no daemon
+//! need run.
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
+use super::tidy;
 use crate::client::DaemonClient;
 use crate::output::{OutputFormat, TableRow, table_header_lines, truncate};
 
@@ -54,6 +61,12 @@ pub enum SkillsCommands {
         /// Output format
         #[arg(long, value_enum, default_value = "table")]
         format: OutputFormat,
+    },
+    /// List the unedited copies of shipped skills in config/skills; --apply moves them to .archived
+    Tidy {
+        /// Move them (without it, nothing moves)
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -415,10 +428,21 @@ fn json_document(value: &serde_json::Value) -> String {
     )
 }
 
+/// What `skills tidy` prints for `config_dir`'s `skills/`, having moved
+/// what it moved (subagent design §2.12; [`tidy`] says how).
+pub(crate) async fn tidy_lines(
+    config_dir: &std::path::Path,
+    daemon: Option<&DaemonClient>,
+    apply: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<String>> {
+    tidy::tidy_lines(tidy::Kind::Skills, config_dir, daemon, apply, now).await
+}
+
 pub async fn run(args: SkillsArgs) -> Result<()> {
-    let client = DaemonClient::connect()?;
     match args.command {
         SkillsCommands::List { format } => {
+            let client = DaemonClient::connect()?;
             let (skills, diagnostics) = fetch(&client).await?;
             match format {
                 OutputFormat::Json => println!(
@@ -436,6 +460,7 @@ pub async fn run(args: SkillsArgs) -> Result<()> {
             }
         }
         SkillsCommands::Info { skill, format } => {
+            let client = DaemonClient::connect()?;
             let (skills, diagnostics) = fetch(&client).await?;
             let found = lookup(&skills, &diagnostics, &skill);
             match format {
@@ -456,6 +481,13 @@ pub async fn run(args: SkillsArgs) -> Result<()> {
                         println!("{line}");
                     }
                 }
+            }
+        }
+        SkillsCommands::Tidy { apply } => {
+            let (config_dir, daemon) = tidy::target()?;
+            let now = chrono::Utc::now();
+            for line in tidy_lines(&config_dir, daemon.as_ref(), apply, now).await? {
+                println!("{line}");
             }
         }
     }

@@ -298,6 +298,7 @@ openalpaca agents resume <agent_id>
 openalpaca agents set <agent_id> <dotted.path> <value>
 openalpaca agents create [--from-file <path>] [--interactive]
 openalpaca agents remove <agent_id>
+openalpaca agents tidy [--apply]
 ```
 
 Notes:
@@ -306,6 +307,7 @@ Notes:
 - `set` takes a dotted config path, for example `openalpaca agents set <agent_id> llm.model <model-id>`. Every section on the way to the last key must already exist in the agent's config (`agents config <agent_id>` shows it). The value is read as a number, then `true`/`false`, then a string.
 - `remove` archives the agent.
 - `list` and `status` show one row per agent template, built-in ones included. A template a file in `~/.openalpaca/config/agents` switches off — a file holding its `id:` and `disabled: true` — reads `disabled` in the STATUS column and has no instance, so `config` and `set` do not find it; delete that file, or remove the line, and it reads `idle` again once a template runs under that `id`. An `id` switched off before this store ever ran a template of it has no row: `list` leaves it out and `status` does not find it, while `GET /v1/agent-templates` and Settings → Agents still list it. The file, not a command, is the switch; `GET /v1/agent-templates` names the file (`state: "disabled"`, `path`).
+- `tidy` lists the files in `~/.openalpaca/config/agents` that are unedited copies of a template OpenAlpaca shipped — what an earlier build wrote there, or a copy of the repository's `config/` — which this build does not read (the built-in template runs in its place): each file, its `version` (`current`, or `earlier` for a version an earlier build shipped), its `edit` when it is a copy as the Installation Manual's step 7 or 8 left it, and where it would go. It moves nothing. `tidy --apply` moves each to `agents/.archived/<file name without .md>.<UTC timestamp>.md`, one line per move, and ends with what that means for an earlier build: one started afterwards finds `agents/` without these files and does not write them again (Installation Manual → *Keep the builds apart*). Nothing else is moved: a template you edited, one of your own, a file that switches a template off, a file that does not parse. No start, reload or route ever moves a file; only this command does, when you run it. It reads the files itself and needs no daemon. When a daemon is running, it asks that daemon first and moves only the copies the daemon also lists as unused (a daemon of an earlier build may read a copy as yours); it names each copy it leaves. The config directory is `OPENALPACA_CONFIG_DIR` when that names a directory, else `~/.openalpaca/config` — the one `openalpaca daemon start` and the app give the daemon.
 
 ### `llm`
 
@@ -981,6 +983,7 @@ openalpaca skills list                 # the catalog, then the problems
 openalpaca skills list --format json   # {"skills": [...], "diagnostics": [...]}
 openalpaca skills info review          # one skill, by id or slash command
 openalpaca skills info /review
+openalpaca skills tidy [--apply]       # the unedited copies in config/skills
 ```
 
 Notes:
@@ -1017,6 +1020,13 @@ Notes:
   name that is neither a loaded skill nor in the problems is an error.
 - The scan runs when the daemon starts, and a skill's problems are re-read when
   its directory changes.
+- `tidy` is `agents tidy` for `config/skills/`: it lists each folder there that
+  is an unedited copy of a skill OpenAlpaca shipped (every file in it a version
+  shipped at its path; a missing file allowed), which this build does not read,
+  and moves nothing; `tidy --apply` moves each folder, whole, to
+  `skills/.archived/<id>.<UTC timestamp>/` and ends with the same warning for
+  an earlier build. A folder you edited or added a file to stays. A folder
+  moved there is not read as a skill.
 
 ### `chat`
 
