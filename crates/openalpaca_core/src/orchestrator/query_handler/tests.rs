@@ -441,7 +441,8 @@ fn apply_keepalive_cross_channel_injects_send() {
 /// N-TOOL-1 (Z1-05), through the front door: the main loop's sandbox cuts a
 /// tool at `[execution.agent_defaults] max_tool_runtime_secs`, and the
 /// `shell_execute` definition the model is handed states that same figure —
-/// 60 s by default, and whatever the key is set to.
+/// 120 s by default (N-TOOL-1b), and whatever the key is set to — with the
+/// ceiling a call's own `timeout_secs` is clamped to.
 #[cfg(unix)]
 mod main_loop_tool_timeout {
     use crate::bus::EventBus;
@@ -469,10 +470,12 @@ mod main_loop_tool_timeout {
     use std::time::Duration;
     use uuid::Uuid;
 
-    /// Calls `shell_execute` once with `command` (when given), then answers;
-    /// keeps every request it was handed.
+    /// Calls `shell_execute` once with `command` (when given) and, when
+    /// given, its `timeout_secs`, then answers; keeps every request it was
+    /// handed.
     struct CallsTheShell {
         command: Option<String>,
+        timeout_secs: Option<u64>,
         seen: Mutex<Vec<ChatRequest>>,
     }
 
@@ -495,7 +498,12 @@ mod main_loop_tool_timeout {
                     vec![ToolCall {
                         id: "tc_shell".to_string(),
                         name: "shell_execute".to_string(),
-                        arguments: serde_json::json!({ "command": command }),
+                        arguments: match self.timeout_secs {
+                            Some(secs) => {
+                                serde_json::json!({ "command": command, "timeout_secs": secs })
+                            }
+                            None => serde_json::json!({ "command": command }),
+                        },
                     }],
                     FinishReason::ToolUse,
                     String::new(),
@@ -526,12 +534,31 @@ mod main_loop_tool_timeout {
         config
     }
 
+    /// [`config`], its `[execution.agent_defaults]` read from `table` as a
+    /// hand-edited `daemon.toml` is.
+    fn config_from(table: &str) -> DaemonConfig {
+        let mut config = crate::test_util::daemon_config_with_agent_defaults(table);
+        config.orchestrator.routing.tool_selection = "full".to_string();
+        config.security.auto_approve_confirmations = true;
+        config
+    }
+
     /// One main-loop turn in `project`, with the registered `shell_execute`
     /// on its surface; every request the model was handed.
     async fn turn(
         config: DaemonConfig,
         project: &GuardedProject,
         command: Option<String>,
+    ) -> Vec<ChatRequest> {
+        turn_asking(config, project, command, None).await
+    }
+
+    /// [`turn`], the call asking for `timeout_secs`.
+    async fn turn_asking(
+        config: DaemonConfig,
+        project: &GuardedProject,
+        command: Option<String>,
+        timeout_secs: Option<u64>,
     ) -> Vec<ChatRequest> {
         let registry = ToolRegistry::default();
         for tool in crate::tools::builtins::builtin_tools(None, None, None) {
@@ -547,6 +574,7 @@ mod main_loop_tool_timeout {
         ))));
         let provider = Arc::new(CallsTheShell {
             command,
+            timeout_secs,
             seen: Mutex::new(Vec::new()),
         });
         let router = LlmRouter::single_provider(
@@ -598,16 +626,77 @@ mod main_loop_tool_timeout {
             .clone()
     }
 
+    /// N-TOOL-1b (B-11): 120 s by default, and the 600 s ceiling a call may
+    /// ask for, both stated.
     #[tokio::test]
     async fn the_main_loops_shell_definition_states_the_default_cut() {
         let project = GuardedProject::new();
         let seen = turn(config(None), &project, None).await;
         let description = shell_description(&seen[0]);
         assert!(
-            description.contains("still running after 60 seconds is stopped"),
+            description.contains("still running after 120 seconds is stopped"),
             "{description}"
         );
+        assert!(description.contains("up to 600 seconds"), "{description}");
         assert!(!description.contains("300"), "{description}");
+    }
+
+    /// One turn under `table` whose `shell_execute` call starts a background
+    /// `sleep 5` and asks for `timeout_secs`; what the model was shown for
+    /// it, once the sleep is gone (R45).
+    async fn a_cut_command_asking(table: &str, timeout_secs: u64) -> String {
+        let project = GuardedProject::new();
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let command = format!(
+            "cd '{}'; sleep 5 & echo $! > '{}'; wait",
+            dir.path().display(),
+            pidfile.display()
+        );
+        let seen = turn_asking(
+            config_from(table),
+            &project,
+            Some(command),
+            Some(timeout_secs),
+        )
+        .await;
+        let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
+        let _kill = KillOnFail(pid);
+        let result = seen
+            .get(1)
+            .and_then(|request| request.messages.iter().find(|m| m.role == Role::Tool))
+            .expect("the command's result reached the model")
+            .content
+            .clone();
+        assert!(
+            wait_until_gone(pid, GONE_WITHIN).await,
+            "the background sleep {pid} outlived the main loop's cut"
+        );
+        result
+    }
+
+    /// N-TOOL-1b (B-11): a `timeout_secs` above the ceiling runs under the
+    /// ceiling — clamped, never refused.
+    #[tokio::test]
+    async fn a_timeout_secs_above_the_ceiling_runs_under_the_ceiling() {
+        let result = a_cut_command_asking(
+            "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 2",
+            3600,
+        )
+        .await;
+        assert!(result.contains("timed out after 2s"), "{result:?}");
+    }
+
+    /// N-TOOL-1b: a `timeout_secs` below the ceiling — above the default
+    /// here — runs under the figure asked for.
+    #[tokio::test]
+    async fn a_timeout_secs_below_the_ceiling_runs_under_that_figure() {
+        let result = a_cut_command_asking(
+            "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 3",
+            2,
+        )
+        .await;
+        assert!(result.contains("timed out after 2s"), "{result:?}");
     }
 
     /// The key moves both: the sandbox cuts the command at 1 s (killing what
@@ -732,14 +821,18 @@ fn twenty_skills() -> Vec<(String, String)> {
         .collect()
 }
 
-/// Twenty skills overflow the default budget, and every one of them is still
-/// listed — past the budget by its name alone. The parent `break`s at the
-/// first line that does not fit and drops the rest without a word.
+/// Twenty skills overflow a budget of 500 characters (the default before
+/// N-SKILL-5), and every one of them is still listed — past the budget by
+/// its name alone. N-SKILL-1's parent `break`s at the first line that does
+/// not fit and drops the rest without a word. The budget is the daemon
+/// config's.
 #[test]
 fn available_skills_lists_every_skill_names_only_past_the_budget() {
     let skills = twenty_skills();
     let (_tmp, catalog) = scanned_catalog(&skills);
-    let orch = orchestrator_over(catalog, DaemonConfig::default());
+    let mut config = DaemonConfig::default();
+    config.orchestrator.prompt_budgets.skills_catalog_budget = 500;
+    let orch = orchestrator_over(catalog, config);
 
     let block = orch.build_skills_catalog_block();
     let listed = listed_names(&block);
@@ -760,28 +853,30 @@ fn available_skills_lists_every_skill_names_only_past_the_budget() {
     assert!(block.contains("- skill-07 (/skill-07)\n"), "{block}");
 }
 
-/// The budget is `[orchestrator.prompt_budgets] skills_catalog_budget`: one
-/// large enough carries every description.
+/// The budget is `[orchestrator.prompt_budgets] skills_catalog_budget`, and
+/// its default, 20,000 characters (N-SKILL-5), carries every description of
+/// twenty skills — the parent's 500 listed them by name alone.
 #[test]
 fn the_catalog_budget_is_read_from_the_daemon_config() {
     let skills = twenty_skills();
     let (_tmp, catalog) = scanned_catalog(&skills);
-    let mut config = DaemonConfig::default();
+    let config = DaemonConfig::default();
     assert_eq!(
         config.orchestrator.prompt_budgets.skills_catalog_budget,
-        500
+        20_000
     );
-    config.orchestrator.prompt_budgets.skills_catalog_budget = 20_000;
     let orch = orchestrator_over(catalog, config);
 
     let block = orch.build_skills_catalog_block();
     assert_eq!(listed_names(&block).len(), 20, "{block}");
-    assert!(
-        block.contains(
-            "- skill-20 (/skill-20): Does the skill-20 job for the person who asks for it\n"
-        ),
-        "{block}"
-    );
+    for (id, _) in &skills {
+        assert!(
+            block.contains(&format!(
+                "- {id} (/{id}): Does the {id} job for the person who asks for it\n"
+            )),
+            "{block}"
+        );
+    }
 }
 
 /// A skill with no slash command is listed by its id, which is what

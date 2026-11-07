@@ -48,7 +48,25 @@ From repository root:
 ./scripts/release/package-macos.sh
 ```
 
-It must run on macOS, and it packages for the host architecture only. It
+It must run on macOS, and it packages for the host architecture only. Before
+it builds anything it checks `THIRD-PARTY-NOTICES` at the repository root: the
+file records the SHA-256 of the `Cargo.lock` and `bun.lock` it was generated
+from, and the script stops, naming the stale lockfile, when either is not the
+tree's. Regenerate it with `python3.11 -I scripts/release/gen_notices.py`
+(after `bun install --frozen-lockfile`; it needs cargo-about 0.9.2, and prints
+the command that installs it) and commit it with the lockfiles; never edit it
+by hand. Beside the packages the app's frontend ships, it lists as bundled
+tools the build tools whose own runtime code the frontend's bundle carries
+though they are devDependencies (`BUNDLED_TOOLS` in the generator: vite, whose
+module-preload polyfill and preload helper the bundle carries), each with its
+own licence notice. The generator refuses, writing nothing and naming each, a
+JavaScript package or bundled tool whose licence `deny.toml`'s
+`[licenses] allow` list does not admit (OFL-1.1, the fonts', is admitted for
+JavaScript alone); `gen_notices.py --check-licences` checks the committed
+file's JavaScript licences the same way, and `gen_notices.py --check-hashes`
+names a lockfile that is not the one the committed file records, so a change
+that moves a lockfile commits the regenerated file with it. Both are local
+gates: there is no remote CI. The script then
 installs the GUI's JS dependencies from the frozen lockfile
 (`bun install --frozen-lockfile`), builds the daemon once —
 `apps/openalpaca-gui/scripts/prepare-sidecar.ts --release`, which stages
@@ -58,7 +76,10 @@ app bundle, and then checks that the daemon inside the bundle and the
 `libexec/openalpacad` it packages are byte for byte that one build; it stops if
 they differ (an unsigned bundle is assumed: signing changes the bytes). `package-linux.sh` and `package-windows.ps1` follow the same
 sequence (the daemon is read out of the AppImage with `--appimage-extract`, out
-of the MSI with an administrative `msiexec /a` install into a scratch folder).
+of the MSI with an administrative `msiexec /a` install into a scratch folder),
+but neither checks `THIRD-PARTY-NOTICES` nor puts it or `LICENSE` at the
+archive's root yet (macOS first): their app bundles carry both through the
+shared `tauri.conf.json`, the notices unchecked, until they gain the check.
 
 Expected output:
 
@@ -74,6 +95,11 @@ Package contents:
 - `install.sh`
 - `uninstall.sh`
 - `manifest.json` — build metadata: `name`, `version`, `target`, `built_at_utc`, `git_sha`
+- `LICENSE` — OpenAlpaca's own licence (MIT)
+- `THIRD-PARTY-NOTICES` — every third-party Rust crate and JavaScript package
+  the release ships, and each build tool whose runtime code its app's bundle
+  carries, each with its licence text; the app carries both files
+  in `openalpaca-gui.app/Contents/Resources/`, where an installed app keeps them
 
 Note: binaries and the `.app` bundle are **not codesigned and not notarised**.
 macOS Gatekeeper will show "unidentified developer" warnings; the installer
@@ -240,11 +266,16 @@ using with an older build is the second case it names. To switch over:
    Settings → Persona, keep the lines you want as standing instructions, and
    delete the rest. Nothing moves them into memory notes for you.
 
-7. **Check `agents/system_agent.md`.** `~/.openalpaca/config/agents/` survives
-   the reset too, and the daemon writes that directory only when it is absent,
-   so a store an earlier build set up keeps the `system_agent.md` that build
-   wrote. As earlier builds shipped it, that file ends its frontmatter with two
-   lines that switch the agent's approval prompts off: `file_delete` is not
+7. **Check `agents/system_agent.md`, if you edited it.** `~/.openalpaca/config/agents/`
+   survives the reset too, so a store an earlier build set up keeps the
+   `system_agent.md` that build wrote. A copy you never edited needs nothing:
+   this build's agent templates are built in, and a file byte-identical to a
+   version an earlier build shipped — or to one on which this step was done
+   exactly as written here — is not read; the built-in template runs, and
+   `state/logs/daemon.log` and the template listing (`GET /v1/agent-templates`)
+   name the file as not used. The step stands for a copy you edited otherwise,
+   which is read as yours. As earlier builds shipped it, that file ends its
+   frontmatter with two lines that switch the agent's approval prompts off: `file_delete` is not
    the name of any tool, and a template's own `require_confirmation_for` list
    replaces the default — every tool marked destructive asks first — instead
    of adding to it, so with those two lines the agent's `shell_execute`,
@@ -261,15 +292,20 @@ using with an older build is the second case it names. To switch over:
    A running daemon reads the change on its own (`state/logs/daemon.log` says
    `Agent template hot-reloaded`); `openalpaca daemon restart`, or `Stop
    daemon…` then `Start daemon` in the app's Settings → Connection, does the
-   same. A file that does not have the two lines needs nothing. A template of
+   same. While an edited copy keeps the two lines, `daemon.log` warns at each
+   start that its `require_confirmation_for` names `"file_delete"`, which is
+   no tool. A file that does not have the two lines needs nothing. A template of
    your own that names real tools in `require_confirmation_for` is unaffected:
    an explicit list still wins. A store you already switched over with an
    earlier build — one this build opens without the message above — keeps
    that build's `system_agent.md` too: do this step on it as well.
 
-8. **Give `agents/writing_agent.md` its `file_read` line.** The shipped
-   writing agent now reads the files it is asked to work on, and a store an
-   earlier build set up keeps the template that build wrote, without it. Open
+8. **Give `agents/writing_agent.md` its `file_read` line, if you edited it.**
+   The shipped writing agent now reads the files it is asked to work on, and
+   a store an earlier build set up keeps the template that build wrote,
+   without it. As in step 7, a copy you never edited — or one on which this
+   step was done exactly as written — is not read, and the built-in template,
+   which has the line, runs. In a copy you edited otherwise, open
    `~/.openalpaca/config/agents/writing_agent.md` and add one line under
    `capabilities:`:
 
@@ -286,6 +322,26 @@ using with an older build is the second case it names. To switch over:
    `artifact_write` or `workspace_write` when it names them, though they no
    longer ask by default. A skill's `permissions.confirm.tools` list works the
    same way. The templates this build ships carry no such list.
+
+9. **Take this build's `create-skill`, if you use it.**
+   `~/.openalpaca/config/skills/` is also written only when it is absent, so
+   a store an earlier build set up keeps that build's `create-skill`, scripts
+   and all. Asked for a skill in its `user` scope, those scripts wrote it
+   under `~/.config/openalpaca/skills/`, a folder the daemon never reads, and
+   reported success: the skill never loaded. This build's scripts write only
+   to the folder the daemon reads skills from, and refuse any other scope,
+   naming that folder. To take them, stop the daemon and move
+   `~/.openalpaca/config/skills/` aside; start the daemon, which writes the
+   four shipped skills into a new `skills/`, and stop it again; move back
+   every folder you want to keep but `create-skill` — your own skills, and a
+   shipped one you edited — and start it. Where the start wrote a folder of
+   the same name — a shipped skill you edited (`code-review`, `commit-message`
+   or `explain-code`), or one of yours named like a shipped skill — delete
+   that new folder first, then move yours back in its place. A skill the old
+   scripts wrote under `~/.config/openalpaca/skills/` loads once you move its
+   folder into `~/.openalpaca/config/skills/`. A store you already switched
+   over with an earlier build — one this build opens without the message
+   above — keeps that build's `create-skill` too: do this step on it as well.
 
 The reset leaves `~/.openalpaca/README.md` as it is, and an older build's text
 there is out of date — it may describe no `projects/` folder, list `skills/`
@@ -315,6 +371,21 @@ not follow that advice — it deletes the new store. A build from before
 and run its migrations 5 to 42 on it, so never run one against a store this
 build created. To go back, stop this build and run the older one against the
 copy you kept in step 1.
+
+Two things differ going back to a build from before the built-in agent
+templates (2026-11). A store *first* started by this build has an empty
+`agents/`: an earlier build skips a directory that exists, finds no template
+and answers "No agent templates are installed…"; delete the empty `agents/`
+folder, and that build's next start writes its templates there. And an
+unedited copy this build lists as not used is still the earlier build's only
+copy: delete it under this build and the earlier one does without it
+(`lead_agent.md` deleted, it borrows another template as its lead —
+`code_agent` on a stock store). The cure is the same: stop
+the daemon, move `agents/` aside, and let the earlier build's next start
+write it again. A file that switches a template off (`disabled: true`, see
+*Upgrade*) means nothing to an earlier build: it skips the line, so a full
+template that says it runs as your template, and the two-line form is
+skipped with a warning that it has no `name`.
 
 ### Projects live in the home store
 
@@ -456,12 +527,23 @@ when none is running.
 ### What the first boot writes
 
 A first boot writes the content the daemon carries in its own binary into
-`~/.openalpaca/config`: `llm.toml`, `daemon.toml`, `mcp.toml`, the nine agent
-templates (`agents/`), the skills (`skills/`) and the tool config (`tools/`).
-The rule is per directory: a directory that already exists is left
-alone entirely, even one you emptied on purpose, and inside a directory being
-filled an existing file is never overwritten. Without the templates the first
-workflow request has no lead agent to run and says so.
+`~/.openalpaca/config`: `llm.toml`, `daemon.toml`, `mcp.toml`, the skills
+(`skills/`) and the tool config (`tools/`). The rule is per directory: a
+directory that already exists is left alone entirely, even one you emptied on
+purpose, and inside a directory being filled an existing file is never
+overwritten.
+
+The nine agent templates are built in: the daemon registers them from its
+binary at every start and writes none of them. It creates `agents/` empty,
+when absent, for templates of your own and for overrides: a file there whose
+`id:` is a built-in template's replaces that template, and deleting it brings
+the built-in one back, without a restart. A file byte-identical to a version
+OpenAlpaca shipped — a copy an earlier build wrote, or one copied from the
+repository's `config/agents/` — is not read and not touched: the built-in
+template runs, so its later fixes reach you. To keep such a copy's text on
+purpose, change any byte of it (a comment line will do); it is then yours.
+At each start `state/logs/daemon.log` says how many templates are built in,
+which files override one and which copies are not read.
 
 It also creates the persona documents in `~/.openalpaca/config/orchestrator/`
 — `SOUL.md`, `USER.md`, `IDENTITY.md` and `BOOTSTRAP.md` — and the memory
@@ -618,7 +700,7 @@ All in `~/.openalpaca/config/llm.toml`:
 |---|---|---|
 | `[providers.ollama] default_model` | `""` | Empty means "whatever is installed" — the router picks a discovered model, preferring a tools-capable one. Name a tag to pin it. |
 | `[providers.ollama] default_max_tokens` | `8192` | The output ceiling for one answer (the cloud default is 4096). A request that names its own `max_tokens` still wins. |
-| `[providers.ollama] request_timeout_secs` | `600` | Wall clock for one **non-streaming** call to this provider. |
+| `[providers.ollama] request_timeout_secs` | `3600` | Wall clock for one **non-streaming** call to this provider: a call to a local model may run up to an hour. An install seeded before this build keeps `600` (see [Upgrade](#upgrade)). |
 | `[timeouts] llm_request_timeout_secs` | `120` | The same budget for any provider that sets no override. |
 
 You should not need a `[models]` row at all — discovery fills the catalogue —
@@ -639,12 +721,12 @@ other bounds sit over a stream, and whichever trips first wins:
 | Bound | Value | Configurable |
 |---|---|---|
 | No chunk from the provider | 90 s | No — `STREAM_IDLE_TIMEOUT` in `crates/openalpaca_llm/src/streaming.rs` |
-| Gap between HTTP reads | `request_timeout_secs` (600 s for the seeded Ollama) | Yes |
-| One whole streamed round | 10 minutes | No — `max_stream_duration` in `crates/openalpaca_core/src/runner/agentic_loop/config.rs` |
+| Gap between HTTP reads | `request_timeout_secs` (3,600 s for the seeded Ollama) | Yes |
+| One whole streamed round | An hour for a provider that needs no key (Ollama); 10 minutes for any other | No — `max_keyless_stream_duration` and `max_stream_duration` in `crates/openalpaca_core/src/runner/agentic_loop/config.rs` |
 
 The HTTP layer also bounds the connect phase at 30 s. When any of these trips
 the turn is not lost: the loop logs it and retries the round **without**
-streaming, where the per-provider total (600 s for the seeded Ollama) applies
+streaming, where the per-provider total (3,600 s for the seeded Ollama) applies
 from the start.
 
 In practice the 90 s is the one that fires. A model that is still loading into
@@ -684,6 +766,19 @@ Upgrade keeps:
 
 - `~/.openalpaca` data and config
 
+A written `llm.toml` is yours and no build rewrites it, so an install seeded
+before this build keeps `request_timeout_secs = 600` under
+`[providers.ollama]`: a non-streaming call to a local model is still cut at ten
+minutes there. To let it run up to an hour, as a new install does, set it by
+hand:
+
+```toml
+[providers.ollama]
+request_timeout_secs = 3600
+```
+
+A streamed round to a local model is allowed the hour either way.
+
 An upgrade from any build before the schema re-baseline of 2026-09-28 is the one
 exception — a pre-redesign build at schema 42 as well as an earlier
 Markdown-memory build at 43 to 45: the new daemon refuses the old database
@@ -691,11 +786,41 @@ instead of starting on it. Follow [Switching to the Markdown Memory
 Build](#switching-to-the-markdown-memory-build) before you start it.
 
 An upgrade from an earlier build made since that re-baseline — one this build
-opens — keeps the store as it is, agent templates included: read [Agents work
-in the project](#agents-work-in-the-project) before you start it. Such a store
-may keep a `system_agent.md` with two leftover lines that, since this build,
-would let that agent write and edit your project's files and run commands in
-it without asking; step 7 of the switch-over removes them.
+opens — keeps the store as it is: read [Agents work in the
+project](#agents-work-in-the-project) before you start it. Nothing under
+`config/` is written, moved or deleted. The agent templates an earlier build
+wrote into `agents/` stay on disk, but one you never edited is no longer read:
+the built-in template runs, its later fixes with it — `system_agent` asks
+again before its shell commands and file writes, `writing_agent` reads files —
+with no hand step. A shipped template you deleted from `agents/` runs again,
+from the binary; a file of its `id` there overrides it. A template you edited
+still overrides the built-in one; if it is a `system_agent.md` that keeps two
+leftover lines which would let that agent write and edit your project's files
+and run commands in it without asking, step 7 of the switch-over removes them,
+and `daemon.log` warns about them meanwhile. Where you had deleted a shipped
+template and a plugin's template of the same id filled it, the built-in
+template runs again and the plugin's is listed as refused. The store also
+keeps that build's `create-skill`, whose `user` scope wrote skills where the
+daemon never reads them; step 9 says how to take this build's copy.
+
+An emptied `agents/` no longer means "no templates". To switch a built-in
+template off, put a file in `agents/` holding its `id:` and
+`disabled: true` — two lines are enough:
+
+```markdown
+---
+id: research_agent
+disabled: true
+---
+```
+
+It is off at once, without a restart: the lead agent no longer sees it, a
+spawn of it is refused naming the file, Settings → Agents shows it
+"Switched off", and no plugin's template takes its id. A full template that
+says `disabled: true` is switched off whole; the line works for a template
+of your own too. Delete the file, or remove the line, and the template is
+back. Switching `lead_agent` off alone does not stop workflows: another
+template is borrowed as the lead, as when the lead is busy.
 
 Upgrade replaces:
 
@@ -754,9 +879,10 @@ the platform's data-directory convention.
 
 ### Windows
 
-**Status: experimental.** CI tests the two installer scripts and the packaging
-script's hash helpers on Windows, but
-never builds or runs the binaries there, and the CLI's daemon start/stop code
+**Status: experimental.** The Pester tests of the two installer scripts and
+the packaging script's hash helpers are run by hand on a Windows machine
+(`Invoke-Pester -Path scripts/release/tests`, on Pester 6.2.0); nothing
+builds or runs the binaries there, and the CLI's daemon start/stop code
 is written against Unix signals. Expect `package-windows.ps1` to fail at the
 build step until that is ported.
 

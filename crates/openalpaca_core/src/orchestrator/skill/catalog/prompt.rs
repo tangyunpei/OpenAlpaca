@@ -21,9 +21,9 @@
 use super::{SkillCatalog, SkillSummary};
 
 /// The most characters of a description one line carries; a longer one is
-/// cut and ends with `…`. The stock skills' longest is about 200 characters,
-/// so the four of them fit the default budget of 500 with their descriptions.
-pub const AVAILABLE_SKILLS_DESCRIPTION_CHARS: usize = 100;
+/// cut and ends with `…` (N-SKILL-5; ZCode's figure). The stock skills'
+/// longest, create-skill's, is 199 characters, so each is listed whole.
+pub const AVAILABLE_SKILLS_DESCRIPTION_CHARS: usize = 250;
 
 /// What the model is told the list is for.
 const HEADER: &str = "Run one of these skills with the invoke_skill tool: pass its id (or its /slash command) as `skill`.";
@@ -199,6 +199,137 @@ mod tests {
         assert!(over.contains(NAMES_ONLY), "{over}");
         assert!(over.contains("- alpha (/a)\n- beta\n"), "{over}");
         assert!(!over.contains("skill's description"), "{over}");
+    }
+
+    /// The budget a config with no `skills_catalog_budget` carries.
+    fn default_budget() -> usize {
+        crate::daemon_config::DaemonConfig::default()
+            .orchestrator
+            .prompt_budgets
+            .skills_catalog_budget
+    }
+
+    /// N-SKILL-5: a description is listed whole to 250 characters; past them
+    /// it is cut to 250, the ellipsis included (N-SKILL-1's cut was 100).
+    #[test]
+    fn a_description_is_whole_to_250_characters_and_cut_past_them() {
+        let block = render_available_skills(
+            &[
+                skill("two-hundred", None, &"a".repeat(200)),
+                skill("two-fifty", None, &"b".repeat(250)),
+                skill(
+                    "three-hundred",
+                    None,
+                    &format!("{}{}", "c".repeat(249), "d".repeat(51)),
+                ),
+            ],
+            default_budget(),
+            SkillsAudience::Lead,
+        );
+        let described = |id: &str| -> String {
+            block
+                .lines()
+                .find_map(|l| l.strip_prefix(format!("- {id}: ").as_str()))
+                .unwrap_or_else(|| panic!("{id} is not described:\n{block}"))
+                .to_string()
+        };
+        assert_eq!(described("two-hundred"), "a".repeat(200));
+        assert_eq!(described("two-fifty"), "b".repeat(250));
+        let cut = described("three-hundred");
+        assert_eq!(cut, format!("{}…", "c".repeat(249)));
+        assert_eq!(cut.chars().count(), 250);
+    }
+
+    /// N-SKILL-5: twenty skills whose lines fit the default budget are each
+    /// listed with the whole of its description, none by its id alone; the
+    /// parent's 500 characters listed every one by its id.
+    #[test]
+    fn twenty_skills_within_the_default_budget_are_each_described() {
+        let skills: Vec<SkillSummary> = (1..=20)
+            .map(|n| {
+                let id = format!("skill-{n:02}");
+                let description = format!(
+                    "Does the {id} job for the person who asks for it. {}",
+                    "Then it reports what it did. ".repeat(6)
+                );
+                skill(&id, Some(&id), description.trim_end())
+            })
+            .collect();
+
+        let block = render_available_skills(&skills, default_budget(), SkillsAudience::MainLoop);
+        assert!(!block.contains(NAMES_ONLY), "{block}");
+        for skill in &skills {
+            let line = format!("- {0} (/{0}): {1}\n", skill.id, skill.description);
+            assert!(block.contains(&line), "{line}{block}");
+        }
+    }
+
+    /// N-SKILL-5: the default budget holds 20,000 characters of skill lines —
+    /// the key's clamp maximum — and one more lists every skill by its id
+    /// alone: the fallback is kept.
+    #[test]
+    fn the_default_budget_holds_twenty_thousand_characters_of_lines() {
+        // Eighty lines of 250 characters: `- s-01: `, a description of 241,
+        // the line break.
+        let mut skills: Vec<SkillSummary> = (1..=80)
+            .map(|n| skill(&format!("s-{n:02}"), None, &"x".repeat(241)))
+            .collect();
+        let fits = render_available_skills(&skills, default_budget(), SkillsAudience::Lead);
+        let line_chars: usize = fits
+            .lines()
+            .filter(|l| l.starts_with("- "))
+            .map(|l| l.chars().count() + 1)
+            .sum();
+        assert_eq!(line_chars, 20_000, "{fits}");
+        assert!(!fits.contains(NAMES_ONLY), "{fits}");
+
+        skills[0].description.push('x');
+        let over = render_available_skills(&skills, default_budget(), SkillsAudience::Lead);
+        assert!(over.contains(NAMES_ONLY), "{over}");
+        assert!(over.contains("- s-01\n- s-02\n"), "{over}");
+        assert!(!over.contains("xxx"), "{over}");
+    }
+
+    /// N-SKILL-5: the four stock skills' block, as the main loop's is
+    /// rendered, each skill with the whole of its description. The parent's
+    /// differed in create-skill's line alone: that description, 199
+    /// characters, was cut at 100 ("… Collects configurati…"); the other
+    /// three are under 100, and the four lines, 497 characters, fit the
+    /// budget.
+    #[test]
+    fn the_stock_skills_are_each_listed_with_the_whole_of_its_description() {
+        let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/skills");
+        let catalog = SkillCatalog::new();
+        assert_eq!(
+            catalog.scan_directory(&shipped, crate::middleware::skill::SkillScope::Project),
+            4
+        );
+
+        let block = catalog.available_skills_block(default_budget(), SkillsAudience::MainLoop);
+        let expected = format!(
+            "<available_skills>\n{HEADER}{USER_SLASH}\n{}</available_skills>",
+            concat!(
+                "- code-review (/review): Review code for bugs, style issues, security concerns, \
+                 and improvements\n",
+                "- commit-message (/commit): Generate conventional commit messages from code \
+                 changes\n",
+                "- create-skill (/create-skill): Interactively guide the user through creating a \
+                 new SKILL.md skill definition. Collects configuration, validates inputs, \
+                 scaffolds the directory, and writes the skill file using bundled script \
+                 tools.\n",
+                "- explain-code (/explain-code): Explain what a piece of code does in plain \
+                 language\n",
+            )
+        );
+        let differing: Vec<(&str, &str)> = block
+            .lines()
+            .zip(expected.lines())
+            .filter(|(rendered, pinned)| rendered != pinned)
+            .collect();
+        assert_eq!(
+            block, expected,
+            "the lines that differ, (rendered, pinned): {differing:#?}"
+        );
     }
 
     /// The main loop's user can type a skill's slash command; the lead's

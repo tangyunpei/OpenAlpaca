@@ -166,7 +166,9 @@ fn every_per_request_lead_tool_says_its_arguments_reach_no_program() {
                 1.0,
             ))),
             provides_capabilities: vec![],
-            exempt_from_timeout: false,
+            exempt_from_timeout: crate::tools::builtins::builtin_is_exempt_from_timeout(
+                "invoke_skill",
+            ),
             annotations: None,
             version: "test-0.0.0".into(),
             author: "builtin".into(),
@@ -874,6 +876,7 @@ fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
         None,
         None,
         None,
+        48,
     );
     assert!(
         prompt.contains(
@@ -894,6 +897,551 @@ fn the_lead_prompt_says_check_subagent_status_returns_the_whole_answer() {
              Call this after spawning all subagents."
         ),
         "{prompt}"
+    );
+}
+
+// ── N-LLM-1: what queues a spawn, and the router's per-key default ──
+
+/// N-LLM-1: the description says what N-LEAD-2 built — a spawn returns at
+/// once, and one past the run's concurrency bound is queued — not that the
+/// system follows "LLM capacity".
+#[test]
+fn spawn_subagent_description_says_a_spawn_past_the_concurrency_bound_is_queued() {
+    assert_eq!(
+        spawn_subagent_tool_definition_from_templates(&[]).description,
+        "Spawn a subagent to work on a specific objective, written as a self-contained brief: \
+         the goal, the inputs it needs, the constraints, and what to return and where. \
+         Spawning is always immediate — it returns a run_id at once, and a subagent spawned \
+         past this run's concurrency bound is queued and starts when a slot frees, as the \
+         reply says. Spawn all independent objectives in a single round, then use \
+         wait_for_subagents to collect results. Multiple instances of the same agent can run \
+         concurrently.\n\n\
+         Available agents:\nNo agents available."
+    );
+}
+
+/// N-LLM-1: nothing the lead reads says spawning follows LLM capacity; the
+/// prompt's step 3, its `<tools>` line and both spawn descriptions say a
+/// subagent past the run's concurrency bound is queued.
+#[test]
+fn no_lead_surface_speaks_of_llm_capacity() {
+    let engine = crate::compose::ComposeEngine::new(16);
+    let prompt = build_lead_agent_prompt_from_templates(
+        &engine,
+        "Test persona",
+        &[],
+        200_000,
+        None,
+        None,
+        None,
+        48,
+    );
+    let single = spawn_subagent_tool_definition_from_templates(&[]).description;
+    let batch = spawn_subagents_batch_tool_definition(&[]).description;
+    for (surface, text) in [
+        ("prompt", &prompt),
+        ("spawn_subagent", &single),
+        ("batch", &batch),
+    ] {
+        assert!(
+            !text.to_lowercase().contains("capacity"),
+            "{surface}: {text}"
+        );
+        assert!(
+            text.contains("this run's concurrency bound"),
+            "{surface}: {text}"
+        );
+    }
+    // Step 3 and the `<tools>` line, and the description, in the same words.
+    let queued = "a subagent spawned past this run's concurrency bound is queued and starts \
+                  when a slot frees";
+    assert_eq!(prompt.matches(queued).count(), 2, "{prompt}");
+    assert!(single.contains(queued), "{single}");
+}
+
+/// N-LLM-1: one key admits a full batch of concurrent model calls, so the
+/// subagents a run's stock concurrency bound lets run, and the lead beside
+/// them, do not wait inside the router for one key's permits. A move of the
+/// batch cap or the bound past the router's default fails here.
+#[test]
+fn the_routers_per_key_default_holds_a_full_batch() {
+    let batch = spawn_subagents_batch_tool_definition(&[]);
+    let batch_cap = batch.parameters["properties"]["subagents"]["maxItems"]
+        .as_u64()
+        .unwrap() as usize;
+    let bound = crate::daemon_config::DaemonConfig::default()
+        .execution
+        .lead_agent_defaults
+        .max_concurrent_subagents;
+    let per_key = openalpaca_llm::RateLimitConfig::default().per_key_concurrency;
+    assert_eq!(per_key, 8);
+    assert!(
+        per_key >= batch_cap,
+        "per_key_concurrency ({per_key}) under a full batch ({batch_cap})"
+    );
+    assert!(
+        per_key > bound,
+        "per_key_concurrency ({per_key}) leaves no permit for the lead beside its {bound} subagents"
+    );
+}
+
+// ── SA-2: the objective is a self-contained brief ────────────────────
+
+/// What both spawn tools say an `objective` holds (SA-2).
+const OBJECTIVE_PARAMETER: &str = "A self-contained brief for the subagent: the goal (what to \
+     achieve, and why); the inputs it needs (facts, file paths, workspace keys, earlier \
+     results); the constraints (scope, limits, what not to do); and what to return and where \
+     (what its answer must hold, and any file or workspace key it is to write). The subagent \
+     is given neither the user's request nor this conversation, only this brief.";
+
+/// SA-2: the batch's description, pinned whole, says each objective is a
+/// brief, and both tools' `objective` parameters say what a brief holds.
+#[test]
+fn the_batch_description_and_both_objective_parameters_say_what_a_brief_holds() {
+    let single = spawn_subagent_tool_definition_from_templates(&[]);
+    let batch = spawn_subagents_batch_tool_definition(&[]);
+    assert_eq!(
+        batch.description,
+        "Spawn multiple subagents in a single call (1-8). More efficient than calling \
+         spawn_subagent repeatedly. Each entry specifies an agent_id and an objective, \
+         written as a self-contained brief: the goal, the inputs it needs, the constraints, \
+         and what to return and where. Every entry returns its run_id at once; up to this \
+         run's concurrency bound they run in parallel, and the rest are queued and start as \
+         slots free. Use wait_for_subagents to collect results.\n\n\
+         Available agents:\nNo agents available."
+    );
+    assert_eq!(
+        single.parameters["properties"]["objective"]["description"],
+        OBJECTIVE_PARAMETER
+    );
+    let entry = &batch.parameters["properties"]["subagents"]["items"];
+    assert_eq!(
+        entry["properties"]["objective"]["description"],
+        OBJECTIVE_PARAMETER
+    );
+}
+
+/// SA-2: the lead prompt and both spawn tools — their descriptions and their
+/// `objective` parameters — name the brief's four parts in the same words,
+/// and the prompt and the parameters say why it must stand on its own.
+#[test]
+fn every_lead_surface_says_the_objective_is_a_self_contained_brief() {
+    let engine = crate::compose::ComposeEngine::new(16);
+    let prompt = build_lead_agent_prompt_from_templates(
+        &engine,
+        "Test persona",
+        &[],
+        200_000,
+        None,
+        None,
+        None,
+        48,
+    );
+    let single = spawn_subagent_tool_definition_from_templates(&[]);
+    let batch = spawn_subagents_batch_tool_definition(&[]);
+    let parameter = |def: &ToolDefinition, pointer: &str| {
+        def.parameters
+            .pointer(pointer)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let single_objective = parameter(&single, "/properties/objective/description");
+    let batch_objective = parameter(
+        &batch,
+        "/properties/subagents/items/properties/objective/description",
+    );
+    let surfaces = [
+        ("prompt", prompt.as_str(), true),
+        ("spawn_subagent", single.description.as_str(), false),
+        ("batch", batch.description.as_str(), false),
+        ("spawn_subagent objective", single_objective.as_str(), true),
+        ("batch objective", batch_objective.as_str(), true),
+    ];
+    for (surface, text, says_why) in surfaces {
+        for part in [
+            "self-contained brief",
+            "the goal",
+            "the inputs it needs",
+            "the constraints",
+            "what to return and where",
+        ] {
+            assert!(text.contains(part), "{surface} lacks {part:?}: {text}");
+        }
+        if says_why {
+            assert!(
+                text.contains("given neither the user's request nor this conversation"),
+                "{surface}: {text}"
+            );
+        }
+    }
+}
+
+/// A brief of exactly `chars` characters, its head and its tail tagged `tag`.
+fn sa2_brief(tag: &str, chars: usize) -> String {
+    let head = format!("BRIEF-{tag}-HEAD goal: weigh every alpaca. ");
+    let tail = format!(" return the weights to the lead. BRIEF-{tag}-TAIL");
+    let fill = chars - head.chars().count() - tail.chars().count();
+    let body: String = "inputs: the herd in the lower field; constraints: no shearing. "
+        .chars()
+        .cycle()
+        .take(fill)
+        .collect();
+    let text = format!("{head}{body}{tail}");
+    assert_eq!(text.chars().count(), chars);
+    text
+}
+
+/// SA-2b (SA-2's option (a)): a file-based (LLM) template's subagent at the
+/// default window is given a 4,000-character brief once — whole, as the user
+/// turn it answers, the last message, after any memory block or
+/// working-folder line — by `spawn_subagent` and by an entry of
+/// `spawn_subagents_batch` alike, and in no system message: the context
+/// package's task description (`ContextManager::distill`) is left out of the
+/// bundle Layer 3 routes, as `build_subagent_minimal`'s doc asks, where until
+/// SA-2b it reached the subagent as a second system message, `messages[1]`
+/// (`a4d8d110`'s characterization, which pinned that copy). The
+/// 500-character span and `subagent_open` record and the log lines' previews
+/// are records only. (A plugin-backed template's executor is handed the
+/// objective after the system prompt instead,
+/// `test_spawn_subagent_executes_plugin_backed_template`.)
+#[tokio::test]
+async fn a_file_based_subagent_gets_its_brief_once_as_its_last_user_turn() {
+    let (single_brief, batch_brief) = (sa2_brief("SINGLE", 4_000), sa2_brief("BATCH", 4_000));
+
+    let provider = ScriptedProvider::new(vec![
+        scripted_response("done", vec![]),
+        scripted_response("done", vec![]),
+    ]);
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(spawn_tool_bounded(
+        scripted_router(provider.clone()),
+        shared,
+        tracker.clone(),
+        6,
+    ));
+    spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": single_brief}))
+        .await
+        .unwrap();
+    SpawnSubagentsBatchTool::new(spawn.clone())
+        .execute(&serde_json::json!({
+            "subagents": [{"agent_id": "worker", "objective": batch_brief}]
+        }))
+        .await
+        .unwrap();
+    eventually("both subagents finished", || tracker.all_done()).await;
+
+    let requests = provider.seen_messages.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "one model call per subagent");
+    for (tag, brief) in [("SINGLE", &single_brief), ("BATCH", &batch_brief)] {
+        let (head, tail) = (format!("BRIEF-{tag}-HEAD"), format!("BRIEF-{tag}-TAIL"));
+        let messages = requests
+            .iter()
+            .find(|m| m.iter().any(|m| m.content.contains(&head)))
+            .unwrap_or_else(|| panic!("no subagent was given the {tag} brief"));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.content.contains(&head) || m.content.contains(&tail))
+                .count(),
+            1,
+            "{tag}: the brief is given once"
+        );
+        let turn = messages.last().unwrap();
+        assert_eq!(turn.role, openalpaca_llm::Role::User, "{tag}");
+        assert_eq!(
+            &turn.content, brief,
+            "{tag}: the brief whole, as the last user turn"
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|m| m.role == openalpaca_llm::Role::System)
+                .all(|m| !m.content.contains(&head) && !m.content.contains(&tail)),
+            "{tag}: the brief reached a system message"
+        );
+    }
+}
+
+/// SA-2b: the subagent's window no longer takes its brief. Until SA-2b it
+/// bounded it twice (`a4d8d110`'s second characterization): the task
+/// description's system copy, distilled into at most 40% of the window and
+/// cut past it, and Layer 5's trim, which dropped the user turn — the only
+/// non-system message — once the brief, counted twice, passed about 37.5%:
+/// on an 8,192-token model (M5's local case) a 12,800-character brief reached
+/// the subagent as its system copy alone and a 20,000-character one as that
+/// copy cut to its first 13,104 characters, with no user message — an
+/// Anthropic request with an empty `messages` list. Now each arrives whole,
+/// once, as its last user turn, and every request holds a non-system message
+/// (what an Anthropic request's `messages` is made of).
+#[tokio::test]
+async fn a_long_brief_on_a_small_window_arrives_whole_as_its_user_turn() {
+    let (mid, long) = (sa2_brief("MID", 12_800), sa2_brief("LONG", 20_000));
+    let provider = ScriptedProvider::new(vec![
+        scripted_response("done", vec![]),
+        scripted_response("done", vec![]),
+    ]);
+    let router = scripted_router(provider.clone());
+    let mut info = router
+        .model_registry()
+        .get_model_info("claude-sonnet-4-20250514")
+        .unwrap();
+    info.context_window = 8_192;
+    router
+        .model_registry()
+        .register("claude-sonnet-4-20250514".to_string(), info);
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = spawn_tool_bounded(router, shared, tracker.clone(), 6);
+    for brief in [&mid, &long] {
+        spawn
+            .execute(&serde_json::json!({"agent_id": "worker", "objective": brief}))
+            .await
+            .unwrap();
+    }
+    eventually("both subagents finished", || tracker.all_done()).await;
+
+    let requests = provider.seen_messages.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "one model call per subagent");
+    for (tag, brief) in [("MID", &mid), ("LONG", &long)] {
+        let head = format!("BRIEF-{tag}-HEAD");
+        let messages = requests
+            .iter()
+            .find(|m| m.iter().any(|m| m.content.contains(&head)))
+            .unwrap_or_else(|| panic!("no subagent was given the {tag} brief"));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role != openalpaca_llm::Role::System),
+            "{tag}: a request with no non-system message"
+        );
+        let turn = messages.last().unwrap();
+        assert_eq!(turn.role, openalpaca_llm::Role::User, "{tag}");
+        assert_eq!(
+            &turn.content, brief,
+            "{tag}: the brief whole, as the user turn"
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|m| m.role == openalpaca_llm::Role::System)
+                .all(|m| !m.content.contains(&head)),
+            "{tag}: the brief reached a system message"
+        );
+    }
+}
+
+/// Tells a subagent's rounds from the lead's and from the working-state
+/// writer's call (its prompt's system text), scripting each and keeping every
+/// subagent request.
+struct SubagentCompactionProvider {
+    lead: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for SubagentCompactionProvider {
+    fn name(&self) -> &str {
+        "subagent-compaction"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let (writer, _) = crate::orchestrator::working_state::render_prompt(None, "");
+        let first = request.messages.first();
+        if first.is_some_and(|m| m.content == writer) {
+            return Ok(scripted_response(
+                r#"{"topic":"Weighing the herd","goal":"Weigh every alpaca","done":[],"decisions":[],"open":[],"next":"Report the weights","refs":[]}"#,
+                vec![],
+            ));
+        }
+        let queue = if first.is_some_and(|m| m.content.contains("You are a subagent")) {
+            self.subagent_requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(request.messages.as_ref().clone());
+            &self.subagent
+        } else {
+            &self.lead
+        };
+        let next = queue.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+        Ok(next.unwrap_or_else(|| scripted_response("done", vec![])))
+    }
+}
+
+/// SA-2b (3): a compaction keeps the subagent's brief. Its messages open
+/// with the system prompt, the working-folder line (R28) and then the
+/// brief, and every compaction tier kept only `messages[..2]` — until SA-2b
+/// the system prompt and the brief's system copy, the user turn compressible
+/// like any later row. Now the loop's kept head (`LoopConfig::kept_head`) is
+/// everything the subagent was handed, so after a compaction its brief is
+/// still there whole, as a user message, and still in no system message. A
+/// ~7,500-token first round on an 8,192-token window keeps every later round
+/// past the compaction trigger; the fourth round's list is long enough for
+/// the summary tier to fold the older rows behind the four recent ones.
+#[tokio::test]
+async fn a_subagents_brief_survives_its_loops_compaction() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let brief = sa2_brief("KEPT", 600);
+    let big = "x".repeat(30_000);
+    let shared = Arc::new(SharedContext::new());
+    let worker = crate::test_util::make_agent("worker", vec!["memory_read"]);
+    shared
+        .agent_registry
+        .register_template(crate::test_util::template_from_agent(&worker));
+    let call = |id: &str, name: &str, arguments: serde_json::Value| openalpaca_llm::ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
+    };
+    let provider = Arc::new(SubagentCompactionProvider {
+        lead: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    "",
+                    vec![call(
+                        "call-1",
+                        "spawn_subagent",
+                        serde_json::json!({"agent_id": "worker", "objective": brief}),
+                    )],
+                ),
+                scripted_response(
+                    "",
+                    vec![call("call-2", "wait_for_subagents", serde_json::json!({}))],
+                ),
+                scripted_response("all done", vec![]),
+            ]
+            .into(),
+        ),
+        subagent: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    &big,
+                    vec![call("s-1", "no_such_tool", serde_json::json!({}))],
+                ),
+                scripted_response(
+                    "next",
+                    vec![call("s-2", "no_such_tool", serde_json::json!({}))],
+                ),
+                scripted_response(
+                    "next",
+                    vec![call("s-3", "no_such_tool", serde_json::json!({}))],
+                ),
+                scripted_response("seventeen", vec![]),
+            ]
+            .into(),
+        ),
+        subagent_requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Ollama,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    router.model_registry().register(
+        "claude-sonnet-4-20250514".to_string(),
+        openalpaca_llm::routing::model_registry::ModelInfo {
+            provider: openalpaca_llm::ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "weigh the herd",
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some("conv-sub"),
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+
+    let requests = provider.subagent_requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 4, "the subagent answered in four rounds");
+    let first = &requests[0];
+    let at = first
+        .iter()
+        .position(|m| m.role == openalpaca_llm::Role::User && m.content == brief)
+        .unwrap();
+    assert!(
+        at >= 2 && first[at - 1].content.starts_with("<working_folder>"),
+        "the working-folder line stands before the brief: {:?}",
+        first
+            .iter()
+            .map(|m| &m.content[..m.content.len().min(40)])
+            .collect::<Vec<_>>()
+    );
+    let after = &requests[3];
+    assert!(
+        !after.iter().any(|m| m.content == big)
+            && after.iter().any(|m| {
+                m.content
+                    .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
+            }),
+        "the last round was compacted, its older rows folded into a working state"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|m| m.role == openalpaca_llm::Role::User && m.content == brief),
+        "the brief, whole, as a user message after the compaction: {:?}",
+        after
+            .iter()
+            .map(|m| (m.role.clone(), &m.content[..m.content.len().min(40)]))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        after
+            .iter()
+            .filter(|m| m.role == openalpaca_llm::Role::System)
+            .all(|m| !m.content.contains("BRIEF-KEPT-HEAD")),
+        "the brief reached a system message"
     );
 }
 
@@ -1245,6 +1793,7 @@ fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
         None,
         None,
         None,
+        48,
     );
     assert!(
         prompt.contains("spawn_subagents_batch"),
@@ -1979,6 +2528,8 @@ struct ScriptedProvider {
     responses: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
     seen_tool_names: std::sync::Mutex<Vec<Vec<String>>>,
     seen_messages: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+    /// A call (by its index) answered only after a pause.
+    delays: std::sync::Mutex<std::collections::HashMap<usize, std::time::Duration>>,
 }
 
 impl ScriptedProvider {
@@ -1987,7 +2538,13 @@ impl ScriptedProvider {
             responses: std::sync::Mutex::new(responses.into()),
             seen_tool_names: std::sync::Mutex::new(Vec::new()),
             seen_messages: std::sync::Mutex::new(Vec::new()),
+            delays: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Call `call` (0-based) answers after `by`.
+    fn delay_call(&self, call: usize, by: std::time::Duration) {
+        self.delays.lock().unwrap().insert(call, by);
     }
 
     fn tool_names(&self, call: usize) -> Vec<String> {
@@ -2036,19 +2593,26 @@ impl openalpaca_llm::LlmProvider for ScriptedProvider {
         &self,
         request: openalpaca_llm::ChatRequest,
     ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
-        self.seen_tool_names
-            .lock()
-            .unwrap()
-            .push(request.tools.iter().map(|t| t.name.clone()).collect());
+        let call = {
+            let mut seen = self.seen_tool_names.lock().unwrap();
+            seen.push(request.tools.iter().map(|t| t.name.clone()).collect());
+            seen.len() - 1
+        };
         self.seen_messages
             .lock()
             .unwrap()
             .push(request.messages.as_ref().clone());
-        self.responses
+        let response = self
+            .responses
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or_else(|| openalpaca_llm::LlmError::Http("script exhausted".to_string()))
+            .ok_or_else(|| openalpaca_llm::LlmError::Http("script exhausted".to_string()));
+        let delay = self.delays.lock().unwrap().get(&call).copied();
+        if let Some(by) = delay {
+            tokio::time::sleep(by).await;
+        }
+        response
     }
 }
 
@@ -2644,6 +3208,64 @@ async fn test_invoke_skill_through_lead_path_runs_fixture_skill() {
         }
     }
     assert!(completed, "missing SkillCompleted event for the nested skill");
+}
+
+/// SKILL-NO-CUT: a skill the lead invokes is not cut at the per-tool bound
+/// (1 s here) — its own loop bounds it. Its model answers after 2 s, and
+/// its answer reaches the lead as the tool's result.
+#[tokio::test]
+async fn a_skill_the_lead_invokes_runs_past_the_per_tool_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = fixture_skill_catalog(&tmp);
+    let provider = ScriptedProvider::new(vec![
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-1".to_string(),
+                name: "invoke_skill".to_string(),
+                arguments: serde_json::json!({"skill": "echo-skill", "query": "say hi"}),
+            }],
+        ),
+        scripted_response("nested skill output", vec![]),
+        scripted_response("lead done", vec![]),
+    ]);
+    provider.delay_call(1, std::time::Duration::from_secs(2));
+
+    let result = run_lead_for_test(
+        provider.clone(),
+        Arc::new(ToolRegistry::default()),
+        catalog,
+        Arc::new(ArcSwap::from_pointee(
+            crate::test_util::daemon_config_with_agent_defaults("max_tool_runtime_secs = 1"),
+        )),
+        EventBus::new(256),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    assert_eq!(
+        provider.calls(),
+        3,
+        "lead round, nested skill round, lead round"
+    );
+    let messages = provider.seen_messages.lock().unwrap();
+    assert!(
+        !messages[2]
+            .iter()
+            .any(|m| m.content.contains("timed out after")),
+        "the skill was cut: {:?}",
+        messages[2].last()
+    );
+    assert!(
+        messages[2]
+            .iter()
+            .any(|m| m.content.contains("nested skill output")),
+        "lead round 2 should carry the skill's answer as a tool result"
+    );
 }
 
 // ── Session event log (§5.5) ────────────────────────────────────────
@@ -3509,11 +4131,29 @@ async fn spawn_and_finish(
     shared: Arc<SharedContext>,
     agent_id: &str,
 ) -> Vec<String> {
+    spawn_and_finish_under(
+        scripted_router(provider),
+        registry,
+        shared,
+        agent_id,
+        DaemonConfig::default(),
+    )
+    .await
+}
+
+/// [`spawn_and_finish`], over any router and under `config`.
+async fn spawn_and_finish_under(
+    router: Arc<LlmRouter>,
+    registry: Arc<ToolRegistry>,
+    shared: Arc<SharedContext>,
+    agent_id: &str,
+    config: DaemonConfig,
+) -> Vec<String> {
     let bus = EventBus::new(256);
     let mut rx = bus.subscribe();
     let tracker = Arc::new(SubagentTracker::new());
     let spawn_tool = SpawnSubagentTool::new(
-        scripted_router(provider),
+        router,
         registry,
         shared,
         bus,
@@ -3521,7 +4161,7 @@ async fn spawn_and_finish(
         "task-1".to_string(),
         "user-1".to_string(),
         "test-lead".to_string(),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        Arc::new(ArcSwap::from_pointee(config)),
         None,
         tracker.clone(),
         0,
@@ -4135,6 +4775,7 @@ fn the_lead_prompt_carries_the_user_document_exactly_once() {
         Some(&doc),
         Some(1000),
         None,
+        48,
     );
     assert_eq!(prompt.matches("### USER PROFILE ###").count(), 1, "{prompt}");
     assert!(prompt.contains("Name: Alex"), "{prompt}");
@@ -4151,6 +4792,7 @@ fn the_lead_prompt_carries_the_user_document_exactly_once() {
         None,
         None,
         None,
+        48,
     );
     assert_eq!(without.matches("### USER PROFILE ###").count(), 0);
 }
@@ -5444,9 +6086,8 @@ impl openalpaca_llm::LlmProvider for GatedWorkers {
 }
 
 /// A router whose every call lands on `provider`, with room for sixteen
-/// concurrent calls on its one key: the router's own per-key bound (five by
-/// default) would otherwise hold a sixth subagent's model call, and that is
-/// not the bound under test.
+/// concurrent calls on its one key, so the router's own per-key bound (eight
+/// by default) is never the bound under test.
 fn roomy_router(provider: Arc<dyn openalpaca_llm::LlmProvider>) -> Arc<LlmRouter> {
     let key_pool = openalpaca_llm::KeyPool::new(
         vec![openalpaca_llm::ApiKey::new(
@@ -5488,6 +6129,23 @@ fn spawn_tool_bounded(
     tracker: Arc<SubagentTracker>,
     max_concurrent: usize,
 ) -> SpawnSubagentTool {
+    spawn_tool_under(
+        router,
+        shared,
+        tracker,
+        max_concurrent,
+        DaemonConfig::default(),
+    )
+}
+
+/// [`spawn_tool_bounded`] under `config`.
+fn spawn_tool_under(
+    router: Arc<LlmRouter>,
+    shared: Arc<SharedContext>,
+    tracker: Arc<SubagentTracker>,
+    max_concurrent: usize,
+    config: DaemonConfig,
+) -> SpawnSubagentTool {
     SpawnSubagentTool::new(
         router,
         Arc::new(ToolRegistry::default()),
@@ -5497,7 +6155,7 @@ fn spawn_tool_bounded(
         "task-1".to_string(),
         "user-1".to_string(),
         "test-lead".to_string(),
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        Arc::new(ArcSwap::from_pointee(config)),
         None,
         tracker,
         0,
@@ -6128,4 +6786,567 @@ fn a_subagent_failure_says_a_retry_will_not_help_only_where_it_cannot() {
             format!("Agent 'researcher' could not finish: {transient}")
         );
     }
+}
+
+// ── N-TOOL-1b (B-11): a template's `timeout_seconds` is not the per-tool bound ──
+
+/// A plugin's tool still running at test scale (`test_util::SLOW_TOOL_RUNS`).
+struct SlowPluginExec;
+
+#[async_trait]
+impl openalpaca_api::plugin_traits::PluginToolExecutor for SlowPluginExec {
+    async fn execute(
+        &self,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        tokio::time::sleep(crate::test_util::SLOW_TOOL_RUNS).await;
+        Ok("finished".to_string())
+    }
+
+    fn plugin_id(&self) -> &str {
+        "plug"
+    }
+}
+
+/// The lead's template says `timeout_seconds: 600`; its tool calls are cut at
+/// `[execution.agent_defaults] max_tool_runtime_secs` (1 s here), not at 600.
+/// The lead holds no command tool, and its cut binds every tool it calls: a
+/// plugin's stands in.
+#[tokio::test]
+async fn a_leads_template_timeout_is_not_its_per_tool_bound() {
+    let registry = Arc::new(ToolRegistry::default());
+    register_extension_tool(
+        &registry,
+        "plug::slow",
+        crate::tools::registry::ToolBackend::Plugin(Arc::new(SlowPluginExec)),
+    );
+    let mut lead = lead_subagent();
+    lead.constraints.timeout_seconds = Some(600);
+    let provider = ScriptedProvider::new(vec![
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-1".to_string(),
+                name: "plug::slow".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+        ),
+        scripted_response("done", vec![]),
+    ]);
+    let config = crate::test_util::daemon_config_with_agent_defaults("max_tool_runtime_secs = 1");
+
+    let result = run_lead_as(
+        &lead,
+        provider.clone(),
+        registry,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(ArcSwap::from_pointee(config)),
+        EventBus::default(),
+    )
+    .await;
+
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    let results = tool_results_seen(&provider, 1);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].contains("Tool 'plug::slow' timed out after 1s"),
+        "the lead's call ran past the daemon's bound: {:?}",
+        results[0]
+    );
+}
+
+/// A subagent's template says `timeout_seconds: 600`; its command is cut at
+/// `[execution.agent_defaults] max_tool_runtime_secs` (1 s here), not at 600,
+/// and its `shell_execute` definition states that figure and the configured
+/// ceiling (7 s here, not the default 600).
+#[tokio::test]
+async fn a_subagents_template_timeout_is_not_its_per_tool_bound() {
+    let shared = Arc::new(SharedContext::new());
+    let mut template = crate::test_util::template_from_agent(&crate::test_util::make_agent(
+        "builder",
+        vec!["shell_execute"],
+    ));
+    template.frontmatter.timeout_seconds = Some(600);
+    assert!(shared.agent_registry.register_template(template));
+    let registry = Arc::new(ToolRegistry::default());
+    registry.register(crate::test_util::slow_shell()).unwrap();
+    let provider = crate::test_util::CallsOneTool::new(
+        "shell_execute",
+        serde_json::json!({"command": "make"}),
+    );
+    let router = Arc::new(LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    ));
+    let config = crate::test_util::daemon_config_with_agent_defaults(
+        "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 7",
+    );
+
+    let violations = spawn_and_finish_under(router, registry, shared, "builder", config).await;
+
+    let result = provider.tool_result();
+    assert!(
+        result.contains("Tool 'shell_execute' timed out after 1s"),
+        "the subagent's command ran past the daemon's bound: {result:?} \
+         (violations: {violations:?})"
+    );
+    let description = provider.description_of("shell_execute");
+    assert!(
+        description.contains("still running after 1 second is stopped"),
+        "{description}"
+    );
+    assert!(description.contains("up to 7 seconds"), "{description}");
+}
+
+// ── N-LEAD-6: a run's subagents bounded by a lifetime backstop ──────────
+
+/// What a spawn past the run's bound of `bound` subagents is refused with.
+fn subagent_bound_refusal(bound: usize) -> String {
+    format!(
+        "Maximum subagents per run ({bound}) reached — this run has spawned {bound}, so no \
+         more can be spawned. Collect their results with wait_for_subagents, then complete \
+         what is left directly or report it as not done."
+    )
+}
+
+/// `count` spawns of `worker` through `spawn_subagents_batch`, eight at a
+/// time, each accepted.
+async fn spawn_workers(spawn: &Arc<SpawnSubagentTool>, count: usize) {
+    let batch = SpawnSubagentsBatchTool::new(spawn.clone());
+    let mut spawned = 0;
+    while spawned < count {
+        let size = (count - spawned).min(8);
+        let entries: Vec<serde_json::Value> = (0..size)
+            .map(|n| {
+                let objective = format!("job {}", spawned + n + 1);
+                serde_json::json!({"agent_id": "worker", "objective": objective})
+            })
+            .collect();
+        let reply = batch
+            .execute(&serde_json::json!({"subagents": entries}))
+            .await
+            .unwrap();
+        assert!(
+            reply.starts_with(&format!(
+                "Batch spawn: {size}/{size} subagents spawned successfully."
+            )),
+            "{reply}"
+        );
+        spawned += size;
+    }
+}
+
+/// Every entry the tracker holds, whatever its status.
+fn tracked(tracker: &SubagentTracker) -> usize {
+    let (queued, running, completed, failed) = tracker.status_counts();
+    queued + running + completed + failed
+}
+
+/// **N-LEAD-6.** A run that has spawned 48 subagents — six full batches,
+/// the stock bound — is refused the 49th by `spawn_subagent`, the refusal
+/// naming 48, and nothing is spawned for it: no instance, no tracker entry.
+/// The 48 queue and run as N-LEAD-2 built: six at once under the
+/// concurrency bound, each queued one as a slot frees. Before the fix
+/// nothing bounded the run: the 49th was queued like the rest.
+#[tokio::test(start_paused = true)]
+async fn a_runs_forty_ninth_spawn_is_refused_naming_the_bound_and_the_forty_eight_run() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(spawn_tool_bounded(
+        roomy_router(provider.clone()),
+        shared.clone(),
+        tracker.clone(),
+        6,
+    ));
+
+    spawn_workers(&spawn, 48).await;
+    let instances = shared.agent_registry.list_instances().len();
+    let refused = spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "job 49"}))
+        .await
+        .expect_err("the run's 49th spawn is refused");
+    assert_eq!(refused, subagent_bound_refusal(48));
+    assert_eq!(shared.agent_registry.list_instances().len(), instances);
+    assert_eq!(tracked(&tracker), 48);
+    assert_eq!(spawn.spawn_count(), 48);
+
+    eventually("six running, forty-two queued", || {
+        tracker.status_counts() == (42, 6, 0, 0) && provider.worker_calls() == 6
+    })
+    .await;
+    provider.gate.add_permits(48);
+    eventually("all forty-eight ran", || {
+        tracker.status_counts() == (0, 0, 48, 0) && provider.worker_calls() == 48
+    })
+    .await;
+    assert!(
+        !provider
+            .worker_objectives
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|objective| objective.contains("job 49")),
+        "the refused subagent ran"
+    );
+}
+
+/// **N-LEAD-6.** Inside `spawn_subagents_batch` the bound is met entry by
+/// entry: a run at 44 sends a batch of eight, the first four are spawned and
+/// the last four are each refused naming 48 — the call itself succeeds.
+#[tokio::test(start_paused = true)]
+async fn a_batch_that_reaches_the_bound_spawns_up_to_it_and_refuses_the_rest() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(spawn_tool_bounded(
+        roomy_router(provider.clone()),
+        shared,
+        tracker.clone(),
+        6,
+    ));
+    spawn_workers(&spawn, 44).await;
+
+    let entries: Vec<serde_json::Value> = (45..=52)
+        .map(|n| serde_json::json!({"agent_id": "worker", "objective": format!("job {n}")}))
+        .collect();
+    let reply = SpawnSubagentsBatchTool::new(spawn.clone())
+        .execute(&serde_json::json!({"subagents": entries}))
+        .await
+        .unwrap();
+
+    assert!(
+        reply.starts_with("Batch spawn: 4/8 subagents spawned successfully."),
+        "{reply}"
+    );
+    for entry in 5..=8 {
+        assert!(
+            reply.contains(&format!(
+                "[{entry}] FAILED (worker): {}",
+                subagent_bound_refusal(48)
+            )),
+            "entry {entry}: {reply}"
+        );
+    }
+    assert_eq!(
+        reply.matches("OK: Subagent 'worker' spawned").count(),
+        4,
+        "{reply}"
+    );
+    assert_eq!(tracked(&tracker), 48);
+    assert_eq!(spawn.spawn_count(), 48);
+}
+
+/// **N-LEAD-6.** Spawns racing on separate tasks for a run's last slots:
+/// eight on as many threads, four slots left, admit exactly four and refuse
+/// four naming the bound. The lead's loop does not race them today — a
+/// round's spawns run on one task with no await in the spawn path — so this
+/// pins the case the atomic reservation is for: a spawn moved to another
+/// task, or an await added. The bound is reserved where it is checked, not
+/// read and counted later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn spawns_racing_for_the_last_slots_are_admitted_exactly_up_to_the_bound() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn = Arc::new(spawn_tool_bounded(
+        roomy_router(provider.clone()),
+        shared,
+        tracker.clone(),
+        6,
+    ));
+    spawn_workers(&spawn, 44).await;
+
+    let start = Arc::new(tokio::sync::Barrier::new(8));
+    let racers: Vec<_> = (0..8)
+        .map(|n| {
+            let spawn = spawn.clone();
+            let start = start.clone();
+            tokio::spawn(async move {
+                let objective = format!("racer {n}");
+                start.wait().await;
+                spawn
+                    .execute(&serde_json::json!({"agent_id": "worker", "objective": objective}))
+                    .await
+            })
+        })
+        .collect();
+    let (mut accepted, mut refused) = (0, 0);
+    for racer in racers {
+        match racer.await.unwrap() {
+            Ok(_) => accepted += 1,
+            Err(error) => {
+                assert_eq!(error, subagent_bound_refusal(48));
+                refused += 1;
+            }
+        }
+    }
+
+    assert_eq!((accepted, refused), (4, 4));
+    assert_eq!(tracked(&tracker), 48);
+    assert_eq!(spawn.spawn_count(), 48);
+}
+
+/// **N-LEAD-6 with N-LEAD-4.** A resumed run's subagents — rebuilt from its
+/// session log — are this run's, so they count toward its bound: under a
+/// bound of 3, a run resumed with two may spawn one more and is refused the
+/// next, naming 3. The figure the run reports as spawned is still this
+/// attempt's own, 1.
+#[tokio::test(start_paused = true)]
+async fn a_resumed_runs_subagents_count_toward_its_bound() {
+    use crate::session_log::replay::{ReplayedClose, ReplayedSubagent};
+
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    tracker.restore(&[
+        ReplayedSubagent {
+            run_id: "worker::aaaaaaaa".to_string(),
+            close: Some(ReplayedClose {
+                state: "done".to_string(),
+                detail: None,
+                answer: "counted the alpacas".to_string(),
+            }),
+        },
+        ReplayedSubagent {
+            run_id: "worker::bbbbbbbb".to_string(),
+            close: None,
+        },
+    ]);
+    let config: DaemonConfig =
+        toml::from_str("[execution.lead_agent_defaults]\nmax_subagents_per_run = 3\n").unwrap();
+    let spawn = spawn_tool_under(roomy_router(provider), shared, tracker.clone(), 6, config);
+
+    spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "weigh the alpacas again"}))
+        .await
+        .unwrap();
+    let refused = spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "shear the alpacas"}))
+        .await
+        .expect_err("the run's fourth subagent is refused");
+
+    assert_eq!(refused, subagent_bound_refusal(3));
+    assert_eq!(tracked(&tracker), 3);
+    assert_eq!(spawn.spawn_count(), 1);
+}
+
+/// **N-LEAD-6.** Only a subagent spawned counts: a spawn refused for another
+/// reason — a template that does not exist — takes no slot, so under a bound
+/// of 3 five such refusals still leave room for three workers, and the
+/// fourth is refused naming 3.
+#[tokio::test(start_paused = true)]
+async fn a_spawn_refused_for_another_reason_takes_no_slot() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let config: DaemonConfig =
+        toml::from_str("[execution.lead_agent_defaults]\nmax_subagents_per_run = 3\n").unwrap();
+    let spawn = spawn_tool_under(roomy_router(provider), shared, tracker.clone(), 6, config);
+
+    for n in 1..=5 {
+        let error = spawn
+            .execute(&serde_json::json!({"agent_id": "ghost", "objective": format!("haunt {n}")}))
+            .await
+            .expect_err("no such template");
+        assert!(error.starts_with("Cannot spawn agent 'ghost'"), "{error}");
+    }
+    for n in 1..=3 {
+        spawn
+            .execute(&serde_json::json!({"agent_id": "worker", "objective": format!("job {n}")}))
+            .await
+            .unwrap_or_else(|error| panic!("worker {n} refused: {error}"));
+    }
+    let refused = spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "job 4"}))
+        .await
+        .expect_err("the run's fourth subagent is refused");
+
+    assert_eq!(refused, subagent_bound_refusal(3));
+    assert_eq!(tracked(&tracker), 3);
+    assert_eq!(spawn.spawn_count(), 3);
+}
+
+/// **N-LEAD-6.** The bound is the run's lifetime, not the subagents still
+/// active: under a bound of 3, three workers spawn and all three finish,
+/// and the fourth is still refused naming 3 — a finished subagent frees a
+/// concurrency slot, never a slot of the run's bound.
+#[tokio::test(start_paused = true)]
+async fn the_bound_counts_finished_subagents_too() {
+    let provider = GatedWorkers::new();
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let config: DaemonConfig =
+        toml::from_str("[execution.lead_agent_defaults]\nmax_subagents_per_run = 3\n").unwrap();
+    let spawn = spawn_tool_under(
+        roomy_router(provider.clone()),
+        shared.clone(),
+        tracker.clone(),
+        6,
+        config,
+    );
+
+    for n in 1..=3 {
+        spawn
+            .execute(&serde_json::json!({"agent_id": "worker", "objective": format!("job {n}")}))
+            .await
+            .unwrap_or_else(|error| panic!("worker {n} refused: {error}"));
+    }
+    provider.gate.add_permits(3);
+    eventually("all three finished", || {
+        tracker.status_counts() == (0, 0, 3, 0) && provider.worker_calls() == 3
+    })
+    .await;
+    let instances = shared.agent_registry.list_instances().len();
+    let refused = spawn
+        .execute(&serde_json::json!({"agent_id": "worker", "objective": "job 4"}))
+        .await
+        .expect_err("the run's fourth subagent is refused");
+
+    assert_eq!(refused, subagent_bound_refusal(3));
+    assert_eq!(shared.agent_registry.list_instances().len(), instances);
+    assert_eq!(tracked(&tracker), 3);
+    assert_eq!(spawn.spawn_count(), 3);
+}
+
+/// A lead that spawns four workers in one batch, then answers; workers
+/// answer at once. It keeps every request the lead sent.
+struct LeadSpawnsFour {
+    lead_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for LeadSpawnsFour {
+    fn name(&self) -> &str {
+        "lead-spawns-four"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        if !is_lead_request(&request) {
+            return Ok(scripted_response("weighed", vec![]));
+        }
+        let first = tool_results_in(&request) == 0;
+        self.lead_requests
+            .lock()
+            .unwrap()
+            .push(request.messages.as_ref().clone());
+        if !first {
+            return Ok(scripted_response("done", vec![]));
+        }
+        let entries: Vec<serde_json::Value> = (1..=4)
+            .map(|n| {
+                let objective = format!("weigh herd {n}");
+                serde_json::json!({"agent_id": "worker", "objective": objective})
+            })
+            .collect();
+        Ok(scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-batch".to_string(),
+                name: "spawn_subagents_batch".to_string(),
+                arguments: serde_json::json!({"subagents": entries}),
+            }],
+        ))
+    }
+}
+
+/// **N-LEAD-6.** The bound is the owner's figure, read once at the run's
+/// start: under `max_subagents_per_run = 3` the lead's prompt names 3, and a
+/// batch of four spawns three and refuses the fourth naming 3 — the figure
+/// the lead was told is the figure enforced.
+#[tokio::test]
+async fn the_lead_is_told_the_configured_bound_and_refused_at_it() {
+    let provider = Arc::new(LeadSpawnsFour {
+        lead_requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let config: DaemonConfig =
+        toml::from_str("[execution.lead_agent_defaults]\nmax_subagents_per_run = 3\n").unwrap();
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "weigh the four herds",
+        Arc::new(LlmRouter::single_provider(
+            provider.clone(),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        )),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(config)),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        None,
+    )
+    .await;
+
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+    assert_eq!(result.subagents_spawned, 3);
+    let requests = provider.lead_requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "the lead answered after one batch");
+    let system = &requests[0][0];
+    assert_eq!(system.role, openalpaca_llm::Role::System);
+    assert!(
+        system.content.contains(
+            "This run may spawn at most 3 subagents in all, retries included; a spawn past \
+             that is refused."
+        ),
+        "{}",
+        system.content
+    );
+    let results: Vec<&str> = requests[1]
+        .iter()
+        .filter(|m| m.role == openalpaca_llm::Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].starts_with("Batch spawn: 3/4 subagents spawned successfully."),
+        "{}",
+        results[0]
+    );
+    assert!(
+        results[0].contains(&format!(
+            "[4] FAILED (worker): {}",
+            subagent_bound_refusal(3)
+        )),
+        "{}",
+        results[0]
+    );
 }

@@ -1,7 +1,7 @@
 # API Docs
 
-> Generated from source by `python3 scripts/gen_api_docs.py`.
-> Validate freshness with `python3 scripts/gen_api_docs.py --check`.
+> Generated from source by `python3.11 scripts/gen_api_docs.py`.
+> Validate freshness with `python3.11 scripts/gen_api_docs.py --check`.
 
 ## Apps
 

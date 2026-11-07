@@ -9,7 +9,7 @@
 #   --description   Short description
 #
 # Optional:
-#   --scope         project (default) or user
+#   --scope         project (the default and the only scope: any other is refused)
 #   --mode          manual (default) or auto
 #   --slash         Slash command (default: /<id>)
 #   --level         Permission level: readonly (default), readwrite, admin
@@ -27,9 +27,11 @@
 
 set -euo pipefail
 
-# Resolve project root from script location
+# The skills root, from the script's own location: the script is at
+# <config>/skills/create-skill/scripts/, so the root is the skills directory
+# this skill was loaded from, the one directory the daemon reads skills from.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SKILLS_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Defaults
 SKILL_ID=""
@@ -75,18 +77,19 @@ for arg in "$@"; do
   esac
 done
 
+# One root, so one scope: `user` wrote under ~/.config/openalpaca/skills,
+# which nothing reads, and reported success.
+if [[ "$SCOPE" != "project" ]]; then
+  echo "Error: --scope=$SCOPE is refused: the daemon reads skills only from $SKILLS_ROOT (--scope=project, the default)" >&2
+  exit 1
+fi
+
 # Validation
 if [[ -z "$SKILL_ID" ]]; then echo "Error: --id is required" >&2; exit 1; fi
 if [[ -z "$NAME" ]]; then echo "Error: --name is required" >&2; exit 1; fi
 if [[ -z "$DESCRIPTION" ]]; then echo "Error: --description is required" >&2; exit 1; fi
 
-# Determine path
-if [[ "$SCOPE" == "user" ]]; then
-  BASE_DIR="$HOME/.config/openalpaca/skills"
-else
-  BASE_DIR="$PROJECT_ROOT/config/skills"
-fi
-SKILL_DIR="$BASE_DIR/$SKILL_ID"
+SKILL_DIR="$SKILLS_ROOT/$SKILL_ID"
 OUTPUT_FILE="$SKILL_DIR/SKILL.md"
 
 # Default slash command

@@ -3,7 +3,7 @@
 `openalpacad` is the local control plane for OpenAlpaca, serving HTTP APIs, streaming events, orchestration runtime, connectors, and storage.
 
 Related docs:
-- [API Docs index](api/README.md) (generated from source by `python3 scripts/gen_api_docs.py`)
+- [API Docs index](api/README.md) (generated from source by `python3.11 scripts/gen_api_docs.py`)
 - [CLI Manual](CLI_Manual.md)
 - [GUI Manual](GUI_Manual.md)
 - [Agent Loop reference](agent-loop.md) — how one turn or one agent runs: rounds, exits, guards, compaction, steering
@@ -182,7 +182,7 @@ Important runtime files:
 - `config/llm.toml`
 - `config/daemon.toml`
 - `config/mcp.toml` (MCP server declarations)
-- `config/agents/*.md` (Markdown with YAML frontmatter; legacy `.toml` agent files still load with a deprecation warning)
+- `config/agents/*.md` (Markdown with YAML frontmatter: your own templates and overrides of the nine built-in ones; legacy `.toml` agent files still load with a deprecation warning)
 - `config/skills/*/SKILL.md`
 - `config/tools/*.toml`
 - orchestrator persona docs under `config/orchestrator/`
@@ -190,11 +190,12 @@ Important runtime files:
 ## Secrets and First Run
 
 - On first startup the daemon seeds missing `llm.toml`, `daemon.toml` and `mcp.toml` from templates embedded in the binary (sourced from `scripts/release/templates/config/`).
-- The same step seeds the **content** the daemon also carries in its binary: `config/agents/` (the nine templates), `config/skills/` (helper scripts included, written executable) and `config/tools/`. The rule is per directory:
+- The same step seeds the **content** the daemon also carries in its binary: `config/skills/` (helper scripts included, written executable) and `config/tools/`, and creates `config/agents/` empty. The rule is per directory:
   - a directory that already exists is skipped whole, including one the owner emptied;
   - inside a directory being filled, an existing file is never overwritten;
   - one `INFO` line per directory names the count and the path, and a per-file failure is a `WARN` that does not stop the rest.
-- A workflow is led by an agent template: one with the `orchestration` capability when there is one, otherwise any template that can be spawned. When no agent templates are loaded at all, the workflow request fails with "No agent templates are installed…" and names the `config/agents` directory. That is a different message from "All agents are busy", which clears by itself.
+- The nine agent templates are **built in**: registered from the binary at every start, never written to disk. A `config/agents/*.md` whose `id` is a built-in template's overrides it; one byte-identical to a version OpenAlpaca shipped (an earlier build's seeded copy, or a copy of the repository's `config/agents/`) is set aside — not read, not touched — and the built-in template runs. One that does not parse withholds the `id` it names rather than letting the built-in template stand in. A plugin's template never takes a built-in `id`. A file whose frontmatter says `disabled: true` switches off the `id` it names (its `id:` line, else its file name; `id:` and `disabled:` are enough, and a full template saying it is switched off whole): no template of that `id` runs — neither the built-in one nor a plugin's — the lead is not offered it, a spawn of it is refused naming the file, and its `agent` row, where it has one, reads `disabled` until the file goes (an `id` switched off before any template of it ran here has none). At each start one `INFO` line counts the built-in templates, the files read (naming those that override a built-in one) and the copies set aside (naming the earlier versions), then one line per override and one per file that switches a template off (`INFO`); a `require_confirmation_for` naming no tool is a `WARN` (that list replaces the default prompts; a plugin's `<plugin>::<tool>` is not checked, since plugins load after the templates). `GET /v1/agent-templates` carries the same facts per row: `source` (`bundled`, `file`, `plugin`), `plugin`, `path`, `overrides_bundled`, `state` (`ready`, `withheld`, `disabled`), `not_used` (with `reason` `unedited_copy`, `overridden`, `duplicate`, `does_not_parse` or `plugin_refused`, and an unedited copy's `version` and manual `edit`) and `warnings`. `POST` or `PUT` of a built-in `id` writes an override (`overrides_bundled: true` in the answer); `DELETE` archives the file that holds the `id`, whatever it is called, and of a built-in template with no file answers `409 {"error":"bundled"}`; of a switched-off `id` it archives the switching file, and the template is back; of a plugin's template it takes the template out of the list until the plugin next loads.
+- A workflow is led by an agent template: one with the `orchestration` capability when there is one, otherwise any template that can be spawned. Both are tried in one order — your `config/agents` files, then the built-in templates, then a plugin's, each by id, so your own `my_lead` comes before the built-in `lead_agent` — and the same lead is chosen from start to start. When no template can be spawned at all — only files that withhold the built-in ones can bring that about — the workflow request fails with "No agent template can act as Lead Agent…", naming the `config/agents` directory and `daemon.log`. That is a different message from "All agents are busy", which clears by itself.
 - The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`store::master_key_dir()`). The daemon reads it at boot and keeps it in its own process memory: it does not export `OPENALPACA_MASTER_KEY`, and removes one it inherited from the shell or launcher that started it, so no program it spawns — a shell command, a skill script, an MCP server, a plugin, a CLI model backend — receives the key. That keeps the key out of a child's environment, not out of its reach: the key file itself stays readable to any program running as you, a shell command you approve included, since the shell is not confined in this version. Startup fails hard if the key cannot be ensured. The variable is read only by the CLI and the test harnesses, where it overrides the file.
 - Persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`, and conditionally `BOOTSTRAP.md`) are written into `<config>/orchestrator/` from templates if absent.
 
@@ -204,7 +205,8 @@ A file watcher reloads configuration without restart:
 
 - `config/orchestrator/SOUL.md`, `USER.md`, `IDENTITY.md`, `BOOTSTRAP.md` (parse failures keep the last valid version)
 - `config/llm.toml` and `config/daemon.toml`. An `llm.toml` edit reloads the runtime config first and **then** registers every provider the file enables that the router does not already hold — the same registration, discovery included, that the toggle route performs — so turning a provider on by hand needs no restart. Nothing is unloaded on this path: a disable arrives through the toggle. The daemon's own writes are swallowed by a hash ring.
-- the `config/skills/` and `config/agents/` directories
+- the `config/skills/` directory
+- the `config/agents/` directory: any change rereads every top-level `.md` in it (legacy `.toml` agents are read at start only), setting aside again each unedited copy of a shipped version. A file deleted or renamed, or given another `id:`, takes its template out without a restart — or, for an override, brings the built-in template back; of two files claiming one `id` the first by file name is used and a `WARN` names both. A file that no longer parses withholds the `id` it names — its `id:` line, else its file name — when a template held that `id` before, and a spawn of that template is refused naming the file and the error, rather than the previous copy running on. It never takes an `id` from a file that parses, whichever sorts first: that file is used and a `WARN` names both. A file whose `id` nothing held before is skipped with a `WARN`, as at start. A file saying `disabled: true` switches its `id` off at once, and deleting it, or removing the line, brings the template back. An edit naming an unknown `annotation:` capability withholds that template with a `WARN` (a start still refuses to boot on such a file). The idle instance each template answers to follows, so the singleton lead's next run uses the edit (one busy at the time picks it up at the next change), and the template's `agent` row is rewritten. `POST`, `PUT` and `DELETE /v1/agent-templates` reread the directory the same way, so their change is in effect when the call returns.
 - `config/mcp.toml` — that file **is** the MCP declaration and toggle store, so a hand edit is authoritative: the supervisor diffs desired against actual on presence, the `enabled` bit and a config fingerprint, and loads or unloads only what changed. An unparseable save keeps the last good set rather than tearing servers down, and the daemon's own writes are swallowed by a hash ring so a toggle does not reconcile twice.
 
 ## LLM Providers and Local Models
@@ -355,7 +357,7 @@ shipped `lead_agent` template sets `3.0`). At price `0` none of the caps bite.
 | Key | Default | Scope |
 |---|---|---|
 | `[timeouts] llm_request_timeout_secs` | 120 | Wall clock for one **non-streaming** LLM call, any provider that sets no override. Clamped to 1…86400 s with a `WARN`. |
-| `[providers.<name>] request_timeout_secs` | unset | Per-provider override of the above. The seeded template sets **600** for Ollama. |
+| `[providers.<name>] request_timeout_secs` | unset | Per-provider override of the above. The seeded template sets **3600** for Ollama: a call to a local model may run up to an hour. |
 | `[providers.<name>] default_max_tokens` | 4096 (8192 for the seeded Ollama) | Output ceiling for one answer; a request-level `max_tokens` still wins. |
 
 The HTTP client carries **no total deadline**: it bounds the connect (30 s,
@@ -371,15 +373,15 @@ fires:
 | Bound | Value | Where | What happens |
 |---|---|---|---|
 | Idle between SSE chunks | **90 s**, not configurable | `STREAM_IDLE_TIMEOUT`, `crates/openalpaca_llm/src/streaming.rs` | The stream errors, the loop logs it and **retries the turn without streaming**. |
-| Streaming wall clock | 600 s, not configurable | `LoopConfig::max_stream_duration` | Same fallback: the collection is cancelled and the turn is retried non-streaming. |
-| HTTP read gap | `request_timeout_secs` (600 s for the seeded Ollama, else `[timeouts] llm_request_timeout_secs`) | `build_http_client` | The request fails at the transport. |
+| Streaming wall clock | 600 s, or 3,600 s when the provider serving the round needs no key (Ollama); not configurable | `LoopConfig::max_stream_duration`, `LoopConfig::max_keyless_stream_duration` | Same fallback: the collection is cancelled and the turn is retried non-streaming. |
+| HTTP read gap | `request_timeout_secs` (3,600 s for the seeded Ollama, else `[timeouts] llm_request_timeout_secs`) | `build_http_client` | The request fails at the transport. |
 
 The first is by far the tightest, so on a local model it is the one that fires,
 and the symptom is a turn that stalls and then answers un-streamed rather than
 one that fails. The case that reaches it in practice is a model still being
 loaded into memory: warm the tag once before a long run. The read timeout at
-600 s is ten minutes of silence and is effectively unreachable while the loop
-is the consumer.
+3,600 s for the seeded Ollama is an hour of silence and is effectively
+unreachable while the loop is the consumer.
 
 Streaming for Ollama is real (the provider forwards to the OpenAI-compatible
 streaming client), and every OpenAI-compatible base is asked for
@@ -398,7 +400,7 @@ A stdio server's `command` is looked up on the daemon's `PATH`, which comes from
 
 There is **no per-tool switch**: a whole server (or plugin) is turned off with `openalpaca ext disable mcp <server>` — see Extensions below. A disabled server's tools leave every surface and the gate refuses them.
 
-A streamable-HTTP server (`transport = "http"`) is bounded by idleness, never by a total deadline: a streamed answer is no longer cut at 30 s by the connection — it runs until the call's own deadline, the server's `request_timeout_secs` (default 30), so raise that for a long-running tool. The connection itself is given up only when nothing at all arrives for five minutes, or for `request_timeout_secs` when that is longer, so a stream the server holds open between events is not cut either. A redirect is followed only on the server's own origin (scheme, host and port), for up to ten hops, and only for a server given no credentials: a server with `auth` or `extra_headers` (`extra_headers_from` included) follows no redirect at all, since the credential and every extra header would travel with the request. So a server whose `url` relies on a redirect — `http://` to `https://` included, or any redirect when credentials are configured — stops connecting: its row reads `Failed` with reason `config_invalid`, its detail saying ``server redirected to <origin>; set `url` to the canonical endpoint``, and it connects again once `url` is the endpoint the server redirected to. A call that meets such a redirect mid-session returns the same message and is never retried.
+A streamable-HTTP server (`transport = "http"`) is bounded by idleness, never by a total deadline: a streamed answer is no longer cut at 30 s by the connection — it runs until the call's own deadline, the server's `request_timeout_secs` (default 30), so raise that for a long-running tool — up to `[execution.agent_defaults] max_tool_runtime_secs` in `config/daemon.toml` (120 by default): the sandbox ends every MCP call there, whatever the server's figure, with `Tool '<server>__<tool>' timed out after 120s`, and an MCP call may not ask for more. The connection itself is given up only when nothing at all arrives for five minutes, or for `request_timeout_secs` when that is longer, so a stream the server holds open between events is not cut either. A redirect is followed only on the server's own origin (scheme, host and port), for up to ten hops, and only for a server given no credentials: a server with `auth` or `extra_headers` (`extra_headers_from` included) follows no redirect at all, since the credential and every extra header would travel with the request. So a server whose `url` relies on a redirect — `http://` to `https://` included, or any redirect when credentials are configured — stops connecting: its row reads `Failed` with reason `config_invalid`, its detail saying ``server redirected to <origin>; set `url` to the canonical endpoint``, and it connects again once `url` is the endpoint the server redirected to. A call that meets such a redirect mid-session returns the same message and is never retried.
 
 ## Extensions (MCP servers + plugins)
 
@@ -560,7 +562,7 @@ bookkeeping. `DELETE /v1/sessions/{id}` takes the transcript with the rows:
 | `POST /v1/tasks` | Create a run. Takes `unattended`. |
 | `GET /v1/tasks/{id}` | One run. |
 | `GET /v1/tasks/{id}/timeline` | One lane per spawned subagent (label, template, state, start and end). This is where a run's agents are reported. |
-| `POST /v1/tasks/{id}/action` | `cancel`, `pause`, `resume` or `start`. Takes an optional `unattended`. |
+| `POST /v1/tasks/{id}/action` | `cancel`, `resume` or `start`. Takes an optional `unattended`. `pause` is refused until a later design: `409` with `{"error": "<the chat's /pause sentence>"}`, and nothing moves (no status, no `TaskUpdated`). `resume` still un-pauses a row an earlier build left `paused`. |
 | `POST /v1/tasks/{id}/steer` | Push a message into the run's steering inbox. `404` on a run that is not yours. |
 | `POST /v1/tasks/{id}/rerun` | Answers `201` with a **new** id, copied from a finished run's goal. Takes an optional `unattended`. |
 | `GET\|POST /v1/lanes/{lane_key}/followups` | Read or add to a lane's follow-up queue. The `POST` takes `unattended`. |
@@ -1040,13 +1042,13 @@ here — it is confirmed only through the routes below.
 
 **Chat memory commands** (`/remember`, `/forget`, `/memories`). The
 orchestrator answers these itself, in its deterministic tier, with **no model
-involved** — the turn's `IntentClassified` names them `memory_command`. Typed
-by a person on an attended turn of the app's or the CLI's chat (source `gui`
-or `cli`, not `unattended`), such a command is a **user-directed** surface like
-the routes below: it builds its `UserSurface` context from the turn — the
-turn's owner, and the project root the turn's own workspace resolved to — so
-`/remember` records origin `user`. G2 is untouched: no model ever sees the
-command, and the text written is exactly what was typed.
+involved** — the turn's latency row (`GET /v1/orchestrator/latency`) names them
+`memory_command`. Typed by a person on an attended turn of the app's or the
+CLI's chat (source `gui` or `cli`, not `unattended`), such a command is a
+**user-directed** surface like the routes below: it builds its `UserSurface`
+context from the turn — the turn's owner, and the project root the turn's own
+workspace resolved to — so `/remember` records origin `user`. G2 is untouched:
+no model ever sees the command, and the text written is exactly what was typed.
 
 - `/remember [--kind <k>] [--global | --project] <text>` stores a note: the
   title is the first line cut at 80 characters, the body is the whole text,
@@ -1202,7 +1204,7 @@ Every chat message (any source: GUI, CLI, connectors) is routed by the orchestra
 
 1. **Deterministic commands** (no LLM call):
    - `/status` / `/tasks` — task summary; `/status <task_id>` for one task.
-   - `/cancel`, `/pause`, `/resume` — task control. Bare forms (no id) resolve against the lane's active workflows; an explicit id (`/cancel <id>`) targets that task.
+   - `/cancel` — stops a run. The bare form (no id) resolves against the lane's active workflows; an explicit id (`/cancel <id>`) targets that task. `/pause` and `/resume`, bare or with an id, answer one sentence — pause is not supported, `/cancel` stops a run — and change nothing. Pause is refused on every surface until a later design: the action route's `pause` answers `409` with the same sentence, `openalpaca tasks pause` prints it, and the GUI offers no Pause.
    - `/steer <text>` — inject a steering message into the lane's running workflow (guaranteed delivery, bypasses the model; requires `orchestrator.routing.steering_enabled`, default on).
    - `/remember`, `/forget`, `/memories` — the chat memory commands (see [Memory](#memory), *Chat memory commands*): matched before any skill — a slash command or the router's pick — and before the task commands above, which the three words cannot be confused with; the command word in any case and followed by a space or nothing (`/remembering` is not one). Only on an attended turn of the app's or the CLI's chat; every other turn is answered with a fixed sentence and changes nothing. Their names are reserved: a skill claiming one as its slash command, an alias or its id is not reached by that slash, and the skill loader logs one `WARN` naming it.
    - `/<skill> [args]` — invoke a skill by slash command, alias, or skill ID (directory name); skills can also be selected by the weighted skill router.
@@ -1573,6 +1575,15 @@ Every way a prompt stops being pending is announced — a timeout included — s
 a client can always take its prompt down. The timeout defaults to 300 s
 (`execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml`) and is
 fail-closed.
+
+One agent's prompts for calls that are not read-only come one at a time.
+Within a round, such a call runs only once the calls before it have finished,
+so of two such calls that ask, the second prompt appears after the first has
+been answered and its call has run or been refused, and each waits its own
+timeout. Read-only calls in a row still run side by side, so when an agent
+template's or a skill's own list names a read-only tool, two calls of it in
+one round can ask at once. Prompts from different agents — subagents running
+side by side — can still be pending together.
 
 An approval is remembered for the rest of the loop that asked — one chat turn,
 or one agent's run inside a workflow — and no further: `these_args` covers

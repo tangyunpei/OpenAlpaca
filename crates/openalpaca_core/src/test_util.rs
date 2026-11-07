@@ -325,7 +325,7 @@ impl Drop for KillOnFail {
 }
 
 /// How long an R45 test waits for a killed process to be gone. The kill is
-/// immediate, but the system reaps an orphan asynchronously, and a loaded CI
+/// immediate, but the system reaps an orphan asynchronously, and a loaded
 /// machine is slow.
 #[cfg(unix)]
 pub(crate) const GONE_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
@@ -380,4 +380,151 @@ pub(crate) async fn wait_until_gone(pid: i32, within: std::time::Duration) -> bo
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     process_is_gone(pid)
+}
+
+// ── N-TOOL-1b (B-11): what a loop's per-tool bound cuts ──────────────────
+
+/// How long [`slow_shell`]'s stand-in runs: past the 1 s bound the tests set,
+/// short of anything a test would sit out — a loop that does not cut it at
+/// its bound gets `"finished"` back after this, and the test fails then.
+pub(crate) const SLOW_TOOL_RUNS: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A tool that is still running at test scale: it sleeps [`SLOW_TOOL_RUNS`]
+/// and answers `"finished"`.
+pub(crate) struct Sleeps;
+
+#[async_trait::async_trait]
+impl crate::tools::registry::BuiltInTool for Sleeps {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        tokio::time::sleep(SLOW_TOOL_RUNS).await;
+        Ok("finished".to_string())
+    }
+}
+
+/// The registered `shell_execute` — its definition, its capability, its
+/// place among the command tools — over a [`Sleeps`] backend that declares
+/// nothing, so no card is raised and nothing is run.
+pub(crate) fn slow_shell() -> crate::tools::registry::RegisteredTool {
+    let shell = crate::tools::builtins::builtin_tools(None, None, None)
+        .into_iter()
+        .find(|tool| tool.definition.name == "shell_execute")
+        .expect("shell_execute is a builtin");
+    crate::tools::registry::RegisteredTool {
+        backend: crate::tools::registry::ToolBackend::BuiltIn(std::sync::Arc::new(Sleeps)),
+        annotations: None,
+        ..shell
+    }
+}
+
+/// A provider that asks for one tool call, then answers `"done"`, keeping
+/// every request it was handed.
+pub(crate) struct CallsOneTool {
+    call: openalpaca_llm::ToolCall,
+    seen: std::sync::Mutex<Vec<openalpaca_llm::ChatRequest>>,
+}
+
+impl CallsOneTool {
+    pub(crate) fn new(name: &str, arguments: serde_json::Value) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            call: openalpaca_llm::ToolCall {
+                id: "tc_once".to_string(),
+                name: name.to_string(),
+                arguments,
+            },
+            seen: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Every request that reached this provider, in arrival order.
+    pub(crate) fn requests(&self) -> Vec<openalpaca_llm::ChatRequest> {
+        self.seen.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// The description of `tool` in the first request.
+    pub(crate) fn description_of(&self, tool: &str) -> String {
+        self.requests()
+            .first()
+            .expect("no request reached the provider")
+            .tools
+            .iter()
+            .find(|definition| definition.name == tool)
+            .unwrap_or_else(|| panic!("the first request carries no {tool}"))
+            .description
+            .clone()
+    }
+
+    /// What the model was shown for its one call: the tool message of the
+    /// second request.
+    pub(crate) fn tool_result(&self) -> String {
+        self.requests()
+            .get(1)
+            .and_then(|request| {
+                request
+                    .messages
+                    .iter()
+                    .find(|m| m.role == openalpaca_llm::Role::Tool)
+                    .map(|m| m.content.clone())
+            })
+            .expect("the call's result never reached the model")
+    }
+}
+
+#[async_trait::async_trait]
+impl openalpaca_llm::LlmProvider for CallsOneTool {
+    fn name(&self) -> &str {
+        "calls-one-tool"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let model = request.model.clone().unwrap_or_else(|| "recorded".into());
+        let first = {
+            let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+            seen.push(request);
+            seen.len() == 1
+        };
+        let (tool_calls, finish_reason, content) = if first {
+            (
+                vec![self.call.clone()],
+                openalpaca_llm::FinishReason::ToolUse,
+                String::new(),
+            )
+        } else {
+            (
+                Vec::new(),
+                openalpaca_llm::FinishReason::Stop,
+                "done".to_string(),
+            )
+        };
+        Ok(openalpaca_llm::ChatResponse {
+            content,
+            tool_calls,
+            model,
+            usage: openalpaca_llm::Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// A daemon config whose `[execution.agent_defaults]` is `table`, read as a
+/// hand-edited `daemon.toml` is (a key this build does not know is ignored),
+/// then validated as the loader validates it.
+pub(crate) fn daemon_config_with_agent_defaults(table: &str) -> crate::daemon_config::DaemonConfig {
+    let mut config: crate::daemon_config::DaemonConfig =
+        toml::from_str(&format!("[execution.agent_defaults]\n{table}\n"))
+            .expect("the table parses");
+    config.validate();
+    config
 }

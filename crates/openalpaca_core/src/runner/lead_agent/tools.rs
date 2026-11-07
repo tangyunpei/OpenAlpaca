@@ -14,7 +14,7 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
-use crate::prompt_ctx::{ExecutionPath, SectionPriority};
+use crate::prompt_ctx::{ExecutionPath, PackageSectionKind, SectionPriority};
 use crate::runner::plugin_agent::{PluginLoopOutcome, PluginRunScope, run_plugin_agent_loop};
 use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
@@ -223,8 +223,20 @@ pub struct SpawnSubagentTool {
     created_by: String,
     lead_template_id: String,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
-    /// Tracks how many subagents have been spawned (for observability).
+    /// How many subagents this tool has spawned (the run's report), and the
+    /// slots it holds against `max_subagents_per_run`: a spawn reserves its
+    /// slot here before it registers anything, and gives it back if the
+    /// spawn then fails (N-LEAD-6).
     spawn_count: AtomicUsize,
+    /// N-LEAD-6: the most subagents this run may spawn in all —
+    /// `[execution.lead_agent_defaults] max_subagents_per_run`, read once
+    /// when the run starts, the figure its prompt names.
+    max_subagents_per_run: usize,
+    /// N-LEAD-6: the subagents a resumed run's tracker already holds
+    /// (N-LEAD-4) — this run's, spawned before the daemon stopped, those its
+    /// session log still records — which count toward the bound beside
+    /// `spawn_count`.
+    restored_subagents: usize,
     /// The turn's workspace identity: `workspace_id` scopes memory,
     /// `request_workspace_root` alone places artifacts (R22).
     workspace: MemoryScopeContext,
@@ -306,6 +318,12 @@ impl SpawnSubagentTool {
         unattended: bool,
         conversation_id: Option<String>,
     ) -> Self {
+        let max_subagents_per_run = daemon_config
+            .load()
+            .execution
+            .lead_agent_defaults
+            .max_subagents_per_run;
+        let (queued, running, completed, failed) = tracker.status_counts();
         Self {
             router,
             tool_registry,
@@ -317,6 +335,8 @@ impl SpawnSubagentTool {
             lead_template_id,
             daemon_config,
             spawn_count: AtomicUsize::new(0),
+            max_subagents_per_run,
+            restored_subagents: queued + running + completed + failed,
             subagents_token: cancel_token
                 .as_ref()
                 .map_or_else(CancellationToken::new, CancellationToken::child_token),
@@ -338,6 +358,39 @@ impl SpawnSubagentTool {
 
     pub fn spawn_count(&self) -> usize {
         self.spawn_count.load(Ordering::SeqCst)
+    }
+
+    /// The most subagents this run may spawn in all (N-LEAD-6): what the
+    /// lead's prompt names, so the figure it is told is the one enforced.
+    pub fn max_subagents_per_run(&self) -> usize {
+        self.max_subagents_per_run
+    }
+
+    /// N-LEAD-6: take one of the run's slots, or refuse the spawn naming the
+    /// bound. One atomic step, so the count stays exact however spawns are
+    /// scheduled. Today a round's spawns cannot interleave: `spawn_subagent`
+    /// runs alone, and two `spawn_subagents_batch` calls of one group
+    /// (N-TOOL-3) run under one `join_all` on one task, with no await between
+    /// this reservation and the spawn. A spawn on another task, or an await
+    /// added to the path, would race for the last slot; this keeps it exact.
+    fn reserve_spawn(&self) -> Result<(), String> {
+        let room = self
+            .max_subagents_per_run
+            .saturating_sub(self.restored_subagents);
+        self.spawn_count
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |spawned| {
+                (spawned < room).then_some(spawned + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                let bound = self.max_subagents_per_run;
+                format!(
+                    "Maximum subagents per run ({bound}) reached — this run has spawned \
+                     {bound}, so no more can be spawned. Collect their results with \
+                     wait_for_subagents, then complete what is left directly or report it \
+                     as not done."
+                )
+            })
     }
 
     /// N-LEAD-1: stop every subagent this run left queued or running, once
@@ -427,6 +480,10 @@ impl BuiltInTool for SpawnSubagentTool {
             ));
         }
 
+        // N-LEAD-6: the run's lifetime bound, before anything is registered —
+        // a refused spawn leaves no instance, lane or task behind.
+        self.reserve_spawn()?;
+
         // 3. Spawn a new instance from the agent template
         //    (agent_id is really a template_id — the LLM picks from the template catalog)
         let agent = self
@@ -434,6 +491,8 @@ impl BuiltInTool for SpawnSubagentTool {
             .agent_registry
             .spawn_instance(agent_id, self.task_id.clone())
             .map_err(|e| {
+                // Nothing was spawned: the slot goes back (N-LEAD-6).
+                self.spawn_count.fetch_sub(1, Ordering::SeqCst);
                 // A template a **disabled plugin** used to contribute is
                 // attributed to that plugin rather than reading as an unknown
                 // name (extension design §10 case 5(a)).
@@ -526,8 +585,6 @@ impl BuiltInTool for SpawnSubagentTool {
             );
         }
 
-        self.spawn_count.fetch_add(1, Ordering::SeqCst);
-
         // 5. Build SandboxManager for subagent
         let subagent_tool_ctx = ToolContext {
             agent_id: Some(agent_id.to_string()),
@@ -607,13 +664,31 @@ impl BuiltInTool for SpawnSubagentTool {
         .unwrap_or(200_000);
 
         // Distill parent context for this sub-agent
-        let context_package = self.context_manager.distill(
+        let mut context_package = self.context_manager.distill(
             &self.parent_bundle,
             &agent.constraints,
             model_window,
             objective,
             None, // no predecessor handoff for lead agent spawns
         );
+        // SA-2b: the objective reaches the subagent once, as its user turn
+        // (`current_user_turn` below). `distill` always adds it as the task
+        // description, which Layer 3 would route to a second system message —
+        // so it leaves the package here, as `build_subagent_minimal`'s doc
+        // asks; the other sections were fitted beside it all the same, and
+        // a plugin-backed template is handed the objective by its own path.
+        let task_description_tokens: usize = context_package
+            .sections
+            .iter()
+            .filter(|s| s.kind == PackageSectionKind::TaskDescription)
+            .map(|s| s.token_estimate)
+            .sum();
+        context_package
+            .sections
+            .retain(|s| s.kind != PackageSectionKind::TaskDescription);
+        context_package.total_tokens = context_package
+            .total_tokens
+            .saturating_sub(task_description_tokens);
         let bundle = context_package.to_bundle();
         // Design §5: a distilled memory section reaches a subagent the way
         // it reaches every other loop — outside Layer 3, which leaves
@@ -758,6 +833,11 @@ impl BuiltInTool for SpawnSubagentTool {
             let insert_at = messages.len().saturating_sub(1);
             messages.insert(insert_at, ChatMessage::user(&note));
         }
+        // SA-2b: every compaction keeps what the subagent was handed — the
+        // system prompt, any memory block or working-folder line, and its
+        // objective last — where the default head (the system prompt and
+        // one message) would leave the objective among the rows it folds.
+        loop_config.kept_head = messages.len();
 
         // **S3 — a subagent's rounds carry a budget too.** The lead's loop is
         // handed a `ContextBudgetManager` and the main loop's is; a subagent's
@@ -776,7 +856,13 @@ impl BuiltInTool for SpawnSubagentTool {
             + memory_turn.as_ref().map_or(0, |m| m.token_estimate());
         let budget_tools_tokens = crate::runner::estimate_tools_tokens(&tools);
 
-        let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
+        // N-TOOL-1b: the per-tool bound is the daemon's, not the template's
+        // `timeout_seconds`.
+        let mut sandbox_policy = SandboxPolicy::from_constraints(
+            &instance_id,
+            &agent.constraints,
+            &self.daemon_config.load().execution.agent_defaults,
+        );
         // The template grants capabilities; the sandbox is asked about tool
         // names. `tools` is what those capabilities resolved to (step 6), so
         // the allow list admits exactly that surface — otherwise a researcher
@@ -1230,6 +1316,17 @@ impl BuiltInTool for SpawnSubagentsBatchTool {
     }
 }
 
+/// The `objective` parameter's description on both spawn tools (SA-2): an
+/// objective is the subagent's brief — the user turn it answers — so the
+/// parameter says what a brief holds. It names no length: since SA-2b
+/// nothing cuts or drops a brief, but one past the subagent's window, a
+/// figure the lead is not told, fails at the provider.
+const OBJECTIVE_DESCRIPTION: &str = "A self-contained brief for the subagent: the goal (what to \
+     achieve, and why); the inputs it needs (facts, file paths, workspace keys, earlier \
+     results); the constraints (scope, limits, what not to do); and what to return and where \
+     (what its answer must hold, and any file or workspace key it is to write). The subagent \
+     is given neither the user's request nor this conversation, only this brief.";
+
 /// Tool definition for `spawn_subagents_batch`.
 pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> ToolDefinition {
     let agent_descriptions: Vec<String> = templates
@@ -1254,10 +1351,11 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
         name: "spawn_subagents_batch".to_string(),
         description: format!(
             "Spawn multiple subagents in a single call (1-8). More efficient than calling \
-             spawn_subagent repeatedly. Each entry specifies an agent_id and objective. \
-             Every entry returns its run_id at once; up to this run's concurrency bound they \
-             run in parallel, and the rest are queued and start as slots free. Use \
-             wait_for_subagents to collect results.\n\nAvailable agents:\n{}",
+             spawn_subagent repeatedly. Each entry specifies an agent_id and an objective, \
+             written as a self-contained brief: the goal, the inputs it needs, the constraints, \
+             and what to return and where. Every entry returns its run_id at once; up to this \
+             run's concurrency bound they run in parallel, and the rest are queued and start as \
+             slots free. Use wait_for_subagents to collect results.\n\nAvailable agents:\n{}",
             agents_list
         ),
         parameters: serde_json::json!({
@@ -1274,7 +1372,7 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
                             },
                             "objective": {
                                 "type": "string",
-                                "description": "A clear, specific objective for this subagent"
+                                "description": OBJECTIVE_DESCRIPTION
                             }
                         },
                         "required": ["agent_id", "objective"]
@@ -1849,10 +1947,13 @@ pub fn spawn_subagent_tool_definition_from_templates(
     ToolDefinition {
         name: "spawn_subagent".to_string(),
         description: format!(
-            "Spawn a subagent to work on a specific objective. Spawning is always immediate — \
-             the system automatically queues execution if LLM capacity is limited. Spawn all \
-             independent objectives in a single round, then use wait_for_subagents to collect \
-             results. Multiple instances of the same agent can run concurrently.\n\n\
+            "Spawn a subagent to work on a specific objective, written as a self-contained \
+             brief: the goal, the inputs it needs, the constraints, and what to return and \
+             where. Spawning is always immediate — it returns a run_id at once, and a subagent \
+             spawned past this run's concurrency bound is queued and starts when a slot frees, \
+             as the reply says. Spawn all independent objectives in a single round, then use \
+             wait_for_subagents to collect results. Multiple instances of the same agent can \
+             run concurrently.\n\n\
              Available agents:\n{}",
             agents_list
         ),
@@ -1865,7 +1966,7 @@ pub fn spawn_subagent_tool_definition_from_templates(
                 },
                 "objective": {
                     "type": "string",
-                    "description": "A clear, specific objective for the subagent to accomplish"
+                    "description": OBJECTIVE_DESCRIPTION
                 }
             },
             "required": ["agent_id", "objective"]

@@ -1,4 +1,4 @@
-# Storage and project work — design (rev 1.3, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built; the owner's blanket answer of 2026-10-17 recorded; the freshness sweep's S12 residue in §18)
+# Storage and project work — design (rev 1.4, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built; the owner's blanket answer of 2026-10-17 recorded; the freshness sweep's S12 residue in §18; R30 and §18's `writing_agent.md` bullet amended for unedited copies by the bundled templates)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
@@ -81,7 +81,7 @@ recommended: ST-15…ST-21. Building Stage 1 raised two; the owner answered both
 | # | What |
 |---|---|
 | R7 | **The length rule.** A folder name longer than 200 bytes is cut and always gets the hash. This is ST-4's rule for a name that cannot be used whole. |
-| R30 | **T34 is fixed as its own row said**: the shipped `system_agent` template loses its two confirmation lines. The rule that an explicit list wins stays. A store seeded earlier keeps its old template; the switch-over note says which two lines to delete. *For skills, reversed by the owner's B-03, taken 2026-10-17 (PDT; 2026-10-18T01:56Z) by the owner's blanket answer: a skill's list is united with the annotation-derived set and `skill_script:*` tools ask like the shell — not built (§12).* |
+| R30 | **T34 is fixed as its own row said**: the shipped `system_agent` template loses its two confirmation lines. The rule that an explicit list wins stays. A store seeded earlier keeps its old template; the switch-over note says which two lines to delete. *Changed for unedited copies by the taken SA-1/Z3-06 rows (2026-10-19), built by the subagent design's C3 (`tasks/subagent-brief-design.md` §2.2): nothing rewrites a seeded template, but one byte-identical to a shipped version — or with the switch-over's step done exactly as written — is set aside at load and the bundled template runs; an edited copy keeps its template, as this row says.* *For skills, reversed by the owner's B-03, taken 2026-10-17 (PDT; 2026-10-18T01:56Z) by the owner's blanket answer: a skill's list is united with the annotation-derived set and `skill_script:*` tools ask like the shell — not built (§12).* |
 | R29 | **The blanket `../` text filter.** Today any tool argument containing `../` is refused, file content included, so a source file with a relative import cannot be written. Shown as "the filter goes"; narrowed in rev 0.4 — see §0.5. |
 | F3, R23, T35 | **Three findings older than this design.** Every child process inherits the daemon's master key through the environment: fixed in Stage 0 (F3), though a shell command can still read the key file (ST-14). The `send` tool sends any file path it is given: confined in Stage 2 (R23). Extension tools never prompt, and an MCP tool that sends no hint is treated as harmless: recorded as pending decision **T35**, not built here. *T35 taken 2026-10-17 (PDT; 2026-10-18T01:56Z) by the owner's blanket answer as option (iv) — §18.* |
 | R43 | **"Always allow" keeps its scope**: one tool, one subagent. A run-wide allow is not built. *Within it, the owner took B-01 and B-16 on 2026-10-17: the card declares what Always allow covers per tool, a dangerous-command catalog always asks, and a prompt's clock starts at the head of its queue — not built (§12).* |
@@ -1153,7 +1153,9 @@ live check.
 - **A skill is pointed at an `artifact_read` it may not hold** (S5's M5): `file_read`'s description and `file_write`'s
   by-product result name it, and a file-based skill holds it only when granted `read_result`, which brings it (X5).
 - **A store seeded before S5.8 keeps `writing_agent.md` without `file_read`**: the switch-over note's step 8 has the
-  line.
+  line. *Changed for unedited copies by the taken SA-1/Z3-06 rows, built by the subagent design's C3: such a copy is
+  set aside at load and the bundled `writing_agent`, which reads files, runs; nothing is rewritten; an edited copy
+  keeps its template, and step 8 stands for it.*
 
 *The app (S6a, F-E, X-G)*
 
@@ -1274,6 +1276,11 @@ beta waits for, so it stays the owner's call (Stages 0–2 are all built).
 
 ## Revision log
 
+- **rev 1.4 (2026-11-07).** The subagent design's C3 (`tasks/subagent-brief-design.md` rev 2.1, §8, §11): the
+  shipped agent templates are a bundled layer, and a config file byte-identical to a shipped version is set aside at
+  load. §0.3's R30 row and §18's `writing_agent.md` bullet are amended — changed for unedited copies by the taken
+  SA-1/Z3-06 rows: such a copy is set aside and the bundled version runs; nothing is rewritten; an edited copy keeps
+  its template, as R30 says. Nothing else moves.
 - **rev 1.3 (2026-10-31).** The toolchain programme's freshness sweep (`tasks/deps-upgrade/programme-plan.md`
   rev 1.18): §18 gains two residues of its S12 (`252e9c2e`, unicode-normalization 0.1.26, Unicode 18) — a project
   whose root holds one of the 37 new combining marks, registered by an earlier build, is listed but not found by its

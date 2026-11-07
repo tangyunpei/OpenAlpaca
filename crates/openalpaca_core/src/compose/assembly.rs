@@ -60,36 +60,69 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
         .sum();
     let dynamic_ctx_msg_tokens =
         crate::runner::estimate_messages_tokens(&input.dynamic_context.context_messages);
-    let dynamic_context_tokens = dynamic_ctx_block_tokens + dynamic_ctx_msg_tokens;
+    let mut dynamic_context_tokens = dynamic_ctx_block_tokens + dynamic_ctx_msg_tokens;
     let mut history_tokens =
         crate::runner::estimate_messages_tokens(&input.history.messages);
 
     // === Budget trim =========================================================
     // If the stitched messages exceed `model_window * TRIM_THRESHOLD`, drop the
-    // oldest non-system messages until we fit. The system message at index 0
-    // is preserved — the spec is explicit that Layer 5 trims from the head of
-    // history, not from the system prompt. So is the working-state block
-    // (design 11 §4, CQ-4): it is the one carrier of what the trim removes,
-    // so the trim takes the message after it. The previous conversation's
-    // block may go, and is not counted as a history row when it does (§3.2).
+    // oldest non-system messages until we fit, then Layer 3's system blocks,
+    // oldest first. The system prompt at index 0 is preserved — the spec is
+    // explicit that Layer 5 trims from the head of history, not from the
+    // system prompt. So is the working-state block (design 11 §4, CQ-4): it
+    // is the one carrier of what the trim removes, so the trim takes the
+    // message after it. The previous conversation's block may go, and is not
+    // counted as a history row when it does (§3.2). A Layer 3 message, a
+    // system block or a section routed as a user message, is not a history
+    // row either: its tokens come off the dynamic context's figure, which
+    // counted them. The current user turn is kept too (SA-2b): it is what
+    // the request asks, so a turn that alone passes the threshold goes
+    // whole, and a context-length error, if the provider returns one, is the
+    // caller's — never a request with no user message (on Anthropic, an
+    // empty `messages` list).
     let threshold = (input.model_window as f64 * TRIM_THRESHOLD) as u32;
     let mut total = crate::runner::estimate_messages_tokens(&messages);
-    let mut trimmed = 0usize;
+    let mut history_trimmed = 0usize;
+    let mut blocks_trimmed = 0usize;
     let mut history_head_dropped = 0usize;
+    let system_prompt_at = (!input.static_prompt.system_message.is_empty()).then_some(0);
+    let mut current_turn_at = input
+        .history
+        .ends_with_current_turn
+        .then(|| messages.len() - 1);
+    let is_kept = |i: usize, m: &ChatMessage, current: Option<usize>| {
+        Some(i) == system_prompt_at
+            || Some(i) == current
+            || m.content
+                .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
+    };
     while total > threshold && messages.len() > 1 {
-        let Some(idx_to_trim) = messages.iter().position(|m| {
-            !matches!(m.role, Role::System)
-                && !m
-                    .content
-                    .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
-        }) else {
+        let candidate = |system: bool| {
+            messages
+                .iter()
+                .enumerate()
+                .find(|(i, m)| {
+                    matches!(m.role, Role::System) == system && !is_kept(*i, m, current_turn_at)
+                })
+                .map(|(i, _)| i)
+        };
+        let Some(idx_to_trim) = candidate(false).or_else(|| candidate(true)) else {
             // Nothing left the trim may take — stop (spec forbids removing
-            // the system prompt, and the working state stays).
+            // the system prompt, and the working state and the current turn
+            // stay).
             break;
         };
         let removed = messages.remove(idx_to_trim);
-        if idx_to_trim < history_start {
+        if let Some(current) = current_turn_at.as_mut()
+            && idx_to_trim < *current
+        {
+            *current -= 1;
+        }
+        let system = matches!(removed.role, Role::System);
+        let in_history = idx_to_trim >= history_start;
+        if !in_history {
             history_start -= 1;
+            blocks_trimmed += usize::from(system);
         } else if !removed
             .content
             .starts_with(crate::orchestrator::working_state::PREVIOUS_BLOCK_PREFIX)
@@ -98,11 +131,19 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
         }
         let removed_tokens = crate::runner::estimate_messages_tokens(std::slice::from_ref(&removed));
         total = total.saturating_sub(removed_tokens);
-        history_tokens = history_tokens.saturating_sub(removed_tokens);
-        trimmed += 1;
+        if in_history {
+            history_trimmed += 1;
+            history_tokens = history_tokens.saturating_sub(removed_tokens);
+        } else {
+            // A Layer 3 message: its tokens come off the figure that counted it.
+            dynamic_context_tokens = dynamic_context_tokens.saturating_sub(removed_tokens);
+        }
     }
-    if trimmed > 0 {
+    if history_trimmed > 0 {
         section_registry.push("<trimmed:history>");
+    }
+    if blocks_trimmed > 0 {
+        section_registry.push("<trimmed:system_blocks>");
     }
 
     let current_turn_tokens = input

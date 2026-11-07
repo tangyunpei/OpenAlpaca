@@ -519,20 +519,6 @@ impl KeyPool {
         self.keys.is_empty()
     }
 
-    /// Count API-compatible keys that are currently available (not in cooldown).
-    /// Used by the router to estimate how many parallel LLM calls can proceed
-    /// without contention, so spawn concurrency can be adapted dynamically.
-    pub async fn available_api_key_count(&self) -> usize {
-        let mut count = 0;
-        for key_lock in &self.keys {
-            let key = key_lock.read().await;
-            if key.is_api_compatible_key() && key.is_available() {
-                count += 1;
-            }
-        }
-        count
-    }
-
     /// Returns the shortest remaining cooldown duration among API-compatible
     /// rate-limited keys, or `None` if no keys are cooling down.
     /// Useful for waiting until the next key becomes available.

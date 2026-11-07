@@ -96,6 +96,7 @@ impl LlmRouter {
                 Ok(stream) => {
                     return Ok(RoutedStream {
                         model: model.to_string(),
+                        requires_key: entry.provider.requires_key(),
                         stream: Box::pin(crate::streaming::PermitStream::new(stream, permit)),
                     });
                 }
@@ -216,7 +217,9 @@ impl LlmRouter {
                 );
                 self.try_fallback(model, &request).await
             }
-            // Transient errors (529 Overloaded, 500+) should also try fallback models
+            // Transient errors (529 Overloaded, 500+, and a transport failure
+            // that may pass — a request timeout among them, which the key
+            // layer does not retry) should also try fallback models
             Err(LlmRouterError::Llm(ref llm_err)) if llm_err.is_transient() => {
                 tracing::warn!(
                     model = model,

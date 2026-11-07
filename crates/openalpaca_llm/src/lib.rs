@@ -52,8 +52,8 @@ pub use routing::rate_limiter::{
     CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
 };
 pub use routing::router::{
-    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext,
-    RoutedStream, RouterRequest,
+    LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream,
+    RouterRequest,
 };
 pub use streaming::collect_stream;
 pub use tool_arguments::UnreadableArguments;
@@ -240,44 +240,67 @@ mod tests {
         assert!(LlmError::Stream("broken pipe".to_string()).is_transient());
     }
 
+    /// The retry table's rows by kind (M57, (a)). Each kind is produced from a
+    /// real reqwest error in `providers::transport_tests`; here, only what the
+    /// router and the loop read from it.
     #[test]
-    fn test_http_timeout_is_transient() {
-        assert!(LlmError::Http("error sending request: operation timed out".into()).is_transient());
+    fn transport_kinds_are_retried_as_the_retry_table_says() {
+        use crate::error::TransportKind;
+        for (kind, transient, retried_on_key) in [
+            (TransportKind::ConnectTimeout, true, true),
+            (TransportKind::RequestTimeout, true, false),
+            (TransportKind::ResetOrClosed, true, true),
+            (TransportKind::ConnectRefused, false, false),
+            (TransportKind::Dns, false, false),
+            (TransportKind::TlsOrOther, false, false),
+        ] {
+            let err = LlmError::Transport {
+                kind,
+                message: "error sending request for url (http://127.0.0.1:1/)".to_string(),
+            };
+            assert_eq!(err.is_transient(), transient, "{kind:?}");
+            assert_eq!(err.is_retryable_on_key(), retried_on_key, "{kind:?}");
+        }
     }
 
+    /// The key layer's predicate is `is_transient` but for a request timeout.
     #[test]
-    fn test_http_connection_reset_is_transient() {
-        assert!(LlmError::Http("connection reset by peer".into()).is_transient());
+    fn the_key_layer_retries_every_other_transient_error() {
+        for err in [
+            LlmError::Stream("broken pipe".to_string()),
+            LlmError::RateLimited { retry_after_ms: 1 },
+            LlmError::Api {
+                status: 500,
+                message: "boom".to_string(),
+            },
+            LlmError::Http("operation timed out".to_string()),
+        ] {
+            assert!(err.is_transient() && err.is_retryable_on_key(), "{err}");
+        }
     }
 
+    /// The `Http` arm still reads its text: no provider here builds it any
+    /// more, but a plugin's provider bridge does (`provider/chat` failed), and
+    /// these are the words it is read for. These strings pinned the providers'
+    /// errors before M57, which never carried them.
     #[test]
-    fn test_http_broken_pipe_is_transient() {
-        assert!(LlmError::Http("error sending request: broken pipe".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_dns_error_not_transient() {
-        assert!(!LlmError::Http("dns error: failed to lookup address".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_tls_error_not_transient() {
-        assert!(!LlmError::Http("error trying to connect: ssl connect error: certificate verify failed".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_connection_refused_not_transient() {
-        assert!(!LlmError::Http("tcp connect error: Connection refused (os error 61)".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_connection_closed_is_transient() {
-        assert!(LlmError::Http("connection closed before message completed".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_incomplete_message_is_transient() {
-        assert!(LlmError::Http("error reading response: incomplete message".into()).is_transient());
+    fn the_http_arm_reads_its_own_text() {
+        for (text, transient) in [
+            ("error sending request: operation timed out", true),
+            ("connection reset by peer", true),
+            ("error sending request: broken pipe", true),
+            ("connection closed before message completed", true),
+            ("error reading response: incomplete message", true),
+            ("dns error: failed to lookup address", false),
+            (
+                "error trying to connect: ssl connect error: certificate verify failed",
+                false,
+            ),
+            ("tcp connect error: Connection refused (os error 61)", false),
+        ] {
+            let err = LlmError::Http(text.into());
+            assert_eq!(err.is_transient(), transient, "{text}");
+        }
     }
 
     #[tokio::test]

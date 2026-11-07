@@ -35,8 +35,10 @@ export function useAgentTemplates(): UseQueryResult<AgentTemplate[]> {
 }
 
 /**
- * The per-template on/off switch is not served (GAP-20's remaining half).
- * Run counts *are* — `run_count`/`last_run_at` ride on the template row.
+ * The per-template on/off switch is not served (GAP-20's remaining half): a
+ * file in `config/agents` saying `disabled: true` switches a template off,
+ * and no route writes one. Run counts *are* — `run_count`/`last_run_at` ride
+ * on the template row.
  */
 export const TEMPLATE_TOGGLE_NOTE = gapNote(GAPS["GAP-20"]);
 

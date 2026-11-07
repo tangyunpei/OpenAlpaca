@@ -101,8 +101,8 @@ fn print_help() {
         "/steer <text>".bold()
     );
     println!(
-        "  {} — Control a workflow (bare form targets active ones)",
-        "/cancel|/pause|/resume [id]".bold()
+        "  {} — Stop a workflow (bare form targets active ones)",
+        "/cancel [id]".bold()
     );
     println!(
         "  {} — Save a note as yours",

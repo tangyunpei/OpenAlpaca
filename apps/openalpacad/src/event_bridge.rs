@@ -277,13 +277,6 @@ pub fn spawn_event_bridge(
                         "Model access denied: agent={agent_id}, model={model_id}, reason={reason}"
                     );
                 }
-                openalpaca_core::events::SystemEvent::IntentClassified {
-                    request_id,
-                    intent_type,
-                    ..
-                } => {
-                    tracing::debug!("Intent classified: request={request_id}, type={intent_type}");
-                }
                 openalpaca_core::events::SystemEvent::UserProfileUpdated {
                     actor,
                     mode,
@@ -326,19 +319,6 @@ pub fn spawn_event_bridge(
                         "Bootstrap onboarding completed"
                     );
                 }
-                openalpaca_core::events::SystemEvent::DispatchDecision {
-                    request_id,
-                    task_id,
-                    mode,
-                    reason,
-                    agent_count,
-                    error_message,
-                    ..
-                } => {
-                    tracing::debug!(
-                        "DispatchDecision: request={request_id}, task={task_id:?}, mode={mode}, reason={reason}, agents={agent_count}, error={error_message:?}"
-                    );
-                }
                 openalpaca_core::events::SystemEvent::OrchestrationStage {
                     request_id,
                     mode,
@@ -350,22 +330,7 @@ pub fn spawn_event_bridge(
                     );
                 }
 
-                // ── Skill lifecycle events (log-only) ─────────────────────
-                openalpaca_core::events::SystemEvent::SkillDiscovered {
-                    skill_id,
-                    skill_name,
-                    scope,
-                    ..
-                } => {
-                    tracing::debug!(
-                        "Skill discovered: id={skill_id}, name={skill_name}, scope={scope}"
-                    );
-                }
-                openalpaca_core::events::SystemEvent::SkillSelected {
-                    skill_id, score, ..
-                } => {
-                    tracing::debug!("Skill auto-selected: id={skill_id}, score={score:.3}");
-                }
+                // ── Skill lifecycle events (forwarded to clients) ─────────
                 openalpaca_core::events::SystemEvent::SkillInvocationStarted {
                     request_id,
                     skill_id,
@@ -379,16 +344,6 @@ pub fn spawn_event_bridge(
                         &request_id.to_string(),
                         &skill_id,
                         &query_preview,
-                    );
-                }
-                openalpaca_core::events::SystemEvent::SkillContextInjected {
-                    request_id,
-                    skill_id,
-                    context_bytes,
-                    ..
-                } => {
-                    tracing::debug!(
-                        "Skill context injected: request={request_id}, skill={skill_id}, bytes={context_bytes}"
                     );
                 }
                 openalpaca_core::events::SystemEvent::SkillCompleted {

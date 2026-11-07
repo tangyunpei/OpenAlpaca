@@ -1075,6 +1075,78 @@ async fn test_plugin_backend_execution() {
     assert_eq!(result.unwrap(), "plugin: test::echo");
 }
 
+/// PLUGIN-WAIT: the `Plugin` arm hands the executor the sandbox's cut where
+/// the context carries one (`execute_within`) and calls `execute` where it
+/// carries none, or there is no context.
+#[tokio::test]
+async fn a_plugin_backend_is_handed_the_sandboxs_cut_from_the_context() {
+    struct Says;
+    #[async_trait]
+    impl openalpaca_api::plugin_traits::PluginToolExecutor for Says {
+        async fn execute(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<String, String> {
+            Ok("no cut".to_string())
+        }
+        async fn execute_within(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+            sandbox_cut: std::time::Duration,
+        ) -> Result<String, String> {
+            Ok(format!("cut at {}s", sandbox_cut.as_secs()))
+        }
+        fn plugin_id(&self) -> &str {
+            "test"
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "test::echo".into(),
+                description: "".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Plugin(Arc::new(Says)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let args = serde_json::json!({});
+    let cut = ToolContext {
+        sandbox_cut_secs: Some(42),
+        ..Default::default()
+    };
+    assert_eq!(
+        registry
+            .execute_with_context("test::echo", &args, &cut)
+            .await
+            .as_deref(),
+        Ok("cut at 42s")
+    );
+    assert_eq!(
+        registry
+            .execute_with_context("test::echo", &args, &ToolContext::default())
+            .await
+            .as_deref(),
+        Ok("no cut")
+    );
+    assert_eq!(
+        registry.execute("test::echo", &args).await.as_deref(),
+        Ok("no cut")
+    );
+}
+
 #[test]
 fn test_tool_name_validation() {
     let registry = ToolRegistry::default();
@@ -2681,6 +2753,7 @@ async fn auto_approve_cannot_undo_the_extension_gate_on_either_arm() {
         require_confirmation_for: vec!["github__create_issue".to_string()],
         max_tool_calls: None,
         max_tool_runtime_secs: 30,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -3013,4 +3086,98 @@ async fn a_command_tool_that_times_out_takes_the_processes_it_started_with_it() 
         wait_until_gone(pid, GONE_WITHIN).await,
         "the command's background sleep {pid} outlived its timeout"
     );
+}
+
+/// N-TOOL-3 (Z1-01): which calls may run beside the other calls of their
+/// round — a tool that declares read-only (an MCP tool also idempotent) and
+/// the lead's three coordination builtins, whatever they declare; every
+/// other call runs alone.
+#[test]
+fn runs_concurrently_admits_read_only_tools_and_the_leads_coordination_tools() {
+    let registry = ToolRegistry::default();
+    let register = |tool: RegisteredTool| registry.register(tool).unwrap();
+    register(make_tool_with_annotations(
+        "reads",
+        vec![],
+        Some(readonly_annotations()),
+    ));
+    register(make_tool_with_annotations(
+        "edits",
+        vec![],
+        Some(destructive_annotations()),
+    ));
+    register(make_tool_with_annotations(
+        "writes_quietly",
+        vec![],
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false),
+        ),
+    ));
+    register(make_tool_with_annotations("declares_nothing", vec![], None));
+    // As the lead registers them: no annotations.
+    for name in [
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
+        "spawn_subagent",
+    ] {
+        register(make_tool(name, "ok"));
+    }
+    let mcp = |name: &str, annotations: Option<openalpaca_mcp::ToolAnnotations>| {
+        let mut tool = mcp_tool(name, "srv", 0);
+        tool.annotations = annotations;
+        tool
+    };
+    register(mcp("srv__reads", Some(readonly_annotations())));
+    register(mcp(
+        "srv__reads_not_idempotent",
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(true)
+                .idempotent(false),
+        ),
+    ));
+    register(mcp(
+        "srv__reads_idempotence_unsaid",
+        Some(openalpaca_mcp::ToolAnnotations::new().read_only(true)),
+    ));
+    register(make_tool_with_backend(
+        "plug::reads",
+        ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+    ));
+
+    for together in [
+        "reads",
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
+        "srv__reads",
+    ] {
+        assert!(
+            registry.runs_concurrently(together),
+            "{together} runs alone"
+        );
+    }
+    for alone in [
+        "edits",
+        "writes_quietly",
+        "declares_nothing",
+        "spawn_subagent",
+        "srv__reads_not_idempotent",
+        "srv__reads_idempotence_unsaid",
+        "plug::reads",
+        "never_registered",
+    ] {
+        assert!(!registry.runs_concurrently(alone), "{alone} runs together");
+    }
+
+    // A coordination tool's name is the lead's builtin only: an extension's
+    // tool registered under it declares nothing, and runs alone.
+    let other = ToolRegistry::default();
+    other
+        .register(mcp_tool("wait_for_subagents", "srv", 0))
+        .unwrap();
+    assert!(!other.runs_concurrently("wait_for_subagents"));
 }

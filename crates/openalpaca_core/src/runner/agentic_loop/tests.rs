@@ -318,6 +318,7 @@ async fn test_sandbox_execution() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -394,6 +395,7 @@ async fn test_sandbox_denied_tool() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -575,6 +577,7 @@ async fn test_cancellation_during_tool_execution() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -663,6 +666,7 @@ async fn a_run_cancelled_while_a_prompt_waits_withdraws_the_prompt_and_says_so()
         require_confirmation_for: vec!["search".to_string()],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         // Far longer than the test: only the cancellation can end this wait.
@@ -1811,6 +1815,100 @@ async fn test_agentic_loop_routed_completes() {
         result.model_used,
         Some("claude-sonnet-4-20250514".to_string())
     );
+}
+
+/// The agentic loop's column of M57's retry table: it retries what
+/// `is_transient` admits and ends at once on what it does not. A request
+/// timeout reaches it from the first call (the router's key layer passes it
+/// on, M57 (a)); a connect timeout or a lost connection only once the key
+/// layer's three tries are spent; a refused port never comes back. Each loop
+/// retry is a round, so `rounds_used` says which layer made the calls. The
+/// errors are stand-ins for the kinds `openalpaca_llm`'s transport tests
+/// produce from real reqwest errors.
+#[tokio::test(start_paused = true)]
+async fn the_loop_retries_a_transient_transport_failure_and_not_a_refused_port() {
+    use openalpaca_llm::error::TransportKind;
+    let failure = |kind: TransportKind| {
+        Err(LlmError::Transport {
+            kind,
+            message: format!("error sending request for url (http://127.0.0.1:1/): {kind:?}"),
+        })
+    };
+    let refused = "LLM error: HTTP error: error sending request for url (http://127.0.0.1:1/): \
+                   ConnectRefused";
+    let answer = Ok(ChatResponse {
+        content: "answered".to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage::default(),
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    });
+
+    // (kind, failed calls before the answer, calls made, rounds used, the
+    // turn's error — `None` for the answer)
+    for (kind, failures, calls, rounds, error) in [
+        (TransportKind::RequestTimeout, 1, 2, 2, None),
+        (TransportKind::ConnectTimeout, 3, 4, 2, None),
+        (TransportKind::ResetOrClosed, 3, 4, 2, None),
+        (TransportKind::ConnectRefused, 1, 1, 0, Some(refused)),
+        // A model that never answers: the loop's three retries spent, the
+        // turn ends in the chain's words, not the provider's.
+        (
+            TransportKind::RequestTimeout,
+            4,
+            4,
+            3,
+            Some("All fallback models failed"),
+        ),
+    ] {
+        let mut responses = vec![failure(kind); failures];
+        responses.push(answer.clone());
+        let provider = Arc::new(MockRouterProvider::new(responses));
+        let router = LlmRouter::single_provider(
+            Arc::clone(&provider) as Arc<dyn LlmProvider>,
+            ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        );
+        let config = LoopConfig {
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            enable_caching: false,
+            thinking: None,
+            ..Default::default()
+        };
+
+        let result = run_agentic_loop_routed(
+            &router,
+            vec![ChatMessage::user("hello")],
+            vec![],
+            &config,
+            None,
+            "test",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let made = provider.call_count.load(Ordering::SeqCst);
+        assert_eq!(made, calls, "{kind:?}");
+        assert_eq!(result.rounds_used, rounds, "{kind:?}");
+        match error {
+            None => {
+                assert_eq!(result.finish_reason, LoopFinishReason::Complete, "{kind:?}");
+                assert_eq!(result.final_content, "answered");
+            }
+            Some(text) => assert_eq!(
+                result.finish_reason,
+                LoopFinishReason::Error(text.to_string()),
+                "{kind:?}"
+            ),
+        }
+    }
 }
 
 #[tokio::test]
@@ -3057,6 +3155,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -3245,6 +3344,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -3432,6 +3532,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -3611,6 +3712,7 @@ async fn a_dropped_spill_record_leaves_the_model_an_inline_head_not_a_reference(
 
     let model_text = model_visible_result(
         &config,
+        &call.name,
         &result_text,
         true,
         emitted.then_some(rel.as_str()),
@@ -3681,6 +3783,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -4025,6 +4128,210 @@ async fn a_substituted_model_is_reported_on_the_streaming_path() {
         Some(EFFECTIVE_MODEL),
         "a streamed turn names the model the router called, not the one requested"
     );
+}
+
+// ── LOCAL-CALL-HOUR: a streamed round to a local model may run an hour ──
+
+/// A model that keeps generating: its stream sends one `TextDelta` a second
+/// and never ends, so only the loop's round bound stops it. Asked without
+/// streaming, it answers at once. `needs_key` is what the provider says of
+/// itself (`LlmProvider::requires_key`) — `false` is a local model's.
+struct EndlessStreamProvider {
+    needs_key: bool,
+    unstreamed_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmProvider for EndlessStreamProvider {
+    fn name(&self) -> &str {
+        "endless-stream"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn requires_key(&self) -> bool {
+        self.needs_key
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.unstreamed_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ChatResponse {
+            content: "answered unstreamed".to_string(),
+            tool_calls: vec![],
+            model: request.model.clone().unwrap_or_default(),
+            usage: Usage {
+                input_tokens: 4,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+
+    async fn chat_streaming(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatStream, LlmError> {
+        Ok(Box::pin(futures_util::stream::unfold((), |()| async {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            Some((
+                Ok(openalpaca_llm::StreamEvent::TextDelta {
+                    text: "tick ".to_string(),
+                }),
+                (),
+            ))
+        })))
+    }
+}
+
+const LOCAL_MODEL: &str = "local-model";
+
+/// A router serving `provider` the way the boot builder serves each kind: a
+/// provider that needs no key as Ollama with an empty key pool (its calls go
+/// through the keyless slot), one that needs a key with a key of its own.
+fn endless_stream_router(provider: Arc<EndlessStreamProvider>) -> (LlmRouter, &'static str) {
+    if provider.needs_key {
+        let router = LlmRouter::single_provider(
+            provider,
+            ProviderType::Anthropic,
+            EFFECTIVE_MODEL.to_string(),
+        );
+        return (router, EFFECTIVE_MODEL);
+    }
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        ProviderType::Ollama,
+        openalpaca_llm::ProviderEntry {
+            provider,
+            key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(
+                openalpaca_llm::KeyPool::new(vec![], openalpaca_llm::SelectionStrategy::RoundRobin),
+            )),
+        },
+    );
+    let registry = openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new());
+    registry.register(
+        LOCAL_MODEL.to_string(),
+        openalpaca_llm::ModelInfo {
+            provider: ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 32_768,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
+        },
+    );
+    let router = LlmRouter::new(
+        providers,
+        registry,
+        std::collections::HashMap::new(),
+        Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::with_defaults(),
+        )),
+        LOCAL_MODEL.to_string(),
+    );
+    (router, LOCAL_MODEL)
+}
+
+/// One streamed turn against a model that never stops, under the two round
+/// bounds at test scale: 2 s for a provider that needs a key, 6 s for one
+/// that needs none. Returns the result, the time the turn took, how many
+/// stream events the watcher saw, and how many unstreamed calls were made.
+async fn an_endless_streamed_turn(needs_key: bool) -> (LoopResult, Duration, usize, usize) {
+    let provider = Arc::new(EndlessStreamProvider {
+        needs_key,
+        unstreamed_calls: AtomicUsize::new(0),
+    });
+    let (router, model) = endless_stream_router(Arc::clone(&provider));
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&seen);
+    let config = LoopConfig {
+        model: Some(model.to_string()),
+        stream_callback: Some(Arc::new(move |_event: &openalpaca_llm::StreamEvent| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })),
+        max_stream_duration: Duration::from_secs(2),
+        max_keyless_stream_duration: Duration::from_secs(6),
+        ..Default::default()
+    };
+
+    let started = tokio::time::Instant::now();
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("write until you are stopped")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let took = started.elapsed();
+    (
+        result,
+        took,
+        seen.load(Ordering::SeqCst),
+        provider.unstreamed_calls.load(Ordering::SeqCst),
+    )
+}
+
+/// **LOCAL-CALL-HOUR.** A streamed round to a provider that needs no key
+/// runs past the keyed bound and is dropped at its own (an hour in
+/// production), then answered by the non-streaming call. Before the change
+/// every streamed round was dropped at `max_stream_duration`, local or not.
+#[tokio::test(start_paused = true)]
+async fn a_streamed_round_to_a_keyless_provider_runs_to_its_own_bound() {
+    let (result, took, events, unstreamed) = an_endless_streamed_turn(false).await;
+
+    assert!(
+        took >= Duration::from_secs(6) && took < Duration::from_secs(7),
+        "dropped at the keyless bound, not the keyed one: took {took:?}"
+    );
+    assert!(
+        (5..=6).contains(&events),
+        "the stream ran past the keyed bound's two events: {events}"
+    );
+    assert_eq!(
+        unstreamed, 1,
+        "then the round is asked again without streaming"
+    );
+    assert_eq!(result.final_content, "answered unstreamed");
+    assert_eq!(result.model_used.as_deref(), Some(LOCAL_MODEL));
+}
+
+/// And a provider that needs a key keeps today's bound: its round is dropped
+/// at `max_stream_duration` and answered by the non-streaming call.
+#[tokio::test(start_paused = true)]
+async fn a_streamed_round_to_a_keyed_provider_is_dropped_at_the_keyed_bound() {
+    let (result, took, events, unstreamed) = an_endless_streamed_turn(true).await;
+
+    assert!(
+        took >= Duration::from_secs(2) && took < Duration::from_secs(3),
+        "dropped at the keyed bound: took {took:?}"
+    );
+    assert!((1..=2).contains(&events), "{events}");
+    assert_eq!(
+        unstreamed, 1,
+        "then the round is asked again without streaming"
+    );
+    assert_eq!(result.final_content, "answered unstreamed");
 }
 
 // ── V3: a turn that reaches no answer says why ───────────────────────
@@ -4422,8 +4729,11 @@ async fn a_loop_without_a_guard_ships_whatever_the_model_said() {
 
 /// N-TOOL-1 (Z1-05): what a loop tells the model about a tool's time limit is
 /// the limit its sandbox enforces — `shell_execute`'s definition states the
-/// figure, and a call cut at it is told what to do instead of to raise a
-/// `timeout` parameter that does not exist.
+/// figure, and a call cut at it is told what to do. N-TOOL-1b (B-11): the
+/// definition also states the ceiling a call's `timeout_secs` is clamped to,
+/// and a command cut below that ceiling is told it may ask for more — B-11's
+/// deferral of a model-settable timeout, which these tests pinned as "no
+/// such parameter", taken.
 mod stated_tool_timeout {
     use super::*;
     use crate::bus::EventBus;
@@ -4475,7 +4785,7 @@ mod stated_tool_timeout {
         }
     }
 
-    fn policy(max_tool_runtime_secs: u64) -> SandboxPolicy {
+    fn policy(max_tool_runtime_secs: u64, max_tool_runtime_ceiling_secs: u64) -> SandboxPolicy {
         SandboxPolicy {
             agent_id: "test".to_string(),
             allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
@@ -4483,6 +4793,7 @@ mod stated_tool_timeout {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -4499,10 +4810,12 @@ mod stated_tool_timeout {
             .expect("shell_execute is a builtin")
     }
 
-    /// Run one loop whose sandbox cuts a tool at `secs`, with `tool` on its
-    /// surface, and return every request the model was handed.
+    /// Run one loop whose sandbox cuts a tool at `secs`, or at a command's
+    /// `timeout_secs` up to `ceiling`, with `tool` on its surface, and return
+    /// every request the model was handed.
     async fn requests(
         secs: u64,
+        ceiling: u64,
         tool: RegisteredTool,
         replies: Vec<ChatResponse>,
     ) -> Vec<ChatRequest> {
@@ -4525,7 +4838,7 @@ mod stated_tool_timeout {
             &config,
             Some(&sandbox),
             "test",
-            Some(&policy(secs)),
+            Some(&policy(secs, ceiling)),
             None,
             None,
             None,
@@ -4550,26 +4863,46 @@ mod stated_tool_timeout {
 
     #[tokio::test]
     async fn the_shell_definition_states_the_timeout_the_loops_sandbox_enforces() {
-        let seen = requests(45, shell(), vec![reply(vec![])]).await;
+        let seen = requests(45, 600, shell(), vec![reply(vec![])]).await;
         let description = shell_description(&seen[0]);
         assert!(
-            description.contains("still running after 45 seconds is stopped"),
+            description.contains(
+                "still running after 45 seconds is stopped, with every process it started; set \
+                 timeout_secs to let one run up to 600 seconds."
+            ),
             "{description}"
         );
         assert!(!description.contains("300"), "{description}");
     }
 
-    /// A sandbox that allows longer than the tool's own bound does not move
-    /// it: the command is still stopped at 300 s, and that is what is stated.
+    /// N-TOOL-1b: the shell's own bound — 300 s before — yields to every
+    /// ceiling, so a loop that allows longer states what it allows.
     #[tokio::test]
-    async fn a_sandbox_longer_than_the_shells_own_bound_states_the_shells() {
-        let seen = requests(900, shell(), vec![reply(vec![])]).await;
+    async fn a_bound_past_the_shells_old_300_is_stated_as_enforced() {
+        let seen = requests(450, 900, shell(), vec![reply(vec![])]).await;
         let description = shell_description(&seen[0]);
         assert!(
-            description.contains("still running after 300 seconds is stopped"),
+            description.contains("still running after 450 seconds is stopped"),
             "{description}"
         );
-        assert!(!description.contains("900"), "{description}");
+        assert!(description.contains("up to 900 seconds"), "{description}");
+        assert!(!description.contains("300"), "{description}");
+    }
+
+    /// A loop whose ceiling is its bound offers no more: the definition says
+    /// so, and names no larger figure.
+    #[tokio::test]
+    async fn a_bound_at_the_ceiling_is_stated_as_the_most() {
+        let seen = requests(60, 60, shell(), vec![reply(vec![])]).await;
+        let description = shell_description(&seen[0]);
+        assert!(
+            description.contains(
+                "still running after 60 seconds is stopped, with every process it started — \
+                 the most a command may run here."
+            ),
+            "{description}"
+        );
+        assert!(!description.contains("up to"), "{description}");
     }
 
     /// The registered definition, which reaches a model only through a loop,
@@ -4595,10 +4928,10 @@ mod stated_tool_timeout {
         }
     }
 
-    /// A call cut at the sandbox's limit is told the limit and what to do —
-    /// never to raise a `timeout` parameter, which no tool here takes.
-    #[tokio::test]
-    async fn a_timed_out_command_is_told_its_limit_and_no_timeout_parameter() {
+    /// What the model was shown for one `shell_execute` call sending
+    /// `arguments` to a command that hangs, in a loop cutting at `secs` with
+    /// `ceiling`.
+    async fn hanging_command(secs: u64, ceiling: u64, arguments: serde_json::Value) -> String {
         let hangs = RegisteredTool {
             backend: ToolBackend::BuiltIn(Arc::new(Hangs)),
             annotations: None,
@@ -4607,25 +4940,51 @@ mod stated_tool_timeout {
         let call = openalpaca_llm::ToolCall {
             id: "tc_slow".to_string(),
             name: "shell_execute".to_string(),
-            arguments: serde_json::json!({"command": "make"}),
+            arguments,
         };
-        let seen = requests(1, hangs, vec![reply(vec![call]), reply(vec![])]).await;
-        let result = seen[1]
+        let seen = requests(secs, ceiling, hangs, vec![reply(vec![call]), reply(vec![])]).await;
+        seen[1]
             .messages
             .iter()
             .find(|m| m.role == openalpaca_llm::Role::Tool)
             .expect("the cut call's result reached the model")
             .content
-            .clone();
-        assert!(result.contains("timed out after 1s"), "{result}");
+            .clone()
+    }
+
+    /// N-TOOL-1b: a command cut below the ceiling is told its limit, and that
+    /// its `timeout_secs` may ask for up to the ceiling.
+    #[tokio::test]
+    async fn a_command_cut_below_the_ceiling_is_told_it_may_ask_for_more() {
+        let result = hanging_command(1, 600, serde_json::json!({"command": "make"})).await;
         assert!(
-            result.contains("Hint:"),
-            "a cut command is told what to do: {result}"
+            result.ends_with(
+                "timed out after 1s\nHint: a command may run up to 600 seconds here — call it \
+                 again with a larger timeout_secs, or split the work into smaller commands that \
+                 each finish sooner."
+            ),
+            "{result}"
         );
+    }
+
+    /// A command cut at the ceiling is told that is the most it may run, and
+    /// is not sent after a larger `timeout_secs`.
+    #[tokio::test]
+    async fn a_command_cut_at_the_ceiling_is_told_that_is_the_most() {
+        let result = hanging_command(
+            1,
+            2,
+            serde_json::json!({"command": "make", "timeout_secs": 3600}),
+        )
+        .await;
         assert!(
-            !result.to_lowercase().contains("timeout"),
-            "no `timeout` parameter exists to raise: {result}"
+            result.ends_with(
+                "timed out after 2s\nHint: that is the most a command may run here; split the \
+                 work into smaller commands that each finish sooner."
+            ),
+            "{result}"
         );
+        assert!(!result.contains("timeout_secs"), "{result}");
     }
 }
 
@@ -4701,7 +5060,9 @@ mod tool_error_flag {
 
     /// One loop whose tool answers `answer`: its result, and the tool-result
     /// message the model was handed next.
-    async fn run(answer: Result<&'static str, &'static str>) -> (LoopResult, ChatMessage) {
+    pub(super) async fn run(
+        answer: Result<&'static str, &'static str>,
+    ) -> (LoopResult, ChatMessage) {
         let registry = ToolRegistry::default();
         registry
             .register(RegisteredTool {
@@ -4729,6 +5090,7 @@ mod tool_error_flag {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 60,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -4769,7 +5131,7 @@ mod tool_error_flag {
     }
 
     /// The flag as the message carries it on the wire (absent when false).
-    fn flagged(message: &ChatMessage) -> bool {
+    pub(super) fn flagged(message: &ChatMessage) -> bool {
         serde_json::to_value(message).unwrap()["is_error"] == serde_json::json!(true)
     }
 
@@ -4791,6 +5153,262 @@ mod tool_error_flag {
         assert!(flagged(&message), "a failure is flagged: {message:?}");
         assert_eq!(message.content, "[tool_error] boom");
         assert_eq!(result.last_tool_error.as_deref(), Some("[tool_error] boom"));
+    }
+}
+
+/// N-TOOL-6 (Z1-15): a call that succeeds with nothing to read — a command
+/// that prints nothing, an MCP result with no content — reaches the model as
+/// a line naming the tool, never as an empty result it could take for a
+/// missing one. The log keeps the tool's own output; a replay hands a resumed
+/// run the line the model first read.
+mod no_output {
+    use super::tool_error_flag::{flagged, run};
+    use super::*;
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    #[tokio::test]
+    async fn a_success_with_no_output_reaches_the_model_as_a_line_naming_the_tool() {
+        let (result, message) = run(Ok("")).await;
+        assert_eq!(message.content, "(says completed with no output)");
+        assert!(!flagged(&message), "a success is not flagged: {message:?}");
+        assert_eq!(result.last_tool_error, None, "no tool failed");
+    }
+
+    /// Whitespace alone is nothing to read either (`echo` prints a newline).
+    #[tokio::test]
+    async fn a_success_of_whitespace_alone_reaches_the_model_as_the_same_line() {
+        let (_, message) = run(Ok(" \n\t\r\n")).await;
+        assert_eq!(message.content, "(says completed with no output)");
+        assert!(!flagged(&message), "a success is not flagged: {message:?}");
+    }
+
+    /// Text with whitespace around it is handed over as it came, untrimmed.
+    #[tokio::test]
+    async fn a_success_with_text_is_handed_over_as_it_came() {
+        let (_, message) = run(Ok("\n  done\n")).await;
+        assert_eq!(message.content, "\n  done\n");
+    }
+
+    /// An `Err` is never the line, even one with no text of its own.
+    #[tokio::test]
+    async fn a_failure_with_no_text_is_still_a_failure() {
+        let (result, message) = run(Err("")).await;
+        assert!(flagged(&message), "a failure is flagged: {message:?}");
+        assert_eq!(message.content, "[tool_error] ");
+        assert_eq!(result.last_tool_error.as_deref(), Some("[tool_error] "));
+    }
+
+    /// A tool that succeeds with exactly what it was built with.
+    struct Quiet(String);
+
+    #[async_trait]
+    impl BuiltInTool for Quiet {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// One loop with a session log whose one call, `quiet`, answers `output`
+    /// at the inline threshold `inline_bytes`: what the model was handed,
+    /// the call's `tool_result` record, and what a replay hands a resumed run
+    /// for that call. With `results_unwritable`, a file stands where the
+    /// session's `results/` goes, so a spill's write fails.
+    async fn run_logged(
+        output: String,
+        inline_bytes: usize,
+        results_unwritable: bool,
+    ) -> (String, serde_json::Value, String) {
+        let registry = ToolRegistry::default();
+        registry
+            .register(RegisteredTool {
+                definition: openalpaca_llm::ToolDefinition {
+                    name: "quiet".to_string(),
+                    description: "Quiet".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                    input_examples: None,
+                },
+                backend: ToolBackend::BuiltIn(Arc::new(Quiet(output))),
+                provides_capabilities: vec![],
+                exempt_from_timeout: false,
+                annotations: None,
+                version: "test-0.0.0".into(),
+                author: "test".into(),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let policy = SandboxPolicy {
+            agent_id: "code_agent::a1".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            max_tool_runtime_ceiling_secs: 600,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let provider = Arc::new(MockRouterProvider::new(vec![
+            Ok(ChatResponse {
+                content: "Checking.".to_string(),
+                tool_calls: vec![openalpaca_llm::ToolCall {
+                    id: "tc_quiet".to_string(),
+                    name: "quiet".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                model: "claude-sonnet-4-20250514".to_string(),
+                usage: Usage::default(),
+                finish_reason: FinishReason::ToolUse,
+                thinking: None,
+                parts: None,
+            }),
+            Ok(ChatResponse {
+                content: "Done.".to_string(),
+                tool_calls: vec![],
+                model: "claude-sonnet-4-20250514".to_string(),
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            }),
+        ]));
+        let router = LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-20250514".to_string(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let service = SessionLogService::new(
+            dir.path().to_path_buf(),
+            None,
+            SessionLogLimits::default(),
+            "test".to_string(),
+        );
+        if results_unwritable {
+            let session = dir.path().join("sess-quiet");
+            std::fs::create_dir_all(&session).unwrap();
+            std::fs::write(session.join("results"), b"").unwrap();
+        }
+        let handle = service.handle_for("sess-quiet");
+        let config = LoopConfig {
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            enable_caching: false,
+            session_log: Some(handle.clone()),
+            tool_result_inline_bytes: inline_bytes,
+            ..Default::default()
+        };
+
+        let result = run_agentic_loop_routed(
+            &router,
+            vec![ChatMessage::user("check it")],
+            vec![],
+            &config,
+            Some(&sandbox),
+            "code_agent::a1",
+            Some(&policy),
+            Some("task-quiet"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        assert!(handle.flush().await);
+
+        let session = dir.path().join("sess-quiet");
+        let record = read_records(&session)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.kind == "tool_result")
+            .expect("the result is narrated")
+            .data;
+        let seen = provider.tool_results_seen();
+        assert_eq!(seen.len(), 1, "one tool result reached the backend");
+        let replay = crate::session_log::replay::rebuild(&session, "task-quiet", 4).unwrap();
+        let replayed: Vec<String> = replay
+            .messages
+            .iter()
+            .filter(|m| m.tool_call_id.as_deref() == Some("tc_quiet"))
+            .map(|m| m.content.clone())
+            .collect();
+        assert_eq!(replayed.len(), 1, "the replay answers the call once");
+        (seen[0].clone(), record, replayed[0].clone())
+    }
+
+    /// The record is the tool's own output, the source of truth for what it
+    /// returned; the line is what the model reads, and a resumed run reads it
+    /// too, byte for byte.
+    #[tokio::test]
+    async fn the_log_keeps_the_empty_output_and_a_replay_hands_back_the_line() {
+        let (seen, record, replayed) = run_logged(String::new(), MAX_TOOL_RESULT_SIZE, false).await;
+        assert_eq!(seen, "(quiet completed with no output)");
+        assert_eq!(record["ok"], serde_json::json!(true));
+        assert_eq!(
+            record["result"],
+            serde_json::json!(""),
+            "the log keeps what the tool returned: {record}"
+        );
+        assert_eq!(
+            replayed, seen,
+            "a resumed run reads what the model first read"
+        );
+    }
+
+    /// Whitespace over the inline threshold spills like any other result: the
+    /// model gets the stub naming the file, which `read_result` can page, and
+    /// a replay hands the same stub back — the line stands only for a result
+    /// that would sit inline.
+    #[tokio::test]
+    async fn whitespace_over_the_threshold_spills_like_any_result() {
+        let (seen, record, replayed) = run_logged(" \n".repeat(100), 64, false).await;
+        let rel = record["result"]["spill"]["rel"]
+            .as_str()
+            .unwrap_or_else(|| panic!("200 bytes over a 64-byte threshold spill: {record}"));
+        assert!(
+            seen.starts_with("[result too large: 200 bytes; first 2 KB follow]"),
+            "{seen:?}"
+        );
+        assert!(
+            seen.ends_with(&format!(
+                "[full result: result_ref=file:{rel} — use read_result to page]"
+            )),
+            "{seen:?}"
+        );
+        assert_eq!(replayed, seen, "the replay hands back the same stub");
+    }
+
+    /// A spill whose `results/` write failed keeps only its first 2 KB in the
+    /// record, beside `spill_error`. When those are whitespace with text after
+    /// them, the model was handed the stub, which says there is more, and a
+    /// replay hands back the preview the record kept — never the line, which
+    /// would tell a resumed model the call printed nothing.
+    #[tokio::test]
+    async fn a_failed_spill_is_not_replayed_as_no_output() {
+        let output = format!("{}BUILD OK: 12 targets", "\n".repeat(3000));
+        let (seen, record, replayed) = run_logged(output, 64, true).await;
+        assert!(
+            record["spill_error"].is_string(),
+            "the spill's write failed: {record}"
+        );
+        assert!(
+            seen.starts_with("[result too large: 3020 bytes; first 2 KB follow]"),
+            "{seen:?}"
+        );
+        assert_eq!(
+            record["result"],
+            serde_json::json!("\n".repeat(2048)),
+            "the record keeps the preview"
+        );
+        assert_eq!(replayed, "\n".repeat(2048), "a replay hands it back");
     }
 }
 
@@ -4851,6 +5469,7 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -4965,5 +5584,575 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
         replayed,
         [stub.as_str()],
         "the replay hands back the same stub"
+    );
+}
+
+/// N-TOOL-3 (Z1-01): a round's calls run in groups, in the model's order —
+/// consecutive read-only calls together, every other call alone — so two
+/// changes to one file never interleave once each has passed its gate, and
+/// reads still overlap. No test here reads a clock: overlap is a barrier
+/// met or a count of calls in flight.
+mod round_groups {
+    use super::*;
+    use crate::bus::EventBus;
+    use crate::security::confirmation::ApprovalScope;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SNAPSHOTS_DIR, SessionLogLimits, SessionLogService};
+    use crate::test_util::GuardedProject;
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use std::sync::Mutex;
+
+    /// Answers from its script, the last reply repeated, and keeps every
+    /// request it was handed.
+    struct Scripted {
+        replies: Vec<ChatResponse>,
+        seen: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for Scripted {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+            seen.push(request);
+            let index = (seen.len() - 1).min(self.replies.len() - 1);
+            Ok(self.replies[index].clone())
+        }
+    }
+
+    fn call(id: &str, name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments,
+        }
+    }
+
+    /// One round of `calls`, then an answer.
+    fn script(calls: Vec<ToolCall>) -> Vec<ChatResponse> {
+        let round = ChatResponse {
+            content: String::new(),
+            tool_calls: calls,
+            model: "mock-model".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        };
+        let answer = ChatResponse {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+            ..round.clone()
+        };
+        vec![round, answer]
+    }
+
+    fn policy(auto_approve: bool) -> SandboxPolicy {
+        SandboxPolicy {
+            agent_id: "test".to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            max_tool_runtime_ceiling_secs: 600,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve,
+            unattended: false,
+        }
+    }
+
+    /// A tool named `name`, declaring `annotations`, whose body is `body`.
+    fn tool(
+        name: &str,
+        annotations: Option<openalpaca_mcp::ToolAnnotations>,
+        body: Arc<dyn BuiltInTool>,
+    ) -> RegisteredTool {
+        RegisteredTool {
+            definition: ToolDefinition {
+                name: name.to_string(),
+                description: name.to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(body),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// What a read-only builtin declares.
+    fn reads() -> Option<openalpaca_mcp::ToolAnnotations> {
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(true)
+                .idempotent(true),
+        )
+    }
+
+    /// What a by-product writer declares: not read-only, and never asks.
+    fn writes() -> Option<openalpaca_mcp::ToolAnnotations> {
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false),
+        )
+    }
+
+    /// Counts how many of its calls are in flight at once: each call counts
+    /// itself in, yields to whatever else the round is running, and counts
+    /// itself out. Under one `join_all` every call is in before any is out.
+    #[derive(Default)]
+    struct InFlight {
+        now: AtomicUsize,
+        most: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl BuiltInTool for InFlight {
+        async fn execute(&self, arguments: &Value) -> Result<String, String> {
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            self.now.fetch_sub(1, Ordering::SeqCst);
+            Ok(arguments["n"].to_string())
+        }
+    }
+
+    /// Waits at a barrier for the round's other calls: `Ok` once they are
+    /// all in flight together, `Err` when this call waited alone.
+    struct Meets(tokio::sync::Barrier);
+
+    #[async_trait]
+    impl BuiltInTool for Meets {
+        async fn execute(&self, _arguments: &Value) -> Result<String, String> {
+            tokio::time::timeout(Duration::from_secs(5), self.0.wait())
+                .await
+                .map(|_| "met".to_string())
+                .map_err(|_| "waited alone".to_string())
+        }
+    }
+
+    /// Notes when each call starts and ends in one journal, yielding between
+    /// the two, so calls that run together interleave there.
+    #[derive(Default)]
+    struct Journal(Mutex<Vec<String>>);
+
+    impl Journal {
+        fn note(&self, line: String) {
+            self.0.lock().unwrap_or_else(|p| p.into_inner()).push(line);
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
+    }
+
+    #[async_trait]
+    impl BuiltInTool for Journal {
+        async fn execute(&self, arguments: &Value) -> Result<String, String> {
+            let id = arguments["id"].as_str().unwrap_or_default().to_string();
+            self.note(format!("start {id}"));
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            self.note(format!("end {id}"));
+            Ok(id)
+        }
+    }
+
+    /// Cancels the run, then never finishes: only the cancel ends its call.
+    struct CancelsTheRun(CancellationToken);
+
+    #[async_trait]
+    impl BuiltInTool for CancelsTheRun {
+        async fn execute(&self, _arguments: &Value) -> Result<String, String> {
+            self.0.cancel();
+            std::future::pending().await
+        }
+    }
+
+    /// One loop over `sandbox` whose model makes `calls` in one round: the
+    /// loop's result and every request the model was handed (the second
+    /// carries the round's results).
+    async fn run_in(
+        sandbox: &SandboxManager,
+        policy: &SandboxPolicy,
+        calls: Vec<ToolCall>,
+        config: &LoopConfig,
+        tool_context: Option<&ToolContext>,
+        cancel: Option<CancellationToken>,
+    ) -> (LoopResult, Vec<ChatRequest>) {
+        let provider = Scripted {
+            replies: script(calls),
+            seen: Mutex::new(Vec::new()),
+        };
+        let result = run_agentic_loop(
+            &provider,
+            vec![ChatMessage::user("go")],
+            vec![],
+            config,
+            Some(sandbox),
+            "test",
+            Some(policy),
+            None,
+            cancel,
+            tool_context,
+        )
+        .await;
+        let seen = provider
+            .seen
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner());
+        (result, seen)
+    }
+
+    /// [`run_in`] with a sandbox over `registry` and a plain loop.
+    async fn run(
+        registry: ToolRegistry,
+        policy: &SandboxPolicy,
+        calls: Vec<ToolCall>,
+    ) -> (LoopResult, Vec<ChatRequest>) {
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let config = LoopConfig {
+            enable_caching: false,
+            ..Default::default()
+        };
+        run_in(&sandbox, policy, calls, &config, None, None).await
+    }
+
+    /// The round's results as the model was handed them, in order: the
+    /// call's id, the text, and whether it failed.
+    fn results(request: &ChatRequest) -> Vec<(String, String, bool)> {
+        request
+            .messages
+            .iter()
+            .filter(|m| m.role == openalpaca_llm::Role::Tool)
+            .map(|m| {
+                (
+                    m.tool_call_id.clone().unwrap_or_default(),
+                    m.content.clone(),
+                    m.is_error,
+                )
+            })
+            .collect()
+    }
+
+    /// How the round's edits got past their gate with no card.
+    enum PreApproved {
+        /// The policy's `auto_approve`.
+        AutoApprove,
+        /// An earlier Always allow of `file_edit`, cached for the whole tool.
+        AlwaysAllow,
+    }
+
+    /// Z1-01's case: two `file_edit` calls on one file in one round, each
+    /// let through with no card. Both land, and the second planned on the
+    /// file the first wrote — its pre-edit copy holds the first edit.
+    async fn two_edits_of_one_file(pre_approved: PreApproved) {
+        let gp = GuardedProject::new();
+        std::fs::write(gp.root.join("notes.txt"), "alpha\nbeta\n").unwrap();
+        let sessions = gp.home_root().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let service = SessionLogService::new(
+            sessions,
+            None,
+            SessionLogLimits::default(),
+            "test".to_string(),
+        );
+        let log = service.handle_for("sess-edits");
+
+        let registry = ToolRegistry::default();
+        let file_edit = crate::tools::builtins::builtin_tools(None, None, None)
+            .into_iter()
+            .find(|tool| tool.definition.name == "file_edit")
+            .expect("file_edit is a builtin");
+        registry.register(file_edit).unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let policy = match pre_approved {
+            PreApproved::AutoApprove => policy(true),
+            PreApproved::AlwaysAllow => {
+                sandbox
+                    .approval_cache()
+                    .record("file_edit", 0, ApprovalScope::EntireTool);
+                policy(false)
+            }
+        };
+        // The pre-edit copy goes into the loop's log: the loop hands the
+        // tool its own handle, whatever the context carried.
+        let config = LoopConfig {
+            enable_caching: false,
+            session_log: Some(log.clone()),
+            ..Default::default()
+        };
+        let edit = |id: &str, old: &str, new: &str| {
+            call(
+                id,
+                "file_edit",
+                serde_json::json!({"path": "notes.txt", "old_string": old, "new_string": new}),
+            )
+        };
+        let calls = vec![edit("tc_1", "alpha", "ALPHA"), edit("tc_2", "beta", "BETA")];
+        let (result, seen) = run_in(&sandbox, &policy, calls, &config, Some(&gp.ctx()), None).await;
+        assert!(log.flush().await);
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        let results = results(&seen[1]);
+        let ids: Vec<&str> = results.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(ids, ["tc_1", "tc_2"], "the results keep the model's order");
+        for (id, text, failed) in &results {
+            assert!(
+                !failed && text.starts_with("Edited notes.txt"),
+                "{id}: {text}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(gp.root.join("notes.txt")).unwrap(),
+            "ALPHA\nBETA\n",
+            "both edits landed"
+        );
+        let mut copies: Vec<std::path::PathBuf> =
+            std::fs::read_dir(service.session_dir("sess-edits").join(SNAPSHOTS_DIR))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .collect();
+        copies.sort();
+        let copies: Vec<String> = copies
+            .iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect();
+        assert_eq!(
+            copies,
+            ["alpha\nbeta\n", "ALPHA\nbeta\n"],
+            "the second edit planned on the file the first one wrote"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_edits_of_one_file_in_one_round_both_land_under_auto_approve() {
+        two_edits_of_one_file(PreApproved::AutoApprove).await;
+    }
+
+    #[tokio::test]
+    async fn two_edits_of_one_file_in_one_round_both_land_after_always_allow() {
+        two_edits_of_one_file(PreApproved::AlwaysAllow).await;
+    }
+
+    /// A tool that is not read-only, or declares nothing, runs alone: no two
+    /// such calls are ever in flight together.
+    #[tokio::test]
+    async fn calls_that_are_not_read_only_run_one_at_a_time() {
+        let counter = Arc::new(InFlight::default());
+        let registry = ToolRegistry::default();
+        registry
+            .register(tool("writes", writes(), counter.clone()))
+            .unwrap();
+        registry
+            .register(tool("declares_nothing", None, counter.clone()))
+            .unwrap();
+        let calls = vec![
+            call("tc_1", "writes", serde_json::json!({"n": 1})),
+            call("tc_2", "declares_nothing", serde_json::json!({"n": 2})),
+            call("tc_3", "writes", serde_json::json!({"n": 3})),
+        ];
+        let (result, seen) = run(registry, &policy(false), calls).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        assert_eq!(
+            counter.most.load(Ordering::SeqCst),
+            1,
+            "two calls that are not read-only were in flight together"
+        );
+        let expected: Vec<(String, String, bool)> = [("tc_1", "1"), ("tc_2", "2"), ("tc_3", "3")]
+            .into_iter()
+            .map(|(id, text)| (id.to_string(), text.to_string(), false))
+            .collect();
+        assert_eq!(results(&seen[1]), expected);
+    }
+
+    /// Two read-only calls in one round still run together: each waits for
+    /// the other at a barrier, which one alone would never pass.
+    #[tokio::test]
+    async fn read_only_calls_in_one_round_still_run_together() {
+        let meets = Arc::new(Meets(tokio::sync::Barrier::new(2)));
+        let registry = ToolRegistry::default();
+        registry
+            .register(tool("reads", reads(), meets.clone()))
+            .unwrap();
+        let calls = vec![
+            call("tc_1", "reads", serde_json::json!({})),
+            call("tc_2", "reads", serde_json::json!({})),
+        ];
+        let (result, seen) = run(registry, &policy(false), calls).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        let met: Vec<(String, bool)> = results(&seen[1])
+            .into_iter()
+            .map(|(_, text, failed)| (text, failed))
+            .collect();
+        assert_eq!(
+            met,
+            [("met".to_string(), false), ("met".to_string(), false)]
+        );
+    }
+
+    /// The lead's three coordination tools run together whatever they
+    /// declare — two declare nothing, one declares it is not read-only.
+    #[tokio::test]
+    async fn the_leads_coordination_tools_run_together_whatever_they_declare() {
+        let meets = Arc::new(Meets(tokio::sync::Barrier::new(3)));
+        let registry = ToolRegistry::default();
+        for (name, annotations) in [
+            ("spawn_subagents_batch", None),
+            ("check_subagent_status", None),
+            ("wait_for_subagents", writes()),
+        ] {
+            registry
+                .register(tool(name, annotations, meets.clone()))
+                .unwrap();
+        }
+        let calls = vec![
+            call("tc_1", "spawn_subagents_batch", serde_json::json!({})),
+            call("tc_2", "check_subagent_status", serde_json::json!({})),
+            call("tc_3", "wait_for_subagents", serde_json::json!({})),
+        ];
+        let (result, seen) = run(registry, &policy(false), calls).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        for (id, text, failed) in results(&seen[1]) {
+            assert!(!failed && text == "met", "{id}: {text}");
+        }
+    }
+
+    /// Groups run one after another in the model's order — the two reads
+    /// together, then the write, the read and the write each alone — and
+    /// the results come back in that order.
+    #[tokio::test]
+    async fn a_round_runs_its_groups_one_after_another_in_the_models_order() {
+        let journal = Arc::new(Journal::default());
+        let registry = ToolRegistry::default();
+        registry
+            .register(tool("reads", reads(), journal.clone()))
+            .unwrap();
+        registry
+            .register(tool("writes", writes(), journal.clone()))
+            .unwrap();
+        let calls: Vec<ToolCall> = [
+            ("r1", "reads"),
+            ("r2", "reads"),
+            ("w1", "writes"),
+            ("r3", "reads"),
+            ("w2", "writes"),
+        ]
+        .into_iter()
+        .map(|(id, name)| call(id, name, serde_json::json!({"id": id})))
+        .collect();
+        let (result, seen) = run(registry, &policy(false), calls).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+        let lines = journal.lines();
+        assert_eq!(lines.len(), 10, "{lines:?}");
+        let (first, rest) = lines.split_at(4);
+        assert_eq!(
+            first[..2],
+            ["start r1", "start r2"],
+            "the two reads run together: {lines:?}"
+        );
+        let mut ends = first[2..].to_vec();
+        ends.sort();
+        assert_eq!(ends, ["end r1", "end r2"], "{lines:?}");
+        assert_eq!(
+            rest,
+            [
+                "start w1", "end w1", "start r3", "end r3", "start w2", "end w2"
+            ],
+            "each later group starts once the one before it has ended: {lines:?}"
+        );
+        let order: Vec<(String, String)> = results(&seen[1])
+            .into_iter()
+            .map(|(id, text, _)| (id, text))
+            .collect();
+        let expected: Vec<(String, String)> = ["r1", "r2", "w1", "r3", "w2"]
+            .into_iter()
+            .map(|id| (id.to_string(), id.to_string()))
+            .collect();
+        assert_eq!(order, expected, "the results keep the model's order");
+    }
+
+    /// A cancel while a later group runs ends the round as it did the one
+    /// `join_all`: the earlier group has run, and no result reaches a model.
+    #[tokio::test]
+    async fn a_cancel_while_a_later_group_runs_ends_the_round() {
+        let token = CancellationToken::new();
+        let counter = Arc::new(InFlight::default());
+        let registry = ToolRegistry::default();
+        registry
+            .register(tool("writes", writes(), counter.clone()))
+            .unwrap();
+        registry
+            .register(tool(
+                "cancels",
+                writes(),
+                Arc::new(CancelsTheRun(token.clone())),
+            ))
+            .unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let config = LoopConfig {
+            enable_caching: false,
+            ..Default::default()
+        };
+        let calls = vec![
+            call("tc_1", "writes", serde_json::json!({"n": 1})),
+            call("tc_2", "cancels", serde_json::json!({})),
+        ];
+        let (result, seen) =
+            run_in(&sandbox, &policy(false), calls, &config, None, Some(token)).await;
+
+        assert_eq!(result.finish_reason, LoopFinishReason::Cancelled);
+        assert_eq!(result.rounds_used, 1);
+        assert_eq!(seen.len(), 1, "no round's results reached a model");
+        assert_eq!(counter.most.load(Ordering::SeqCst), 1, "the first call ran");
+        assert_eq!(counter.now.load(Ordering::SeqCst), 0, "and ended");
+    }
+}
+
+/// N-TOOL-3 (Z1-01): a round cut into its groups, in the model's order — a
+/// run of calls that may run together is one group, every other call one
+/// of its own.
+#[test]
+fn call_groups_cut_a_round_into_runs_that_go_together_and_single_calls() {
+    /// Each group as its first call and the one after its last.
+    fn cut(together: &[bool]) -> Vec<(usize, usize)> {
+        super::tool_helpers::call_groups(together)
+            .into_iter()
+            .map(|group| (group.start, group.end))
+            .collect()
+    }
+
+    assert!(cut(&[]).is_empty());
+    assert_eq!(cut(&[true]), [(0, 1)]);
+    assert_eq!(cut(&[false]), [(0, 1)]);
+    assert_eq!(cut(&[true, true, true]), [(0, 3)]);
+    assert_eq!(cut(&[false, false]), [(0, 1), (1, 2)]);
+    assert_eq!(
+        cut(&[true, true, false, true, false, false, true, true]),
+        [(0, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 8)]
     );
 }

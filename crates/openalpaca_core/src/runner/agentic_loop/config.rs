@@ -12,6 +12,15 @@ use std::time::Duration;
 /// Default context compression threshold (fraction of max_context_tokens).
 pub(super) const DEFAULT_CONTEXT_THRESHOLD: f64 = 0.6;
 
+/// The longest one streamed round may run when the routed provider needs a
+/// key: ten minutes ([`LoopConfig::max_stream_duration`]'s default).
+pub(super) const KEYED_STREAM_ROUND: Duration = Duration::from_secs(600);
+
+/// The longest one streamed round may run when the routed provider needs no
+/// key — a local model, which may run up to an hour (LOCAL-CALL-HOUR):
+/// [`LoopConfig::max_keyless_stream_duration`]'s default.
+pub(super) const KEYLESS_STREAM_ROUND: Duration = Duration::from_secs(3600);
+
 /// Optional callback for streaming events (UI progress, logging).
 pub type StreamCallback = Arc<dyn Fn(&StreamEvent) + Send + Sync>;
 
@@ -19,10 +28,13 @@ pub type StreamCallback = Arc<dyn Fn(&StreamEvent) + Send + Sync>;
 ///
 /// `Clone` is implemented manually because `StreamCallback` (`Arc<dyn Fn>`)
 /// implements `Clone` but not `Debug`.
+///
+/// It carries no per-tool time bound: that is the sandbox policy's alone
+/// (`SandboxPolicy::max_tool_runtime_secs`, N-TOOL-1b), the one number a loop
+/// cuts at and states.
 pub struct LoopConfig {
     pub max_rounds: usize,
     pub max_tools_per_round: usize,
-    pub max_tool_runtime: Duration,
     pub max_cost: f64,
     /// Override model for this loop (used by LlmRouter).
     pub model: Option<String>,
@@ -38,6 +50,13 @@ pub struct LoopConfig {
     /// context compression. Each "round" is roughly 3 messages (assistant +
     /// tool results). Default: `4`.
     pub context_tail_keep: usize,
+    /// How many of the messages the loop was handed every compaction tier
+    /// keeps at the head of the list, untouched: the system prompt and the
+    /// initial query by default
+    /// (`context_budget::compaction::DEFAULT_KEPT_HEAD`, 2). A spawned
+    /// subagent sets it to its whole handed list, its objective last behind
+    /// any memory block or working-folder line (SA-2b).
+    pub kept_head: usize,
     /// Fraction of model context window to use as compression trigger (0.0–1.0).
     /// Only used by `with_context_window()`. Default: `0.6`.
     pub context_threshold: f64,
@@ -53,10 +72,16 @@ pub struct LoopConfig {
     /// streaming first, forwarding each event to this callback, then falls
     /// back to non-streaming on failure.
     pub stream_callback: Option<StreamCallback>,
-    /// Maximum wall-clock duration for streaming collection.
-    /// If `collect_stream()` exceeds this, it is cancelled and the loop
-    /// falls back to non-streaming. Default: 10 minutes.
+    /// Maximum wall-clock duration for streaming collection when the routed
+    /// provider needs a key. If `collect_stream()` exceeds this, it is
+    /// cancelled and the loop falls back to non-streaming. Default: 10
+    /// minutes.
     pub max_stream_duration: Duration,
+    /// The same bound when the routed provider needs no key
+    /// (`LlmProvider::requires_key` false: Ollama), read from the stream the
+    /// router hands back (`RoutedStream::requires_key`). Default: an hour —
+    /// a call to a local model may run that long (LOCAL-CALL-HOUR).
+    pub max_keyless_stream_duration: Duration,
     /// What compaction's working-state writer is called with (design 11
     /// §3.1, CQ-3): `[orchestrator.costs] summary_model` (`None` the
     /// router's default), its daily ceiling, the line cut and the block's
@@ -113,19 +138,20 @@ impl Clone for LoopConfig {
         Self {
             max_rounds: self.max_rounds,
             max_tools_per_round: self.max_tools_per_round,
-            max_tool_runtime: self.max_tool_runtime,
             max_cost: self.max_cost,
             model: self.model.clone(),
             fallback_models: self.fallback_models.clone(),
             agent_constraints: self.agent_constraints.clone(),
             max_context_tokens: self.max_context_tokens,
             context_tail_keep: self.context_tail_keep,
+            kept_head: self.kept_head,
             context_threshold: self.context_threshold,
             initial_tool_choice: self.initial_tool_choice.clone(),
             enable_caching: self.enable_caching,
             thinking: self.thinking.clone(),
             stream_callback: self.stream_callback.clone(),
             max_stream_duration: self.max_stream_duration,
+            max_keyless_stream_duration: self.max_keyless_stream_duration,
             writer: self.writer.clone(),
             working_state: self.working_state.clone(),
             working_state_cursor: self.working_state_cursor.clone(),
@@ -150,10 +176,15 @@ impl std::fmt::Debug for LoopConfig {
             .field("max_context_tokens", &self.max_context_tokens)
             .field("context_threshold", &self.context_threshold)
             .field("context_tail_keep", &self.context_tail_keep)
+            .field("kept_head", &self.kept_head)
             .field("enable_caching", &self.enable_caching)
             .field("thinking", &self.thinking)
             .field("stream_callback", &self.stream_callback.is_some())
             .field("max_stream_duration", &self.max_stream_duration)
+            .field(
+                "max_keyless_stream_duration",
+                &self.max_keyless_stream_duration,
+            )
             .field("writer", &self.writer)
             .field("working_state", &self.working_state.is_some())
             .field("working_state_cursor", &self.working_state_cursor)
@@ -176,19 +207,20 @@ impl Default for LoopConfig {
         Self {
             max_rounds: 15,
             max_tools_per_round: 5,
-            max_tool_runtime: Duration::from_secs(60),
             max_cost: 1.00,
             model: None,
             fallback_models: Vec::new(),
             agent_constraints: None,
             max_context_tokens: 0,
             context_tail_keep: 4,
+            kept_head: crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
             context_threshold: DEFAULT_CONTEXT_THRESHOLD,
             initial_tool_choice: None,
             enable_caching: true,
             thinking: None,
             stream_callback: None,
-            max_stream_duration: Duration::from_secs(600),
+            max_stream_duration: KEYED_STREAM_ROUND,
+            max_keyless_stream_duration: KEYLESS_STREAM_ROUND,
             writer: WriterConfig::default(),
             working_state: None,
             working_state_cursor: None,
@@ -213,7 +245,6 @@ impl LoopConfig {
     pub fn from_defaults(
         max_rounds: usize,
         max_tools_per_round: usize,
-        max_tool_runtime_secs: u64,
         max_cost: f64,
         agent: &crate::agent::subagent::SubAgent,
     ) -> Self {
@@ -243,24 +274,20 @@ impl LoopConfig {
         Self {
             max_rounds: agent.constraints.max_rounds.unwrap_or(max_rounds),
             max_tools_per_round,
-            max_tool_runtime: Duration::from_secs(
-                agent
-                    .constraints
-                    .timeout_seconds
-                    .unwrap_or(max_tool_runtime_secs),
-            ),
             max_cost: agent.constraints.max_cost_per_task.unwrap_or(max_cost),
             model,
             fallback_models: agent.llm_config.fallback_models.clone(),
             agent_constraints: Some(agent.constraints.clone()),
             max_context_tokens: 0,
             context_tail_keep: 4,
+            kept_head: crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
             context_threshold: DEFAULT_CONTEXT_THRESHOLD,
             initial_tool_choice: None,
             enable_caching: true,
             thinking: None,
             stream_callback: None,
-            max_stream_duration: Duration::from_secs(600),
+            max_stream_duration: KEYED_STREAM_ROUND,
+            max_keyless_stream_duration: KEYLESS_STREAM_ROUND,
             writer: WriterConfig::default(),
             working_state: None,
             working_state_cursor: None,
@@ -300,7 +327,6 @@ impl LoopConfig {
         Self::from_defaults(
             defaults.max_rounds,
             defaults.max_tools_per_round,
-            defaults.max_tool_runtime_secs,
             defaults.max_cost,
             agent,
         )
@@ -314,7 +340,6 @@ impl LoopConfig {
         Self::from_defaults(
             defaults.max_rounds,
             defaults.max_tools_per_round,
-            defaults.max_tool_runtime_secs,
             defaults.max_cost,
             agent,
         )
@@ -350,8 +375,9 @@ pub struct LoopResult {
     /// last one, not a list: the reader wants the one it stopped on.
     pub last_tool_error: Option<String>,
     /// The working state this loop's last `LlmSummary` compaction wrote, and
-    /// its boundary: `messages[2..boundary]` of the list the loop was handed
-    /// lie behind it (design 11 §3.3). Counted in the list as the compaction
+    /// its boundary: `messages[head..boundary]` of the list the loop was
+    /// handed lie behind it (design 11 §3.3), `head` being `kept_head`
+    /// (`DEFAULT_KEPT_HEAD` but in a spawned subagent's loop). Counted in the list as the compaction
     /// found it, so once an earlier tier or compaction had shortened the list
     /// it falls short of the truth, never past it. `None` when the loop never
     /// wrote one.

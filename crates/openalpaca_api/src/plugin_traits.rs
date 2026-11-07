@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -7,8 +9,29 @@ use serde_json::Value;
 #[async_trait]
 pub trait PluginToolExecutor: Send + Sync {
     /// Execute a tool by name with JSON arguments.
-    /// The tool_name is the bare name (without plugin namespace prefix).
+    ///
+    /// `tool_name` is the name the tool is registered under,
+    /// `<plugin>::<tool>` (the registry's `Plugin` arm passes its own); the
+    /// implementor sends its plugin the bare `<tool>` the plugin listed.
     async fn execute(&self, tool_name: &str, arguments: &Value) -> Result<String, String>;
+
+    /// [`Self::execute`] for a call the sandbox cuts at `sandbox_cut`
+    /// (PLUGIN-WAIT): the registry's `Plugin` arm calls this where the call's
+    /// context carries the sandbox's figure, and `execute` where it carries
+    /// none. An implementor that waits for its plugin's answer waits past
+    /// `sandbox_cut`, so the sandbox's clock, with its own message, is the
+    /// one that ends a slow call.
+    ///
+    /// Default: [`Self::execute`], so no existing implementor changes.
+    async fn execute_within(
+        &self,
+        tool_name: &str,
+        arguments: &Value,
+        sandbox_cut: Duration,
+    ) -> Result<String, String> {
+        let _ = sandbox_cut;
+        self.execute(tool_name, arguments).await
+    }
 
     /// The plugin this executor belongs to.
     fn plugin_id(&self) -> &str;

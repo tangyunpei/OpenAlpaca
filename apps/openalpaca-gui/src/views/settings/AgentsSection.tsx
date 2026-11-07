@@ -8,9 +8,12 @@
  * (`GET /v1/agent-instances`) — the design's rows are templates, so the
  * running count is shown as meta rather than conflated with them.
  *
- * Unavailable: the per-template on/off switch. There is no enabled flag on a
- * template and nothing would enforce one in the spawn path (GAP-20's remaining
- * half).
+ * A template a file in `config/agents` switches off (`disabled: true`,
+ * subagent design §2.4 L-4a) is listed with its file and a "Switched off"
+ * chip, its toggle off.
+ *
+ * Unavailable: the toggle as a control. The switch is the person's file and
+ * no route writes it (GAP-20's remaining half).
  */
 
 import { Button, Tag, chipVariant } from "@/components/ui";
@@ -79,14 +82,24 @@ export function AgentsSection() {
         >
           {rows.map((template) => {
             const running = runningByTemplate.get(template.id) ?? 0;
+            const switchedOff = template.state === "disabled";
             return (
               <ListRow
                 key={template.id}
                 name={template.name}
                 tags={
-                  template.singleton ? <Tag value="singleton" /> : undefined
+                  switchedOff || template.singleton ? (
+                    <>
+                      {template.singleton && <Tag value="singleton" />}
+                      {switchedOff && <Tag value="Switched off" />}
+                    </>
+                  ) : undefined
                 }
-                description={template.description}
+                description={
+                  switchedOff && template.path
+                    ? `Switched off by ${template.path}`
+                    : template.description
+                }
                 chips={
                   template.model === undefined ? undefined : (
                     <Button variant={chipVariant(false)} disabled>
@@ -97,7 +110,7 @@ export function AgentsSection() {
                 meta={templateMeta(template, running)}
                 control={
                   <Toggle
-                    checked
+                    checked={!switchedOff}
                     label={`Enable ${template.name}`}
                     disabled
                     disabledReason={TEMPLATE_TOGGLE_NOTE}

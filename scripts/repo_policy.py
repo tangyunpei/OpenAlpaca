@@ -1,13 +1,16 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """The repository-policy guard (B-23): what the workflows and the gate scripts may not do.
 
 Usage:
-  python3 -I scripts/repo_policy.py [ROOT]
+  python3.11 -I scripts/repo_policy.py [ROOT]
 
 ROOT is the repository root (default: this file's parent's parent). Exit 0 when every
-rule holds; 1 with one line per violation, `path:line: rule: what`; 2 on a usage error,
-a file the guard cannot read, or a ROOT with no .github/workflows. CI's `tooling` job
-runs it; so can anyone, offline.
+rule holds; 1 with one line per violation, `path:line: rule: what`; 2 on a usage error
+(a ROOT that is not a directory among them) or a file the guard cannot read (a Cargo.lock
+that is not TOML, or whose [[package]] is not an array of tables, among them). There is
+no remote CI (the owner, 2026-11-06): it is a local gate, run offline. A ROOT with no
+.github/workflows has zero workflows to check; the workflow rules stay for any workflow
+a later commit adds.
 
 The rules:
   locked     every `cargo build`, `test`, `clippy` and `check` a workflow runs, whatever
@@ -20,6 +23,11 @@ The rules:
              the toolchain is rust-toolchain.toml's. The G-base driver's
              `cargo "+$TOOLCHAIN"` is a parameter, not a literal — the named exception
              the rule's form leaves out by itself.
+  python-pin every `actions/setup-python` step reads the root .python-version by
+             `python-version-file: .python-version` and names no `python-version:`
+             (with both inputs, setup-python takes the literal, warning only), an
+             input's name read in any case, as the runner reads it; and that file
+             holds one line, `X.Y` or `X.Y.Z` (its shape: no Python is looked up).
   build-dir  every CARGO_TARGET_DIR a workflow or a gate script sets is paired with
              CARGO_BUILD_BUILD_DIR (M63, MF-5): on the same command line, on an adjacent
              line of the same script, or as a sibling key of the same `env:` mapping.
@@ -31,13 +39,22 @@ The workflows are .github/workflows/*.yml and *.yaml. The gate scripts are the *
 *.py, *.ps1, *.ts and *.mjs files under scripts/, tasks/deps-upgrade/tools/ and
 apps/openalpaca-gui/scripts/. A comment is not a command: `#` lines (and `//`, `/*`,
 `*` lines in TypeScript) are skipped.
-"""
 
-from __future__ import annotations
+A workflow step is read as a block list item, from its `- ` to the next line at or left
+of that dash (a `#` line ends nothing), and python-pin matches an input by its key
+anywhere in the step. Outside that form, and not read: a flow-style step
+(`- {uses: …}`), an anchor on a step's `-` line, a `with:` alias or merge key (`<<:`) —
+a step whose input comes only through one is refused, as not reading the pin — an
+explicit key (`? python-version`), and a job that gets its Python otherwise (a
+`container:` image, the runner's own python3, another installer). Refused rather than
+read: another spelling of the pin's path (`./.python-version`), an empty
+`python-version: ''`, and a `- uses:` line inside a `run: |` text.
+"""
 
 import pathlib
 import re
 import sys
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -63,6 +80,12 @@ TOOLCHAIN_LITERAL = re.compile(r"""\bcargo\s+["']?\+\d+\.\d+(?:\.\d+)?\b""")
 USES = re.compile(r"^(\s*)(?:-\s+)?uses:\s*([^\s#]+)\s*(?:#\s*(.*))?$")
 SHA_REF = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[^@\s]+)?@[0-9a-f]{40}$")
 VERSION_COMMENT = re.compile(r"^v\d+\.\d+\.\d+\b")
+# setup-python's two inputs, as a block key (after a step's `- ` too) or in a flow mapping, the
+# name in any case as the runner reads it: `python-version-file` is never read as `python-version`.
+PYTHON_LITERAL = re.compile(r"""(?:^\s*(?:-\s+)?|[{,]\s*)["']?(?i:python-version)["']?\s*:""")
+READS_PIN = re.compile(
+    r"""(?:^\s*(?:-\s+)?|[{,]\s*)["']?(?i:python-version-file)["']?\s*:\s*["']?\.python-version["']?\s*(?:[,}].*)?$""")
+PIN_LINE = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?")
 SHELL_TARGET = re.compile(r"\bCARGO_TARGET_DIR=")
 SHELL_BUILD = re.compile(r"\bCARGO_BUILD_BUILD_DIR=")
 YAML_TARGET = re.compile(r"^(\s*)CARGO_TARGET_DIR\s*:")
@@ -160,10 +183,12 @@ def check_uses(rel, lines, out):
 
 
 def step_body(lines, i, indent):
-    """The lines of the step whose `uses:` is lines[i] (0-based), up to the next item at its level."""
+    """The lines of the step whose `uses:` is lines[i] (0-based), up to the next item at its level.
+    A `#` line ends nothing, whatever its indent: YAML reads past it."""
     body = []
     for line in lines[i + 1:]:
-        if line.strip() and (len(line) - len(line.lstrip())) <= indent:
+        s = line.lstrip()
+        if s and not s.startswith("#") and len(line) - len(s) <= indent:
             break
         body.append(line)
     return body
@@ -198,6 +223,44 @@ def check_toolchain(rel, lines, suffix, out):
         m = TOOLCHAIN_LITERAL.search(strip_comment(line))
         if m and not excepted("toolchain", rel, line):
             out.append("%s:%d: toolchain: `%s` names a toolchain; the pinned one comes from rust-toolchain.toml" % (rel, n, m.group(0)))
+
+
+def check_python_pin_steps(rel, lines, out):
+    for i, line in enumerate(lines):
+        m = USES.match(line)
+        if not m or not m.group(2).strip("'\"").lower().startswith("actions/setup-python@"):
+            continue
+        start, dash = step_start(lines, i)  # the whole step, whatever its keys' order
+        step = [(start, lines[start][dash + 1:])] + list(enumerate(step_body(lines, start, dash), start + 1))
+        texts = [(n, strip_comment(t)) for n, t in step if not is_comment(t, ".yml")]
+        literal = next(((n, t.strip()) for n, t in texts if PYTHON_LITERAL.search(t)), None)
+        if literal:  # one violation per step: the literal, which wins over any file input
+            out.append("%s:%d: python-pin: `%s` names a Python; the pinned one comes from .python-version" % (rel, literal[0] + 1, literal[1]))
+        elif not any(READS_PIN.search(t) for _, t in texts):
+            out.append("%s:%d: python-pin: actions/setup-python does not read the pin (no `python-version-file: .python-version`)" % (rel, i + 1))
+
+
+def check_python_pin_file(root, out):
+    path = root / ".python-version"
+    if not path.is_file():
+        out.append(".python-version:1: python-pin: there is no .python-version; the pin is one line, `X.Y` or `X.Y.Z`")
+        return
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise Unreadable("%s: %s" % (path, e))
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()  # the newline that ends the last line starts no other
+    if not any(lines):
+        what = "is empty"
+    elif len(lines) > 1:
+        what = "holds %d lines" % len(lines)
+    elif not PIN_LINE.fullmatch(lines[0]):
+        what = "reads `%s`" % ascii(lines[0])[1:-1]
+    else:
+        return
+    out.append(".python-version:1: python-pin: .python-version %s; the pin is one line, `X.Y` or `X.Y.Z`" % what)
 
 
 def check_build_dir_shell(rel, lines, suffix, out):
@@ -253,8 +316,25 @@ def ignored_zip_ids(path: pathlib.Path):
 
 
 def locked_zip_majors(lock: pathlib.Path) -> list[str]:
-    text = "\n".join(read(lock)) if lock.is_file() else ""
-    return re.findall(r'(?m)^\[\[package\]\]\nname = "zip"\nversion = "(\d+)\.', text)
+    """The major of every zip Cargo.lock holds, read by tomllib; [] with no Cargo.lock."""
+    if not lock.is_file():
+        return []
+    try:
+        doc = tomllib.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as e:
+        raise Unreadable("%s: %s" % (lock, e))
+    except tomllib.TOMLDecodeError as e:
+        raise Unreadable("%s: not TOML: %s" % (lock, e))
+    packages = doc.get("package", [])
+    if not isinstance(packages, list) or not all(isinstance(p, dict) for p in packages):
+        raise Unreadable("%s: not a Cargo.lock: [[package]] is not an array of tables" % lock)
+    majors = []
+    for p in packages:
+        if p.get("name") == "zip":
+            m = re.match(r"(\d+)\.", str(p.get("version", "")))
+            if m:
+                majors.append(m.group(1))
+    return majors
 
 
 def check_zip8(root, out):
@@ -273,11 +353,13 @@ def check(root: pathlib.Path) -> list[str]:
         check_uses(rel, lines, out)
         check_checkout(rel, lines, out)
         check_toolchain(rel, lines, ".yml", out)
+        check_python_pin_steps(rel, lines, out)
         check_build_dir_yaml(rel, lines, out)
     for path in gate_scripts(root):
         rel, lines = path.relative_to(root).as_posix(), read(path)
         check_toolchain(rel, lines, path.suffix, out)
         check_build_dir_shell(rel, lines, path.suffix, out)
+    check_python_pin_file(root, out)
     check_zip8(root, out)
     return out
 
@@ -287,8 +369,8 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(__doc__)
         return 2
     root = pathlib.Path(argv[1]).resolve() if len(argv) == 2 else ROOT
-    if not (root / ".github" / "workflows").is_dir():
-        sys.stderr.write("repo_policy: %s has no .github/workflows\n" % root)
+    if not root.is_dir():
+        sys.stderr.write("repo_policy: %s is not a directory\n" % root)
         return 2
     try:
         found = check(root)

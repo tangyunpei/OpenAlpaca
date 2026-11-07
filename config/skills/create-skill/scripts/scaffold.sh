@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scaffold.sh — Create the full directory structure for a new skill.
 #
-# Usage: scaffold.sh --id=<skill-id> [--scope=project|user] [--dirs=scripts,examples,templates,assets]
+# Usage: scaffold.sh --id=<skill-id> [--scope=project] [--dirs=scripts,examples,templates,assets]
 #
 # Creates:
 #   config/skills/<id>/
@@ -14,10 +14,11 @@
 
 set -euo pipefail
 
-# Resolve project root from script location:
-# script is at <project>/config/skills/create-skill/scripts/scaffold.sh
+# The skills root, from the script's own location: the script is at
+# <config>/skills/create-skill/scripts/, so the root is the skills directory
+# this skill was loaded from, the one directory the daemon reads skills from.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SKILLS_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 SKILL_ID=""
 SCOPE="project"
@@ -33,6 +34,13 @@ for arg in "$@"; do
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
   esac
 done
+
+# One root, so one scope: `user` wrote under ~/.config/openalpaca/skills,
+# which nothing reads, and reported success.
+if [[ "$SCOPE" != "project" ]]; then
+  echo "Error: --scope=$SCOPE is refused: the daemon reads skills only from $SKILLS_ROOT (--scope=project, the default)" >&2
+  exit 1
+fi
 
 if [[ -z "$SKILL_ID" ]]; then
   echo "Error: --id is required" >&2
@@ -54,14 +62,7 @@ case "$SKILL_ID" in
     ;;
 esac
 
-# Determine base path
-if [[ "$SCOPE" == "user" ]]; then
-  BASE_DIR="$HOME/.config/openalpaca/skills"
-else
-  BASE_DIR="$PROJECT_ROOT/config/skills"
-fi
-
-SKILL_DIR="$BASE_DIR/$SKILL_ID"
+SKILL_DIR="$SKILLS_ROOT/$SKILL_ID"
 
 # Check for existing skill
 if [[ -f "$SKILL_DIR/SKILL.md" ]]; then
@@ -103,7 +104,6 @@ echo "  \"skill_id\": \"$SKILL_ID\","
 echo "  \"path\": \"$SKILL_DIR\","
 echo "  \"created_dirs\": ["
 
-FIRST=true
 echo -n "    \"$SKILL_DIR\""
 if [[ -n "$DIRS" ]]; then
   IFS=',' read -ra DIR_LIST <<< "$DIRS"

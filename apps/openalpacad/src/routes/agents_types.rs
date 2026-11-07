@@ -1,6 +1,10 @@
 //! Request/response types for agent management endpoints.
 
 use openalpaca_core::agent::AgentConfigFile;
+use openalpaca_core::agent::registry::{
+    NotUsed, NotUsedReason, TemplateLayer, TemplateProvenance, TemplateState,
+};
+use openalpaca_core::bundled::ShippedVersion;
 use openalpaca_storage::{AgentMetrics, SubAgentConfig};
 use serde::{Deserialize, Serialize};
 
@@ -93,6 +97,76 @@ pub struct TemplateResponse {
     /// `"30d"` or `"all"` — so the client can label the row without having to
     /// remember what it asked for.
     pub window: String,
+    /// Where the template comes from (subagent design §2.7 R-1): `"bundled"`
+    /// (the binary), `"file"` (`config/agents/`) or `"plugin"`.
+    pub source: String,
+    /// The plugin's id for a plugin's template, else null.
+    pub plugin: Option<String>,
+    /// The file the template is read from (or, withheld or disabled, the
+    /// file that withholds it or switches it off), else null.
+    pub path: Option<String>,
+    /// Whether a file of the person's stands over the bundled template of
+    /// this id.
+    pub overrides_bundled: bool,
+    /// `"ready"`; `"withheld"`: a file holds the id and cannot be used
+    /// (L-4); or `"disabled"`: a file holds the id and says `disabled: true`
+    /// (L-4a). A spawn of a withheld or disabled id is refused naming the
+    /// file.
+    pub state: String,
+    /// The definitions of this id that do not run: a bundled template
+    /// overridden, unedited copies set aside, duplicates, plugins refused.
+    pub not_used: Vec<NotUsedResponse>,
+    /// What the daemon found worth saying about the file: why it is
+    /// withheld, a confirmation list naming no tool (W-1).
+    pub warnings: Vec<String>,
+}
+
+/// One entry of a template row's `not_used` (R-1).
+#[derive(Debug, Serialize)]
+pub struct NotUsedResponse {
+    /// `"bundled"`, `"file"` or `"plugin"`.
+    pub source: String,
+    pub path: Option<String>,
+    pub plugin: Option<String>,
+    /// `unedited_copy`, `overridden`, `duplicate`, `does_not_parse` or
+    /// `plugin_refused`.
+    pub reason: String,
+    /// For an unedited copy: `"current"` or `"earlier"`.
+    pub version: Option<String>,
+    /// For an unedited copy the Installation Manual's step made:
+    /// `manual_step_7` or `manual_step_8` (V-2a).
+    pub edit: Option<String>,
+}
+
+fn layer_word(layer: TemplateLayer) -> &'static str {
+    match layer {
+        TemplateLayer::Bundled => "bundled",
+        TemplateLayer::File => "file",
+        TemplateLayer::Plugin => "plugin",
+    }
+}
+
+impl NotUsedResponse {
+    fn from_entry(entry: &NotUsed) -> Self {
+        let (version, edit) = match entry.reason {
+            NotUsedReason::UneditedCopy(copy) => (
+                Some(match copy.version {
+                    ShippedVersion::Current => "current",
+                    ShippedVersion::Earlier => "earlier",
+                }),
+                copy.edit.map(|edit| edit.as_str()),
+            ),
+            _ => (None, None),
+        };
+        Self {
+            source: layer_word(entry.layer).to_string(),
+            path: entry.path.as_ref().map(|p| p.display().to_string()),
+            plugin: entry.plugin.clone(),
+            reason: entry.reason.as_str().to_string(),
+            version: version.map(str::to_string),
+            edit: edit.map(str::to_string),
+        }
+    }
 }
 
 impl TemplateResponse {
@@ -101,13 +175,24 @@ impl TemplateResponse {
     /// rather than looked up here, so listing N templates stays one query.
     /// `window` is the resolved label (`resolve_window`'s first element),
     /// echoed onto every row of the same list.
+    ///
+    /// `provenance` is `AgentRegistry::provenance` of the id; None reads as a
+    /// file template with nothing to say (a template built in a test).
     pub fn from_template(
         t: &openalpaca_core::agent::AgentTemplate,
+        provenance: Option<&TemplateProvenance>,
         runs: Option<&openalpaca_storage::TemplateRunCount>,
         window: &str,
     ) -> Self {
         let persona = openalpaca_core::agent::template::extract_persona(t);
         let fm = &t.frontmatter;
+        let plugin = match &t.source {
+            openalpaca_core::agent::AgentSource::Plugin { plugin_id, .. } => {
+                Some(plugin_id.clone())
+            }
+            openalpaca_core::agent::AgentSource::Internal => None,
+        };
+        let layer = provenance.map_or(TemplateLayer::File, |p| p.layer);
         Self {
             id: fm.id.clone(),
             name: fm.name.clone(),
@@ -129,7 +214,47 @@ impl TemplateResponse {
             run_count: runs.map(|r| r.run_count).unwrap_or(0),
             last_run_at: runs.and_then(|r| r.last_run_at.clone()),
             window: window.to_string(),
+            source: layer_word(layer).to_string(),
+            plugin: if layer == TemplateLayer::Plugin {
+                plugin
+            } else {
+                None
+            },
+            path: provenance
+                .and_then(|p| p.path.as_ref())
+                .map(|p| p.display().to_string()),
+            overrides_bundled: provenance.is_some_and(TemplateProvenance::overrides_bundled),
+            state: match provenance.map(|p| &p.state) {
+                Some(TemplateState::Withheld { .. }) => "withheld",
+                Some(TemplateState::Disabled { .. }) => "disabled",
+                _ => "ready",
+            }
+            .to_string(),
+            not_used: provenance
+                .map(|p| p.not_used.iter().map(NotUsedResponse::from_entry).collect())
+                .unwrap_or_default(),
+            warnings: provenance.map(|p| p.warnings.clone()).unwrap_or_default(),
         }
+    }
+
+    /// The row of an id a file withholds (L-4) or switches off (L-4a): no
+    /// definition runs under it, so the row carries none — its name is the
+    /// id, its definition the parser's defaults — and `state`, `path` and
+    /// `warnings` say why.
+    pub fn withheld(
+        id: &str,
+        provenance: &TemplateProvenance,
+        runs: Option<&openalpaca_storage::TemplateRunCount>,
+        window: &str,
+    ) -> Option<Self> {
+        let stub = openalpaca_core::agent::template::parse_agent_markdown(&format!(
+            "---\nid: \"{id}\"\nname: \"{id}\"\ndescription: \"\"\n---\n"
+        ))
+        .ok()
+        .filter(|stub| stub.frontmatter.id == id)?;
+        let mut row = Self::from_template(&stub, Some(provenance), runs, window);
+        row.persona = String::new();
+        Some(row)
     }
 }
 
@@ -178,6 +303,7 @@ mod tests {
         };
         let v = serde_json::to_value(TemplateResponse::from_template(
             &template(),
+            None,
             Some(&runs),
             "7d",
         ))
@@ -194,8 +320,13 @@ mod tests {
     /// still carries the window it was asked about.
     #[test]
     fn a_template_that_never_ran_in_the_window_reports_zero_runs() {
-        let v = serde_json::to_value(TemplateResponse::from_template(&template(), None, "30d"))
-            .unwrap();
+        let v = serde_json::to_value(TemplateResponse::from_template(
+            &template(),
+            None,
+            None,
+            "30d",
+        ))
+        .unwrap();
 
         assert_eq!(v["run_count"], 0);
         assert!(

@@ -6,10 +6,7 @@
 //! - Recency bonus (recently used skills)
 //! - Negative keyword penalty
 
-use crate::bus::EventBus;
-use crate::events::SystemEvent;
 use crate::orchestrator::skill::catalog::SkillCatalog;
-use chrono::Utc;
 use std::sync::RwLock;
 
 /// Result of routing a user query against the skill catalog.
@@ -52,8 +49,6 @@ pub struct SkillRouter {
     recency_window: usize,
     auto_select_threshold: f64,
     suggest_threshold: f64,
-    /// Optional event bus for emitting lifecycle events.
-    bus: Option<EventBus>,
 }
 
 const DEFAULT_RECENCY_WINDOW: usize = 10;
@@ -65,18 +60,6 @@ impl SkillRouter {
             recency_window: DEFAULT_RECENCY_WINDOW,
             auto_select_threshold,
             suggest_threshold,
-            bus: None,
-        }
-    }
-
-    /// Create a new SkillRouter with an event bus for lifecycle events.
-    pub fn new_with_bus(auto_select_threshold: f64, suggest_threshold: f64, bus: EventBus) -> Self {
-        Self {
-            recent_skills: RwLock::new(Vec::new()),
-            recency_window: DEFAULT_RECENCY_WINDOW,
-            auto_select_threshold,
-            suggest_threshold,
-            bus: Some(bus),
         }
     }
 
@@ -210,23 +193,6 @@ impl SkillRouter {
                     reason,
                 });
             }
-        }
-
-        // Emit lifecycle event for auto-selected skill
-        if let Some(ref selected_id) = selected
-            && let Some(ref bus) = self.bus
-        {
-            let score = scores
-                .iter()
-                .find(|s| s.skill_id == *selected_id)
-                .map(|s| s.score)
-                .unwrap_or(0.0);
-            bus.publish(SystemEvent::SkillSelected {
-                skill_id: selected_id.clone(),
-                score,
-                query_preview: user_query.chars().take(100).collect(),
-                timestamp: Utc::now(),
-            });
         }
 
         RouteResult {

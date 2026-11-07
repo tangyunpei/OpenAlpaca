@@ -93,12 +93,38 @@ locate_app_bundle() {
     || die "Tauri app bundle not found: $APP_BUNDLE_PATH (cargo's target directory for apps/openalpaca-gui/src-tauri; no other directory is read)."
 }
 
+# Dies unless THIRD-PARTY-NOTICES at the repository root records, once each
+# in its header (the lines before its first rule of 72 "="), the SHA-256 of
+# the tree's Cargo.lock and bun.lock — the lockfiles
+# scripts/release/gen_notices.py read when it wrote the file (B-22) — as the
+# generator writes it, "<lockfile> sha256 <hex>" from the first column with
+# single spaces, naming the stale lockfile and the command that regenerates
+# the file. Bash, awk and shasum only: no Python on the packaging path.
+require_current_notices() {
+  local notices="$REPO_ROOT/THIRD-PARTY-NOTICES" regenerate lock recorded actual
+  regenerate="python3.11 -I scripts/release/gen_notices.py (after bun install --frozen-lockfile), and commit it"
+  require_cmd shasum
+  [[ -f "$notices" ]] || die "No $notices; generate it: $regenerate."
+  for lock in Cargo.lock bun.lock; do
+    recorded="$(awk -v lock="$lock" '
+        length($0) == 72 && /^=+$/ { exit }
+        $1 == lock && $2 == "sha256" && NF == 3 && $0 == $1 " " $2 " " $3 { print $3 }' "$notices")" \
+      || die "Cannot read $notices."
+    [[ "$recorded" =~ ^[0-9a-f]{64}$ ]] \
+      || die "$notices records no single \"$lock sha256 <hex>\" line; regenerate it: $regenerate."
+    actual="$(shasum -a 256 "$REPO_ROOT/$lock" | awk '{print $1}')" || die "Cannot hash $REPO_ROOT/$lock."
+    [[ "$actual" == "$recorded" ]] \
+      || die "$notices is stale: it was generated from a $lock with sha256 $recorded, but the tree's $lock is $actual; regenerate it: $regenerate."
+  done
+}
+
 # `source scripts/release/package-macos.sh` defines the functions above and
 # builds nothing. It turns on `set -euo pipefail` in the sourcing shell, and a
 # failing lookup's `die` exits that shell, an interactive one included: source
-# it inside `bash -c`. A manual seam: no CI job or committed test drives it,
-# unlike the Windows scripts' -DotSourceOnly, which Pester drives in CI
-# (DU-33 keeps the CI legs deferred).
+# it inside `bash -c`. scripts/tests/test_gen_notices.py drives
+# require_current_notices through this seam; the packaging legs themselves
+# stay deferred (DU-33), unlike the Windows scripts' -DotSourceOnly, which
+# Pester drives, run by hand on Windows.
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 [[ "$(uname -s)" == "Darwin" ]] || die "package-macos.sh must run on macOS."
@@ -113,6 +139,11 @@ require_cmd git
 require_cmd awk
 require_cmd sed
 require_cmd date
+
+# Before anything is built: the notices the package carries must be the
+# tree's lockfiles' (B-22).
+echo "==> Checking THIRD-PARTY-NOTICES against Cargo.lock and bun.lock"
+require_current_notices
 
 HOST_TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
 case "$HOST_TARGET" in
@@ -212,6 +243,8 @@ cp -R "$APP_BUNDLE_PATH" "$STAGING_DIR/gui/openalpaca-gui.app"
 cp -R "$REPO_ROOT/scripts/release/templates/config/." "$STAGING_DIR/config/"
 install -m 755 "$REPO_ROOT/scripts/release/install.sh" "$STAGING_DIR/install.sh"
 install -m 755 "$REPO_ROOT/scripts/release/uninstall.sh" "$STAGING_DIR/uninstall.sh"
+install -m 644 "$REPO_ROOT/LICENSE" "$STAGING_DIR/LICENSE"
+install -m 644 "$REPO_ROOT/THIRD-PARTY-NOTICES" "$STAGING_DIR/THIRD-PARTY-NOTICES"
 
 cat >"$STAGING_DIR/manifest.json" <<EOF
 {

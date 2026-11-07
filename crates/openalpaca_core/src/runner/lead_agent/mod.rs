@@ -133,7 +133,9 @@ pub async fn run_lead_agent(
         "Lead agent starting execution"
     );
 
-    // 1. List worker agent templates (all templates except the lead itself)
+    // 1. List worker agent templates (all templates except the lead itself),
+    // sorted by id (G-2): the `<agents>` block and both spawn descriptions
+    // read the same from run to run.
     let all_templates = shared_context.agent_registry.list_templates();
     let worker_templates: Vec<AgentTemplate> = all_templates
         .into_iter()
@@ -376,12 +378,17 @@ pub async fn run_lead_agent(
         wait_for_subagents_tool_definition(),
     );
     // invoke_skill is per-request like the coordination tools — inject its
-    // backend into the per-request registry, never the global one.
+    // backend into the per-request registry, never the global one. Exempt
+    // from the per-tool time limit, as the main loop registers it
+    // (SKILL-NO-CUT): the skill's own loop bounds it.
+    let invoke_skill_def = crate::tools::builtins::invoke_skill_tool_definition();
     if let Err(e) = lead_registry.register(crate::tools::registry::RegisteredTool {
-        definition: crate::tools::builtins::invoke_skill_tool_definition(),
+        exempt_from_timeout: crate::tools::builtins::builtin_is_exempt_from_timeout(
+            &invoke_skill_def.name,
+        ),
+        definition: invoke_skill_def,
         backend: crate::tools::registry::ToolBackend::BuiltIn(invoke_skill_tool),
         provides_capabilities: vec![],
-        exempt_from_timeout: false,
         annotations: None,
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
@@ -429,7 +436,13 @@ pub async fn run_lead_agent(
     if let Some(ref broker) = confirmation_broker {
         sandbox.set_confirmation_broker(broker.clone());
     }
-    let mut sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
+    // N-TOOL-1b: the lead's per-tool bound is the daemon's, read at the run's
+    // start; its template's `timeout_seconds` is not a tool's bound.
+    let mut sandbox_policy = SandboxPolicy::from_constraints(
+        &lead_agent.id,
+        &lead_agent.constraints,
+        &daemon_config.load().execution.agent_defaults,
+    );
     sandbox_policy.confirmation_timeout_secs = Some(
         daemon_config
             .load()
@@ -475,6 +488,9 @@ pub async fn run_lead_agent(
                 .user_profile_budget,
         ),
         Some(&skills_catalog_block),
+        // N-LEAD-6: the bound the spawn tool read at its construction, so the
+        // prompt names the figure enforced.
+        spawn_tool.max_subagents_per_run(),
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {

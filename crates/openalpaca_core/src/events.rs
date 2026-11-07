@@ -93,12 +93,6 @@ pub enum SystemEvent {
         current_task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
-    /// The Orchestrator classified a user's intent
-    IntentClassified {
-        request_id: Uuid,
-        intent_type: String,
-        timestamp: DateTime<Utc>,
-    },
     /// A security policy was violated
     SecurityViolation {
         agent_id: String,
@@ -251,50 +245,20 @@ pub enum SystemEvent {
         task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
-    /// Dispatch decision record (Routing V2 tool path). Historical rows may
-    /// carry retired planner-era mode/reason strings.
-    DispatchDecision {
-        request_id: String,
-        task_id: Option<String>,
-        /// "lead_agent"
-        mode: String,
-        /// "model_tool_call"
-        reason: String,
-        agent_count: usize,
-        dag_node_count: Option<usize>,
-        predictability_score: Option<f64>,
-        error_message: Option<String>,
-        timestamp: DateTime<Utc>,
-    },
-    /// Request-level orchestration stage metrics
+    /// Request-level orchestration stage metrics, published with the
+    /// `orchestrator_latency` row of the same turn. Kept, unlike the
+    /// log-only variants N-EVENT-1 deleted, for its consumers: the two
+    /// live-eval harnesses and the orchestrator's tests read `mode` (and
+    /// `ack_ms`) off the bus.
     OrchestrationStage {
         request_id: Uuid,
-        /// "task_ops" | "steered" | "skill_command" | "bootstrap" |
-        /// "forced_simple_query" | "social_fast_path" | "main_loop"
+        /// "task_ops" | "memory_command" | "steered" | "skill_command" |
+        /// "skill_withdrawn" | "bootstrap" | "forced_simple_query" |
+        /// "social_fast_path" | "main_loop"
         mode: String,
         ack_ms: u64,
         fallback_reason: Option<String>,
         auto_promotion_reason: Option<String>,
-        timestamp: DateTime<Utc>,
-    },
-    /// A new skill was discovered during catalog scanning
-    SkillDiscovered {
-        /// Skill ID (directory name)
-        skill_id: String,
-        /// Human-readable skill name from frontmatter
-        skill_name: String,
-        /// "project" | "user"
-        scope: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// The skill router auto-selected a skill for a user query
-    SkillSelected {
-        /// Skill ID that was selected
-        skill_id: String,
-        /// The routing score that triggered selection
-        score: f64,
-        /// User query that triggered the selection (truncated)
-        query_preview: String,
         timestamp: DateTime<Utc>,
     },
     /// A skill invocation started
@@ -304,15 +268,6 @@ pub enum SystemEvent {
         skill_id: String,
         /// User query (truncated)
         query_preview: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// Skill context was injected into the prompt
-    SkillContextInjected {
-        request_id: Uuid,
-        /// Skill ID being invoked
-        skill_id: String,
-        /// Number of bytes of context injected
-        context_bytes: usize,
         timestamp: DateTime<Utc>,
     },
     /// A skill invocation completed successfully
@@ -670,6 +625,106 @@ mod tests {
                 assert!(openable);
             }
             other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+    }
+
+    /// N-EVENT-1: the five log-only variants — published, logged by the
+    /// daemon's bridge, read by nothing — are out of the vocabulary, so no
+    /// path can publish one; each comes back only with a consumer. Each
+    /// payload is the one its variant carried. `orchestration_stage` stays:
+    /// the live-eval harnesses and the orchestrator's tests read its `mode`.
+    #[test]
+    fn the_log_only_events_are_out_of_the_vocabulary_and_orchestration_stage_stays() {
+        let at = "2026-11-01T00:00:00Z";
+        let request = "00000000-0000-4000-8000-000000000001";
+        let retired = [
+            (
+                "intent_classified",
+                serde_json::json!({
+                    "request_id": request,
+                    "intent_type": "task_query",
+                    "timestamp": at
+                }),
+            ),
+            (
+                "dispatch_decision",
+                serde_json::json!({
+                    "request_id": request,
+                    "task_id": "t-1",
+                    "mode": "lead_agent",
+                    "reason": "model_tool_call",
+                    "agent_count": 0,
+                    "dag_node_count": null,
+                    "predictability_score": null,
+                    "error_message": null,
+                    "timestamp": at
+                }),
+            ),
+            (
+                "skill_discovered",
+                serde_json::json!({
+                    "skill_id": "code-review",
+                    "skill_name": "Code Review",
+                    "scope": "project",
+                    "timestamp": at
+                }),
+            ),
+            (
+                "skill_selected",
+                serde_json::json!({
+                    "skill_id": "code-review",
+                    "score": 0.9,
+                    "query_preview": "review this code",
+                    "timestamp": at
+                }),
+            ),
+            (
+                "skill_context_injected",
+                serde_json::json!({
+                    "request_id": request,
+                    "skill_id": "code-review",
+                    "context_bytes": 19,
+                    "timestamp": at
+                }),
+            ),
+        ];
+        let still_events: Vec<String> = retired
+            .into_iter()
+            .filter_map(|(name, payload)| {
+                let event = serde_json::json!({ "type": name, "payload": payload });
+                match serde_json::from_value::<SystemEvent>(event) {
+                    Ok(parsed) => Some(format!("{parsed:?}")),
+                    Err(e) => {
+                        assert!(
+                            e.to_string().contains(&format!("unknown variant `{name}`")),
+                            "`{name}` refused for another reason: {e}"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+        assert!(
+            still_events.is_empty(),
+            "still SystemEvents: {still_events:#?}"
+        );
+
+        let stage = serde_json::json!({
+            "type": "orchestration_stage",
+            "payload": {
+                "request_id": request,
+                "mode": "task_ops",
+                "ack_ms": 3,
+                "fallback_reason": null,
+                "auto_promotion_reason": null,
+                "timestamp": at
+            }
+        });
+        match serde_json::from_value::<SystemEvent>(stage).unwrap() {
+            SystemEvent::OrchestrationStage { mode, ack_ms, .. } => {
+                assert_eq!((mode.as_str(), ack_ms), ("task_ops", 3));
+            }
+            other => panic!("Expected OrchestrationStage, got {other:?}"),
         }
     }
 }

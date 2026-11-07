@@ -167,18 +167,6 @@ impl Orchestrator {
 
         let skill_block = skill_to_prompt_block(&skill_doc);
 
-        // Emit SkillContextInjected when injected_context is present. Moved here
-        // from inside the former PromptBuilder chain; the event contract is
-        // unchanged (request_id, skill_id, context_bytes, timestamp).
-        if !injected_context.is_empty() {
-            self.bus.publish(SystemEvent::SkillContextInjected {
-                request_id,
-                skill_id: skill_name.to_string(),
-                context_bytes: injected_context.len(),
-                timestamp: Utc::now(),
-            });
-        }
-
         // Resolve tools via capability model, falling back to legacy name-based matching.
         // Intent-suggested tools are intentionally NOT merged here to maintain
         // skill-level tool isolation (P1-1 security fix).
@@ -379,6 +367,7 @@ impl Orchestrator {
             );
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
             let denied_caps: Vec<String> = skill_deny.clone();
+            let (max_tool_runtime_secs, max_tool_runtime_ceiling_secs) = self.tool_runtime_bounds();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
                 // Closed set: the skill may call exactly the tools resolved for
@@ -397,7 +386,8 @@ impl Orchestrator {
                     .rate_limit
                     .max_calls
                     .map(|n| n as u32),
-                max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+                max_tool_runtime_secs,
+                max_tool_runtime_ceiling_secs,
                 stream_id: stream_id.map(|s| s.to_string()),
                 lane_key: Some(lane_key.to_string()),
                 confirmation_timeout_secs: Some(
@@ -837,6 +827,8 @@ impl Orchestrator {
                 // Register invoke_skill:* backends so the sandbox can execute them
                 if !skill_doc.frontmatter.depends_on.is_empty() {
                     let call_stack = vec![skill_name.to_string()];
+                    let (max_tool_runtime_secs, max_tool_runtime_ceiling_secs) =
+                        self.tool_runtime_bounds();
                     let executor = Arc::new(SkillInvocationToolExecutor::new(
                         self.skill_catalog.clone(),
                         self.tool_registry.clone(),
@@ -858,6 +850,8 @@ impl Orchestrator {
                             .execution
                             .agent_defaults
                             .confirmation_timeout_secs,
+                        max_tool_runtime_secs,
+                        max_tool_runtime_ceiling_secs,
                     ));
                     for dep_id in &skill_doc.frontmatter.depends_on {
                         if self.skill_catalog.get(dep_id).is_some() {
@@ -1203,6 +1197,20 @@ impl Orchestrator {
         })
     }
 
+    /// N-TOOL-1b: the per-tool bound every loop reads,
+    /// `[execution.agent_defaults] max_tool_runtime_secs`, and the ceiling a
+    /// command's or a plugin tool's own `timeout_secs` is clamped to — per
+    /// invocation, from one snapshot, so a reload between the two reads
+    /// cannot pair a new bound with an old ceiling.
+    fn tool_runtime_bounds(&self) -> (u64, u64) {
+        let config = self.daemon_config.load();
+        let tools = &config.execution.agent_defaults;
+        (
+            tools.max_tool_runtime_secs,
+            tools.max_tool_runtime_ceiling_secs,
+        )
+    }
+
     /// Execute a plugin-backed skill out-of-process.
     ///
     /// The plugin's `PluginSkillExecutor` drives its own reasoning loop inside
@@ -1257,13 +1265,15 @@ impl Orchestrator {
             plugin_skill_allowlist(skill_name, fm, &self.tool_registry, &withheld_scope)?;
         let denied: Vec<String> = fm.tools.deny.clone();
 
+        let (max_tool_runtime_secs, max_tool_runtime_ceiling_secs) = self.tool_runtime_bounds();
         let policy = SandboxPolicy {
             agent_id: format!("plugin:{plugin_id}"),
             allowed_capabilities: allowed,
             denied_capabilities: denied,
             require_confirmation_for: fm.permissions.confirm.tools.clone(),
             max_tool_calls: fm.tools.rate_limit.max_calls.map(|n| n as u32),
-            max_tool_runtime_secs: self.loop_config.max_tool_runtime.as_secs(),
+            max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs,
             stream_id: stream_id.map(|s| s.to_string()),
             lane_key: Some(lane_key.to_string()),
             confirmation_timeout_secs: Some(

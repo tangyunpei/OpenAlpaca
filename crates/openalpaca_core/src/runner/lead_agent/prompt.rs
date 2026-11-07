@@ -90,6 +90,11 @@ pub(super) fn workflow_contract_suffix(steering_attached: bool) -> String {
 /// skills. `SubagentMinimal` renders raw blocks only, so it is carried as
 /// the last raw block, `skills_catalog`, the nearest to that suffix. Absent
 /// or empty, nothing is emitted.
+///
+/// `max_subagents_per_run` is the run's bound on the subagents it spawns in
+/// all (N-LEAD-6), which `<workflow>`'s step 3 names: the figure the run's
+/// spawn tool enforces (`SpawnSubagentTool::max_subagents_per_run`).
+#[allow(clippy::too_many_arguments)]
 pub fn build_lead_agent_prompt_from_templates(
     compose_engine: &ComposeEngine,
     base_persona: &str,
@@ -98,6 +103,7 @@ pub fn build_lead_agent_prompt_from_templates(
     user_document: Option<&UserDocument>,
     user_budget: Option<usize>,
     skills_catalog: Option<&str>,
+    max_subagents_per_run: usize,
 ) -> String {
 
     // Available agents catalog (High — important for delegation decisions).
@@ -123,7 +129,9 @@ pub fn build_lead_agent_prompt_from_templates(
 
     // ── The 8 lead-agent raw blocks in canonical registration order. ──────
     // String constants copied verbatim from the pre-migration
-    // PromptBuilder chain; the exact bytes are load-bearing.
+    // PromptBuilder chain, but for step 2's brief (SA-2), what step 3 and
+    // the `<tools>` line say queues a spawn (N-LLM-1) and step 3's last
+    // sentence (N-LEAD-6); the exact bytes are load-bearing.
     let role_text = "<role>\n\
          You are a Lead Agent orchestrating a complex task. You are responsible for analyzing \
          the user's request, decomposing it into sub-objectives, delegating work to specialized \
@@ -131,13 +139,19 @@ pub fn build_lead_agent_prompt_from_templates(
          Do not attempt to perform specialized work (coding, research, analysis) yourself when \
          a suitable subagent is available. Your value is in orchestration and synthesis.\n\
          </role>";
-    let workflow_text = "<workflow>\n\
+    let workflow_text = format!(
+        "<workflow>\n\
          Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
-         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
+         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
+         constraints, and what to return and where — since a subagent is given neither the \
+         user's request nor this conversation, only its brief.\n\
          Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
-         sub-objective to the best agent by skills. Spawning is always immediate — the system \
-         automatically manages execution ordering based on available LLM capacity. Subagents may \
-         be queued if capacity is limited — this is handled automatically and transparently.\n\
+         sub-objective to the best agent by skills. Spawning is always immediate — each spawn \
+         returns its run_id at once, and a subagent spawned past this run's concurrency bound is \
+         queued and starts when a slot frees, as the spawn's reply says. \
+         This run may spawn at most {max_subagents_per_run} subagents in all, retries included; \
+         a spawn past that is refused.\n\
          Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
          queued ones), or check_subagent_status for individual progress.\n\
          Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
@@ -145,7 +159,8 @@ pub fn build_lead_agent_prompt_from_templates(
          retry will not help.\n\
          Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
          that directly addresses the user's original request.\n\
-         </workflow>";
+         </workflow>"
+    );
     let delegation_text = "<delegation-criteria>\n\
          Spawn subagents when:\n\
          - Tasks can run in parallel (e.g., research + implementation are independent)\n\
@@ -157,9 +172,10 @@ pub fn build_lead_agent_prompt_from_templates(
          - The task requires maintaining context across sequential steps that one agent handles best\n\
          </delegation-criteria>";
     let tool_patterns_text = "<tools>\n\
-         spawn_subagent: Spawning is always immediate — returns a run_id instantly. The system \
-         automatically queues execution if LLM capacity is limited. Spawn all independent \
-         objectives in a single round before waiting — this is the preferred pattern.\n\
+         spawn_subagent: Spawning is always immediate — returns a run_id instantly, and a \
+         subagent spawned past this run's concurrency bound is queued and starts when a slot \
+         frees. Spawn all independent objectives in a single round before waiting — this is the \
+         preferred pattern.\n\
          spawn_subagents_batch: When spawning 3+ independent subagents, use spawn_subagents_batch \
          for parallel spawning instead of individual spawn_subagent calls. This is more efficient \
          and reduces round-trips.\n\
@@ -214,7 +230,7 @@ pub fn build_lead_agent_prompt_from_templates(
         },
         SystemBlock {
             name: "workflow",
-            content: Arc::<str>::from(workflow_text.to_string()),
+            content: Arc::<str>::from(workflow_text),
             priority: SectionPriority::High,
         },
         SystemBlock {

@@ -181,7 +181,7 @@ impl LlmProvider for OpenAiProvider {
         let response = req_builder
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         if !response.status().is_success() {
             return Ok(vec![]);
@@ -190,7 +190,7 @@ impl LlmProvider for OpenAiProvider {
         let body: serde_json::Value = response
             .json()
             .await
-            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let models = body["data"]
             .as_array()
@@ -229,7 +229,7 @@ impl LlmProvider for OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let status = response.status().as_u16();
 
@@ -265,7 +265,7 @@ impl LlmProvider for OpenAiProvider {
         let response_body: serde_json::Value = response
             .json()
             .await
-            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         if status >= 400 {
             let message = response_body["error"]["message"]
@@ -311,7 +311,7 @@ impl LlmProvider for OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let status = response.status().as_u16();
 
@@ -332,7 +332,7 @@ impl LlmProvider for OpenAiProvider {
             let error_body: serde_json::Value = response
                 .json()
                 .await
-                .map_err(|e| LlmError::Serialization(e.to_string()))?;
+                .map_err(crate::providers::reqwest_error)?;
             let message = error_body["error"]["message"]
                 .as_str()
                 .unwrap_or("Unknown error")

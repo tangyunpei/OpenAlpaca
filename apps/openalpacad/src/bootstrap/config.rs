@@ -77,8 +77,8 @@ const DEFAULT_MCP_TOML: &str =
 /// launching the daemon before `install.sh` runs) gets working defaults
 /// instead of an empty config directory.
 ///
-/// The three files below, and then the content directories the daemon also
-/// carries — `agents/`, `skills/`, `tools/` (L9,
+/// The three files below, and then the content directories — `skills/` and
+/// `tools/` seeded (L9), `agents/` created empty (subagent design §2.5 S-1;
 /// [`super::content::seed_default_content`]). Same rule for all of them: write
 /// only what is absent.
 pub fn seed_default_configs(config_dir: &Path) {

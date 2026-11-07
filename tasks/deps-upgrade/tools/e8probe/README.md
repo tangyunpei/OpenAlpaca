@@ -83,7 +83,7 @@ The checks, rerun whenever a lock moves:
 
 ```sh
 cd "$R"
-python3 -I tasks/deps-upgrade/tools/gbase/lockdiff.py \
+python3.11 -I tasks/deps-upgrade/tools/gbase/lockdiff.py \
   --expected rusqlite-subtree=rusqlite,libsqlite3-sys,hashlink,hashbrown \
   --expected sha2-subtree=sha2,digest,block-buffer,crypto-common,generic-array,hybrid-array,cpufeatures,const-oid,version_check \
   "$E/old/Cargo.lock" "$E/new/Cargo.lock"            # unexpected: 0; exit 0

@@ -11,7 +11,7 @@ It runs on a local Ollama model with no API key, or on Anthropic and OpenAI mode
 - **Chat** from a terminal or the desktop app. Replies stream as they are written.
 - **Use a local model.** A local Ollama needs no API key and costs nothing.
 - **Hand off bigger jobs.** Ask for a workflow: a lead agent runs it in the background with subagents, then reports back in the chat.
-- **Steer work in flight.** Check, pause, resume, cancel or redirect a running workflow from the same conversation.
+- **Steer work in flight.** Check, cancel or redirect a running workflow from the same conversation.
 - **Work in your project.** In a project an agent reads, lists, writes and edits its files and runs commands there. Each write and each command asks you first, and what it writes is a real file of the project. Drafts and hand-offs are kept as versioned artifacts.
 - **Attach files** to a message.
 - **Keep a memory.** What you ask it to remember, and what it learns from what you say, are Markdown notes on your own disk — searched by keyword, with no model or download, and readable, editable and forgettable in the app, the CLI or any text editor.
@@ -27,6 +27,8 @@ These steps build from source and end with a first reply. To package and install
 - **Rust** through [rustup](https://rustup.rs). The repo pins 1.99.1 in `rust-toolchain.toml`; rustup fetches it on the first build.
 - **A model:** [Ollama](https://ollama.com) running locally, or an Anthropic or OpenAI API key.
 - **[Bun](https://bun.sh)** 1.4.4 (the version the root `package.json` pins), only for the desktop app (step 6).
+- **Python 3.11** (any 3.11.x: the line the root `.python-version` pins), as `python3.11` on `PATH`, only for the repository's scripts (`docs/api/` and the tooling checks): from [uv](https://docs.astral.sh/uv/) (`uv python install` reads `.python-version`) or [python.org](https://www.python.org/downloads/). macOS's own `/usr/bin/python3` is 3.9 and does not run them.
+- With [pyenv](https://github.com/pyenv/pyenv), install a 3.11 there too: its shims read `.python-version`, so inside the repository its `python3` needs one, and without it the Rust test and the echo-plugin stub that call `python3` fail under `cargo test`.
 - Linux only: `sudo apt-get install -y pkg-config`. The desktop app also needs `libdbus-1-dev` and [Tauri's system libraries](https://tauri.app/start/prerequisites/).
 
 ### 2. Build
@@ -155,7 +157,7 @@ Config is plain files. The daemon reloads most of them when they change. Edit th
 | `llm.toml` | Providers, keys (encrypted), default model, fallback chains. Created on first start; git-ignored in the repo. |
 | `daemon.toml` | Execution limits, cost caps, routing, sessions, uploads, security, server settings. The repo's `config/daemon.toml` is the full reference; a fresh install gets a shorter file and built-in defaults. |
 | `mcp.toml` | MCP server declarations and each server's on/off switch. |
-| `agents/*.md` | Agent templates: YAML frontmatter (model, capabilities, limits) plus a persona. Nine ship. |
+| `agents/*.md` | Agent templates: YAML frontmatter (model, capabilities, limits) plus a persona. Nine are built in; a file here of the same `id` overrides one. |
 | `skills/*/SKILL.md` | Skills. Four ship: `code-review`, `commit-message`, `create-skill`, `explain-code`. |
 | `orchestrator/*.md` | The assistant's persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`), created on first start. `USER.md` is yours to edit (`openalpaca persona edit user`, or Settings → Persona); nothing writes learned facts into it. |
 
@@ -196,8 +198,8 @@ Set `OPENALPACA_HOME_STORE=/absolute/path` to move the whole root, for example t
 
 ```bash
 cargo build -p openalpacad -p openalpaca                      # the daemon and the CLI
-cargo build --workspace --exclude openalpaca_gui              # everything but the desktop shell, as CI builds it
-cargo test --workspace --exclude openalpaca_gui               # all Rust tests, as CI runs them
+cargo build --workspace --exclude openalpaca_gui              # everything but the desktop shell
+cargo test --workspace --exclude openalpaca_gui               # all Rust tests
 cargo clippy --workspace --exclude openalpaca_gui --all-targets
 
 cd apps/openalpaca-gui && bun install
@@ -205,18 +207,18 @@ bun run check && bun run test && bun run format:check && bun run build
 ```
 
 - A bare `cargo build` or `cargo test` covers what `--workspace --exclude openalpaca_gui` does: `default-members` is every member but the desktop shell, both apps included. Check the shell in its own `target/gui`, as [apps/openalpaca-gui/README.md](apps/openalpaca-gui/README.md) says.
-- CI (`.github/workflows/ci.yml`) has four jobs: the Rust build, tests and clippy above, run `--locked` on the toolchain `rust-toolchain.toml` pins; the four `bun run` gates under the Bun the root `package.json` pins; the Windows install-script tests on Pester 6.2.0; and a tooling job — the scripts' tests, `gen_api_docs.py --check` and the repository-policy guard `scripts/repo_policy.py` — on Python 3.9.25, the scripts' floor. Its actions are pinned by commit SHA.
-- Advisories (`.github/workflows/audit.yml`), on every pull request, every push to `main` and weekly: cargo-deny checks the crates the workspace resolves to (not every `Cargo.lock` entry) against RustSec, the licence allow list and crates.io as the only source (`deny.toml`); cargo-audit, run by hand from the root, reads the whole lock with the same ignores (`.cargo/audit.toml`); and `bun audit` checks `bun.lock`. The owner answers a red run: a lock refresh, a bump, or an ignore with its reason.
+- There is no remote CI: every gate runs locally. Run the Rust build, tests and clippy above with `--locked` on the toolchain `rust-toolchain.toml` pins, the four `bun run` gates under the Bun the root `package.json` pins, and, on the Python 3.11 the root `.python-version` pins, the scripts' tests (`scripts/tests/`), `gen_api_docs.py --check`, `scripts/release/gen_notices.py --check-hashes` and `--check-licences`, and the repository-policy guard `scripts/repo_policy.py`. The Windows install-script tests run by hand on a Windows machine: `Invoke-Pester -Path scripts/release/tests` on Pester 6.2.0.
+- Advisories, run by hand from the root: cargo-deny checks the crates the workspace resolves to (not every `Cargo.lock` entry) against RustSec, the licence allow list and crates.io as the only source (`deny.toml`); cargo-audit reads the whole lock with the same ignores (`.cargo/audit.toml`); and `bun audit` checks `bun.lock`. The owner answers a finding: a lock refresh, a bump, or an ignore with its reason.
 - To run the daemon in the foreground on the repo's own config, use `OPENALPACA_CONFIG_DIR="$PWD/config" cargo run -p openalpacad`. Export the same variable for the CLI, so `openalpaca config set` edits the same files.
-- `docs/api/` is generated. Run `python3 scripts/gen_api_docs.py`; never edit it by hand.
-- Toolchain: Rust 1.99.1. Frontend: Bun 1.4.4, TypeScript 7, React 19, Vite 8, Tailwind 4, Vitest 5.
+- `docs/api/` is generated. Run `python3.11 scripts/gen_api_docs.py`; never edit it by hand.
+- Toolchain: Rust 1.99.1, Python 3.11 (the scripts). Frontend: Bun 1.4.4, TypeScript 7, React 19, Vite 8, Tailwind 4, Vitest 5.
 
 ## Status and limitations
 
 - **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 1, `002_working_state.sql` upgrades it to 2, `003_no_project_store_rows.sql` to 3 and `004_project_files.sql` to 4, so a fresh database opens at 4, and the next migration will be `005`. A database from before that re-baseline (2026-09-28) — 42, the last schema with memory inside the database, or 43 to 45 — is refused rather than upgraded; see [Switching to the Markdown Memory Build](docs/Installation_Manual.md#switching-to-the-markdown-memory-build).
 - **The shell is not confined to the project.** A command an agent runs starts in the project's folder, but an approved command runs as you and can reach any file you can. Every command asks first: read it before you approve it.
 - **Reading never asks.** In a project an agent can read any file there, `.env` included, and what it reads goes to the model that answers — a remote provider's when that model is not local.
-- **Platforms.** Developed on macOS. CI builds and tests on Linux. Windows has packaging scripts, but CI does not build the Rust workspace there.
+- **Platforms.** Developed on macOS. Nothing builds or tests the workspace on Linux or Windows now. Windows has packaging scripts, whose Pester tests are run by hand.
 - **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
 - **MCP** is client-side and tools only. MCP resources and prompts are not implemented: the client has no resource or prompt methods. Serving MCP is not a goal.
 - **Memory search is by keyword.** There is no embedding model, so a question worded very differently from the note, or in another language, can miss it. Aliases on a note (for example a Chinese and an English name for the same thing) are the remedy.
@@ -224,4 +226,4 @@ bun run check && bun run test && bun run format:check && bun run build
 - **Resuming an interrupted run** by replay is experimental and off by default (`resume_enabled` in `daemon.toml`).
 - **Costs.** A chat turn is capped at $1. A workflow's lead agent is capped at $3 by its shipped template (`daemon.toml` defaults to $5 where a template sets nothing). There is no overall daily budget; only the small background jobs (memory extraction, summaries, task-output extraction) have daily ceilings.
 - **Releases are unsigned.** The macOS package is not code-signed.
-- **License:** MIT, as declared in `Cargo.toml`.
+- **License:** MIT, as declared in `Cargo.toml`; the text is in [LICENSE](LICENSE).

@@ -277,7 +277,8 @@ pub enum ToolBackend {
     Command {
         command: String,                      // Binary name
         args_template: Option<String>,        // Args with {param} placeholders
-        timeout_secs: u64,                    // 1-300
+        timeout_secs: u64,                    // 1-300, its calls' default; a call's
+                                              // timeout_secs lifts it to the ceiling
     },
     Plugin(Arc<dyn openalpaca_api::plugin_traits::PluginToolExecutor>),
     Mcp {
@@ -425,9 +426,12 @@ the stand-in (`UnreadableArguments`) that `openalpaca_llm`'s reader puts in
 place of arguments a provider sent that could not be read — the reader has
 already warned once, with the tool, the byte length and the problem, never the
 text.  The refusal names the problem and the length, and the call never runs
-with `{}`, whatever its schema accepts.  It decodes nothing: only the provider
-layer reads a JSON string as the object it holds, before the sandbox's
-sanitizer; a string that reaches the registry by another path stays a string,
+with `{}`, whatever its schema accepts.  It decodes nothing: the provider
+layer's reader (the stream collector, the OpenAI-compatible parser) reads a
+model's JSON string as the object it holds, and the sandbox's entry one that
+reaches it still a string — a plugin's, or the `input` of a `tool_use` that
+Anthropic's non-streamed parser passes as sent (N-TOOL-8) — both before the
+sandbox's sanitizer; a string that still reaches the registry stays a string,
 because the sanitizer checked only its outer text.  Then
 `validate_tool_arguments()` performs:
 
@@ -545,7 +549,6 @@ capabilities:
 denied_capabilities:
   - "web_access"
 max_tool_calls: 50
-timeout_seconds: 600
 ---
 ```
 
@@ -690,7 +693,7 @@ All of these are registered in the shared `ToolRegistry` at daemon startup.
 | `artifact_write` | `name`, `kind`, `content` (required); `note`, `summary`, `metadata` | `artifact_write` | `kind` ∈ `markdown`, `code`, `terminal`, `table`, `plan`, `image`, `html`, `binary`; versioned; max `max_artifact_bytes` (10 MB); store chosen from `request_workspace_root`, else the home store; needs a database |
 | `read_result` | `result_ref` (required), `offset`, `limit` | `read_result` | Reads only inside the calling session's `results/`; page 8 KB default, 64 KB max; needs `ToolContext.session_id` |
 | `artifact_read` | `artifact_id` (required); `offset`, `limit` | `read_result` | A by-product of the turn's owner, of the turn's project or of none; pages like `read_result` (8 KB default, 64 KB max); refuses a result file in the project, another project's by-product, and `image` or `binary` kinds; needs a database |
-| `shell_execute` | `command` (required) | `shell_execute` | Starts in the working folder (a scratch folder is made at first use); the sandbox's per-tool timeout (`max_tool_runtime_secs`, 60 s by default) ends it first, and a 300 s timeout of its own holds when the sandbox is bypassed — on either, or when the call's future is dropped, `run_bounded` kills its process group (unix; the direct child on Windows); output cap 512 KB per stream, a cut stream ending with a line that says so; injection patterns blocked by the sanitizer, and `../` allowed (R29: a builtin's arguments are exempt); destructive — every command asks, its card naming the folder |
+| `shell_execute` | `command` (required), `timeout_secs` | `shell_execute` | Starts in the working folder (a scratch folder is made at first use); the sandbox's per-tool timeout (`max_tool_runtime_secs`, 120 s by default, or the call's `timeout_secs` clamped to `max_tool_runtime_ceiling_secs`, 600 s) ends it first, and a timeout of its own at the ceiling's highest setting, 3600 s, holds when the sandbox is bypassed — on either, or when the call's future is dropped, `run_bounded` kills its process group (unix; the direct child on Windows); output cap 512 KB per stream, a cut stream ending with a line that says so; injection patterns blocked by the sanitizer, and `../` allowed (R29: a builtin's arguments are exempt); destructive — every command asks, its card naming the folder |
 | `memory_search` | `query` (required, 1–512 chars); `kind`, `scope`, `limit` (1–50, default 10), `detail` (`index` default, or `snippets`), `date_from`, `date_to` (RFC 3339 or `YYYY-MM-DD`, inclusive), `order_by` (`relevance` default, `newest`, `oldest`), `historical`, `as_of` | `memory_read` | Lexical only (index schema 5, design 09 §6.5): every term against a `unicode61` FTS5 table as a word or a word's beginning (a prefix query when its last token has ≥ 3 characters or is a number after another token, `10:30` finding `10:30am`; when that query fills its cap, each such term again as a whole word in the header and in the body), every term of ≥ 3 characters against a trigram table over titles, aliases and tags, and a term carrying a character of a script `unicode61` cannot split into words (CJK, Thai and the other scripts written without spaces; Devanagari, Tamil and the other scripts built with vowel signs — `query::is_unsegmented`) against a trigram table over those scripts' bodies; a bounded substring scan for a 1–2 character query, no model; `match` names `term`, `prefix`, `trigram`, `phrase`, `title`, `alias` or `fact_key`; filters (status, supersession, tombstones, same-`fact_key` losers, validity, the date bounds) before the limit; every hit re-read and re-hashed. `index` answers one row per note — `id`, `date`, `kind`, `scope`, `status`, `title`, `reason`, `size`, `conflict` — and no body; `snippets` answers cited excerpts by heading and line range with `freshness`, `conflict`, `valid_from`, `valid_to`; both with `partial` and `index_state` |
 | `memory_read` | `ids` (required, 1–10 distinct note ids); `expected_revision`, `section` (single id only) | `memory_read` | One entry per id in the order asked, each with provenance, the bodies sharing 32 KiB (a short one is never cut to make room); an id no note of the caller has answers `{id, error: "not_found"}` in its place; the old `id` argument is `invalid_input`; the service re-checks owner and scope |
 | `memory_timeline` | exactly one of `anchor` (a note id), `query`, `date`; `before`, `after` (0–20, default 5) | `memory_read` | The notes dated around the anchor, in date order, as `memory_search` index rows whose `reason` is `before`, `anchor` or `after`; superseded, archived and ended notes are listed and marked, candidates never |
@@ -833,7 +836,7 @@ caller lists them, and the caller's allow list is built from that same list.
 | `memory_search`, `memory_read`, `memory_list`, `memory_timeline` | see 6.1 (definitions only; the backends are shared) | When registered |
 | `read_result` | see 6.1 (definition only) | With a session log **and** a database |
 | every `<server>__<tool>` / `<plugin>::<tool>` | — | When its extension is enabled (`extension_tool_defs()`) |
-| `invoke_skill` | `skill`, `query` (both required) | With an LLM router |
+| `invoke_skill` | `skill`, `query` (both required) | With an LLM router. `exempt_from_timeout: true` (`builtins::builtin_is_exempt_from_timeout`): the skill's own loop bounds it |
 | `steer_workflow` | `task_id`, `message` (both required) | Lane has an active workflow **and** `steering_enabled` |
 | `queue_followup` | `description` (required) | Same condition |
 
@@ -853,13 +856,13 @@ why custom TOML tools may not use the four coordination names.
 
 | Tool | Parameters | Notes |
 |------|-----------|-------|
-| `spawn_subagent` | `agent_id`, `objective` (both required) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency bound `max_concurrent_subagents`: past it the subagent is registered `queued`, its `run_id` returned at once, and it starts when a slot frees (N-LEAD-2, 2026-10-17) |
-| `spawn_subagents_batch` | `subagents`: 1–8 × `{agent_id, objective}` | Registered when `execution.lead_agent_defaults.batch_spawn_enabled` (default `true`); more than 8 items is an error |
+| `spawn_subagent` | `agent_id`, `objective` (both required) | Non-blocking; returns a `run_id`. The tool description embeds the catalog of worker templates. Guards: a lead cannot spawn its own template; depth limit `MAX_SUBAGENT_DEPTH` (3); concurrency bound `max_concurrent_subagents`: past it the subagent is registered `queued`, its `run_id` returned at once, and it starts when a slot frees (N-LEAD-2, 2026-10-17); run bound `max_subagents_per_run` (48): a run's next spawn past it, here or in a batch, is refused before anything is registered, naming the figure, which the lead's prompt states (N-LEAD-6). The `objective` is the subagent's brief — the goal, the inputs it needs, the constraints, what to return and where — as the tool's description, its parameter and the lead's prompt say; the subagent is given it once, whole, as its last user turn and in no system message, kept by the assembly's trim and by every compaction (SA-2, SA-2b) |
+| `spawn_subagents_batch` | `subagents`: 1–8 × `{agent_id, objective}` | Registered when `execution.lead_agent_defaults.batch_spawn_enabled` (default `true`); more than 8 items is an error; each `objective` a brief, as for `spawn_subagent` (SA-2) |
 | `check_subagent_status` | `subagent_run_id` (required) | `exempt_from_timeout: true` |
 | `wait_for_subagents` | none | Blocks until every spawned subagent finishes, or returns early when the user steers the run. `exempt_from_timeout: true` |
 | `post_update` | `message` (required) | Posts a progress note to the lane. Only when `steering_enabled` |
 | `queue_followup` | `description` (required) | Queues work to start after the run. Only when `steering_enabled` |
-| `invoke_skill` | `skill`, `query` | Same tool as the chat loop's |
+| `invoke_skill` | `skill`, `query` | Same tool as the chat loop's, `exempt_from_timeout: true` |
 
 The lead's surface also lists the workspace tools, `memory_search`,
 `memory_read` and `memory_timeline`, every
@@ -924,7 +927,10 @@ description = "Search query"
 type = "http"                    # or "command"
 url = "https://api.example.com/search?q={query}"
 method = "GET"                   # default: GET
-timeout_secs = 30                # default: 30, range: 1-300
+timeout_secs = 30                # default: 30, range: 1-300; a command
+                                 # tool's is its calls' default, which a
+                                 # call's own timeout_secs may lift up to
+                                 # max_tool_runtime_ceiling_secs (600)
 
 # Optional: MCP-style annotation hints (feed confirmation defaults and
 # annotation:* capabilities)
@@ -969,7 +975,9 @@ pub enum ToolBackendConfig {
 ```
 
 Load-time validation: non-empty name; HTTP URLs must start with
-`http://`/`https://`; `timeout_secs` must be in `[1, 300]`; any
+`http://`/`https://`; `timeout_secs` must be in `[1, 300]` (a `command`
+tool's is its calls' default, which a call may lift up to
+`[execution.agent_defaults] max_tool_runtime_ceiling_secs`); any
 `annotation:`-prefixed entry in `provides_capabilities` must be one of the
 8 known annotation capability names.  One invalid tool rejects its whole
 file.
@@ -1106,6 +1114,11 @@ depends on the registry dropping the last reference.
 - **Non-text content is dropped**: image/audio/resource blocks in tool
   results are replaced with a bracketed placeholder — they are not
   surfaced to the model.
+- **Structured content is dropped**: `serialize_call_result()` reads only
+  the content blocks, so a successful result carrying only
+  `structuredContent` reaches the loop as `""` and the model as
+  `(<server>__<tool> completed with no output)` (N-TOOL-6); M14
+  (programme step 8) serializes it.
 - **MCP resources and prompts are not implemented**: the client has no
   resource or prompt methods at all — it imports tools and nothing else.
   A future phase would add the methods rather than fill in placeholders,
@@ -1139,6 +1152,15 @@ plugin system (`crates/openalpaca_plugins`) registers plugin-provided
 tools into the shared registry when the plugin loads:
 
 - name `<plugin>::<tool>`, where `<plugin>` is the plugin's directory name;
+  a call reaches the plugin as `tools/call` under the bare `<tool>` it
+  listed, and a failure reads `plugin <plugin>::<tool>: …`;
+- a call the sandbox cuts waits for the plugin's answer past the cut
+  (`ToolContext::sandbox_cut_secs`, `PluginToolExecutor::execute_within`;
+  5 s past it), so the sandbox's "Tool '<name>' timed out after <n>s"
+  ends a slow one; a call no sandbox cuts waits the channel's 60 s, as
+  `tools/list` and every other request without a figure of its own do
+  (`initialize` waits 10 s, `shutdown` 3 s) (PLUGIN-WAIT); a call may send
+  `timeout_secs`, as a command's may, and the plugin is handed it as sent;
 - `author = "plugin:<id>"`, `version` from the manifest, no annotations,
   `exempt_from_timeout = false`;
 - `provides_capabilities` = the manifest's `capabilities.provides` — the
@@ -1204,6 +1226,10 @@ pub async fn execute_tool(
 
 The agent identity comes from `ctx.agent_id` (falls back to `"unknown"`).
 
+0. `decoded_json_string_call()` — a call whose arguments are a top-level JSON
+   string holding an object is read as that object, once, with one WARN
+   naming the tool and the agent, never the text (N-TOOL-8); a string inside
+   it is never decoded, and every step below reads the object
 1. `CapabilityManager::check_agent_capability()` — deny list, then allow list
 2. `InputSanitizer::sanitize_tool_args_with(.., registry.traversal_rule(name))` — injection/traversal
    checks, the `../` check only for a tool whose arguments reach a program (R29)
@@ -1249,7 +1275,8 @@ pub struct SandboxPolicy {
     pub denied_capabilities: Vec<String>,
     pub require_confirmation_for: Vec<String>,
     pub max_tool_calls: Option<u32>,
-    pub max_tool_runtime_secs: u64,
+    pub max_tool_runtime_secs: u64,               // the per-tool bound
+    pub max_tool_runtime_ceiling_secs: u64,       // the most a timeout_secs gets
     pub stream_id: Option<String>,                // SSE confirmation routing
     pub lane_key: Option<String>,                 // connector confirmation routing
     pub confirmation_timeout_secs: Option<u64>,   // default 300
@@ -1258,11 +1285,21 @@ pub struct SandboxPolicy {
 }
 ```
 
-`SandboxPolicy::from_constraints(agent_id, &AgentConstraints)` builds a
-policy from an agent template's constraints
-(`max_tool_runtime_secs` defaults to 60 when the template sets no
-timeout; `unattended` starts `false` and is set by the caller that knows
-where the work came from).  The daemon's
+`SandboxPolicy::from_constraints(agent_id, &AgentConstraints, &AgentDefaults)`
+builds a policy from an agent template's constraints, its per-tool bound
+and ceiling from the daemon's `[execution.agent_defaults]` — a template's
+`timeout_seconds` is not read (N-TOOL-1b); `unattended` starts `false` and
+is set by the caller that knows where the work came from.
+`SandboxPolicy::runtime_secs_for` is the sandbox's cut for one call: a
+`shell_execute`, `Command`-backend or plugin tool call's `timeout_secs` (a
+whole number above 0) clamped to the ceiling
+(`SandboxPolicy::asked_runtime_secs`), else `max_tool_runtime_secs`; the
+figure reaches every tool as `ToolContext::sandbox_cut_secs`, and a plugin
+tool waits past it (PLUGIN-WAIT). A `Command`-backend tool's own
+`timeout_secs` (its TOML's) is its calls' default: it still kills a call
+that asked for nothing where smaller, and stands back for one that asked,
+which the sandbox alone cuts (CMD-TIMEOUT; the figure reaches the backend
+as `ToolContext::asked_runtime_secs`).  The daemon's
 `security.auto_approve_confirmations` config flag forces
 `auto_approve = true` globally.  `auto_approve` is read before
 `unattended`.
@@ -1530,7 +1567,7 @@ When `sandbox` is `None`, tool calls return stub results with a warning —
 a misconfiguration guard, not a supported mode.
 
 `LoopConfig` fields that matter to tools: `max_tools_per_round`,
-`max_tool_runtime`, `initial_tool_choice`, `session_log` (enables the
+`initial_tool_choice`, `session_log` (enables the
 result spill), `tool_result_inline_bytes`, `span_id`, `event_bus`.
 `LoopResult.last_tool_error` keeps the last tool error (capped) for the
 runtime's no-answer line.
@@ -1549,10 +1586,19 @@ When the LLM response contains tool calls:
    get a `max_tool_calls limit reached` error; overflow beyond the
    per-round cap gets `max tools per round exceeded` — every tool call ID
    receives a tool-result message.
-5. Executable calls run **in parallel** via
-   `futures_util::future::join_all()` (each future calls
-   `SandboxManager::execute_tool(tool_call, policy, ctx)`), raced against
-   the cancellation token.
+5. Executable calls run **in groups**, in the model's order
+   (`tool_helpers::call_groups` over `ToolRegistry::runs_concurrently`;
+   N-TOOL-3, 2026-11-01): consecutive calls whose tool declares
+   `read_only_hint` (an MCP tool also `idempotent_hint`), or that are the
+   lead's `spawn_subagents_batch`, `check_subagent_status` or
+   `wait_for_subagents` as builtins whatever they declare, share a group
+   and run together via `futures_util::future::join_all()`; every other
+   call is a group of one.  The groups run one after another, each call
+   through `execute_call` (which calls
+   `SandboxManager::execute_tool(tool_call, policy, ctx)`), and one
+   `select!` races the whole round against the cancellation token.  With
+   no sandbox every call is a group of one and gets the stub error.  A
+   `tool_result` record's `duration_ms` is its group's wall-clock.
 6. Per result: decide whether it spills, write the `tool_call` /
    `tool_result` records to the session log (stamped with the owning
    extension, when there is one), and compute the model-visible text
@@ -1576,9 +1622,10 @@ The threshold is `LoopConfig.tool_result_inline_bytes`, set from
 
 | Result | Loop has a session log | Loop has none |
 |--------|------------------------|---------------|
-| `Ok`, within the threshold | As is | As is |
+| `Ok`, within the threshold | As is, bar an empty or whitespace-only one (below) | As is, bar an empty or whitespace-only one (below) |
 | `Ok`, over the threshold | **Spilled**: the full text goes to `sessions/<id>/results/`; the model gets the stub below | Cut at the threshold by `truncate_tool_result_to()` |
 | `Err`, over the threshold | Head **and** tail inline (`utils::text::head_tail()`); the full text is still spilled for the log | Head and tail inline |
+| `Ok`, empty or whitespace alone (N-TOOL-6) | Within the threshold, `(<tool> completed with no output)` from `no_output_line()`, the record keeping the tool's own output; over it, spilled like any `Ok` | The same line, at any size |
 
 The chat loop, the lead agent and its subagents run with a session log.  A
 skill invocation does not.
@@ -1604,7 +1651,14 @@ and tail at the budget an error result gets (N-TOOL-7):
 Its `tool_result` record carries `stub: {"form": "head_tail", "budget": <bytes>}`
 (`command_stub_marker()`), since the record keeps only the head's preview: a
 resumed run's replay (`session_log::replay`) rebuilds the same stub from the
-`results/` file, checked against the record's `bytes` and `sha256`.
+`results/` file, checked against the record's `bytes` and `sha256`.  It
+hands an empty success back as the same `no_output_line()`, from the
+record's `name` and output; a whitespace result over the threshold spilled
+and replays as its stub — or, when its `results/` write failed (the
+record's `spill_error`), as the 2 KB preview its record kept, never the
+line — and one whose record the 64 KB envelope cut
+(`cap_data()`: whitespace whose JSON escaping runs long) replays as the cut
+preview, as any inline result so cut does.
 
 `read_result(result_ref, offset?, limit?)` pages the file back in.  It is a
 **grant, not ambient**: the chat loop offers it when the daemon has a
@@ -1654,7 +1708,8 @@ the failure is known — the loop adds none:
 | `file_write` | the system refuses the write (`PermissionDenied`), on the file or on a folder it makes above it | check the file's permissions, or write it under another path |
 | `web_fetch` | HTTP 404 | use web_search to find the correct URL first |
 | `web_fetch` | the request or the body read ran out of time | the URL may be unreachable; try a different source |
-| `shell_execute`, `Command` tools | cut at the sandbox's limit, or the shell's own 300 s | that is the most a command may run here; split the work into smaller commands that each finish sooner (`tools::platform::COMMAND_TIMED_OUT_HINT`) |
+| `shell_execute`, `Command` tools | cut by the sandbox below the most it may run — the ceiling | a command may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller commands that each finish sooner (`tools::platform::command_timed_out_hint`) |
+| `shell_execute`, `Command` tools | cut by the sandbox at that most, or by the shell's own 3600 s | that is the most a command may run here; split the work into smaller commands that each finish sooner (`tools::platform::COMMAND_TIMED_OUT_HINT`) |
 | `shell_execute` | exit 127 | check that the command is installed, or give its full path |
 
 ---
@@ -1818,16 +1873,17 @@ beside it is the code default.
 [execution.agent_defaults]
 max_rounds = 15                # Max LLM loop iterations per agent
 max_tools_per_round = 5        # Max tool calls executed per LLM round
-max_tool_runtime_secs = 60     # Per-tool sandbox timeout
+max_tool_runtime_secs = 120    # Per-tool sandbox timeout, every loop; exempt tools: §7
+max_tool_runtime_ceiling_secs = 600  # Most a command's or a plugin tool's timeout_secs gets
 max_cost = 1                   # Max API cost per agent run / chat turn (USD)
 confirmation_timeout_secs = 300
 
 [execution.lead_agent_defaults]
 batch_spawn_enabled = true     # Enables spawn_subagents_batch
 max_concurrent_subagents = 6
+max_subagents_per_run = 48     # Most subagents one run spawns in all (1-1000)
 max_rounds = 18
 max_tools_per_round = 3
-max_tool_runtime_secs = 300
 max_cost = 5
 
 [execution.skill_defaults]     # not in the shipped file; code defaults:
@@ -1873,7 +1929,10 @@ Markdown files with YAML frontmatter.  Tool access is declared via
 `capabilities` / `denied_capabilities` (see
 [Section 4](#4-capability-based-tool-resolution)); execution constraints
 (`max_tool_calls`, `timeout_seconds`, `max_cost_per_task`, `max_rounds`,
-`require_confirmation_for`) are also frontmatter fields.  On first boot an
+`require_confirmation_for`) are also frontmatter fields; `timeout_seconds`
+is accepted, names the task's time budget, and nothing enforces it (no
+tool's limit is it since N-TOOL-1b), so the shipped templates no longer
+set it.  On first boot an
 installed daemon seeds this directory with the nine shipped templates.
 
 ### Custom Tool TOML

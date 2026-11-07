@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Tests for `lockdates.py`'s gate modes (§1.2's freshness gate), with no network.
 
 Run with either:
-  python3 -I tasks/deps-upgrade/tools/gbase/tests/test_lockdates.py
-  python3 -m pytest tasks/deps-upgrade/tools/gbase/tests/test_lockdates.py
+  python3.11 -I tasks/deps-upgrade/tools/gbase/tests/test_lockdates.py
+  python3.11 -m pytest tasks/deps-upgrade/tools/gbase/tests/test_lockdates.py
 
 Every run passes `--date-source`, which reads registry facts from a file and never the
 network: `fixtures/registry-recorded.json` holds crates.io's `created_at` for a few
@@ -16,10 +16,9 @@ Not here: the driver's handling of gate output that ends before its verdict (A-1
 partial-output test), which is gbase.sh's, not this script's.
 """
 
-from __future__ import annotations
-
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -134,6 +133,13 @@ def test_a_crate_from_another_source_is_no_verdict() -> None:
                          'name = "alpha"\nversion = "1.0.1"\nsource = "git+https://example.invalid/alpha#0"')
     rc, out = gate(PARENT, new)
     assert rc == 2 and "cannot date" in out, out
+
+
+def test_a_lock_that_is_not_toml_is_no_verdict() -> None:
+    rc, out = gate(PARENT, '[[package]\nname = "alpha"\nversion = "1.0.1"\n')
+    assert rc == 2, out
+    assert len(out.splitlines()) == 1, out
+    assert re.match(r"lockdates: no verdict: .*/new\.lock is not TOML \(.+\): not a Cargo\.lock$", out.strip()), out
 
 
 def test_two_modes_are_no_verdict_before_anything_is_read() -> None:

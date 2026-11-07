@@ -1310,6 +1310,7 @@ mod tests {
                 allowed_capabilities: vec!["artifact_write".to_string()],
                 ..Default::default()
             },
+            &crate::daemon_config::AgentDefaults::default(),
         );
 
         // The runner's context: no bus on it at all.
@@ -1387,7 +1388,11 @@ mod tests {
             allowed_capabilities: vec!["artifact_write".to_string()],
             ..Default::default()
         };
-        let policy = SandboxPolicy::from_constraints("writing_agent", &constraints);
+        let policy = SandboxPolicy::from_constraints(
+            "writing_agent",
+            &constraints,
+            &crate::daemon_config::AgentDefaults::default(),
+        );
         let call = ToolCall {
             id: "call-1".to_string(),
             name: "artifact_write".to_string(),

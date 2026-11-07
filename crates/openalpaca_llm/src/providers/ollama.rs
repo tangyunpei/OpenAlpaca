@@ -126,7 +126,7 @@ impl OllamaProvider {
             .json(&serde_json::json!({ "model": id }))
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
@@ -139,7 +139,7 @@ impl OllamaProvider {
         let body: serde_json::Value = response
             .json()
             .await
-            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let capabilities: Vec<&str> = body["capabilities"]
             .as_array()
@@ -193,7 +193,7 @@ impl LlmProvider for OllamaProvider {
             .deadline(self.client().get(&url))
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         if !response.status().is_success() {
             return Ok(vec![]);
@@ -202,7 +202,7 @@ impl LlmProvider for OllamaProvider {
         let body: serde_json::Value = response
             .json()
             .await
-            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let models = body["models"]
             .as_array()
@@ -312,13 +312,13 @@ impl LlmProvider for OllamaProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+                .map_err(crate::providers::reqwest_error)?;
 
             let status = response.status().as_u16();
             let response_body: serde_json::Value = response
                 .json()
                 .await
-                .map_err(|e| LlmError::Serialization(e.to_string()))?;
+                .map_err(crate::providers::reqwest_error)?;
 
             if status >= 400 {
                 let message = response_body["error"]["message"]

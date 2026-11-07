@@ -609,9 +609,9 @@ fn bench_search_100k_learned_notes_with_verification() {
     );
 }
 
-/// The corpus generator itself (not a bench, so it runs in CI): the average
-/// mix draws exactly what the slice-2 generator drew, so the 10K numbers
-/// stay comparable; the learned mix keeps 70 % of its notes small.
+/// The corpus generator itself (not a bench, so `cargo test` runs it): the
+/// average mix draws exactly what the slice-2 generator drew, so the 10K
+/// numbers stay comparable; the learned mix keeps 70 % of its notes small.
 #[test]
 fn the_bench_corpus_mixes_have_their_shapes() {
     let dir = TempDir::new().unwrap();

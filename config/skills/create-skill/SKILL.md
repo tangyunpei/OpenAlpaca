@@ -76,8 +76,8 @@ scripts:
           description: "The skill ID to check (lowercase kebab-case)"
         scope:
           type: string
-          enum: [project, user]
-          description: "Scope to check: project (default) or user"
+          enum: [project]
+          description: "Where to check: project, the default and only scope (the config directory's skills/, the one directory the daemon reads skills from)"
       required: [id]
 
   - file: list_skills.sh
@@ -90,8 +90,8 @@ scripts:
       properties:
         scope:
           type: string
-          enum: [project, user, both]
-          description: "Which scope to scan: project, user, or both (default)"
+          enum: [project]
+          description: "Which skills to list: project, the default and only scope (the config directory's skills/, the one directory the daemon reads skills from)"
 
   - file: scaffold.sh
     name: scaffold
@@ -107,8 +107,8 @@ scripts:
           description: "Skill ID (lowercase kebab-case directory name)"
         scope:
           type: string
-          enum: [project, user]
-          description: "Where to create: project (default) or user"
+          enum: [project]
+          description: "Where to create: project, the default and only scope (the config directory's skills/, the one directory the daemon reads skills from)"
         dirs:
           type: string
           description: "Comma-separated optional dirs to create: scripts,examples,templates,assets"
@@ -137,8 +137,8 @@ scripts:
           description: "Short description of what the skill does"
         scope:
           type: string
-          enum: [project, user]
-          description: "Where to create: project (default) or user"
+          enum: [project]
+          description: "Where to create: project, the default and only scope (the config directory's skills/, the one directory the daemon reads skills from)"
         mode:
           type: string
           enum: [manual, auto, scheduled, disabled]

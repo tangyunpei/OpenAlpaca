@@ -365,8 +365,13 @@ fn in_a_project_an_openalpaca_folder_is_refused_for_reading_and_writing() {
         .expect_err("at any depth");
 }
 
-/// Planted with capitals on disk, so a case-sensitive volume (CI's) proves
-/// the comparison and not the file system's folding.
+/// Planted with capitals on disk and asked for with them: the path a
+/// resolution canonicalizes to keeps the case on disk on either kind of
+/// volume (macOS's `realpath` included), so the refusal is the comparison's
+/// and a run on macOS proves it. A case-sensitive volume adds one guard:
+/// against a rule that passes only because the file system folds case.
+/// That half ran on the removed Linux job and runs on no gate now: the owner's
+/// open item (the local Linux leg, `tasks/pending-decisions.md` §1).
 #[test]
 fn the_folder_names_are_compared_without_case() {
     let dir = tempfile::tempdir().unwrap();

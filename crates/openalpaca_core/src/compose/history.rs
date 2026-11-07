@@ -25,9 +25,12 @@ pub fn compute(input: &HistoryInput) -> HistoryOutput {
         HistoryMode::Skip => Vec::new(),
         HistoryMode::Default => build_default(input),
     };
+    let ends_with_current_turn =
+        matches!(input.mode, HistoryMode::Default) && input.current_user_turn.is_some();
 
     HistoryOutput {
         messages,
+        ends_with_current_turn,
         fingerprint,
     }
 }

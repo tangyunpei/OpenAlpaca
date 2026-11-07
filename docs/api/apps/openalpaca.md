@@ -1,6 +1,6 @@
 # openalpaca (CLI)
 
-> Generated from source by `python3 scripts/gen_api_docs.py`.
+> Generated from source by `python3.11 scripts/gen_api_docs.py`.
 
 ## Overview
 
@@ -21,7 +21,7 @@
 | `openalpaca config` | Manage system configuration (interactive if no subcommands) | `apps/openalpaca/src/commands/config.rs` |
 | `openalpaca gui` | Manage GUI process | `apps/openalpaca/src/commands/gui.rs` |
 | `openalpaca connector` | Manage platform connectors (Telegram, etc.) | `apps/openalpaca/src/commands/connector.rs` |
-| `openalpaca tasks` | Manage tasks (list, status, create, cancel, pause, resume) | `apps/openalpaca/src/commands/tasks.rs` |
+| `openalpaca tasks` | Manage tasks (list, status, create, cancel, resume; pause refused) | `apps/openalpaca/src/commands/tasks.rs` |
 | `openalpaca agents` | Manage agents (list, status, config, create, remove) | `apps/openalpaca/src/commands/agents.rs` |
 | `openalpaca llm` | Manage LLM settings, keys, and usage | `apps/openalpaca/src/commands/llm.rs` |
 | `openalpaca chat` | Chat with the Orchestrator | `apps/openalpaca/src/commands/chat.rs` |

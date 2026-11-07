@@ -1,10 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Generate API documentation under docs/api from repository source-of-truth.
 
 Usage:
-  python3 scripts/gen_api_docs.py
-  python3 scripts/gen_api_docs.py --check
-  python3 scripts/tests/test_gen_api_docs.py   # parser regression tests
+  python3.11 scripts/gen_api_docs.py
+  python3.11 scripts/gen_api_docs.py --check
+  python3.11 scripts/tests/test_gen_api_docs.py   # parser regression tests
+
+A workspace Cargo.toml that is not TOML, or whose [workspace] is not a table or whose
+members are not an array of strings, stops it with exit 2 and one line naming the file
+and the reason, never a traceback.
 
 Parsing rule: every scan for a Rust delimiter (brace, paren, top-level comma)
 runs over a comment- and literal-masked copy of the source produced by
@@ -13,15 +17,14 @@ a char literal, a `//` inside a string literal is not a comment, and a comma in
 a doc comment is not a variant separator.
 """
 
-from __future__ import annotations
-
 import argparse
 import dataclasses
 import pathlib
 import re
 import sys
+import tomllib
 from collections import defaultdict
-from typing import Iterable
+from collections.abc import Iterable
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -38,6 +41,11 @@ MIGRATIONS_DIR = ROOT / "crates" / "openalpaca_storage" / "src" / "migrations"
 MIGRATIONS_MOD = MIGRATIONS_DIR / "mod.rs"
 
 METHOD_ORDER = {"GET": 0, "POST": 1, "PUT": 2, "DELETE": 3, "PATCH": 4}
+
+
+class SourceError(Exception):
+    """A source the generator cannot read as what it must be; `main` prints it and exits 2."""
+
 
 RAW_STRING_PREFIX = re.compile(r'b?r(#*)"')
 
@@ -568,11 +576,22 @@ def qualify_route_type(type_name: str | None, module: str, type_defs: dict[str, 
 
 
 def parse_workspace_crates() -> list[pathlib.Path]:
-    text = read_text(CARGO_TOML)
-    mm = re.search(r"members\s*=\s*\[(.*?)\]", text, re.S)
-    if not mm:
-        return []
-    members = re.findall(r'"([^"]+)"', mm.group(1))
+    """The `[workspace] members` under crates/, read by tomllib; [] with no members.
+
+    A SourceError when the file is not TOML, its `workspace` not a table, or its
+    `members` not an array of strings."""
+    try:
+        manifest = tomllib.loads(read_text(CARGO_TOML))
+    except tomllib.TOMLDecodeError as e:
+        raise SourceError(f"{CARGO_TOML} is not TOML: {e}") from None
+    workspace = manifest.get("workspace", {})
+    if not isinstance(workspace, dict):
+        raise SourceError(f"{CARGO_TOML} is not a workspace manifest: [workspace] is not a table")
+    members = workspace.get("members", [])
+    if not isinstance(members, list) or not all(isinstance(m, str) for m in members):
+        raise SourceError(
+            f"{CARGO_TOML} is not a workspace manifest: [workspace] members is not an array of strings"
+        )
     out: list[pathlib.Path] = []
     for member in members:
         if member.startswith("crates/"):
@@ -1137,8 +1156,8 @@ def generate_api_readme(crate_docs: list[CrateDoc]) -> str:
     lines = [
         "# API Docs",
         "",
-        "> Generated from source by `python3 scripts/gen_api_docs.py`.",
-        "> Validate freshness with `python3 scripts/gen_api_docs.py --check`.",
+        "> Generated from source by `python3.11 scripts/gen_api_docs.py`.",
+        "> Validate freshness with `python3.11 scripts/gen_api_docs.py --check`.",
         "",
         "## Apps",
         "",
@@ -1214,7 +1233,7 @@ def generate_openalpacad_doc(
     lines = [
         "# openalpacad HTTP API",
         "",
-        "> Generated from source by `python3 scripts/gen_api_docs.py`.",
+        "> Generated from source by `python3.11 scripts/gen_api_docs.py`.",
         "",
         "## Overview",
         "",
@@ -1308,7 +1327,7 @@ def generate_openalpaca_cli_doc(cli_info: dict[str, object]) -> str:
     lines = [
         "# openalpaca (CLI)",
         "",
-        "> Generated from source by `python3 scripts/gen_api_docs.py`.",
+        "> Generated from source by `python3.11 scripts/gen_api_docs.py`.",
         "",
         "## Overview",
         "",
@@ -1413,7 +1432,7 @@ def generate_openalpaca_gui_doc(gui_info: dict[str, object]) -> str:
     lines = [
         "# openalpaca-gui (Tauri + React)",
         "",
-        "> Generated from source by `python3 scripts/gen_api_docs.py`.",
+        "> Generated from source by `python3.11 scripts/gen_api_docs.py`.",
         "",
         "## Overview",
         "",
@@ -1501,7 +1520,7 @@ def generate_crate_doc(crate: CrateDoc) -> str:
     lines = [
         f"# `{crate.name}`",
         "",
-        "> Generated from source by `python3 scripts/gen_api_docs.py`.",
+        "> Generated from source by `python3.11 scripts/gen_api_docs.py`.",
         "",
         "## Overview",
         "",
@@ -1726,7 +1745,7 @@ def apply_outputs(outputs: dict[pathlib.Path, str], check: bool) -> int:
     if check:
         if changed:
             print("API documentation is stale. Regenerate with:")
-            print("  python3 scripts/gen_api_docs.py")
+            print("  python3.11 scripts/gen_api_docs.py")
             print("\nChanged files:")
             for p in changed:
                 print(f"- {rel(p)}")
@@ -1748,7 +1767,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="Exit non-zero if docs are stale.")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    outputs = collect_generated_docs()
+    try:
+        outputs = collect_generated_docs()
+    except SourceError as e:
+        print(f"gen_api_docs: {e}", file=sys.stderr)
+        return 2
     return apply_outputs(outputs, check=args.check)
 
 

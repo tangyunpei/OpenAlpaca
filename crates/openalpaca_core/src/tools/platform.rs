@@ -44,13 +44,29 @@ pub fn shown_output(kept: &[u8], stream: &str) -> String {
     text
 }
 
-/// What a command stopped at its time limit is told — by the shell's own
-/// bound and by the sandbox's cut alike (N-TOOL-4, Z1-13: the hint belongs to
-/// whoever enforced the limit, not to a guess the loop makes from the words).
-/// The message it follows names the limit; no tool takes a parameter that
-/// raises it (N-TOOL-1, Z1-05).
+/// What a command stopped at the most it may run is told — by the shell's own
+/// bound, and by the sandbox's cut at that most (N-TOOL-4, Z1-13: the hint
+/// belongs to whoever enforced the limit, not to a guess the loop makes from
+/// the words). The message it follows names the limit.
 pub const COMMAND_TIMED_OUT_HINT: &str = "Hint: that is the most a command may run here; split \
     the work into smaller commands that each finish sooner.";
+
+/// What a command the sandbox cut after `secs` is told, where it may run up
+/// to `most_secs` (N-TOOL-1b, B-11) — the ceiling a call's `timeout_secs` is
+/// clamped to, for `shell_execute` and a `Command`-backend tool alike
+/// (CMD-TIMEOUT): below that most, that its `timeout_secs` can give it
+/// longer; at it, [`COMMAND_TIMED_OUT_HINT`].
+pub fn command_timed_out_hint(secs: u64, most_secs: u64) -> String {
+    if secs < most_secs {
+        format!(
+            "Hint: a command may run up to {most_secs} seconds here — call it again with a \
+             larger timeout_secs, or split the work into smaller commands that each finish \
+             sooner."
+        )
+    } else {
+        COMMAND_TIMED_OUT_HINT.to_string()
+    }
+}
 
 /// Why [`run_bounded`] produced no output.
 #[derive(Debug)]

@@ -9,8 +9,7 @@ mod types;
 
 pub use fallback::{flatten_messages, truncate_messages_for_cli};
 pub use types::{
-    LlmCapacityInfo, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream,
-    RouterRequest,
+    LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream, RouterRequest,
 };
 
 use crate::LlmProvider;
@@ -26,8 +25,6 @@ use arc_swap::ArcSwap;
 // Re-export types used by tests via `use super::*;`
 #[cfg(test)]
 use crate::error::LlmError;
-#[cfg(test)]
-use crate::keys::key_pool::CallResult;
 #[cfg(test)]
 use crate::types::*;
 use dashmap::{DashMap, DashSet};
@@ -552,3 +549,6 @@ mod tests;
 
 #[cfg(all(test, feature = "ollama", feature = "openai"))]
 mod ollama_tests;
+
+#[cfg(all(test, feature = "ollama", feature = "openai"))]
+mod transport_tests;

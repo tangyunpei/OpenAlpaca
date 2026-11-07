@@ -37,7 +37,7 @@ first turns; see [The continuity split](#the-continuity-split) below.
 | `compare.py` | The paired comparison: accuracy per system, the paired difference with its 95 % CI, the discordant-pair rate, per-category point differences, the gate verdict. It prints both reports' judge models first — with each report's `recall_mode` beside its judge when the report records one — and **refuses two reports graded by different judges** unless `--allow-judge-mismatch`; a recall-mode mismatch is never refused. `--self-test` checks the refusal and the printout. |
 | `reports/` | The archived baselines of the deleted engine, measured on 2026-09-24 on a local Ollama as reader and judge: `baseline-A-2026-09-24.json` (13.0 %), `baseline-B-2026-09-24.json` (90.6 %), and their comparison. **B is the comparator** for D and E. |
 | `crates/openalpaca_core/tests/memory_eval.rs` | The runner: a data-validation test and the harness's own tests — the judge guard, the coverage verdict, the learning measures and invariants, a re-judge of a fixture-sized report, a replay of a fixture-sized scratch database, the gateway feed, forced re-run and L-S confirm on two short sessions, and the recall-mode switch with the listed-versus-delivered counts and the read recorder, all on an offline stub model (run under `--features live-eval`, no network) — and the `#[ignore]`d live eval. |
-| `crates/openalpaca_core/tests/memory_eval_corpus.rs` | The corpus's validation, in **default CI** with no model and no feature: coverage, the change pairs' order, the counts, the language shares within 5 points, the size, and the leakage check — no held-out question shares an 8-word shingle, or a 12-character Han/kana/Hangul shingle, with any turn. It validates the episode split and the continuity split too (for the latter: the counts, the kinds and their order, at least 3 turns on each side of every split, a rejection before an abstention set's split, and no question or gold answer sharing a shingle with a turn after its split), and that each check catches its planted fault. |
+| `crates/openalpaca_core/tests/memory_eval_corpus.rs` | The corpus's validation, in the default `cargo test` run (a local gate; there is no remote CI) with no model and no feature: coverage, the change pairs' order, the counts, the language shares within 5 points, the size, and the leakage check — no held-out question shares an 8-word shingle, or a 12-character Han/kana/Hangul shingle, with any turn. It validates the episode split and the continuity split too (for the latter: the counts, the kinds and their order, at least 3 turns on each side of every split, a rejection before an abstention set's split, and no question or gold answer sharing a shingle with a turn after its split), and that each check catches its planted fault. |
 | `crates/openalpaca_core/tests/common/eval.rs` | The data files' types, shared by both test files. |
 
 ## How it works
@@ -209,7 +209,7 @@ for mode in excerpts index; do
     cargo test -p openalpaca_core --features live-eval \
     --test memory_eval -- --ignored memory_eval --nocapture
 done
-python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D-index.json \
+python3.11 scripts/eval/memory/compare.py /tmp/memory-eval/report-D-index.json \
   /tmp/memory-eval/report-D-excerpts.json
 # Accuracy is compare.py's; the cost side is each report's totals:
 # reader_tokens_in_mean_per_turn / _median_per_turn, reader_rounds_mean_per_turn,
@@ -227,11 +227,11 @@ python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D-index.json \
 # Compare (candidate first, baseline second). The archived baselines were
 # graded by qwen3.8:27b-mtp-q8_0: compare.py refuses a report graded by another
 # judge until one side is re-judged (below), or --allow-judge-mismatch says so.
-python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
+python3.11 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
   scripts/eval/memory/reports/baseline-B-2026-09-24.json
-python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
+python3.11 scripts/eval/memory/compare.py /tmp/memory-eval/report-D.json \
   scripts/eval/memory/reports/baseline-A-2026-09-24.json --margin -10
-python3 scripts/eval/memory/compare.py --self-test   # the judge refusal, the recall-mode printout
+python3.11 scripts/eval/memory/compare.py --self-test   # the judge refusal, the recall-mode printout
 ```
 
 Optional variables:
@@ -585,7 +585,7 @@ for system in K0 K; do
     cargo test -p openalpaca_core --features live-eval \
     --test memory_eval -- --ignored memory_eval --nocapture
 done
-python3 scripts/eval/memory/compare.py /tmp/memory-eval/report-K.json \
+python3.11 scripts/eval/memory/compare.py /tmp/memory-eval/report-K.json \
   /tmp/memory-eval/report-K0.json
 ```
 

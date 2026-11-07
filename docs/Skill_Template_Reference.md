@@ -55,9 +55,9 @@ The catalog API supports two scopes with project-overrides-user semantics (`Skil
 | Scope | Path | Priority |
 |-------|------|----------|
 | **Project** | `config/skills/` (relative to config dir) | Higher — overrides User scope |
-| **User** | e.g. `~/.config/openalpaca/skills/` | Lower — fallback |
+| **User** | A directory the caller passes | Lower — fallback |
 
-**In practice, the daemon currently loads only the project scope**: at startup it scans `<config-dir>/skills/` as `Project` scope and does not pass a user directory. Multi-scope discovery is implemented in the catalog but not wired into the daemon.
+**In practice, the daemon currently loads only the project scope**: at startup it scans `<config-dir>/skills/` as `Project` scope and does not pass a user directory. Multi-scope discovery is implemented in the catalog but not wired into the daemon. The shipped `create-skill` writes only there: its scripts take `--scope=project` alone and refuse any other scope, naming that directory.
 
 Skills with `invoke.mode: "disabled"` are skipped during the scan and never enter the catalog.
 
@@ -278,7 +278,7 @@ Skills can bundle executable scripts in a `scripts/` directory and expose them a
 | `scripts[].description` | `String` | — (required) | Human-readable description shown in the tool definition. |
 | `scripts[].parameters` | JSON Schema | `{"type": "object", "properties": {}}` | JSON Schema describing the tool's input parameters. |
 | `scripts[].interpreter` | `Option<String>` | `None` | Interpreter to run the script (e.g., `"python3"`, `"node"`). If omitted, the script is executed directly — it must be executable (`chmod +x`) with a shebang. |
-| `scripts[].timeout_secs` | `u64` | `30` | Maximum execution time in seconds before the script is killed. |
+| `scripts[].timeout_secs` | `u64` | `30` | Maximum execution time in seconds before the script is killed. The sandbox also ends every tool call at `[execution.agent_defaults] max_tool_runtime_secs` in `config/daemon.toml` (120 by default), and a script may not ask for more, so set this below that bound: at or above it, the sandbox's cut comes first. |
 
 A missing required field (`file`, `name`, or `description`) is a YAML parse error that prevents the **whole skill** from loading.
 
@@ -430,7 +430,7 @@ Auto-selection requires **all three conditions**:
 2. `invoke.mode == "auto"`
 3. No other skill has already been auto-selected (scores sorted descending; first qualifying skill wins)
 
-An auto-selection emits a `SkillSelected` event with the score and a query preview.
+An auto-selected invocation's score and `was_auto_selected` are recorded in `skill_execution_log` (Section 10).
 
 ### Worked Example: `code-review` Skill
 
@@ -483,8 +483,6 @@ The body is truncated to `context.budget_tokens * 4` characters — **16,000 cha
 --- context: <relative-path> ---
 <file contents>
 ```
-
-When context is injected, a `SkillContextInjected` event is emitted with the byte count.
 
 ### Source Resolution
 
@@ -686,13 +684,10 @@ Skill activity is published on the system event bus:
 
 | Event | When |
 |-------|------|
-| `SkillSelected` | Router auto-selects a skill (includes score + query preview). |
 | `SkillInvocationStarted` | Invocation begins. |
 | `SkillCompleted` / `SkillFailed` | Invocation ends (duration, output preview / error). |
-| `SkillContextInjected` | `context.sources` produced injected context (byte count). |
 | `ContextBudgetComputed` | Token budget breakdown for the invocation's prompt. |
 | `SkillCatalogUpdated` | A skill was hot-reloaded by the file watcher (`action: "reloaded"`), or an edit to it could not be loaded (`"reload_failed"`). |
-| `SkillDiscovered` | A `SKILL.md` was loaded into the catalog (startup scan or reload). |
 
 ### Execution Telemetry
 
@@ -856,7 +851,7 @@ scripts:                           # Scripts in <skill-dir>/scripts/ exposed as 
           enum: [express, fastapi, actix, rails]
           description: "API framework to target"
       required: [directory]
-    timeout_secs: 120              # 2 minutes for large codebases
+    timeout_secs: 110              # under the sandbox's 120 s per-tool bound
   - file: check_deps.py            # Python script with explicit interpreter
     name: check_dependencies
     description: "Check project dependencies against known vulnerability databases"
@@ -1114,6 +1109,9 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 
 **"Script timed out after Ns"**
 - The script exceeded its `timeout_secs` (default 30). Increase the timeout in the `scripts:` declaration or optimize the script.
+
+**"Tool 'skill_script:X' timed out after 120s"**
+- The sandbox's per-tool bound, `[execution.agent_defaults] max_tool_runtime_secs` (120 by default), ended the call before the script's own `timeout_secs`. A script cannot ask for more, so a `timeout_secs` above the bound changes nothing: raise `max_tool_runtime_secs` in `config/daemon.toml` (it applies to every tool call), or make the script faster.
 
 **"Script failed (exit N): ..."**
 - Non-zero exit status; the first 500 characters of stderr are included. Debug manually: `cd config/skills/<id> && ./scripts/<file> --key=value`.

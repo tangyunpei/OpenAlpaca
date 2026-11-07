@@ -485,7 +485,7 @@ async fn remember_on_an_attended_app_turn_saves_one_user_note_with_no_model_call
         "the body is the whole text, as typed"
     );
     let mut changes = Vec::new();
-    let mut intents = Vec::new();
+    let mut stage_modes = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event {
             SystemEvent::MemoryChanged {
@@ -494,7 +494,7 @@ async fn remember_on_an_attended_app_turn_saves_one_user_note_with_no_model_call
                 origin,
                 ..
             } => changes.push((change, surface, origin)),
-            SystemEvent::IntentClassified { intent_type, .. } => intents.push(intent_type),
+            SystemEvent::OrchestrationStage { mode, .. } => stage_modes.push(mode),
             _ => {}
         }
     }
@@ -506,7 +506,7 @@ async fn remember_on_an_attended_app_turn_saves_one_user_note_with_no_model_call
             "user".to_string()
         )]
     );
-    assert_eq!(intents, vec!["memory_command".to_string()]);
+    assert_eq!(stage_modes, vec!["memory_command".to_string()]);
 
     let report = learning.flush(&scene).await;
     assert_eq!(report.calls, 0, "{report:?}");

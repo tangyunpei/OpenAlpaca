@@ -1,0 +1,12 @@
+[plugin]
+name = "named-test"
+version = "0.1.0"
+description = "Test plugin that answers a tool call only by the name it listed"
+entry = "./named-server.py"
+mcp_compatible = true
+
+[capabilities]
+provides = ["testing"]
+
+[types]
+tools = true

@@ -746,6 +746,18 @@ export interface AgentTemplate {
    * daemon actually counted rather than assuming.
    */
   window: string;
+  /**
+   * `"ready"`; `"withheld"` — a file in `config/agents` holds the id and
+   * does not parse; or `"disabled"` — a file there holds the id and says
+   * `disabled: true`, which switches the template off (subagent design §2.4
+   * L-4a). Absent from a daemon older than the field, read as ready.
+   */
+  state?: "ready" | "withheld" | "disabled";
+  /**
+   * The file the template is read from — or that withholds it or switches
+   * it off — else null (a built-in or a plugin's template).
+   */
+  path?: string | null;
 }
 
 export interface AgentInstance {

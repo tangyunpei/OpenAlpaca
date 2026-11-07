@@ -1358,6 +1358,7 @@ fn test_assembly_budget_trim_drops_oldest_non_system_history() {
     };
     let history = HistoryOutput {
         messages: history_messages.clone(),
+        ends_with_current_turn: false,
         fingerprint: [0u8; 32],
     };
     let layer_trace = LayerTrace {
@@ -1404,6 +1405,7 @@ fn test_assembly_budget_trim_preserves_system_message() {
     let big: String = "a".repeat(4000);
     let history = HistoryOutput {
         messages: vec![ChatMessage::user(&big), ChatMessage::assistant(&big)],
+        ends_with_current_turn: false,
         fingerprint: [0u8; 32],
     };
     let persona = PersonaOutput {
@@ -1446,6 +1448,225 @@ fn test_assembly_budget_trim_preserves_system_message() {
     assert!(!out.messages.is_empty());
 }
 
+/// Layer 5's inputs for SA-2b's trim tests: a two-message system prompt and
+/// Layer 3 block, and Layer 4's own output for `recent` and `current`.
+fn sa2b_assembly(
+    block: &str,
+    recent: Vec<ChatMessage>,
+    current: Option<ChatMessage>,
+    window: u32,
+) -> ComposedRequest {
+    use super::assembly::{self, AssemblyInput};
+
+    let persona = PersonaOutput {
+        blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let static_prompt = StaticPromptOutput {
+        system_message: Arc::from("system"),
+        section_registry: vec!["system"],
+        fingerprint: [0u8; 32],
+    };
+    let dyn_ctx = DynamicContextOutput {
+        context_messages: vec![],
+        additional_system_blocks: vec![SystemBlock {
+            name: "task_context",
+            content: Arc::from(block),
+            priority: SectionPriority::Normal,
+        }],
+        fingerprint: [0u8; 32],
+    };
+    let history = super::history::compute(&HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        working_state: None,
+        previous: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(recent),
+        current_user_turn: current,
+        mode: HistoryMode::Default,
+    });
+    assembly::compose(AssemblyInput {
+        persona: &persona,
+        static_prompt: &static_prompt,
+        dynamic_context: &dyn_ctx,
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: window,
+        layer_trace: LayerTrace {
+            persona_mode: PersonaMode::Minimal,
+            static_prompt_mode: StaticPromptMode::Default,
+            dynamic_context_mode: DynamicContextMode::Default,
+            history_mode: HistoryMode::Default,
+            memo_hits: LayerMemoHits::default(),
+        },
+    })
+}
+
+/// SA-2b (2): Layer 5's trim never takes the current user turn. Past the
+/// threshold (2,000-token window, 1,500) it takes the history first, oldest
+/// first, then Layer 3's system blocks — never the system prompt at
+/// `messages[0]` — and stops with the turn whole. Until SA-2b it took the
+/// oldest non-system message, the current turn among them, and kept every
+/// system message.
+#[test]
+fn layer5_trims_history_then_system_blocks_and_keeps_the_current_turn() {
+    let current = format!("CURRENT-TURN {}", "c".repeat(2_000));
+    let out = sa2b_assembly(
+        &"b".repeat(8_000),
+        vec![
+            ChatMessage::user(&"u".repeat(4_000)),
+            ChatMessage::assistant(&"a".repeat(4_000)),
+        ],
+        Some(ChatMessage::user(&current)),
+        2_000,
+    );
+    let shape: Vec<(Role, usize)> = out
+        .messages
+        .iter()
+        .map(|m| (m.role.clone(), m.content.len()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![(Role::System, 6), (Role::User, current.len())],
+        "the system prompt and the current turn, nothing else"
+    );
+    assert_eq!(out.messages[0].content, "system");
+    assert_eq!(out.messages[1].content, current, "the current turn whole");
+    assert_eq!(out.history_head_dropped, 2, "both history rows went");
+    assert!(out.section_registry.contains(&"<trimmed:history>"));
+    assert!(out.section_registry.contains(&"<trimmed:system_blocks>"));
+    assert_eq!(
+        out.token_budget.dynamic_context_tokens, 0,
+        "the dropped block is no longer counted"
+    );
+
+    // Within the threshold once the history is gone, the block stays.
+    let out = sa2b_assembly(
+        &"b".repeat(2_000),
+        vec![ChatMessage::user(&"u".repeat(4_000))],
+        Some(ChatMessage::user(&current)),
+        2_000,
+    );
+    assert_eq!(
+        out.messages
+            .iter()
+            .map(|m| m.role.clone())
+            .collect::<Vec<_>>(),
+        vec![Role::System, Role::System, Role::User],
+        "the history went first, and that was enough"
+    );
+    assert_eq!(out.messages[2].content, current);
+}
+
+/// A Layer 3 section routed as a user message (`InjectionMode::UserMessage`:
+/// a predecessor's output, a conversation summary, a workspace artifact)
+/// stands below the history, so the trim takes it before any history row.
+/// It is not a history row: its tokens come off the dynamic context's
+/// figure, which counted them — the one the main loop and a skill register
+/// as the loop's `system_prompt` section — the history's stays whole, and
+/// no `<trimmed:history>` is recorded. Until this test the trim took its
+/// tokens off `history_tokens` and marked the history trimmed.
+#[test]
+fn layer5_counts_a_dropped_context_message_against_the_dynamic_context() {
+    use super::assembly::{self, AssemblyInput};
+
+    let persona = PersonaOutput {
+        blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let static_prompt = StaticPromptOutput {
+        system_message: Arc::from("system"),
+        section_registry: vec!["system"],
+        fingerprint: [0u8; 32],
+    };
+    let context = format!("PREDECESSOR {}", "p".repeat(4_000));
+    let dyn_ctx = DynamicContextOutput {
+        context_messages: vec![ChatMessage::user(&context)],
+        additional_system_blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let current = format!("CURRENT-TURN {}", "c".repeat(400));
+    let history = super::history::compute(&HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        working_state: None,
+        previous: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(vec![
+            ChatMessage::user(&"u".repeat(400)),
+            ChatMessage::assistant(&"a".repeat(400)),
+        ]),
+        current_user_turn: Some(ChatMessage::user(&current)),
+        mode: HistoryMode::Default,
+    });
+    let history_estimate = crate::runner::estimate_messages_tokens(&history.messages);
+    let out = assembly::compose(AssemblyInput {
+        persona: &persona,
+        static_prompt: &static_prompt,
+        dynamic_context: &dyn_ctx,
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: 1_000, // threshold 750: the context message alone passes it
+        layer_trace: LayerTrace {
+            persona_mode: PersonaMode::Minimal,
+            static_prompt_mode: StaticPromptMode::Default,
+            dynamic_context_mode: DynamicContextMode::Default,
+            history_mode: HistoryMode::Default,
+            memo_hits: LayerMemoHits::default(),
+        },
+    });
+
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_ref()).collect();
+    assert_eq!(
+        contents,
+        vec![
+            "system",
+            "u".repeat(400).as_str(),
+            "a".repeat(400).as_str(),
+            current.as_str()
+        ],
+        "the context message went, and that was enough"
+    );
+    assert_eq!(out.history_head_dropped, 0, "no history row went");
+    assert_eq!(
+        out.token_budget.dynamic_context_tokens, 0,
+        "the dropped context message is no longer counted"
+    );
+    assert_eq!(
+        out.token_budget.history_tokens, history_estimate,
+        "the history's figure is what was sent of it"
+    );
+    assert!(
+        !out.section_registry.contains(&"<trimmed:history>"),
+        "no history row was trimmed: {:?}",
+        out.section_registry
+    );
+    assert!(!out.section_registry.contains(&"<trimmed:system_blocks>"));
+}
+
+/// SA-2b (2): a current user turn that alone passes the threshold goes
+/// whole — the provider's context-length error, if any, is the caller's —
+/// and the request always holds a non-system message (an Anthropic request
+/// with an empty `messages` list is what the old trim could send).
+#[test]
+fn layer5_sends_a_current_turn_past_the_threshold_whole() {
+    let current = format!("CURRENT-TURN {}", "c".repeat(8_000));
+    let out = sa2b_assembly(
+        "block",
+        vec![ChatMessage::assistant("earlier")],
+        Some(ChatMessage::user(&current)),
+        2_000,
+    );
+    let last = out.messages.last().unwrap();
+    assert_eq!(
+        (last.role.clone(), last.content.len()),
+        (Role::User, current.len()),
+        "the current turn, last"
+    );
+    assert!(last.content == current, "the current turn whole");
+    assert!(out.messages.iter().any(|m| m.role != Role::System));
+    assert_eq!(out.messages[0].content, "system");
+}
+
 #[test]
 fn test_assembly_populates_per_layer_token_budget() {
     use super::assembly::{self, AssemblyInput};
@@ -1470,6 +1691,7 @@ fn test_assembly_populates_per_layer_token_budget() {
     };
     let history = HistoryOutput {
         messages: vec![ChatMessage::user("history message")],
+        ends_with_current_turn: false,
         fingerprint: [0u8; 32],
     };
     let layer_trace = LayerTrace {
@@ -2786,11 +3008,16 @@ fn test_golden_lead_agent_byte_identical() {
          </role>";
     let workflow_text = "<workflow>\n\
          Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
-         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
+         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
+         constraints, and what to return and where — since a subagent is given neither the \
+         user's request nor this conversation, only its brief.\n\
          Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
-         sub-objective to the best agent by skills. Spawning is always immediate — the system \
-         automatically manages execution ordering based on available LLM capacity. Subagents may \
-         be queued if capacity is limited — this is handled automatically and transparently.\n\
+         sub-objective to the best agent by skills. Spawning is always immediate — each spawn \
+         returns its run_id at once, and a subagent spawned past this run's concurrency bound is \
+         queued and starts when a slot frees, as the spawn's reply says. \
+         This run may spawn at most 48 subagents in all, retries included; a spawn past that \
+         is refused.\n\
          Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
          queued ones), or check_subagent_status for individual progress.\n\
          Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
@@ -2810,9 +3037,10 @@ fn test_golden_lead_agent_byte_identical() {
          - The task requires maintaining context across sequential steps that one agent handles best\n\
          </delegation-criteria>";
     let tool_patterns_text = "<tools>\n\
-         spawn_subagent: Spawning is always immediate — returns a run_id instantly. The system \
-         automatically queues execution if LLM capacity is limited. Spawn all independent \
-         objectives in a single round before waiting — this is the preferred pattern.\n\
+         spawn_subagent: Spawning is always immediate — returns a run_id instantly, and a \
+         subagent spawned past this run's concurrency bound is queued and starts when a slot \
+         frees. Spawn all independent objectives in a single round before waiting — this is the \
+         preferred pattern.\n\
          spawn_subagents_batch: When spawning 3+ independent subagents, use spawn_subagents_batch \
          for parallel spawning instead of individual spawn_subagent calls. This is more efficient \
          and reduces round-trips.\n\
@@ -2870,6 +3098,8 @@ fn test_golden_lead_agent_byte_identical() {
         None,
         None,
         Some(&skills_catalog),
+        // The stock bound on a run's subagents (N-LEAD-6), named in step 3.
+        48,
     );
 
     // ── Byte-identical assertion on system message content. ─────────────

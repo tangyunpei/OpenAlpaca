@@ -1,6 +1,6 @@
 # `openalpaca_llm`
 
-> Generated from source by `python3 scripts/gen_api_docs.py`.
+> Generated from source by `python3.11 scripts/gen_api_docs.py`.
 
 ## Overview
 
@@ -32,7 +32,7 @@
 - `pub use routing::model_registry::{ DiscoveredModel, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery, };`
 - `pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};`
 - `pub use routing::rate_limiter::{ CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter, };`
-- `pub use routing::router::{ LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream, RouterRequest, };`
+- `pub use routing::router::{ LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream, RouterRequest, };`
 - `pub use streaming::collect_stream;`
 - `pub use tool_arguments::UnreadableArguments;`
 - `pub use types::*;`

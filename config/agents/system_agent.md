@@ -18,7 +18,6 @@ verbosity: "concise"
 model: "claude-haiku-4-5-20251001"
 fallback_models: []
 max_tool_calls: 30
-timeout_seconds: 600
 ---
 
 ## Persona

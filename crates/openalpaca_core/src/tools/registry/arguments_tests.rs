@@ -1,7 +1,9 @@
 //! A call's arguments before its backend runs (N-TOOL-5, audit Z1-14): every
 //! problem is reported in one result, arguments a provider sent that could not
-//! be read never run a tool, and a JSON string is refused rather than read as
-//! the object it holds — the sanitizer has already passed its outer text.
+//! be read never run a tool, and the registry refuses a JSON string rather
+//! than read it as the object it holds — read after the sanitizer, it would
+//! pass what the sanitizer never saw. The sandbox reads it, at its entry,
+//! before the sanitizer (N-TOOL-8).
 
 use super::*;
 use std::sync::Mutex;
@@ -127,9 +129,11 @@ async fn every_problem_is_named_in_one_result() {
 
 /// A JSON string is refused at dispatch, as it always was, and not read as
 /// the object its text holds — by dispatch or by the precheck before a card.
-/// The model's strings are read upstream, where a provider's answer is parsed;
-/// anything else reaches the registry after the sandbox's sanitizer has
-/// checked only the string's outer text.
+/// A model's strings are read upstream, where a streamed or OpenAI-compatible
+/// answer is parsed, and any that reaches the sandbox still a string — a
+/// plugin's, an Anthropic-compatible server's non-streamed `tool_use` — at
+/// the sandbox's entry, before its sanitizer (N-TOOL-8); the registry runs
+/// after the sanitizer and decodes nothing.
 #[tokio::test]
 async fn a_json_string_is_refused_not_read_as_the_object_it_holds() {
     let tool = Arc::new(Kept::default());
@@ -158,6 +162,7 @@ fn sandbox_policy(confirm: &[&str], auto_approve: bool) -> crate::security::sand
         require_confirmation_for: confirm.iter().map(|t| t.to_string()).collect(),
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -170,8 +175,10 @@ fn sandbox_policy(confirm: &[&str], auto_approve: bool) -> crate::security::sand
 /// a newline in a shell command, `../` in an argument that reaches a program,
 /// a NUL anywhere — must not reach the tool sent as a JSON string, whose outer
 /// text carries them only as escapes (`\u0060`, `\n`, `.\u002e/`,
-/// `\u0000`) the sanitizer cannot see. Through the sandbox, with no card to
-/// stop it and under `auto_approve` on the confirm list.
+/// `\u0000`). Through the sandbox, with no card to stop it and under
+/// `auto_approve` on the confirm list: since N-TOOL-8 the sandbox reads such
+/// a string as its object at its entry, before the sanitizer, which refuses
+/// the decoded object in the words it refuses the object sent as one.
 #[tokio::test]
 async fn a_json_string_cannot_carry_past_the_sanitizer_what_it_refuses_in_an_object() {
     use crate::security::sandbox::SandboxManager;
@@ -216,6 +223,12 @@ async fn a_json_string_cannot_carry_past_the_sanitizer_what_it_refuses_in_an_obj
             sandbox_policy(&["shell_execute"], true),
         ),
         (
+            "shell_execute",
+            r#"{"command":"echo a\nrm x"}"#,
+            "Potential command injection: newline (command separator)",
+            sandbox_policy(&[], false),
+        ),
+        (
             "run_script",
             r#"{"path":".\u002e/.\u002e/etc/passwd"}"#,
             "Path traversal pattern detected",
@@ -228,7 +241,6 @@ async fn a_json_string_cannot_carry_past_the_sanitizer_what_it_refuses_in_an_obj
             sandbox_policy(&[], false),
         ),
     ];
-    let mut refused_as_strings = Vec::new();
     for (tool, text, sanitizer_says, policy) in cases {
         for hidden in ["`", "\n", "../", "\0"] {
             assert!(
@@ -252,21 +264,9 @@ async fn a_json_string_cannot_carry_past_the_sanitizer_what_it_refuses_in_an_obj
         let as_string = sandbox
             .execute_tool(&call(serde_json::json!(text)), &policy, &ctx)
             .await;
-        refused_as_strings.push((tool, as_string));
+        assert_eq!(as_string, Err(as_object), "{tool}: sent as a JSON string");
     }
 
-    let expected: Vec<_> = ["shell_execute", "shell_execute", "run_script", "write_note"]
-        .into_iter()
-        .map(|tool| {
-            (
-                tool,
-                Err(format!(
-                    "Tool '{tool}': arguments must be a JSON object, got string"
-                )),
-            )
-        })
-        .collect();
-    assert_eq!(refused_as_strings, expected);
     let runs = |tool: &Kept| tool.runs.lock().unwrap().clone();
     assert_eq!(
         [runs(&shell), runs(&script), runs(&note)],
@@ -355,6 +355,7 @@ async fn a_shell_call_whose_arguments_could_not_be_read_hears_why() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,

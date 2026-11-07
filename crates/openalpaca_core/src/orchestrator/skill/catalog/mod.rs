@@ -10,14 +10,11 @@
 //! supports multi-scope discovery: project-level skills can override user-level
 //! skills with the same ID.
 
-use crate::bus::EventBus;
-use crate::events::SystemEvent;
 use crate::middleware::skill::{
     SkillDocument, SkillFrontmatter, SkillParseError, SkillScope, parse_skill_frontmatter,
     parse_skill_markdown,
 };
 use crate::orchestrator::intent::is_reserved_slash_name;
-use chrono::Utc;
 use openalpaca_storage::resolve_skill_key;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -105,8 +102,6 @@ pub struct SkillCatalog {
     /// What the last scan of each skills directory found (N-SKILL-2): the
     /// files it skipped and the problems of the ones it loaded.
     diagnostics: RwLock<Vec<SkillDiagnostic>>,
-    /// Optional event bus for emitting lifecycle events.
-    bus: Option<EventBus>,
     /// Cached catalog summary — invalidated on mutation (Opt-8a).
     cached_summary: CatalogSummaryCache,
     /// The ENABLE axis's availability question (design §6.2 #12). `SkillRouter`
@@ -135,21 +130,6 @@ impl SkillCatalog {
             command_index: RwLock::new(HashMap::new()),
             alias_index: RwLock::new(HashMap::new()),
             diagnostics: RwLock::new(Vec::new()),
-            bus: None,
-            cached_summary: RwLock::new(None),
-            availability_oracle: RwLock::new(None),
-            tombstones: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Create a new SkillCatalog with an event bus for lifecycle events.
-    pub fn new_with_bus(bus: EventBus) -> Self {
-        Self {
-            entries: RwLock::new(HashMap::new()),
-            command_index: RwLock::new(HashMap::new()),
-            alias_index: RwLock::new(HashMap::new()),
-            diagnostics: RwLock::new(Vec::new()),
-            bus: Some(bus),
             cached_summary: RwLock::new(None),
             availability_oracle: RwLock::new(None),
             tombstones: RwLock::new(HashMap::new()),
@@ -473,7 +453,6 @@ impl SkillCatalog {
             });
         }
 
-        let skill_name_for_event = frontmatter.name.clone();
         warn_reserved_slash_claims(&key, &frontmatter);
 
         let entry = SkillEntry {
@@ -553,20 +532,6 @@ impl SkillCatalog {
                 claimed.push(cmd.strip_prefix('/').unwrap_or(cmd).to_lowercase());
             }
             self.clear_tombstones(&key, &claimed);
-        }
-
-        // Emit lifecycle event
-        if let Some(ref bus) = self.bus {
-            let scope_str = match scope {
-                SkillScope::Project => "project",
-                SkillScope::User => "user",
-            };
-            bus.publish(SystemEvent::SkillDiscovered {
-                skill_id: key,
-                skill_name: skill_name_for_event,
-                scope: scope_str.to_string(),
-                timestamp: Utc::now(),
-            });
         }
 
         self.invalidate_summary_cache();
