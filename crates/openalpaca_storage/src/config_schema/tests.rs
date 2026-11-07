@@ -564,6 +564,16 @@ fn test_the_per_tool_bound_its_ceiling_and_no_lead_bound() {
     assert!(lookup("daemon.execution.lead_max_tool_runtime_secs").is_none());
 }
 
+/// PLUGIN-WAIT: a plugin tool's call may ask for its own `timeout_secs` as a
+/// command's may, so the ceiling's row names both, not commands alone.
+#[test]
+fn test_the_ceilings_row_names_command_and_plugin_tools() {
+    let ceiling = lookup("daemon.execution.max_tool_runtime_ceiling_secs").unwrap();
+    let said = ceiling.description;
+    assert!(said.contains("command"), "{said}");
+    assert!(said.contains("plugin"), "{said}");
+}
+
 /// N-SKILL-5: the skill catalog's budget row names the daemon's default,
 /// 20,000 characters — the top of its range, 100–20,000.
 #[test]

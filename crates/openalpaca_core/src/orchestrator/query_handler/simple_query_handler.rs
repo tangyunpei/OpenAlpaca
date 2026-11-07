@@ -316,10 +316,10 @@ impl Orchestrator {
 
         // N-TOOL-1 (Z1-05), N-TOOL-1b: the cut a tool call of this turn runs
         // under — `[execution.agent_defaults] max_tool_runtime_secs`, and the
-        // ceiling a command's own `timeout_secs` is clamped to — read per
-        // turn like the confirmation timeout beside them, so a reload reaches
-        // the next turn. The policy is their one carrier; the loop states
-        // both on `shell_execute`'s definition.
+        // ceiling a command's or a plugin tool's own `timeout_secs` is
+        // clamped to — read per turn like the confirmation timeout beside
+        // them, so a reload reaches the next turn. The policy is their one
+        // carrier; the loop states both on `shell_execute`'s definition.
         let (max_tool_runtime_secs, max_tool_runtime_ceiling_secs) = {
             let config = self.daemon_config.load();
             let tools = &config.execution.agent_defaults;

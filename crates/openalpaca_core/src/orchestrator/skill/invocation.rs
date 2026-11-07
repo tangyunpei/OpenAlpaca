@@ -1199,9 +1199,9 @@ impl Orchestrator {
 
     /// N-TOOL-1b: the per-tool bound every loop reads,
     /// `[execution.agent_defaults] max_tool_runtime_secs`, and the ceiling a
-    /// command's own `timeout_secs` is clamped to — per invocation, from one
-    /// snapshot, so a reload between the two reads cannot pair a new bound
-    /// with an old ceiling.
+    /// command's or a plugin tool's own `timeout_secs` is clamped to — per
+    /// invocation, from one snapshot, so a reload between the two reads
+    /// cannot pair a new bound with an old ceiling.
     fn tool_runtime_bounds(&self) -> (u64, u64) {
         let config = self.daemon_config.load();
         let tools = &config.execution.agent_defaults;

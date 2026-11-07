@@ -30,10 +30,10 @@ pub struct AgentDefaults {
     /// what it started, R45). A template's `timeout_seconds` does not move
     /// it.
     pub max_tool_runtime_secs: u64,
-    /// The most a call's own `timeout_secs` may ask for, on `shell_execute`
-    /// and the `Command`-backend tools: a larger figure is clamped to this,
-    /// never refused. Never below `max_tool_runtime_secs` (`validate` raises
-    /// it to that).
+    /// The most a call's own `timeout_secs` may ask for, on `shell_execute`,
+    /// a `Command`-backend tool or a plugin's tool: a larger figure is
+    /// clamped to this, never refused. Never below `max_tool_runtime_secs`
+    /// (`validate` raises it to that).
     pub max_tool_runtime_ceiling_secs: u64,
     pub max_cost: f64,
     /// Timeout for interactive tool confirmation prompts (seconds).

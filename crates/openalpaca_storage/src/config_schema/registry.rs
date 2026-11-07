@@ -537,7 +537,7 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
             max: Some(3600),
         },
         default: Some("600"),
-        description: "Max seconds a command tool call may ask for (timeout_secs)",
+        description: "Max seconds a command or plugin tool call may ask for (timeout_secs)",
         category: "Daemon",
         subcategory: Some("Execution"),
         sensitive: false,

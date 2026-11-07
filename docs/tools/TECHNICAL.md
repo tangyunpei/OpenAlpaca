@@ -1874,7 +1874,7 @@ beside it is the code default.
 max_rounds = 15                # Max LLM loop iterations per agent
 max_tools_per_round = 5        # Max tool calls executed per LLM round
 max_tool_runtime_secs = 120    # Per-tool sandbox timeout, every loop; exempt tools: §7
-max_tool_runtime_ceiling_secs = 600  # Most a command's timeout_secs gets
+max_tool_runtime_ceiling_secs = 600  # Most a command's or a plugin tool's timeout_secs gets
 max_cost = 1                   # Max API cost per agent run / chat turn (USD)
 confirmation_timeout_secs = 300
 
