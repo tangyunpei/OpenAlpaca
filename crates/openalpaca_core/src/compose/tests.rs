@@ -1558,6 +1558,91 @@ fn layer5_trims_history_then_system_blocks_and_keeps_the_current_turn() {
     assert_eq!(out.messages[2].content, current);
 }
 
+/// A Layer 3 section routed as a user message (`InjectionMode::UserMessage`:
+/// a predecessor's output, a conversation summary, a workspace artifact)
+/// stands below the history, so the trim takes it before any history row.
+/// It is not a history row: its tokens come off the dynamic context's
+/// figure, which counted them — the one the main loop and a skill register
+/// as the loop's `system_prompt` section — the history's stays whole, and
+/// no `<trimmed:history>` is recorded. Until this test the trim took its
+/// tokens off `history_tokens` and marked the history trimmed.
+#[test]
+fn layer5_counts_a_dropped_context_message_against_the_dynamic_context() {
+    use super::assembly::{self, AssemblyInput};
+
+    let persona = PersonaOutput {
+        blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let static_prompt = StaticPromptOutput {
+        system_message: Arc::from("system"),
+        section_registry: vec!["system"],
+        fingerprint: [0u8; 32],
+    };
+    let context = format!("PREDECESSOR {}", "p".repeat(4_000));
+    let dyn_ctx = DynamicContextOutput {
+        context_messages: vec![ChatMessage::user(&context)],
+        additional_system_blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let current = format!("CURRENT-TURN {}", "c".repeat(400));
+    let history = super::history::compute(&HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        working_state: None,
+        previous: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(vec![
+            ChatMessage::user(&"u".repeat(400)),
+            ChatMessage::assistant(&"a".repeat(400)),
+        ]),
+        current_user_turn: Some(ChatMessage::user(&current)),
+        mode: HistoryMode::Default,
+    });
+    let history_estimate = crate::runner::estimate_messages_tokens(&history.messages);
+    let out = assembly::compose(AssemblyInput {
+        persona: &persona,
+        static_prompt: &static_prompt,
+        dynamic_context: &dyn_ctx,
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: 1_000, // threshold 750: the context message alone passes it
+        layer_trace: LayerTrace {
+            persona_mode: PersonaMode::Minimal,
+            static_prompt_mode: StaticPromptMode::Default,
+            dynamic_context_mode: DynamicContextMode::Default,
+            history_mode: HistoryMode::Default,
+            memo_hits: LayerMemoHits::default(),
+        },
+    });
+
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_ref()).collect();
+    assert_eq!(
+        contents,
+        vec![
+            "system",
+            "u".repeat(400).as_str(),
+            "a".repeat(400).as_str(),
+            current.as_str()
+        ],
+        "the context message went, and that was enough"
+    );
+    assert_eq!(out.history_head_dropped, 0, "no history row went");
+    assert_eq!(
+        out.token_budget.dynamic_context_tokens, 0,
+        "the dropped context message is no longer counted"
+    );
+    assert_eq!(
+        out.token_budget.history_tokens, history_estimate,
+        "the history's figure is what was sent of it"
+    );
+    assert!(
+        !out.section_registry.contains(&"<trimmed:history>"),
+        "no history row was trimmed: {:?}",
+        out.section_registry
+    );
+    assert!(!out.section_registry.contains(&"<trimmed:system_blocks>"));
+}
+
 /// SA-2b (2): a current user turn that alone passes the threshold goes
 /// whole — the provider's context-length error, if any, is the caller's —
 /// and the request always holds a non-system message (an Anthropic request

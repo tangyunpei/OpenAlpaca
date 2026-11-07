@@ -72,14 +72,17 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
     // system prompt. So is the working-state block (design 11 §4, CQ-4): it
     // is the one carrier of what the trim removes, so the trim takes the
     // message after it. The previous conversation's block may go, and is not
-    // counted as a history row when it does (§3.2). And so is the current
-    // user turn (SA-2b): it is what the request asks, so a turn that alone
-    // passes the threshold goes whole, and a context-length error, if the
-    // provider returns one, is the caller's — never a request with no user
-    // message (on Anthropic, an empty `messages` list).
+    // counted as a history row when it does (§3.2). A Layer 3 message, a
+    // system block or a section routed as a user message, is not a history
+    // row either: its tokens come off the dynamic context's figure, which
+    // counted them. The current user turn is kept too (SA-2b): it is what
+    // the request asks, so a turn that alone passes the threshold goes
+    // whole, and a context-length error, if the provider returns one, is the
+    // caller's — never a request with no user message (on Anthropic, an
+    // empty `messages` list).
     let threshold = (input.model_window as f64 * TRIM_THRESHOLD) as u32;
     let mut total = crate::runner::estimate_messages_tokens(&messages);
-    let mut trimmed = 0usize;
+    let mut history_trimmed = 0usize;
     let mut blocks_trimmed = 0usize;
     let mut history_head_dropped = 0usize;
     let system_prompt_at = (!input.static_prompt.system_message.is_empty()).then_some(0);
@@ -128,15 +131,15 @@ pub fn compose(input: AssemblyInput<'_>) -> ComposedRequest {
         }
         let removed_tokens = crate::runner::estimate_messages_tokens(std::slice::from_ref(&removed));
         total = total.saturating_sub(removed_tokens);
-        if in_history || !system {
+        if in_history {
+            history_trimmed += 1;
             history_tokens = history_tokens.saturating_sub(removed_tokens);
         } else {
-            // A Layer 3 block: its tokens come off the figure that counted it.
+            // A Layer 3 message: its tokens come off the figure that counted it.
             dynamic_context_tokens = dynamic_context_tokens.saturating_sub(removed_tokens);
         }
-        trimmed += 1;
     }
-    if trimmed > blocks_trimmed {
+    if history_trimmed > 0 {
         section_registry.push("<trimmed:history>");
     }
     if blocks_trimmed > 0 {
