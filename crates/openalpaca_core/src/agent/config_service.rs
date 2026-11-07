@@ -350,6 +350,13 @@ impl AgentConfigService {
             let _ = std::fs::rename(&toml_path, &archive_path);
         }
 
+        // A plugin's template has no file to archive, and the route's rescan
+        // replaces only the file layer: take it out of the plugin layer here,
+        // as before the layers (T-2). The plugin's next load brings it back.
+        if provenance.layer == TemplateLayer::Plugin {
+            self.registry.remove_template(id);
+        }
+
         // 2. Update DB status to archived — unless a bundled template stands
         // under the file, overridden or switched off by it: the id is then in
         // the catalog after the rescan, which writes the bundled template's

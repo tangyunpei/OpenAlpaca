@@ -1206,6 +1206,34 @@ mod tests {
         assert!(!t.agents().join(".archived").exists());
     }
 
+    /// T-2: `DELETE` of a plugin's template takes it out of the catalog, as
+    /// before C2 — no file holds it, and the rescan that follows replaces
+    /// only the file layer, so the service removes it from the plugin layer
+    /// itself rather than answering `archived` while it stays spawnable.
+    #[test]
+    fn deleting_a_plugin_s_template_takes_it_out_of_the_catalog() {
+        let t = Templates::new(&[]);
+        let mut plugin =
+            parse_agent_markdown("---\nid: acme_agent\nname: A\ndescription: d\n---\n").unwrap();
+        plugin.source = openalpaca_core::agent::AgentSource::Plugin {
+            plugin_id: "acme".to_string(),
+            executor: Arc::new(IdleExecutor),
+        };
+        assert!(t.registry.register_template(plugin));
+
+        t.route().delete("acme_agent").unwrap();
+
+        assert!(t.registry.get_template("acme_agent").is_none());
+        assert!(t.registry.provenance("acme_agent").is_none());
+        assert!(
+            !t.registry
+                .list_templates()
+                .iter()
+                .any(|template| template.frontmatter.id == "acme_agent")
+        );
+        assert!(!t.agents().join(".archived").exists());
+    }
+
     // ── A file that switches a template off (§2.4 L-4a, §7 O-1 (b)) ──
 
     /// R-1: an id a file switches off keeps its row, saying `disabled` and
