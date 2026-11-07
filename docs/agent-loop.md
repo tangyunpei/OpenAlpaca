@@ -185,23 +185,23 @@ bound and the queueing are unchanged.
 `objective` parameter — say to write each objective as a self-contained
 brief: the goal, the inputs it needs, the constraints, and what to return
 and where, since a subagent is given neither the user's request nor the
-lead's conversation. A file-based template's subagent gets it as the user
-turn it answers — while the request fits, the last message, after any
-memory block or working-folder line — and again as a second system
-message: the context package's task description
-(`ContextManager::distill`), which Layer 3 routes there because the spawn
-site does not drop it. Anthropic's request joins that copy to the system
-text, OpenAI and Ollama send it as a second system message, and every
-compaction tier keeps it, as it keeps `messages[..2]`; the composed system
-prompt itself holds neither. The subagent's window bounds the brief twice:
-the copy is distilled into at most 40% of it (`SUB_AGENT_CONTEXT_RATIO`),
-past which it is cut and marked `[...truncated]`, and Layer 5's trim
-(`TRIM_THRESHOLD`, 75%) drops the user turn, the request's only non-system
-message, which a brief counted twice reaches at about 37.5% — on an
-8,192-token model, a brief of 12,800 characters arrives as the system copy
-alone. The span row and the lane's `subagent_open` record keep the
-objective's first 500 characters, and two log lines a preview (80 bytes;
-50 characters) — records only. A plugin-backed template's executor is
+lead's conversation. A file-based template's subagent gets it once, as the
+user turn it answers — the last message, after any memory block or
+working-folder line — and in no system message (SA-2b): the context
+package's task description (`ContextManager::distill`) is left out of the
+bundle the spawn site feeds Layer 3, which would route it to a second
+system message, as it did until SA-2b. The subagent's window no longer
+cuts or drops the brief: `distill` still fits the package's other sections
+beside it into 40% of the window (`SUB_AGENT_CONTEXT_RATIO`), but nothing
+cuts the brief itself; Layer 5's trim never takes the current user turn
+(below); and every compaction tier keeps everything the subagent was
+handed — its kept head (`LoopConfig::kept_head`) is the whole list, the
+brief last. A brief longer than the window goes whole; the provider's
+context-length error, if any, fails the subagent's run, on its first round
+or a later one, and the lead reads that failure as any other. The
+span row and the lane's `subagent_open` record keep the objective's first
+500 characters, and two log lines a preview (80 bytes; 50 characters) —
+records only. A plugin-backed template's executor is
 handed it after the composed system prompt, as `Objective: …` in its
 instructions, and as its context's `objective`.
 
@@ -655,7 +655,7 @@ that passes none (the social fast path, tests) never compacts.
   |---|---|---|
   | ≥ 60% | `TruncateToolResults` | Cuts tool results longer than 200 bytes to half their size. |
   | ≥ 70% | `DropMultimedia` | Replaces image, audio and document parts with one-line text placeholders. |
-  | ≥ 75% | `DiscardSocial` | Removes small-talk user messages and the replies to them. Keeps the system message, the first query and the last `min_recent_messages` (default 4). |
+  | ≥ 75% | `DiscardSocial` | Removes small-talk user messages and the replies to them. Keeps the kept head — the system message and the first query (a spawned subagent: everything it was handed) — and the last `min_recent_messages` (default 4). |
   | ≥ 80% | `HeuristicSummary` | Replaces older rounds with a compact summary built without a model (`runner/agentic_loop/context.rs::compress_context`). |
   | ≥ 85% | `LlmSummary` | Folds the older messages into the conversation's **working state** with one model call (below). Cancellable: a cancel restores the messages untouched. |
 
@@ -666,7 +666,8 @@ that passes none (the social fast path, tests) never compacts.
   and answers the state, a fixed-shape JSON object: `topic`, `goal`, `done`,
   `asked`, `decisions`, `open`, `next`, `refs`. It replaces those messages with the
   rendered state at `messages[2]` (a previous state block among them is taken
-  out, so the list never holds two) and is carried out on
+  out, so the list never holds two; for a spawned subagent `2` is its kept
+  head's length, SA-2b) and is carried out on
   `LoopResult.working_state`. The call is the one working-state writer the
   turn end and a conversation's close use too
   (`orchestrator/working_state.rs`): `[orchestrator.costs] summary_model`
@@ -691,7 +692,15 @@ that passes none (the social fast path, tests) never compacts.
 - **Never compacted away.** `<user_interjection>` steering messages are
   exempt from discard and truncation. A working-state block is never cut:
   the heuristic summary keeps it whole ahead of its own, and `LlmSummary`
-  replaces it with the state it writes.
+  replaces it with the state it writes. A spawned subagent's brief is in its
+  kept head (SA-2b).
+- **The assembly's trim** (`compose/assembly.rs`, Layer 5), before the
+  loop: while the stitched request passes 75% of the window
+  (`TRIM_THRESHOLD`) it takes the oldest non-system message, then Layer 3's
+  system blocks — never the system prompt, the working-state block or the
+  current user turn (SA-2b). A current turn that alone passes the threshold
+  goes whole, so no request is sent without a user message (on Anthropic,
+  an empty `messages` list).
 - **Narration.** Each compaction publishes
   `SystemEvent::CompactionTriggered` (utilization and message counts) and,
   with a session log attached, writes a `compaction` record with the tier,

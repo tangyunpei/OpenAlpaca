@@ -157,7 +157,7 @@ fn test_compaction_tier_thresholds() {
 }
 
 // ── Compaction tests ──────────────────────────────────────────────
-use super::compaction::{CompactionPipeline, Summarizer};
+use super::compaction::{CompactionPipeline, DEFAULT_KEPT_HEAD, Summarizer};
 use crate::orchestrator::working_state::{
     BLOCK_PREFIX, PREVIOUS_BLOCK_PREFIX, VERSION, WorkingState,
 };
@@ -176,7 +176,7 @@ fn test_discard_removes_social() {
         ChatMessage::user("What's the weather?"),
         ChatMessage::assistant("It's sunny."),
     ];
-    let result = CompactionPipeline::discard_social(&messages, 2);
+    let result = CompactionPipeline::discard_social(&messages, DEFAULT_KEPT_HEAD, 2);
     assert!(result.len() < messages.len());
     assert_eq!(result[0].role, openalpaca_llm::Role::System);
     assert!(result.last().unwrap().content.contains("sunny"));
@@ -190,7 +190,7 @@ fn test_discard_preserves_substantive() {
         ChatMessage::user("Write a sort function"),
         ChatMessage::assistant("Here's the implementation..."),
     ];
-    let result = CompactionPipeline::discard_social(&messages, 2);
+    let result = CompactionPipeline::discard_social(&messages, DEFAULT_KEPT_HEAD, 2);
     assert_eq!(result.len(), messages.len());
 }
 
@@ -251,11 +251,18 @@ async fn test_summarize_replaces_older_messages() {
         ChatMessage::assistant("Lifetimes ensure references are valid..."),
     ];
     let summarizer = MockSummarizer::new("Rust");
-    let (result, written) =
-        CompactionPipeline::summarize_older(messages.clone(), 2, None, &[], &summarizer, 4000)
-            .await
-            .unwrap()
-            .expect("the older messages are summarised");
+    let (result, written) = CompactionPipeline::summarize_older(
+        messages.clone(),
+        DEFAULT_KEPT_HEAD,
+        2,
+        None,
+        &[],
+        &summarizer,
+        4000,
+    )
+    .await
+    .unwrap()
+    .expect("the older messages are summarised");
     // System + initial + state + last 2 messages
     assert_eq!(result.len(), 5);
     assert_eq!(written, state("Rust"));
@@ -280,10 +287,17 @@ async fn test_summarize_preserves_recent_when_nothing_to_summarize() {
         ChatMessage::assistant("answer"),
     ];
     let summarizer = MockSummarizer::new("summary");
-    let result =
-        CompactionPipeline::summarize_older(messages.clone(), 4, None, &[], &summarizer, 4000)
-            .await
-            .unwrap();
+    let result = CompactionPipeline::summarize_older(
+        messages.clone(),
+        DEFAULT_KEPT_HEAD,
+        4,
+        None,
+        &[],
+        &summarizer,
+        4000,
+    )
+    .await
+    .unwrap();
     assert!(result.is_none(), "no change");
     assert!(summarizer.seen.lock().unwrap().is_empty(), "and no call");
 }
@@ -323,8 +337,16 @@ async fn one_state_block_is_left_after_compaction_wherever_the_previous_stood() 
 
     for (shape, messages, kept_head) in [("main loop", main_loop, 1), ("lead", lead, 2)] {
         let summarizer = MockSummarizer::new("Lisbon trip, booked");
-        let result =
-            CompactionPipeline::compact(messages, 4, Some(&previous), &[], &summarizer, 4000).await;
+        let result = CompactionPipeline::compact(
+            messages,
+            DEFAULT_KEPT_HEAD,
+            4,
+            Some(&previous),
+            &[],
+            &summarizer,
+            4000,
+        )
+        .await;
 
         let blocks: Vec<&ChatMessage> = result
             .compacted_messages
@@ -395,11 +417,18 @@ async fn the_writer_never_reads_the_previous_conversations_block() {
 
     for (shape, messages, kept) in [("main loop", main_loop, true), ("older", in_older, false)] {
         let summarizer = MockSummarizer::new("This conversation");
-        let (result, _) =
-            CompactionPipeline::summarize_older(messages, 4, None, &[], &summarizer, 4000)
-                .await
-                .unwrap()
-                .expect("the older messages are summarised");
+        let (result, _) = CompactionPipeline::summarize_older(
+            messages,
+            DEFAULT_KEPT_HEAD,
+            4,
+            None,
+            &[],
+            &summarizer,
+            4000,
+        )
+        .await
+        .unwrap()
+        .expect("the older messages are summarised");
         let seen = summarizer.seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "{shape}: one call");
         assert!(
@@ -437,10 +466,18 @@ async fn the_rows_behind_the_list_are_read_first_and_never_alone() {
         }))
         .collect();
     let summarizer = MockSummarizer::new("read");
-    CompactionPipeline::summarize_older(messages, 2, None, &behind, &summarizer, 4000)
-        .await
-        .unwrap()
-        .expect("summarised");
+    CompactionPipeline::summarize_older(
+        messages,
+        DEFAULT_KEPT_HEAD,
+        2,
+        None,
+        &behind,
+        &summarizer,
+        4000,
+    )
+    .await
+    .unwrap()
+    .expect("summarised");
     assert_eq!(
         summarizer.seen.lock().unwrap()[0].1,
         vec!["b1", "b2", "u1", "a2", "u3", "a4"],
@@ -454,9 +491,17 @@ async fn the_rows_behind_the_list_are_read_first_and_never_alone() {
         ChatMessage::assistant("answer"),
     ];
     let summarizer = MockSummarizer::new("read");
-    let result = CompactionPipeline::summarize_older(short, 4, None, &behind, &summarizer, 4000)
-        .await
-        .unwrap();
+    let result = CompactionPipeline::summarize_older(
+        short,
+        DEFAULT_KEPT_HEAD,
+        4,
+        None,
+        &behind,
+        &summarizer,
+        4000,
+    )
+    .await
+    .unwrap();
     assert!(result.is_none());
     assert!(
         summarizer.seen.lock().unwrap().is_empty(),
@@ -481,7 +526,9 @@ async fn test_compaction_full_pipeline() {
 
     let summarizer = MockSummarizer::new("Rust discussion");
 
-    let result = CompactionPipeline::compact(messages, 2, None, &[], &summarizer, 4000).await;
+    let result =
+        CompactionPipeline::compact(messages, DEFAULT_KEPT_HEAD, 2, None, &[], &summarizer, 4000)
+            .await;
     assert!(result.compacted_messages.len() < 10);
     // The social pair went before the summary, so the boundary is counted in
     // the list as handed: 10 messages less the 2 kept.
@@ -518,8 +565,16 @@ async fn test_compaction_fallback_on_summarizer_failure() {
         ChatMessage::assistant("recent response"),
     ];
 
-    let result =
-        CompactionPipeline::compact(messages, 2, None, &[], &FailingSummarizer, 4000).await;
+    let result = CompactionPipeline::compact(
+        messages,
+        DEFAULT_KEPT_HEAD,
+        2,
+        None,
+        &[],
+        &FailingSummarizer,
+        4000,
+    )
+    .await;
     assert!(result.compacted_messages.len() < 10);
     assert!(
         result.working_state.is_none(),
@@ -547,6 +602,7 @@ async fn test_compaction_preserves_recent() {
     ];
     let result = CompactionPipeline::compact(
         messages,
+        DEFAULT_KEPT_HEAD,
         2,
         None,
         &[],
@@ -556,4 +612,89 @@ async fn test_compaction_preserves_recent() {
     .await;
     let last = result.compacted_messages.last().unwrap();
     assert_eq!(last.content, "recent_a");
+}
+
+/// SA-2b (3): a loop's kept head is kept by every phase. A spawned
+/// subagent's list opens with its system prompt, a working-folder line and
+/// its objective (`LoopConfig::kept_head` = 3): the social discard, the
+/// summary and its heuristic fallback each keep those three where they
+/// stand, and fold only what follows — where the default head (2) would
+/// have folded the objective with the older rows.
+#[tokio::test]
+async fn every_phase_keeps_a_longer_kept_head() {
+    struct FailingSummarizer;
+    #[async_trait]
+    impl Summarizer for FailingSummarizer {
+        async fn summarize(
+            &self,
+            _: Option<&WorkingState>,
+            _: &[ChatMessage],
+        ) -> Result<WorkingState, String> {
+            Err("model unavailable".to_string())
+        }
+    }
+
+    let head = vec![
+        ChatMessage::system("system prompt"),
+        ChatMessage::user("<working_folder>the scratch folder</working_folder>"),
+        ChatMessage::user("BRIEF: weigh every alpaca, return the weights"),
+    ];
+    let mut messages = head.clone();
+    for i in 1..=4 {
+        messages.push(ChatMessage::user(if i == 1 { "thanks" } else { "go on" }));
+        messages.push(ChatMessage::assistant(&format!("round {i}")));
+    }
+    let kept = |list: &[ChatMessage]| {
+        list[..3]
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+    };
+    let want = kept(&head);
+
+    let discarded = CompactionPipeline::discard_social(&messages, 3, 2);
+    assert_eq!(kept(&discarded), want, "the social discard");
+    assert!(!discarded.iter().any(|m| m.content == "thanks"));
+
+    let summarizer = MockSummarizer::new("Weighing");
+    let (summarised, _) =
+        CompactionPipeline::summarize_older(messages.clone(), 3, 2, None, &[], &summarizer, 4000)
+            .await
+            .unwrap()
+            .expect("older rows to fold");
+    assert_eq!(kept(&summarised), want, "the summary");
+    assert!(summarised[3].content.starts_with(BLOCK_PREFIX));
+    let read = summarizer.seen.lock().unwrap()[0].1.clone();
+    assert!(
+        !read.iter().any(|m| m.starts_with("BRIEF")),
+        "the writer was handed the objective: {read:?}"
+    );
+
+    let fallback =
+        CompactionPipeline::compact(messages.clone(), 3, 2, None, &[], &FailingSummarizer, 4000)
+            .await;
+    assert_eq!(kept(&fallback.compacted_messages), want, "the heuristic");
+    assert!(
+        fallback.compacted_messages[3]
+            .content
+            .starts_with("[Context compressed:")
+    );
+
+    let defaulted = CompactionPipeline::compact(
+        messages,
+        DEFAULT_KEPT_HEAD,
+        2,
+        None,
+        &[],
+        &FailingSummarizer,
+        4000,
+    )
+    .await;
+    assert!(
+        !defaulted
+            .compacted_messages
+            .iter()
+            .any(|m| m.content.starts_with("BRIEF")),
+        "the default head folds the objective"
+    );
 }

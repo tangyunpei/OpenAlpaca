@@ -1092,24 +1092,21 @@ fn sa2_brief(tag: &str, chars: usize) -> String {
     text
 }
 
-/// SA-2's characterization, true before and after it: a file-based (LLM)
-/// template's subagent at the default window is given a 4,000-character
-/// objective whole as the user turn it answers — the last message, after any
-/// memory block or working-folder line — by `spawn_subagent` and by an entry
-/// of `spawn_subagents_batch` alike; the 500-character span and
-/// `subagent_open` record and the log lines' previews are records only. The
-/// composed system prompt, `messages[0]`, holds none of it; but the context
-/// package's task description (`ContextManager::distill`) reaches Layer 3,
-/// which routes it to a second system message, `messages[1]`, a whole copy —
-/// the spawn site does not drop it as `build_subagent_minimal`'s doc asks.
-/// Anthropic's request joins it to the system text, and every compaction tier
-/// keeps `messages[..2]`, so it is the copy that survives a compaction. A
-/// change that drops the section turns this test, deliberately. What bounds a
-/// longer brief is the next test's. (A plugin-backed template's executor is
-/// handed the objective after the system prompt instead,
+/// SA-2b (SA-2's option (a)): a file-based (LLM) template's subagent at the
+/// default window is given a 4,000-character brief once — whole, as the user
+/// turn it answers, the last message, after any memory block or
+/// working-folder line — by `spawn_subagent` and by an entry of
+/// `spawn_subagents_batch` alike, and in no system message: the context
+/// package's task description (`ContextManager::distill`) is left out of the
+/// bundle Layer 3 routes, as `build_subagent_minimal`'s doc asks, where until
+/// SA-2b it reached the subagent as a second system message, `messages[1]`
+/// (`a4d8d110`'s characterization, which pinned that copy). The
+/// 500-character span and `subagent_open` record and the log lines' previews
+/// are records only. (A plugin-backed template's executor is handed the
+/// objective after the system prompt instead,
 /// `test_spawn_subagent_executes_plugin_backed_template`.)
 #[tokio::test]
-async fn a_file_based_subagent_gets_a_long_brief_whole_as_its_turn_and_a_system_copy() {
+async fn a_file_based_subagent_gets_its_brief_once_as_its_last_user_turn() {
     let (single_brief, batch_brief) = (sa2_brief("SINGLE", 4_000), sa2_brief("BATCH", 4_000));
 
     let provider = ScriptedProvider::new(vec![
@@ -1140,56 +1137,48 @@ async fn a_file_based_subagent_gets_a_long_brief_whole_as_its_turn_and_a_system_
     let requests = provider.seen_messages.lock().unwrap().clone();
     assert_eq!(requests.len(), 2, "one model call per subagent");
     for (tag, brief) in [("SINGLE", &single_brief), ("BATCH", &batch_brief)] {
-        let head = format!("BRIEF-{tag}-HEAD");
+        let (head, tail) = (format!("BRIEF-{tag}-HEAD"), format!("BRIEF-{tag}-TAIL"));
         let messages = requests
             .iter()
             .find(|m| m.iter().any(|m| m.content.contains(&head)))
             .unwrap_or_else(|| panic!("no subagent was given the {tag} brief"));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.content.contains(&head) || m.content.contains(&tail))
+                .count(),
+            1,
+            "{tag}: the brief is given once"
+        );
         let turn = messages.last().unwrap();
         assert_eq!(turn.role, openalpaca_llm::Role::User, "{tag}");
         assert_eq!(
             &turn.content, brief,
-            "{tag}: the brief whole, as the user turn"
+            "{tag}: the brief whole, as the last user turn"
         );
-        let system = &messages[0];
-        assert_eq!(system.role, openalpaca_llm::Role::System, "{tag}");
         assert!(
-            !system.content.contains(&head)
-                && !system.content.contains(&format!("BRIEF-{tag}-TAIL")),
-            "{tag}: the brief reached the composed system prompt"
-        );
-        let copy = &messages[1];
-        assert_eq!(copy.role, openalpaca_llm::Role::System, "{tag}");
-        assert_eq!(
-            &copy.content, brief,
-            "{tag}: the task description's copy, whole"
-        );
-        assert_eq!(
             messages
                 .iter()
-                .filter(|m| m.content.contains(&head))
-                .count(),
-            2,
-            "{tag}: the brief is given twice, the copy and the user turn"
+                .filter(|m| m.role == openalpaca_llm::Role::System)
+                .all(|m| !m.content.contains(&head) && !m.content.contains(&tail)),
+            "{tag}: the brief reached a system message"
         );
     }
 }
 
-/// SA-2's bounds, true before and after it: nothing cuts a brief on its way
-/// to a file-based template's subagent, but the subagent's window bounds it
-/// twice. The task description's copy is distilled into at most 40% of the
-/// window (`ContextManager::distill`, `SUB_AGENT_CONTEXT_RATIO`), past which
-/// it is cut and marked `[...truncated]`; and Layer 5's trim
-/// (`assembly::compose`, `TRIM_THRESHOLD`) drops the oldest non-system
-/// message while the request is over 75% of the window — the user turn, the
-/// only one — which a brief, counted twice, reaches at about 37.5%. On an
-/// 8,192-token model (M5's local case) a 12,800-character brief (3,200
-/// tokens, within the copy's 3,276) reaches the subagent as its system copy
-/// alone, with no user turn, and a 20,000-character one as that copy cut to
-/// its first 13,104 characters. A change that keeps the user turn or drops
-/// the copy turns this test, deliberately: both are the owner's decisions.
+/// SA-2b: the subagent's window no longer takes its brief. Until SA-2b it
+/// bounded it twice (`a4d8d110`'s second characterization): the task
+/// description's system copy, distilled into at most 40% of the window and
+/// cut past it, and Layer 5's trim, which dropped the user turn — the only
+/// non-system message — once the brief, counted twice, passed about 37.5%:
+/// on an 8,192-token model (M5's local case) a 12,800-character brief reached
+/// the subagent as its system copy alone and a 20,000-character one as that
+/// copy cut to its first 13,104 characters, with no user message — an
+/// Anthropic request with an empty `messages` list. Now each arrives whole,
+/// once, as its last user turn, and every request holds a non-system message
+/// (what an Anthropic request's `messages` is made of).
 #[tokio::test]
-async fn a_brief_past_its_share_of_a_small_window_loses_its_user_turn_then_its_tail() {
+async fn a_long_brief_on_a_small_window_arrives_whole_as_its_user_turn() {
     let (mid, long) = (sa2_brief("MID", 12_800), sa2_brief("LONG", 20_000));
     let provider = ScriptedProvider::new(vec![
         scripted_response("done", vec![]),
@@ -1218,34 +1207,241 @@ async fn a_brief_past_its_share_of_a_small_window_loses_its_user_turn_then_its_t
 
     let requests = provider.seen_messages.lock().unwrap().clone();
     assert_eq!(requests.len(), 2, "one model call per subagent");
-    let given = |tag: &str| {
+    for (tag, brief) in [("MID", &mid), ("LONG", &long)] {
         let head = format!("BRIEF-{tag}-HEAD");
-        requests
+        let messages = requests
             .iter()
             .find(|m| m.iter().any(|m| m.content.contains(&head)))
-            .unwrap_or_else(|| panic!("no subagent was given the {tag} brief"))
-            .clone()
-    };
-    for tag in ["MID", "LONG"] {
-        let messages = given(tag);
-        assert_eq!(messages.len(), 2, "{tag}: the system prompt and the copy");
+            .unwrap_or_else(|| panic!("no subagent was given the {tag} brief"));
         assert!(
             messages
                 .iter()
-                .all(|m| m.role == openalpaca_llm::Role::System),
-            "{tag}: no user turn"
+                .any(|m| m.role != openalpaca_llm::Role::System),
+            "{tag}: a request with no non-system message"
+        );
+        let turn = messages.last().unwrap();
+        assert_eq!(turn.role, openalpaca_llm::Role::User, "{tag}");
+        assert_eq!(
+            &turn.content, brief,
+            "{tag}: the brief whole, as the user turn"
         );
         assert!(
-            !messages[0].content.contains(&format!("BRIEF-{tag}-HEAD")),
-            "{tag}: the brief reached the composed system prompt"
+            messages
+                .iter()
+                .filter(|m| m.role == openalpaca_llm::Role::System)
+                .all(|m| !m.content.contains(&head)),
+            "{tag}: the brief reached a system message"
         );
     }
-    assert_eq!(given("MID")[1].content, mid, "the copy whole, within 40%");
-    // 40% of 8,192 tokens is 3,276, at four characters a token.
-    assert_eq!(
-        given("LONG")[1].content,
-        format!("{}\n[...truncated]", &long[..13_104]),
-        "the copy cut at 40% of the window, its tail gone"
+}
+
+/// Tells a subagent's rounds from the lead's and from the working-state
+/// writer's call (its prompt's system text), scripting each and keeping every
+/// subagent request.
+struct SubagentCompactionProvider {
+    lead: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent_requests: std::sync::Mutex<Vec<Vec<openalpaca_llm::ChatMessage>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for SubagentCompactionProvider {
+    fn name(&self) -> &str {
+        "subagent-compaction"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let (writer, _) = crate::orchestrator::working_state::render_prompt(None, "");
+        let first = request.messages.first();
+        if first.is_some_and(|m| m.content == writer) {
+            return Ok(scripted_response(
+                r#"{"topic":"Weighing the herd","goal":"Weigh every alpaca","done":[],"decisions":[],"open":[],"next":"Report the weights","refs":[]}"#,
+                vec![],
+            ));
+        }
+        let queue = if first.is_some_and(|m| m.content.contains("You are a subagent")) {
+            self.subagent_requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(request.messages.as_ref().clone());
+            &self.subagent
+        } else {
+            &self.lead
+        };
+        let next = queue.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+        Ok(next.unwrap_or_else(|| scripted_response("done", vec![])))
+    }
+}
+
+/// SA-2b (3): a compaction keeps the subagent's brief. Its messages open
+/// with the system prompt, the working-folder line (R28) and then the
+/// brief, and every compaction tier kept only `messages[..2]` — until SA-2b
+/// the system prompt and the brief's system copy, the user turn compressible
+/// like any later row. Now the loop's kept head (`LoopConfig::kept_head`) is
+/// everything the subagent was handed, so after a compaction its brief is
+/// still there whole, as a user message, and still in no system message. A
+/// ~7,500-token first round on an 8,192-token window keeps every later round
+/// past the compaction trigger; the fourth round's list is long enough for
+/// the summary tier to fold the older rows behind the four recent ones.
+#[tokio::test]
+async fn a_subagents_brief_survives_its_loops_compaction() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let brief = sa2_brief("KEPT", 600);
+    let big = "x".repeat(30_000);
+    let shared = Arc::new(SharedContext::new());
+    let worker = crate::test_util::make_agent("worker", vec!["memory_read"]);
+    shared
+        .agent_registry
+        .register_template(crate::test_util::template_from_agent(&worker));
+    let call = |id: &str, name: &str, arguments: serde_json::Value| openalpaca_llm::ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
+    };
+    let provider = Arc::new(SubagentCompactionProvider {
+        lead: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    "",
+                    vec![call(
+                        "call-1",
+                        "spawn_subagent",
+                        serde_json::json!({"agent_id": "worker", "objective": brief}),
+                    )],
+                ),
+                scripted_response(
+                    "",
+                    vec![call("call-2", "wait_for_subagents", serde_json::json!({}))],
+                ),
+                scripted_response("all done", vec![]),
+            ]
+            .into(),
+        ),
+        subagent: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    &big,
+                    vec![call("s-1", "no_such_tool", serde_json::json!({}))],
+                ),
+                scripted_response(
+                    "next",
+                    vec![call("s-2", "no_such_tool", serde_json::json!({}))],
+                ),
+                scripted_response(
+                    "next",
+                    vec![call("s-3", "no_such_tool", serde_json::json!({}))],
+                ),
+                scripted_response("seventeen", vec![]),
+            ]
+            .into(),
+        ),
+        subagent_requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Ollama,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    router.model_registry().register(
+        "claude-sonnet-4-20250514".to_string(),
+        openalpaca_llm::routing::model_registry::ModelInfo {
+            provider: openalpaca_llm::ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "weigh the herd",
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some("conv-sub"),
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+
+    let requests = provider.subagent_requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 4, "the subagent answered in four rounds");
+    let first = &requests[0];
+    let at = first
+        .iter()
+        .position(|m| m.role == openalpaca_llm::Role::User && m.content == brief)
+        .unwrap();
+    assert!(
+        at >= 2 && first[at - 1].content.starts_with("<working_folder>"),
+        "the working-folder line stands before the brief: {:?}",
+        first
+            .iter()
+            .map(|m| &m.content[..m.content.len().min(40)])
+            .collect::<Vec<_>>()
+    );
+    let after = &requests[3];
+    assert!(
+        !after.iter().any(|m| m.content == big)
+            && after.iter().any(|m| {
+                m.content
+                    .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
+            }),
+        "the last round was compacted, its older rows folded into a working state"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|m| m.role == openalpaca_llm::Role::User && m.content == brief),
+        "the brief, whole, as a user message after the compaction: {:?}",
+        after
+            .iter()
+            .map(|m| (m.role.clone(), &m.content[..m.content.len().min(40)]))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        after
+            .iter()
+            .filter(|m| m.role == openalpaca_llm::Role::System)
+            .all(|m| !m.content.contains("BRIEF-KEPT-HEAD")),
+        "the brief reached a system message"
     );
 }
 

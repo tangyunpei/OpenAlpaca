@@ -1358,6 +1358,7 @@ fn test_assembly_budget_trim_drops_oldest_non_system_history() {
     };
     let history = HistoryOutput {
         messages: history_messages.clone(),
+        ends_with_current_turn: false,
         fingerprint: [0u8; 32],
     };
     let layer_trace = LayerTrace {
@@ -1404,6 +1405,7 @@ fn test_assembly_budget_trim_preserves_system_message() {
     let big: String = "a".repeat(4000);
     let history = HistoryOutput {
         messages: vec![ChatMessage::user(&big), ChatMessage::assistant(&big)],
+        ends_with_current_turn: false,
         fingerprint: [0u8; 32],
     };
     let persona = PersonaOutput {
@@ -1446,6 +1448,140 @@ fn test_assembly_budget_trim_preserves_system_message() {
     assert!(!out.messages.is_empty());
 }
 
+/// Layer 5's inputs for SA-2b's trim tests: a two-message system prompt and
+/// Layer 3 block, and Layer 4's own output for `recent` and `current`.
+fn sa2b_assembly(
+    block: &str,
+    recent: Vec<ChatMessage>,
+    current: Option<ChatMessage>,
+    window: u32,
+) -> ComposedRequest {
+    use super::assembly::{self, AssemblyInput};
+
+    let persona = PersonaOutput {
+        blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let static_prompt = StaticPromptOutput {
+        system_message: Arc::from("system"),
+        section_registry: vec!["system"],
+        fingerprint: [0u8; 32],
+    };
+    let dyn_ctx = DynamicContextOutput {
+        context_messages: vec![],
+        additional_system_blocks: vec![SystemBlock {
+            name: "task_context",
+            content: Arc::from(block),
+            priority: SectionPriority::Normal,
+        }],
+        fingerprint: [0u8; 32],
+    };
+    let history = super::history::compute(&HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        working_state: None,
+        previous: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(recent),
+        current_user_turn: current,
+        mode: HistoryMode::Default,
+    });
+    assembly::compose(AssemblyInput {
+        persona: &persona,
+        static_prompt: &static_prompt,
+        dynamic_context: &dyn_ctx,
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: window,
+        layer_trace: LayerTrace {
+            persona_mode: PersonaMode::Minimal,
+            static_prompt_mode: StaticPromptMode::Default,
+            dynamic_context_mode: DynamicContextMode::Default,
+            history_mode: HistoryMode::Default,
+            memo_hits: LayerMemoHits::default(),
+        },
+    })
+}
+
+/// SA-2b (2): Layer 5's trim never takes the current user turn. Past the
+/// threshold (2,000-token window, 1,500) it takes the history first, oldest
+/// first, then Layer 3's system blocks — never the system prompt at
+/// `messages[0]` — and stops with the turn whole. Until SA-2b it took the
+/// oldest non-system message, the current turn among them, and kept every
+/// system message.
+#[test]
+fn layer5_trims_history_then_system_blocks_and_keeps_the_current_turn() {
+    let current = format!("CURRENT-TURN {}", "c".repeat(2_000));
+    let out = sa2b_assembly(
+        &"b".repeat(8_000),
+        vec![
+            ChatMessage::user(&"u".repeat(4_000)),
+            ChatMessage::assistant(&"a".repeat(4_000)),
+        ],
+        Some(ChatMessage::user(&current)),
+        2_000,
+    );
+    let shape: Vec<(Role, usize)> = out
+        .messages
+        .iter()
+        .map(|m| (m.role.clone(), m.content.len()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![(Role::System, 6), (Role::User, current.len())],
+        "the system prompt and the current turn, nothing else"
+    );
+    assert_eq!(out.messages[0].content, "system");
+    assert_eq!(out.messages[1].content, current, "the current turn whole");
+    assert_eq!(out.history_head_dropped, 2, "both history rows went");
+    assert!(out.section_registry.contains(&"<trimmed:history>"));
+    assert!(out.section_registry.contains(&"<trimmed:system_blocks>"));
+    assert_eq!(
+        out.token_budget.dynamic_context_tokens, 0,
+        "the dropped block is no longer counted"
+    );
+
+    // Within the threshold once the history is gone, the block stays.
+    let out = sa2b_assembly(
+        &"b".repeat(2_000),
+        vec![ChatMessage::user(&"u".repeat(4_000))],
+        Some(ChatMessage::user(&current)),
+        2_000,
+    );
+    assert_eq!(
+        out.messages
+            .iter()
+            .map(|m| m.role.clone())
+            .collect::<Vec<_>>(),
+        vec![Role::System, Role::System, Role::User],
+        "the history went first, and that was enough"
+    );
+    assert_eq!(out.messages[2].content, current);
+}
+
+/// SA-2b (2): a current user turn that alone passes the threshold goes
+/// whole — the provider's context-length error, if any, is the caller's —
+/// and the request always holds a non-system message (an Anthropic request
+/// with an empty `messages` list is what the old trim could send).
+#[test]
+fn layer5_sends_a_current_turn_past_the_threshold_whole() {
+    let current = format!("CURRENT-TURN {}", "c".repeat(8_000));
+    let out = sa2b_assembly(
+        "block",
+        vec![ChatMessage::assistant("earlier")],
+        Some(ChatMessage::user(&current)),
+        2_000,
+    );
+    let last = out.messages.last().unwrap();
+    assert_eq!(
+        (last.role.clone(), last.content.len()),
+        (Role::User, current.len()),
+        "the current turn, last"
+    );
+    assert!(last.content == current, "the current turn whole");
+    assert!(out.messages.iter().any(|m| m.role != Role::System));
+    assert_eq!(out.messages[0].content, "system");
+}
+
 #[test]
 fn test_assembly_populates_per_layer_token_budget() {
     use super::assembly::{self, AssemblyInput};
@@ -1470,6 +1606,7 @@ fn test_assembly_populates_per_layer_token_budget() {
     };
     let history = HistoryOutput {
         messages: vec![ChatMessage::user("history message")],
+        ends_with_current_turn: false,
         fingerprint: [0u8; 32],
     };
     let layer_trace = LayerTrace {

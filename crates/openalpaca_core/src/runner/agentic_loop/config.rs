@@ -50,6 +50,13 @@ pub struct LoopConfig {
     /// context compression. Each "round" is roughly 3 messages (assistant +
     /// tool results). Default: `4`.
     pub context_tail_keep: usize,
+    /// How many of the messages the loop was handed every compaction tier
+    /// keeps at the head of the list, untouched: the system prompt and the
+    /// initial query by default
+    /// (`context_budget::compaction::DEFAULT_KEPT_HEAD`, 2). A spawned
+    /// subagent sets it to its whole handed list, its objective last behind
+    /// any memory block or working-folder line (SA-2b).
+    pub kept_head: usize,
     /// Fraction of model context window to use as compression trigger (0.0–1.0).
     /// Only used by `with_context_window()`. Default: `0.6`.
     pub context_threshold: f64,
@@ -137,6 +144,7 @@ impl Clone for LoopConfig {
             agent_constraints: self.agent_constraints.clone(),
             max_context_tokens: self.max_context_tokens,
             context_tail_keep: self.context_tail_keep,
+            kept_head: self.kept_head,
             context_threshold: self.context_threshold,
             initial_tool_choice: self.initial_tool_choice.clone(),
             enable_caching: self.enable_caching,
@@ -168,6 +176,7 @@ impl std::fmt::Debug for LoopConfig {
             .field("max_context_tokens", &self.max_context_tokens)
             .field("context_threshold", &self.context_threshold)
             .field("context_tail_keep", &self.context_tail_keep)
+            .field("kept_head", &self.kept_head)
             .field("enable_caching", &self.enable_caching)
             .field("thinking", &self.thinking)
             .field("stream_callback", &self.stream_callback.is_some())
@@ -204,6 +213,7 @@ impl Default for LoopConfig {
             agent_constraints: None,
             max_context_tokens: 0,
             context_tail_keep: 4,
+            kept_head: crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
             context_threshold: DEFAULT_CONTEXT_THRESHOLD,
             initial_tool_choice: None,
             enable_caching: true,
@@ -270,6 +280,7 @@ impl LoopConfig {
             agent_constraints: Some(agent.constraints.clone()),
             max_context_tokens: 0,
             context_tail_keep: 4,
+            kept_head: crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
             context_threshold: DEFAULT_CONTEXT_THRESHOLD,
             initial_tool_choice: None,
             enable_caching: true,
@@ -364,8 +375,9 @@ pub struct LoopResult {
     /// last one, not a list: the reader wants the one it stopped on.
     pub last_tool_error: Option<String>,
     /// The working state this loop's last `LlmSummary` compaction wrote, and
-    /// its boundary: `messages[2..boundary]` of the list the loop was handed
-    /// lie behind it (design 11 §3.3). Counted in the list as the compaction
+    /// its boundary: `messages[head..boundary]` of the list the loop was
+    /// handed lie behind it (design 11 §3.3), `head` being `kept_head`
+    /// (`DEFAULT_KEPT_HEAD` but in a spawned subagent's loop). Counted in the list as the compaction
     /// found it, so once an earlier tier or compaction had shortened the list
     /// it falls short of the truth, never past it. `None` when the loop never
     /// wrote one.

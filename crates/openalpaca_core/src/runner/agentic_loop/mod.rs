@@ -719,6 +719,7 @@ async fn run_agentic_loop_core(
                     budget,
                     &backend,
                     config.writer.max_chars,
+                    config.kept_head,
                 );
                 // Design 11 §3.3: the state the older messages are folded
                 // into — this loop's last one, else the one it was handed

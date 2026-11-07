@@ -14,7 +14,7 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
-use crate::prompt_ctx::{ExecutionPath, SectionPriority};
+use crate::prompt_ctx::{ExecutionPath, PackageSectionKind, SectionPriority};
 use crate::runner::plugin_agent::{PluginLoopOutcome, PluginRunScope, run_plugin_agent_loop};
 use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
@@ -664,13 +664,31 @@ impl BuiltInTool for SpawnSubagentTool {
         .unwrap_or(200_000);
 
         // Distill parent context for this sub-agent
-        let context_package = self.context_manager.distill(
+        let mut context_package = self.context_manager.distill(
             &self.parent_bundle,
             &agent.constraints,
             model_window,
             objective,
             None, // no predecessor handoff for lead agent spawns
         );
+        // SA-2b: the objective reaches the subagent once, as its user turn
+        // (`current_user_turn` below). `distill` always adds it as the task
+        // description, which Layer 3 would route to a second system message —
+        // so it leaves the package here, as `build_subagent_minimal`'s doc
+        // asks; the other sections were fitted beside it all the same, and
+        // a plugin-backed template is handed the objective by its own path.
+        let task_description_tokens: usize = context_package
+            .sections
+            .iter()
+            .filter(|s| s.kind == PackageSectionKind::TaskDescription)
+            .map(|s| s.token_estimate)
+            .sum();
+        context_package
+            .sections
+            .retain(|s| s.kind != PackageSectionKind::TaskDescription);
+        context_package.total_tokens = context_package
+            .total_tokens
+            .saturating_sub(task_description_tokens);
         let bundle = context_package.to_bundle();
         // Design §5: a distilled memory section reaches a subagent the way
         // it reaches every other loop — outside Layer 3, which leaves
@@ -815,6 +833,11 @@ impl BuiltInTool for SpawnSubagentTool {
             let insert_at = messages.len().saturating_sub(1);
             messages.insert(insert_at, ChatMessage::user(&note));
         }
+        // SA-2b: every compaction keeps what the subagent was handed — the
+        // system prompt, any memory block or working-folder line, and its
+        // objective last — where the default head (the system prompt and
+        // one message) would leave the objective among the rows it folds.
+        loop_config.kept_head = messages.len();
 
         // **S3 — a subagent's rounds carry a budget too.** The lead's loop is
         // handed a `ContextBudgetManager` and the main loop's is; a subagent's
@@ -1295,9 +1318,9 @@ impl BuiltInTool for SpawnSubagentsBatchTool {
 
 /// The `objective` parameter's description on both spawn tools (SA-2): an
 /// objective is the subagent's brief — the user turn it answers — so the
-/// parameter says what a brief holds. It names no length: the subagent's
-/// window bounds a brief (`ContextManager::distill`, Layer 5's trim), by a
-/// figure the lead is not told.
+/// parameter says what a brief holds. It names no length: since SA-2b
+/// nothing cuts or drops a brief, but one past the subagent's window, a
+/// figure the lead is not told, fails at the provider.
 const OBJECTIVE_DESCRIPTION: &str = "A self-contained brief for the subagent: the goal (what to \
      achieve, and why); the inputs it needs (facts, file paths, workspace keys, earlier \
      results); the constraints (scope, limits, what not to do); and what to return and where \
