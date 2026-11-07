@@ -155,9 +155,10 @@ describe("AgentsSection run counts (GAP-20, counts half — T48)", () => {
   });
 
   /**
-   * The other half of GAP-20 is untouched: enabling a template needs
-   * enforcement in the spawn path (plan P-31), so the switch stays disabled
-   * and still names why.
+   * The other half of GAP-20 narrowed with C3a: a file saying `disabled:
+   * true` switches a template off and the spawn path refuses it, but no
+   * route writes that file, so the switch stays disabled and names the file
+   * that does the job.
    */
   it("leaves the per-template toggle disabled and attributed", () => {
     state.templates = [template({ run_count: 3 })];
@@ -166,6 +167,46 @@ describe("AgentsSection run counts (GAP-20, counts half — T48)", () => {
 
     const toggle = screen.getByRole("switch");
     expect(toggle).toBeDisabled();
-    expect(screen.getByText(/no enabled flag/i)).toBeInTheDocument();
+    expect(screen.getByText(/disabled: true/)).toBeInTheDocument();
+  });
+});
+
+describe("AgentsSection switched-off templates (§7 O-1 (b), C3a)", () => {
+  /**
+   * A file in `config/agents` saying `disabled: true` switches a template
+   * off (subagent design §2.4 L-4a): the daemon lists its row with
+   * `state: "disabled"` and the file's `path`. The row says so in words and
+   * names the file, and its toggle reads off — still not a control.
+   */
+  it("shows a switched-off template's chip and file", () => {
+    const path = "/Users/x/.openalpaca/config/agents/research_agent.md";
+    state.templates = [
+      template({
+        id: "research_agent",
+        name: "research_agent",
+        description: "",
+        state: "disabled",
+        path,
+        source: "file",
+      }),
+    ];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText("Switched off")).toBeInTheDocument();
+    expect(screen.getByText(`Switched off by ${path}`)).toBeInTheDocument();
+    const toggle = screen.getByRole("switch");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(toggle).toBeDisabled();
+  });
+
+  /** A ready template keeps today's row: no chip, the toggle on. */
+  it("leaves a ready template's row as it was", () => {
+    state.templates = [template({ state: "ready", source: "bundled" })];
+
+    render(<AgentsSection />);
+
+    expect(screen.queryByText(/Switched off/)).toBeNull();
+    expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
   });
 });

@@ -305,6 +305,7 @@ Notes:
 - `--from-file <path>` creates the agent from a TOML file.
 - `set` takes a dotted config path, for example `openalpaca agents set <agent_id> llm.model <model-id>`. Every section on the way to the last key must already exist in the agent's config (`agents config <agent_id>` shows it). The value is read as a number, then `true`/`false`, then a string.
 - `remove` archives the agent.
+- `list` and `status` show one row per agent template, built-in ones included. A template a file in `~/.openalpaca/config/agents` switches off — a file holding its `id:` and `disabled: true` — reads `disabled` in the STATUS column and has no instance, so `config` and `set` do not find it; delete that file, or remove the line, and it reads `idle` again once a template runs under that `id`. An `id` switched off before this store ever ran a template of it has no row: `list` leaves it out and `status` does not find it, while `GET /v1/agent-templates` and Settings → Agents still list it. The file, not a command, is the switch; `GET /v1/agent-templates` names the file (`state: "disabled"`, `path`).
 
 ### `llm`
 

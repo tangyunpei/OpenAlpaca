@@ -98,10 +98,10 @@ The GUI renders what the daemon serves and nothing else. When the design shows a
 
 `src/lib/unavailable.ts` is the single registry of those surfaces. Two entries are left:
 
-| Gap      | Surface                                    | What is missing                                                                |
-| -------- | ------------------------------------------ | ------------------------------------------------------------------------------ |
-| `GAP-17` | Settings → Connectors, `Connect service`   | No route adds a connector; connectors are compiled into the daemon             |
-| `GAP-20` | Settings → Agents, the per-template toggle | Agent templates have no `enabled` flag, and nothing would enforce one on spawn |
+| Gap      | Surface                                    | What is missing                                                                                                                         |
+| -------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `GAP-17` | Settings → Connectors, `Connect service`   | No route adds a connector; connectors are compiled into the daemon                                                                      |
+| `GAP-20` | Settings → Agents, the per-template toggle | No route writes a template's switch: a file in `config/agents` saying `disabled: true` switches it off, and the toggle cannot write one |
 
 Each entry in `GAPS` carries a label, the missing API, a proposed endpoint and the surface it blocks. `gapNote(gap)` is the sentence a view prints, and it is read at the point of use — `CONNECTOR_ADD_NOTE` in `hooks/useConnectors.ts`, `TEMPLATE_TOGGLE_NOTE` in `hooks/useAgents.ts`. `Availability<T>` is the result type for an adapter whose route does not exist yet.
 

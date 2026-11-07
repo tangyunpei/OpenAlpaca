@@ -1412,10 +1412,13 @@ separately, which instances are running right now (`GET /v1/agent-instances`).
 A template with no completed run in the window says so in words, because
 `0 runs` reads like a metric that failed to load.
 
-The per-template on/off switch is the second remaining gap: a template has no
-`enabled` field and nothing would enforce one where subagents are spawned. The
-switch is drawn on and disabled, with that reason attached, and a note under
-the list says the same.
+A template a file in `~/.openalpaca/config/agents` switches off — a file
+holding its `id:` and `disabled: true` — is listed with a **Switched off**
+chip and the file's path ("Switched off by …"), and its switch is drawn off.
+
+The per-template on/off switch as a control is the second remaining gap: the
+switch is that file, and no route writes it. The switch is drawn disabled,
+with that reason attached, and a note under the list says the same.
 
 ### Conversations
 
@@ -1463,7 +1466,7 @@ Two, and both say so in the UI rather than rendering a dead control
 | Gap | Surface | Why | Proposed |
 |---|---|---|---|
 | GAP-17 | `Connect service` in Settings → Connectors | Connectors are compiled into the daemon; `POST /v1/connectors/{id}/config` only sets a token on one that already exists | `POST /v1/connectors { kind, credentials }` |
-| GAP-20 | the per-template toggle in Settings → Agents | `TemplateResponse` has no `enabled` flag, and nothing enforces one where subagents are spawned | `PUT /v1/agent-templates/{id}/enabled` |
+| GAP-20 | the per-template toggle in Settings → Agents | No route writes a template's switch — a file in `config/agents` saying `disabled: true` switches it off, the row says `state: "disabled"` and a spawn of it is refused | `PUT /v1/agent-templates/{id}/enabled` |
 
 Some other absences are **decisions**, not gaps, and are stated as such where
 they appear: HTML and SVG previews are shown as source until the webview

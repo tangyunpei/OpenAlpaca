@@ -524,7 +524,8 @@ pub async fn list_templates_handler(
 
 /// The rows of `GET /v1/agent-templates`, sorted by id: every resolved
 /// template with where it comes from (R-1), and a row for each id a file
-/// withholds — in no list of templates, but listed, saying why.
+/// withholds or switches off — in no list of templates, but listed, saying
+/// why.
 fn template_rows(
     registry: &AgentRegistry,
     runs: &std::collections::HashMap<String, openalpaca_storage::TemplateRunCount>,
@@ -539,7 +540,7 @@ fn template_rows(
             TemplateResponse::from_template(t, provenance.as_ref(), runs.get(id), window)
         })
         .collect();
-    rows.extend(registry.withheld_ids().iter().filter_map(|id| {
+    rows.extend(registry.held_off_ids().iter().filter_map(|id| {
         let provenance = registry.provenance(id)?;
         TemplateResponse::withheld(id, &provenance, runs.get(id), window)
     }));
@@ -555,7 +556,7 @@ pub async fn get_template_handler(
     let registry = &state.gateway.shared_context.agent_registry;
     let template = registry.get_template(&id);
     let provenance = registry.provenance(&id);
-    if template.is_none() && registry.withheld_ids().binary_search(&id).is_err() {
+    if template.is_none() && registry.held_off_ids().binary_search(&id).is_err() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": format!("Template '{}' not found", id) })),
@@ -574,7 +575,8 @@ pub async fn get_template_handler(
             tracing::warn!("Failed to read template run counts: {e}");
             std::collections::HashMap::new()
         });
-    // A withheld id's row says why no definition runs under it (R-1).
+    // A withheld or switched-off id's row says why no definition runs under
+    // it (R-1).
     let response = match (&template, &provenance) {
         (Some(template), _) => Some(TemplateResponse::from_template(
             template,
@@ -1202,5 +1204,107 @@ mod tests {
         );
         assert!(t.registry.get_template("general_agent").is_some());
         assert!(!t.agents().join(".archived").exists());
+    }
+
+    // ── A file that switches a template off (§2.4 L-4a, §7 O-1 (b)) ──
+
+    /// R-1: an id a file switches off keeps its row, saying `disabled` and
+    /// naming the file — a bundled id and one of the person's own alike —
+    /// while no definition runs under it.
+    #[test]
+    fn agent_templates_rows_say_disabled_with_the_path() {
+        let t = Templates::new(&[
+            (
+                "research_agent.md",
+                "---\nid: research_agent\ndisabled: true\n---\n".to_string(),
+            ),
+            (
+                "reader_off.md",
+                "---\nid: reader\ndisabled: true\n---\n".to_string(),
+            ),
+        ]);
+
+        let rows = serde_json::to_value(template_rows(
+            &t.registry,
+            &std::collections::HashMap::new(),
+            "7d",
+        ))
+        .unwrap();
+        let row = |id: &str| {
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == id)
+                .unwrap_or_else(|| panic!("no row for {id}: {rows}"))
+                .clone()
+        };
+        let research = row("research_agent");
+        assert_eq!(research["state"], "disabled");
+        assert_eq!(research["source"], "file");
+        assert_eq!(
+            research["path"],
+            t.agents().join("research_agent.md").display().to_string()
+        );
+        assert_eq!(research["warnings"], serde_json::json!([]));
+        let reader = row("reader");
+        assert_eq!(reader["state"], "disabled");
+        assert_eq!(
+            reader["path"],
+            t.agents().join("reader_off.md").display().to_string()
+        );
+        assert_eq!(rows.as_array().unwrap().len(), 10);
+    }
+
+    /// T-2: `DELETE` on a switched-off id archives the switching file, and
+    /// the template it switched off is back when the call returns, its row
+    /// `idle` again.
+    #[test]
+    fn delete_on_a_switched_off_id_archives_the_switching_file() {
+        let t = Templates::new(&[(
+            "no research.md",
+            "---\nid: research_agent\ndisabled: true\n---\n".to_string(),
+        )]);
+        assert!(t.registry.get_template("research_agent").is_none());
+        let rows = serde_json::to_value(template_rows(
+            &t.registry,
+            &std::collections::HashMap::new(),
+            "7d",
+        ))
+        .unwrap();
+        let research = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "research_agent")
+            .unwrap_or_else(|| panic!("no row for research_agent: {rows}"));
+        assert_eq!(research["state"], "disabled", "switched off, not withheld");
+
+        t.route().delete("research_agent").unwrap();
+
+        assert!(!t.agents().join("no research.md").exists());
+        let archived: Vec<String> = std::fs::read_dir(t.agents().join(".archived"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(archived.len(), 1);
+        assert!(
+            archived[0].starts_with("no research.") && archived[0].ends_with(".md"),
+            "{archived:?}"
+        );
+        assert!(t.registry.get_template("research_agent").is_some());
+        let row = SubAgentRepository::new(&t.db)
+            .get("research_agent")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "idle");
+    }
+
+    /// T-2: the refusal for a bundled template no file holds names the two
+    /// ways a person has — a file overriding it, or one switching it off.
+    #[test]
+    fn the_bundled_refusal_names_the_switch() {
+        let message = DeleteTemplateError::Bundled.to_string();
+        assert!(message.contains("override it"), "{message}");
+        assert!(message.contains("disabled: true"), "{message}");
     }
 }

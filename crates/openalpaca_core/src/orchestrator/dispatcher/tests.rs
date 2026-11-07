@@ -411,6 +411,46 @@ fn a_persons_own_lead_is_chosen_before_the_bundled_lead() {
     assert_eq!(dispatch_one(&dispatcher, "Second"), "lead_agent");
 }
 
+/// G-1, as today: a file switching `lead_agent` off (subagent design §2.4
+/// L-4a) does not stop workflows — no `orchestration` template is left, so
+/// the fallback borrows another template as lead, the first by id
+/// (`code_agent` on a stock store). §7 O-1's changed premise is the owner's
+/// to confirm; nothing here changes the fallback.
+#[test]
+fn switching_off_lead_agent_alone_still_borrows_a_lead() {
+    use crate::agent::file_layer::{LoadMode, rescan_file_layer};
+    use crate::bundled::bundled_templates;
+
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().canonicalize().unwrap());
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("lead_agent.md"),
+        "---\nid: lead_agent\ndisabled: true\n---\n",
+    )
+    .unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup(vec![]);
+    let registry = &dispatcher.shared_context.agent_registry;
+    registry.set_bundled_layer(bundled_templates());
+    rescan_file_layer(
+        &agents,
+        LoadMode::Start,
+        registry,
+        &crate::tools::ToolRegistry::default(),
+        &db,
+    )
+    .unwrap();
+
+    assert!(
+        registry
+            .find_templates_by_capability("orchestration")
+            .is_empty()
+    );
+    assert_eq!(dispatch_one(&dispatcher, "First"), "code_agent");
+}
+
 /// …and the capacity case still reads as capacity.
 #[test]
 fn test_dispatch_lead_agent_fails_when_the_only_lead_is_busy() {

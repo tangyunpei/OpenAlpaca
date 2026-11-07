@@ -406,6 +406,22 @@ pub fn lenient_template_id(input: &str) -> Option<String> {
         .filter(|id| !id.is_empty())
 }
 
+/// Whether a template file's frontmatter says `disabled: true` (subagent
+/// design §2.4 L-4a, §7 O-1 (b)), read leniently from its raw text by the
+/// parser's boolean rule (`true`, `yes` or `1`), whether or not the rest of
+/// the file parses: a file that says it switches off the id it names, and
+/// its other keys are not read. False when the text opens no frontmatter.
+pub fn lenient_disabled(input: &str) -> bool {
+    let mut lines = input.lines();
+    if lines.next().is_none_or(|first| first.trim() != "---") {
+        return false;
+    }
+    lines
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| line.trim().strip_prefix("disabled:"))
+        .is_some_and(parse_yaml_bool)
+}
+
 /// Render an `AgentTemplate` back to valid Markdown with YAML frontmatter.
 ///
 /// Designed to round-trip: `parse_agent_markdown(render_agent_markdown(t))`

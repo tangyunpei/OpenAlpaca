@@ -8,12 +8,13 @@
 //! nothing keeps a copy the directory no longer holds. The file layer sits
 //! over the bundled one (`crate::bundled`): a file overrides the bundled
 //! template of its `id`, and an unedited copy of a shipped version is set
-//! aside (§2.2), so a file deleted brings the bundled template back. The
+//! aside (§2.2), so a file deleted brings the bundled template back. A file
+//! saying `disabled: true` switches the id it names off (§2.4 L-4a). The
 //! legacy `.toml` agents are not templates: the daemon reads them at start,
 //! as before.
 
 use super::registry::{AgentRegistry, FileLayer, NotUsedReason, TemplateLayer, same_definition};
-use super::template::{AgentTemplate, lenient_template_id, parse_agent_markdown};
+use super::template::{AgentTemplate, lenient_disabled, lenient_template_id, parse_agent_markdown};
 use crate::bundled::{ShippedCopy, ShippedVersion, classify_agent_file};
 use crate::tools::ToolRegistry;
 use crate::tools::registry::validate_annotation_capability;
@@ -40,16 +41,30 @@ struct Read {
     path: PathBuf,
     /// Set when the bytes are a version OpenAlpaca shipped (V-1, V-4).
     copy: Option<ShippedCopy>,
-    parsed: Result<AgentTemplate, Broken>,
+    content: Content,
+}
+
+/// What a file holds.
+enum Content {
+    Template(Box<AgentTemplate>),
+    /// The frontmatter says `disabled: true` (L-4a): the file switches off
+    /// the id its `id:` line names, else its file stem, and nothing else in
+    /// it is read.
+    Disabled {
+        id: Option<String>,
+    },
+    Broken(Broken),
 }
 
 impl Read {
     /// The id the file names: its template's, else its `id:` line read
     /// leniently, else its file stem.
     fn id(&self) -> Option<String> {
-        match &self.parsed {
-            Ok(template) => Some(template.frontmatter.id.clone()),
-            Err(broken) => broken.id.clone().or_else(|| file_stem(&self.path)),
+        match &self.content {
+            Content::Template(template) => Some(template.frontmatter.id.clone()),
+            Content::Disabled { id } | Content::Broken(Broken { id, .. }) => {
+                id.clone().or_else(|| file_stem(&self.path))
+            }
         }
     }
 }
@@ -76,9 +91,14 @@ struct Broken {
 /// stem) as withheld (L-4) when a layer of the registry held that id before
 /// the rescan — the bundled one included, so a broken override never gives
 /// way to the bundled template (U2) — and is skipped with a `WARN`, as
-/// before, when none did. A template whose `require_confirmation_for` names
-/// no tool is warned about (W-1). A directory that cannot be read leaves the
-/// layer as it was; one that does not exist empties it.
+/// before, when none did. A file whose frontmatter says `disabled: true`
+/// switches off the id it names (L-4a), taking its place in the file-name
+/// order as a template does; its `agent` row reads `disabled` while it
+/// does, and `idle` again once it does not and a template runs under the
+/// id. A template whose
+/// `require_confirmation_for` names no tool is warned about (W-1). A
+/// directory that cannot be read leaves the layer as it was; one that does
+/// not exist empties it.
 ///
 /// `tools` is the tool registry: the `annotation:` names it knows, and the
 /// tools W-1 checks a confirmation list against.
@@ -89,7 +109,8 @@ struct Broken {
 ///
 /// Returns an error only in `LoadMode::Start`, for an unknown `annotation:`
 /// capability, worded as the start always worded it. At start it logs §1.3's
-/// summary and one line per override.
+/// summary, then one line per override, then one per file that switches an
+/// id off; a reload logs the last when a file newly switches an id off.
 pub fn rescan_file_layer(
     agents_dir: &Path,
     mode: LoadMode,
@@ -128,24 +149,26 @@ pub fn rescan_file_layer(
     }
 
     // The start refuses a file naming an unknown capability wherever it
-    // sorts, a duplicate included, as it always has.
+    // sorts, a duplicate included, as it always has. A file that switches
+    // an id off is not read past its `disabled:` and `id:` lines.
     if mode == LoadMode::Start {
         for file in &files_read {
-            if let Ok(template) = &file.parsed {
+            if let Content::Template(template) = &file.content {
                 check_capabilities(template, &known_capabilities)
                     .map_err(|e| format!("{}: {e}", file.path.display()))?;
             }
         }
     }
 
-    // The files that parse first, then the broken ones: a broken file never
-    // takes an id from one that parses, whichever sorts first.
+    // The files that parse or switch an id off first, then the broken ones:
+    // a broken file never takes an id from either, whichever sorts first.
     let mut loaded = Vec::new();
+    let mut switched_off = Vec::new();
     let mut broken_files = Vec::new();
     for file in &files_read {
         let path = &file.path;
-        match &file.parsed {
-            Ok(template) => {
+        match &file.content {
+            Content::Template(template) => {
                 let id = &template.frontmatter.id;
                 if layer.holds(id) {
                     note_duplicate(&mut layer, id, path);
@@ -157,7 +180,7 @@ pub fn rescan_file_layer(
                     withhold(&mut layer, id, path, reason);
                     continue;
                 }
-                layer.insert(template.clone(), Some(path.clone()));
+                layer.insert(AgentTemplate::clone(template), Some(path.clone()));
                 for warning in confirmation_warnings(template, path, tools) {
                     warn!("{warning}");
                     layer.warn(id, warning);
@@ -171,7 +194,22 @@ pub fn rescan_file_layer(
                     );
                 }
             }
-            Err(broken) => broken_files.push((path, broken)),
+            Content::Disabled { .. } => {
+                let Some(id) = file.id() else {
+                    warn!(
+                        "Agent template {} says disabled: true but names no id",
+                        path.display()
+                    );
+                    continue;
+                };
+                if layer.holds(&id) {
+                    note_duplicate(&mut layer, &id, path);
+                    continue;
+                }
+                layer.disable(id.clone(), path.clone());
+                switched_off.push((id, path.clone()));
+            }
+            Content::Broken(broken) => broken_files.push((path, broken)),
         }
     }
     for (path, broken) in broken_files {
@@ -191,6 +229,7 @@ pub fn rescan_file_layer(
     }
 
     let before = resolved_by_layer(registry);
+    let disabled_before = registry.disabled_ids();
     registry.replace_file_layer(layer);
     let after = resolved_by_layer(registry);
     for (id, (layer, template)) in &after {
@@ -214,6 +253,27 @@ pub fn rescan_file_layer(
             }
         }
     }
+    // L-4a: a switched-off id's row is kept, reading `disabled`; one no
+    // longer switched off reads `idle` again when a template runs under it
+    // (a file's or the bundle's was set back by its row's write above; a
+    // plugin's is set back here). Under which nothing runs, the row stays
+    // as it reads, as a row a daemon that was down left `disabled` does.
+    let repo = openalpaca_storage::SubAgentRepository::new(db);
+    for (id, path) in &switched_off {
+        let _ = repo.update_status(id, "disabled", None);
+        if mode == LoadMode::Reload && disabled_before.binary_search(id).is_err() {
+            info!("{}", switch_off_line(path, id, registry.is_bundled(id)));
+        }
+    }
+    for id in &disabled_before {
+        if !switched_off.iter().any(|(off, _)| off == id)
+            && registry.get_template(id).is_some()
+            && let Ok(Some(row)) = repo.get(id)
+            && row.status == "disabled"
+        {
+            let _ = repo.update_status(id, "idle", None);
+        }
+    }
     if mode == LoadMode::Start {
         let bundled = registry.bundled_count();
         let overriding: Vec<(&str, &Path)> = loaded
@@ -230,6 +290,9 @@ pub fn rescan_file_layer(
                 "Agent template {} overrides the bundled template {id}",
                 path.display()
             );
+        }
+        for (id, path) in &switched_off {
+            info!("{}", switch_off_line(path, id, registry.is_bundled(id)));
         }
     }
     registry.sync_template_instances();
@@ -295,6 +358,20 @@ pub(crate) fn start_summary(
     format!(
         "Agent templates: {bundled} bundled; {read} from {}{overrides}; {copies}{earlier}",
         dir.display()
+    )
+}
+
+/// §1.3's line for a file that switches an id off (L-4a), `INFO`: deliberate,
+/// like an override.
+fn switch_off_line(path: &Path, id: &str, bundled: bool) -> String {
+    let which = if bundled {
+        "the bundled template"
+    } else {
+        "the template"
+    };
+    format!(
+        "Agent template {} switches off {which} {id} (disabled: true)",
+        path.display()
     )
 }
 
@@ -394,23 +471,33 @@ fn read_template_files(agents_dir: &Path) -> std::io::Result<Vec<Read>> {
                 .as_ref()
                 .ok()
                 .and_then(|bytes| classify_agent_file(bytes));
-            let parsed = match bytes {
+            let content = match bytes {
                 Ok(bytes) => match String::from_utf8(bytes) {
-                    Ok(text) => parse_agent_markdown(&text).map_err(|e| Broken {
+                    Ok(text) if lenient_disabled(&text) => Content::Disabled {
                         id: lenient_template_id(&text),
-                        error: e.to_string(),
-                    }),
-                    Err(e) => Err(Broken {
+                    },
+                    Ok(text) => match parse_agent_markdown(&text) {
+                        Ok(template) => Content::Template(Box::new(template)),
+                        Err(e) => Content::Broken(Broken {
+                            id: lenient_template_id(&text),
+                            error: e.to_string(),
+                        }),
+                    },
+                    Err(e) => Content::Broken(Broken {
                         id: lenient_template_id(&String::from_utf8_lossy(e.as_bytes())),
                         error: "the file is not UTF-8".to_string(),
                     }),
                 },
-                Err(e) => Err(Broken {
+                Err(e) => Content::Broken(Broken {
                     id: None,
                     error: format!("cannot be read: {e}"),
                 }),
             };
-            Read { path, copy, parsed }
+            Read {
+                path,
+                copy,
+                content,
+            }
         })
         .collect())
 }
@@ -530,10 +617,11 @@ fn persist_template_to_db(db: &Database, template: &AgentTemplate, template_id: 
     let _ = repo.upsert(&storage_config);
     // The upsert never moves an existing row's status, so a row a DELETE
     // archived — an earlier build's, before the bundled template of its id
-    // ran again, or this build's, before a file of its id came back — would
-    // read `archived` while the template runs: set it back.
+    // ran again, or this build's, before a file of its id came back — or one
+    // a switching file left `disabled` (L-4a) would read so while the
+    // template runs: set it back.
     if let Ok(Some(row)) = repo.get(template_id)
-        && row.status == "archived"
+        && (row.status == "archived" || row.status == "disabled")
     {
         let _ = repo.update_status(template_id, "idle", None);
     }
@@ -549,3 +637,6 @@ mod tests;
 
 #[cfg(test)]
 mod bundle_tests;
+
+#[cfg(test)]
+mod disabled_tests;

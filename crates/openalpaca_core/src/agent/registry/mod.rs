@@ -57,6 +57,13 @@ pub enum TemplateState {
         path: PathBuf,
         reason: String,
     },
+    /// A file holds the id and says `disabled: true` (§2.4 L-4a, §7 O-1
+    /// (b)): the id leaves every list, a spawn of it is refused naming the
+    /// file, and no other layer's template of the id stands in — neither
+    /// the bundled one nor a plugin's.
+    Disabled {
+        path: PathBuf,
+    },
 }
 
 /// Why a definition of an id is not used.
@@ -123,11 +130,12 @@ impl TemplateProvenance {
     }
 }
 
-/// What the file layer holds under an id: a template, or a file that
-/// cannot be used (L-4).
+/// What the file layer holds under an id: a template, a file that cannot
+/// be used (L-4), or a file that switches the id off (L-4a).
 enum FileHeld {
     Template(Box<AgentTemplate>),
     Withheld { reason: String },
+    Disabled,
 }
 
 /// An id of the file layer, with the file it was read from and the other
@@ -144,7 +152,7 @@ impl FileTemplate {
     fn template(&self) -> Option<&AgentTemplate> {
         match &self.held {
             FileHeld::Template(template) => Some(template),
-            FileHeld::Withheld { .. } => None,
+            FileHeld::Withheld { .. } | FileHeld::Disabled => None,
         }
     }
 }
@@ -179,7 +187,13 @@ impl FileLayer {
         self.hold(id, Some(path), FileHeld::Withheld { reason })
     }
 
-    /// Whether the layer holds `id`, usable or withheld.
+    /// Hold `id` for a file that switches it off (L-4a). Returns false, as
+    /// `insert` does, when the id is already in the layer.
+    pub fn disable(&mut self, id: String, path: PathBuf) -> bool {
+        self.hold(id, Some(path), FileHeld::Disabled)
+    }
+
+    /// Whether the layer holds `id`, usable, withheld or switched off.
     pub fn holds(&self, id: &str) -> bool {
         self.templates.contains_key(id)
     }
@@ -273,8 +287,9 @@ struct TemplateLayers {
 
 impl TemplateLayers {
     /// Recompute the resolved view: each id from the file layer, else the
-    /// bundled one, else the plugin one. An id the file layer withholds is
-    /// in no layer's view: nothing stands in for the person's file (L-4).
+    /// bundled one, else the plugin one. An id the file layer withholds or
+    /// switches off is in no layer's view: nothing stands in for the
+    /// person's file (L-4, L-4a).
     fn resolve(&mut self) {
         self.resolved.clear();
         self.resolved.extend(
@@ -299,7 +314,8 @@ impl TemplateLayers {
         }
     }
 
-    /// Whether any layer holds `id`, a withheld file's included.
+    /// Whether any layer holds `id`, a withheld or switching file's
+    /// included.
     fn holds(&self, id: &str) -> bool {
         self.resolved.contains_key(id) || self.file.holds(id)
     }
@@ -417,7 +433,7 @@ impl AgentRegistry {
     // ── Template methods ─────────────────────────────────────────────
 
     /// Register an agent template. Returns false if any layer already holds
-    /// the id, a withheld file included.
+    /// the id, a withheld file or one that switches the id off included.
     ///
     /// A plugin's template (`AgentSource::Plugin`) goes into the plugin
     /// layer, any other into the file layer with no path.
@@ -483,15 +499,30 @@ impl AgentRegistry {
         self.lock_templates().bundled.len()
     }
 
-    /// The ids a file withholds (L-4), sorted: in no list of templates, but
-    /// on the template listing's rows (R-1).
-    pub fn withheld_ids(&self) -> Vec<String> {
+    /// The ids a file holds with no template under them — withheld (L-4)
+    /// or switched off (L-4a) — sorted: in no list of templates, but on the
+    /// template listing's rows (R-1).
+    pub fn held_off_ids(&self) -> Vec<String> {
         let templates = self.lock_templates();
         let mut ids: Vec<String> = templates
             .file
             .templates
             .iter()
-            .filter(|(_, entry)| matches!(entry.held, FileHeld::Withheld { .. }))
+            .filter(|(_, entry)| entry.template().is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// The ids a file switches off (L-4a), sorted.
+    pub fn disabled_ids(&self) -> Vec<String> {
+        let templates = self.lock_templates();
+        let mut ids: Vec<String> = templates
+            .file
+            .templates
+            .iter()
+            .filter(|(_, entry)| matches!(entry.held, FileHeld::Disabled))
             .map(|(id, _)| id.clone())
             .collect();
         ids.sort();
@@ -504,6 +535,9 @@ impl AgentRegistry {
     /// `not_used` lists, after the file layer's own entries (duplicates,
     /// broken files), the bundled template a file overrides, the unedited
     /// copies set aside for the id (V-1) and the plugins refused it (P-2).
+    /// An id a file switches off (L-4a) lists no bundled template as
+    /// overridden — the file runs nothing in its place — and lists a plugin's
+    /// template of the id, registered before the file came, as refused.
     pub fn provenance(&self, template_id: &str) -> Option<TemplateProvenance> {
         let templates = self.lock_templates();
         let mut provenance = if let Some(entry) = templates.file.templates.get(template_id) {
@@ -515,16 +549,35 @@ impl AgentRegistry {
                     },
                     vec![format!("{} {reason}", path.display())],
                 ),
+                (FileHeld::Disabled, Some(path)) => {
+                    (TemplateState::Disabled { path: path.clone() }, Vec::new())
+                }
                 _ => (TemplateState::Ready, Vec::new()),
             };
             warnings.extend(entry.warnings.iter().cloned());
             let mut not_used = entry.not_used.clone();
-            if templates.bundled.contains_key(template_id) {
+            let disabled = matches!(entry.held, FileHeld::Disabled);
+            if templates.bundled.contains_key(template_id) && !disabled {
                 not_used.push(NotUsed {
                     layer: TemplateLayer::Bundled,
                     path: None,
                     reason: NotUsedReason::Overridden,
                     plugin: None,
+                });
+            }
+            if disabled
+                && let Some(AgentSource::Plugin { plugin_id, .. }) =
+                    templates.plugin.get(template_id).map(|t| &t.source)
+                && !templates
+                    .refused
+                    .get(template_id)
+                    .is_some_and(|plugins| plugins.contains(plugin_id))
+            {
+                not_used.push(NotUsed {
+                    layer: TemplateLayer::Plugin,
+                    path: None,
+                    reason: NotUsedReason::PluginRefused,
+                    plugin: Some(plugin_id.clone()),
                 });
             }
             TemplateProvenance {
@@ -724,6 +777,15 @@ impl AgentRegistry {
             let templates = self.lock_templates();
             let Some(template) = templates.resolved.get(template_id) else {
                 return Err(match templates.file.templates.get(template_id) {
+                    Some(FileTemplate {
+                        held: FileHeld::Disabled,
+                        path: Some(path),
+                        ..
+                    }) => format!(
+                        "template '{template_id}' is switched off by {} (disabled: true); delete \
+                         that file, or remove the line, to use it again",
+                        path.display()
+                    ),
                     Some(FileTemplate {
                         held: FileHeld::Withheld { reason },
                         path: Some(path),

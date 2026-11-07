@@ -14,7 +14,8 @@ use std::sync::Arc;
 pub enum DeleteTemplateError {
     /// The id is a bundled template no file of the person's holds: a
     /// built-in template cannot be removed, only overridden or switched
-    /// off by a file (subagent design §2.10 T-2).
+    /// off by a file saying `disabled: true` (subagent design §2.10 T-2,
+    /// §2.4 L-4a).
     Bundled,
     /// Any other refusal or failure, worded for the person.
     Other(String),
@@ -31,7 +32,8 @@ impl std::fmt::Display for DeleteTemplateError {
         match self {
             Self::Bundled => f.write_str(
                 "a built-in template cannot be removed; write a file of the same id in \
-                 config/agents to override it",
+                 config/agents to override it, or one holding its id and `disabled: true` to \
+                 switch it off",
             ),
             Self::Other(message) => f.write_str(message),
         }
@@ -287,8 +289,8 @@ impl AgentConfigService {
     /// is called, moves to `.archived/<file stem>.<UTC timestamp>.md` and its
     /// `agent` row reads `archived`. The caller rescans the file layer, which
     /// takes the template and its idle instance out of the catalog — or
-    /// brings back the bundled template the file overrode (§2.10 T-2), whose
-    /// row is then not archived.
+    /// brings back the bundled template the file overrode or switched off
+    /// (§2.10 T-2, §2.4 L-4a), whose row the rescan then sets back.
     ///
     /// Refused for a bundled template no file holds
     /// (`DeleteTemplateError::Bundled`), and if any busy instances are
@@ -349,9 +351,10 @@ impl AgentConfigService {
         }
 
         // 2. Update DB status to archived — unless a bundled template stands
-        // under the file: the id stays in the catalog, and the rescan writes
-        // the bundled template's definition into its row.
-        if !provenance.overrides_bundled() {
+        // under the file, overridden or switched off by it: the id is then in
+        // the catalog after the rescan, which writes the bundled template's
+        // definition into its row.
+        if !self.registry.is_bundled(id) {
             let repo = SubAgentRepository::new(&self.db);
             let _ = repo.update_status(id, "archived", None);
         }

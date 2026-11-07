@@ -102,14 +102,16 @@ pub struct TemplateResponse {
     pub source: String,
     /// The plugin's id for a plugin's template, else null.
     pub plugin: Option<String>,
-    /// The file the template is read from (or, withheld, the file that
-    /// withholds it), else null.
+    /// The file the template is read from (or, withheld or disabled, the
+    /// file that withholds it or switches it off), else null.
     pub path: Option<String>,
     /// Whether a file of the person's stands over the bundled template of
     /// this id.
     pub overrides_bundled: bool,
-    /// `"ready"`, or `"withheld"`: a file holds the id and cannot be used
-    /// (L-4), and a spawn of it is refused naming the file.
+    /// `"ready"`; `"withheld"`: a file holds the id and cannot be used
+    /// (L-4); or `"disabled"`: a file holds the id and says `disabled: true`
+    /// (L-4a). A spawn of a withheld or disabled id is refused naming the
+    /// file.
     pub state: String,
     /// The definitions of this id that do not run: a bundled template
     /// overridden, unedited copies set aside, duplicates, plugins refused.
@@ -224,6 +226,7 @@ impl TemplateResponse {
             overrides_bundled: provenance.is_some_and(TemplateProvenance::overrides_bundled),
             state: match provenance.map(|p| &p.state) {
                 Some(TemplateState::Withheld { .. }) => "withheld",
+                Some(TemplateState::Disabled { .. }) => "disabled",
                 _ => "ready",
             }
             .to_string(),
@@ -234,9 +237,10 @@ impl TemplateResponse {
         }
     }
 
-    /// The row of an id a file withholds (L-4): no definition runs under
-    /// it, so the row carries none — its name is the id, its definition
-    /// the parser's defaults — and `state`, `path` and `warnings` say why.
+    /// The row of an id a file withholds (L-4) or switches off (L-4a): no
+    /// definition runs under it, so the row carries none — its name is the
+    /// id, its definition the parser's defaults — and `state`, `path` and
+    /// `warnings` say why.
     pub fn withheld(
         id: &str,
         provenance: &TemplateProvenance,

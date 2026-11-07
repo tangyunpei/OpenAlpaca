@@ -161,18 +161,20 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // per list — `?window=7d|30d|all` (default `7d`, 400 `UNKNOWN_WINDOW`
   // otherwise), counting *completed* runs only (`state != 'running'`), so
   // `12 runs · 7d` is the daemon's own number over the window it says it used.
-  // What is left is the toggle: a template has no `enabled` field and
-  // nothing would enforce one in the spawn path.
+  // What is left is the toggle's writer: since C3a (subagent design §2.4
+  // L-4a) a file in `config/agents` saying `disabled: true` switches a
+  // template off, its row says `state: "disabled"` and a spawn of it is
+  // refused — but the switch is the person's file, and no route writes it.
   "GAP-20": {
     id: "GAP-20",
     label: "Agent template enable/disable",
     missingApi:
-      "TemplateResponse has no enabled flag, and nothing enforces one where subagents are spawned",
+      "No route writes a template's switch — a file in config/agents saying disabled: true switches it off",
     proposedEndpoint: "PUT /v1/agent-templates/{id}/enabled",
     blocks: "The per-template toggle in Settings → Agents",
     fixSize: "M",
     noteOverride:
-      "Templates have no enabled flag — the per-template toggle is not served",
+      "Templates are switched off by a file in config/agents saying disabled: true — the per-template toggle is not served",
   },
   // GAP-21 (a conversation could be neither renamed nor deleted) is closed
   // with Phase 7a. Its daemon half landed first: migration 039 made a lane

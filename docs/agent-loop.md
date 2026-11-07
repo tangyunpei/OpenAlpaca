@@ -129,7 +129,11 @@ block as the main loop, as its last raw block, less the main loop's
 sentence that the user can type a skill's `/slash` command. The lead's `SandboxPolicy` allowlist is extended from the
 final tool definitions at run time (template denials still win);
 subagents stay template-scoped — they get only the capabilities their
-own template declares, never the lead's blanket grant.
+own template declares, never the lead's blanket grant. A template a file
+in `config/agents/` switches off (`disabled: true`) is not offered to the
+lead: its `<agents>` block and both spawn descriptions are built from the
+resolved list, which leaves it out, and a spawn naming it is refused
+with the file's path.
 
 Subagents can be plugin-backed: when the spawned template's source is
 `AgentSource::Plugin` (contributed by a plugin manifest), the spawn path

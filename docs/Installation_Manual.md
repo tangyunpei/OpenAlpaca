@@ -381,7 +381,10 @@ unedited copy this build lists as not used is still the earlier build's only
 copy: delete it under this build and the earlier one does without it
 (`lead_agent.md` deleted, it has no lead agent). The cure is the same: stop
 the daemon, move `agents/` aside, and let the earlier build's next start
-write it again.
+write it again. A file that switches a template off (`disabled: true`, see
+*Upgrade*) means nothing to an earlier build: it skips the line, so a full
+template that says it runs as your template, and the two-line form is
+skipped with a warning that it has no `name`.
 
 ### Projects live in the home store
 
@@ -798,6 +801,25 @@ template and a plugin's template of the same id filled it, the built-in
 template runs again and the plugin's is listed as refused. The store also
 keeps that build's `create-skill`, whose `user` scope wrote skills where the
 daemon never reads them; step 9 says how to take this build's copy.
+
+An emptied `agents/` no longer means "no templates". To switch a built-in
+template off, put a file in `agents/` holding its `id:` and
+`disabled: true` — two lines are enough:
+
+```markdown
+---
+id: research_agent
+disabled: true
+---
+```
+
+It is off at once, without a restart: the lead agent no longer sees it, a
+spawn of it is refused naming the file, Settings → Agents shows it
+"Switched off", and no plugin's template takes its id. A full template that
+says `disabled: true` is switched off whole; the line works for a template
+of your own too. Delete the file, or remove the line, and the template is
+back. Switching `lead_agent` off alone does not stop workflows: another
+template is borrowed as the lead, as when the lead is busy.
 
 Upgrade replaces:
 
