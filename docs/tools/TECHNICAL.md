@@ -1154,6 +1154,13 @@ tools into the shared registry when the plugin loads:
 - name `<plugin>::<tool>`, where `<plugin>` is the plugin's directory name;
   a call reaches the plugin as `tools/call` under the bare `<tool>` it
   listed, and a failure reads `plugin <plugin>::<tool>: …`;
+- a call the sandbox cuts waits for the plugin's answer past the cut
+  (`ToolContext::sandbox_cut_secs`, `PluginToolExecutor::execute_within`;
+  5 s past it), so the sandbox's "Tool '<name>' timed out after <n>s"
+  ends a slow one; a call no sandbox cuts waits the channel's 60 s, as
+  `tools/list` and every other request without a figure of its own do
+  (`initialize` waits 10 s, `shutdown` 3 s) (PLUGIN-WAIT); a call may send
+  `timeout_secs`, as a command's may, and the plugin is handed it as sent;
 - `author = "plugin:<id>"`, `version` from the manifest, no annotations,
   `exempt_from_timeout = false`;
 - `provides_capabilities` = the manifest's `capabilities.provides` — the
@@ -1284,13 +1291,15 @@ and ceiling from the daemon's `[execution.agent_defaults]` — a template's
 `timeout_seconds` is not read (N-TOOL-1b); `unattended` starts `false` and
 is set by the caller that knows where the work came from.
 `SandboxPolicy::runtime_secs_for` is the sandbox's cut for one call: a
-`shell_execute` or `Command`-backend call's `timeout_secs` (a whole number
-above 0) clamped to the ceiling (`SandboxPolicy::asked_runtime_secs`), else
-`max_tool_runtime_secs`. A `Command`-backend tool's own `timeout_secs` (its
-TOML's) is its calls' default: it still kills a call that asked for nothing
-where smaller, and stands back for one that asked, which the sandbox alone
-cuts (CMD-TIMEOUT; the figure reaches the backend as
-`ToolContext::asked_runtime_secs`).  The daemon's
+`shell_execute`, `Command`-backend or plugin tool call's `timeout_secs` (a
+whole number above 0) clamped to the ceiling
+(`SandboxPolicy::asked_runtime_secs`), else `max_tool_runtime_secs`; the
+figure reaches every tool as `ToolContext::sandbox_cut_secs`, and a plugin
+tool waits past it (PLUGIN-WAIT). A `Command`-backend tool's own
+`timeout_secs` (its TOML's) is its calls' default: it still kills a call
+that asked for nothing where smaller, and stands back for one that asked,
+which the sandbox alone cuts (CMD-TIMEOUT; the figure reaches the backend
+as `ToolContext::asked_runtime_secs`).  The daemon's
 `security.auto_approve_confirmations` config flag forces
 `auto_approve = true` globally.  `auto_approve` is read before
 `unattended`.

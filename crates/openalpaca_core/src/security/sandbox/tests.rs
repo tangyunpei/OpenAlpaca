@@ -2139,3 +2139,170 @@ async fn a_caller_supplied_asked_figure_is_discarded() {
         .unwrap_err();
     assert_eq!(err, "Command timed out after 1s");
 }
+
+// ── PLUGIN-WAIT: a plugin tool waits the sandbox's figure ───────────
+
+/// A plugin's tool, `slow-plugin::slow`, whose executor answers after 2 s.
+fn slow_plugin_tool() -> ToolRegistry {
+    struct AnswersLate;
+    #[async_trait]
+    impl openalpaca_api::plugin_traits::PluginToolExecutor for AnswersLate {
+        async fn execute(
+            &self,
+            _tool_name: &str,
+            _arguments: &serde_json::Value,
+        ) -> Result<String, String> {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Ok("late".to_string())
+        }
+        fn plugin_id(&self) -> &str {
+            "slow-plugin"
+        }
+    }
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "slow-plugin::slow".to_string(),
+                description: "slow".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Plugin(Arc::new(AnswersLate)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "plugin:slow-plugin".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    registry
+}
+
+/// A plugin tool's call may ask for its own figure, as a command's may: its
+/// `timeout_secs` lifts the bound for that call, clamped to the ceiling; one
+/// that asks nothing is cut at the bound.
+#[tokio::test]
+async fn a_plugin_tools_call_may_ask_for_its_own_figure() {
+    let sandbox = SandboxManager::with_defaults(Arc::new(slow_plugin_tool()), EventBus::default());
+    let call = |arguments: serde_json::Value| ToolCall {
+        id: "tc_plugin".to_string(),
+        name: "slow-plugin::slow".to_string(),
+        arguments,
+    };
+    let asked = sandbox
+        .execute_tool(
+            &call(serde_json::json!({"timeout_secs": 3})),
+            &bounded(1, 600),
+            &ToolContext::default(),
+        )
+        .await;
+    assert_eq!(asked.as_deref(), Ok("late"));
+    let clamped = sandbox
+        .execute_tool(
+            &call(serde_json::json!({"timeout_secs": 3600})),
+            &bounded(1, 3),
+            &ToolContext::default(),
+        )
+        .await;
+    assert_eq!(clamped.as_deref(), Ok("late"));
+    let cut = sandbox
+        .execute_tool(
+            &call(serde_json::json!({})),
+            &bounded(1, 600),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(cut, "Tool 'slow-plugin::slow' timed out after 1s");
+}
+
+/// What a plugin tool's executor was handed: the sandbox's cut, or `None`
+/// when called through `execute`.
+#[derive(Default)]
+struct RecordsTheCut(std::sync::Mutex<Vec<Option<Duration>>>);
+
+#[async_trait]
+impl openalpaca_api::plugin_traits::PluginToolExecutor for RecordsTheCut {
+    async fn execute(
+        &self,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        self.0.lock().unwrap().push(None);
+        Ok("plain".to_string())
+    }
+    async fn execute_within(
+        &self,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+        sandbox_cut: Duration,
+    ) -> Result<String, String> {
+        self.0.lock().unwrap().push(Some(sandbox_cut));
+        Ok("within".to_string())
+    }
+    fn plugin_id(&self) -> &str {
+        "rec"
+    }
+}
+
+/// The sandbox hands a plugin tool the figure it cuts the call at — the
+/// bound, or what the call asked for clamped to the ceiling — and a figure a
+/// caller put on the context is not passed through.
+#[tokio::test]
+async fn the_sandbox_hands_a_plugin_tool_the_figure_it_cuts_at() {
+    let recorder = Arc::new(RecordsTheCut::default());
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "rec::tool".to_string(),
+                description: "records".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Plugin(recorder.clone()),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "plugin:rec".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let call = |arguments: serde_json::Value| ToolCall {
+        id: "tc_rec".to_string(),
+        name: "rec::tool".to_string(),
+        arguments,
+    };
+    let forged = ToolContext {
+        sandbox_cut_secs: Some(99),
+        ..Default::default()
+    };
+    for (arguments, ctx) in [
+        (serde_json::json!({}), ToolContext::default()),
+        (
+            serde_json::json!({"timeout_secs": 7}),
+            ToolContext::default(),
+        ),
+        (
+            serde_json::json!({"timeout_secs": 9999}),
+            ToolContext::default(),
+        ),
+        (serde_json::json!({}), forged),
+    ] {
+        let answer = sandbox
+            .execute_tool(&call(arguments), &bounded(3, 600), &ctx)
+            .await;
+        assert_eq!(answer.as_deref(), Ok("within"));
+    }
+    let secs = |s| Some(Duration::from_secs(s));
+    assert_eq!(
+        *recorder.0.lock().unwrap(),
+        vec![secs(3), secs(7), secs(600), secs(3)]
+    );
+}

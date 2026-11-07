@@ -1075,6 +1075,78 @@ async fn test_plugin_backend_execution() {
     assert_eq!(result.unwrap(), "plugin: test::echo");
 }
 
+/// PLUGIN-WAIT: the `Plugin` arm hands the executor the sandbox's cut where
+/// the context carries one (`execute_within`) and calls `execute` where it
+/// carries none, or there is no context.
+#[tokio::test]
+async fn a_plugin_backend_is_handed_the_sandboxs_cut_from_the_context() {
+    struct Says;
+    #[async_trait]
+    impl openalpaca_api::plugin_traits::PluginToolExecutor for Says {
+        async fn execute(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<String, String> {
+            Ok("no cut".to_string())
+        }
+        async fn execute_within(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+            sandbox_cut: std::time::Duration,
+        ) -> Result<String, String> {
+            Ok(format!("cut at {}s", sandbox_cut.as_secs()))
+        }
+        fn plugin_id(&self) -> &str {
+            "test"
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "test::echo".into(),
+                description: "".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Plugin(Arc::new(Says)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let args = serde_json::json!({});
+    let cut = ToolContext {
+        sandbox_cut_secs: Some(42),
+        ..Default::default()
+    };
+    assert_eq!(
+        registry
+            .execute_with_context("test::echo", &args, &cut)
+            .await
+            .as_deref(),
+        Ok("cut at 42s")
+    );
+    assert_eq!(
+        registry
+            .execute_with_context("test::echo", &args, &ToolContext::default())
+            .await
+            .as_deref(),
+        Ok("no cut")
+    );
+    assert_eq!(
+        registry.execute("test::echo", &args).await.as_deref(),
+        Ok("no cut")
+    );
+}
+
 #[test]
 fn test_tool_name_validation() {
     let registry = ToolRegistry::default();

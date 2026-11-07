@@ -234,6 +234,13 @@ mcp_compatible = true
             Self::build(root, Some(HomeStoreGuard::set(&root.join(".home"))))
         }
 
+        /// [`Self::new`], its plugins' channel default `wait` — a test-scale
+        /// stand-in for the production 60 s.
+        fn with_channel_timeout(root: &Path, wait: std::time::Duration) -> Self {
+            let home = HomeStoreGuard::set(&root.join(".home"));
+            Self::build_waiting(root, Some(home), wait)
+        }
+
         /// A second supervisor over the same plugins root, as a restart is —
         /// fresh in-memory state, the same two files on disk.
         fn restart(root: &Path) -> Self {
@@ -241,6 +248,14 @@ mcp_compatible = true
         }
 
         fn build(root: &Path, home: Option<HomeStoreGuard>) -> Self {
+            Self::build_waiting(root, home, CHANNEL_DEFAULT_TIMEOUT)
+        }
+
+        fn build_waiting(
+            root: &Path,
+            home: Option<HomeStoreGuard>,
+            wait: std::time::Duration,
+        ) -> Self {
             let bus = EventBus::new(256);
             // The production shape from C4 (`services/tools.rs`): the ledger
             // holds the bus, so `mark_failed` announces its own `failed` and
@@ -256,7 +271,8 @@ mcp_compatible = true
                     Some(Arc::clone(&agents)),
                 )
                 .with_event_bus(bus.clone())
-                .with_notice_lane(NOTICE_LANE),
+                .with_notice_lane(NOTICE_LANE)
+                .with_channel_timeout(wait),
             );
             Self {
                 manager,
@@ -710,6 +726,234 @@ mcp_compatible = true
         assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
 
         tear_down_named_stub(&h, pid).await;
+    }
+
+    // ── PLUGIN-WAIT: a plugin tool waits the sandbox's figure ────────
+
+    /// The channel default these tests run under: a test-scale stand-in for
+    /// the production 60 s, which every plugin tool call waited before.
+    const CHANNEL_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Call `named-test::echo` through a sandbox over the harness's registry,
+    /// under a policy whose per-tool bound is `bound_secs` (its ceiling the
+    /// shipped 600 s) and which admits every tool — the path every loop's
+    /// tool calls take.
+    async fn call_through_sandbox(
+        h: &Harness,
+        bound_secs: u64,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
+        use openalpaca_core::security::capabilities::Allowlist;
+        use openalpaca_core::security::sandbox::{SandboxManager, SandboxPolicy};
+
+        let sandbox = SandboxManager::with_defaults(Arc::clone(&h.tools), h.bus.clone());
+        let policy = SandboxPolicy {
+            agent_id: "plugin-wait".to_string(),
+            allowed_capabilities: Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: bound_secs,
+            max_tool_runtime_ceiling_secs: 600,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tc_wait".to_string(),
+            name: "named-test::echo".to_string(),
+            arguments,
+        };
+        let ctx = openalpaca_core::tools::registry::ToolContext {
+            agent_id: Some("plugin-wait".to_string()),
+            ..Default::default()
+        };
+        sandbox.execute_tool(&call, &policy, &ctx).await
+    }
+
+    /// **A plugin tool waits the sandbox's figure, not the channel's.** The
+    /// stub answers after 2 s; the channel's default is 1 s and the
+    /// sandbox's bound 3 s, so the answer is due — where the call used to end
+    /// at the channel's default with "timeout waiting for plugin response".
+    #[tokio::test]
+    async fn a_slow_plugin_tool_waits_the_sandboxs_figure_not_the_channels() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = call_through_sandbox(
+            &h,
+            3,
+            serde_json::json!({"message": "late", "delay_secs": 2}),
+        )
+        .await;
+        assert_eq!(
+            answer.as_deref(),
+            Ok("echo: late"),
+            "a plugin tool did not wait the sandbox's figure"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **Past the sandbox's figure a plugin tool is cut with the sandbox's
+    /// message**, "Tool '<name>' timed out after <n>s", not the plugin
+    /// channel's: the sandbox's clock is the one that ends it. The row stays
+    /// `Enabled` — a cut is no crash.
+    #[tokio::test]
+    async fn past_the_sandboxs_figure_a_plugin_tool_is_cut_with_its_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let error = call_through_sandbox(
+            &h,
+            2,
+            serde_json::json!({"message": "too late", "delay_secs": 4}),
+        )
+        .await
+        .expect_err("the stub answers after the sandbox's bound");
+        assert_eq!(
+            error, "Tool 'named-test::echo' timed out after 2s",
+            "the call was not cut by the sandbox's clock"
+        );
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A plugin tool's call may ask for its own figure**, as a command's
+    /// may: its `timeout_secs` (3) lifts the sandbox's bound (1 s) for that
+    /// call, and the argument reaches the plugin as it was sent.
+    #[tokio::test]
+    async fn a_plugin_tool_call_may_ask_for_its_own_figure() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = call_through_sandbox(
+            &h,
+            1,
+            serde_json::json!({"message": "asked", "delay_secs": 2, "timeout_secs": 3}),
+        )
+        .await;
+        assert_eq!(
+            answer.as_deref(),
+            Ok("echo: asked (timeout_secs 3)"),
+            "a plugin tool's timeout_secs did not lift the bound for its call"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A call no sandbox cuts keeps the channel's default**: one made on
+    /// the registry directly names no figure, so its plugin's answer is
+    /// waited for as long as every other request's.
+    #[tokio::test]
+    async fn without_the_sandboxs_figure_a_plugin_tool_waits_the_channels_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let error = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "unbounded", "delay_secs": 2}),
+            )
+            .await
+            .expect_err("the stub answers after the channel's default");
+        assert_eq!(
+            error, "plugin named-test::echo: timeout waiting for plugin response",
+            "a call no sandbox cuts did not wait the channel's default"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **The plugin's other requests still wait the channel's default** —
+    /// `tools/list`, `skill/invoke`, the agent bridge's — which names no
+    /// figure of its own.
+    #[tokio::test]
+    async fn the_channels_other_requests_still_wait_its_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let channel = {
+            let plugins = h.manager.plugins.read().await;
+            let state = plugins.get("named-test").expect("the stub is loaded");
+            state
+                .process
+                .as_ref()
+                .expect("it holds its child")
+                .channel
+                .clone()
+        };
+        let started = std::time::Instant::now();
+        let result = channel
+            .call("ping", serde_json::json!({"delay_secs": 2}))
+            .await;
+        assert!(
+            matches!(result, Err(PluginError::Timeout)),
+            "a request with no figure of its own did not end at the channel's default: {result:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1900),
+            "it waited past the channel's default: {:?}",
+            started.elapsed()
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **`initialize` keeps its own figure, 10 s** — neither the channel's
+    /// default nor a tool call's: a plugin that answers it after 2 s, under
+    /// a channel default of 1 s, starts.
+    #[tokio::test]
+    async fn initialize_keeps_its_own_figure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_named_stub(tmp.path());
+        let manifest_path = dir.join("plugin.toml");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("mcp_compatible = true", "mcp_compatible = false")
+            .replace(
+                "\n[capabilities]",
+                "\n[plugin.env]\nNAMED_STUB_INIT_DELAY_SECS = \"2\"\n\n[capabilities]",
+            );
+        std::fs::write(&manifest_path, manifest).unwrap();
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest
+                .plugin
+                .env
+                .get("NAMED_STUB_INIT_DELAY_SECS")
+                .map(String::as_str),
+            Some("2")
+        );
+
+        let mut process = PluginProcess::spawn(&manifest, &dir, CHANNEL_WAIT).unwrap();
+        let pid = process.child.id().expect("the stub has a pid");
+        let _group = KillGroupOnDrop(pid);
+        let ready = process
+            .initialize("named-test", "0.1.0", &[], HashMap::new())
+            .await;
+        assert!(
+            ready.is_ok(),
+            "initialize did not wait its own figure: {ready:?}"
+        );
+
+        process.kill();
+        let _ = process.child.wait().await;
+        assert!(!pid_alive(pid), "the stub {pid} outlived the test");
     }
 
     /// **Redundant enable registers no second capability provider** (design
@@ -2509,7 +2753,7 @@ mcp_compatible = true
         // A second bring-up of the same plugin, published behind the live one's
         // back.
         let manifest = PluginManifest::from_dir(&dir).unwrap();
-        let intruder = PluginProcess::spawn(&manifest, &dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir, CHANNEL_DEFAULT_TIMEOUT).unwrap();
         let intruder_pid = intruder.child.id().expect("the second child has a pid");
         let discovered = Discovered {
             tools: vec![mock_plugin_tool("echo-test::intruder", "echo-test")],

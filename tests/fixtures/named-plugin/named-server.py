@@ -4,12 +4,17 @@
 Speaks JSON-RPC 2.0 over Content-Length-framed stdio (LSP/MCP standard),
 as tests/fixtures/echo-plugin/echo-server.sh does, but in one process and
 strict about the tool's name. Responds to:
-  tools/list  -> one tool, "echo", with a "message" string and an optional
-                 "fail" boolean
-  tools/call  -> for params.name == "echo": "echo: <message>", or, when
-                 "fail" is true, a JSON-RPC error; for any other name a
-                 JSON-RPC error naming the name it was asked for
-  everything else (a request) -> an empty result; a notification -> nothing
+  tools/list  -> one tool, "echo", with a "message" string, an optional
+                 "fail" boolean and an optional "delay_secs" number
+  tools/call  -> for params.name == "echo": after "delay_secs" seconds
+                 (none by default), "echo: <message>" -- with
+                 " (timeout_secs <n>)" when the arguments carry one -- or,
+                 when "fail" is true, a JSON-RPC error; for any other name
+                 a JSON-RPC error naming the name it was asked for
+  initialize  -> {"ready": true}, after NAMED_STUB_INIT_DELAY_SECS seconds
+                 from its environment (none by default)
+  everything else (a request) -> an empty result, after params.delay_secs
+                 seconds (none by default); a notification -> nothing
 
 It leads a process group of its own, so a test can end it, and anything it
 might have started, with one signal to the group.
@@ -18,6 +23,7 @@ might have started, with one signal to the group.
 import json
 import os
 import sys
+import time
 
 LISTED = "echo"
 
@@ -61,7 +67,11 @@ def answer(msg):
     if method == "tools/list":
         schema = {
             "type": "object",
-            "properties": {"message": {"type": "string"}, "fail": {"type": "boolean"}},
+            "properties": {
+                "message": {"type": "string"},
+                "fail": {"type": "boolean"},
+                "delay_secs": {"type": "number"},
+            },
             "required": ["message"],
         }
         tool = {"name": LISTED, "description": "Echo back the input", "inputSchema": schema}
@@ -71,10 +81,18 @@ def answer(msg):
         if name != LISTED:
             return error(mid, "no tool named %r; this plugin lists %r" % (name, LISTED))
         args = params.get("arguments") or {}
+        # One process: a delayed answer holds every later request behind it.
+        time.sleep(args.get("delay_secs", 0))
         if args.get("fail"):
             return error(mid, "echo was asked to fail")
         text = "echo: %s" % args.get("message", "no message")
+        if "timeout_secs" in args:
+            text += " (timeout_secs %s)" % args["timeout_secs"]
         return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": text}]}}
+    if method == "initialize":
+        time.sleep(float(os.environ.get("NAMED_STUB_INIT_DELAY_SECS", "0")))
+        return {"jsonrpc": "2.0", "id": mid, "result": {"ready": True}}
+    time.sleep(params.get("delay_secs", 0))
     return {"jsonrpc": "2.0", "id": mid, "result": {}}
 
 

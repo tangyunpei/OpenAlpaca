@@ -796,8 +796,9 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   spawn, both skill tiers' per invocation. A template's `timeout_seconds`
   is accepted and not enforced: it is no tool's limit (N-TOOL-1b) and
   nothing else enforces it, so the shipped templates no longer set it
-  (TEMPLATE-TIMEOUT). A call to `shell_execute` or a `Command`-backend
-  tool may send `timeout_secs`: the sandbox cuts it at that figure, a
+  (TEMPLATE-TIMEOUT). A call to `shell_execute`, a `Command`-backend
+  tool or a plugin's tool may send `timeout_secs` (a plugin's tool is
+  handed it as sent, PLUGIN-WAIT): the sandbox cuts it at that figure, a
   larger one at `max_tool_runtime_ceiling_secs` (600 s) — clamped, never
   refused. The sandbox's figure is an outer bound: a tool with a clock of
   its own stops at whichever comes first, with its own error, not the
@@ -809,14 +810,17 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   alone (CMD-TIMEOUT); an `Http`-backend tool's
   request stops at its TOML's `timeout_secs` (30 s by default); an MCP
   tool at its server's `request_timeout_secs` (`config/mcp.toml`, 30 s by
-  default); a plugin tool's wait for its plugin's answer at 60 s, which no
-  key sets ("timeout waiting for plugin response"); a builtin at a
-  deadline of its own, `web_fetch`'s among them. A command the sandbox
-  cuts below the most it may run — the ceiling — is told it may ask for
-  more, naming it. The loop writes both figures into `shell_execute`'s
-  definition before the first request, so the model is told the limits it
-  really runs under; the registered definition names none, and the shell's
-  own bound (3600 s, the ceiling's highest setting) never comes first.
+  default); a builtin at a deadline of its own, `web_fetch`'s among them.
+  A plugin tool has none beside the sandbox's: it waits for its plugin's
+  answer past the sandbox's figure, so the sandbox's cut, with its own
+  message, ends a slow one (PLUGIN-WAIT); only a call made outside the
+  sandbox still waits 60 s, which no key sets ("timeout waiting for
+  plugin response"). A command the sandbox cuts below the most it may
+  run — the ceiling — is told it may ask for more, naming it. The loop
+  writes both figures into `shell_execute`'s definition before the first
+  request, so the model is told the limits it really runs under; the
+  registered definition names none, and the shell's own bound (3600 s,
+  the ceiling's highest setting) never comes first.
 - **A tool call's arguments are read, never guessed.** The provider layer
   reads them with one reader (`openalpaca_llm`'s stream collector and the
   OpenAI-compatible response parser): nothing or `null` is `{}`, a JSON

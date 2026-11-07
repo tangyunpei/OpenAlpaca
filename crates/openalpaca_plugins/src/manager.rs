@@ -66,7 +66,7 @@ use crate::manifest::PluginManifest;
 use crate::permission_gate::{
     PermissionGate, PermissionTable, REDACTED, SecretReference, secret_reference,
 };
-use crate::process_pool::PluginProcess;
+use crate::process_pool::{CHANNEL_DEFAULT_TIMEOUT, PluginProcess};
 
 /// How long a teardown waits for a killed plugin child to actually exit
 /// before giving up and letting the kernel finish the job (design §3.2 T4).
@@ -270,6 +270,10 @@ pub struct PluginManager {
     /// out of every build but this crate's tests — no production flag.
     #[cfg(test)]
     pub(crate) fail_swap_commit: std::sync::atomic::AtomicBool,
+    /// What a plugin's JSON-RPC request waits when its caller names no
+    /// figure: [`CHANNEL_DEFAULT_TIMEOUT`], set by no key — a test sets its
+    /// own at test scale (`with_channel_timeout`, this crate's tests only).
+    channel_timeout: std::time::Duration,
 }
 
 impl PluginManager {
@@ -305,7 +309,16 @@ impl PluginManager {
             notice_lane: String::new(),
             #[cfg(test)]
             fail_swap_commit: std::sync::atomic::AtomicBool::new(false),
+            channel_timeout: CHANNEL_DEFAULT_TIMEOUT,
         }
+    }
+
+    /// A channel default at test scale for the plugins this supervisor
+    /// spawns from now on; this crate's tests only.
+    #[cfg(test)]
+    pub(crate) fn with_channel_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.channel_timeout = timeout;
+        self
     }
 
     /// Attach the daemon's default lane, `{local_user_id}:gui` — where T1 step
@@ -1221,7 +1234,7 @@ impl PluginManager {
         }
 
         // `spawn` failing is the one exit with nothing to unwind.
-        let process = match PluginProcess::spawn(&manifest, dir) {
+        let process = match PluginProcess::spawn(&manifest, dir, self.channel_timeout) {
             Ok(process) => process,
             Err(e) => {
                 warn!(plugin = %id, error = %e, "plugin failed to spawn");

@@ -201,6 +201,15 @@ pub struct ToolContext {
     /// sandbox's cut is the call's one clock, and the tool's own
     /// `timeout_secs` — its default — stands back.
     pub asked_runtime_secs: Option<u64>,
+    /// The seconds the sandbox cuts this call at, whether asked for or the
+    /// per-tool bound (PLUGIN-WAIT, `SandboxPolicy::runtime_secs_for`).
+    /// Set by
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// alone, under the same discipline: `None` on a context a caller built
+    /// with it set and on an exempt call. A `Plugin`-backend tool reads it:
+    /// its plugin's answer is waited for past this figure, so the sandbox's
+    /// cut, not the plugin channel's default, is what ends a slow call.
+    pub sandbox_cut_secs: Option<u64>,
 }
 
 /// The fact that a person approved one call on its confirmation card
@@ -715,7 +724,8 @@ impl ToolRegistry {
     /// Execute a tool by name with per-invocation context.
     /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends; a
     /// command tool runs in the call's working folder (storage design §10,
-    /// R26); Http, Plugin and MCP backends do not read the context.
+    /// R26); a plugin tool waits past the sandbox's cut (PLUGIN-WAIT); Http
+    /// and MCP backends do not read the context.
     pub async fn execute_with_context(
         &self,
         tool_name: &str,
@@ -809,8 +819,9 @@ impl ToolRegistry {
         } = self.admit(tool_name, arguments, ctx)?;
 
         // A command tool reads the context for its working folder (R26) and
-        // the figure its call asked for (CMD-TIMEOUT); these two do not.
-        if ctx.is_some() && matches!(backend, ToolBackend::Http { .. } | ToolBackend::Plugin(_)) {
+        // the figure its call asked for (CMD-TIMEOUT), a plugin tool the
+        // sandbox's cut (PLUGIN-WAIT); this one does not.
+        if ctx.is_some() && matches!(backend, ToolBackend::Http { .. }) {
             tracing::trace!(
                 tool_name,
                 agent_id = ?ctx.and_then(|c| c.agent_id.as_ref()),
@@ -861,7 +872,17 @@ impl ToolRegistry {
                 )
                 .await
             }
-            ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
+            // PLUGIN-WAIT: where the sandbox cuts this call, the plugin's
+            // answer is waited for past that figure, so the sandbox's clock is
+            // the one that ends it; a call no sandbox cuts waits as before.
+            ToolBackend::Plugin(executor) => match ctx.and_then(|c| c.sandbox_cut_secs) {
+                Some(secs) => {
+                    executor
+                        .execute_within(tool_name, arguments, std::time::Duration::from_secs(secs))
+                        .await
+                }
+                None => executor.execute(tool_name, arguments).await,
+            },
             ToolBackend::Mcp {
                 client,
                 remote_name,
@@ -1400,6 +1421,15 @@ impl ToolRegistry {
                 .tools
                 .get(tool_name)
                 .is_some_and(|entry| matches!(entry.backend, ToolBackend::Command { .. }))
+    }
+
+    /// Whether `tool_name` is a plugin's tool (`ToolBackend::Plugin`): a call
+    /// to one may ask for its own figure, as a command tool's may
+    /// (PLUGIN-WAIT, `SandboxPolicy::asked_runtime_secs`).
+    pub(crate) fn is_plugin_tool(&self, tool_name: &str) -> bool {
+        self.tools
+            .get(tool_name)
+            .is_some_and(|entry| matches!(entry.backend, ToolBackend::Plugin(_)))
     }
 
     /// Return the names of tools that use command backends (i.e., execute via shell).
