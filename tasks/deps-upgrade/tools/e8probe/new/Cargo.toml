@@ -15,6 +15,6 @@ name = "e8probe"
 path = "../src/main.rs"
 
 [dependencies]
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rusqlite = { version = "=0.41.1", features = ["bundled"] }
 sha2 = "=0.11.1"
 serde_json = "=1.0.154"

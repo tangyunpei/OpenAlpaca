@@ -1,8 +1,8 @@
 //! e8probe — E8 step 7's read-only checks of a COPY of a store (programme-plan
 //! §4.5 *E8* and *E8-PROBE*). One source, two builds that differ only in
 //! rusqlite and sha2: `old/` (rusqlite 0.38.0 with the bundled SQLite 3.51.1,
-//! sha2 0.10.9 — the branch point's) and `new/` (rusqlite 0.40.2 with SQLite
-//! 3.53.2, sha2 0.11.1 — the wave's). README.md beside this directory is the
+//! sha2 0.10.9 — the branch point's) and `new/` (rusqlite 0.41.1 with SQLite
+//! 3.54.1, sha2 0.11.1 — the wave's). README.md beside this directory is the
 //! manual; every format below was matched against the source it cites there.
 //!
 //! It prints only fixed words, counts and partition keys (F-04) on stdout, one

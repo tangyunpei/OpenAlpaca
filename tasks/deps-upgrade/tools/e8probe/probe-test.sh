@@ -22,7 +22,7 @@
 # README's table):
 #   old equals new   every word and count line equal between the variants
 #                    (old records the search, new compares, old compares
-#                    again), sqlite 3.51.1 against 3.53.2, mismatches 0, each
+#                    again), sqlite 3.51.1 against 3.54.1, mismatches 0, each
 #                    live snapshot `key=equal` and an earlier build's (no
 #                    project id) `key=absent`, `folder=orphan`, its notes
 #                    `unlocated`, not `missing`; search `different 0` with
@@ -433,7 +433,7 @@ for r in all-1-old all-2-new all-3-old; do
   check "[$r] every stdout line inside the paste alphabet" in_alphabet "$r"
 done
 check "[old] sqlite 3.51.1" has all-1-old "db	sqlite 3.51.1"
-check "[new] sqlite 3.53.2" has all-2-new "db	sqlite 3.53.2"
+check "[new] sqlite 3.54.1" has all-2-new "db	sqlite 3.54.1"
 check "[old record] search recorded with results" grep -q -E $'^search\trecorded queries [0-9]+ with-results [1-9][0-9]* error 0$' "$RUNS/all-1-old.out"
 for r in all-2-new all-3-old; do
   check "[$r] search compared: query-list equal, different 0, error 0, with-results > 0" \
