@@ -3223,14 +3223,312 @@ fn an_index_at_schema_6_is_rebuilt_for_unicode_18() {
     }
     let index = MemoryIndex::open(&path).unwrap();
     let report = index.index_state().unwrap();
-    assert_eq!(SCHEMA_VERSION, 7);
+    assert_eq!(SCHEMA_VERSION, 8);
     assert_eq!(report.state, IndexState::Rebuilding);
-    assert_eq!(report.schema_version, 7);
+    assert_eq!(report.schema_version, 8);
     assert_eq!(report.notes, 0, "nothing of the v6 cache is served");
     index.rebuild(&[note()]).unwrap();
     assert_eq!(query::normalize("x\u{209D}y"), "xwy");
     let r = index.search(&q("xwy")).unwrap();
     assert_eq!(ids(&r), vec!["n1"]);
+}
+
+/// The security batch's SQLite 3.54.1: FTS5 now takes a deleted row of a
+/// `contentless_delete=1` table out of the bm25 totals, which 3.53.2 never
+/// did, so a cache written at schema 7 can hold an averages record that
+/// counts rows its tables no longer have. Such a record is planted here —
+/// each table's `<table>_data` block `id = 1` rewritten with totals above
+/// the live rows' — in a cache stamped 7. The open recreates the cache: no
+/// note is served, the averages records no longer hold the planted totals,
+/// and the rebuilt cache's totals are the live rows'. Kept at 7, the cache
+/// would be served as it is, planted totals and all.
+#[test]
+fn an_index_at_schema_7_is_rebuilt_for_the_corrected_bm25_totals() {
+    let notes = || {
+        vec![
+            record("n1", "Release step", "Tag, then run the release script.\n"),
+            record("n2", "回答风格", "用户喜欢简洁的回答\n"),
+        ]
+    };
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(INDEX_FILE_NAME);
+    let inflated: Vec<Bm25Totals> = {
+        let index = MemoryIndex::open(&path).unwrap();
+        index.rebuild(&notes()).unwrap();
+        let conn = index.lock();
+        let live = live_totals(&conn);
+        for (table, rows, columns) in &live {
+            let mut block = Vec::new();
+            put_fts5_varint(&mut block, rows + 3);
+            for n in columns {
+                put_fts5_varint(&mut block, n + 40);
+            }
+            conn.execute(
+                &format!("UPDATE {table}_data SET block = ?1 WHERE id = 1"),
+                [block],
+            )
+            .unwrap();
+        }
+        let inflated: Vec<Bm25Totals> = live
+            .iter()
+            .map(|(table, rows, columns)| {
+                (*table, rows + 3, columns.iter().map(|n| n + 40).collect())
+            })
+            .collect();
+        assert_eq!(recorded_totals(&conn), inflated, "the plant took");
+        assert_ne!(recorded_totals(&conn), live_totals(&conn));
+        conn.execute(
+            "UPDATE meta SET value = '7' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+        inflated
+    };
+    let index = MemoryIndex::open(&path).unwrap();
+    let report = index.index_state().unwrap();
+    assert_eq!(report.state, IndexState::Rebuilding);
+    assert_eq!(report.schema_version, SCHEMA_VERSION);
+    assert_eq!(report.notes, 0, "nothing of the v7 cache is served");
+    {
+        let conn = index.lock();
+        for (table, rows, columns) in &inflated {
+            let block: Vec<u8> = conn
+                .query_row(
+                    &format!("SELECT block FROM {table}_data WHERE id = 1"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let planted: Vec<u64> = std::iter::once(*rows).chain(columns.clone()).collect();
+            assert_ne!(
+                fts5_varints(&block),
+                planted,
+                "{table}: the planted totals went with the cache"
+            );
+        }
+    }
+    index.rebuild(&notes()).unwrap();
+    let conn = index.lock();
+    assert_eq!(recorded_totals(&conn), live_totals(&conn));
+}
+
+/// Appends `value` as one FTS5 varint, as `sqlite3Fts5PutVarint` writes
+/// it below 2^56 — the inverse of [`fts5_varint`]: big-endian groups of
+/// seven bits, the high bit set on every byte but the last.
+fn put_fts5_varint(out: &mut Vec<u8>, value: u64) {
+    assert!(value < 1 << 56, "{value} would take the nine-byte form");
+    let mut groups = vec![(value & 0x7f) as u8];
+    let mut rest = value >> 7;
+    while rest > 0 {
+        groups.push((rest & 0x7f) as u8 | 0x80);
+        rest >>= 7;
+    }
+    out.extend(groups.iter().rev());
+}
+
+/// One FTS5 varint, as `sqlite3Fts5GetVarint` reads it: big-endian groups
+/// of seven bits, the high bit set on every byte but the last, and a ninth
+/// byte, if reached, read whole.
+fn fts5_varint(bytes: &[u8], at: &mut usize) -> u64 {
+    let mut value = 0u64;
+    for k in 0..9 {
+        let byte = bytes[*at];
+        *at += 1;
+        if k == 8 {
+            return (value << 8) | u64::from(byte);
+        }
+        value = (value << 7) | u64::from(byte & 0x7f);
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    value
+}
+
+fn fts5_varints(bytes: &[u8]) -> Vec<u64> {
+    let mut at = 0;
+    let mut out = Vec::new();
+    while at < bytes.len() {
+        out.push(fts5_varint(bytes, &mut at));
+    }
+    out
+}
+
+/// A full-text table's bm25 totals: its name, its row count and each
+/// column's token count.
+type Bm25Totals = (&'static str, u64, Vec<u64>);
+
+/// The totals bm25 reads, per full-text table: the averages record, block
+/// `id = 1` of `<table>_data` — the row count, then each column's token
+/// count, as FTS5 varints. Neither a query nor `optimize` recomputes it;
+/// only an insert or a delete moves it.
+fn recorded_totals(conn: &rusqlite::Connection) -> Vec<Bm25Totals> {
+    FTS_TABLES
+        .iter()
+        .map(|&table| {
+            let block: Vec<u8> = conn
+                .query_row(
+                    &format!("SELECT block FROM {table}_data WHERE id = 1"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let values = fts5_varints(&block);
+            (table, values[0], values[1..].to_vec())
+        })
+        .collect()
+}
+
+/// The same totals counted from the rows each table holds now: one
+/// `<table>_docsize` row per live row, its `sz` the row's token count per
+/// column as FTS5 varints.
+fn live_totals(conn: &rusqlite::Connection) -> Vec<Bm25Totals> {
+    FTS_TABLES
+        .iter()
+        .map(|&table| {
+            let mut stmt = conn
+                .prepare(&format!("SELECT sz FROM {table}_docsize"))
+                .unwrap();
+            let sizes: Vec<Vec<u64>> = stmt
+                .query_map([], |r| r.get::<_, Vec<u8>>(0))
+                .unwrap()
+                .map(|sz| fts5_varints(&sz.unwrap()))
+                .collect();
+            let columns = sizes.iter().map(Vec::len).max().unwrap_or(0);
+            let mut sums = vec![0u64; columns];
+            for row in &sizes {
+                for (sum, n) in sums.iter_mut().zip(row) {
+                    *sum += n;
+                }
+            }
+            (table, sizes.len() as u64, sums)
+        })
+        .collect()
+}
+
+/// How many chunks each full-text table should hold: every chunk for
+/// `fts_word` and `fts_tri_head`, one carrying an unsegmented character for
+/// `fts_tri` (the upsert's rule).
+fn live_chunks(conn: &rusqlite::Connection) -> Vec<(&'static str, u64)> {
+    let mut stmt = conn.prepare("SELECT body FROM chunk").unwrap();
+    let bodies: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|b| b.unwrap())
+        .collect();
+    let unsegmented = bodies
+        .iter()
+        .filter(|b| b.chars().any(query::is_unsegmented))
+        .count() as u64;
+    vec![
+        ("fts_word", bodies.len() as u64),
+        ("fts_tri_head", bodies.len() as u64),
+        ("fts_tri", unsegmented),
+    ]
+}
+
+/// The bm25 totals count only the rows a table still holds — schema 8's
+/// premise. bm25 reads a table's row count and each column's token count
+/// from FTS5's averages record (`<table>_data`, `id = 1`), not from the
+/// rows; SQLite 3.54.1 takes a deleted row of a `contentless_delete=1`
+/// table out of it, 3.53.2 left it counted. The most direct observable is
+/// that record itself, decoded and set beside the same figures counted from
+/// the live rows (`<table>_docsize`, one row per indexed chunk with its
+/// token counts), which in turn match the chunks each table should hold,
+/// and beside the record of an index rebuilt from the final notes, which
+/// never deleted a row. Every edit, retitle, removal and partition replace
+/// below goes through the index's own API, so the `chunk_ad` trigger does
+/// the deleting, in all three tables (the Chinese and Hindi bodies are in
+/// `fts_tri`). The note removed by path is two sections the chunker cuts
+/// into several chunks, so that one delete takes several rows of one note
+/// out of `fts_word` and `fts_tri_head`. Under 3.53.2 each table's record
+/// still counts every row ever inserted, and the comparison fails for all
+/// three at once.
+#[test]
+fn the_bm25_totals_count_only_the_rows_each_table_still_holds() {
+    let sqlite = rusqlite::version();
+    let index = ready_index();
+    let a = record("a", "Old office", "The office is on Elm Street.\n");
+    let b = record("b", "Lunch break", "Lunch break is at noon.\n");
+    let c = record("c", "回答风格", "用户喜欢简洁的回答\n");
+    let mut d = record("d", "Weekend", "हर शनिवार दोस्तों के साथ।\n");
+    d.aliases = vec!["शनिवार".into()];
+    // Two sections of about 1 KiB each: the second heading starts a new
+    // chunk once the open one holds half the chunker's target.
+    let tagging = "Tag the commit first, then check the release notes. ".repeat(20);
+    let publishing = "Then run the release script and publish the build. ".repeat(20);
+    let e = record(
+        "e",
+        "Release",
+        &format!("# Tagging\n\n{tagging}\n\n# Publishing\n\n{publishing}\n"),
+    );
+    let mut q1 = record("q1", "Other partition", "Kept in its own partition.\n");
+    q1.partition_key = "home-q".into();
+    let mut q2 = record("q2", "其他分区", "另一个分区的笔记\n");
+    q2.partition_key = "home-q".into();
+    index
+        .upsert_many(&[a.clone(), b, c.clone(), d.clone(), e.clone(), q1, q2])
+        .unwrap();
+    {
+        let conn = index.lock();
+        let e_chunks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk c JOIN note n ON n.rowid = c.note_rowid
+                 WHERE n.partition_key = 'home-p' AND n.id = 'e'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(e_chunks > 1, "note e is several chunks: {e_chunks}");
+        assert_eq!(
+            recorded_totals(&conn),
+            live_totals(&conn),
+            "before any delete (SQLite {sqlite})"
+        );
+    }
+
+    // An edit, a Chinese edit, a Hindi retitle, a removal by id and by
+    // path, and a partition replaced whole.
+    let mut a2 = a.clone();
+    a2.body = "The office moved to Oak Avenue in June.\n".into();
+    a2.revision = format!("{:0>64}", 2);
+    index.upsert(&a2).unwrap();
+    let mut c2 = c.clone();
+    c2.body = "用户喜欢详细的回答，并附上例子\n".into();
+    c2.revision = format!("{:0>64}", 2);
+    index.upsert(&c2).unwrap();
+    let mut d2 = d.clone();
+    d2.title = "शनिवार की योजना".into();
+    d2.relative_path = "notes/d--saturday.md".into();
+    index.upsert(&d2).unwrap();
+    assert!(index.remove("home-p", "b").unwrap());
+    assert!(index.remove_path("home-p", &e.relative_path).unwrap());
+    let mut q3 = record("q3", "新的分区", "替换后的分区只有这一条\n");
+    q3.partition_key = "home-q".into();
+    index
+        .replace_partition("home-q", std::slice::from_ref(&q3))
+        .unwrap();
+
+    let rebuilt = MemoryIndex::open_in_memory().unwrap();
+    rebuilt.rebuild(&[a2, c2, d2, q3]).unwrap();
+    let conn = index.lock();
+    let recorded = recorded_totals(&conn);
+    let live = live_totals(&conn);
+    assert_eq!(
+        recorded, live,
+        "the averages record counts only live rows (SQLite {sqlite})"
+    );
+    let counted: Vec<(&str, u64)> = live.iter().map(|(t, rows, _)| (*t, *rows)).collect();
+    assert_eq!(counted, live_chunks(&conn), "one live row per chunk");
+    assert!(
+        live.iter().all(|(_, rows, _)| *rows > 0),
+        "every table still holds a row: {live:?}"
+    );
+    assert_eq!(
+        recorded,
+        recorded_totals(&rebuilt.lock()),
+        "the totals equal a rebuild's from the final notes (SQLite {sqlite})"
+    );
 }
 
 /// Five dated notes a day apart, one per status the timeline shows or hides.
