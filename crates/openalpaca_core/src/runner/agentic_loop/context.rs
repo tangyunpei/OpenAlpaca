@@ -78,7 +78,8 @@ pub(crate) fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
 ///
 /// `messages[..head]` is never compressed: the system prompt and the
 /// initial query by default (`context_budget::compaction::DEFAULT_KEPT_HEAD`),
-/// a spawned subagent's whole handed list (SA-2b).
+/// a spawned subagent's whole handed list (SA-2b), a lead's list through its
+/// objective (SA-2b-LEAD).
 pub(crate) fn compress_context(
     messages: &mut Vec<ChatMessage>,
     head: usize,

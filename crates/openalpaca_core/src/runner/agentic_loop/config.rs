@@ -55,7 +55,8 @@ pub struct LoopConfig {
     /// initial query by default
     /// (`context_budget::compaction::DEFAULT_KEPT_HEAD`, 2). A spawned
     /// subagent sets it to its whole handed list, its objective last behind
-    /// any memory block or working-folder line (SA-2b).
+    /// any memory block or working-folder line (SA-2b); a lead, through its
+    /// objective, which an opening memory block puts third (SA-2b-LEAD).
     pub kept_head: usize,
     /// Fraction of model context window to use as compression trigger (0.0–1.0).
     /// Only used by `with_context_window()`. Default: `0.6`.
@@ -377,7 +378,8 @@ pub struct LoopResult {
     /// The working state this loop's last `LlmSummary` compaction wrote, and
     /// its boundary: `messages[head..boundary]` of the list the loop was
     /// handed lie behind it (design 11 §3.3), `head` being `kept_head`
-    /// (`DEFAULT_KEPT_HEAD` but in a spawned subagent's loop). Counted in the list as the compaction
+    /// (`DEFAULT_KEPT_HEAD` but in a spawned subagent's loop and a lead's
+    /// given a memory block). Counted in the list as the compaction
     /// found it, so once an earlier tier or compaction had shortened the list
     /// it falls short of the truth, never past it. `None` when the loop never
     /// wrote one.

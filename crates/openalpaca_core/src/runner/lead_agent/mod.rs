@@ -545,6 +545,9 @@ pub async fn run_lead_agent(
     }
 
     messages.push(ChatMessage::user(task_description));
+    // SA-2b-LEAD: the loop's kept head runs through the objective — the
+    // system prompt, the memory block if one was delivered, the objective.
+    let objective_head = messages.len();
 
     // Design 11 §4, owner decision CQ-6: the working state of the
     // conversation the run was started from — what the chat decided —
@@ -579,10 +582,10 @@ pub async fn run_lead_agent(
     //
     // It goes in **here**, after the persona layers and the objective and
     // before anything the loop will add, because that is the shape the loop
-    // itself produced the first time: `messages[0..=1]` is the pair every
-    // compaction is forbidden to touch, and the rounds follow it. The
-    // recorded calls arrive as messages and nothing dispatches them — a
-    // replay re-primes context, it never re-runs work.
+    // itself produced the first time: `messages[..objective_head]` is the
+    // head every compaction is forbidden to touch, and the rounds follow
+    // it. The recorded calls arrive as messages and nothing dispatches
+    // them — a replay re-primes context, it never re-runs work.
     if let Some(history) = resume {
         let plan = history.plan;
         tracing::info!(
@@ -656,6 +659,12 @@ pub async fn run_lead_agent(
     loop_config.writer =
         crate::orchestrator::working_state::WriterConfig::new(&daemon_config.load(), db.clone());
     loop_config.working_state = chat_state.map(|(state, _)| state);
+    // SA-2b-LEAD (the owner's answer of 2026-11-12, item 7, (a)): every
+    // compaction keeps the objective, which an opening memory block puts at
+    // `messages[2]`, outside the default head (the system prompt and one
+    // message). The chat's working state, the working-folder line and a
+    // replayed history stay behind it, for the loop to fold.
+    loop_config.kept_head = objective_head;
     loop_config.event_bus = Some(bus.clone());
     loop_config.experimental_ephemeral_pressure =
         daemon_config.load().experimental.ephemeral_pressure_layer;

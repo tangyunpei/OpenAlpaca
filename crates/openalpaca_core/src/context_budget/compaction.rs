@@ -19,7 +19,8 @@ pub trait Summarizer: Send + Sync {
 /// The messages at the head of a list every compaction tier keeps by
 /// default: the system prompt and the initial query (`messages[..2]`). A
 /// loop handed a longer head — a spawned subagent's, its objective last
-/// (SA-2b) — passes its own count (`LoopConfig::kept_head`).
+/// (SA-2b), or a lead's behind its opening memory block, through its
+/// objective (SA-2b-LEAD) — passes its own count (`LoopConfig::kept_head`).
 pub const DEFAULT_KEPT_HEAD: usize = 2;
 
 /// 2-phase compaction pipeline for context window management.
@@ -54,7 +55,7 @@ impl CompactionPipeline {
     ///          heuristic.
     ///
     /// Every phase keeps `messages[..head]` (`DEFAULT_KEPT_HEAD` but for a
-    /// spawned subagent's loop).
+    /// spawned subagent's loop and a lead's given a memory block).
     pub async fn compact(
         messages: Vec<ChatMessage>,
         head: usize,

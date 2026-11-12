@@ -695,7 +695,7 @@ that passes none (the social fast path, tests) never compacts.
   |---|---|---|
   | ≥ 60% | `TruncateToolResults` | Cuts tool results longer than 200 bytes to half their size. |
   | ≥ 70% | `DropMultimedia` | Replaces image, audio and document parts with one-line text placeholders. |
-  | ≥ 75% | `DiscardSocial` | Removes small-talk user messages and the replies to them. Keeps the kept head — the system message and the first query (a spawned subagent: everything it was handed) — and the last `min_recent_messages` (default 4). |
+  | ≥ 75% | `DiscardSocial` | Removes small-talk user messages and the replies to them. Keeps the kept head — the system message and the first query (a spawned subagent: everything it was handed; a lead: everything through its objective, behind its memory block when it has one) — and the last `min_recent_messages` (default 4). |
   | ≥ 80% | `HeuristicSummary` | Replaces older rounds with a compact summary built without a model (`runner/agentic_loop/context.rs::compress_context`). |
   | ≥ 85% | `LlmSummary` | Folds the older messages into the conversation's **working state** with one model call (below). Cancellable: a cancel restores the messages untouched. |
 
@@ -707,7 +707,8 @@ that passes none (the social fast path, tests) never compacts.
   `asked`, `decisions`, `open`, `next`, `refs`. It replaces those messages with the
   rendered state at `messages[2]` (a previous state block among them is taken
   out, so the list never holds two; for a spawned subagent `2` is its kept
-  head's length, SA-2b) and is carried out on
+  head's length, SA-2b, and for a lead the length through its objective, 3
+  behind a memory block, SA-2b-LEAD) and is carried out on
   `LoopResult.working_state`. The call is the one working-state writer the
   turn end and a conversation's close use too
   (`orchestrator/working_state.rs`): `[orchestrator.costs] summary_model`
@@ -733,7 +734,10 @@ that passes none (the social fast path, tests) never compacts.
   exempt from discard and truncation. A working-state block is never cut:
   the heuristic summary keeps it whole ahead of its own, and `LlmSummary`
   replaces it with the state it writes. A spawned subagent's brief is in its
-  kept head (SA-2b).
+  kept head (SA-2b), and so is a lead's objective, which its opening memory
+  block puts at `messages[2]`: the lead's kept head runs through it
+  (SA-2b-LEAD); the chat's working state, the working-folder line and a
+  replayed history behind it are folded as before.
 - **The assembly's trim** (`compose/assembly.rs`, Layer 5), before the
   loop: while the stitched request passes 75% of the window
   (`TRIM_THRESHOLD`) it takes the oldest non-system message, then Layer 3's

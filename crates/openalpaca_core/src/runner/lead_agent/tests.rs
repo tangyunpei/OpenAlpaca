@@ -4872,6 +4872,154 @@ async fn a_lead_run_is_primed_with_its_memory_once_and_its_profile_once() {
     assert_eq!(ring[0].lane_key.as_deref(), Some("user-1:cli"));
 }
 
+/// SA-2b-LEAD (the owner's answer of 2026-11-12, item 7, (a)): a lead
+/// given an opening memory block has its objective at `messages[2]`, behind
+/// the block — outside the default kept head (`DEFAULT_KEPT_HEAD`, 2), so a
+/// compaction of the lead's loop folded the objective into the working
+/// state with the older rows. Now the lead's loop keeps its head through
+/// the objective (`LoopConfig::kept_head`), so after a compaction the
+/// objective is still there, verbatim, behind the memory block, and what
+/// stood behind the objective (here the working-folder line) is folded as
+/// it was without a memory block. A ~7,500-token first round on an
+/// 8,192-token window keeps every later round past the compaction
+/// trigger; the fourth round's list is long enough for the summary tier
+/// to fold the older rows.
+#[tokio::test]
+async fn a_lead_with_a_memory_block_keeps_its_objective_through_a_compaction() {
+    let scene = lead_memory_scene();
+    let objective = "write the status reports OBJECTIVE-KEPT-THROUGH-COMPACTION";
+    let big = "x".repeat(30_000);
+    let call = |id: &str| openalpaca_llm::ToolCall {
+        id: id.to_string(),
+        name: "no_such_tool".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let provider = Arc::new(LeadCompactionProvider {
+        rounds: std::sync::Mutex::new(
+            vec![
+                scripted_response(&big, vec![call("l-1")]),
+                scripted_response("next", vec![call("l-2")]),
+                scripted_response("next", vec![call("l-3")]),
+                scripted_response("all done", vec![]),
+            ]
+            .into(),
+        ),
+        state: r#"{"topic":"Status reports","goal":"Write them","done":[],"decisions":[],"open":[],"next":"Send them","refs":[]}"#.to_string(),
+        writer_prompts: std::sync::Mutex::new(Vec::new()),
+        lead_requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Ollama,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    router.model_registry().register(
+        "claude-sonnet-4-20250514".to_string(),
+        openalpaca_llm::routing::model_registry::ModelInfo {
+            provider: openalpaca_llm::ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        objective,
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        Some(scene.service.clone()),
+        None,
+        "task-1",
+        LEAD_OWNER,
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some("conv-lead"),
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+
+    let requests = provider.lead_requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 4, "the lead answered in four rounds");
+    let shape = |messages: &[openalpaca_llm::ChatMessage]| {
+        messages
+            .iter()
+            .map(|m| {
+                (
+                    m.role.clone(),
+                    m.content.chars().take(40).collect::<String>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = &requests[0];
+    assert!(
+        first[1].content.starts_with("<memory_context>\n")
+            && first[2].content == objective
+            && first[3].content.starts_with("<working_folder>"),
+        "the memory block at messages[1], the objective at messages[2], the \
+         working-folder line behind it: {:?}",
+        shape(first)
+    );
+    let after = &requests[3];
+    assert!(
+        !after.iter().any(|m| m.content == big)
+            && after.iter().any(|m| {
+                m.content
+                    .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
+            }),
+        "the last round was compacted, its older rows folded into a working state: {:?}",
+        shape(after)
+    );
+    assert!(
+        after[1].content.starts_with("<memory_context>\n")
+            && after[2].role == openalpaca_llm::Role::User
+            && after[2].content == objective,
+        "the objective, verbatim, behind the memory block after the compaction: {:?}",
+        shape(after)
+    );
+    assert_eq!(
+        after.iter().filter(|m| m.content == objective).count(),
+        1,
+        "the objective once"
+    );
+    assert!(
+        after[3]
+            .content
+            .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX),
+        "the head ends at the objective: the working-folder line behind it is \
+         folded with the older rows, as without a memory block: {:?}",
+        shape(after)
+    );
+}
+
 /// The lead's opening memory message on `scene` for "write the status
 /// reports", through the real run under `config`.
 async fn lead_opening_memory(scene: &LeadMemoryScene, config: DaemonConfig) -> String {
