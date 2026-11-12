@@ -322,6 +322,39 @@ fn editing_then_deleting_a_lead_agent_override_moves_the_next_spawns_model() {
     assert_eq!(next.llm_config.model, bundled_model);
 }
 
+/// LEAD-SINGLETON (C2's item 2, taken 2026-11-12): on a store with no
+/// `lead_agent.md` the bundled lead's idle instance is there before its
+/// first run and after it, and neither a rescan nor setting the bundled
+/// layer again takes it or moves its `config_version`.
+#[test]
+fn the_bundled_leads_idle_instance_survives_a_run_a_rescan_and_the_bundle_set_again() {
+    let store = Store::new();
+    store.rescan(LoadMode::Start);
+    let (_, version) = store
+        .registry
+        .get_with_version("lead_agent")
+        .expect("there before the first run");
+
+    let run = store
+        .registry
+        .spawn_instance("lead_agent", "t1".to_string())
+        .unwrap();
+    store.registry.destroy_instance(&run.id);
+    assert!(
+        store.registry.get_with_version("lead_agent").is_some(),
+        "there after the run"
+    );
+    store.rescan(LoadMode::Reload);
+    store.registry.set_bundled_layer(bundled_templates());
+
+    let (idle, kept) = store
+        .registry
+        .get_with_version("lead_agent")
+        .expect("there after a run, a rescan and the bundle set again");
+    assert!(idle.status.is_available(), "{:?}", idle.status);
+    assert_eq!(kept, version);
+}
+
 /// V-4: a copy renamed but not edited is still unedited — matched by
 /// content, whatever the file is called.
 #[test]

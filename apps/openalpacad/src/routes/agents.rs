@@ -875,6 +875,62 @@ mod tests {
         assert!(on_disk.contains("model: \"model-b\""), "{on_disk}");
     }
 
+    /// LEAD-SINGLETON (C2's item 2, taken 2026-11-12): `GET
+    /// /v1/agents/lead_agent/config` finds the lead before its first run and
+    /// after it — the bundled lead's and a file's alike — where the first
+    /// run used to take the instance it reads.
+    #[test]
+    fn the_lead_agents_config_answers_before_and_after_a_run() {
+        for files in [vec![], vec![("lead_agent.md", lead("model-a"))]] {
+            let t = Templates::new(&files);
+            let (_, version) = t
+                .service
+                .get_agent_config("lead_agent")
+                .expect("found before the first run");
+            let ran = t
+                .registry
+                .spawn_instance("lead_agent", "t1".to_string())
+                .unwrap();
+            t.registry.destroy_instance(&ran.id);
+            let (config, kept) = t
+                .service
+                .get_agent_config("lead_agent")
+                .expect("found after a run");
+            assert_eq!(config.agent.id, "lead_agent");
+            assert_eq!(kept, version);
+        }
+    }
+
+    /// LEAD-SINGLETON: a `PUT /v1/agents/lead_agent/config` (`agents set`)
+    /// holds for the lead's later runs, not only its next one, until its
+    /// template changes — the rescan of a changed definition rebuilds it.
+    #[test]
+    fn a_config_set_on_the_lead_holds_for_its_runs_until_its_template_changes() {
+        let t = Templates::new(&[("lead_agent.md", lead("model-a"))]);
+        let (mut config, version) = t.service.get_agent_config("lead_agent").unwrap();
+        config.llm.as_mut().expect("the lead names a model").model = Some("model-set".into());
+        t.service
+            .update_agent_config("lead_agent", config, version)
+            .unwrap();
+
+        for task in ["t1", "t2"] {
+            let run = t
+                .registry
+                .spawn_instance("lead_agent", task.to_string())
+                .unwrap();
+            assert_eq!(run.llm_config.model.as_deref(), Some("model-set"));
+            t.registry.destroy_instance(&run.id);
+        }
+
+        let edited = parse_agent_markdown(&lead("model-b")).unwrap();
+        t.route().update("lead_agent", edited).unwrap();
+        let next = t
+            .registry
+            .spawn_instance("lead_agent", "t3".to_string())
+            .unwrap();
+        assert_eq!(next.llm_config.model.as_deref(), Some("model-b"));
+    }
+
     /// T-2's present form: `DELETE /v1/agent-templates/{id}` archives the
     /// file, and the template, its idle instance and its row's status follow
     /// when the call returns.

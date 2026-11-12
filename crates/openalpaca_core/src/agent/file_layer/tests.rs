@@ -4,7 +4,7 @@
 //! and holds the crate's home-store guard on a home inside it.
 
 use super::*;
-use crate::agent::registry::{NotUsedReason, TemplateLayer, TemplateState};
+use crate::agent::registry::{DestroyOutcome, NotUsedReason, TemplateLayer, TemplateState};
 use crate::test_util::HomeStoreGuard;
 use openalpaca_storage::SubAgentRepository;
 use tempfile::TempDir;
@@ -260,8 +260,8 @@ fn a_hot_edit_reaches_the_singleton_leads_next_spawn() {
     f.write("lead_agent.md", &lead("model-a"));
     f.rescan(LoadMode::Start).unwrap();
 
-    // The first run claims the instance the start registered; it goes
-    // with the run.
+    // The first run claims the instance the start registered; its end
+    // sets it back to idle (LEAD-SINGLETON).
     let first = f
         .registry
         .spawn_instance("lead_agent", "t1".to_string())
@@ -269,7 +269,7 @@ fn a_hot_edit_reaches_the_singleton_leads_next_spawn() {
     assert_eq!(first.llm_config.model.as_deref(), Some("model-a"));
     f.registry.destroy_instance(&first.id);
 
-    // Edited after one run: the rescan registers it afresh.
+    // Edited after one run: the rescan rebuilds the idle instance.
     f.write("lead_agent.md", &lead("model-b"));
     f.rescan(LoadMode::Reload).unwrap();
     let second = f
@@ -279,8 +279,8 @@ fn a_hot_edit_reaches_the_singleton_leads_next_spawn() {
     assert_eq!(second.llm_config.model.as_deref(), Some("model-b"));
     f.registry.destroy_instance(&second.id);
 
-    // A run with no rescan before it makes the singleton's own instance,
-    // which its end sets back to idle.
+    // A run with no rescan before it claims the same instance, which its
+    // end sets back to idle.
     let third = f
         .registry
         .spawn_instance("lead_agent", "t3".to_string())
@@ -298,6 +298,111 @@ fn a_hot_edit_reaches_the_singleton_leads_next_spawn() {
         .spawn_instance("lead_agent", "t4".to_string())
         .unwrap();
     assert_eq!(fourth.llm_config.model.as_deref(), Some("model-c"));
+}
+
+/// LEAD-SINGLETON (C2's item 2, taken 2026-11-12): the singleton lead's
+/// idle instance is registered as a singleton, so a run sets it back to
+/// idle instead of removing it — the instance `GET
+/// /v1/agents/lead_agent/config` reads is there before the first run and
+/// after each, at the same `config_version`, and an unchanged rescan keeps
+/// it.
+#[test]
+fn the_leads_idle_instance_survives_a_run() {
+    let f = Fixture::new();
+    f.write("lead_agent.md", &lead("model-a"));
+    f.rescan(LoadMode::Start).unwrap();
+    let (_, version) = f
+        .registry
+        .get_with_version("lead_agent")
+        .expect("there before the first run");
+
+    for task in ["t1", "t2"] {
+        let run = f
+            .registry
+            .spawn_instance("lead_agent", task.to_string())
+            .unwrap();
+        assert_eq!(run.id, "lead_agent");
+        assert_eq!(
+            f.registry.destroy_instance(&run.id),
+            DestroyOutcome::ResetToIdle
+        );
+        let (after, kept) = f
+            .registry
+            .get_with_version("lead_agent")
+            .expect("there after a run");
+        assert!(after.status.is_available(), "{:?}", after.status);
+        assert_eq!(after.current_task, None);
+        assert_eq!(after.llm_config.model.as_deref(), Some("model-a"));
+        assert_eq!(kept, version);
+    }
+
+    f.rescan(LoadMode::Reload).unwrap();
+    let (_, kept) = f
+        .registry
+        .get_with_version("lead_agent")
+        .expect("kept by a rescan");
+    assert_eq!(kept, version);
+}
+
+/// LEAD-SINGLETON with L-1a: an edit made while the lead runs is in its idle
+/// instance when the run ends — what `GET /v1/agents/lead_agent/config`
+/// reads — and in its next run, not the definition the run started from.
+#[test]
+fn an_edit_while_the_lead_runs_reaches_its_idle_instance_and_next_run() {
+    let f = Fixture::new();
+    f.write("lead_agent.md", &lead("model-a"));
+    f.rescan(LoadMode::Start).unwrap();
+    let run = f
+        .registry
+        .spawn_instance("lead_agent", "t1".to_string())
+        .unwrap();
+
+    f.write("lead_agent.md", &lead("model-b"));
+    f.rescan(LoadMode::Reload).unwrap();
+    f.registry.destroy_instance(&run.id);
+
+    let idle = f.registry.get("lead_agent").expect("there after the run");
+    assert!(idle.status.is_available(), "{:?}", idle.status);
+    assert_eq!(idle.llm_config.model.as_deref(), Some("model-b"));
+    let next = f
+        .registry
+        .spawn_instance("lead_agent", "t2".to_string())
+        .unwrap();
+    assert_eq!(next.llm_config.model.as_deref(), Some("model-b"));
+}
+
+/// LEAD-SINGLETON with C3a (§2.4 L-4a): a lead switched off while it runs
+/// has no idle instance once the run ends.
+#[test]
+fn a_lead_switched_off_while_it_runs_has_no_idle_instance_after() {
+    let f = Fixture::new();
+    f.write("lead_agent.md", &lead("model-a"));
+    f.rescan(LoadMode::Start).unwrap();
+    let run = f
+        .registry
+        .spawn_instance("lead_agent", "t1".to_string())
+        .unwrap();
+
+    f.write(
+        "lead_agent.md",
+        "---\nid: lead_agent\ndisabled: true\n---\n",
+    );
+    f.rescan(LoadMode::Reload).unwrap();
+    assert!(
+        f.registry.get(&run.id).is_some(),
+        "a busy instance is left alone"
+    );
+
+    assert_eq!(
+        f.registry.destroy_instance(&run.id),
+        DestroyOutcome::Removed
+    );
+    assert!(f.registry.get_with_version("lead_agent").is_none());
+    assert!(
+        f.registry
+            .spawn_instance("lead_agent", "t2".to_string())
+            .is_err()
+    );
 }
 
 /// L-1a: a hot edit rebuilds a template's idle instance — the one `GET
@@ -369,7 +474,8 @@ fn a_broken_file_never_takes_the_id_of_a_file_that_parses() {
 }
 
 /// L-1a: the idle instance a template file materialised goes with the file;
-/// while busy it stays, and the next change takes it.
+/// while busy it stays, and its run's end (the singleton lead's,
+/// LEAD-SINGLETON) or the next change takes it.
 #[test]
 fn a_template_files_idle_instance_leaves_with_it() {
     let f = Fixture::new();

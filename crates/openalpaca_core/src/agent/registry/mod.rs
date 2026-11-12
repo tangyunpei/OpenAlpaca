@@ -20,7 +20,9 @@ use std::sync::Mutex;
 /// the correct lifecycle status ("destroyed" vs "idle").
 #[derive(Debug, Clone, PartialEq)]
 pub enum DestroyOutcome {
-    /// Non-singleton instance was removed from registry entirely.
+    /// The instance was removed from the registry entirely: a non-singleton
+    /// one, or a singleton's synced idle instance whose id left the catalog
+    /// or was switched off while it ran (L-1a, LEAD-SINGLETON).
     Removed,
     /// Singleton instance was reset to Idle (still in registry for reuse).
     ResetToIdle,
@@ -343,6 +345,16 @@ impl TemplateLayers {
         } else {
             None
         }
+    }
+
+    /// The template the idle instance of `id` follows (L-1a): its resolved
+    /// file or bundled template; `None` for a plugin's, or an id that left
+    /// the catalog or was switched off.
+    fn instance_template(&self, id: &str) -> Option<&AgentTemplate> {
+        if self.layer_of(id) == Some(TemplateLayer::Plugin) {
+            return None;
+        }
+        self.resolved.get(id)
     }
 
     /// The resolved templates in L-1's order: the file layer's, then the
@@ -902,9 +914,19 @@ impl AgentRegistry {
     /// so it can be re-claimed later. Returns a `DestroyOutcome` so callers
     /// can emit the correct lifecycle event status.
     ///
-    /// Uses the cached `is_singleton` field on `RegisteredAgent` to avoid
-    /// needing the templates lock.
+    /// A singleton's idle instance that `sync_template_instances` made — the
+    /// lead's (L-1a, LEAD-SINGLETON) — catches up here with a change made
+    /// while it ran, which the rescan left alone because it was busy: an id
+    /// that left the catalog, or was switched off, loses it (`Removed`), and
+    /// a changed definition rebuilds it, so the next run and `GET
+    /// /v1/agents/{id}/config` see the template in force, as a new instance
+    /// did when the run took it away.
     pub fn destroy_instance(&self, instance_id: &str) -> DestroyOutcome {
+        // Held to the end, in the order every path takes them (templates,
+        // instances, synced): a rescan replacing a layer cannot land between
+        // the template read and the reset, so its sync, which would skip the
+        // still-busy instance, sees it idle instead.
+        let templates = self.lock_templates();
         let mut instances = self.lock_instances();
         if let Some(entry) = instances.get_mut(instance_id)
             && entry.is_singleton
@@ -912,6 +934,23 @@ impl AgentRegistry {
             // Singleton: reset to Idle instead of removing
             entry.agent.status = AgentStatus::Idle;
             entry.agent.current_task = None;
+            let mut synced = self.lock_synced();
+            if let Some(built) = synced.get(instance_id) {
+                match templates.instance_template(instance_id) {
+                    None => {
+                        instances.remove(instance_id);
+                        synced.remove(instance_id);
+                        return DestroyOutcome::Removed;
+                    }
+                    Some(template) if !same_definition(built, template) => {
+                        entry.agent = idle_instance(template);
+                        entry.config_version += 1;
+                        entry.is_singleton = template.frontmatter.singleton;
+                        synced.insert(instance_id.to_string(), template.clone());
+                    }
+                    Some(_) => {}
+                }
+            }
             return DestroyOutcome::ResetToIdle;
         }
         // Non-singleton: remove entirely
@@ -953,10 +992,13 @@ impl AgentRegistry {
     /// id — the one the singleton lead is claimed from, `GET
     /// /v1/agents/{id}/config` reads and `?skill=` filters: an idle one built
     /// from another definition is rebuilt, a missing one registered, a busy
-    /// one left alone and rebuilt at the next change, as hot reload always
-    /// did. The idle instance of an id that left the catalog goes. Only the
-    /// instances this method materialised are ever removed, so a legacy
-    /// `.toml` agent stays; a plugin's template gets none, as before.
+    /// one left alone and caught up when its run ends (`destroy_instance`)
+    /// or at the next change. Each is registered as its template's
+    /// `singleton` says (LEAD-SINGLETON), so the singleton lead's run sets
+    /// its instance back to idle rather than taking it away. The idle
+    /// instance of an id that left the catalog goes. Only the instances this
+    /// method materialised are ever removed, so a legacy `.toml` agent
+    /// stays; a plugin's template gets none, as before.
     pub fn sync_template_instances(&self) {
         let wanted: HashMap<String, AgentTemplate> = {
             let templates = self.lock_templates();
@@ -978,7 +1020,7 @@ impl AgentRegistry {
                         RegisteredAgent {
                             agent: idle_instance(template),
                             config_version: 0,
-                            is_singleton: false,
+                            is_singleton: template.frontmatter.singleton,
                         },
                     );
                     synced.insert(id.clone(), template.clone());
@@ -990,6 +1032,7 @@ impl AgentRegistry {
                     if !current {
                         entry.agent = idle_instance(template);
                         entry.config_version += 1;
+                        entry.is_singleton = template.frontmatter.singleton;
                         synced.insert(id.clone(), template.clone());
                     }
                 }

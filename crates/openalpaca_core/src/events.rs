@@ -76,7 +76,9 @@ pub enum SystemEvent {
     ///   "idle"      — singleton released back to the reuse pool
     ///   "waiting"   — instance paused awaiting user action
     ///   "error"     — instance entered error state
-    ///   "destroyed" — non-singleton instance removed from registry
+    ///   "destroyed" — instance removed from registry: a non-singleton one,
+    ///                 or a singleton whose template left the catalog or was
+    ///                 switched off while it ran
     AgentStatusChanged {
         /// Kept for backward compat (same as instance_id).
         agent_id: String,
