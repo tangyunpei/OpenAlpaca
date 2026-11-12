@@ -558,6 +558,81 @@ async fn a_cloud_timeout_whose_local_rung_spent_its_whole_timeout_ends_naming_it
     assert_eq!(hits(&local, LOCAL_2).await, 0, "{err}");
 }
 
+/// A keyed primary whose keys are the problem — every key refused, or none
+/// the provider's API takes — then a local rung that spends its whole
+/// timeout: the call ends naming the keys, the fix the person must make
+/// (N-LEAD-5), not the local model's timeout, and the local rung is asked
+/// once. Without the keys arms' `LocalCallTimedOut` alternative the call
+/// would end naming the local model.
+#[tokio::test]
+async fn a_keys_error_stays_the_answer_when_a_local_rung_spends_its_whole_timeout() {
+    for managed_only in [false, true] {
+        let local = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
+        let cloud = MockHttpServer::start(|_| {
+            MockResponse::error(401, r#"{"error":{"message":"invalid api key"}}"#)
+        })
+        .await;
+        let (cloud_type, mut cloud_entry) = provider_entry(
+            true,
+            &cloud.base_url,
+            plain_client(),
+            CLOUD,
+            REQUEST_TIMEOUT,
+        );
+        if managed_only {
+            // A managed token only: the pool has no key the API takes.
+            let mut key = ApiKey::new(
+                "managed".to_string(),
+                ProviderType::OpenAI,
+                "sk-test".to_string(),
+            );
+            key.source = crate::keys::key_pool::KeySource::Codex;
+            cloud_entry.key_pool = Arc::new(ArcSwap::from_pointee(KeyPool::new(
+                vec![key],
+                SelectionStrategy::RoundRobin,
+            )));
+        }
+        let router = router_over(
+            vec![
+                (cloud_type, cloud_entry),
+                provider_entry(
+                    false,
+                    &local.base_url,
+                    plain_client(),
+                    PRIMARY,
+                    REQUEST_TIMEOUT,
+                ),
+            ],
+            &[
+                (CLOUD, ProviderType::OpenAI),
+                (PRIMARY, ProviderType::Ollama),
+            ],
+            rates(100),
+        );
+
+        let err = router.complete(request(CLOUD)).await.unwrap_err();
+
+        if managed_only {
+            assert!(
+                matches!(err, LlmRouterError::NoApiCompatibleKeys),
+                "no API-compatible key: {err} ({err:?})"
+            );
+            assert_eq!(hits(&cloud, CLOUD).await, 0, "{err}");
+        } else {
+            assert!(
+                matches!(err, LlmRouterError::AllKeysRefused),
+                "every key refused: {err} ({err:?})"
+            );
+            assert!(hits(&cloud, CLOUD).await >= 1, "{err}");
+        }
+        assert_eq!(
+            hits(&local, PRIMARY).await,
+            1,
+            "the local rung is asked once (managed only: {managed_only}): {err}"
+        );
+    }
+}
+
 /// Only the whole figure is spent: a local call whose read gap (250 ms)
 /// ends it long before its deadline (5 s) — as the OS's TCP timeout can,
 /// reported as the same kind — keeps M57's row. Streamed, it is the
