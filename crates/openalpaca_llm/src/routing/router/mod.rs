@@ -108,8 +108,9 @@ pub struct LlmRouter {
     /// (requested → effective) pairs already announced, so a substitution is
     /// visible once per pair instead of once per round (L3).
     pub(super) substitutions_logged: DashSet<(String, String)>,
-    /// (alias, provider) pairs whose collapse to the parent's model on a
-    /// mixed install was announced (M-5), so it is said once per pair.
+    /// (alias, provider) pairs whose collapse on a mixed install — to the
+    /// parent's model, or the default where the parent is not routable — was
+    /// announced (M-5), so it is said once per pair.
     pub(super) alias_collapses_logged: DashSet<(ModelAlias, String)>,
 }
 
@@ -523,11 +524,12 @@ impl LlmRouter {
         }
 
         let model = parent
+            .clone()
             .filter(|p| self.is_routable(p))
             .or_else(|| self.effective_default_model())?;
         if let Some(provider) = &provider {
             if passed_over.is_empty() {
-                self.announce_collapse(alias, provider, &model);
+                self.announce_collapse(alias, provider, parent.as_deref(), &model);
             } else {
                 self.announce_passed_over(alias, provider, &passed_over, &model);
             }
@@ -572,8 +574,16 @@ impl LlmRouter {
     /// M-5's `INFO` for a collapse on a mixed install: the parent's provider
     /// has no model for `alias`, and another loaded provider has one, which
     /// the alias does not move to. Once per (alias, provider); nothing where
-    /// no loaded provider has one (an Ollama-only install).
-    fn announce_collapse(&self, alias: ModelAlias, provider: &ProviderType, model: &str) {
+    /// no loaded provider has one (an Ollama-only install). Where the parent
+    /// is not routable either, step 3 answered the effective default, and
+    /// the line says so rather than call it the parent's model.
+    fn announce_collapse(
+        &self,
+        alias: ModelAlias,
+        provider: &ProviderType,
+        parent: Option<&str>,
+        model: &str,
+    ) {
         let elsewhere = self.providers.iter().any(|entry| {
             let other = entry.key();
             other != provider
@@ -585,14 +595,25 @@ impl LlmRouter {
                 .alias_collapses_logged
                 .insert((alias, provider.to_string()))
         {
-            tracing::info!(
-                alias = alias.as_str(),
-                provider = %provider,
-                model,
-                "Model alias '{alias}' has no model on {provider}: it runs on {model}, the \
-                 parent's model. To use another, pin it under \
-                 [providers.{provider}.model_aliases]."
-            );
+            match parent.filter(|p| *p != model) {
+                None => tracing::info!(
+                    alias = alias.as_str(),
+                    provider = %provider,
+                    model,
+                    "Model alias '{alias}' has no model on {provider}: it runs on {model}, the \
+                     parent's model. To use another, pin it under \
+                     [providers.{provider}.model_aliases]."
+                ),
+                Some(parent) => tracing::info!(
+                    alias = alias.as_str(),
+                    provider = %provider,
+                    parent,
+                    model,
+                    "Model alias '{alias}' has no model on {provider}: its parent's model \
+                     {parent} is not available, so it runs on {model}, the default model. \
+                     To use another, pin it under [providers.{provider}.model_aliases]."
+                ),
+            }
         }
     }
 

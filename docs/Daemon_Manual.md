@@ -337,8 +337,9 @@ templates still name model ids.
 | `strong` | `claude-opus-5-5` | `gpt-5.2` | the parent's model |
 
 Resolution, in order: the parent's provider's pin; that provider's built-in
-row; the parent's model itself (with no parent, the model a request naming
-none reaches); nothing, when no model is routable. An alias never moves a
+row; the parent's model itself (with no parent, or a parent that is not
+routable, the model a request naming none reaches); nothing, when no model
+is routable. An alias never moves a
 run to another provider by itself: on a machine whose main model is a local
 Ollama model, `strong` stays on that model even with an Anthropic key
 loaded, unless you pin it elsewhere.
@@ -362,7 +363,9 @@ says so once per (model, answer) pair at `WARN`: `Model alias 'fast' would
 use <id>, which is not available — answering with <model>.` When the
 parent's provider has no model for an alias and another loaded provider has
 one, the alias still runs on the parent's model, and that is said once per
-alias and provider at `INFO`. The seeded `llm.toml` carries a commented-out
+alias and provider at `INFO`; if the parent's model is not available either
+(its provider is off), the line says so and names the default model the
+alias runs on instead. The seeded `llm.toml` carries a commented-out
 example; an existing `llm.toml` is never rewritten, so the built-in rows
 reach it with the release.
 

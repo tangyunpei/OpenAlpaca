@@ -314,6 +314,72 @@ fn an_alias_on_a_parent_that_is_not_routable_answers_the_effective_default() {
     }
 }
 
+/// M-5's `INFO` names the model step 3 answers for what it is: the
+/// parent's model where the parent is routable, the default where it is
+/// not (a pulled tag once Ollama is off, Anthropic loaded) — never the
+/// default called the parent's model. Each once per (alias, provider).
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_collapse_line_calls_the_default_the_default_not_the_parents_model() {
+    let mixed = router(
+        &[ProviderType::Ollama, ProviderType::Anthropic],
+        "claude-haiku-4-5-20251001",
+    );
+    pulled(&mixed, "qwen3:8b");
+    assert_eq!(
+        resolved(&mixed, ModelAlias::Fast, Some("qwen3:8b")),
+        "qwen3:8b"
+    );
+
+    let ollama_off = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    pulled(&ollama_off, "qwen3:8b");
+    for _ in 0..3 {
+        assert_eq!(
+            resolved(&ollama_off, ModelAlias::Balanced, Some("qwen3:8b")),
+            "claude-haiku-4-5-20251001"
+        );
+    }
+
+    logs_assert(|lines: &[&str]| {
+        let parents = lines
+            .iter()
+            .filter(|l| {
+                l.contains("INFO")
+                    && l.contains(
+                        "Model alias 'fast' has no model on ollama: it runs on qwen3:8b, \
+                         the parent's model",
+                    )
+            })
+            .count();
+        if parents != 1 {
+            return Err(format!("the parent's model said once, not {parents} times"));
+        }
+        let balanced: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.contains("Model alias 'balanced'"))
+            .collect();
+        if let Some(line) = balanced.iter().find(|l| l.contains("the parent's model")) {
+            return Err(format!("the default called the parent's model: {line}"));
+        }
+        let defaults = balanced
+            .iter()
+            .filter(|l| {
+                l.contains("INFO")
+                    && l.contains(
+                        "Model alias 'balanced' has no model on ollama: its parent's model \
+                         qwen3:8b is not available, so it runs on claude-haiku-4-5-20251001, \
+                         the default model",
+                    )
+                    && l.contains("[providers.ollama.model_aliases]")
+            })
+            .count();
+        match (defaults, balanced.len()) {
+            (1, 1) => Ok(()),
+            (d, n) => Err(format!("the default said once at INFO, not {d} of {n}")),
+        }
+    });
+}
+
 /// Step 4: nothing routable resolves nothing, with or without a parent.
 #[test]
 fn nothing_routable_resolves_no_alias() {
