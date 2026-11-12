@@ -1089,7 +1089,7 @@ async fn the_cli_backend_will_not_serve_a_provider_that_is_not_loaded() {
     router.register_cli_backend(ProviderType::Anthropic, cli_provider.clone());
 
     let err = router
-        .try_fallback("claude-sonnet-4-5-20250929", &make_request(None))
+        .try_fallback("claude-sonnet-4-5-20250929", &make_request(None), None)
         .await
         .expect_err("a provider that is not loaded may not be served at all");
 

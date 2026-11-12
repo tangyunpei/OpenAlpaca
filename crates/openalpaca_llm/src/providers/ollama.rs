@@ -185,6 +185,12 @@ impl LlmProvider for OllamaProvider {
         false
     }
 
+    /// The deadline [`Self::with_request_timeout`] set, the one the chat
+    /// calls carry (LOCAL-HOUR-NO-RETRY).
+    fn request_timeout(&self) -> Option<std::time::Duration> {
+        self.request_timeout
+    }
+
     async fn list_models_with_key(&self, _key: &str) -> Result<Vec<String>, LlmError> {
         // Ollama uses native /api/tags endpoint (no auth needed)
         let url = format!("{}/api/tags", self.native_base());

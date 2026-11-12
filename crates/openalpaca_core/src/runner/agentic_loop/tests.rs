@@ -4206,6 +4206,12 @@ fn endless_stream_router(provider: Arc<EndlessStreamProvider>) -> (LlmRouter, &'
         );
         return (router, EFFECTIVE_MODEL);
     }
+    (keyless_router(provider), LOCAL_MODEL)
+}
+
+/// `provider` served as Ollama is, with an empty key pool, for
+/// [`LOCAL_MODEL`].
+fn keyless_router(provider: Arc<dyn LlmProvider>) -> LlmRouter {
     let mut providers = std::collections::HashMap::new();
     providers.insert(
         ProviderType::Ollama,
@@ -4233,7 +4239,7 @@ fn endless_stream_router(provider: Arc<EndlessStreamProvider>) -> (LlmRouter, &'
             declared: true,
         },
     );
-    let router = LlmRouter::new(
+    LlmRouter::new(
         providers,
         registry,
         std::collections::HashMap::new(),
@@ -4241,8 +4247,7 @@ fn endless_stream_router(provider: Arc<EndlessStreamProvider>) -> (LlmRouter, &'
             openalpaca_llm::ModelRegistry::with_defaults(),
         )),
         LOCAL_MODEL.to_string(),
-    );
-    (router, LOCAL_MODEL)
+    )
 }
 
 /// One streamed turn against a model that never stops, under the two round
@@ -4292,12 +4297,14 @@ async fn an_endless_streamed_turn(needs_key: bool) -> (LoopResult, Duration, usi
     )
 }
 
-/// **LOCAL-CALL-HOUR.** A streamed round to a provider that needs no key
-/// runs past the keyed bound and is dropped at its own (an hour in
-/// production), then answered by the non-streaming call. Before the change
-/// every streamed round was dropped at `max_stream_duration`, local or not.
+/// **LOCAL-CALL-HOUR**, then **LOCAL-HOUR-NO-RETRY.** A streamed round to a
+/// provider that needs no key runs past the keyed bound and is dropped at its
+/// own (an hour in production). Having used that whole bound it is not asked
+/// again without streaming: the turn ends naming it. Before LOCAL-CALL-HOUR
+/// every streamed round was dropped at `max_stream_duration`, local or not;
+/// before LOCAL-HOUR-NO-RETRY the dropped round was asked again unstreamed.
 #[tokio::test(start_paused = true)]
-async fn a_streamed_round_to_a_keyless_provider_runs_to_its_own_bound() {
+async fn a_streamed_round_to_a_keyless_provider_runs_to_its_own_bound_and_is_not_asked_again() {
     let (result, took, events, unstreamed) = an_endless_streamed_turn(false).await;
 
     assert!(
@@ -4309,11 +4316,18 @@ async fn a_streamed_round_to_a_keyless_provider_runs_to_its_own_bound() {
         "the stream ran past the keyed bound's two events: {events}"
     );
     assert_eq!(
-        unstreamed, 1,
-        "then the round is asked again without streaming"
+        unstreamed, 0,
+        "a round that used its whole bound is not asked again without streaming"
     );
-    assert_eq!(result.final_content, "answered unstreamed");
-    assert_eq!(result.model_used.as_deref(), Some(LOCAL_MODEL));
+    assert_eq!(result.final_content, "");
+    match &result.finish_reason {
+        LoopFinishReason::Error(e) => {
+            assert!(e.contains(LOCAL_MODEL), "{e}");
+            assert!(e.contains("within its whole timeout of 6 s"), "{e}");
+            assert!(e.contains("not asked again"), "{e}");
+        }
+        other => panic!("the turn ends naming the timeout, not {other:?}"),
+    }
 }
 
 /// And a provider that needs a key keeps today's bound: its round is dropped
@@ -4332,6 +4346,229 @@ async fn a_streamed_round_to_a_keyed_provider_is_dropped_at_the_keyed_bound() {
         "then the round is asked again without streaming"
     );
     assert_eq!(result.final_content, "answered unstreamed");
+}
+
+// ── LOCAL-HOUR-NO-RETRY: a local call that used its whole timeout ────
+
+/// A provider whose every call — streamed or not — waits `deadline` and then
+/// fails as reqwest's deadline or read gap does
+/// (`TransportKind::RequestTimeout`). `needs_key` is what it says of itself,
+/// and `figure` the timeout it says its calls carry
+/// (`LlmProvider::request_timeout`).
+struct SpentDeadlineProvider {
+    needs_key: bool,
+    deadline: Duration,
+    figure: Option<Duration>,
+    calls: AtomicUsize,
+    streamed_calls: AtomicUsize,
+}
+
+impl SpentDeadlineProvider {
+    /// Every call waits out its whole figure, 5 s.
+    fn new(needs_key: bool) -> Arc<Self> {
+        Self::failing_after(
+            needs_key,
+            Duration::from_secs(5),
+            Some(Duration::from_secs(5)),
+        )
+    }
+
+    /// Every call fails after `deadline`, its figure `figure`.
+    fn failing_after(needs_key: bool, deadline: Duration, figure: Option<Duration>) -> Arc<Self> {
+        Arc::new(Self {
+            needs_key,
+            deadline,
+            figure,
+            calls: AtomicUsize::new(0),
+            streamed_calls: AtomicUsize::new(0),
+        })
+    }
+
+    async fn spend(&self) -> LlmError {
+        tokio::time::sleep(self.deadline).await;
+        LlmError::Transport {
+            kind: openalpaca_llm::error::TransportKind::RequestTimeout,
+            message: "operation timed out".to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for SpentDeadlineProvider {
+    fn name(&self) -> &str {
+        "spent-deadline"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn requires_key(&self) -> bool {
+        self.needs_key
+    }
+
+    fn request_timeout(&self) -> Option<Duration> {
+        self.figure
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(self.spend().await)
+    }
+
+    async fn chat_streaming(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatStream, LlmError> {
+        self.streamed_calls.fetch_add(1, Ordering::SeqCst);
+        Err(self.spend().await)
+    }
+}
+
+/// A turn against [`SpentDeadlineProvider`], keyless as Ollama is served or
+/// keyed, streamed when `streamed`. Returns the result and the time it took.
+async fn a_spent_deadline_turn(
+    provider: &Arc<SpentDeadlineProvider>,
+    streamed: bool,
+) -> (LoopResult, Duration) {
+    let (router, model) = if provider.needs_key {
+        let router = LlmRouter::single_provider(
+            Arc::clone(provider) as Arc<dyn LlmProvider>,
+            ProviderType::Anthropic,
+            EFFECTIVE_MODEL.to_string(),
+        );
+        (router, EFFECTIVE_MODEL)
+    } else {
+        (
+            keyless_router(Arc::clone(provider) as Arc<dyn LlmProvider>),
+            LOCAL_MODEL,
+        )
+    };
+    let config = LoopConfig {
+        model: Some(model.to_string()),
+        stream_callback: streamed
+            .then(|| -> StreamCallback { Arc::new(|_event: &openalpaca_llm::StreamEvent| {}) }),
+        ..Default::default()
+    };
+    let started = tokio::time::Instant::now();
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("answer slowly")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    (result, started.elapsed())
+}
+
+/// The finish a spent local call ends a turn with: an error naming it.
+fn ends_naming_the_local_timeout(result: &LoopResult) {
+    match &result.finish_reason {
+        LoopFinishReason::Error(e) => {
+            assert!(e.contains(LOCAL_MODEL), "{e}");
+            assert!(e.contains("within its whole timeout of 5 s"), "{e}");
+            assert!(e.contains("not asked again"), "{e}");
+        }
+        other => panic!("the turn ends naming the timeout, not {other:?}"),
+    }
+}
+
+/// **LOCAL-HOUR-NO-RETRY.** A non-streaming call to a local model that used
+/// its whole deadline is made once: the loop does not ask it again after a
+/// backoff (M57 asked it four times, with 14 s of backoff between), and the
+/// turn ends naming it.
+#[tokio::test(start_paused = true)]
+async fn a_local_call_that_used_its_whole_timeout_ends_the_turn_unretried() {
+    let provider = SpentDeadlineProvider::new(false);
+    let (result, took) = a_spent_deadline_turn(&provider, false).await;
+
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1, "asked once");
+    assert_eq!(provider.streamed_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(took, provider.deadline, "one deadline and no backoff");
+    ends_naming_the_local_timeout(&result);
+}
+
+/// **LOCAL-HOUR-NO-RETRY.** A streamed call to a local model that used its
+/// whole read gap is not asked again without streaming, nor by the loop.
+#[tokio::test(start_paused = true)]
+async fn a_streamed_local_call_that_used_its_whole_timeout_is_not_asked_unstreamed() {
+    let provider = SpentDeadlineProvider::new(false);
+    let (result, took) = a_spent_deadline_turn(&provider, true).await;
+
+    assert_eq!(
+        provider.streamed_calls.load(Ordering::SeqCst),
+        1,
+        "asked once"
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "not asked again without streaming"
+    );
+    assert_eq!(took, provider.deadline, "one deadline and no backoff");
+    ends_naming_the_local_timeout(&result);
+}
+
+/// And a provider that needs a key keeps today's retries: the loop asks a
+/// timed-out call again after its backoff, three times (M57's (a)).
+#[tokio::test(start_paused = true)]
+async fn a_keyed_call_that_timed_out_is_still_retried_by_the_loop() {
+    let provider = SpentDeadlineProvider::new(true);
+    let (result, took) = a_spent_deadline_turn(&provider, false).await;
+
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        4,
+        "once and three retries"
+    );
+    assert_eq!(
+        took,
+        provider.deadline * 4 + Duration::from_secs(2 + 4 + 8),
+        "four deadlines and the loop's three backoffs"
+    );
+    match &result.finish_reason {
+        LoopFinishReason::Error(e) => assert!(!e.contains("not asked again"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// And a local call's timeout that came before its whole figure — the OS's
+/// TCP timeout, which reqwest reports as the same kind — or from a provider
+/// that names no figure keeps M57's row: the loop asks it again after its
+/// backoff, three times. Only the whole figure is spent.
+#[tokio::test(start_paused = true)]
+async fn a_local_timeout_short_of_its_whole_figure_is_still_retried_by_the_loop() {
+    for figure in [Some(Duration::from_secs(5)), None] {
+        let provider = SpentDeadlineProvider::failing_after(false, Duration::from_secs(1), figure);
+        let (result, took) = a_spent_deadline_turn(&provider, false).await;
+
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            4,
+            "once and three retries (figure {figure:?})"
+        );
+        assert_eq!(
+            took,
+            provider.deadline * 4 + Duration::from_secs(2 + 4 + 8),
+            "four early timeouts and the loop's three backoffs (figure {figure:?})"
+        );
+        match &result.finish_reason {
+            LoopFinishReason::Error(e) => assert!(!e.contains("not asked again"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 // ── V3: a turn that reaches no answer says why ───────────────────────

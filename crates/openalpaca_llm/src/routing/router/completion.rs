@@ -10,7 +10,9 @@ impl LlmRouter {
     /// Retries on rate-limit or auth errors by rotating to the next key
     /// (up to `pool.len().min(3)` attempts). Does NOT fall back to other
     /// models — the caller (agentic loop) handles streaming→non-streaming
-    /// fallback on final failure.
+    /// fallback on final failure: through [`Self::complete`], or through
+    /// [`Self::complete_elsewhere`] when this ends as
+    /// [`LlmRouterError::LocalCallTimedOut`].
     ///
     /// Returns the stream **and the model it is being served by** (V4): the
     /// ladder below may answer a request for one id with another, and only
@@ -88,6 +90,7 @@ impl LlmRouter {
                 ephemeral_system_notice: request.ephemeral_system_notice.clone(),
             };
 
+            let started = tokio::time::Instant::now();
             match entry
                 .provider
                 .chat_streaming_with_key(&key_guard.secret, chat_request)
@@ -132,7 +135,15 @@ impl LlmRouter {
                     .await;
                     continue;
                 }
-                Err(e) => return Err(LlmRouterError::Llm(e)),
+                // A local call that spent its whole read gap ends as
+                // `LocalCallTimedOut`: the caller does not ask it again
+                // without streaming (LOCAL-HOUR-NO-RETRY).
+                Err(e) => {
+                    return Err(
+                        super::spent_local_call(&entry, model, &e, started.elapsed())
+                            .unwrap_or(LlmRouterError::Llm(e)),
+                    );
+                }
             }
         }
 
@@ -174,10 +185,13 @@ impl LlmRouter {
                     "No API-compatible keys configured (only managed/OAuth tokens). \
                      Add an API key (sk-ant-api*) to avoid CLI fallback. Trying fallback chain."
                 );
-                self.try_fallback(model, &request)
+                self.try_fallback(model, &request, None)
                     .await
                     .map_err(|fallback| match fallback {
-                        LlmRouterError::AllFallbacksFailed => e,
+                        // A local rung that spent its timeout is not retried
+                        // either; the keys stay the answer to act on.
+                        LlmRouterError::AllFallbacksFailed
+                        | LlmRouterError::LocalCallTimedOut { .. } => e,
                         other => other,
                     })
             }
@@ -186,10 +200,11 @@ impl LlmRouter {
                     model = model,
                     "The provider refused every key it was offered. Trying fallback chain."
                 );
-                self.try_fallback(model, &request)
+                self.try_fallback(model, &request, None)
                     .await
                     .map_err(|fallback| match fallback {
-                        LlmRouterError::AllFallbacksFailed => e,
+                        LlmRouterError::AllFallbacksFailed
+                        | LlmRouterError::LocalCallTimedOut { .. } => e,
                         other => other,
                     })
             }
@@ -198,14 +213,14 @@ impl LlmRouter {
                     model = model,
                     "All API keys are rate-limited. Trying fallback chain."
                 );
-                self.try_fallback(model, &request).await
+                self.try_fallback(model, &request, None).await
             }
             Err(LlmRouterError::MaxRetriesExceeded) => {
                 tracing::warn!(
                     model = model,
                     "Max retries exceeded across all keys. Trying fallback chain."
                 );
-                self.try_fallback(model, &request).await
+                self.try_fallback(model, &request, None).await
             }
             // The provider was unloaded between the ladder and the call — a
             // disable landing mid-request. Take the ladder's next rung rather
@@ -215,7 +230,18 @@ impl LlmRouter {
                     model = model,
                     "Model became unroutable during the call. Trying fallback chain."
                 );
-                self.try_fallback(model, &request).await
+                self.try_fallback(model, &request, None).await
+            }
+            // A local call that used its whole timeout: no rung of its own
+            // provider is asked, another provider's may answer, and when none
+            // does the call ends naming it (LOCAL-HOUR-NO-RETRY).
+            Err(spent @ LlmRouterError::LocalCallTimedOut { .. }) => {
+                tracing::warn!(
+                    model = model,
+                    error = %spent,
+                    "A local call used its whole timeout. Trying the ladder's other providers."
+                );
+                self.try_fallback(model, &request, Some(spent)).await
             }
             // Transient errors (529 Overloaded, 500+, and a transport failure
             // that may pass — a request timeout among them, which the key
@@ -226,10 +252,34 @@ impl LlmRouter {
                     error = %llm_err,
                     "Transient API error. Trying fallback chain."
                 );
-                self.try_fallback(model, &request).await
+                self.try_fallback(model, &request, None).await
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Ask the ladder again after a local call used its whole timeout
+    /// (LOCAL-HOUR-NO-RETRY): `spent` names the model, and no rung served by
+    /// its provider is asked — the model itself included — while a rung on
+    /// another provider may answer. When none does, the call's error is
+    /// `spent`. The agentic loop calls this, not [`Self::complete`], after a
+    /// streamed round to a local model that spent its whole read gap or ran
+    /// its whole round bound. Any other `spent` is today's [`Self::complete`].
+    pub async fn complete_elsewhere(
+        &self,
+        request: RouterRequest,
+        spent: LlmRouterError,
+    ) -> Result<ChatResponse, LlmRouterError> {
+        let LlmRouterError::LocalCallTimedOut { model, .. } = &spent else {
+            return self.complete(request).await;
+        };
+        let model = model.clone();
+        let _permit = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .map_err(|_| LlmRouterError::MaxRetriesExceeded)?;
+        self.try_fallback(&model, &request, Some(spent)).await
     }
 
     pub(super) async fn try_model(

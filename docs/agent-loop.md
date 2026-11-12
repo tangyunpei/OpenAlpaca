@@ -341,6 +341,19 @@ non-streaming call** — same round, no extra round charged — when:
   may run up to an hour. The loop reads which from the stream the
   router hands back (`RoutedStream::requires_key`).
 
+A local call that used up its whole timeout is not asked again
+(LOCAL-HOUR-NO-RETRY): a streamed round to a provider that needs no key
+that runs its whole `max_keyless_stream_duration`, or whose streaming
+request spends its whole read gap (`request_timeout_secs`) before the
+stream opens, goes to `LlmRouter::complete_elsewhere` instead of the
+non-streaming call. No rung of the fallback ladder served by that
+provider is asked — the model itself included — while a rung on another
+provider may answer; when none does, the round ends with
+`LlmRouterError::LocalCallTimedOut`, which names the model and the
+timeout and is not transient, so the loop does not retry it either. A
+stream that opened and then fell silent (its 90 s idle gap, or a read
+gap that came first) is still asked again without streaming.
+
 `complete_streaming` returns `RoutedStream { model, requires_key,
 stream }`. A stream carries no model id of its own, and the router is
 the only code that knows which rung of its fallback ladder it settled
@@ -821,7 +834,12 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   (capped at 30 s) that a cancellation interrupts. Each retry **costs a
   round**, and retries stop once `max_rounds` is used up. The counter
   resets to zero on any success. Anything else ends the loop with
-  `Error`.
+  `Error` — among them `LocalCallTimedOut`, a call to a provider that
+  needs no key that used up its whole timeout, which the router neither
+  repeats nor walks down the ladder to the same provider
+  (LOCAL-HOUR-NO-RETRY; a keyed provider's timeout keeps the retry,
+  unless a local rung of its ladder used up its own whole timeout in
+  that call, which then ends the turn naming the local model).
 - **Per-call time limit** — the sandbox cuts a tool call (all but the few
   exempt ones) at its policy's `max_tool_runtime_secs`, and a command it
   cuts is killed with every process it started. The exempt ones bound

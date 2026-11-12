@@ -46,6 +46,41 @@ pub(super) fn keyless_slot(provider_name: &str) -> KeyGuard {
     }
 }
 
+/// The call to `entry`'s provider that failed with `error` after `elapsed`,
+/// as the spent local call it may be (LOCAL-HOUR-NO-RETRY, the owner's
+/// answer of 2026-11-12): a provider that needs no key, a request timeout —
+/// the non-streaming deadline or the read gap, both the provider's
+/// [`LlmProvider::request_timeout`] — and at least that long gone. The rule
+/// is the call's own figure, not a fixed hour: the seeded 3,600 s or the
+/// person's own. The OS's TCP timeout, which reqwest reports as the same
+/// kind, before the figure is up, and a provider that names no figure, keep
+/// today's retries. `None` for every other failure.
+pub(super) fn spent_local_call(
+    entry: &ProviderEntry,
+    model: &str,
+    error: &crate::error::LlmError,
+    elapsed: std::time::Duration,
+) -> Option<LlmRouterError> {
+    use crate::error::{LlmError, TransportKind};
+    let provider = &entry.provider;
+    if provider.requires_key() {
+        return None;
+    }
+    let LlmError::Transport {
+        kind: TransportKind::RequestTimeout,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    let timeout = provider.request_timeout()?;
+    (elapsed >= timeout).then(|| LlmRouterError::LocalCallTimedOut {
+        model: model.to_string(),
+        provider: provider.name().to_string(),
+        timeout_secs: timeout.as_secs(),
+    })
+}
+
 /// The LLM Router — routes requests to providers with key rotation and fallback.
 pub struct LlmRouter {
     pub(super) providers: DashMap<ProviderType, ProviderEntry>,
@@ -230,6 +265,26 @@ impl LlmRouter {
     /// lock on that same shard (R59).
     pub(super) fn provider_entry(&self, provider_type: &ProviderType) -> Option<ProviderEntry> {
         self.providers.get(provider_type).map(|e| e.value().clone())
+    }
+
+    /// The error a streamed round to `model` ends as when it ran its whole
+    /// round bound, `bound`, on a provider that needs no key
+    /// (LOCAL-HOUR-NO-RETRY): the agentic loop holds that bound, so it says
+    /// when; the provider's name is the router's to read.
+    pub fn local_call_timed_out(&self, model: &str, bound: std::time::Duration) -> LlmRouterError {
+        let provider = self
+            .model_registry
+            .resolve_provider(model)
+            .and_then(|pt| self.provider_entry(&pt))
+            .map_or_else(
+                || "local".to_string(),
+                |entry| entry.provider.name().to_string(),
+            );
+        LlmRouterError::LocalCallTimedOut {
+            model: model.to_string(),
+            provider,
+            timeout_secs: bound.as_secs(),
+        }
     }
 
     /// Is this provider loaded right now?

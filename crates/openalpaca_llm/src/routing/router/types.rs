@@ -119,6 +119,29 @@ pub enum LlmRouterError {
     )]
     NoRoutableModel,
 
+    /// A call to a provider that needs no key — a local model — used up its
+    /// whole timeout with no answer: the deadline of a non-streaming call, the
+    /// read gap of a streamed one before its stream opened, or a streamed
+    /// round's own bound
+    /// (LOCAL-HOUR-NO-RETRY, the owner's answer of 2026-11-12). Not
+    /// transient: that provider is not asked again — not on its slot, not on
+    /// the fallback ladder, not by the agentic loop, and a streamed round not
+    /// again without streaming. A rung on another provider may still answer
+    /// (`LlmRouter::complete_elsewhere`); when none does, this is the call's
+    /// error, so the turn ends naming it.
+    #[error(
+        "{model} ({provider}, a local model) did not finish answering within its whole \
+         timeout of {timeout_secs} s, so it was not asked again. A smaller model or a shorter \
+         request may finish in time. A non-streaming call's timeout is \
+         `request_timeout_secs` under `[providers.{provider}]` in llm.toml; a streamed \
+         round's is fixed."
+    )]
+    LocalCallTimedOut {
+        model: String,
+        provider: String,
+        timeout_secs: u64,
+    },
+
     #[error("No fallback chain configured for model: {0}")]
     NoFallbackAvailable(String),
 

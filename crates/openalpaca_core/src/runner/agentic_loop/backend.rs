@@ -32,7 +32,12 @@ impl<'a> LlmBackend<'a> {
     /// streaming first. On streaming failure, falls back to non-streaming.
     /// A streamed round is bounded by `max_stream_duration`, or by
     /// `max_keyless_stream_duration` when the provider serving it needs no
-    /// key (a local model, LOCAL-CALL-HOUR); past it, the same fallback.
+    /// key (a local model, LOCAL-CALL-HOUR); past it, the same fallback —
+    /// but a local round that ran its whole bound, or a local streaming
+    /// request that spent its whole read gap before its stream opened, is
+    /// not asked again of that provider: the ladder's other providers may
+    /// answer, else the call ends naming it (LOCAL-HOUR-NO-RETRY,
+    /// `LlmRouter::complete_elsewhere`).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn complete(
         &self,
@@ -66,6 +71,9 @@ impl<'a> LlmBackend<'a> {
                 provider.chat(request).await.map_err(LlmRouterError::Llm)
             }
             LlmBackend::Router { router, context, fallback_models, .. } => {
+                // A local call that used its whole timeout on the streamed
+                // attempt: not asked again of its provider (LOCAL-HOUR-NO-RETRY).
+                let mut spent: Option<LlmRouterError> = None;
                 // Try streaming if callback is set
                 if let Some(callback) = stream_callback {
                     let stream_request = RouterRequest {
@@ -114,7 +122,7 @@ impl<'a> LlmBackend<'a> {
                                 round_bound,
                                 openalpaca_llm::collect_stream(
                                     Box::pin(forwarding_stream),
-                                    model_str,
+                                    model_str.clone(),
                                 ),
                             )
                             .await
@@ -141,8 +149,20 @@ impl<'a> LlmBackend<'a> {
                                         requires_key,
                                         "Stream wall-clock deadline exceeded, falling back to non-streaming"
                                     );
+                                    if !requires_key {
+                                        spent = Some(
+                                            router.local_call_timed_out(&model_str, round_bound),
+                                        );
+                                    }
                                 }
                             }
+                        }
+                        Err(e @ LlmRouterError::LocalCallTimedOut { .. }) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Streamed local call used its whole timeout; not asked again without streaming"
+                            );
+                            spent = Some(e);
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -169,7 +189,10 @@ impl<'a> LlmBackend<'a> {
                     fallback_models: fallback_models.clone(),
                     ephemeral_system_notice,
                 };
-                router.complete(request).await
+                match spent {
+                    Some(spent) => router.complete_elsewhere(request, spent).await,
+                    None => router.complete(request).await,
+                }
             }
         }
     }

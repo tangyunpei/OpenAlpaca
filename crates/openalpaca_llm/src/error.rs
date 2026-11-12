@@ -164,7 +164,10 @@ impl LlmError {
     /// Whether this error is transient: worth trying again. The fallback chain
     /// and the agentic loop retry every transient error; the router's key
     /// layer retries those [`Self::is_retryable_on_key`] admits — all but a
-    /// request timeout.
+    /// request timeout. A request timeout that used up a local provider's
+    /// whole timeout leaves the router as `LlmRouterError::LocalCallTimedOut`
+    /// instead, which neither the chain (on that provider) nor the loop
+    /// retries (LOCAL-HOUR-NO-RETRY).
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Http(msg) => is_transient_http_error(msg),
@@ -190,7 +193,8 @@ impl LlmError {
     /// connect the deadline cut short and the OS's TCP timeout on an open
     /// connection ([`TransportKind::RequestTimeout`]); neither is repeated
     /// here either. It stays transient, so the chain and the loop still take
-    /// it.
+    /// it — but for a provider that needs no key, where a call that ran its
+    /// whole timeout is not asked again (LOCAL-HOUR-NO-RETRY).
     pub fn is_retryable_on_key(&self) -> bool {
         !matches!(
             self,

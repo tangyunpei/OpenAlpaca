@@ -78,6 +78,17 @@ pub trait LlmProvider: Send + Sync {
         true
     }
 
+    /// The deadline one non-streaming call to this provider is given — the
+    /// figure its client was built with, which is also a streamed call's read
+    /// gap (`providers::build_http_client`) — or `None` when it sets none.
+    ///
+    /// The router reads it to tell a call that used up its whole timeout
+    /// from one cut short (LOCAL-HOUR-NO-RETRY); `None` keeps today's
+    /// retries.
+    fn request_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Chat using a specific API key. Default delegates to `chat()`.
     /// Providers override this to inject the key into their HTTP requests.
     async fn chat_with_key(

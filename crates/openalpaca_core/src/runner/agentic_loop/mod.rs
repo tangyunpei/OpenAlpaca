@@ -1529,6 +1529,8 @@ async fn run_agentic_loop_core(
             Err(e) => {
                 // Router backend: retry transient errors with exponential backoff.
                 // Direct backend: return error immediately (no retry).
+                // `LocalCallTimedOut` is not among them: a local call that
+                // used its whole timeout is not asked again (LOCAL-HOUR-NO-RETRY).
                 if backend.supports_retry() {
                     let is_transient = matches!(
                         e,

@@ -723,7 +723,7 @@ All in `~/.openalpaca/config/llm.toml`:
 |---|---|---|
 | `[providers.ollama] default_model` | `""` | Empty means "whatever is installed" — the router picks a discovered model, preferring a tools-capable one. Name a tag to pin it. |
 | `[providers.ollama] default_max_tokens` | `8192` | The output ceiling for one answer (the cloud default is 4096). A request that names its own `max_tokens` still wins. |
-| `[providers.ollama] request_timeout_secs` | `3600` | Wall clock for one **non-streaming** call to this provider: a call to a local model may run up to an hour. An install seeded before this build keeps `600` (see [Upgrade](#upgrade)). |
+| `[providers.ollama] request_timeout_secs` | `3600` | Wall clock for one **non-streaming** call to this provider: a call to a local model may run up to an hour, and one that uses up the whole figure is not asked again. An install seeded before this build keeps `600` (see [Upgrade](#upgrade)). |
 | `[timeouts] llm_request_timeout_secs` | `120` | The same budget for any provider that sets no override. |
 
 You should not need a `[models]` row at all — discovery fills the catalogue —
@@ -750,7 +750,13 @@ other bounds sit over a stream, and whichever trips first wins:
 The HTTP layer also bounds the connect phase at 30 s. When any of these trips
 the turn is not lost: the loop logs it and retries the round **without**
 streaming, where the per-provider total (3,600 s for the seeded Ollama) applies
-from the start.
+from the start. The one exception is a local call that used up its whole
+timeout: a round that ran its whole hour, or a request that waited out its
+whole `request_timeout_secs` with no answer, is not asked again of Ollama —
+streamed or not, by the fallback chain or by the loop's retries. A model on
+another provider in your fallback chain may still answer; otherwise the turn
+ends with an error naming the model and the timeout, after one timeout rather
+than several.
 
 In practice the 90 s is the one that fires. A model that is still loading into
 memory can exceed it before its first token. That is the case to watch: warm

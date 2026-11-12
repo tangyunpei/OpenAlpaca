@@ -109,32 +109,97 @@ fn router_with_deadline(
     rates: RateLimitConfig,
     deadline: Duration,
 ) -> LlmRouter {
-    let provider = Arc::new(
-        OllamaProvider::with_client(
-            client,
-            models[0].to_string(),
-            Some(format!("{base}/v1")),
-            None,
+    let served: Vec<(&str, ProviderType)> =
+        models.iter().map(|m| (*m, ProviderType::Ollama)).collect();
+    router_over(
+        vec![provider_entry(false, base, client, models[0], deadline)],
+        &served,
+        rates,
+    )
+}
+
+/// [`router`] on a provider that needs a key: an OpenAI-compatible provider
+/// with one key of its own, at `base`.
+fn keyed_router(base: &str, models: &[&str], rates: RateLimitConfig) -> LlmRouter {
+    let served: Vec<(&str, ProviderType)> =
+        models.iter().map(|m| (*m, ProviderType::OpenAI)).collect();
+    router_over(
+        vec![provider_entry(
+            true,
+            base,
+            plain_client(),
+            models[0],
+            REQUEST_TIMEOUT,
+        )],
+        &served,
+        rates,
+    )
+}
+
+/// One provider at `base`, through `client`, with `deadline` as each
+/// non-streaming call's deadline: `keyed`, an OpenAI-compatible provider
+/// with one key in its pool; else a keyless local Ollama, its pool empty.
+fn provider_entry(
+    keyed: bool,
+    base: &str,
+    client: reqwest::Client,
+    model: &str,
+    deadline: Duration,
+) -> (ProviderType, ProviderEntry) {
+    let base_url = format!("{base}/v1");
+    let (provider_type, provider, keys): (ProviderType, Arc<dyn LlmProvider>, _) = if keyed {
+        (
+            ProviderType::OpenAI,
+            Arc::new(
+                crate::providers::openai::OpenAiProvider::with_client(
+                    client,
+                    "sk-test".to_string(),
+                    Some(model.to_string()),
+                    Some(base_url),
+                    None,
+                )
+                .with_request_timeout(deadline),
+            ),
+            vec![ApiKey::new(
+                "k1".to_string(),
+                ProviderType::OpenAI,
+                "sk-test".to_string(),
+            )],
         )
-        .with_request_timeout(deadline),
-    );
-    let mut providers = HashMap::new();
-    providers.insert(
-        ProviderType::Ollama,
-        ProviderEntry {
-            provider,
-            key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
-                vec![],
-                SelectionStrategy::RoundRobin,
-            ))),
-        },
-    );
+    } else {
+        (
+            ProviderType::Ollama,
+            Arc::new(
+                OllamaProvider::with_client(client, model.to_string(), Some(base_url), None)
+                    .with_request_timeout(deadline),
+            ),
+            vec![],
+        )
+    };
+    let entry = ProviderEntry {
+        provider,
+        key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
+            keys,
+            SelectionStrategy::RoundRobin,
+        ))),
+    };
+    (provider_type, entry)
+}
+
+/// A router over `entries`, serving each `(model, provider)` of `served`:
+/// the first model the default, the rest its fallback chain, in order.
+fn router_over(
+    entries: Vec<(ProviderType, ProviderEntry)>,
+    served: &[(&str, ProviderType)],
+    rates: RateLimitConfig,
+) -> LlmRouter {
+    let providers: HashMap<ProviderType, ProviderEntry> = entries.into_iter().collect();
     let registry = ModelRegistry::new(HashMap::new());
-    for model in models {
+    for (model, provider) in served {
         registry.register(
             model.to_string(),
             ModelInfo {
-                provider: ProviderType::Ollama,
+                provider: provider.clone(),
                 input_price_per_million: 0.0,
                 output_price_per_million: 0.0,
                 context_window: 32_768,
@@ -150,10 +215,10 @@ fn router_with_deadline(
     }
     let mut chains = HashMap::new();
     chains.insert(
-        models[0].to_string(),
-        models[1..]
+        served[0].0.to_string(),
+        served[1..]
             .iter()
-            .map(|m| m.to_string())
+            .map(|(m, _)| m.to_string())
             .collect::<Vec<_>>(),
     );
     LlmRouter::new_with_runtime(
@@ -161,7 +226,7 @@ fn router_with_deadline(
         registry,
         chains,
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        models[0].to_string(),
+        served[0].0.to_string(),
         LlmRuntimeConfig::default(),
         rates,
     )
@@ -173,14 +238,16 @@ fn plain_client() -> reqwest::Client {
 
 // ── request timeout: not retried on the key, taken by the chain ─────────────
 
-/// A silent server: each rung of the ladder is asked once and waits its whole
-/// deadline, so one `complete` call takes `(1 + chain length) × request_timeout`
-/// (C = 0) — the bound of (a) — and ends with the chain exhausted.
+/// A silent server behind a provider that needs a key: each rung of the
+/// ladder is asked once and waits its whole deadline, so one `complete` call
+/// takes `(1 + chain length) × request_timeout` (C = 0) — the bound of (a) —
+/// and ends with the chain exhausted. A local provider's whole timeout is not
+/// asked again (LOCAL-HOUR-NO-RETRY, below); a keyed one's keeps this row.
 #[tokio::test]
 async fn a_request_timeout_is_asked_once_per_rung_and_held_to_the_bound() {
     let server = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
     let models = [PRIMARY, FALLBACK_1, FALLBACK_2];
-    let router = router(&server.base_url, plain_client(), &models, rates(100));
+    let router = keyed_router(&server.base_url, &models, rates(100));
     let chain = router.substitution_ladder(PRIMARY, &[]).len();
     assert_eq!(chain, 2);
 
@@ -207,14 +274,15 @@ async fn a_request_timeout_is_asked_once_per_rung_and_held_to_the_bound() {
     assert!(elapsed < bound + SLACK, "held to the bound: {elapsed:?}");
 }
 
-/// A streamed turn's one loop attempt: the stream fails on its read gap and
-/// is returned at once, then the loop's backend retries through `complete`
-/// (`runner/agentic_loop/backend.rs`) — `(2 + chain length) × request_timeout`.
+/// A streamed turn's one loop attempt, on a provider that needs a key: the
+/// stream fails on its read gap and is returned at once, then the loop's
+/// backend retries through `complete` (`runner/agentic_loop/backend.rs`) —
+/// `(2 + chain length) × request_timeout`.
 #[tokio::test]
 async fn a_streamed_attempt_and_its_non_streaming_retry_are_held_to_the_bound() {
     let server = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
     let models = [PRIMARY, FALLBACK_1, FALLBACK_2];
-    let router = router(&server.base_url, plain_client(), &models, rates(100));
+    let router = keyed_router(&server.base_url, &models, rates(100));
     let chain = router.substitution_ladder(PRIMARY, &[]).len();
 
     let started = Instant::now();
@@ -248,6 +316,290 @@ async fn a_streamed_attempt_and_its_non_streaming_retry_are_held_to_the_bound() 
     );
     assert!(elapsed >= bound, "{elapsed:?}");
     assert!(elapsed < bound + SLACK, "held to the bound: {elapsed:?}");
+}
+
+// ── a local call that used its whole timeout: not asked again ───────────────
+//
+// LOCAL-HOUR-NO-RETRY (the owner's answer of 2026-11-12): a call to a
+// provider that needs no key which used up its whole timeout is not asked
+// again — not on its slot, not down the ladder to the same provider, and a
+// streamed call not again without streaming. A rung on another provider may
+// still answer. Each test is held to a silent loopback server and a 250 ms
+// deadline, never a real hour.
+
+const LOCAL_2: &str = "m-local-2";
+const CLOUD: &str = "m-cloud";
+
+/// The error a spent local call ends as, or a panic naming what came back.
+fn local_timeout(err: &LlmRouterError, model: &str) {
+    match err {
+        LlmRouterError::LocalCallTimedOut {
+            model: named,
+            provider,
+            timeout_secs,
+        } => {
+            assert_eq!(named, model, "{err}");
+            assert_eq!(provider, "ollama", "{err}");
+            assert_eq!(*timeout_secs, REQUEST_TIMEOUT.as_secs(), "{err}");
+            assert!(err.to_string().contains("not asked again"), "{err}");
+        }
+        other => panic!("not a spent local call: {other} ({other:?})"),
+    }
+}
+
+/// A silent local server: the primary is asked once and waits its whole
+/// deadline; the ladder's rungs on the same provider are not asked, and the
+/// call ends naming the timeout, not "All fallback models failed" — which
+/// the agentic loop would ask again.
+#[tokio::test]
+async fn a_local_call_that_used_its_whole_timeout_is_not_asked_again() {
+    let server = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
+    let models = [PRIMARY, FALLBACK_1, FALLBACK_2];
+    let router = router(&server.base_url, plain_client(), &models, rates(100));
+
+    let started = Instant::now();
+    let err = router.complete(request(PRIMARY)).await.unwrap_err();
+    let elapsed = started.elapsed();
+
+    assert_eq!(hits(&server, PRIMARY).await, 1, "{err}");
+    assert_eq!(
+        hits(&server, FALLBACK_1).await,
+        0,
+        "no rung of its own: {err}"
+    );
+    assert_eq!(
+        hits(&server, FALLBACK_2).await,
+        0,
+        "no rung of its own: {err}"
+    );
+    local_timeout(&err, PRIMARY);
+    assert!(
+        elapsed >= REQUEST_TIMEOUT,
+        "it waited its deadline: {elapsed:?}"
+    );
+    assert!(
+        elapsed < REQUEST_TIMEOUT + SLACK,
+        "held to one deadline: {elapsed:?}"
+    );
+}
+
+/// A streamed call to a silent local server spends its read gap — the same
+/// figure — and is not asked again without streaming: `complete_elsewhere`,
+/// what the loop's backend calls then, asks no rung of the same provider.
+#[tokio::test]
+async fn a_streamed_local_call_that_used_its_whole_read_gap_is_not_asked_again() {
+    let server = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
+    let models = [PRIMARY, FALLBACK_1];
+    let router = router(&server.base_url, plain_client(), &models, rates(100));
+
+    let streamed = match router.complete_streaming(request(PRIMARY)).await {
+        Ok(_) => panic!("a silent server opened a stream"),
+        Err(e) => e,
+    };
+    local_timeout(&streamed, PRIMARY);
+
+    let err = router
+        .complete_elsewhere(request(PRIMARY), streamed)
+        .await
+        .unwrap_err();
+    local_timeout(&err, PRIMARY);
+    assert_eq!(hits(&server, PRIMARY).await, 1, "not asked again: {err}");
+    assert_eq!(
+        hits(&server, FALLBACK_1).await,
+        0,
+        "no rung of its own: {err}"
+    );
+}
+
+/// The ladder may still move to another provider: a local model that spent
+/// its whole timeout, a second model on the same local provider (skipped),
+/// then a keyed provider's model, which answers — streamed or not.
+#[tokio::test]
+async fn a_local_call_that_used_its_whole_timeout_may_be_answered_by_another_provider() {
+    for streamed in [false, true] {
+        let local = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
+        let cloud =
+            MockHttpServer::start(|_| MockResponse::json(completion_body(CLOUD, "from the cloud")))
+                .await;
+        let router = router_over(
+            vec![
+                provider_entry(
+                    false,
+                    &local.base_url,
+                    plain_client(),
+                    PRIMARY,
+                    REQUEST_TIMEOUT,
+                ),
+                provider_entry(
+                    true,
+                    &cloud.base_url,
+                    plain_client(),
+                    CLOUD,
+                    REQUEST_TIMEOUT,
+                ),
+            ],
+            &[
+                (PRIMARY, ProviderType::Ollama),
+                (LOCAL_2, ProviderType::Ollama),
+                (CLOUD, ProviderType::OpenAI),
+            ],
+            rates(100),
+        );
+
+        let response = if streamed {
+            let spent = match router.complete_streaming(request(PRIMARY)).await {
+                Ok(_) => panic!("a silent server opened a stream"),
+                Err(e) => e,
+            };
+            router.complete_elsewhere(request(PRIMARY), spent).await
+        } else {
+            router.complete(request(PRIMARY)).await
+        }
+        .expect("the keyed rung answers");
+
+        assert_eq!(response.content, "from the cloud", "streamed: {streamed}");
+        assert_eq!(hits(&local, PRIMARY).await, 1, "streamed: {streamed}");
+        assert_eq!(
+            hits(&local, LOCAL_2).await,
+            0,
+            "the same local provider is not asked again (streamed: {streamed})"
+        );
+        assert_eq!(hits(&cloud, CLOUD).await, 1, "streamed: {streamed}");
+    }
+}
+
+/// A keyed primary that fails, then a local rung that spends its whole
+/// timeout: when nothing on the ladder answers, the call ends naming the
+/// local timeout, so the loop does not ask the ladder — and the local
+/// model — again.
+#[tokio::test]
+async fn a_ladder_whose_local_rung_spent_its_whole_timeout_ends_naming_it() {
+    let local = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
+    let cloud = MockHttpServer::start(|_| MockResponse::error(500, "{}")).await;
+    let router = router_over(
+        vec![
+            provider_entry(
+                true,
+                &cloud.base_url,
+                plain_client(),
+                CLOUD,
+                REQUEST_TIMEOUT,
+            ),
+            provider_entry(
+                false,
+                &local.base_url,
+                plain_client(),
+                PRIMARY,
+                REQUEST_TIMEOUT,
+            ),
+        ],
+        &[
+            (CLOUD, ProviderType::OpenAI),
+            (PRIMARY, ProviderType::Ollama),
+            (LOCAL_2, ProviderType::Ollama),
+        ],
+        rates(100),
+    );
+
+    let err = router.complete(request(CLOUD)).await.unwrap_err();
+
+    local_timeout(&err, PRIMARY);
+    assert_eq!(
+        hits(&cloud, CLOUD).await,
+        3,
+        "the keyed 500 keeps its tries"
+    );
+    assert_eq!(hits(&local, PRIMARY).await, 1, "{err}");
+    assert_eq!(hits(&local, LOCAL_2).await, 0, "{err}");
+}
+
+/// A keyed primary that times out, then a local rung that spends its whole
+/// timeout: the call ends naming the local model, not "All fallback models
+/// failed". The cloud model's timeout loses the loop's retries here, since a
+/// retry would walk the ladder to the local model again.
+#[tokio::test]
+async fn a_cloud_timeout_whose_local_rung_spent_its_whole_timeout_ends_naming_it() {
+    let local = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
+    let cloud = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
+    let router = router_over(
+        vec![
+            provider_entry(
+                true,
+                &cloud.base_url,
+                plain_client(),
+                CLOUD,
+                REQUEST_TIMEOUT,
+            ),
+            provider_entry(
+                false,
+                &local.base_url,
+                plain_client(),
+                PRIMARY,
+                REQUEST_TIMEOUT,
+            ),
+        ],
+        &[
+            (CLOUD, ProviderType::OpenAI),
+            (PRIMARY, ProviderType::Ollama),
+            (LOCAL_2, ProviderType::Ollama),
+        ],
+        rates(100),
+    );
+
+    let err = router.complete(request(CLOUD)).await.unwrap_err();
+
+    local_timeout(&err, PRIMARY);
+    assert_eq!(
+        hits(&cloud, CLOUD).await,
+        1,
+        "a timeout is asked once: {err}"
+    );
+    assert_eq!(hits(&local, PRIMARY).await, 1, "{err}");
+    assert_eq!(hits(&local, LOCAL_2).await, 0, "{err}");
+}
+
+/// Only the whole figure is spent: a local call whose read gap (250 ms)
+/// ends it long before its deadline (5 s) — as the OS's TCP timeout can,
+/// reported as the same kind — keeps M57's row. Streamed, it is the
+/// provider's own error; not streamed, each rung of its chain is asked once
+/// and the call ends "All fallback models failed", which the loop retries.
+#[tokio::test]
+async fn a_local_timeout_short_of_its_whole_figure_keeps_the_retry_row() {
+    let server = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
+    let models = [PRIMARY, FALLBACK_1, FALLBACK_2];
+    let router = router_with_deadline(
+        &server.base_url,
+        plain_client(),
+        &models,
+        rates(100),
+        PATIENT,
+    );
+
+    let streamed = match router.complete_streaming(request(PRIMARY)).await {
+        Ok(_) => panic!("a silent server opened a stream"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(&streamed, LlmRouterError::Llm(e) if e.is_transient()),
+        "{streamed}"
+    );
+
+    let started = Instant::now();
+    let err = router.complete(request(PRIMARY)).await.unwrap_err();
+    let elapsed = started.elapsed();
+
+    assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err}");
+    assert_eq!(
+        hits(&server, PRIMARY).await,
+        2,
+        "streamed, then once: {err}"
+    );
+    assert_eq!(hits(&server, FALLBACK_1).await, 1, "{err}");
+    assert_eq!(hits(&server, FALLBACK_2).await, 1, "{err}");
+    assert!(
+        elapsed < PATIENT,
+        "each ended on its read gap, not its deadline: {elapsed:?}"
+    );
 }
 
 // ── reset, closed, incomplete body: retried on the key, then the chain ──────
@@ -568,14 +920,10 @@ async fn a_streamed_call_returns_each_transport_failure_at_once() {
         (MockResponse::hang_up(), TransportKind::ResetOrClosed),
         (MockResponse::reset(), TransportKind::ResetOrClosed),
     ] {
+        // On a provider that needs a key: a local one's silent server is
+        // its spent read gap, `LocalCallTimedOut` (LOCAL-HOUR-NO-RETRY).
         let server = MockHttpServer::start(move |_| answer.clone()).await;
-        let err = streamed(&router(
-            &server.base_url,
-            plain_client(),
-            &models,
-            rates(100),
-        ))
-        .await;
+        let err = streamed(&keyed_router(&server.base_url, &models, rates(100))).await;
         assert_eq!(server.requests().await.len(), 1, "{err}");
         assert!(err.is_transient(), "{err}");
         assert_eq!(kind(&err), Some(expected), "{err}");
@@ -587,12 +935,13 @@ async fn a_streamed_call_returns_each_transport_failure_at_once() {
 /// Each rung's timeout reports one failure to the one breaker. Once it is
 /// open a `complete` call fails at once on every rung — no request is made —
 /// while a streamed call, which neither asks nor tells the breaker, is still
-/// made.
+/// made. On a provider that needs a key: a local one's timeout walks no rung
+/// of its own (LOCAL-HOUR-NO-RETRY).
 #[tokio::test]
 async fn an_open_breaker_fails_complete_at_once_on_every_rung_but_not_a_stream() {
     let server = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
     let models = [PRIMARY, FALLBACK_1, FALLBACK_2];
-    let router = router(&server.base_url, plain_client(), &models, rates(3));
+    let router = keyed_router(&server.base_url, &models, rates(3));
 
     let err = router.complete(request(PRIMARY)).await.unwrap_err();
     assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err}");
