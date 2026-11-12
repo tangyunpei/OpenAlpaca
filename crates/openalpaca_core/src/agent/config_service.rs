@@ -4,7 +4,7 @@
 
 use super::config::AgentConfigFile;
 use super::registry::{AgentRegistry, TemplateLayer};
-use super::template::{self, AgentTemplate, render_agent_markdown};
+use super::template::{self, AgentSource, AgentTemplate, render_agent_markdown};
 use openalpaca_storage::{AgentMetrics, Database, SubAgentRepository};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,6 +17,12 @@ pub enum DeleteTemplateError {
     /// off by a file saying `disabled: true` (subagent design §2.10 T-2,
     /// §2.4 L-4a).
     Bundled,
+    /// The id is a plugin's template, which no file of the person's
+    /// holds: it is the plugin's to remove, by disabling or uninstalling
+    /// it, and a file of the person's can override it or switch it off
+    /// (the owner's answer of 2026-11-12, C2's item (3) as (b); §2.10
+    /// T-2). `plugin` is the plugin's id.
+    Plugin { plugin: String },
     /// Any other refusal or failure, worded for the person.
     Other(String),
 }
@@ -34,6 +40,14 @@ impl std::fmt::Display for DeleteTemplateError {
                 "a built-in template cannot be removed; write a file of the same id in \
                  config/agents to override it, or one holding its id and `disabled: true` to \
                  switch it off",
+            ),
+            Self::Plugin { plugin } => write!(
+                f,
+                "a plugin's template cannot be removed; it comes from the plugin {plugin} — \
+                 disable or uninstall the plugin to take it out (`openalpaca ext disable \
+                 plugin {plugin}`, or Settings → Extensions), or write a file of the same id \
+                 in config/agents to override it, or one holding its id and `disabled: true` \
+                 to switch it off",
             ),
             Self::Other(message) => f.write_str(message),
         }
@@ -293,8 +307,10 @@ impl AgentConfigService {
     /// (§2.10 T-2, §2.4 L-4a), whose row the rescan then sets back.
     ///
     /// Refused for a bundled template no file holds
-    /// (`DeleteTemplateError::Bundled`), and if any busy instances are
-    /// currently spawned from this template.
+    /// (`DeleteTemplateError::Bundled`), for a plugin's template
+    /// (`DeleteTemplateError::Plugin`, naming the plugin), and if any busy
+    /// instances are currently spawned from this template. A refusal
+    /// changes nothing.
     pub fn delete_template(&self, id: &str) -> Result<(), DeleteTemplateError> {
         // Check template exists (a withheld file's id included)
         let Some(provenance) = self.registry.provenance(id) else {
@@ -302,6 +318,16 @@ impl AgentConfigService {
         };
         if provenance.layer == TemplateLayer::Bundled {
             return Err(DeleteTemplateError::Bundled);
+        }
+        if provenance.layer == TemplateLayer::Plugin {
+            // The plugin is named from the resolved template; one that left
+            // between the two reads (its plugin unloaded) is not found.
+            return Err(match self.registry.get_template(id).map(|t| t.source) {
+                Some(AgentSource::Plugin { plugin_id, .. }) => {
+                    DeleteTemplateError::Plugin { plugin: plugin_id }
+                }
+                _ => format!("Template '{}' not found", id).into(),
+            });
         }
 
         // Reject deletion if any busy instances exist for this template
@@ -320,7 +346,7 @@ impl AgentConfigService {
         }
 
         // 1. Archive the Markdown file that holds the id (`<id>.md` for a
-        // template no file is known for: a plugin's leaves nothing to move)
+        // template no file is known for)
         let md_path = match &provenance.path {
             Some(path) if provenance.layer == TemplateLayer::File => path.clone(),
             _ => self.config_dir.join(format!("{id}.md")),
@@ -348,13 +374,6 @@ impl AgentConfigService {
             let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
             let archive_path = archive_dir.join(format!("{id}.{timestamp}.toml"));
             let _ = std::fs::rename(&toml_path, &archive_path);
-        }
-
-        // A plugin's template has no file to archive, and the route's rescan
-        // replaces only the file layer: take it out of the plugin layer here,
-        // as before the layers (T-2). The plugin's next load brings it back.
-        if provenance.layer == TemplateLayer::Plugin {
-            self.registry.remove_template(id);
         }
 
         // 2. Update DB status to archived — unless a bundled template stands

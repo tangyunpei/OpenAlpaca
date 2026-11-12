@@ -14,7 +14,8 @@
 //! GET    /v1/agent-templates/{id}         -> get template (JSON)
 //! POST   /v1/agent-templates              -> create template (JSON body)
 //! PUT    /v1/agent-templates/{id}         -> update template
-//! DELETE /v1/agent-templates/{id}         -> archive template
+//! DELETE /v1/agent-templates/{id}         -> archive template (409 for a
+//!                                             bundled or a plugin's one)
 //!
 //! Instance endpoints:
 //! GET    /v1/agent-instances              -> list active instances
@@ -698,12 +699,23 @@ pub async fn delete_template_handler(
 
 /// A refused `DELETE /v1/agent-templates/{id}`: a bundled template no file
 /// holds is `409 {"error":"bundled","message":…}` (subagent design §2.10
-/// T-2), anything else `404` as before.
+/// T-2), a plugin's template `409 {"error":"plugin","plugin":<id>,
+/// "message":…}`, the sentence naming the plugin too (PLUGIN-TEMPLATE-409),
+/// anything else `404` as before.
 fn delete_refusal(e: &DeleteTemplateError) -> Response {
     match e {
         DeleteTemplateError::Bundled => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "bundled", "message": e.to_string() })),
+        )
+            .into_response(),
+        DeleteTemplateError::Plugin { plugin } => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "plugin",
+                "plugin": plugin,
+                "message": e.to_string(),
+            })),
         )
             .into_response(),
         DeleteTemplateError::Other(message) => (
@@ -1262,12 +1274,13 @@ mod tests {
         assert!(!t.agents().join(".archived").exists());
     }
 
-    /// T-2: `DELETE` of a plugin's template takes it out of the catalog, as
-    /// before C2 — no file holds it, and the rescan that follows replaces
-    /// only the file layer, so the service removes it from the plugin layer
-    /// itself rather than answering `archived` while it stays spawnable.
-    #[test]
-    fn deleting_a_plugin_s_template_takes_it_out_of_the_catalog() {
+    /// PLUGIN-TEMPLATE-409 (C2's item (3), taken as (b) on 2026-11-12):
+    /// `DELETE` of a plugin's template is refused as a bundled one is —
+    /// `409 {"error":"plugin"}`, its sentence naming the plugin — and
+    /// nothing changes: the template stays in the catalog, nothing is
+    /// archived and its row is not touched.
+    #[tokio::test]
+    async fn deleting_a_plugin_s_template_is_409_naming_the_plugin() {
         let t = Templates::new(&[]);
         let mut plugin =
             parse_agent_markdown("---\nid: acme_agent\nname: A\ndescription: d\n---\n").unwrap();
@@ -1276,18 +1289,70 @@ mod tests {
             executor: Arc::new(IdleExecutor),
         };
         assert!(t.registry.register_template(plugin));
+        // An `agent` row is what a delete would archive, and a leftover
+        // `<id>.toml` what it would move to `.archived`: both must stand
+        // after the refusal.
+        SubAgentRepository::new(&t.db)
+            .upsert(&openalpaca_storage::SubAgentConfig {
+                id: "acme_agent".to_string(),
+                template_id: "acme_agent".to_string(),
+                name: "A".to_string(),
+                description: Some("d".to_string()),
+                icon: None,
+                status: "idle".to_string(),
+                current_task_id: None,
+                skills_json: "[]".to_string(),
+                preset_json: "{}".to_string(),
+                constraints_json: None,
+                llm_config_json: None,
+                persona: None,
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+            })
+            .unwrap();
+        let leftover = t.agents().join("acme_agent.toml");
+        std::fs::write(&leftover, "id = \"acme_agent\"\n").unwrap();
+        let row_before = SubAgentRepository::new(&t.db)
+            .get("acme_agent")
+            .unwrap()
+            .map(|row| row.status);
+        assert!(row_before.is_some(), "no agent row seeded");
+        assert_ne!(row_before.as_deref(), Some("archived"));
 
-        t.route().delete("acme_agent").unwrap();
-
-        assert!(t.registry.get_template("acme_agent").is_none());
-        assert!(t.registry.provenance("acme_agent").is_none());
+        let err = t.route().delete("acme_agent").unwrap_err();
+        let response = delete_refusal(&err);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], "plugin", "{body}");
+        assert_eq!(body["plugin"], "acme", "{body}");
+        let message = body["message"].as_str().unwrap();
         assert!(
-            !t.registry
-                .list_templates()
-                .iter()
-                .any(|template| template.frontmatter.id == "acme_agent")
+            message.starts_with(
+                "a plugin's template cannot be removed; it comes from the plugin acme"
+            ),
+            "{body}"
+        );
+        assert!(
+            message.contains("openalpaca ext disable plugin acme"),
+            "{body}"
+        );
+
+        assert!(t.registry.get_template("acme_agent").is_some());
+        assert_eq!(
+            t.registry.provenance("acme_agent").unwrap().layer,
+            openalpaca_core::agent::registry::TemplateLayer::Plugin
         );
         assert!(!t.agents().join(".archived").exists());
+        assert!(leftover.exists());
+        let row_after = SubAgentRepository::new(&t.db)
+            .get("acme_agent")
+            .unwrap()
+            .map(|row| row.status);
+        assert_eq!(row_after, row_before);
+        assert_ne!(row_after.as_deref(), Some("archived"));
     }
 
     // ── A file that switches a template off (§2.4 L-4a, §7 O-1 (b)) ──

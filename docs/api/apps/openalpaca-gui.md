@@ -155,6 +155,12 @@
 
 ## API Module Map
 
+### `agents.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/agents.test.ts`
+- Exported functions: none
+- Endpoints: none
+
 ### `agents.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/agents.ts`

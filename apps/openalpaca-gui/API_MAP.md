@@ -1417,7 +1417,10 @@ an unedited copy of a shipped version is set aside. Each row says so: `source`,
 `plugin`, `path`, `overrides_bundled`, `state` and `warnings`, and `not_used` for every
 definition of the id that does not run. `POST` and `PUT` of a built-in `id` write an
 override and answer `overrides_bundled: true`; `DELETE` of a built-in template no file
-holds is `409 {"error":"bundled","message":…}`. A file holding an `id:` and
+holds is `409 {"error":"bundled","message":…}`, and of a plugin's template
+`409 {"error":"plugin","plugin":…,"message":…}` naming the plugin, nothing changed
+(`deleteAgentTemplate` throws the sentence as its message, the word as its `code`;
+no view calls it yet). A file holding an `id:` and
 `disabled: true` switches that id off (§2.4 L-4a, C3a): its row reads
 `state: "disabled"` with the file's `path`, a spawn of it is refused naming the file,
 and `DELETE` of the id archives that file, bringing the template back.
