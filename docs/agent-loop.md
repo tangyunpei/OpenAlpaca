@@ -52,6 +52,12 @@ Two details of the budget checks:
   `max_rounds` plus any steering bonus and the answer guard's one bonus
   round, never more than `2 × max_rounds`.
 
+What step 5's request leaves out: it carries no `temperature`.
+`LlmBackend::complete` (`runner/agentic_loop/backend.rs`) sets none on
+any of its paths, so the model answers at its own default. A template's
+`temperature`, and an agent's `preset.temperature`, is accepted and not
+sent, so the shipped templates no longer set it (TEMPLATE-TEMPERATURE).
+
 ## How a Loop Ends
 
 Every invocation returns a `LoopResult` whose `finish_reason` is one of

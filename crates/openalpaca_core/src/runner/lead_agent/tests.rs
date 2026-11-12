@@ -4053,6 +4053,160 @@ async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
     }
 }
 
+// ── TEMPLATE-TEMPERATURE: a template's temperature is not sent ──────────
+
+/// [`LeadAndSubagentProvider`]'s script, recording each request's
+/// `temperature` and whether a subagent sent it.
+struct TemperatureRecordingProvider {
+    inner: LeadAndSubagentProvider,
+    seen: std::sync::Mutex<Vec<(bool, Option<f32>)>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for TemperatureRecordingProvider {
+    fn name(&self) -> &str {
+        "temperature-recording"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let is_subagent = request
+            .messages
+            .first()
+            .is_some_and(|m| m.content.contains("You are a subagent"));
+        self.seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((is_subagent, request.temperature));
+        openalpaca_llm::LlmProvider::chat(&self.inner, request).await
+    }
+}
+
+/// TEMPLATE-TEMPERATURE: a template's `temperature` is accepted and not
+/// sent. A lead and a subagent whose templates both set `temperature: 0.9`
+/// run their turns, and no request either makes carries a temperature —
+/// what the manuals now say, and why the shipped templates no longer set it.
+#[tokio::test]
+async fn no_lead_or_subagent_turn_sends_its_templates_temperature() {
+    let shared = Arc::new(SharedContext::new());
+    let worker = crate::agent::template::parse_agent_markdown(
+        "---\nid: \"worker\"\nname: \"Worker\"\ndescription: \"Counts\"\n\
+         capabilities:\n  - \"memory_read\"\ntemperature: 0.9\n---\n\n## Persona\n\nCount.\n",
+    )
+    .expect("the worker template parses");
+    assert_eq!(worker.frontmatter.temperature, 0.9);
+    shared.agent_registry.register_template(worker);
+    let mut lead = lead_subagent();
+    lead.preset.temperature = 0.9;
+
+    let provider = Arc::new(TemperatureRecordingProvider {
+        inner: LeadAndSubagentProvider {
+            lead: std::sync::Mutex::new(
+                vec![
+                    scripted_response(
+                        "",
+                        vec![openalpaca_llm::ToolCall {
+                            id: "call-1".to_string(),
+                            name: "spawn_subagent".to_string(),
+                            arguments: serde_json::json!({
+                                "agent_id": "worker",
+                                "objective": "count the alpacas",
+                            }),
+                        }],
+                    ),
+                    scripted_response(
+                        "",
+                        vec![openalpaca_llm::ToolCall {
+                            id: "call-2".to_string(),
+                            name: "wait_for_subagents".to_string(),
+                            arguments: serde_json::json!({}),
+                        }],
+                    ),
+                    scripted_response("all done", vec![]),
+                ]
+                .into(),
+            ),
+            subagent_reply: "seventeen".to_string(),
+        },
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Ollama,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    router.model_registry().register(
+        "claude-sonnet-4-20250514".to_string(),
+        openalpaca_llm::routing::model_registry::ModelInfo {
+            provider: openalpaca_llm::ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+
+    let result = run_lead_agent(
+        &lead,
+        "do the thing",
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+
+    let seen = provider.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().filter(|(subagent, _)| !subagent).count() >= 3,
+        "the lead's three rounds: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|(subagent, _)| *subagent),
+        "the subagent ran a turn: {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|(_, temperature)| temperature.is_none()),
+        "a request carried a temperature: {seen:?}"
+    );
+}
+
 // ── A subagent's allow list admits the tools its capabilities resolve to ──
 
 /// A built-in backend that counts its calls and answers with one fixed

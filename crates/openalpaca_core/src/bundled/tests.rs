@@ -216,7 +216,7 @@ fn fixtures() -> Vec<(PathBuf, String)> {
 #[test]
 fn every_fixture_is_a_shipped_version() {
     let files = fixtures();
-    assert_eq!(files.len(), 12, "{files:?}");
+    assert_eq!(files.len(), 13, "{files:?}");
     for (file, path) in &files {
         let bytes = std::fs::read(file).unwrap();
         assert!(
@@ -272,6 +272,38 @@ fn both_sides_of_template_timeout_classify_as_shipped() {
         })
     );
     assert_eq!(classify_agent_file(b"---\nid: mine\n---\n"), None);
+}
+
+/// V-2b: TEMPLATE-TEMPERATURE took the `temperature:` line out of the nine
+/// shipped templates, so an unedited copy of the version before it — what
+/// an earlier build seeded, or a copy of the repository's `config/` — is an
+/// earlier shipped version, set aside like any other, and the bundled
+/// template it differs from is the current one.
+#[test]
+fn the_side_before_template_temperature_classifies_as_an_earlier_shipped_version() {
+    let before = test_support::LEAD_AGENT_4038C409;
+    assert!(
+        before.contains("\ntemperature: 0.3\n"),
+        "the fixture is the side that set it"
+    );
+    assert_eq!(
+        classify_agent_file(before.as_bytes()),
+        Some(ShippedCopy {
+            version: ShippedVersion::Earlier,
+            edit: None
+        })
+    );
+    let bundled = BUNDLED_AGENTS
+        .iter()
+        .find(|file| file.path == "agents/lead_agent.md")
+        .expect("lead_agent.md is bundled");
+    assert_eq!(
+        classify_agent_file(bundled.contents.as_bytes()),
+        Some(ShippedCopy {
+            version: ShippedVersion::Current,
+            edit: None
+        })
+    );
 }
 
 /// **T4.** The main loop's tool calls are attributed to `orchestrator`, so

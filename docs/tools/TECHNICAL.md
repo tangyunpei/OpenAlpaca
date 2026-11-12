@@ -1950,8 +1950,12 @@ Markdown files with YAML frontmatter.  Tool access is declared via
 `require_confirmation_for`) are also frontmatter fields; `timeout_seconds`
 is accepted, names the task's time budget, and nothing enforces it (no
 tool's limit is it since N-TOOL-1b), so the shipped templates no longer
-set it.  On first boot an
-installed daemon seeds this directory with the nine shipped templates.
+set it.  `temperature` is accepted and not sent either (no agent turn
+sends a temperature: `LlmBackend::complete` sets none on every path), so
+the shipped templates no longer set it (TEMPLATE-TEMPERATURE).  The nine
+shipped templates are built in (`openalpaca_core::bundled`), registered
+from the binary and never written to this directory; a file here whose
+`id` is a shipped template's overrides it.
 
 ### Custom Tool TOML
 

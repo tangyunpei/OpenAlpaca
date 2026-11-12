@@ -22,6 +22,9 @@ pub(crate) const WRITING_AGENT_2BC29A80: &str =
 pub(crate) const LEAD_AGENT_9B1EA1D3: &str = include_str!("fixtures/9b1ea1d3/agents/lead_agent.md");
 /// `e9f15916`'s `lead_agent.md`: the side TEMPLATE-TIMEOUT wrote (V-2b).
 pub(crate) const LEAD_AGENT_E9F15916: &str = include_str!("fixtures/e9f15916/agents/lead_agent.md");
+/// `4038c409`'s `lead_agent.md`: the side before TEMPLATE-TEMPERATURE, its
+/// `temperature: 0.3` line still in it.
+pub(crate) const LEAD_AGENT_4038C409: &str = include_str!("fixtures/4038c409/agents/lead_agent.md");
 
 /// The Installation Manual's step 7, as written: delete exactly the two
 /// lines `require_confirmation_for:` and `  - "file_delete"`.

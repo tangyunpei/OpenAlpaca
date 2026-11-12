@@ -13,7 +13,6 @@ capabilities:
   - "read_result"
 denied_capabilities:
   - "web_access"
-temperature: 0.2
 verbosity: "concise"
 model: "claude-haiku-4-5-20251001"
 fallback_models: []

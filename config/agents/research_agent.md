@@ -12,7 +12,6 @@ capabilities:
 denied_capabilities:
   - "shell_execute"
   - "file_write"
-temperature: 0.3
 verbosity: "detailed"
 model: "claude-sonnet-4-6"
 fallback_models:

@@ -14,7 +14,6 @@ capabilities:
   - "read_result"
 denied_capabilities:
   - "web_access"
-temperature: 0.3
 verbosity: "detailed"
 model: "claude-sonnet-4-6"
 fallback_models:

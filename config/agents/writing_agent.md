@@ -13,7 +13,6 @@ capabilities:
 denied_capabilities:
   - "shell_execute"
   - "web_access"
-temperature: 0.7
 verbosity: "detailed"
 model: "claude-sonnet-4-6"
 fallback_models: []

@@ -646,11 +646,11 @@ fn all_nine_templates_name_memory_read() {
 /// profiles — their `description` and `## Persona` change — and everything
 /// else each grants or bounds stays as it was: the capabilities and denials
 /// (so `read_result`, `memory_read` and `writing_agent`'s `file_read` stay),
-/// `singleton`, the caps, `temperature` (parsed and sent nowhere, the
-/// owner's open item), `verbosity`, `require_confirmation_for`, the name and
-/// the icon. A table of the values before SA-1, checked against the bundled
-/// bytes. The `model:` lines are pinned too: SA-3's commit (C8), not SA-1's,
-/// moves them.
+/// `singleton`, the caps, `verbosity`, `require_confirmation_for`, the name
+/// and the icon (`temperature`, sent nowhere, is out of all nine since
+/// TEMPLATE-TEMPERATURE: `no_shipped_template_sets_temperature`). A table of
+/// the values before SA-1, checked against the bundled bytes. The `model:`
+/// lines are pinned too: SA-3's commit (C8), not SA-1's, moves them.
 #[test]
 fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
     struct Kept {
@@ -660,7 +660,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
         singleton: bool,
         capabilities: &'static [&'static str],
         denied: &'static [&'static str],
-        temperature: f32,
         verbosity: &'static str,
         max_tool_calls: Option<u32>,
         max_cost_per_task: Option<f64>,
@@ -688,7 +687,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
                 "read_result",
             ],
             denied: &["web_access"],
-            temperature: 0.3,
             verbosity: "detailed",
             max_tool_calls: Some(50),
             max_cost_per_task: Some(3.0),
@@ -703,7 +701,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             singleton: false,
             capabilities: &["file_read", "memory_read", "workspace_read", "read_result"],
             denied: &["file_write", "shell_execute", "web_access"],
-            temperature: 0.2,
             verbosity: "concise",
             max_tool_calls: Some(40),
             max_cost_per_task: Some(0.25),
@@ -729,7 +726,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
                 "read_result",
             ],
             denied: &["persona_write"],
-            temperature: 0.4,
             verbosity: "detailed",
             max_tool_calls: Some(50),
             max_cost_per_task: Some(5.0),
@@ -751,7 +747,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
                 "read_result",
             ],
             denied: &[],
-            temperature: 0.3,
             verbosity: "detailed",
             max_tool_calls: Some(50),
             max_cost_per_task: Some(3.0),
@@ -773,7 +768,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
                 "read_result",
             ],
             denied: &["file_write", "shell_execute"],
-            temperature: 0.5,
             verbosity: "detailed",
             max_tool_calls: Some(30),
             max_cost_per_task: Some(1.5),
@@ -794,7 +788,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
                 "read_result",
             ],
             denied: &["shell_execute", "file_write"],
-            temperature: 0.3,
             verbosity: "detailed",
             max_tool_calls: Some(12),
             max_cost_per_task: Some(0.35),
@@ -816,7 +809,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
                 "read_result",
             ],
             denied: &["file_write", "web_access"],
-            temperature: 0.2,
             verbosity: "detailed",
             max_tool_calls: Some(40),
             max_cost_per_task: Some(1.0),
@@ -840,7 +832,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
                 "read_result",
             ],
             denied: &["web_access"],
-            temperature: 0.2,
             verbosity: "concise",
             max_tool_calls: Some(30),
             max_cost_per_task: None,
@@ -863,7 +854,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
                 "read_result",
             ],
             denied: &["shell_execute", "web_access"],
-            temperature: 0.7,
             verbosity: "detailed",
             max_tool_calls: Some(10),
             max_cost_per_task: None,
@@ -892,7 +882,6 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
         assert_eq!(fm.singleton, kept.singleton, "{id}");
         assert_eq!(fm.capabilities, strings(kept.capabilities), "{id}");
         assert_eq!(fm.denied_capabilities, strings(kept.denied), "{id}");
-        assert_eq!(fm.temperature, kept.temperature, "{id}");
         assert_eq!(fm.verbosity, kept.verbosity, "{id}");
         assert_eq!(fm.max_tool_calls, kept.max_tool_calls, "{id}");
         assert_eq!(fm.max_cost_per_task, kept.max_cost_per_task, "{id}");
@@ -981,6 +970,58 @@ fn a_template_that_sets_timeout_seconds_still_parses_and_loads() {
     assert_eq!(loaded.frontmatter.timeout_seconds, Some(600));
     let agent = loaded.to_subagent("a1", "task-1");
     assert_eq!(agent.constraints.timeout_seconds, Some(600));
+}
+
+/// TEMPLATE-TEMPERATURE: no agent turn sends a template's `temperature`
+/// (`LlmBackend::complete` sends none), so no shipped template sets one —
+/// read from the file's frontmatter lines, since the parser fills its
+/// default, 0.5, whether the key is there or not; the parsed value is that
+/// default.
+#[test]
+fn no_shipped_template_sets_temperature() {
+    let mut seen = 0;
+    let mut setting = Vec::new();
+    for file in crate::bundled::BUNDLED_AGENTS {
+        let path = file.path;
+        let body = file.contents;
+        let doc =
+            parse_agent_markdown(body).unwrap_or_else(|e| panic!("{} does not parse: {e}", path));
+        let in_frontmatter = body
+            .lines()
+            .skip_while(|line| line.trim() != "---")
+            .skip(1)
+            .take_while(|line| line.trim() != "---")
+            .any(|line| line.trim_start().starts_with("temperature:"));
+        if in_frontmatter || doc.frontmatter.temperature != 0.5 {
+            setting.push(path.to_string());
+        }
+        seen += 1;
+    }
+    setting.sort();
+    assert!(
+        setting.is_empty(),
+        "shipped templates still set temperature: {setting:?}"
+    );
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
+/// TEMPLATE-TEMPERATURE: the key's declarations stay, so a person's own
+/// template that still sets `temperature` parses and loads — accepted and
+/// carried to the subagent's preset, which no request reads.
+#[test]
+fn a_template_that_sets_temperature_still_parses_and_loads() {
+    assert!(VALID_AGENT.contains("\ntemperature: 0.3\n"));
+    let doc = parse_agent_markdown(VALID_AGENT).expect("should parse");
+    assert_eq!(doc.frontmatter.temperature, 0.3);
+
+    let registry = crate::agent::AgentRegistry::new();
+    assert!(registry.register_template(doc.clone()));
+    let loaded = registry
+        .get_template("code_agent")
+        .expect("the template is in the catalog");
+    assert_eq!(loaded.frontmatter.temperature, 0.3);
+    let agent = loaded.to_subagent("a1", "task-1");
+    assert_eq!(agent.preset.temperature, 0.3);
 }
 
 /// Design 09 §5 (LQ3): the owner's installed `config/agents/` is never
