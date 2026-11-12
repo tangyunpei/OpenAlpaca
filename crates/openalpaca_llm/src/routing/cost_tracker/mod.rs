@@ -82,14 +82,22 @@ impl CostTracker {
         self.model_registry.store(model_registry);
     }
 
-    /// The (input, output) price per million tokens to bill this model at.
-    fn pricing_for(&self, model: &str) -> (f64, f64) {
+    /// The (input, output) price per million tokens to bill one request to
+    /// this model at, its prompt `input_tokens` long (cached tokens
+    /// included): the model's long-prompt rate when the prompt is longer
+    /// than that rate's threshold (O-17 (a)), else its standard rate.
+    fn pricing_for(&self, model: &str, input_tokens: u32) -> (f64, f64) {
         let registry = self.model_registry.load();
         if let Some(pricing) = registry.get_pricing(model) {
-            return (
-                pricing.input_price_per_million,
-                pricing.output_price_per_million,
-            );
+            return match pricing.long_prompt {
+                Some(long) if input_tokens > long.above_input_tokens => {
+                    (long.input_price_per_million, long.output_price_per_million)
+                }
+                _ => (
+                    pricing.input_price_per_million,
+                    pricing.output_price_per_million,
+                ),
+            };
         }
         // An id the catalogue has never met, or one a keyed provider's
         // discovery registered with no price (O-18 (b)). Where the whole
@@ -117,9 +125,10 @@ impl CostTracker {
     }
 
     /// Calculate the cost for a given model and token counts.
-    /// Falls back to default pricing if model is unknown.
+    /// Falls back to default pricing if model is unknown. A prompt past the
+    /// model's long-prompt threshold is priced at its long-prompt rate.
     pub fn calculate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-        let (input_price, output_price) = self.pricing_for(model);
+        let (input_price, output_price) = self.pricing_for(model, input_tokens);
         (input_tokens as f64 * input_price / 1_000_000.0)
             + (output_tokens as f64 * output_price / 1_000_000.0)
     }
@@ -130,6 +139,8 @@ impl CostTracker {
     /// are a subset of it, per `Usage`). Non-cached input bills at the base input
     /// rate, cache-write tokens at 1.25x, and cache-read tokens at 0.1x — so a
     /// mostly-cached prompt is no longer charged up to ~10x its real cost.
+    /// The prompt's length, for a long-prompt rate, is `input_tokens`: cache
+    /// reads and writes count toward it.
     pub fn calculate_cost_with_cache(
         &self,
         model: &str,
@@ -138,7 +149,7 @@ impl CostTracker {
         cache_creation_tokens: u32,
         cache_read_tokens: u32,
     ) -> f64 {
-        let (input_price, output_price) = self.pricing_for(model);
+        let (input_price, output_price) = self.pricing_for(model, input_tokens);
         let cached = cache_creation_tokens as u64 + cache_read_tokens as u64;
         let non_cached_input = (input_tokens as u64).saturating_sub(cached);
         (non_cached_input as f64 * input_price / 1_000_000.0)

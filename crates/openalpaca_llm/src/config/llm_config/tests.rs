@@ -425,3 +425,48 @@ context = 262144
         assert_eq!(collected.usage.output_tokens, 3);
     }
 }
+
+/// M-3: `[providers.<name>.model_aliases]` takes `fast`, `balanced` and
+/// `strong` (any case); any other key is warned at load and ignored, and so
+/// is a pin naming no model.
+#[test]
+#[tracing_test::traced_test]
+fn an_unknown_model_aliases_key_is_warned_and_ignored() {
+    use crate::routing::model_alias::ModelAlias;
+    let config: LlmRouterConfig = toml::from_str(
+        r#"
+[providers.ollama.model_aliases]
+Fast = "qwen3:4b"
+fastest = "qwen3:0.6b"
+strong = "  "
+"#,
+    )
+    .expect("parses");
+    let runtime = LlmRuntimeConfig::from(&config);
+    let pins = &runtime.provider_defaults["ollama"].model_aliases;
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[&ModelAlias::Fast], "qwen3:4b");
+    // Both are said at WARN: the unknown key, and the pin naming no model.
+    logs_assert(|lines: &[&str]| {
+        let warned = |needles: &[&str]| {
+            lines
+                .iter()
+                .filter(|l| l.contains("WARN") && needles.iter().all(|n| l.contains(n)))
+                .count()
+        };
+        let unknown = warned(&[
+            "[providers.ollama.model_aliases] has a key 'fastest' that is no model alias",
+            "fast, balanced or strong",
+        ]);
+        let empty = warned(&["[providers.ollama.model_aliases] strong names no model"]);
+        match (unknown, empty) {
+            (1, 1) => Ok(()),
+            (u, e) => Err(format!(
+                "one WARN each: the unknown key {u} times, the empty pin {e} times"
+            )),
+        }
+    });
+    // The raw table survives a write of the file's typed form.
+    let written = toml::to_string(&config).expect("serialises");
+    assert!(written.contains("fastest"), "{written}");
+}

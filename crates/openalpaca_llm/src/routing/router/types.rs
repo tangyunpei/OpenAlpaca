@@ -160,3 +160,15 @@ pub struct ProviderEntry {
     pub provider: Arc<dyn LlmProvider>,
     pub key_pool: Arc<ArcSwap<KeyPool>>,
 }
+
+/// What [`LlmRouter::resolve_alias`](super::LlmRouter::resolve_alias)
+/// settled on for an alias (M-4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasResolution {
+    /// The routable model the alias names here.
+    pub model: String,
+    /// The candidates passed over on the way, because they were not
+    /// routable: the parent's provider's pin, then its compiled id. Each is
+    /// announced once (M-5).
+    pub passed_over: Vec<String>,
+}

@@ -78,6 +78,7 @@ fn local_model_info() -> ModelInfo {
         supports_reasoning: false,
         supports_tools: true,
         declared: true,
+        long_prompt: None,
     }
 }
 

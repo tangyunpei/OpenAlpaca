@@ -361,7 +361,7 @@ mod tests {
             Ok(ChatResponse {
                 content: "skill output".to_string(),
                 tool_calls: vec![],
-                model: "claude-sonnet-4-20250514".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
@@ -402,7 +402,7 @@ Echo the user's query back to them.
         let router = Arc::new(LlmRouter::single_provider(
             provider,
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         InvokeSkillTool::new(
             catalog,
@@ -608,7 +608,7 @@ Never runs.
         let router = Arc::new(LlmRouter::single_provider(
             Arc::new(FailingProvider),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         let tool = InvokeSkillTool::new(
             catalog,
@@ -697,7 +697,7 @@ Build it.
         let router = Arc::new(LlmRouter::single_provider(
             provider.clone(),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         let tool = InvokeSkillTool::new(
             catalog,

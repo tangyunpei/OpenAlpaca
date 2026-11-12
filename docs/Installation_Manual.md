@@ -725,6 +725,7 @@ All in `~/.openalpaca/config/llm.toml`:
 | `[providers.ollama] default_max_tokens` | `8192` | The output ceiling for one answer (the cloud default is 4096). A request that names its own `max_tokens` still wins. |
 | `[providers.ollama] request_timeout_secs` | `3600` | Wall clock for one **non-streaming** call to this provider: a call to a local model may run up to an hour, and one that uses up the whole figure is not asked again. An install seeded before this build keeps `600` (see [Upgrade](#upgrade)). |
 | `[timeouts] llm_request_timeout_secs` | `120` | The same budget for any provider that sets no override. |
+| `[providers.ollama.model_aliases]` | none (a commented-out example) | Pins for the model aliases `fast`, `balanced` and `strong`. Ollama has no built-in model for any of them, so each alias is the model the asking agent already runs on; a pin names another, e.g. `fast = "qwen3:4b"` for a smaller pulled model. A pin may name any model the router can reach, a cloud one included; another key is warned of and ignored. No shipped template names an alias in this build. See the Daemon Manual's *Model aliases*. |
 
 You should not need a `[models]` row at all — discovery fills the catalogue —
 but one you write by hand still overrides what was discovered, field by field:

@@ -846,7 +846,7 @@ mod tests {
         Arc::new(LlmRouter::single_provider(
             Arc::new(StubProvider),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ))
     }
 
@@ -1064,7 +1064,7 @@ mod tests {
             Ok(openalpaca_llm::ChatResponse {
                 content: "skill output".to_string(),
                 tool_calls: vec![],
-                model: "claude-sonnet-4-20250514".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
                 usage: openalpaca_llm::Usage {
                     input_tokens: 10,
                     output_tokens: 5,
@@ -1095,7 +1095,7 @@ mod tests {
         let router = Arc::new(LlmRouter::single_provider(
             Arc::new(AnswersAfter(std::time::Duration::from_secs(2))),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         let (shared, dispatcher, bus, registry) = setup();
         let set = main_loop_tool_set(

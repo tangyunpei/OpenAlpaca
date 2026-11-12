@@ -9,7 +9,8 @@ mod types;
 
 pub use fallback::{flatten_messages, truncate_messages_for_cli};
 pub use types::{
-    LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream, RouterRequest,
+    AliasResolution, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream,
+    RouterRequest,
 };
 
 use crate::LlmProvider;
@@ -18,6 +19,7 @@ use crate::keys::key_pool::{
     ApiKey, KeyGuard, KeyPool, KeyStatus, ProviderType, SelectionStrategy,
 };
 use crate::routing::cost_tracker::CostTracker;
+use crate::routing::model_alias::{ALIAS_TABLE, ModelAlias, compiled_alias};
 use crate::routing::model_registry::ModelRegistry;
 use crate::routing::rate_limiter::{RateLimitConfig, RateLimiterRegistry};
 use arc_swap::ArcSwap;
@@ -106,6 +108,9 @@ pub struct LlmRouter {
     /// (requested → effective) pairs already announced, so a substitution is
     /// visible once per pair instead of once per round (L3).
     pub(super) substitutions_logged: DashSet<(String, String)>,
+    /// (alias, provider) pairs whose collapse to the parent's model on a
+    /// mixed install was announced (M-5), so it is said once per pair.
+    pub(super) alias_collapses_logged: DashSet<(ModelAlias, String)>,
 }
 
 /// Append `candidate` unless it is the model we are already replacing, or is
@@ -143,6 +148,7 @@ impl LlmRouter {
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
             discovery: DashMap::new(),
             substitutions_logged: DashSet::new(),
+            alias_collapses_logged: DashSet::new(),
         }
     }
 
@@ -174,6 +180,7 @@ impl LlmRouter {
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_limit_config)),
             discovery: DashMap::new(),
             substitutions_logged: DashSet::new(),
+            alias_collapses_logged: DashSet::new(),
         }
     }
 
@@ -218,6 +225,7 @@ impl LlmRouter {
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
             discovery: DashMap::new(),
             substitutions_logged: DashSet::new(),
+            alias_collapses_logged: DashSet::new(),
         }
     }
 
@@ -460,6 +468,148 @@ impl LlmRouter {
         }
     }
 
+    // ── M-4: the model aliases ──────────────────────────────────────────────
+
+    /// The model `alias` names for a run whose parent runs on `parent` (the
+    /// subagent design's M-4; `parent` `None`: the effective default).
+    ///
+    /// In order: (1) the parent's provider's pin,
+    /// `[providers.<name>.model_aliases]`, if routable — it may name another
+    /// provider's model, the person's choice; (2) that provider's compiled id
+    /// ([`ALIAS_TABLE`]), if routable; (3) the parent's model itself — an
+    /// alias with no model of its own here collapses to the parent's (the
+    /// effective default when the parent is not routable either); (4) `None`,
+    /// nothing routable. **No step goes to another loaded provider's row or
+    /// pin by itself**: a run stays on the vendor, keys and prices the person
+    /// put its parent on.
+    ///
+    /// A pin or compiled id passed over (steps 1 and 2) is announced once per (id,
+    /// answer) pair at `WARN`; a collapse where another loaded provider has a
+    /// model for the alias, once per (alias, provider) at `INFO` (M-5). The
+    /// alias resolves before the request, so the request is routable and the
+    /// substitution ladder is not walked.
+    pub fn resolve_alias(
+        &self,
+        alias: ModelAlias,
+        parent: Option<&str>,
+    ) -> Option<AliasResolution> {
+        let parent = parent
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.effective_default_model());
+        let provider = parent
+            .as_deref()
+            .and_then(|p| self.model_registry.resolve_provider(p));
+        let mut passed_over: Vec<String> = Vec::new();
+
+        if let Some(provider) = &provider {
+            let candidates = [
+                self.alias_pin(provider, alias),
+                compiled_alias(provider, alias).map(str::to_string),
+            ];
+            for candidate in candidates.into_iter().flatten() {
+                if self.is_routable(&candidate) {
+                    self.announce_passed_over(alias, provider, &passed_over, &candidate);
+                    return Some(AliasResolution {
+                        model: candidate,
+                        passed_over,
+                    });
+                }
+                if !passed_over.contains(&candidate) {
+                    passed_over.push(candidate);
+                }
+            }
+        }
+
+        let model = parent
+            .filter(|p| self.is_routable(p))
+            .or_else(|| self.effective_default_model())?;
+        if let Some(provider) = &provider {
+            if passed_over.is_empty() {
+                self.announce_collapse(alias, provider, &model);
+            } else {
+                self.announce_passed_over(alias, provider, &passed_over, &model);
+            }
+        }
+        Some(AliasResolution { model, passed_over })
+    }
+
+    /// The person's pin for `alias` on `provider`, as the runtime config
+    /// last loaded it.
+    fn alias_pin(&self, provider: &ProviderType, alias: ModelAlias) -> Option<String> {
+        self.runtime_config()
+            .provider_defaults
+            .get(&provider.to_string())
+            .and_then(|d| d.model_aliases.get(&alias).cloned())
+    }
+
+    /// M-5's `WARN`, once per (passed-over id, answering model).
+    fn announce_passed_over(
+        &self,
+        alias: ModelAlias,
+        provider: &ProviderType,
+        passed_over: &[String],
+        model: &str,
+    ) {
+        for id in passed_over {
+            if self
+                .substitutions_logged
+                .insert((id.clone(), model.to_string()))
+            {
+                tracing::warn!(
+                    alias = alias.as_str(),
+                    passed_over = id.as_str(),
+                    model,
+                    "Model alias '{alias}' would use {id}, which is not available — \
+                     answering with {model}. Pin a routable model under \
+                     [providers.{provider}.model_aliases] in llm.toml, or enable its provider."
+                );
+            }
+        }
+    }
+
+    /// M-5's `INFO` for a collapse on a mixed install: the parent's provider
+    /// has no model for `alias`, and another loaded provider has one, which
+    /// the alias does not move to. Once per (alias, provider); nothing where
+    /// no loaded provider has one (an Ollama-only install).
+    fn announce_collapse(&self, alias: ModelAlias, provider: &ProviderType, model: &str) {
+        let elsewhere = self.providers.iter().any(|entry| {
+            let other = entry.key();
+            other != provider
+                && (self.alias_pin(other, alias).is_some()
+                    || ALIAS_TABLE.iter().any(|row| &row.provider == other))
+        });
+        if elsewhere
+            && self
+                .alias_collapses_logged
+                .insert((alias, provider.to_string()))
+        {
+            tracing::info!(
+                alias = alias.as_str(),
+                provider = %provider,
+                model,
+                "Model alias '{alias}' has no model on {provider}: it runs on {model}, the \
+                 parent's model. To use another, pin it under \
+                 [providers.{provider}.model_aliases]."
+            );
+        }
+    }
+
+    /// Every model a call can name right now: a catalogue entry whose
+    /// provider is loaded ([`Self::is_routable`]), sorted. Not
+    /// `available_models()`, which lists discovered models only.
+    pub fn routable_models(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .model_registry
+            .model_ids()
+            .into_iter()
+            .filter(|id| self.is_routable(id))
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// Does this provider need an API key? `None` when it is not loaded.
     ///
     /// The one honest answer for "key health" on a local provider: a `false`
@@ -601,6 +751,9 @@ impl LlmRouter {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod alias_tests;
 
 #[cfg(all(test, feature = "ollama", feature = "openai"))]
 mod ollama_tests;

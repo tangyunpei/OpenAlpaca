@@ -210,6 +210,7 @@ fn router_over(
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
             },
         );
     }

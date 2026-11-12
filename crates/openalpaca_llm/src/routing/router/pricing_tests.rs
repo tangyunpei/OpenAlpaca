@@ -588,3 +588,59 @@ async fn a_later_page_with_an_error_status_or_lost_in_transit_keeps_the_ids_alre
         }
     });
 }
+
+/// M-3c: the two flagships discovery already lists on a keyed install keep
+/// their catalogue rows when it lists them again — price and window — so a
+/// run on either is counted at its page's rate. Red on the parent, where
+/// discovery registered both with no price (counted at the $3 / $15
+/// fallback since O-18's fix) and no window.
+#[tokio::test]
+async fn a_discovered_flagship_keeps_its_catalogue_price() {
+    let server = MockHttpServer::start(|req| {
+        if req.path.starts_with("/v1/models") {
+            MockResponse::json(anthropic_page(&["claude-opus-5-5"], false))
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+    let router = anthropic_router(&server);
+    let status = router.refresh_models_for(&ProviderType::Anthropic).await;
+    assert_eq!(status.error, None);
+    assert!(router.is_routable("claude-opus-5-5"));
+    let cost = router
+        .cost_tracker
+        .calculate_cost("claude-opus-5-5", MILLION, MILLION);
+    assert!(
+        close(cost, 4.0 + 20.0),
+        "claude-opus-5-5 is counted at $4 / $20, not {cost}"
+    );
+    let info = router
+        .model_registry()
+        .get_model_info("claude-opus-5-5")
+        .expect("registered");
+    assert!(info.discovered, "discovery marked it");
+    assert_eq!(info.context_window, 1_000_000);
+
+    let server = MockHttpServer::start(|req| match req.path.as_str() {
+        "/v1/models" => MockResponse::json(models_body(&["gpt-6.1-sol"])),
+        _ => MockResponse::not_found(),
+    })
+    .await;
+    let router = openai_router(&server.base_url, &HashMap::new());
+    let status = router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert_eq!(status.error, None);
+    // A prompt within its standard rate's 272K input tokens.
+    let cost = router
+        .cost_tracker
+        .calculate_cost("gpt-6.1-sol", 100_000, MILLION);
+    assert!(
+        close(cost, 0.2 + 10.0),
+        "gpt-6.1-sol is counted at $2 / $10, not {cost}"
+    );
+    let info = router
+        .model_registry()
+        .get_model_info("gpt-6.1-sol")
+        .expect("registered");
+    assert_eq!(info.context_window, 1_050_000);
+}

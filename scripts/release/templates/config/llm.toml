@@ -41,6 +41,12 @@ default_max_tokens = 8192
 # allowed an hour whatever this says, and is cut sooner only if the tokens stop
 # coming.
 request_timeout_secs = 3600
+# The model aliases fast, balanced and strong each name a model per provider:
+# built in for Anthropic and OpenAI; on Ollama, which has none built in, the
+# model the asking agent runs on. A provider's table pins your own, e.g. a
+# smaller pulled model for fast; a pin may name any model the router can reach.
+# [providers.ollama.model_aliases]
+# fast = "qwen3:4b"
 
 [web_search]
 api_key = ""

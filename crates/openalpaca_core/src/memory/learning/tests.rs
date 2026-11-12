@@ -3045,6 +3045,7 @@ fn router_for(model: Arc<Scripted>, provider: ProviderType, id: &str) -> Arc<Llm
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
         },
     );
     Arc::new(router)

@@ -1190,12 +1190,12 @@ async fn a_long_brief_on_a_small_window_arrives_whole_as_its_user_turn() {
     let router = scripted_router(provider.clone());
     let mut info = router
         .model_registry()
-        .get_model_info("claude-sonnet-4-20250514")
+        .get_model_info("claude-sonnet-4-6")
         .unwrap();
     info.context_window = 8_192;
     router
         .model_registry()
-        .register("claude-sonnet-4-20250514".to_string(), info);
+        .register("claude-sonnet-4-6".to_string(), info);
     let shared = Arc::new(SharedContext::new());
     register_worker_template(&shared, "worker", vec![], vec![]);
     let tracker = Arc::new(SubagentTracker::new());
@@ -1350,10 +1350,10 @@ async fn a_subagents_brief_survives_its_loops_compaction() {
     let router = LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Ollama,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     );
     router.model_registry().register(
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
         openalpaca_llm::routing::model_registry::ModelInfo {
             provider: openalpaca_llm::ProviderType::Ollama,
             input_price_per_million: 0.0,
@@ -1366,6 +1366,7 @@ async fn a_subagents_brief_survives_its_loops_compaction() {
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
         },
     );
 
@@ -2571,7 +2572,7 @@ fn scripted_response(
             openalpaca_llm::FinishReason::ToolUse
         },
         tool_calls,
-        model: "claude-sonnet-4-20250514".to_string(),
+        model: "claude-sonnet-4-6".to_string(),
         usage: openalpaca_llm::Usage {
             input_tokens: 10,
             output_tokens: 5,
@@ -2623,7 +2624,7 @@ fn scripted_router(provider: Arc<ScriptedProvider>) -> Arc<LlmRouter> {
     Arc::new(LlmRouter::single_provider(
         provider,
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     ))
 }
 
@@ -3674,7 +3675,7 @@ fn ollama_only_router(provider: Arc<ScriptedProvider>) -> Arc<LlmRouter> {
     let router = LlmRouter::single_provider(
         provider,
         openalpaca_llm::ProviderType::Ollama,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     );
     router.model_registry().register(
         "qwen3:8b".to_string(),
@@ -3690,6 +3691,7 @@ fn ollama_only_router(provider: Arc<ScriptedProvider>) -> Arc<LlmRouter> {
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
         },
     );
     Arc::new(router)
@@ -3943,7 +3945,7 @@ async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
     let router = LlmRouter::single_provider(
         provider,
         openalpaca_llm::ProviderType::Ollama,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     );
     router.model_registry().register(
         "qwen3:8b".to_string(),
@@ -3959,6 +3961,7 @@ async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
         },
     );
 
@@ -4137,10 +4140,10 @@ async fn no_lead_or_subagent_turn_sends_its_templates_temperature() {
     let router = LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Ollama,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     );
     router.model_registry().register(
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
         openalpaca_llm::routing::model_registry::ModelInfo {
             provider: openalpaca_llm::ProviderType::Ollama,
             input_price_per_million: 0.0,
@@ -4153,6 +4156,7 @@ async fn no_lead_or_subagent_turn_sends_its_templates_temperature() {
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
         },
     );
 
@@ -5065,10 +5069,10 @@ async fn a_lead_with_a_memory_block_keeps_its_objective_through_a_compaction() {
     let router = LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Ollama,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     );
     router.model_registry().register(
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
         openalpaca_llm::routing::model_registry::ModelInfo {
             provider: openalpaca_llm::ProviderType::Ollama,
             input_price_per_million: 0.0,
@@ -5081,6 +5085,7 @@ async fn a_lead_with_a_memory_block_keeps_its_objective_through_a_compaction() {
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
         },
     );
 
@@ -5389,7 +5394,7 @@ async fn a_subagents_memory_search_records_its_task_id_in_the_ring() {
     let router = LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     );
 
     let result = run_lead_agent(
@@ -5755,7 +5760,7 @@ async fn a_subagent_carries_the_runs_conversation_and_is_told_its_scratch_folder
     let router = LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     );
 
     let result = run_lead_agent(
@@ -5909,7 +5914,7 @@ async fn the_leads_compaction_folds_into_the_chats_working_state() {
     let router = LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Ollama,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     );
     router.model_registry().register(
         "qwen3:8b".to_string(),
@@ -5925,6 +5930,7 @@ async fn the_leads_compaction_folds_into_the_chats_working_state() {
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
         },
     );
 
@@ -6135,7 +6141,7 @@ async fn a_subagents_command_is_killed_with_its_group_when_the_lead_ends() {
         Arc::new(LlmRouter::single_provider(
             provider,
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         )),
         registry,
         shared,
@@ -6253,7 +6259,7 @@ async fn dropping_the_run_future_aborts_its_subagents() {
     let router = Arc::new(LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     ));
 
     let run = tokio::spawn(async move {
@@ -6416,7 +6422,7 @@ fn roomy_router(provider: Arc<dyn openalpaca_llm::LlmProvider>) -> Arc<LlmRouter
         Arc::new(openalpaca_llm::CostTracker::new(
             openalpaca_llm::ModelRegistry::with_defaults(),
         )),
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
         openalpaca_llm::LlmRuntimeConfig::default(),
         openalpaca_llm::RateLimitConfig {
             per_key_concurrency: 16,
@@ -6566,7 +6572,7 @@ async fn a_queued_subagent_stopped_by_the_runs_end_never_starts() {
         Arc::new(LlmRouter::single_provider(
             provider.clone(),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         )),
         Arc::new(ToolRegistry::default()),
         shared,
@@ -6918,7 +6924,7 @@ async fn a_subagent_error_is_named_without_debug_escaping() {
                 },
             }),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         )),
         crate::test_util::make_agent("worker", vec![]),
     )
@@ -6951,7 +6957,7 @@ async fn a_subagent_whose_key_is_refused_is_told_a_retry_will_not_help() {
                 },
             }),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         )),
         crate::test_util::make_agent("worker", vec![]),
     )
@@ -7187,7 +7193,7 @@ async fn a_subagents_template_timeout_is_not_its_per_tool_bound() {
     let router = Arc::new(LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     ));
     let config = crate::test_util::daemon_config_with_agent_defaults(
         "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 7",
@@ -7592,7 +7598,7 @@ async fn the_lead_is_told_the_configured_bound_and_refused_at_it() {
         Arc::new(LlmRouter::single_provider(
             provider.clone(),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         )),
         Arc::new(ToolRegistry::default()),
         shared,

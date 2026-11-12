@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::router_config::LlmRouterConfig;
+use crate::routing::model_alias::ModelAlias;
 
 fn default_usage_cache_ttl() -> u64 {
     300
@@ -111,6 +112,12 @@ pub struct ProviderDefaults {
     /// `[providers.<name>] request_timeout_secs` — this provider's own
     /// non-streaming budget. `None` means the `[timeouts]` default applies.
     pub request_timeout_secs: Option<u64>,
+    /// `[providers.<name>.model_aliases]`: the person's pin for each model
+    /// alias on this provider, read at load and on every hot reload. An
+    /// alias with no pin takes the compiled row (`ALIAS_TABLE`); a key that
+    /// names no alias, or a pin that names no model, was warned of and left
+    /// out ([`LlmRuntimeConfig::from`]).
+    pub model_aliases: BTreeMap<ModelAlias, String>,
 }
 
 /// Runtime representation of all externalized LLM configuration.
@@ -133,6 +140,7 @@ impl Default for LlmRuntimeConfig {
                 default_max_tokens: 4096,
                 base_url: None,
                 request_timeout_secs: None,
+                model_aliases: BTreeMap::new(),
             },
         );
         provider_defaults.insert(
@@ -142,6 +150,7 @@ impl Default for LlmRuntimeConfig {
                 default_max_tokens: 4096,
                 base_url: Some("https://api.openai.com/v1".to_string()),
                 request_timeout_secs: None,
+                model_aliases: BTreeMap::new(),
             },
         );
         provider_defaults.insert(
@@ -151,6 +160,7 @@ impl Default for LlmRuntimeConfig {
                 default_max_tokens: 4096,
                 base_url: Some("http://localhost:11434/v1".to_string()),
                 request_timeout_secs: None,
+                model_aliases: BTreeMap::new(),
             },
         );
         Self {
@@ -190,6 +200,45 @@ impl LlmRuntimeConfig {
     }
 }
 
+/// The alias pins of `[providers.<provider>.model_aliases]` (M-3).
+///
+/// A key is matched as an alias word ignoring case; any other key, and a pin
+/// that names no model, is warned of here — at load and at each hot reload,
+/// which both build the runtime config through this — and ignored. An
+/// unknown key is not refused: `llm.toml` keeps unknown keys everywhere else.
+fn model_aliases_of(
+    provider: &str,
+    table: Option<&HashMap<String, String>>,
+) -> BTreeMap<ModelAlias, String> {
+    let mut pins = BTreeMap::new();
+    let Some(table) = table else {
+        return pins;
+    };
+    let mut keys: Vec<&String> = table.keys().collect();
+    keys.sort();
+    for key in keys {
+        let model = table[key].trim();
+        match ModelAlias::parse(key) {
+            Some(alias) if !model.is_empty() => {
+                pins.insert(alias, model.to_string());
+            }
+            Some(alias) => tracing::warn!(
+                provider,
+                alias = alias.as_str(),
+                "[providers.{provider}.model_aliases] {alias} names no model — ignored; \
+                 the alias keeps its built-in model"
+            ),
+            None => tracing::warn!(
+                provider,
+                key = key.as_str(),
+                "[providers.{provider}.model_aliases] has a key '{key}' that is no model \
+                 alias — ignored. The keys are fast, balanced or strong."
+            ),
+        }
+    }
+    pins
+}
+
 impl From<&LlmRouterConfig> for LlmRuntimeConfig {
     fn from(config: &LlmRouterConfig) -> Self {
         let timeouts = config.timeouts.clone().unwrap_or_default();
@@ -218,6 +267,7 @@ impl From<&LlmRouterConfig> for LlmRuntimeConfig {
                     request_timeout_secs: pc
                         .request_timeout_secs
                         .or_else(|| existing.and_then(|e| e.request_timeout_secs)),
+                    model_aliases: model_aliases_of(name, pc.model_aliases.as_ref()),
                 };
                 provider_defaults.insert(name.clone(), defaults);
             }

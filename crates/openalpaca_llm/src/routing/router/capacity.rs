@@ -114,6 +114,7 @@ impl LlmRouter {
                             supports_reasoning: false,
                             supports_tools: model.supports_tools,
                             declared: false,
+                            long_prompt: None,
                         },
                     );
                 }

@@ -10,6 +10,24 @@ use std::sync::RwLock;
 pub struct PricingInfo {
     pub input_price_per_million: f64,
     pub output_price_per_million: f64,
+    /// The higher rate a long prompt pays, when the model has one.
+    pub long_prompt: Option<LongPromptRate>,
+}
+
+/// A second rate a model's whole request pays once its prompt is longer than
+/// a threshold (O-17 (a)).
+///
+/// The prompt's length is its input tokens, cached ones included — the
+/// folded `Usage.input_tokens` — and the request is priced on its own:
+/// above the threshold every input, cache and output token takes this rate,
+/// the cache rates scaling with the input rate as they do at the standard
+/// one. At the threshold itself the standard rate holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LongPromptRate {
+    /// The longest prompt, in input tokens, still priced at the standard rate.
+    pub above_input_tokens: u32,
+    pub input_price_per_million: f64,
+    pub output_price_per_million: f64,
 }
 
 /// Serializable model entry for API responses.
@@ -88,7 +106,8 @@ pub struct ModelInfo {
     pub supports_audio: bool,
     /// Whether this model accepts document (PDF) content parts natively.
     pub supports_document: bool,
-    /// Whether this model supports reasoning (OpenAI o-series).
+    /// Whether this model reports reasoning tokens (OpenAI's reasoning models).
+    /// Recorded, not read by any call path.
     pub supports_reasoning: bool,
     /// Whether this model can be given tools.
     ///
@@ -104,6 +123,11 @@ pub struct ModelInfo {
     /// the picker without the owner's declaration being deleted behind their
     /// back (L2).
     pub declared: bool,
+    /// The rate a request pays once its prompt passes a length, for a model
+    /// whose page prices long prompts higher; `None` for one priced the same
+    /// at any length. Only a compiled row carries one: a `[models]` row the
+    /// person writes replaces the compiled row whole, rate included.
+    pub long_prompt: Option<LongPromptRate>,
 }
 
 /// Registry mapping model IDs to their provider and pricing metadata.
@@ -131,26 +155,63 @@ impl ModelRegistry {
     fn default_models() -> HashMap<String, ModelInfo> {
         let mut models = HashMap::new();
 
-        // Anthropic models (discovered: false — only for internal routing/pricing)
-        for id in &["claude-opus-4-20250514", "claude-opus-4-6"] {
-            models.insert(
-                id.to_string(),
-                ModelInfo {
-                    provider: ProviderType::Anthropic,
-                    input_price_per_million: 15.0,
-                    output_price_per_million: 75.0,
-                    context_window: 200_000,
-                    discovered: false,
-                    supports_image: true,
-                    supports_audio: false,
-                    supports_document: true,
-                    supports_reasoning: false,
-                    supports_tools: true,
-                    declared: true,
-                },
-            );
-        }
-        for id in &["claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-sonnet-4-20250514"] {
+        // Anthropic models (discovered: false — only for internal routing/pricing).
+        // Prices from platform.claude.com/docs/en/about-claude/pricing, read
+        // 2026-11-12. The windows of the rows before Opus 5.5 stay as listed
+        // until step 19's live check (O-17 (a)); the pricing page's "Long
+        // context pricing" gives Claude 4.6 and later (but Haiku 5.5) their
+        // whole window at the standard rate, so none has a long-prompt rate.
+        // `claude-opus-4-20250514` and `claude-sonnet-4-20250514` are gone:
+        // "Retired" on June 15, 2026 (the model-deprecations page, read
+        // 2026-11-12), O-17 (a).
+        //
+        // Claude Opus 5.5, the latest Opus and `strong`'s row (O-13 (a)):
+        // $4 / $20, a 1M-token window (the pricing page and the models
+        // overview, platform.claude.com/docs/en/models/overview, read
+        // 2026-11-12); text and image in and tool use ("All current models
+        // support text and image input, ... vision, and tool use", the
+        // overview); PDFs ("All active models support PDF processing",
+        // .../build-with-claude/pdf-support, read 2026-11-12).
+        models.insert(
+            "claude-opus-5-5".to_string(),
+            ModelInfo {
+                provider: ProviderType::Anthropic,
+                input_price_per_million: 4.0,
+                output_price_per_million: 20.0,
+                context_window: 1_000_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: true,
+                supports_reasoning: false,
+                supports_tools: true,
+                declared: true,
+                long_prompt: None,
+            },
+        );
+        // Claude Opus 4.6: $5 / $25 (the pricing page, read 2026-11-12; the
+        // catalogue had $15 / $75, Opus 4's and 4.1's rate).
+        models.insert(
+            "claude-opus-4-6".to_string(),
+            ModelInfo {
+                provider: ProviderType::Anthropic,
+                input_price_per_million: 5.0,
+                output_price_per_million: 25.0,
+                context_window: 200_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: true,
+                supports_reasoning: false,
+                supports_tools: true,
+                declared: true,
+                long_prompt: None,
+            },
+        );
+        // Claude Sonnet 4.6 and 4.5: $3 / $15 (the pricing page, read
+        // 2026-11-12). Sonnet 4.5 is "Deprecated", retiring November 30,
+        // 2026 (the model-deprecations page): kept until then.
+        for id in &["claude-sonnet-4-6", "claude-sonnet-4-5-20250929"] {
             models.insert(
                 id.to_string(),
                 ModelInfo {
@@ -165,9 +226,11 @@ impl ModelRegistry {
                     supports_reasoning: false,
                     supports_tools: true,
                     declared: true,
+                    long_prompt: None,
                 },
             );
         }
+        // Claude Haiku 4.5: $1 / $5 (the pricing page, read 2026-11-12).
         models.insert(
             "claude-haiku-4-5-20251001".to_string(),
             ModelInfo {
@@ -182,10 +245,16 @@ impl ModelRegistry {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
             },
         );
 
-        // OpenAI models
+        // OpenAI models. `gpt-5.2` $1.75 / $14, `gpt-5-mini` $0.25 / $2 and
+        // `gpt-5-nano` $0.05 / $0.40, as the catalogue had them
+        // (developers.openai.com/api/docs/pricing and each model's page, read
+        // 2026-11-12); the last two "Deprecated", shut down on Dec 11, 2026
+        // (the deprecations page): kept until O-16 (a) moves the aliases off
+        // them. The windows stay as listed until step 19's live check.
         models.insert(
             "gpt-5.2".to_string(),
             ModelInfo {
@@ -200,6 +269,7 @@ impl ModelRegistry {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
             },
         );
         models.insert(
@@ -216,6 +286,7 @@ impl ModelRegistry {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
             },
         );
         models.insert(
@@ -232,6 +303,7 @@ impl ModelRegistry {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
             },
         );
 
@@ -253,40 +325,63 @@ impl ModelRegistry {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
             },
         );
 
-        // OpenAI o-series reasoning models
-        for id in &["o3", "o3-mini", "o1", "o1-mini"] {
-            models.insert(
-                id.to_string(),
-                ModelInfo {
-                    provider: ProviderType::OpenAI,
-                    input_price_per_million: match *id {
-                        "o3" => 10.0,
-                        "o3-mini" => 1.10,
-                        "o1" => 15.0,
-                        "o1-mini" => 1.10,
-                        _ => 0.0,
-                    },
-                    output_price_per_million: match *id {
-                        "o3" => 40.0,
-                        "o3-mini" => 4.40,
-                        "o1" => 60.0,
-                        "o1-mini" => 4.40,
-                        _ => 0.0,
-                    },
-                    context_window: 200_000,
-                    discovered: false,
-                    supports_image: matches!(*id, "o1" | "o3"),
-                    supports_audio: false,
-                    supports_document: false,
-                    supports_reasoning: true,
-                    supports_tools: true,
-                    declared: true,
-                },
-            );
-        }
+        // GPT-6.1 Sol, the latest Sol (O-13 (a); `strong`'s OpenAI row once
+        // C7b lands, O-15 (a)): $2 / $10, and "API prompts with more than
+        // 272K input tokens are priced at 2x input and cache rates and 1.5x
+        // output for the full request" — $4 / $15; a 1,050,000-token window;
+        // text and image in, audio unsupported; reasoning tokens; function
+        // calling, though "Tool calling requires the Responses API", which
+        // the arm reaches only with C7b (developers.openai.com/api/docs/
+        // models/gpt-6.1-sol and .../pricing, read 2026-11-12).
+        models.insert(
+            "gpt-6.1-sol".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 2.0,
+                output_price_per_million: 10.0,
+                context_window: 1_050_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: false,
+                supports_reasoning: true,
+                supports_tools: true,
+                declared: true,
+                long_prompt: Some(LongPromptRate {
+                    above_input_tokens: 272_000,
+                    input_price_per_million: 4.0,
+                    output_price_per_million: 15.0,
+                }),
+            },
+        );
+
+        // o3: $2 / $8 (its page, developers.openai.com/api/docs/models/o3,
+        // and the pricing page, read 2026-11-12; the catalogue had $10 /
+        // $40), a 200,000-token window. "Deprecated", shut down on Dec 11,
+        // 2026 (the deprecations page): kept until then. `o3-mini`, `o1` and
+        // `o1-mini` are gone: "Shut down" (.../models/all and the
+        // deprecations page, read 2026-11-12), O-17 (a).
+        models.insert(
+            "o3".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 2.0,
+                output_price_per_million: 8.0,
+                context_window: 200_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: false,
+                supports_reasoning: true,
+                supports_tools: true,
+                declared: true,
+                long_prompt: None,
+            },
+        );
 
         models
     }
@@ -346,6 +441,7 @@ impl ModelRegistry {
                         // until they say otherwise.
                         supports_tools: entry.supports_tools.unwrap_or(true),
                         declared: true,
+                        long_prompt: None,
                     },
                 );
             }
@@ -380,6 +476,7 @@ impl ModelRegistry {
             .map(|info| PricingInfo {
                 input_price_per_million: info.input_price_per_million,
                 output_price_per_million: info.output_price_per_million,
+                long_prompt: info.long_prompt,
             })
     }
 
@@ -676,3 +773,6 @@ impl ModelRegistry {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod catalogue_tests;

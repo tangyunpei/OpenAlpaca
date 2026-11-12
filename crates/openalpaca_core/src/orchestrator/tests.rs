@@ -1467,6 +1467,7 @@ fn local_only_router(
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
         },
     );
     // `RecordingProvider` is not `OllamaProvider`, so it keeps the trait's
@@ -6331,6 +6332,7 @@ fn ollama_only_router(
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
         },
     );
     Arc::new(router)
@@ -11018,7 +11020,7 @@ Build it.
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
     ));
     let bus = EventBus::default();
     let gate = make_security_gate_with_registry(&bus, registry.clone());

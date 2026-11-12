@@ -222,6 +222,35 @@ async fn a_hand_edit_still_reloads() {
     assert_eq!(h.web_search.load().timeout_secs, 42);
 }
 
+/// C7 (M-3): a hand edit pinning a model alias under
+/// `[providers.<name>.model_aliases]` reaches the router on the watcher's
+/// tick, and removing the pin gives the table's answer back — here Ollama's,
+/// which has no compiled row, so the alias is the parent's own model.
+#[tokio::test]
+async fn a_hand_edited_alias_pin_reaches_the_router_on_reload() {
+    use openalpaca_llm::ModelAlias;
+    let two_models =
+        format!("{CONFIG}\n[models.\"qwen3:4b\"]\nprovider = \"ollama\"\ncontext = 8192\n");
+    let h = Harness::with_config(two_models.clone());
+    assert!(h.router.is_routable("llama3.1") && h.router.is_routable("qwen3:4b"));
+    let fast = |h: &Harness| {
+        h.router
+            .resolve_alias(ModelAlias::Fast, Some("llama3.1"))
+            .expect("fast resolves")
+            .model
+    };
+    assert_eq!(fast(&h), "llama3.1", "no pin: the parent's model");
+
+    let pinned = format!("{two_models}\n[providers.ollama.model_aliases]\nfast = \"qwen3:4b\"\n");
+    std::fs::write(&h.path, &pinned).expect("hand edit");
+    assert!(h.tick(), "a hand edit is not the daemon's write");
+    assert_eq!(fast(&h), "qwen3:4b", "the pin is taken on reload");
+
+    std::fs::write(&h.path, &two_models).expect("hand edit");
+    assert!(h.tick());
+    assert_eq!(fast(&h), "llama3.1", "the pin is gone on reload");
+}
+
 /// **L13.** Hand-editing `llm.toml` to enable a provider the daemon booted
 /// without used to do nothing until a restart: the tick reloads runtime
 /// config, models, the default and the key pools, and every one of those

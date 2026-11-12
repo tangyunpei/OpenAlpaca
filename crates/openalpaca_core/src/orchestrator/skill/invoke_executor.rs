@@ -587,7 +587,7 @@ mod tests {
             Ok(ChatResponse {
                 content,
                 tool_calls,
-                model: "claude-sonnet-4-20250514".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
@@ -677,7 +677,7 @@ Use echo_tool to answer.
         let router = Arc::new(LlmRouter::single_provider(
             provider.clone(),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
 
         // call_stack non-empty = we are inside a parent skill's loop, i.e. this
@@ -769,7 +769,7 @@ Read the file.
         let router = Arc::new(LlmRouter::single_provider(
             provider.clone(),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         let executor = SkillInvocationToolExecutor::new(
             catalog,
@@ -853,7 +853,7 @@ Work on the file.
         let router = Arc::new(LlmRouter::single_provider(
             provider.clone(),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         let executor = SkillInvocationToolExecutor::new(
             catalog,
@@ -909,7 +909,7 @@ Work on the file.
         let router = Arc::new(LlmRouter::single_provider(
             provider,
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         SkillInvocationToolExecutor::new(
             catalog,

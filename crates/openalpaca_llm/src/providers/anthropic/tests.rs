@@ -686,7 +686,7 @@ fn test_build_request_body_with_context_management() {
     let request = ChatRequest {
         messages: Arc::new(vec![ChatMessage::user("hello")]),
         tools: Arc::new(vec![]),
-        model: Some("claude-sonnet-4-20250514".to_string()),
+        model: Some("claude-sonnet-4-6".to_string()),
         temperature: None,
         max_tokens: None,
         tool_choice: None,
@@ -706,7 +706,7 @@ fn test_build_request_body_with_context_management() {
         ephemeral_system_notice: None,
     };
 
-    let body = request::build_request_body("claude-sonnet-4-20250514", 4096, &request);
+    let body = request::build_request_body("claude-sonnet-4-6", 4096, &request);
     assert!(body.get("context_management").is_some());
     let edits = body["context_management"]["edits"].as_array().unwrap();
     assert_eq!(edits.len(), 2);
@@ -729,7 +729,7 @@ fn test_build_request_body_without_context_management() {
         ephemeral_system_notice: None,
     };
 
-    let body = request::build_request_body("claude-sonnet-4-20250514", 4096, &request);
+    let body = request::build_request_body("claude-sonnet-4-6", 4096, &request);
     assert!(body.get("context_management").is_none());
 }
 

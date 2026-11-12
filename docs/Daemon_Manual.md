@@ -322,6 +322,50 @@ it answers before the turn runs: it echoes the model named in the body, or the
 effective default for a turn that names none, and `null` when nothing is
 routable.
 
+### Model aliases
+
+`fast`, `balanced` and `strong` are model aliases: each names one model per
+provider. The router resolves one against the model of the agent that asks
+(its parent) before any call, so the call itself names a routable model. In
+this build no template or tool names an alias yet; the shipped agent
+templates still name model ids.
+
+| Alias | Anthropic | OpenAI | Ollama, or any provider with no row |
+|---|---|---|---|
+| `fast` | `claude-haiku-4-5-20251001` | `gpt-5-nano` | the parent's model |
+| `balanced` | `claude-sonnet-4-6` | `gpt-5-mini` | the parent's model |
+| `strong` | `claude-opus-5-5` | `gpt-5.2` | the parent's model |
+
+Resolution, in order: the parent's provider's pin; that provider's built-in
+row; the parent's model itself (with no parent, the model a request naming
+none reaches); nothing, when no model is routable. An alias never moves a
+run to another provider by itself: on a machine whose main model is a local
+Ollama model, `strong` stays on that model even with an Anthropic key
+loaded, unless you pin it elsewhere.
+
+A pin is yours, per provider, under `[providers.<name>.model_aliases]` in
+`llm.toml`, with the keys `fast`, `balanced` and `strong`:
+
+```toml
+[providers.anthropic.model_aliases]
+strong = "claude-sonnet-4-6"
+
+[providers.ollama.model_aliases]
+fast = "qwen3:4b"
+```
+
+A pin may name any routable model, another provider's included. It is read
+at start and on every hot reload. A key that is not one of the three words,
+or a pin that names no model, is logged as a `WARN` and ignored. A pin or a
+built-in id that is not routable right now is passed over, and `daemon.log`
+says so once per (model, answer) pair at `WARN`: `Model alias 'fast' would
+use <id>, which is not available — answering with <model>.` When the
+parent's provider has no model for an alias and another loaded provider has
+one, the alias still runs on the parent's model, and that is said once per
+alias and provider at `INFO`. The seeded `llm.toml` carries a commented-out
+example; an existing `llm.toml` is never rewritten, so the built-in rows
+reach it with the release.
+
 ### Cost
 
 The cost tracker prices from the router's live registry — compiled defaults
@@ -342,6 +386,22 @@ such as llama.cpp or LM Studio, set up as the `openai` provider with a key)
 is a keyed provider too: its discovered models are counted at the fallback
 although they cost nothing. A `[models."<id>"]` row with `input_price = 0`
 and `output_price = 0` keeps each at `0`.
+
+A model whose provider prices a long prompt higher carries that second rate
+in its built-in row: `gpt-6.1-sol` costs $2 / $10 per million tokens, and a
+request whose prompt is longer than 272,000 input tokens (cached ones
+included) is counted whole at $4 / $15. Each request is priced on its own.
+The built-in rows follow the providers' pages as read on 2026-11-12:
+`claude-opus-5-5` ($4 / $20) and `gpt-6.1-sol` are listed, `claude-opus-4-6`
+is counted at $5 / $25 and `o3` at $2 / $8, and the rows of models the
+providers have shut down or retired (`o1`, `o1-mini`, `o3-mini`,
+`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) are gone, so a
+template or a setting that names one walks the substitution ladder before
+the call, announced, instead of failing at the provider, unless your own
+`[models."<id>"]` row or the provider's model list still names it: then it
+stays routable and the call goes to the provider, priced by your row, or
+at the $3 / $15 fallback when only the list names it. A `[models."<id>"]`
+row replaces a built-in row whole, its long-prompt rate included.
 
 | Cap | Default | Key in `daemon.toml` |
 |---|---|---|

@@ -100,6 +100,7 @@ mod tests {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: false,
+                long_prompt: None,
             },
         );
         router.register_provider(
@@ -173,6 +174,7 @@ mod tests {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: false,
+                long_prompt: None,
             },
         );
         assert_eq!(routed_context_window(&router, Some("broken:0")), None);

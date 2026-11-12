@@ -49,6 +49,7 @@ fn test_custom_registry() {
             supports_reasoning: false,
             supports_tools: true,
             declared: true,
+            long_prompt: None,
         },
     );
     let registry = ModelRegistry::new(models);
@@ -76,6 +77,7 @@ fn test_register_model() {
             supports_reasoning: false,
             supports_tools: true,
             declared: true,
+            long_prompt: None,
         },
     );
     assert_eq!(
@@ -102,6 +104,7 @@ fn test_register_if_absent() {
             supports_reasoning: false,
             supports_tools: true,
             declared: true,
+            long_prompt: None,
         },
     );
     assert_eq!(
@@ -124,6 +127,7 @@ fn test_register_if_absent() {
             supports_reasoning: false,
             supports_tools: true,
             declared: true,
+            long_prompt: None,
         },
     );
     assert_eq!(
@@ -155,6 +159,7 @@ fn test_register_discovered() {
             supports_reasoning: false,
             supports_tools: true,
             declared: true,
+            long_prompt: None,
         },
     );
     let info = registry.get_model_info("gpt-5.2").unwrap();
@@ -177,6 +182,7 @@ fn test_register_discovered() {
             supports_reasoning: false,
             supports_tools: true,
             declared: true,
+            long_prompt: None,
         },
     );
     let info = registry.get_model_info("new-api-model").unwrap();
@@ -206,6 +212,7 @@ fn test_list_discovered_models() {
             supports_reasoning: false,
             supports_tools: true,
             declared: true,
+            long_prompt: None,
         },
     );
 
@@ -235,13 +242,12 @@ fn test_list_models() {
 #[test]
 fn test_o_series_models_registered() {
     let registry = ModelRegistry::with_defaults();
-    for id in &["o3", "o3-mini", "o1", "o1-mini"] {
-        let info = registry
-            .get_model_info(id)
-            .unwrap_or_else(|| panic!("{} should be registered", id));
-        assert_eq!(info.provider, ProviderType::OpenAI);
-        assert!(info.supports_reasoning, "{} should support reasoning", id);
-    }
+    // `o3-mini`, `o1` and `o1-mini` are shut down and have no row (O-17 (a)).
+    let info = registry
+        .get_model_info("o3")
+        .unwrap_or_else(|| panic!("o3 should be registered"));
+    assert_eq!(info.provider, ProviderType::OpenAI);
+    assert!(info.supports_reasoning, "o3 should support reasoning");
     // Non-reasoning models should not have supports_reasoning
     let gpt = registry.get_model_info("gpt-5.2").unwrap();
     assert!(!gpt.supports_reasoning);
