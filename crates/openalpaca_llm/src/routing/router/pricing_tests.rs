@@ -389,8 +389,9 @@ async fn anthropic_discovery_reads_every_page_of_the_model_list() {
     assert_eq!(server.requests().await.len(), 2, "one request per page");
 }
 
-/// A later page that fails in transit or does not decode ends the walk with
-/// the ids already read: the first page's ids are still registered.
+/// A later page that does not decode ends the walk with the ids already
+/// read: the first page's ids are still registered. An error status and a
+/// failure in transit are tested below.
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn a_later_page_that_does_not_decode_keeps_the_ids_already_read() {
@@ -449,4 +450,141 @@ async fn a_later_page_that_does_not_decode_keeps_the_ids_already_read() {
     }
     assert_eq!(server.requests().await.len(), 2, "one request per page");
     assert!(logs_contain("A later page of the model list failed"));
+}
+
+/// A router over one keyed Anthropic provider at `server`, as the two tests
+/// above build it.
+fn anthropic_router(server: &MockHttpServer) -> LlmRouter {
+    let provider = Arc::new(
+        AnthropicProvider::with_client(
+            loopback_client(TIMEOUT),
+            "sk-test-not-a-key".to_string(),
+            None,
+            None,
+        )
+        .with_api_base(format!("{}/v1", server.base_url)),
+    );
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::Anthropic,
+        ProviderEntry {
+            provider,
+            key_pool: keyed_pool(ProviderType::Anthropic),
+        },
+    );
+    LlmRouter::new(
+        providers,
+        registry_for(ProviderType::Anthropic, &HashMap::new()),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "claude-sonnet-4-6".to_string(),
+    )
+}
+
+/// A list that answers every page with the same page — `has_more` set and
+/// the same `last_id` — is read twice and no more: the walk has no page cap,
+/// so the `last_id` that repeats the cursor just sent is what ends it. The
+/// mock stops saying `has_more` after a few requests, so a walk that ignores
+/// the repeat fails this test rather than hanging it.
+#[tokio::test]
+async fn a_last_id_that_repeats_the_cursor_ends_the_walk() {
+    const BOUND: usize = 6;
+    let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&served);
+    let server = MockHttpServer::start(move |req| {
+        if !req.path.starts_with("/v1/models") {
+            return MockResponse::not_found();
+        }
+        let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        MockResponse::json(anthropic_page(
+            &["claude-stuck-a", "claude-stuck-b"],
+            n < BOUND,
+        ))
+    })
+    .await;
+    let router = anthropic_router(&server);
+
+    let status = router.refresh_models_for(&ProviderType::Anthropic).await;
+
+    assert_eq!(status.error, None);
+    assert_eq!(
+        server.requests().await.len(),
+        2,
+        "the first page, then the one whose last_id repeats the cursor"
+    );
+    let discovered: HashSet<String> = router
+        .available_models()
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    for id in ["claude-stuck-a", "claude-stuck-b"] {
+        assert!(
+            discovered.contains(id),
+            "{id} is registered: {discovered:?}"
+        );
+    }
+}
+
+/// A later page answered with an error status, or lost in transit, ends the
+/// walk with the ids already read, as one that does not decode does (above):
+/// the first page's ids are registered, discovery reports no error, and the
+/// failure is one WARN.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_later_page_with_an_error_status_or_lost_in_transit_keeps_the_ids_already_read() {
+    for (label, later) in [
+        ("500", MockResponse::error(500, "{}")),
+        ("404", MockResponse::not_found()),
+        ("hung up", MockResponse::hang_up()),
+    ] {
+        let server = MockHttpServer::start(move |req| {
+            if !req.path.starts_with("/v1/models") {
+                MockResponse::not_found()
+            } else if req.path.contains("after_id=") {
+                later.clone()
+            } else {
+                MockResponse::json(anthropic_page(
+                    &["claude-page-one-a", "claude-page-one-b"],
+                    true,
+                ))
+            }
+        })
+        .await;
+        let router = anthropic_router(&server);
+
+        let status = router.refresh_models_for(&ProviderType::Anthropic).await;
+
+        assert_eq!(status.error, None, "{label}: the first page's ids are kept");
+        assert_eq!(status.models, 2, "{label}");
+        let discovered: HashSet<String> = router
+            .available_models()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        for id in ["claude-page-one-a", "claude-page-one-b"] {
+            assert!(
+                discovered.contains(id),
+                "{label}: {id} is registered: {discovered:?}"
+            );
+        }
+        assert!(
+            server
+                .requests()
+                .await
+                .iter()
+                .any(|r| r.path.contains("after_id=claude-page-one-b")),
+            "{label}: the later page was asked for"
+        );
+    }
+    logs_assert(|lines: &[&str]| {
+        let warned = lines
+            .iter()
+            .filter(|l| l.contains("A later page of the model list failed"))
+            .count();
+        if warned == 3 {
+            Ok(())
+        } else {
+            Err(format!("one WARN per case, 3 in all; found {warned}"))
+        }
+    });
 }
