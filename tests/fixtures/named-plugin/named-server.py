@@ -4,13 +4,16 @@
 Speaks JSON-RPC 2.0 over Content-Length-framed stdio (LSP/MCP standard),
 as tests/fixtures/echo-plugin/echo-server.sh does, but in one process and
 strict about the tool's name. Responds to:
-  tools/list  -> one tool, "echo", with a "message" string, an optional
-                 "fail" boolean and an optional "delay_secs" number
+  tools/list  -> one tool, "echo", with a "message" string, optional
+                 "fail" and "silent" booleans and an optional "delay_secs"
+                 number
   tools/call  -> for params.name == "echo": after "delay_secs" seconds
                  (none by default), "echo: <message>" -- with
                  " (timeout_secs <n>)" when the arguments carry one -- or,
-                 when "fail" is true, a JSON-RPC error; for any other name
-                 a JSON-RPC error naming the name it was asked for
+                 when "fail" is true, a JSON-RPC error, or, when "silent"
+                 is true, no answer at all (a plugin that never answers);
+                 for any other name a JSON-RPC error naming the name it was
+                 asked for
   initialize  -> {"ready": true}, after NAMED_STUB_INIT_DELAY_SECS seconds
                  from its environment (none by default)
   everything else (a request) -> an empty result, after params.delay_secs
@@ -70,6 +73,7 @@ def answer(msg):
             "properties": {
                 "message": {"type": "string"},
                 "fail": {"type": "boolean"},
+                "silent": {"type": "boolean"},
                 "delay_secs": {"type": "number"},
             },
             "required": ["message"],
@@ -83,6 +87,8 @@ def answer(msg):
         args = params.get("arguments") or {}
         # One process: a delayed answer holds every later request behind it.
         time.sleep(args.get("delay_secs", 0))
+        if args.get("silent"):
+            return None
         if args.get("fail"):
             return error(mid, "echo was asked to fail")
         text = "echo: %s" % args.get("message", "no message")
@@ -101,4 +107,6 @@ while True:
     if msg is None:
         sys.exit(0)
     if "id" in msg:
-        send(answer(msg))
+        reply = answer(msg)
+        if reply is not None:
+            send(reply)

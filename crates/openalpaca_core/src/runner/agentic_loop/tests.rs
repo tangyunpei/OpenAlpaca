@@ -5196,8 +5196,8 @@ mod stated_tool_timeout {
         let result = hanging_command(1, 600, serde_json::json!({"command": "make"})).await;
         assert!(
             result.ends_with(
-                "timed out after 1s\nHint: a command may run up to 600 seconds here — call it \
-                 again with a larger timeout_secs, or split the work into smaller commands that \
+                "timed out after 1s\nHint: this tool may run up to 600 seconds here — call it \
+                 again with a larger timeout_secs, or split the work into smaller calls that \
                  each finish sooner."
             ),
             "{result}"
@@ -5216,8 +5216,8 @@ mod stated_tool_timeout {
         .await;
         assert!(
             result.ends_with(
-                "timed out after 2s\nHint: that is the most a command may run here; split the \
-                 work into smaller commands that each finish sooner."
+                "timed out after 2s\nHint: that is the most this tool may run here; split the \
+                 work into smaller calls that each finish sooner."
             ),
             "{result}"
         );

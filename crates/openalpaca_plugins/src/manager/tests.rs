@@ -801,8 +801,9 @@ mcp_compatible = true
 
     /// **Past the sandbox's figure a plugin tool is cut with the sandbox's
     /// message**, "Tool '<name>' timed out after <n>s", not the plugin
-    /// channel's: the sandbox's clock is the one that ends it. The row stays
-    /// `Enabled` — a cut is no crash.
+    /// channel's: the sandbox's clock is the one that ends it. Cut below the
+    /// ceiling, it is told it may ask for more, as a command is
+    /// (PLUGIN-WAIT-2). The row stays `Enabled` — a cut is no crash.
     #[tokio::test]
     async fn past_the_sandboxs_figure_a_plugin_tool_is_cut_with_its_message() {
         let tmp = tempfile::tempdir().unwrap();
@@ -818,8 +819,11 @@ mcp_compatible = true
         .await
         .expect_err("the stub answers after the sandbox's bound");
         assert_eq!(
-            error, "Tool 'named-test::echo' timed out after 2s",
-            "the call was not cut by the sandbox's clock"
+            error,
+            "Tool 'named-test::echo' timed out after 2s\nHint: this tool may run up to 600 \
+             seconds here — call it again with a larger timeout_secs, or split the work into \
+             smaller calls that each finish sooner.",
+            "the call was not cut by the sandbox's clock, or not told it may ask for more"
         );
         assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
 
@@ -954,6 +958,129 @@ mcp_compatible = true
         process.kill();
         let _ = process.child.wait().await;
         assert!(!pid_alive(pid), "the stub {pid} outlived the test");
+    }
+
+    // ── PLUGIN-WAIT-2: a cut call leaves nothing waiting ─────────────
+
+    /// The named stub's channel — the one its tool calls and its other
+    /// requests travel on.
+    async fn named_channel(h: &Harness) -> crate::stdio_channel::StdioChannel {
+        let plugins = h.manager.plugins.read().await;
+        let state = plugins.get("named-test").expect("the stub is loaded");
+        state
+            .process
+            .as_ref()
+            .expect("it holds its child")
+            .channel
+            .clone()
+    }
+
+    /// **A cut plugin call leaves no request waiting in its channel**
+    /// (PLUGIN-WAIT-2): the sandbox's cut drops the proxy's wait, and the
+    /// request's entry goes with it, so a plugin that never answers does not
+    /// grow the channel's map. Nothing tells the plugin (no JSON-RPC cancel);
+    /// its next call is answered as before.
+    #[tokio::test]
+    async fn a_cut_plugin_call_leaves_no_request_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+        let channel = named_channel(&h).await;
+
+        let error = call_through_sandbox(
+            &h,
+            1,
+            serde_json::json!({"message": "never", "silent": true}),
+        )
+        .await
+        .expect_err("the stub never answers");
+        assert!(
+            error.starts_with("Tool 'named-test::echo' timed out after 1s"),
+            "the call was not cut by the sandbox: {error}"
+        );
+        assert_eq!(
+            channel.pending_len().await,
+            0,
+            "the cut call's request is still waiting in the channel"
+        );
+
+        let next = call_through_sandbox(&h, 3, serde_json::json!({"message": "next"})).await;
+        assert_eq!(next.as_deref(), Ok("echo: next"));
+        assert_eq!(channel.pending_len().await, 0);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A cut call's late answer reaches no caller** (PLUGIN-WAIT-2): its
+    /// entry went with the cut, so when the plugin answers it after all the
+    /// channel discards the answer, and the next call is handed its own.
+    #[tokio::test]
+    async fn a_late_answer_to_a_cut_plugin_call_is_discarded() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+        let channel = named_channel(&h).await;
+
+        let error = call_through_sandbox(
+            &h,
+            1,
+            serde_json::json!({"message": "late", "delay_secs": 2}),
+        )
+        .await
+        .expect_err("the stub answers after the sandbox's bound");
+        assert!(
+            error.starts_with("Tool 'named-test::echo' timed out after 1s"),
+            "the call was not cut by the sandbox: {error}"
+        );
+        assert_eq!(
+            channel.pending_len().await,
+            0,
+            "the cut call's request is still waiting for its late answer"
+        );
+
+        // One process: the stub answers the cut call, at about 2 s, before
+        // it reads this one.
+        let next = call_through_sandbox(&h, 3, serde_json::json!({"message": "next"})).await;
+        assert_eq!(
+            next.as_deref(),
+            Ok("echo: next"),
+            "the next call was not handed its own answer"
+        );
+        assert_eq!(channel.pending_len().await, 0);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **Any dropped wait removes its request**, not only the sandbox's cut
+    /// (PLUGIN-WAIT-2): a caller that gives up on a request long before the
+    /// request's own timeout leaves nothing behind in the channel.
+    #[tokio::test]
+    async fn a_dropped_wait_removes_its_request_from_the_channel() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+        let channel = named_channel(&h).await;
+
+        let params = serde_json::json!({
+            "name": "echo",
+            "arguments": {"message": "never", "silent": true},
+        });
+        let gave_up = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            channel.call_with_timeout("tools/call", params, std::time::Duration::from_secs(30)),
+        )
+        .await;
+        assert!(gave_up.is_err(), "the stub never answers: {gave_up:?}");
+        assert_eq!(
+            channel.pending_len().await,
+            0,
+            "the dropped wait's request is still in the channel"
+        );
+
+        tear_down_named_stub(&h, pid).await;
     }
 
     /// **Redundant enable registers no second capability provider** (design

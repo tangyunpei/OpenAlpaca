@@ -161,7 +161,7 @@ const NO_SUCH_COMMAND_HINT: &str =
 fn timed_out(secs: u64) -> String {
     format!(
         "Command timed out after {secs}s\n{}",
-        crate::tools::platform::COMMAND_TIMED_OUT_HINT
+        crate::tools::platform::TIMED_OUT_HINT
     )
 }
 
@@ -329,8 +329,8 @@ mod tests {
         // it cut what to do — never to raise a `timeout` (N-TOOL-1).
         assert_eq!(
             err,
-            "Tool 'shell_execute' timed out after 1s\nHint: that is the most a command may run \
-             here; split the work into smaller commands that each finish sooner."
+            "Tool 'shell_execute' timed out after 1s\nHint: that is the most this tool may run \
+             here; split the work into smaller calls that each finish sooner."
         );
         assert!(
             wait_until_gone(pid, GONE_WITHIN).await,
@@ -605,7 +605,7 @@ mod preview_tests {
     /// N-TOOL-4: the shell's own bound — what holds when the sandbox is
     /// bypassed — tells a command it stopped the same thing the sandbox does
     /// at the ceiling. N-TOOL-1b: that bound is the highest ceiling there is,
-    /// so it is the most a command may run and names no `timeout_secs`.
+    /// so it is the most the tool may run and names no `timeout_secs`.
     #[test]
     fn the_shells_own_bound_tells_a_command_what_to_do() {
         assert_eq!(
@@ -615,8 +615,8 @@ mod preview_tests {
         let text = super::timed_out(SHELL_TIMEOUT_SECS);
         assert_eq!(
             text,
-            "Command timed out after 3600s\nHint: that is the most a command may run here; \
-             split the work into smaller commands that each finish sooner."
+            "Command timed out after 3600s\nHint: that is the most this tool may run here; \
+             split the work into smaller calls that each finish sooner."
         );
         assert!(!text.to_lowercase().contains("timeout"), "{text}");
     }

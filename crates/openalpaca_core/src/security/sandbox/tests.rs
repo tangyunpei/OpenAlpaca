@@ -2071,15 +2071,15 @@ async fn an_unasked_command_tool_above_the_bound_is_cut_at_its_own_figure() {
         .unwrap_err();
     assert_eq!(
         err,
-        "Tool 'slow_cmd' timed out after 3s\nHint: a command may run up to 10 seconds here — \
-         call it again with a larger timeout_secs, or split the work into smaller commands \
-         that each finish sooner."
+        "Tool 'slow_cmd' timed out after 3s\nHint: this tool may run up to 10 seconds here — \
+         call it again with a larger timeout_secs, or split the work into smaller calls that \
+         each finish sooner."
     );
 }
 
 /// CMD-TIMEOUT-2: an author's figure above the ceiling is clamped to it —
 /// its author's 5 s under a 2 s ceiling is cut at 2 s, and told that is the
-/// most a command may run here.
+/// most the tool may run here.
 #[tokio::test]
 async fn an_unasked_command_tool_above_the_ceiling_is_cut_at_the_ceiling() {
     let gp = crate::test_util::GuardedProject::new();
@@ -2098,7 +2098,7 @@ async fn an_unasked_command_tool_above_the_ceiling_is_cut_at_the_ceiling() {
         err,
         format!(
             "Tool 'slow_cmd' timed out after 2s\n{}",
-            crate::tools::platform::COMMAND_TIMED_OUT_HINT
+            crate::tools::platform::TIMED_OUT_HINT
         )
     );
 }
@@ -2122,9 +2122,9 @@ async fn an_unasked_command_tool_at_the_bound_is_cut_by_the_sandbox() {
         .unwrap_err();
     assert_eq!(
         err,
-        "Tool 'slow_cmd' timed out after 2s\nHint: a command may run up to 10 seconds here — \
-         call it again with a larger timeout_secs, or split the work into smaller commands \
-         that each finish sooner."
+        "Tool 'slow_cmd' timed out after 2s\nHint: this tool may run up to 10 seconds here — \
+         call it again with a larger timeout_secs, or split the work into smaller calls that \
+         each finish sooner."
     );
 }
 
@@ -2169,15 +2169,15 @@ async fn a_command_tool_asked_for_nothing_stops_at_its_own_figure() {
         .unwrap_err();
     assert_eq!(
         err,
-        "Command timed out after 1s\nHint: a command may run up to 10 seconds here — \
-         call it again with a larger timeout_secs, or split the work into smaller commands \
-         that each finish sooner."
+        "Command timed out after 1s\nHint: this tool may run up to 10 seconds here — \
+         call it again with a larger timeout_secs, or split the work into smaller calls that \
+         each finish sooner."
     );
 }
 
 /// A call asking above the ceiling runs under the ceiling — cut by the
 /// sandbox at 2 s, not by its backend at its author's 1 s — and is told that
-/// is the most a command may run here.
+/// is the most the tool may run here.
 #[tokio::test]
 async fn a_command_tool_asking_above_the_ceiling_is_cut_at_the_ceiling() {
     let gp = crate::test_util::GuardedProject::new();
@@ -2196,7 +2196,7 @@ async fn a_command_tool_asking_above_the_ceiling_is_cut_at_the_ceiling() {
         err,
         format!(
             "Tool 'slow_cmd' timed out after 2s\n{}",
-            crate::tools::platform::COMMAND_TIMED_OUT_HINT
+            crate::tools::platform::TIMED_OUT_HINT
         )
     );
 }
@@ -2220,9 +2220,9 @@ async fn a_command_tool_cut_at_its_asked_figure_is_cut_by_the_sandbox() {
         .unwrap_err();
     assert_eq!(
         err,
-        "Tool 'slow_cmd' timed out after 2s\nHint: a command may run up to 10 seconds here — \
-         call it again with a larger timeout_secs, or split the work into smaller commands \
-         that each finish sooner."
+        "Tool 'slow_cmd' timed out after 2s\nHint: this tool may run up to 10 seconds here — \
+         call it again with a larger timeout_secs, or split the work into smaller calls that \
+         each finish sooner."
     );
 }
 
@@ -2251,9 +2251,9 @@ async fn a_caller_supplied_asked_figure_is_discarded() {
         .unwrap_err();
     assert_eq!(
         err,
-        "Command timed out after 1s\nHint: a command may run up to 10 seconds here — \
-         call it again with a larger timeout_secs, or split the work into smaller commands \
-         that each finish sooner."
+        "Command timed out after 1s\nHint: this tool may run up to 10 seconds here — \
+         call it again with a larger timeout_secs, or split the work into smaller calls that \
+         each finish sooner."
     );
 }
 
@@ -2300,7 +2300,8 @@ fn slow_plugin_tool() -> ToolRegistry {
 
 /// A plugin tool's call may ask for its own figure, as a command's may: its
 /// `timeout_secs` lifts the bound for that call, clamped to the ceiling; one
-/// that asks nothing is cut at the bound.
+/// that asks nothing is cut at the bound, and — below the ceiling — told it
+/// may ask for more, in the words a command's cut gets (PLUGIN-WAIT-2).
 #[tokio::test]
 async fn a_plugin_tools_call_may_ask_for_its_own_figure() {
     let sandbox = SandboxManager::with_defaults(Arc::new(slow_plugin_tool()), EventBus::default());
@@ -2333,7 +2334,34 @@ async fn a_plugin_tools_call_may_ask_for_its_own_figure() {
         )
         .await
         .unwrap_err();
-    assert_eq!(cut, "Tool 'slow-plugin::slow' timed out after 1s");
+    assert_eq!(
+        cut,
+        "Tool 'slow-plugin::slow' timed out after 1s\nHint: this tool may run up to 600 seconds \
+         here — call it again with a larger timeout_secs, or split the work into smaller calls \
+         that each finish sooner."
+    );
+}
+
+/// A plugin tool cut at the ceiling is told that is the most it may run
+/// (PLUGIN-WAIT-2): the hint is the one a command's cut gets, so at the
+/// ceiling it names no `timeout_secs`.
+#[tokio::test]
+async fn a_plugin_tool_cut_at_the_ceiling_is_told_that_is_the_most() {
+    let sandbox = SandboxManager::with_defaults(Arc::new(slow_plugin_tool()), EventBus::default());
+    let call = ToolCall {
+        id: "tc_plugin".to_string(),
+        name: "slow-plugin::slow".to_string(),
+        arguments: serde_json::json!({"timeout_secs": 5}),
+    };
+    let cut = sandbox
+        .execute_tool(&call, &bounded(1, 1), &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        cut,
+        "Tool 'slow-plugin::slow' timed out after 1s\nHint: that is the most this tool may run \
+         here; split the work into smaller calls that each finish sooner."
+    );
 }
 
 /// What a plugin tool's executor was handed: the sandbox's cut, or `None`

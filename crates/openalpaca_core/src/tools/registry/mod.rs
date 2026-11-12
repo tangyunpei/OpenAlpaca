@@ -1628,7 +1628,7 @@ async fn execute_http(
 /// What a `Command`-backend tool its own clock stopped after `secs` is told
 /// (CMD-TIMEOUT-2): where the sandbox put the ceiling on its context — the
 /// most its call may ask for — the hint the sandbox's cut gives
-/// (`platform::command_timed_out_hint`): below the ceiling, that a larger
+/// (`platform::timed_out_hint`): below the ceiling, that a larger
 /// `timeout_secs` gives it longer; at it, that this is the most. With no
 /// ceiling the call ran outside the sandbox, where nothing would lift its
 /// figure, and the message is the limit alone.
@@ -1636,7 +1636,7 @@ fn command_timed_out(secs: u64, ceiling_secs: Option<u64>) -> String {
     match ceiling_secs {
         Some(most_secs) => format!(
             "Command timed out after {secs}s\n{}",
-            crate::tools::platform::command_timed_out_hint(secs, most_secs)
+            crate::tools::platform::timed_out_hint(secs, most_secs)
         ),
         None => format!("Command timed out after {secs}s"),
     }

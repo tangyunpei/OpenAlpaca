@@ -44,28 +44,30 @@ pub fn shown_output(kept: &[u8], stream: &str) -> String {
     text
 }
 
-/// What a command stopped at the most it may run is told — by the shell's own
-/// bound, and by the sandbox's cut at that most (N-TOOL-4, Z1-13: the hint
-/// belongs to whoever enforced the limit, not to a guess the loop makes from
-/// the words). The message it follows names the limit.
-pub const COMMAND_TIMED_OUT_HINT: &str = "Hint: that is the most a command may run here; split \
-    the work into smaller commands that each finish sooner.";
+/// What a tool call stopped at the most it may run is told — a command by
+/// the shell's own bound, and any call that may ask for its own figure by
+/// the sandbox's cut at that most (N-TOOL-4, Z1-13: the hint belongs to
+/// whoever enforced the limit, not to a guess the loop makes from the
+/// words). The message it follows names the limit. Worded for any tool that
+/// may ask, a command or a plugin's tool (PLUGIN-WAIT-2).
+pub const TIMED_OUT_HINT: &str = "Hint: that is the most this tool may run here; split the \
+    work into smaller calls that each finish sooner.";
 
-/// What a command the sandbox cut after `secs` is told, where it may run up
-/// to `most_secs` (N-TOOL-1b, B-11) — the ceiling a call's `timeout_secs` is
-/// clamped to, for `shell_execute` and a `Command`-backend tool alike
-/// (CMD-TIMEOUT), and since CMD-TIMEOUT-2 what such a tool its own clock
-/// stopped is told too: below that most, that its `timeout_secs` can give it
-/// longer; at it, [`COMMAND_TIMED_OUT_HINT`].
-pub fn command_timed_out_hint(secs: u64, most_secs: u64) -> String {
+/// What a call the sandbox cut after `secs` is told, where it may run up to
+/// `most_secs` (N-TOOL-1b, B-11) — the ceiling a call's `timeout_secs` is
+/// clamped to, for `shell_execute`, a `Command`-backend tool (CMD-TIMEOUT)
+/// and, since PLUGIN-WAIT-2, a plugin's tool alike; since CMD-TIMEOUT-2
+/// what a `Command`-backend tool its own clock stopped is told too: below
+/// that most, that its `timeout_secs` can give it longer; at it,
+/// [`TIMED_OUT_HINT`]. One text for every tool that may ask.
+pub fn timed_out_hint(secs: u64, most_secs: u64) -> String {
     if secs < most_secs {
         format!(
-            "Hint: a command may run up to {most_secs} seconds here — call it again with a \
-             larger timeout_secs, or split the work into smaller commands that each finish \
-             sooner."
+            "Hint: this tool may run up to {most_secs} seconds here — call it again with a \
+             larger timeout_secs, or split the work into smaller calls that each finish sooner."
         )
     } else {
-        COMMAND_TIMED_OUT_HINT.to_string()
+        TIMED_OUT_HINT.to_string()
     }
 }
 

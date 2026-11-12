@@ -618,8 +618,8 @@ impl SandboxManager {
         // PLUGIN-WAIT a plugin tool's as a command's; since CMD-TIMEOUT-2 a
         // `Command`-backend tool's author's figure above the bound, clamped
         // to the ceiling, where the call asked nothing.
-        let runs_a_command = self.registry.is_command_tool(&tool_call.name);
-        let may_ask = runs_a_command || self.registry.is_plugin_tool(&tool_call.name);
+        let may_ask = self.registry.is_command_tool(&tool_call.name)
+            || self.registry.is_plugin_tool(&tool_call.name);
         let asked_secs = policy.asked_runtime_secs(&tool_call.arguments, may_ask);
         let own_secs = self.registry.command_default_secs(&tool_call.name);
         let runtime_secs = policy.runtime_secs_for(&tool_call.arguments, may_ask, own_secs);
@@ -702,17 +702,18 @@ impl SandboxManager {
                 // Timeouts are transient — record for circuit breaker
                 self.circuit_breaker
                     .record_failure_for_task(agent_id, &tool_call.name, task_id);
-                // N-TOOL-4 (Z1-13): the limit is enforced here, so a command
+                // N-TOOL-4 (Z1-13): the limit is enforced here, so a call
                 // cut at it is told what to do here — the hint is this
                 // message's own, not a guess the loop makes from its words.
                 // Below the most it may run it names `timeout_secs`
-                // (N-TOOL-1b): the ceiling, for a `Command`-backend tool as
-                // for `shell_execute` — a call's figure lifts the tool's own
-                // (CMD-TIMEOUT).
-                if runs_a_command {
+                // (N-TOOL-1b): the ceiling, for every call that may ask —
+                // `shell_execute`, a `Command`-backend tool (a call's figure
+                // lifts the tool's own, CMD-TIMEOUT) and, since
+                // PLUGIN-WAIT-2, a plugin's tool — in one text.
+                if may_ask {
                     return Err(format!(
                         "{reason}\n{}",
-                        crate::tools::platform::command_timed_out_hint(
+                        crate::tools::platform::timed_out_hint(
                             runtime_secs,
                             policy.max_tool_runtime_ceiling_secs,
                         )

@@ -3240,7 +3240,7 @@ fn a_command_tools_own_kill_names_the_ceiling_it_may_ask_up_to() {
         command_timed_out(30, Some(600)),
         format!(
             "Command timed out after 30s\n{}",
-            crate::tools::platform::command_timed_out_hint(30, 600)
+            crate::tools::platform::timed_out_hint(30, 600)
         )
     );
     assert!(
@@ -3252,7 +3252,7 @@ fn a_command_tools_own_kill_names_the_ceiling_it_may_ask_up_to() {
         command_timed_out(3600, Some(3600)),
         format!(
             "Command timed out after 3600s\n{}",
-            crate::tools::platform::COMMAND_TIMED_OUT_HINT
+            crate::tools::platform::TIMED_OUT_HINT
         )
     );
     assert_eq!(command_timed_out(30, None), "Command timed out after 30s");

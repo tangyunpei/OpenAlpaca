@@ -782,8 +782,9 @@ A failed call is the call's own `Err`, never a reading of its text: the
 loop marks the text `[tool_error]` and flags the message (`is_error`). The
 Anthropic provider sends the flag as the `tool_result` block's `is_error`;
 an OpenAI-compatible wire has no such field and reads the mark. A recovery
-hint is the failing tool's own words — or the sandbox's, for a command it
-cut at the time limit — and the loop adds none.
+hint is the failing tool's own words — or the sandbox's, for a command or
+a plugin's tool it cut at the time limit (PLUGIN-WAIT-2) — and the loop
+adds none.
 
 `read_result` is a scoped builtin (`tools/builtins/read_result.rs`) and a
 **grant, not ambient**:
@@ -874,9 +875,13 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   answer past the sandbox's figure, so the sandbox's cut, with its own
   message, ends a slow one (PLUGIN-WAIT); only a call made outside the
   sandbox still waits 60 s, which no key sets ("timeout waiting for
-  plugin response"). A command the sandbox cuts below the most it may
-  run — the ceiling — is told it may ask for more, naming it, and so is a
-  `Command`-backend tool its own clock stopped (CMD-TIMEOUT-2). The loop
+  plugin response"). A cut plugin call leaves no request waiting in its
+  plugin's channel, and its late answer is discarded; the plugin itself
+  is not told — no cancel is sent — and runs the call on (PLUGIN-WAIT-2).
+  A call the sandbox cuts below the most it may run — the ceiling — is
+  told it may ask for more, naming it, whether a command or a plugin's
+  tool, in one text (PLUGIN-WAIT-2), and so is a `Command`-backend tool
+  its own clock stopped (CMD-TIMEOUT-2). The loop
   writes both figures into `shell_execute`'s definition before the first
   request, so the model is told the limits it really runs under; the
   registered definition names none, and the shell's own bound (3600 s,

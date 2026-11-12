@@ -1161,7 +1161,16 @@ tools into the shared registry when the plugin loads:
   ends a slow one; a call no sandbox cuts waits the channel's 60 s, as
   `tools/list` and every other request without a figure of its own do
   (`initialize` waits 10 s, `shutdown` 3 s) (PLUGIN-WAIT); a call may send
-  `timeout_secs`, as a command's may, and the plugin is handed it as sent;
+  `timeout_secs`, as a command's may, and the plugin is handed it as sent,
+  and a call cut below the ceiling is told it may ask for more, in the
+  words a command's cut gets (PLUGIN-WAIT-2; *Recovery hints*, below);
+- a wait that ends without its answer — cut, dropped by its caller or timed
+  out — takes its request's entry out of the channel's pending map
+  (`StdioChannel::call_with_timeout`'s `PendingEntry`, PLUGIN-WAIT-2), so a
+  late answer is discarded with a warning and a plugin that never answers
+  grows nothing; the plugin is not told (no JSON-RPC cancel is sent, which
+  waits for a protocol design) and runs the request on — a plugin that
+  answers one request at a time holds the next behind it;
 - `author = "plugin:<id>"`, `version` from the manifest, no annotations,
   `exempt_from_timeout = false`;
 - `provides_capabilities` = the manifest's `capabilities.provides` — the
@@ -1717,8 +1726,8 @@ the failure is known — the loop adds none:
 | `file_write` | the system refuses the write (`PermissionDenied`), on the file or on a folder it makes above it | check the file's permissions, or write it under another path |
 | `web_fetch` | HTTP 404 | use web_search to find the correct URL first |
 | `web_fetch` | the request or the body read ran out of time | the URL may be unreachable; try a different source |
-| `shell_execute`, `Command` tools | cut by the sandbox below the most it may run — the ceiling — or, a `Command` tool, stopped below it by its own `timeout_secs` | a command may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller commands that each finish sooner (`tools::platform::command_timed_out_hint`) |
-| `shell_execute`, `Command` tools | cut by the sandbox at that most, or by the shell's own 3600 s | that is the most a command may run here; split the work into smaller commands that each finish sooner (`tools::platform::COMMAND_TIMED_OUT_HINT`) |
+| `shell_execute`, `Command` tools, plugin tools | cut by the sandbox below the most it may run — the ceiling — or, a `Command` tool, stopped below it by its own `timeout_secs` | this tool may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller calls that each finish sooner (`tools::platform::timed_out_hint`; one text for every tool that may ask, PLUGIN-WAIT-2) |
+| `shell_execute`, `Command` tools, plugin tools | cut by the sandbox at that most, or (`shell_execute`) by the shell's own 3600 s | that is the most this tool may run here; split the work into smaller calls that each finish sooner (`tools::platform::TIMED_OUT_HINT`) |
 | `shell_execute` | exit 127 | check that the command is installed, or give its full path |
 
 ---
