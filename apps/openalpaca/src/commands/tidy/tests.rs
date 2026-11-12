@@ -91,3 +91,44 @@ fn no_daemon_runs_without_a_discovery_file_naming_a_live_one() {
     assert_eq!(found, config);
     assert!(daemon.is_none(), "a stale discovery file names no daemon");
 }
+
+/// A work tree is the nearest of a path and its ancestors, as resolved,
+/// holding a `.git` entry of either kind; a path that does not exist yet
+/// is in its nearest existing ancestor's. Every `.git` here is this test's
+/// own, in its scratch directory; no git runs.
+#[test]
+fn a_git_work_tree_is_the_nearest_ancestor_holding_a_git_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(dir.path());
+    let scratch = dir.path().canonicalize().unwrap();
+    let config = scratch.join("outer/inner/config");
+    std::fs::create_dir_all(&config).unwrap();
+    assert_eq!(
+        git_work_tree(&config),
+        None,
+        "the scratch dir is in no work tree"
+    );
+
+    // A `.git` directory above: that directory, by its resolved path.
+    std::fs::create_dir(scratch.join("outer/.git")).unwrap();
+    assert_eq!(git_work_tree(&config), Some(scratch.join("outer")));
+    assert_eq!(
+        git_work_tree(&dir.path().join("outer/inner/config")),
+        Some(scratch.join("outer"))
+    );
+    // A path below it that does not exist yet: the same work tree.
+    assert_eq!(
+        git_work_tree(&config.join("agents/missing")),
+        Some(scratch.join("outer"))
+    );
+    // A nearer `.git` file (a linked worktree's, a submodule's) wins.
+    std::fs::write(
+        scratch.join("outer/inner/.git"),
+        "gitdir: ../.git/modules/inner\n",
+    )
+    .unwrap();
+    assert_eq!(git_work_tree(&config), Some(scratch.join("outer/inner")));
+    // The directory itself holding one is in its own work tree.
+    std::fs::create_dir(config.join(".git")).unwrap();
+    assert_eq!(git_work_tree(&config), Some(config.clone()));
+}

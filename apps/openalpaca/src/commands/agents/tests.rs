@@ -372,3 +372,96 @@ async fn tidy_listing_with_a_running_daemon_says_which_copy_would_be_left() {
     assert_eq!(store.snapshot(), before);
     assert!(!store.agents.join(".archived").exists());
 }
+
+// ── `--apply` inside a git work tree (the owner's item 22, 2026-11-12) ──
+//
+// Each fake work tree is a `.git` entry this test writes in its own
+// scratch directory; no test runs git or writes under the repository.
+
+/// What `--apply` answers inside a git work tree: `path` is the directory
+/// it found inside one, as given, and `root` the work tree, as the file
+/// system resolves it.
+fn refusal(path: &Path, root: &Path) -> String {
+    format!(
+        "`openalpaca agents tidy --apply` moves nothing inside a git work tree, and {} is \
+         inside {}: a copy there may be a file the repository holds, as in a development \
+         checkout, whose config/ is the source of the built-in ones. Nothing was moved; \
+         `openalpaca agents tidy` lists the copies, for you to move yourself.",
+        path.display(),
+        root.display()
+    )
+}
+
+/// The listing's last line inside a git work tree.
+fn listing_end(path: &Path, root: &Path) -> String {
+    format!(
+        "Nothing was moved; `openalpaca agents tidy --apply` moves nothing here: {} is inside \
+         the git work tree {}.",
+        path.display(),
+        root.display()
+    )
+}
+
+/// A `.git` directory above the config directory — a development
+/// checkout's `config/`, named by `OPENALPACA_CONFIG_DIR` — makes `--apply`
+/// a refusal naming the work tree: nothing moves, no `.archived/` is made,
+/// and the daemon is not asked (the client given answers nothing, so asking
+/// it would be another error). Without `--apply` the copy is still listed.
+#[tokio::test]
+async fn agents_tidy_apply_in_a_git_work_tree_is_refused_naming_it() {
+    plain();
+    let store = Store::new();
+    std::fs::create_dir(store._dir.path().join(".git")).unwrap();
+    let root = store._dir.path().canonicalize().unwrap();
+    let before = store.snapshot();
+    let nobody = DaemonClient::for_tests("http://127.0.0.1:1", "token");
+
+    let error = tidy_lines(&store.config, Some(&nobody), true, now())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), refusal(&store.config, &root));
+    assert_eq!(store.snapshot(), before);
+    assert!(!store.agents.join(".archived").exists());
+
+    let text = tidy_lines(&store.config, None, false, now())
+        .await
+        .unwrap()
+        .join("\n");
+    assert!(
+        text.contains(&format!(
+            "  {} (version: earlier)\n    would move to {}",
+            store.agents.join("system_agent.md").display(),
+            store
+                .agents
+                .join(".archived/system_agent.20261107120000.md")
+                .display()
+        )),
+        "{text}"
+    );
+    assert!(text.ends_with(&listing_end(&store.config, &root)), "{text}");
+    assert_eq!(store.snapshot(), before);
+    assert!(!store.agents.join(".archived").exists());
+}
+
+/// The refusal comes before a copy is read, so inside a git work tree an
+/// `agents/` with nothing to tidy is refused the same way, and nothing is
+/// made in it.
+#[tokio::test]
+async fn agents_tidy_apply_in_a_git_work_tree_is_refused_with_nothing_to_tidy() {
+    plain();
+    let store = Store::new();
+    for entry in std::fs::read_dir(&store.agents).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    std::fs::create_dir(store._dir.path().join(".git")).unwrap();
+    let root = store._dir.path().canonicalize().unwrap();
+
+    let error = tidy_lines(&store.config, None, true, now())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), refusal(&store.config, &root));
+    assert!(store.snapshot().is_empty());
+    assert!(!store.agents.join(".archived").exists());
+}

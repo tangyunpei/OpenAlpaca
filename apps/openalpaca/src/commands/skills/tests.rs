@@ -538,3 +538,63 @@ async fn skills_tidy_apply_moves_nothing_the_running_daemon_reads() {
     assert!(!text.contains(TIDY_WARNING), "nothing moved: {text}");
     assert!(!store.skills.join(".archived").exists());
 }
+
+/// A `.git` file in the config directory — the form a linked worktree or a
+/// submodule has — makes it a work tree's: `skills tidy --apply` is refused,
+/// naming it, and the folder stays whole; without `--apply` it is listed.
+/// The `.git` entry is this test's own, in its scratch directory.
+#[tokio::test]
+async fn skills_tidy_apply_in_a_git_work_tree_is_refused_naming_it() {
+    plain();
+    let store = TidyStore::new();
+    std::fs::write(store.config.join(".git"), "gitdir: ../elsewhere/.git\n").unwrap();
+    let root = store.config.canonicalize().unwrap();
+
+    let error = tidy_lines(&store.config, None, true, now())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "`openalpaca skills tidy --apply` moves nothing inside a git work tree, and {} is \
+             inside {}: a copy there may be a file the repository holds, as in a development \
+             checkout, whose config/ is the source of the built-in ones. Nothing was moved; \
+             `openalpaca skills tidy` lists the copies, for you to move yourself.",
+            store.config.display(),
+            root.display()
+        )
+    );
+    for name in CREATE_SKILL_82022776 {
+        assert_eq!(
+            std::fs::read(store.skills.join("create-skill").join(name)).unwrap(),
+            create_skill_fixture(name)
+        );
+    }
+    assert!(!store.skills.join(".archived").exists());
+
+    let text = tidy_lines(&store.config, None, false, now())
+        .await
+        .unwrap()
+        .join("\n");
+    assert!(
+        text.contains(&format!(
+            "would move to {}",
+            store
+                .skills
+                .join(".archived/create-skill.20261107120000")
+                .display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(&format!(
+            "Nothing was moved; `openalpaca skills tidy --apply` moves nothing here: {} is \
+             inside the git work tree {}.",
+            store.config.display(),
+            root.display()
+        )),
+        "{text}"
+    );
+    assert!(!store.skills.join(".archived").exists());
+}

@@ -25,6 +25,17 @@
 //! a daemon of an older build may read as the person's a copy of a version
 //! its list lacks, so only the copies its own listing names as unused
 //! copies are moved, and the others are named as left.
+//!
+//! With the config directory inside a git work tree `--apply` moves nothing
+//! (the owner's item 22 of 2026-11-12, C5a's development checkout as (b)):
+//! it is refused, naming the work tree, before anything is read or the
+//! daemon asked, and the listing says so in its last line. A development
+//! checkout's `config/`, named by `OPENALPACA_CONFIG_DIR`, is the source of
+//! the built-in files, so every file there is an unedited copy and a move
+//! would take the repository's own files out of place. Only the config
+//! directory is checked, as the owner took it: an `agents/` or `skills/` a
+//! link places inside a work tree is tidied as before. [`git_work_tree`]
+//! says how a work tree is found.
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -196,10 +207,34 @@ async fn daemon_set_aside(kind: Kind, client: &DaemonClient) -> Result<Vec<PathB
         .collect())
 }
 
+/// The git work tree `path` is in, if any: the nearest of `path` and its
+/// ancestors, as the file system resolves them, that holds an entry named
+/// `.git` — a directory, or the file a linked worktree or a submodule has.
+///
+/// No git is run, since git may not be installed; the test is a few
+/// `lstat` calls. It reads no `.git` entry's contents and none of git's
+/// environment or configuration, so it can be wrong both ways: it refuses
+/// where a `.git` entry is not a repository git would use (or a ceiling
+/// would stop git short of it), and it misses a work tree with no `.git`
+/// in it or above it — one git reaches only through `GIT_DIR` or
+/// `--git-dir`, as a bare-repository dotfiles setup does — where `--apply`
+/// still moves.
+fn git_work_tree(path: &Path) -> Option<PathBuf> {
+    // The nearest part of `path` that exists, resolved; a part that does
+    // not exist holds no `.git`.
+    let resolved = path.ancestors().find_map(|part| part.canonicalize().ok())?;
+    resolved
+        .ancestors()
+        .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
+        .map(Path::to_path_buf)
+}
+
 /// What a tidy of `config_dir`'s `agents/` or `skills/` prints, having
 /// moved what it moved: a listing, without `apply`; with it, a line per
 /// copy moved or left and, when one moved, the warning last. `daemon` is
-/// the running daemon, if one runs; `now` names the archive.
+/// the running daemon, if one runs; `now` names the archive. With
+/// `config_dir` inside a git work tree `apply` is refused before anything
+/// is read.
 pub(crate) async fn tidy_lines(
     kind: Kind,
     config_dir: &Path,
@@ -208,6 +243,18 @@ pub(crate) async fn tidy_lines(
     now: DateTime<Utc>,
 ) -> Result<Vec<String>> {
     let dir = config_dir.join(kind.dir());
+    let work_tree = git_work_tree(config_dir);
+    if apply && let Some(root) = &work_tree {
+        return Err(anyhow!(
+            "`openalpaca {kind} tidy --apply` moves nothing inside a git work tree, and {path} \
+             is inside {root}: a copy there may be a file the repository holds, as in a \
+             development checkout, whose config/ is the source of the built-in ones. Nothing \
+             was moved; `openalpaca {kind} tidy` lists the copies, for you to move yourself.",
+            kind = kind.dir(),
+            path = shown(config_dir),
+            root = shown(root),
+        ));
+    }
     let stamp = now.format("%Y%m%d%H%M%S").to_string();
     let copies = kind
         .copies(&dir, &stamp)
@@ -279,10 +326,19 @@ pub(crate) async fn tidy_lines(
         moved += 1;
     }
     if !apply {
-        lines.push(format!(
-            "Nothing was moved; `openalpaca {} tidy --apply` moves them.",
-            kind.dir()
-        ));
+        lines.push(match &work_tree {
+            Some(root) => format!(
+                "Nothing was moved; `openalpaca {} tidy --apply` moves nothing here: {} is \
+                 inside the git work tree {}.",
+                kind.dir(),
+                shown(config_dir),
+                shown(root)
+            ),
+            None => format!(
+                "Nothing was moved; `openalpaca {} tidy --apply` moves them.",
+                kind.dir()
+            ),
+        });
     } else if moved > 0 {
         lines.push(kind.warning().to_string());
     }
@@ -294,7 +350,8 @@ pub(crate) async fn tidy_lines(
 /// when it names a directory, else the store's `config/`. Never a
 /// directory found by walking up from here: in a development checkout that
 /// is the repository's `config/`, whose files are the bundle's source and
-/// all unedited copies of it.
+/// all unedited copies of it. Named by the variable, it is listed, and
+/// `--apply` refused, as inside a git work tree ([`tidy_lines`]).
 fn config_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("OPENALPACA_CONFIG_DIR").map(PathBuf::from)
         && dir.is_dir()
