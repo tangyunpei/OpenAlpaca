@@ -274,6 +274,15 @@ reason on its discovery status — never a boot failure. `PUT
 /v1/settings/llm/providers/{provider}/enabled` answers with
 `discovered_models` and `discovery_error` so a zero always has a stated cause.
 
+Anthropic and OpenAI are listed with an API-compatible key (an OAuth or managed
+key does not count), through each provider's own models list — for Anthropic
+every page of it (up to 1,000 ids a page, the next asked for after the last
+while `has_more` holds; a later page that fails keeps the ids read).
+An id the catalogue already holds keeps its row; one it lacks is registered
+routable, with tool support assumed and **no price** — the daemon's
+`GET /v1/models` and `llm models` show `0` for it, which is the absence of a price (see
+[Cost](#cost)).
+
 ### The effective model
 
 A requested model that is not routable (unknown id, provider not loaded,
@@ -317,9 +326,22 @@ routable.
 
 The cost tracker prices from the router's live registry — compiled defaults
 plus `[models]` rows plus discovered models — so a discovered local model costs
-`0`, a declared price is honoured, and a registry reload reaches the tracker.
-An unknown model is free only where every model on the daemon is local;
-otherwise the conservative cloud fallback still applies.
+`0`, a declared price is honoured (a `[models]` row at `0` included), and a
+registry reload reaches the tracker. An unknown model is free only where every
+model on the daemon is local; otherwise the conservative cloud fallback
+applies: $3 per million input tokens, $15 per million output. The same
+fallback counts a model Anthropic's or OpenAI's discovery registered with no
+price: it still runs, its spend counts against the caps below, and
+`daemon.log` says once per id that it is counted at the fallback. A
+`[models."<id>"]` row with its `input_price` and `output_price` counts it at
+its own rate. A non-streaming OpenAI answer is counted by the model its body
+names, which may be a dated snapshot of the id asked for (such as
+`gpt-4o-mini-2024-07-18`): a snapshot the catalogue lacks meets the same
+fallback. An OpenAI-compatible server on this machine (a loopback `base_url`,
+such as llama.cpp or LM Studio, set up as the `openai` provider with a key)
+is a keyed provider too: its discovered models are counted at the fallback
+although they cost nothing. A `[models."<id>"]` row with `input_price = 0`
+and `output_price = 0` keeps each at `0`.
 
 | Cap | Default | Key in `daemon.toml` |
 |---|---|---|

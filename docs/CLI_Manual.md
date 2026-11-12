@@ -362,7 +362,7 @@ openalpaca config set ai.ollama.enabled true      # also ai.anthropic.enabled, a
 
 #### Other notes
 
-- `--format json` echoes the daemon's own field names. For `llm models` those are `id`, `input_price_per_million`, `output_price_per_million` and `supports_tools`. For `llm keys list` the row carries the daemon's `priority` string and a `keyless` flag.
+- `--format json` echoes the daemon's own field names. For `llm models` those are `id`, `input_price_per_million`, `output_price_per_million` and `supports_tools`. A `0` price on an Anthropic or OpenAI model that discovery found and nothing prices is no price: its calls are counted at the $3 / $15 fallback (the Daemon Manual's *Cost*). For `llm keys list` the row carries the daemon's `priority` string and a `keyless` flag.
 - `llm usage --date` only applies together with `--daily`.
 - **`llm strategy` has no effect at present.** The command prints a success line, but the daemon route it calls (`PUT /v1/orchestrator/config`) reads only `model` and `fallback_models` and ignores the strategy. Key selection is read from `llm.toml`: `strategy = "round_robin"` (the default), `"lru"` or `"primary_fallback"` under `[providers.<name>]`.
 

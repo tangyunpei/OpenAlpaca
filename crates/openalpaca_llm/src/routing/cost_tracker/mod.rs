@@ -2,6 +2,7 @@
 
 use crate::routing::model_registry::ModelRegistry;
 use arc_swap::ArcSwap;
+use dashmap::DashSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -57,6 +58,9 @@ pub struct CostTracker {
     agent_usage: RwLock<HashMap<String, UsageStats>>,
     task_usage: RwLock<HashMap<String, UsageStats>>,
     provider_usage: RwLock<HashMap<String, UsageStats>>,
+    /// Ids already announced as counted at the fallback for want of a price,
+    /// so each is said once, not once per call (O-18).
+    unpriced_announced: DashSet<String>,
 }
 
 impl CostTracker {
@@ -66,6 +70,7 @@ impl CostTracker {
             agent_usage: RwLock::new(HashMap::new()),
             task_usage: RwLock::new(HashMap::new()),
             provider_usage: RwLock::new(HashMap::new()),
+            unpriced_announced: DashSet::new(),
         }
     }
 
@@ -86,14 +91,29 @@ impl CostTracker {
                 pricing.output_price_per_million,
             );
         }
-        // An id the catalogue has never met. Where the whole catalogue is
-        // local, no call can have cost money, and billing this one at cloud
-        // rates would abort a free run on fictional spend.
-        if registry.is_local_only() {
-            return (0.0, 0.0);
+        // An id the catalogue has never met, or one a keyed provider's
+        // discovery registered with no price (O-18 (b)). Where the whole
+        // catalogue is local, no call can have cost money, and billing this
+        // one at cloud rates would abort a free run on fictional spend.
+        let fallback = if registry.is_local_only() {
+            (0.0, 0.0)
+        } else {
+            // Otherwise stay conservative: $3/1M input, $15/1M output
+            // (Sonnet-like). Counting high stops a run early; counting a paid
+            // model at 0 would let it pass every cost cap (N4).
+            (3.0, 15.0)
+        };
+        if registry.is_unpriced(model) && self.unpriced_announced.insert(model.to_string()) {
+            tracing::warn!(
+                model = model,
+                input_price_per_million = fallback.0,
+                output_price_per_million = fallback.1,
+                "Discovered model has no price in the catalogue — its calls are counted \
+                 at the fallback rate. Add a [models.\"<id>\"] row with its price to \
+                 llm.toml to count it at its own."
+            );
         }
-        // Otherwise stay conservative: $3/1M input, $15/1M output (Sonnet-like).
-        (3.0, 15.0)
+        fallback
     }
 
     /// Calculate the cost for a given model and token counts.

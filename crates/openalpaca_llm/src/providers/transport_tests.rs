@@ -582,7 +582,8 @@ async fn anthropics_calls_say_what_failed() {
     assert_eq!(kind(&err), Some(TransportKind::ConnectTimeout));
     assert_eq!(
         err.to_string(),
-        "HTTP error: error sending request for url (https://api.anthropic.com/v1/models): \
+        "HTTP error: error sending request for url \
+         (https://api.anthropic.com/v1/models?limit=1000): \
          client error (Connect): operation timed out"
     );
 }

@@ -235,6 +235,27 @@ impl ModelRegistry {
             },
         );
 
+        // The seeded `llm.toml`'s OpenAI default (O-18 (c)), at the rates and
+        // window of OpenAI's own model page (developers.openai.com, "GPT-4o
+        // mini", read 2026-11-12): text and image in, no audio, function
+        // calling; the page marks it deprecated.
+        models.insert(
+            "gpt-4o-mini".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 0.15,
+                output_price_per_million: 0.60,
+                context_window: 128_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: false,
+                supports_reasoning: false,
+                supports_tools: true,
+                declared: true,
+            },
+        );
+
         // OpenAI o-series reasoning models
         for id in &["o3", "o3-mini", "o1", "o1-mini"] {
             models.insert(
@@ -345,16 +366,41 @@ impl ModelRegistry {
         self.resolve_provider(model_id).map(|p| p.to_string())
     }
 
-    /// Get pricing info for a model.
+    /// The price the registry knows for a model.
+    ///
+    /// `None` for an id it has never met, and for one only a keyed provider's
+    /// discovery registered ([`Self::is_unpriced`]): that row's 0 / 0 is the
+    /// absence of a price, not a price (O-18).
     pub fn get_pricing(&self, model_id: &str) -> Option<PricingInfo> {
         self.models
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
+            .filter(|info| !Self::unpriced(info))
             .map(|info| PricingInfo {
                 input_price_per_million: info.input_price_per_million,
                 output_price_per_million: info.output_price_per_million,
             })
+    }
+
+    /// Whether this id is registered with no price anyone stated: a keyed
+    /// provider's discovery listed it, and neither a compiled row nor a
+    /// `[models]` row prices it.
+    ///
+    /// Such a row stays routable; the cost tracker counts it at its fallback
+    /// for an unknown id (O-18 (b)). A local provider's discovered row is
+    /// priced at 0 instead, because it runs on this machine (L8) — and
+    /// "local" is the set whose provider needs no key: only Ollama is either.
+    pub fn is_unpriced(&self, model_id: &str) -> bool {
+        self.models
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(model_id)
+            .is_some_and(Self::unpriced)
+    }
+
+    fn unpriced(info: &ModelInfo) -> bool {
+        !info.declared && !info.provider.is_local()
     }
 
     /// Get full model info (cloned).
