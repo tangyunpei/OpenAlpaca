@@ -284,6 +284,36 @@ async fn an_alias_no_provider_maps_collapses_to_the_parent_model() {
     assert!(!logs_contain("Model alias"));
 }
 
+/// Step 3 with a parent that is not routable while something else is: the
+/// alias answers the effective default, as `inherit` would — whether the
+/// parent has no catalogue row (an Anthropic id on an Ollama-only install)
+/// or has one whose provider is not loaded (a pulled tag once Ollama is
+/// off).
+#[test]
+fn an_alias_on_a_parent_that_is_not_routable_answers_the_effective_default() {
+    let ollama_only = router(&[ProviderType::Ollama], "qwen3:8b");
+    pulled(&ollama_only, "qwen3:8b");
+    assert!(!ollama_only.is_routable("claude-sonnet-4-6"));
+    for alias in ModelAlias::ALL {
+        let resolution = ollama_only
+            .resolve_alias(alias, Some("claude-sonnet-4-6"))
+            .unwrap_or_else(|| panic!("{alias} resolves"));
+        assert_eq!(resolution.model, "qwen3:8b");
+        assert!(resolution.passed_over.is_empty());
+    }
+
+    let anthropic_only = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    pulled(&anthropic_only, "qwen3:8b");
+    assert!(!anthropic_only.is_routable("qwen3:8b"));
+    for alias in ModelAlias::ALL {
+        assert_eq!(
+            resolved(&anthropic_only, alias, Some("qwen3:8b")),
+            "claude-haiku-4-5-20251001",
+            "{alias} on a parent whose provider is off"
+        );
+    }
+}
+
 /// Step 4: nothing routable resolves nothing, with or without a parent.
 #[test]
 fn nothing_routable_resolves_no_alias() {
