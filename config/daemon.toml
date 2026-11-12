@@ -4,7 +4,8 @@ max_rounds = 15
 # The per-tool bound every loop reads — the main loop, the lead, every subagent
 # and both skill tiers (a template's `timeout_seconds` does not move it): a
 # tool call still running after it is cut, a command with every process it
-# started. Range 1..=600.
+# started. A command tool whose own timeout_secs is above it runs to that
+# figure, up to the ceiling below. Range 1..=600.
 max_tool_runtime_secs = 120
 # The most a call's own `timeout_secs` may ask for, on `shell_execute`, a
 # command tool or a plugin's tool: a larger figure runs under this one, never

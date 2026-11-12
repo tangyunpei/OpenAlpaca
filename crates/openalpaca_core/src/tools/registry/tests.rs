@@ -3081,11 +3081,58 @@ async fn a_command_tool_that_times_out_takes_the_processes_it_started_with_it() 
         .unwrap_err();
     let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
     let _kill = KillOnFail(pid);
+    // Outside the sandbox no ceiling is on the context, so nothing is said
+    // of asking for more (CMD-TIMEOUT-2).
     assert_eq!(err, "Command timed out after 1s");
     assert!(
         wait_until_gone(pid, GONE_WITHIN).await,
         "the command's background sleep {pid} outlived its timeout"
     );
+}
+
+/// CMD-TIMEOUT-2, the one clock, without a race: where the sandbox cuts an
+/// unasked call at or below a `Command`-backend tool's own figure, that
+/// tool's own clock stands back, so with no sandbox around the call (the
+/// cut set by hand) a 2-second command outlives its author's 1 s; where the
+/// cut is above that figure, the tool's own clock still kills it at 1 s.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_tools_own_clock_stands_back_where_the_sandbox_cuts_at_its_figure() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(make_tool_with_backend(
+            "slow_tool",
+            ToolBackend::Command {
+                command: "sh".to_string(),
+                args_template: Some("-c {script}".to_string()),
+                timeout_secs: 1,
+            },
+        ))
+        .unwrap();
+    let args = serde_json::json!({"script": "sleep 2"});
+    let gp = crate::test_util::GuardedProject::new();
+
+    let at_its_figure = ToolContext {
+        sandbox_cut_secs: Some(1),
+        ..gp.ctx()
+    };
+    let ran = registry
+        .execute_with_context("slow_tool", &args, &at_its_figure)
+        .await;
+    assert!(
+        ran.is_ok(),
+        "the tool's own clock did not stand back: {ran:?}"
+    );
+
+    let above_its_figure = ToolContext {
+        sandbox_cut_secs: Some(2),
+        ..gp.ctx()
+    };
+    let err = registry
+        .execute_with_context("slow_tool", &args, &above_its_figure)
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Command timed out after 1s");
 }
 
 /// N-TOOL-3 (Z1-01): which calls may run beside the other calls of their
@@ -3180,4 +3227,68 @@ fn runs_concurrently_admits_read_only_tools_and_the_leads_coordination_tools() {
         .register(mcp_tool("wait_for_subagents", "srv", 0))
         .unwrap();
     assert!(!other.runs_concurrently("wait_for_subagents"));
+}
+
+/// CMD-TIMEOUT-2: a `Command`-backend tool its own clock stopped is told, as
+/// the sandbox's cut is, that it may ask for up to the ceiling the sandbox
+/// put on its context; at the ceiling (the edge where its clock stands back
+/// to 3600 s and a call asked that much), that this is the most; with no
+/// ceiling, outside the sandbox, the limit alone.
+#[test]
+fn a_command_tools_own_kill_names_the_ceiling_it_may_ask_up_to() {
+    assert_eq!(
+        command_timed_out(30, Some(600)),
+        format!(
+            "Command timed out after 30s\n{}",
+            crate::tools::platform::command_timed_out_hint(30, 600)
+        )
+    );
+    assert!(
+        command_timed_out(30, Some(600)).contains("may run up to 600 seconds here"),
+        "{}",
+        command_timed_out(30, Some(600))
+    );
+    assert_eq!(
+        command_timed_out(3600, Some(3600)),
+        format!(
+            "Command timed out after 3600s\n{}",
+            crate::tools::platform::COMMAND_TIMED_OUT_HINT
+        )
+    );
+    assert_eq!(command_timed_out(30, None), "Command timed out after 30s");
+}
+
+/// CMD-TIMEOUT-2: the sandbox reads a `Command`-backend tool's own figure;
+/// every other tool has none.
+#[test]
+fn only_a_command_backend_tool_has_its_own_default_figure() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "lint_project".to_string(),
+                description: "lint".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Command {
+                command: "true".to_string(),
+                args_template: None,
+                timeout_secs: 300,
+            },
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    registry
+        .register(make_tool_with_caps("file_read", vec!["file_read"]))
+        .unwrap();
+    assert_eq!(registry.command_default_secs("lint_project"), Some(300));
+    assert_eq!(registry.command_default_secs("file_read"), None);
+    assert_eq!(registry.command_default_secs("no_such_tool"), None);
 }

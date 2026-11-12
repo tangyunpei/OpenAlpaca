@@ -928,7 +928,8 @@ type = "http"                    # or "command"
 url = "https://api.example.com/search?q={query}"
 method = "GET"                   # default: GET
 timeout_secs = 30                # default: 30, range: 1-300; a command
-                                 # tool's is its calls' default, which a
+                                 # tool's is its calls' default (above
+                                 # max_tool_runtime_secs too), which a
                                  # call's own timeout_secs may lift up to
                                  # max_tool_runtime_ceiling_secs (600)
 
@@ -1293,13 +1294,21 @@ is set by the caller that knows where the work came from.
 `SandboxPolicy::runtime_secs_for` is the sandbox's cut for one call: a
 `shell_execute`, `Command`-backend or plugin tool call's `timeout_secs` (a
 whole number above 0) clamped to the ceiling
-(`SandboxPolicy::asked_runtime_secs`), else `max_tool_runtime_secs`; the
+(`SandboxPolicy::asked_runtime_secs`), else the call's default
+(`SandboxPolicy::default_runtime_secs`): `max_tool_runtime_secs`, or a
+`Command`-backend tool's own `timeout_secs` above it, clamped to the
+ceiling (`ToolRegistry::command_default_secs`, CMD-TIMEOUT-2); the
 figure reaches every tool as `ToolContext::sandbox_cut_secs`, and a plugin
 tool waits past it (PLUGIN-WAIT). A `Command`-backend tool's own
 `timeout_secs` (its TOML's) is its calls' default: it still kills a call
-that asked for nothing where smaller, and stands back for one that asked,
-which the sandbox alone cuts (CMD-TIMEOUT; the figure reaches the backend
-as `ToolContext::asked_runtime_secs`).  The daemon's
+that asked for nothing where it is below the sandbox's cut, and stands back
+for one that asked and for one the sandbox cuts at or below its figure,
+which the sandbox alone cuts (CMD-TIMEOUT, CMD-TIMEOUT-2; the asked figure
+reaches the backend as `ToolContext::asked_runtime_secs`). Its own kill,
+"Command timed out after Ns", carries the hint the sandbox's cut gives,
+naming the ceiling the sandbox put on the context
+(`ToolContext::runtime_ceiling_secs`); outside the sandbox it carries
+none.  The daemon's
 `security.auto_approve_confirmations` config flag forces
 `auto_approve = true` globally.  `auto_approve` is read before
 `unattended`.
@@ -1708,7 +1717,7 @@ the failure is known — the loop adds none:
 | `file_write` | the system refuses the write (`PermissionDenied`), on the file or on a folder it makes above it | check the file's permissions, or write it under another path |
 | `web_fetch` | HTTP 404 | use web_search to find the correct URL first |
 | `web_fetch` | the request or the body read ran out of time | the URL may be unreachable; try a different source |
-| `shell_execute`, `Command` tools | cut by the sandbox below the most it may run — the ceiling | a command may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller commands that each finish sooner (`tools::platform::command_timed_out_hint`) |
+| `shell_execute`, `Command` tools | cut by the sandbox below the most it may run — the ceiling — or, a `Command` tool, stopped below it by its own `timeout_secs` | a command may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller commands that each finish sooner (`tools::platform::command_timed_out_hint`) |
 | `shell_execute`, `Command` tools | cut by the sandbox at that most, or by the shell's own 3600 s | that is the most a command may run here; split the work into smaller commands that each finish sooner (`tools::platform::COMMAND_TIMED_OUT_HINT`) |
 | `shell_execute` | exit 127 | check that the command is installed, or give its full path |
 

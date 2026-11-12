@@ -861,11 +861,12 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   refused. The sandbox's figure is an outer bound: a tool with a clock of
   its own stops at whichever comes first, with its own error, not the
   sandbox's. A `Command`-backend tool's author's own `timeout_secs` (its
-  TOML's, 30 s by default) is its calls' default up to the per-tool bound:
-  a call that sends none is killed there where that figure is below
-  `max_tool_runtime_secs` (120 s), else cut at the bound first, and one
-  that sends `timeout_secs` lifts it, running under the sandbox's figure
-  alone (CMD-TIMEOUT); an `Http`-backend tool's
+  TOML's, 30 s by default) is its calls' default: a call that sends none
+  is killed there by the tool's own clock where that figure is below
+  `max_tool_runtime_secs` (120 s), else cut there by the sandbox, clamped
+  to the ceiling (CMD-TIMEOUT-2), and one that sends `timeout_secs` lifts
+  it, running under the sandbox's figure alone (CMD-TIMEOUT); an
+  `Http`-backend tool's
   request stops at its TOML's `timeout_secs` (30 s by default); an MCP
   tool at its server's `request_timeout_secs` (`config/mcp.toml`, 30 s by
   default); a builtin at a deadline of its own, `web_fetch`'s among them.
@@ -874,7 +875,8 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   message, ends a slow one (PLUGIN-WAIT); only a call made outside the
   sandbox still waits 60 s, which no key sets ("timeout waiting for
   plugin response"). A command the sandbox cuts below the most it may
-  run — the ceiling — is told it may ask for more, naming it. The loop
+  run — the ceiling — is told it may ask for more, naming it, and so is a
+  `Command`-backend tool its own clock stopped (CMD-TIMEOUT-2). The loop
   writes both figures into `shell_execute`'s definition before the first
   request, so the model is told the limits it really runs under; the
   registered definition names none, and the shell's own bound (3600 s,

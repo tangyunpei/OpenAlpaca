@@ -54,7 +54,8 @@ pub const COMMAND_TIMED_OUT_HINT: &str = "Hint: that is the most a command may r
 /// What a command the sandbox cut after `secs` is told, where it may run up
 /// to `most_secs` (N-TOOL-1b, B-11) — the ceiling a call's `timeout_secs` is
 /// clamped to, for `shell_execute` and a `Command`-backend tool alike
-/// (CMD-TIMEOUT): below that most, that its `timeout_secs` can give it
+/// (CMD-TIMEOUT), and since CMD-TIMEOUT-2 what such a tool its own clock
+/// stopped is told too: below that most, that its `timeout_secs` can give it
 /// longer; at it, [`COMMAND_TIMED_OUT_HINT`].
 pub fn command_timed_out_hint(secs: u64, most_secs: u64) -> String {
     if secs < most_secs {

@@ -201,15 +201,28 @@ pub struct ToolContext {
     /// sandbox's cut is the call's one clock, and the tool's own
     /// `timeout_secs` — its default — stands back.
     pub asked_runtime_secs: Option<u64>,
-    /// The seconds the sandbox cuts this call at, whether asked for or the
-    /// per-tool bound (PLUGIN-WAIT, `SandboxPolicy::runtime_secs_for`).
+    /// The seconds the sandbox cuts this call at, whether asked for, a
+    /// `Command`-backend tool's own figure above the bound (CMD-TIMEOUT-2)
+    /// or the per-tool bound (PLUGIN-WAIT, `SandboxPolicy::runtime_secs_for`).
     /// Set by
     /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
     /// alone, under the same discipline: `None` on a context a caller built
     /// with it set and on an exempt call. A `Plugin`-backend tool reads it:
     /// its plugin's answer is waited for past this figure, so the sandbox's
-    /// cut, not the plugin channel's default, is what ends a slow call.
+    /// cut, not the plugin channel's default, is what ends a slow call. A
+    /// `Command`-backend tool reads it too: where it is at or below the
+    /// tool's own figure, that tool's own clock stands back (one clock).
     pub sandbox_cut_secs: Option<u64>,
+    /// The most this call may ask for with its `timeout_secs` — the
+    /// policy's ceiling, `[execution.agent_defaults]
+    /// max_tool_runtime_ceiling_secs` (CMD-TIMEOUT-2). Set by
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// alone, under the same discipline, for a call that may ask: `None` on
+    /// a context a caller built with it set, on an exempt call and on every
+    /// other tool's. A `Command`-backend tool its own clock stopped names
+    /// it in its hint, as the sandbox's cut does; with none set it says
+    /// nothing of asking, since nothing would lift its figure.
+    pub runtime_ceiling_secs: Option<u64>,
 }
 
 /// The fact that a person approved one call on its confirmation card
@@ -851,17 +864,27 @@ impl ToolRegistry {
                 // CMD-TIMEOUT: the author's `timeout_secs` is the call's
                 // default. A call that asked for its own figure runs under the
                 // sandbox's cut at it — one clock, which kills the command's
-                // process group when it drops the call (R45) — so the
-                // backend's own stands back to the ceiling's highest setting,
-                // as `shell_execute`'s does, and never comes first below that
-                // highest setting: two clocks at one figure would race, and
-                // the backend's words, with no hint, could win. With the
+                // process group when it drops the call (R45) — and so, since
+                // CMD-TIMEOUT-2, does one that asked nothing where the
+                // sandbox cuts it at or below its author's figure (that
+                // figure, above the per-tool bound, clamped to the ceiling).
+                // There the backend's own clock stands back to the ceiling's
+                // highest setting, as `shell_execute`'s does, and never comes
+                // first below that highest setting: two clocks at one figure
+                // would race, and the backend's words could win where the
+                // sandbox's event and breaker record belong. With the
                 // ceiling at 3600 s and a call asking that much the two
                 // coincide, and the sandbox's, armed first, all but always
-                // wins.
-                let timeout_secs = match ctx.and_then(|c| c.asked_runtime_secs) {
-                    Some(_) => crate::daemon_config::MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS,
-                    None => *timeout_secs,
+                // wins. Only an author's figure below the sandbox's cut — or
+                // a call no sandbox cuts — keeps the backend's clock.
+                let sandbox_cuts_it = ctx.is_some_and(|c| {
+                    c.asked_runtime_secs.is_some()
+                        || c.sandbox_cut_secs.is_some_and(|cut| cut <= *timeout_secs)
+                });
+                let timeout_secs = if sandbox_cuts_it {
+                    crate::daemon_config::MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS
+                } else {
+                    *timeout_secs
                 };
                 execute_command(
                     command,
@@ -1432,6 +1455,20 @@ impl ToolRegistry {
             .is_some_and(|entry| matches!(entry.backend, ToolBackend::Plugin(_)))
     }
 
+    /// A `Command`-backend tool's own `timeout_secs` (its TOML's): its
+    /// calls' default, which the sandbox cuts an unasked call at where it is
+    /// above the per-tool bound, clamped to the ceiling (CMD-TIMEOUT-2,
+    /// `SandboxPolicy::runtime_secs_for`). `None` for every other tool,
+    /// `shell_execute` among them: its default is the bound.
+    pub(crate) fn command_default_secs(&self, tool_name: &str) -> Option<u64> {
+        self.tools
+            .get(tool_name)
+            .and_then(|entry| match entry.backend {
+                ToolBackend::Command { timeout_secs, .. } => Some(timeout_secs),
+                _ => None,
+            })
+    }
+
     /// Return the names of tools that use command backends (i.e., execute via shell).
     /// These should be treated like shell tools for injection sanitization.
     pub fn command_backend_tool_names(&self) -> Vec<String> {
@@ -1588,12 +1625,30 @@ async fn execute_http(
     }
 }
 
+/// What a `Command`-backend tool its own clock stopped after `secs` is told
+/// (CMD-TIMEOUT-2): where the sandbox put the ceiling on its context — the
+/// most its call may ask for — the hint the sandbox's cut gives
+/// (`platform::command_timed_out_hint`): below the ceiling, that a larger
+/// `timeout_secs` gives it longer; at it, that this is the most. With no
+/// ceiling the call ran outside the sandbox, where nothing would lift its
+/// figure, and the message is the limit alone.
+fn command_timed_out(secs: u64, ceiling_secs: Option<u64>) -> String {
+    match ceiling_secs {
+        Some(most_secs) => format!(
+            "Command timed out after {secs}s\n{}",
+            crate::tools::platform::command_timed_out_hint(secs, most_secs)
+        ),
+        None => format!("Command timed out after {secs}s"),
+    }
+}
+
 /// Execute a command backend tool call in the call's working folder
 /// (storage design §10, R26): the template's placeholders are substituted
 /// and checked first — a missing argument is named as such whatever the
 /// context — then the folder is resolved, and a call with none is refused.
-/// It is killed after `timeout_secs`: its author's, or — under a call's own
-/// figure the sandbox cuts it at — the ceiling's highest setting (CMD-TIMEOUT).
+/// It is killed after `timeout_secs`: its author's, or — under a figure the
+/// sandbox cuts it at (CMD-TIMEOUT, CMD-TIMEOUT-2) — the ceiling's highest
+/// setting.
 async fn execute_command(
     command: &str,
     args_template: Option<&str>,
@@ -1636,7 +1691,10 @@ async fn execute_command(
     let output = match run_bounded(cmd, timeout).await {
         Ok(output) => output,
         Err(RunFailure::TimedOut) => {
-            return Err(format!("Command timed out after {}s", timeout_secs));
+            return Err(command_timed_out(
+                timeout_secs,
+                ctx.and_then(|c| c.runtime_ceiling_secs),
+            ));
         }
         Err(RunFailure::Spawn(e) | RunFailure::Io(e)) => {
             return Err(format!("Failed to execute command: {}", e));

@@ -100,11 +100,32 @@ impl SandboxPolicy {
     }
 
     /// The seconds the sandbox lets one call run (N-TOOL-1b, B-11): what the
-    /// call asked for ([`Self::asked_runtime_secs`]), else the per-tool
-    /// bound.
-    pub fn runtime_secs_for(&self, arguments: &serde_json::Value, may_ask: bool) -> u64 {
+    /// call asked for ([`Self::asked_runtime_secs`]), else its default
+    /// ([`Self::default_runtime_secs`]) — `own_secs` is a `Command`-backend
+    /// tool's own `timeout_secs` (`ToolRegistry::command_default_secs`),
+    /// `None` for every other tool. ZCode's `min(asked || default, max)`.
+    pub fn runtime_secs_for(
+        &self,
+        arguments: &serde_json::Value,
+        may_ask: bool,
+        own_secs: Option<u64>,
+    ) -> u64 {
         self.asked_runtime_secs(arguments, may_ask)
-            .unwrap_or(self.max_tool_runtime_secs)
+            .unwrap_or_else(|| self.default_runtime_secs(own_secs))
+    }
+
+    /// What a call that asked for nothing runs under: the per-tool bound,
+    /// or — for a `Command`-backend tool whose author's `timeout_secs`
+    /// (`own_secs`) is above it — that figure clamped to the ceiling
+    /// (CMD-TIMEOUT-2), never below the bound. An author's figure below the
+    /// bound leaves the bound: that tool's own clock stops it first. One at
+    /// the bound is cut here, the sandbox's the one clock (the backend
+    /// stands back where this cut is at or below its figure).
+    pub fn default_runtime_secs(&self, own_secs: Option<u64>) -> u64 {
+        let bound = self.max_tool_runtime_secs;
+        own_secs.map_or(bound, |own| {
+            own.min(self.max_tool_runtime_ceiling_secs).max(bound)
+        })
     }
 
     /// What a call that may ask for its own figure (`may_ask`: one that runs
@@ -117,8 +138,10 @@ impl SandboxPolicy {
     /// its own argument. A plugin's tool is handed the argument as it was
     /// sent. A `Command`-backend tool's call that asked runs under
     /// this figure alone; one that asked nothing, under its author's own
-    /// `timeout_secs` (its TOML's) too, its default (CMD-TIMEOUT,
-    /// `ToolContext::asked_runtime_secs`).
+    /// `timeout_secs` (its TOML's), its default (CMD-TIMEOUT,
+    /// `ToolContext::asked_runtime_secs`) — the sandbox's cut where that
+    /// figure is at or above the bound, its own clock's below
+    /// ([`Self::default_runtime_secs`], CMD-TIMEOUT-2).
     pub fn asked_runtime_secs(&self, arguments: &serde_json::Value, may_ask: bool) -> Option<u64> {
         if !may_ask {
             return None;
@@ -592,11 +615,14 @@ impl SandboxManager {
 
         // N-TOOL-1b: the sandbox's cut for this call — the policy's bound, or
         // a command's own `timeout_secs` clamped to the ceiling, and since
-        // PLUGIN-WAIT a plugin tool's as a command's.
+        // PLUGIN-WAIT a plugin tool's as a command's; since CMD-TIMEOUT-2 a
+        // `Command`-backend tool's author's figure above the bound, clamped
+        // to the ceiling, where the call asked nothing.
         let runs_a_command = self.registry.is_command_tool(&tool_call.name);
         let may_ask = runs_a_command || self.registry.is_plugin_tool(&tool_call.name);
         let asked_secs = policy.asked_runtime_secs(&tool_call.arguments, may_ask);
-        let runtime_secs = policy.runtime_secs_for(&tool_call.arguments, may_ask);
+        let own_secs = self.registry.command_default_secs(&tool_call.name);
+        let runtime_secs = policy.runtime_secs_for(&tool_call.arguments, may_ask, own_secs);
 
         let registry = self.registry.clone();
         let tool_name = tool_call.name.clone();
@@ -617,7 +643,9 @@ impl SandboxManager {
         // discipline: set here, where this sandbox cuts the call at it, and
         // `None` on every other path, so a `Command`-backend tool stands its
         // own clock back only for a cut that is really there — and so is the
-        // figure it cuts at (PLUGIN-WAIT), which a plugin tool waits past.
+        // figure it cuts at (PLUGIN-WAIT), which a plugin tool waits past, and
+        // the ceiling such a call may ask up to (CMD-TIMEOUT-2), which a
+        // `Command`-backend tool's own kill names in its hint.
         let ctx_owned = {
             let mut owned = disciplined(ctx);
             if owned.event_bus.is_none() {
@@ -626,6 +654,8 @@ impl SandboxManager {
             owned.human_approval = human_approval;
             owned.asked_runtime_secs = asked_secs.filter(|_| !is_exempt);
             owned.sandbox_cut_secs = (!is_exempt).then_some(runtime_secs);
+            owned.runtime_ceiling_secs =
+                (may_ask && !is_exempt).then_some(policy.max_tool_runtime_ceiling_secs);
             owned
         };
 
@@ -885,7 +915,8 @@ fn decoded_json_string_call(tool_call: &ToolCall, source: &str) -> Option<ToolCa
 
 /// A copy of `ctx` with neither person-fact set (design 09 §4.2 rule 1),
 /// nor the figure a call asked for (CMD-TIMEOUT), nor the one the sandbox
-/// cuts it at (PLUGIN-WAIT).
+/// cuts it at (PLUGIN-WAIT), nor the ceiling it may ask up to
+/// (CMD-TIMEOUT-2).
 ///
 /// Every context the sandbox hands onward — to a preview hook, to a denial
 /// hook, to the tool itself — starts from this, and only the sandbox then
@@ -896,6 +927,7 @@ fn disciplined(ctx: &ToolContext) -> ToolContext {
     out.human_denial = None;
     out.asked_runtime_secs = None;
     out.sandbox_cut_secs = None;
+    out.runtime_ceiling_secs = None;
     out
 }
 
