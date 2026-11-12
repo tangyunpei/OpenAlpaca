@@ -114,7 +114,7 @@ sq() { env -i PATH=/usr/bin:/bin HOME=/var/empty LC_ALL=C "$SQLITE" -batch "$@";
 # `rank` settings whose values are the file's RANK_WEIGHTS and
 # HEAD_RANK_WEIGHTS lines, each matched exactly once). The schema_version is
 # 6, the pre-wave build's SCHEMA_VERSION and so the owner's copy's, not the
-# tip's 7 (the sweep's S12 changed no table: SCHEMA_SQL and the weights are
+# tip's 8 (the sweep's S12 changed no table: SCHEMA_SQL and the weights are
 # the same at the branch point and the tip).
 index_schema() {   # -> stdout
   local n

@@ -58,9 +58,10 @@ const DB_SCHEMA_SET: &str = "1,2,3,4";
 /// The pre-wave build's `memory_index::SCHEMA_VERSION` (6 at the branch
 /// point), as its `create_schema` writes it into
 /// `meta(key = 'schema_version')` (`memory_index/mod.rs`): the version the
-/// owner's index holds when E8 copies it. The tip's is 7 (the sweep's S12,
-/// no table changed), and E8 runs before a bumped build first starts on the
-/// real store, so a copy reading 7 was written by a bumped build.
+/// owner's index holds when E8 copies it. The tip's is 8 (the sweep's S12
+/// moved it to 7, no table changed; `fe1162de` to 8), and E8 runs before a
+/// bumped build first starts on the real store, so a copy reading 7 or 8 was
+/// written by a bumped build.
 const INDEX_SCHEMA: &str = "6";
 /// The three FTS5 tables of `memory_index/mod.rs`'s `SCHEMA_SQL`.
 const FTS: [&str; 3] = ["fts_word", "fts_tri_head", "fts_tri"];

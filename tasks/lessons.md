@@ -169,3 +169,9 @@ Each entry: what went wrong → the rule that prevents it.
 **What happened:** Two of the sweep's runs pointed `HOME` at a scratch folder. S05's set no `RUSTUP_HOME` or `CARGO_HOME`; S18's passed its environment as one zsh string, so `HOME` took the whole string and `RUSTUP_HOME`, `CARGO_HOME` and `OPENALPACA_HOME_STORE` were unset. Each time rustup downloaded a second copy of the pinned toolchain from static.rust-lang.org, outside the hosts the run's brief allowed, and S18's cargo fetched 249 crates into the scratch `HOME`: 2.5 GB and 2.8 GB, deleted as not evidence. S18's probe panicked before any scan, so nothing reached a store.
 
 **Rule:** A run that sets a scratch `HOME` sets `RUSTUP_HOME` and `CARGO_HOME` to the real ones, and `OPENALPACA_HOME_STORE` wherever a store is in play, each assignment its own shell word or one `env VAR=… VAR=…` — never a string held in a variable, which zsh passes as one word (the zsh entry above). The run's log shows the toolchain resolved from the real `RUSTUP_HOME` before its first build.
+
+## 2026-11 — `find -not -path` filters output but does not prune the walk
+
+**What happened:** The agent re-pinning the E8 probe looked for a bins folder with `find / -xdev ( -name … ) -not -path '*/.openalpaca/*'`. `-not -path` only hides matches; `find` still descended into `~/.openalpaca` and stat'ed its entries, against the standing rule never to read, stat, ls or find the real store. No file contents were read and nothing was written.
+
+**Rule:** Never walk from `/` or `~` (find, du, rg, fd or the like); search a named scratch or repository root. To exclude a directory from a walk, `-prune` it, never `-not -path`.
