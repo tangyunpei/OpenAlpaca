@@ -440,8 +440,12 @@ On the Responses API each request:
 - names `max_output_tokens` (`default_max_tokens`, 4096 unless set), which
   counts the model's reasoning as well as its answer. OpenAI's reasoning
   guide advises reserving at least 25,000. A reasoning model can therefore
-  end a turn cut short, which the loop continues as it continues any
-  truncated answer;
+  spend the whole cap before any text or tool call. A main-loop or skill
+  turn streamed to its chat continues such a turn as it continues any
+  truncated answer, at most twice at the same cap. A round asked without
+  streaming (every lead and subagent round, and a main-loop or skill turn
+  with no chat stream) ends it as an empty completion, an error that is
+  not retried: the run stops there;
 - sends each tool with `strict` written out: `true` where Chat Completions
   sends it, `false` everywhere else, since on this API a tool without the
   field is made strict wherever the API can;
