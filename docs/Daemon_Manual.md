@@ -372,22 +372,23 @@ reach it with the release.
 ### What a model's API refuses
 
 Some models refuse parts of a request that others take. The router holds
-each request to the model it is sent to, after the ladder has picked it.
-In this build one row says so: `claude-opus-5-5`. Its API refuses
+each request to the model it is sent to, after the ladder has picked it. In
+this build one row says so: `claude-opus-5-5`. Its API refuses
 `temperature`, `top_p` and `top_k`, refuses turning thinking off (thinking
 is always on), refuses a thinking budget, and refuses a forced tool choice.
 So a request to it goes without `temperature` and without a `thinking`
 field that turns thinking off; a thinking budget would go as adaptive
-thinking, though no request this build makes sends one. That covers the conversation summary, the episode summary and
-the memory and task-output extraction when their model is Opus 5.5. A
-round that forces the `send` tool (the main loop's send hint, or a skill
-with `send`) goes with `tool_choice` `auto`, and `daemon.log` says so once
-per model at `INFO`: `claude-opus-5-5 refuses a forced tool choice: a call
-that asks for the tool 'send' is sent with tool_choice auto, here and on
-every later call to claude-opus-5-5`. A `[models."claude-opus-5-5"]` row
-of yours keeps these rules. A model that only discovery lists carries
-none. On Opus 5.5 those utility calls now think inside their `max_tokens`.
-Thinking text comes back empty unless asked for, and nothing here asks.
+thinking, though no request this build makes sends one. That covers the
+conversation summary, the episode summary and the memory and task-output
+extraction when their model is Opus 5.5. A round that forces the `send`
+tool (the main loop's send hint, or a skill with `send`) goes with
+`tool_choice` `auto`, and `daemon.log` says so once per model at `INFO`:
+`claude-opus-5-5 refuses a forced tool choice: a call that asks for the
+tool 'send' is sent with tool_choice auto, here and on every later call to
+claude-opus-5-5`. A `[models."claude-opus-5-5"]` row of yours keeps these
+rules. A model that only discovery lists carries none. On Opus 5.5 those
+utility calls now think inside their `max_tokens`. Thinking text comes back
+empty unless asked for, and nothing here asks.
 
 Within one run, a model's thinking goes back to it unchanged in the next
 request of a tool loop: every thinking block, its signature and its order,
@@ -397,6 +398,21 @@ guard's corrective round. When the run compacts its history, or the budget
 notice changes the system prompt, every kept block is left out from then
 on: never some of them. Thinking is never written to the session log, the
 database or a conversation's history.
+
+What the model reads is narrower than what is sent. The loop's
+`context_management` asks the API to keep the thinking of the last two
+turns only (`clear_thinking_20251015`, `keep` 2 `thinking_turns`, the turn
+in progress counted), and by Anthropic's context-editing page (read
+2026-11-12) a user message that is not only tool results starts a new turn:
+the truncation's "continue" message, a steering message and the answer
+guard's note each do. A tool loop with none of them is one turn, and its
+thinking is all kept. From the second such message on, the server clears
+the thinking of every turn but the one in progress and the one before it,
+before the model reads the request; on a model with preserved thinking,
+Opus 5.5 among them, the page says this never makes the API refuse the
+blocks sent. Whether the API applies the edit under the beta header this
+build sends, `context-management-2025-01-15` (the page names
+`context-management-2025-06-27`), no check has confirmed yet.
 
 ### Cost
 
