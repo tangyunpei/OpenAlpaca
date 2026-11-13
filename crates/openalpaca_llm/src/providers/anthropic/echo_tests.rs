@@ -532,3 +532,53 @@ fn a_kept_turn_that_no_longer_matches_its_message_goes_without_thinking_and_so_d
     assert_eq!(thinking_in(3), 0, "the changed turn goes without");
     assert_eq!(thinking_in(5), 0, "and so does every later turn");
 }
+
+/// A turn that called no tool goes back whole through
+/// [`ChatMessage::assistant_answer`], the message the loop's `MaxTokens`
+/// continuation, its steering drain at the completion guard and its answer
+/// guard's round push: every thinking block with its signature, in its
+/// order, text included — and a turn of thinking blocks alone (its text
+/// never came) goes back as those blocks. A turn that called a tool goes
+/// back from `assistant_answer` as its text alone, without thinking.
+#[test]
+fn an_answer_that_called_no_tool_goes_back_with_all_its_thinking() {
+    let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+    let answered = |content: serde_json::Value, stop_reason: &str| {
+        provider
+            .parse_response(
+                serde_json::from_str(&whole_response("claude-opus-5-5", content, stop_reason))
+                    .unwrap(),
+            )
+            .unwrap()
+    };
+    let sent_back = |response: &ChatResponse| {
+        provider.build_request_body(&request(vec![
+            ChatMessage::user("write it"),
+            ChatMessage::assistant_answer(response),
+            ChatMessage::user("Continue from where you left off."),
+        ]))["messages"][1]
+            .clone()
+    };
+
+    let with_text = serde_json::json!([
+        {"type": "thinking", "thinking": "", "signature": "EqQBsig-A=="},
+        {"type": "redacted_thinking", "data": "EmwKAhgBEgy3va3pzix/LafPsn4a"},
+        {"type": "text", "text": "The first half"},
+        {"type": "thinking", "thinking": "Then the rest.", "signature": "EqQBsig-B=="},
+    ]);
+    let truncated = answered(with_text.clone(), "max_tokens");
+    assert_eq!(truncated.finish_reason, FinishReason::MaxTokens);
+    let assistant = sent_back(&truncated);
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["content"], with_text);
+
+    let thinking_alone = serde_json::json!([
+        {"type": "thinking", "thinking": "", "signature": "EqQBsig-C=="},
+        {"type": "thinking", "thinking": "Still thinking.", "signature": "EqQBsig-D=="},
+    ]);
+    let assistant = sent_back(&answered(thinking_alone.clone(), "max_tokens"));
+    assert_eq!(assistant["content"], thinking_alone);
+
+    let assistant = sent_back(&answered(thinking_turn_blocks(), "tool_use"));
+    assert_eq!(assistant["content"], "Looking.");
+}
