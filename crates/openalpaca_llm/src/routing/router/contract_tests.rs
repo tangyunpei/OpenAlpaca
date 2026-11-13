@@ -349,3 +349,130 @@ async fn a_models_row_for_opus_5_5_keeps_its_contract() {
     assert!(body.get("temperature").is_none(), "{body}");
     assert!(body.get("thinking").is_none(), "{body}");
 }
+
+// ── C7a: an Anthropic turn of thinking alone, cut at `max_tokens` ───────────
+
+/// The blocks of an Anthropic answer cut at `max_tokens` while it was
+/// still thinking: one thinking block with its signature, no text, no
+/// `tool_use`.
+fn thinking_alone_blocks() -> serde_json::Value {
+    serde_json::json!([
+        {"type": "thinking", "thinking": "Plan the search.", "signature": "EqQBsig-A=="},
+    ])
+}
+
+/// A lead's or subagent's round: a tool offered, no forced choice.
+fn tool_round_request(model: &str) -> RouterRequest {
+    RouterRequest {
+        tools: Arc::new(vec![send_tool()]),
+        temperature: None,
+        max_tokens: None,
+        thinking: None,
+        ..utility_request(model)
+    }
+}
+
+/// An Anthropic answer cut at `max_tokens` before any text or call, its
+/// thinking alone, as the arm's 4096 default can end a `claude-opus-5-5`
+/// round. No change made; what this pins: asked without streaming, as
+/// every lead and subagent round is, it is the router's `EmptyCompletion`
+/// (`crate::error::empty_completion_error`, called in `retry.rs`), not
+/// transient, asked once, so nothing retries it and the loop ends the run
+/// on it; streamed, the same answer collects as a `MaxTokens` turn with no
+/// text whose kept thinking `ChatMessage::assistant_answer` carries into
+/// the loop's continuation (the Responses wire's twin is
+/// `pricing_tests::a_responses_turn_cut_before_any_text_ends_unless_streamed`).
+#[tokio::test]
+async fn an_anthropic_turn_of_thinking_alone_cut_at_max_tokens_ends_unless_streamed() {
+    let whole = serde_json::json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-5-5",
+        "content": thinking_alone_blocks(),
+        "stop_reason": "max_tokens",
+        "usage": {"input_tokens": 1_000, "output_tokens": 4_096},
+    });
+    let frame = |event: &str, data: serde_json::Value| format!("event: {event}\ndata: {data}\n\n");
+    let frames = vec![
+        frame(
+            "message_start",
+            serde_json::json!({"type": "message_start", "message": {
+                "id": "msg_1", "type": "message", "role": "assistant", "content": [],
+                "model": "claude-opus-5-5", "usage": {"input_tokens": 1_000}}}),
+        ),
+        frame(
+            "content_block_start",
+            serde_json::json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+        ),
+        frame(
+            "content_block_delta",
+            serde_json::json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "Plan the search."}}),
+        ),
+        frame(
+            "content_block_delta",
+            serde_json::json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "signature_delta", "signature": "EqQBsig-A=="}}),
+        ),
+        frame(
+            "content_block_stop",
+            serde_json::json!({"type": "content_block_stop", "index": 0}),
+        ),
+        frame(
+            "message_delta",
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "max_tokens"},
+                "usage": {"output_tokens": 4_096}}),
+        ),
+        frame("message_stop", serde_json::json!({"type": "message_stop"})),
+    ];
+    let server = MockHttpServer::start(move |req| {
+        let asked: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+        match (req.path.as_str(), asked["stream"].as_bool()) {
+            ("/v1/messages", Some(true)) => MockResponse::sse(frames.clone()),
+            ("/v1/messages", _) => MockResponse::json(whole.to_string()),
+            _ => MockResponse::not_found(),
+        }
+    })
+    .await;
+    let router = anthropic_router(&server, &HashMap::new());
+
+    let refused = router
+        .complete(tool_round_request("claude-opus-5-5"))
+        .await
+        .expect_err("an answer with nothing in it is not an answer");
+    match &refused {
+        LlmRouterError::Llm(
+            inner @ LlmError::EmptyCompletion {
+                model,
+                output_tokens,
+            },
+        ) => {
+            assert_eq!(model, "claude-opus-5-5");
+            assert_eq!(*output_tokens, 4_096);
+            assert!(!inner.is_transient());
+        }
+        other => panic!("expected EmptyCompletion, got {other:?}"),
+    }
+    assert_eq!(server.hits("/v1/messages").await, 1);
+
+    let routed = router
+        .complete_streaming(tool_round_request("claude-opus-5-5"))
+        .await
+        .expect("streams");
+    let streamed = crate::collect_stream(routed.stream, routed.model.clone())
+        .await
+        .expect("a cut stream still collects");
+    assert_eq!(streamed.finish_reason, FinishReason::MaxTokens);
+    assert_eq!(streamed.content, "");
+    assert!(streamed.tool_calls.is_empty());
+    let kept = streamed.echo.as_ref().expect("the thinking is kept");
+    assert_eq!(
+        serde_json::Value::Array(kept.blocks().to_vec()),
+        thinking_alone_blocks()
+    );
+    let continued = ChatMessage::assistant_answer(&streamed);
+    assert_eq!(continued.echo.as_ref(), Some(kept));
+    assert_eq!(server.hits("/v1/messages").await, 2);
+}
