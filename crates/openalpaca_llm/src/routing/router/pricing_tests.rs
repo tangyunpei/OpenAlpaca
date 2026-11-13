@@ -798,3 +798,76 @@ async fn a_streamed_responses_round_is_routed_under_the_asked_id() {
     assert_eq!(response.content, "pong");
     assert_eq!(server.hits("/v1/responses").await, 1);
 }
+
+// ── C7b: a Responses turn cut before any text ───────────────────────────────
+
+/// A Responses answer cut at `max_output_tokens` before any text or call,
+/// a reasoning item alone, as the arm's 4096 default can end a
+/// `gpt-6.1-sol` turn. No change made; what this pins (pending-decisions
+/// §1, *Rev 63*): asked without streaming, as every lead and subagent
+/// round is, it is the router's `EmptyCompletion`, not transient, asked
+/// once, so nothing retries it and the loop ends the run on it; streamed,
+/// the same answer collects as a `MaxTokens` turn, which the loop
+/// continues.
+#[tokio::test]
+async fn a_responses_turn_cut_before_any_text_ends_unless_streamed() {
+    let cut = serde_json::json!({
+        "id": "resp_1",
+        "object": "response",
+        "model": "gpt-6.1-sol",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "output": [{
+            "type": "reasoning", "id": "rs_1", "summary": [],
+            "encrypted_content": "gAAAA-encrypted"
+        }],
+        "usage": {"input_tokens": 1_000, "output_tokens": 4_096,
+                  "input_tokens_details": {"cached_tokens": 0},
+                  "output_tokens_details": {"reasoning_tokens": 4_096}}
+    });
+    let frame = format!(
+        "event: response.incomplete\ndata: {}\n\n",
+        serde_json::json!({"type": "response.incomplete", "response": cut})
+    );
+    let server = MockHttpServer::start(move |req| {
+        let asked: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+        match (req.path.as_str(), asked["stream"].as_bool()) {
+            ("/v1/responses", Some(true)) => MockResponse::sse(vec![frame.clone()]),
+            ("/v1/responses", _) => MockResponse::json(cut.to_string()),
+            _ => MockResponse::not_found(),
+        }
+    })
+    .await;
+    let router = responses_router(&server.base_url);
+
+    let refused = router
+        .complete(tool_request("gpt-6.1-sol"))
+        .await
+        .expect_err("an answer with nothing in it is not an answer");
+    match &refused {
+        LlmRouterError::Llm(
+            inner @ crate::error::LlmError::EmptyCompletion {
+                model,
+                output_tokens,
+            },
+        ) => {
+            assert_eq!(model, "gpt-6.1-sol");
+            assert_eq!(*output_tokens, 4_096);
+            assert!(!inner.is_transient());
+        }
+        other => panic!("expected EmptyCompletion, got {other:?}"),
+    }
+    assert_eq!(server.hits("/v1/responses").await, 1);
+
+    let routed = router
+        .complete_streaming(tool_request("gpt-6.1-sol"))
+        .await
+        .expect("streams");
+    let streamed = crate::collect_stream(routed.stream, routed.model.clone())
+        .await
+        .expect("a cut stream still collects");
+    assert_eq!(streamed.finish_reason, FinishReason::MaxTokens);
+    assert_eq!(streamed.content, "");
+    assert!(streamed.tool_calls.is_empty());
+    assert_eq!(server.hits("/v1/responses").await, 2);
+}

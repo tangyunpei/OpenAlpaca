@@ -591,11 +591,53 @@ fn each_arm_sends_back_only_its_own_turn() {
     assert!(body["messages"][1].to_string().contains("Done."), "{text}");
 }
 
+/// An Anthropic answer turn — thinking and text, no tool call, what
+/// `assistant_answer` carries — reaching the OpenAI arm after a fallback is
+/// rebuilt there as its text. With no calls on either side the call-id
+/// check passes, so only the arm's wire filter keeps its blocks out.
+#[test]
+fn an_anthropic_answer_turn_is_rebuilt_on_the_responses_wire() {
+    let anthropic_turn = EchoedTurn::from_blocks(vec![
+        serde_json::json!({"type": "thinking", "thinking": "", "signature": "sig-A"}),
+        serde_json::json!({"type": "text", "text": "Checking."}),
+    ])
+    .expect("an Anthropic thinking turn");
+    let from_claude = ChatResponse {
+        content: "Checking.".to_string(),
+        tool_calls: vec![],
+        model: "claude-opus-5-5".to_string(),
+        usage: Usage::default(),
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+        echo: Some(anthropic_turn),
+    };
+    let body = cloud().build_responses_body(&request(
+        vec![
+            ChatMessage::user("go"),
+            ChatMessage::assistant_answer(&from_claude),
+            ChatMessage::user("and?"),
+        ],
+        vec![closed_tool("search")],
+    ));
+    assert_eq!(
+        body["input"][1],
+        serde_json::json!({"role": "assistant", "content": "Checking."})
+    );
+    let text = body.to_string();
+    assert!(
+        !text.contains("signature") && !text.contains("sig-A"),
+        "{text}"
+    );
+}
+
 /// A turn cut at `max_output_tokens` before any text — what a reasoning
 /// model can do inside the arm's 4096 default — goes back, in the
 /// `MaxTokens` continuation, as its reasoning item when it has one, and as
 /// an empty assistant message when it has none: the shape step 19's check
-/// meets, which no page read settles.
+/// meets, which no page read settles. Only a streamed round reaches that
+/// continuation; a non-streamed one ends as the router's `EmptyCompletion`
+/// (`routing/router/pricing_tests.rs`).
 #[test]
 fn a_turn_cut_before_any_text_goes_back_as_its_items_or_as_empty_text() {
     let provider = cloud();
@@ -861,6 +903,29 @@ async fn two_calls_in_one_frame_both_survive() {
             ("call_b", &serde_json::json!({"q": "b"})),
         ]
     );
+}
+
+/// Two calls carried only by the completion — on this wire the one frame
+/// that holds more than one item — both survive, in order, each with its
+/// own arguments.
+#[tokio::test]
+async fn two_calls_only_in_the_completion_both_survive() {
+    let a = call_item("call_a", "search", r#"{"q":"a"}"#);
+    let b = call_item("call_b", "fetch", r#"{"q":"b"}"#);
+    let response = collected(&[completed(serde_json::json!([a, b]))]).await;
+    let calls: Vec<(&str, &str, &serde_json::Value)> = response
+        .tool_calls
+        .iter()
+        .map(|c| (c.id.as_str(), c.name.as_str(), &c.arguments))
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            ("call_a", "search", &serde_json::json!({"q": "a"})),
+            ("call_b", "fetch", &serde_json::json!({"q": "b"})),
+        ]
+    );
+    assert_eq!(response.finish_reason, FinishReason::ToolUse);
 }
 
 /// Content and a call in one frame: both survive.
