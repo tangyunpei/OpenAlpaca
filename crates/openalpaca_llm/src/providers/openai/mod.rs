@@ -1,5 +1,6 @@
 pub(crate) mod request;
 mod response;
+mod responses;
 mod streaming;
 
 use crate::LlmProvider;
@@ -49,6 +50,41 @@ pub struct OpenAiProvider {
     request_timeout: Option<std::time::Duration>,
     /// Whose OpenAI-compatible wire this is — see [`OpenAiFlavour`].
     flavour: OpenAiFlavour,
+    /// Whether a request with tools goes to the Responses API (C7b): set
+    /// when `base_url` is OpenAI's own API ([`is_openai_api`]), never for a
+    /// keyless or Ollama provider; see [`Self::uses_responses`].
+    responses_api: bool,
+}
+
+/// The hosts of OpenAI's own API: `api.openai.com` and the regional hosts
+/// of its data-residency table, each of which serves `/v1/responses`
+/// (developers.openai.com/api/docs/guides/your-data, "Support by region",
+/// read 2026-11-12).
+const OPENAI_API_HOSTS: &[&str] = &[
+    "api.openai.com",
+    "us.api.openai.com",
+    "eu.api.openai.com",
+    "au.api.openai.com",
+    "ca.api.openai.com",
+    "jp.api.openai.com",
+    "in.api.openai.com",
+    "sg.api.openai.com",
+    "kr.api.openai.com",
+    "gb.api.openai.com",
+    "ae.api.openai.com",
+];
+
+/// Whether `base_url` is OpenAI's own API: `https` to one of
+/// [`OPENAI_API_HOSTS`], whatever the path. Every other OpenAI-compatible
+/// server — Ollama, llama.cpp, LM Studio, a gateway — keeps Chat
+/// Completions (C7b).
+pub(crate) fn is_openai_api(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url
+                .host_str()
+                .is_some_and(|host| OPENAI_API_HOSTS.contains(&host))
+    })
 }
 
 impl OpenAiProvider {
@@ -69,11 +105,13 @@ impl OpenAiProvider {
         base_url: Option<String>,
         max_tokens: Option<u32>,
     ) -> Self {
+        let base_url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         Self {
             client,
             api_key: Some(api_key),
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            responses_api: is_openai_api(&base_url),
+            base_url,
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             request_timeout: None,
             flavour: OpenAiFlavour::OpenAi,
@@ -104,7 +142,17 @@ impl OpenAiProvider {
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             request_timeout: None,
             flavour: OpenAiFlavour::OpenAi,
+            responses_api: false,
         }
+    }
+
+    /// Send a request with tools through the Responses API, or not, whatever
+    /// the `base_url` (C7b). Only tests call it: they point the provider at a
+    /// loopback mock that stands in for OpenAI's own API.
+    #[cfg(test)]
+    pub(crate) fn with_responses_api(mut self, on: bool) -> Self {
+        self.responses_api = on;
+        self
     }
 
     /// Declare whose OpenAI-compatible wire this is (M2).
@@ -150,6 +198,58 @@ impl OpenAiProvider {
         body: serde_json::Value,
     ) -> Result<ChatResponse, LlmError> {
         response::parse_response(&self.model, body)
+    }
+
+    /// Whether `request` goes to `/responses` rather than
+    /// `/chat/completions` (C7b): on OpenAI's own API, a request that calls
+    /// functions — it offers tools, or its history holds a tool call or a
+    /// tool result. OpenAI's current reasoning models take tool calls with
+    /// reasoning only there: "Tool calling requires the Responses API"
+    /// (gpt-6.1-sol's page), and "Starting with GPT-5.4, Chat Completions
+    /// does not support tool calling with `reasoning_effort` values other
+    /// than `none`" (the migration guide); "GPT-6 Sol
+    /// and GPT-6 Luna support function calling in Chat Completions only with
+    /// `reasoning_effort: "none"`" (the GPT-6 guide; all three read
+    /// 2026-11-12). Every other request
+    /// keeps Chat Completions, which every catalogued OpenAI model supports
+    /// (their pages, the same day), as does every other OpenAI-compatible
+    /// server.
+    pub(crate) fn uses_responses(&self, request: &ChatRequest) -> bool {
+        self.responses_api
+            && self.flavour == OpenAiFlavour::OpenAi
+            && (!request.tools.is_empty()
+                || request
+                    .messages
+                    .iter()
+                    .any(|m| m.tool_calls.is_some() || m.tool_call_id.is_some()))
+    }
+
+    /// The route and body for `request`, on whichever wire it takes.
+    fn route(&self, request: &ChatRequest) -> (String, serde_json::Value) {
+        if self.uses_responses(request) {
+            (
+                format!("{}/responses", self.base_url),
+                self.build_responses_body(request),
+            )
+        } else {
+            (
+                format!("{}/chat/completions", self.base_url),
+                self.build_request_body(request),
+            )
+        }
+    }
+
+    /// The Responses API body for `request` (C7b).
+    pub(crate) fn build_responses_body(&self, request: &ChatRequest) -> serde_json::Value {
+        responses::build_request_body(&self.model, self.max_tokens, request)
+    }
+
+    /// A whole Responses API answer, read (C7b).
+    pub(crate) fn parse_responses_response(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<ChatResponse, LlmError> {
+        responses::parse_response(&self.model, body)
     }
 }
 
@@ -209,8 +309,8 @@ impl LlmProvider for OpenAiProvider {
         key: &str,
         request: ChatRequest,
     ) -> Result<ChatResponse, LlmError> {
-        let body = self.build_request_body(&request);
-        let url = format!("{}/chat/completions", self.base_url);
+        let responses = self.uses_responses(&request);
+        let (url, body) = self.route(&request);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
 
         let mut req_builder = self.deadline(
@@ -275,7 +375,11 @@ impl LlmProvider for OpenAiProvider {
             return Err(LlmError::Api { status, message });
         }
 
-        self.parse_response(response_body)
+        if responses {
+            self.parse_responses_response(response_body)
+        } else {
+            self.parse_response(response_body)
+        }
     }
 
     fn supports_streaming(&self) -> bool {
@@ -287,14 +391,19 @@ impl LlmProvider for OpenAiProvider {
         key: &str,
         request: ChatRequest,
     ) -> Result<ChatStream, LlmError> {
-        let mut body = self.build_request_body(&request);
+        let responses = self.uses_responses(&request);
+        let (url, mut body) = self.route(&request);
         body["stream"] = serde_json::json!(true);
-        // Asked of every OpenAI-compatible base, not just api.openai.com: a
-        // streamed turn that reports no usage is booked at zero tokens and zero
-        // cost, so the caps and the usage screen see nothing (L5). Ollama
-        // honours the flag; a base that does not simply ignores it.
-        body["stream_options"] = serde_json::json!({"include_usage": true});
-        let url = format!("{}/chat/completions", self.base_url);
+        if !responses {
+            // Asked of every OpenAI-compatible base, not just api.openai.com:
+            // a streamed turn that reports no usage is booked at zero tokens
+            // and zero cost, so the caps and the usage screen see nothing
+            // (L5). Ollama honours the flag; a base that does not simply
+            // ignores it. The Responses API's `stream_options` is another
+            // object, and its `response.completed` event always carries the
+            // usage (the reference, read 2026-11-12).
+            body["stream_options"] = serde_json::json!({"include_usage": true});
+        }
 
         let mut req_builder = self
             .client
@@ -341,10 +450,16 @@ impl LlmProvider for OpenAiProvider {
         }
 
         let byte_stream = response.bytes_stream();
-        Ok(Box::pin(streaming::parse_openai_sse(byte_stream)))
+        if responses {
+            Ok(Box::pin(responses::parse_responses_sse(byte_stream)))
+        } else {
+            Ok(Box::pin(streaming::parse_openai_sse(byte_stream)))
+        }
     }
 }
 
+#[cfg(test)]
+use responses::parse_responses_sse;
 #[cfg(test)]
 use streaming::parse_openai_sse;
 

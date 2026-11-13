@@ -205,13 +205,15 @@ fn an_alias_resolves_to_the_parent_providers_model() {
     assert!(strong.passed_over.is_empty());
 }
 
-/// OpenAI's row as built: the holding row until C7b and O-16 (M-3a).
+/// OpenAI's row: `strong` the latest GPT Sol, `gpt-6.1-sol`, with C7b
+/// (O-15 (a)); `fast` and `balanced` the holding rows until O-16's moves
+/// (M-3a).
 #[test]
 fn an_alias_on_an_openai_only_router_resolves_to_openais() {
     let router = router(&[ProviderType::OpenAI], "gpt-4o-mini");
     assert_eq!(resolved(&router, ModelAlias::Fast, None), "gpt-5-nano");
     assert_eq!(resolved(&router, ModelAlias::Balanced, None), "gpt-5-mini");
-    assert_eq!(resolved(&router, ModelAlias::Strong, None), "gpt-5.2");
+    assert_eq!(resolved(&router, ModelAlias::Strong, None), "gpt-6.1-sol");
 }
 
 /// Two keyed providers loaded: the parent's provider's row wins, whatever

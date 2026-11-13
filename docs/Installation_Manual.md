@@ -596,6 +596,16 @@ cannot answer until you enable one:
   `Add key` form that refuses to save against a switched-off provider. See
   [CLI Manual → `llm`](CLI_Manual.md#llm) for the other key commands.
 
+  With `openai` (its default `base_url`, or one of OpenAI's regional hosts
+  such as `https://eu.api.openai.com/v1`), every turn that uses tools goes
+  through OpenAI's Responses API, and the daemon asks OpenAI to store
+  nothing (`store: false`). The
+  model alias `strong` is `gpt-6.1-sol` there; the shipped agent templates
+  start naming aliases in a later release. Ollama, and an OpenAI-compatible
+  server set as the `openai` provider's `base_url`, are sent what they were
+  sent before. See
+  [Daemon Manual → OpenAI's Responses API](Daemon_Manual.md#openais-responses-api).
+
 `openalpaca llm status` shows the result, and names the fix when nothing is
 routable.
 

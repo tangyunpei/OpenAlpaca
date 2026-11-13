@@ -334,7 +334,7 @@ templates still name model ids.
 |---|---|---|---|
 | `fast` | `claude-haiku-4-5-20251001` | `gpt-5-nano` | the parent's model |
 | `balanced` | `claude-sonnet-4-6` | `gpt-5-mini` | the parent's model |
-| `strong` | `claude-opus-5-5` | `gpt-5.2` | the parent's model |
+| `strong` | `claude-opus-5-5` | `gpt-6.1-sol` | the parent's model |
 
 Resolution, in order: the parent's provider's pin; that provider's built-in
 row; the parent's model itself (with no parent, or a parent that is not
@@ -414,6 +414,57 @@ blocks sent. Whether the API applies the edit under the beta header this
 build sends, `context-management-2025-01-15` (the page names
 `context-management-2025-06-27`), no check has confirmed yet.
 
+### OpenAI's Responses API
+
+A request that uses tools, sent to OpenAI's own API, goes to OpenAI's
+Responses API (`/v1/responses`). "Uses tools" means the request offers the
+model tools, or its history holds a tool call or a tool result. "OpenAI's
+own API" means a `base_url` of `https://api.openai.com/...`, the default,
+or of one of the regional hosts OpenAI's data-residency page lists
+(`https://us.api.openai.com/...`, `eu.`, `au.`, `ca.`, `jp.`, `in.`,
+`sg.`, `kr.`, `gb.` and `ae.`; read 2026-11-12). OpenAI's current
+reasoning models take tool calls with reasoning only there: `gpt-6.1-sol`'s
+page says "Tool calling requires the Responses API" (read 2026-11-12). So
+the main loop, a skill, a lead and its subagents on any OpenAI model use
+it. Every other request keeps `/v1/chat/completions`: the conversation
+summary, the episode summary and the memory and task-output extraction,
+which offer no tools. Ollama and any other OpenAI-compatible server
+(llama.cpp, LM Studio, a gateway at another address) are sent exactly
+what they were sent before.
+
+On the Responses API each request:
+
+- carries the whole conversation, as before, and asks OpenAI to store
+  nothing (`store: false`). Left out, the API keeps a response for at least
+  30 days;
+- names `max_output_tokens` (`default_max_tokens`, 4096 unless set), which
+  counts the model's reasoning as well as its answer. OpenAI's reasoning
+  guide advises reserving at least 25,000. A reasoning model can therefore
+  end a turn cut short, which the loop continues as it continues any
+  truncated answer;
+- sends each tool with `strict` written out: `true` where Chat Completions
+  sends it, `false` everywhere else, since on this API a tool without the
+  field is made strict wherever the API can;
+- sends a reasoning model's reasoning back to it within one run: the
+  turn's items, encrypted as OpenAI returned them, before the tool results
+  they led to. A compaction leaves them out from then on, as it leaves out
+  Anthropic's thinking. So does a budget notice (shown only with
+  `[experimental] ephemeral_pressure_layer` on, from 80% of a run's rounds
+  or cost): its text changes every round, and on this API it is the last
+  item, so a turn's reasoning comes after it; the next request moves it,
+  changing the history before that reasoning, which OpenAI's guide says
+  makes the API drop the reasoning. While a notice shows, no reasoning goes
+  back. They are never written to the session log, the database or a
+  conversation's history.
+
+The usage is read as on Chat Completions: input tokens, output tokens
+(reasoning included, which OpenAI bills as output) and cached input. A
+`temperature` a request names is sent. `gpt-6.1-sol` always reasons, and
+OpenAI's GPT-6 guide says to remove `temperature` while a model reasons,
+on either API. So a summary or extraction call whose model is set to
+`gpt-6.1-sol` sends temperature 0 and may be refused; no catalogue rule
+leaves it out for that model yet.
+
 ### Cost
 
 The cost tracker prices from the router's live registry — compiled defaults
@@ -426,14 +477,17 @@ fallback counts a model Anthropic's or OpenAI's discovery registered with no
 price: it still runs, its spend counts against the caps below, and
 `daemon.log` says once per id that it is counted at the fallback. A
 `[models."<id>"]` row with its `input_price` and `output_price` counts it at
-its own rate. A non-streaming OpenAI answer is counted by the model its body
-names, which may be a dated snapshot of the id asked for (such as
-`gpt-4o-mini-2024-07-18`): a snapshot the catalogue lacks meets the same
-fallback. An OpenAI-compatible server on this machine (a loopback `base_url`,
-such as llama.cpp or LM Studio, set up as the `openai` provider with a key)
-is a keyed provider too: its discovered models are counted at the fallback
-although they cost nothing. A `[models."<id>"]` row with `input_price = 0`
-and `output_price = 0` keeps each at `0`.
+its own rate. A non-streaming OpenAI answer, on either of its APIs, is
+counted by the model its body names, which may be a dated snapshot of the
+id asked for (such as `gpt-4o-mini-2024-07-18`, or `gpt-5.2-2025-12-11`,
+`gpt-5.2`'s default snapshot): a snapshot the catalogue lacks meets the
+same fallback. `gpt-6.1-sol`'s page lists no snapshot but the id itself. A
+streamed round is counted by the id it was routed to. An OpenAI-compatible
+server on this machine (a loopback `base_url`, such as llama.cpp or LM
+Studio, set up as the `openai` provider with a key) is a keyed provider
+too: its discovered models are counted at the fallback although they cost
+nothing. A `[models."<id>"]` row with `input_price = 0` and
+`output_price = 0` keeps each at `0`.
 
 A model whose provider prices a long prompt higher carries that second rate
 in its built-in row: `gpt-6.1-sol` costs $2 / $10 per million tokens, and a

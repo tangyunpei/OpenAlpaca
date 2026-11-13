@@ -1739,10 +1739,45 @@ fn openai_strict_accepts(schema: &serde_json::Value) -> Result<(), String> {
 /// builtin with an optional property or an open object must lose `strict`
 /// here rather than every tool-carrying turn on OpenAI. The schema itself is
 /// always sent as written.
+///
+/// C7b: the same holds for a request sent through the Responses API, whose
+/// function tool carries `strict` at its top level beside `type`, `name` and
+/// `parameters` — `true` where Chat Completions' carries it, and an explicit
+/// `false` everywhere else, since there an omitted `strict` asks the API to
+/// make the schema strict (developers.openai.com/api/docs/guides/
+/// function-calling, read 2026-11-12).
 #[test]
 fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() {
     use crate::bus::EventBus;
-    use openalpaca_llm::providers::openai_tools::openai_function_tool;
+    use openalpaca_llm::providers::openai_tools::{
+        openai_function_tool, openai_responses_function_tool,
+    };
+    // The Responses form of `def`, checked against the Chat Completions
+    // form's verdict: same name, description and schema, `strict` always
+    // present and equal to whether Chat Completions sends it.
+    let responses_form_agrees = |def: &ToolDefinition, sent_strict: bool| {
+        let entry = openai_responses_function_tool(def);
+        assert_eq!(entry["type"], "function", "{}", def.name);
+        assert_eq!(entry["name"], def.name.as_str(), "{}", def.name);
+        assert_eq!(
+            entry["description"],
+            def.description.as_str(),
+            "{}",
+            def.name
+        );
+        assert_eq!(
+            entry["parameters"], def.parameters,
+            "{} is sent as written",
+            def.name
+        );
+        assert!(entry.get("function").is_none(), "{}", def.name);
+        assert_eq!(
+            entry.get("strict"),
+            Some(&serde_json::json!(sent_strict)),
+            "{}: strict at the top level, true exactly where Chat Completions sends it",
+            def.name
+        );
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
@@ -1799,6 +1834,7 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
             def.name
         );
         let sent_strict = function.get("strict") == Some(&serde_json::json!(true));
+        responses_form_agrees(def, sent_strict);
         if def.strict != Some(true) {
             assert!(!sent_strict, "{} is not strict-marked", def.name);
             continue;
@@ -1887,6 +1923,7 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
         let sent =
             openai_function_tool(&def)["function"].get("strict") == Some(&serde_json::json!(true));
         assert_eq!(sent, compliant, "{schema}");
+        responses_form_agrees(&def, compliant);
     }
 }
 

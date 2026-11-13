@@ -651,7 +651,8 @@ Prefer concluding the current task over opening new tool calls. ...
 ```
 
 Placement: Anthropic — second element of `system` array, no `cache_control`.
-OpenAI/Ollama — tail `system`-role message in the `messages` array.
+OpenAI/Ollama — tail `system`-role message in the `messages` array (on
+OpenAI's Responses API, C7b, the last item of the `input` array).
 
 The notice is stateless (recomputed per iteration), never persisted to
 conversation history, and never mutates the `Arc<Vec<ChatMessage>>` the
@@ -852,6 +853,16 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   before the model reads it (Anthropic's context-editing page, read
   2026-11-12; not yet confirmed under the `context-management-2025-01-15`
   beta header the arm sends).
+  OpenAI's Responses API (C7b, a request with tools to OpenAI's own API)
+  keeps a turn's output items the same way when the turn carried a
+  reasoning item, and sends them back before the turn's tool results, its
+  reasoning encrypted as OpenAI returned it; the same compaction and notice
+  rule takes them out. There the notice is the last input item, so while
+  one shows a turn's reasoning follows it, and the next request, which
+  moves it, is a prefix change after which OpenAI drops that reasoning
+  ("Keep the prefix unchanged", read 2026-11-12): no reasoning goes back
+  while a notice shows. Each arm sends back only a turn its own API
+  returned.
   The thinking text can be streamed to a watching client (see
   [Streaming](#streaming)). It is persisted nowhere: the field is never
   serialized, so no session log, row or history line holds it.

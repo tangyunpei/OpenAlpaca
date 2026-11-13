@@ -644,3 +644,157 @@ async fn a_discovered_flagship_keeps_its_catalogue_price() {
         .expect("registered");
     assert_eq!(info.context_window, 1_050_000);
 }
+
+// ── C7b: which id prices a Responses API call ───────────────────────────────
+
+/// A keyed OpenAI install whose provider stands in for OpenAI's own API at
+/// `base`, so a request with tools goes through the Responses API (C7b).
+fn responses_router(base: &str) -> LlmRouter {
+    let provider = Arc::new(
+        OpenAiProvider::with_client(
+            loopback_client(TIMEOUT),
+            "sk-test-not-a-key".to_string(),
+            Some("gpt-4o-mini".to_string()),
+            Some(format!("{base}/v1")),
+            None,
+        )
+        .with_responses_api(true),
+    );
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider,
+            key_pool: keyed_pool(ProviderType::OpenAI),
+        },
+    );
+    LlmRouter::new(
+        providers,
+        registry_for(ProviderType::OpenAI, &HashMap::new()),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "gpt-4o-mini".to_string(),
+    )
+}
+
+/// A request for `model` that carries a tool, so it goes to `/responses`.
+fn tool_request(model: &str) -> RouterRequest {
+    RouterRequest {
+        tools: Arc::new(vec![ToolDefinition {
+            name: "search".to_string(),
+            description: "search".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            strict: None,
+            input_examples: None,
+        }]),
+        ..request(model)
+    }
+}
+
+/// A whole Responses answer naming `model`, with these token counts.
+fn responses_answer(model: &str, input: u32, output: u32) -> String {
+    serde_json::json!({
+        "id": "resp_1",
+        "object": "response",
+        "model": model,
+        "status": "completed",
+        "output": [{
+            "type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": "pong", "annotations": []}]
+        }],
+        "usage": {"input_tokens": input, "output_tokens": output,
+                  "input_tokens_details": {"cached_tokens": 0},
+                  "output_tokens_details": {"reasoning_tokens": 0}}
+    })
+    .to_string()
+}
+
+/// C7b's pin, no change made: a non-streaming Responses answer is counted by
+/// the model its body names, as a Chat Completions one is (design item (4)).
+/// `gpt-6.1-sol`'s page (read 2026-11-12) lists one snapshot, the id
+/// itself, so its answer is counted at its row; `gpt-5.2`'s names the
+/// default snapshot `gpt-5.2-2025-12-11`, which no row prices, so an answer
+/// naming it is counted at $3 / $15 (pending-decisions §1.14, *Rev 42*).
+#[tokio::test]
+async fn a_responses_answer_is_counted_by_the_model_its_body_names() {
+    let server = MockHttpServer::start(|req| {
+        let asked: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+        match (req.path.as_str(), asked["model"].as_str()) {
+            ("/v1/responses", Some("gpt-6.1-sol")) => {
+                MockResponse::json(responses_answer("gpt-6.1-sol", 100_000, 100_000))
+            }
+            ("/v1/responses", Some("gpt-5.2")) => {
+                MockResponse::json(responses_answer("gpt-5.2-2025-12-11", MILLION, MILLION))
+            }
+            _ => MockResponse::not_found(),
+        }
+    })
+    .await;
+    let router = responses_router(&server.base_url);
+
+    let mut sol = tool_request("gpt-6.1-sol");
+    sol.context.agent_id = Some("sol".to_string());
+    let answered = router.complete(sol).await.expect("the mock answers");
+    assert_eq!(answered.model, "gpt-6.1-sol");
+    let usage = router
+        .cost_tracker
+        .get_agent_usage("sol")
+        .await
+        .expect("recorded");
+    // 100,000 × $2 + 100,000 × $10 per million, under the long-prompt line.
+    assert!(
+        close(usage.total_cost_usd, 0.2 + 1.0),
+        "{}",
+        usage.total_cost_usd
+    );
+
+    let mut previous = tool_request("gpt-5.2");
+    previous.context.agent_id = Some("snapshot".to_string());
+    let answered = router.complete(previous).await.expect("the mock answers");
+    assert_eq!(answered.model, "gpt-5.2-2025-12-11");
+    let usage = router
+        .cost_tracker
+        .get_agent_usage("snapshot")
+        .await
+        .expect("recorded");
+    assert!(
+        close(usage.total_cost_usd, FALLBACK),
+        "the snapshot is counted at $3 / $15, not {}",
+        usage.total_cost_usd
+    );
+    assert_eq!(server.hits("/v1/chat/completions").await, 0);
+}
+
+/// The streamed site, no change made. What this pins is the router's half:
+/// `RoutedStream.model`, the id the router routed the round to, is the id
+/// asked for, whatever model the completion event names. The cost itself is
+/// recorded by core's loop, which collects the stream under that id and
+/// prices the round by it (`runner/agentic_loop/backend.rs`), outside this
+/// crate.
+#[tokio::test]
+async fn a_streamed_responses_round_is_routed_under_the_asked_id() {
+    let completed = serde_json::json!({
+        "type": "response.completed",
+        "response": serde_json::from_str::<serde_json::Value>(
+            &responses_answer("gpt-5.2-2025-12-11", 1_000, 1_000)
+        ).unwrap()
+    });
+    let frame = format!("event: response.completed\ndata: {completed}\n\n");
+    let server = MockHttpServer::start(move |req| match req.path.as_str() {
+        "/v1/responses" => MockResponse::sse(vec![frame.clone()]),
+        _ => MockResponse::not_found(),
+    })
+    .await;
+    let router = responses_router(&server.base_url);
+
+    let routed = router
+        .complete_streaming(tool_request("gpt-5.2"))
+        .await
+        .expect("streams");
+    assert_eq!(routed.model, "gpt-5.2");
+    let response = crate::collect_stream(routed.stream, routed.model.clone())
+        .await
+        .expect("collects");
+    assert_eq!(response.content, "pong");
+    assert_eq!(server.hits("/v1/responses").await, 1);
+}

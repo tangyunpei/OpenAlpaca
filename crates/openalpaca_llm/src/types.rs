@@ -108,9 +108,10 @@ pub struct ChatMessage {
     pub is_error: bool,
     /// The assistant turn this message rebuilds, as the provider returned
     /// it, when that turn carried thinking (C7a): the Anthropic arm sends it
-    /// back block for block so the model keeps its reasoning across a tool
-    /// loop. Lives only within one loop — never serialized, so no session
-    /// log, database row or history line holds thinking.
+    /// back block for block, and the OpenAI arm's Responses wire item for
+    /// item (C7b), so the model keeps its reasoning across a tool loop.
+    /// Lives only within one loop — never serialized, so no session log,
+    /// database row or history line holds thinking.
     #[serde(skip)]
     pub echo: Option<EchoedTurn>,
 }
@@ -126,8 +127,31 @@ pub struct ChatMessage {
 /// (platform.claude.com/docs/en/models/opus-5-5/migration-guide and
 /// .../build-with-claude/thinking, read 2026-11-12). A whole response keeps
 /// the API's own blocks; a streamed one is put back together by block index.
+///
+/// OpenAI's Responses API asks the same of a reasoning model's tool loop:
+/// "any reasoning items returned in model responses with tool calls must
+/// also be passed back with tool call outputs", every output item "in their
+/// original order" (developers.openai.com/api/docs/guides/function-calling
+/// and .../guides/reasoning, read 2026-11-12; C7b). Such a turn is kept as
+/// its output items, tagged [`EchoWire::OpenAiResponses`], and each arm sends
+/// back only a turn of its own wire.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EchoedTurn(Arc<Vec<serde_json::Value>>);
+pub struct EchoedTurn {
+    wire: EchoWire,
+    items: Arc<Vec<serde_json::Value>>,
+}
+
+/// Whose wire an [`EchoedTurn`]'s items are written for (C7b): a turn goes
+/// back only to the arm that returned it, so a request that falls back to
+/// another provider mid-loop rebuilds the turn from its text and tool calls
+/// instead of sending one API's items to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EchoWire {
+    /// Anthropic's Messages API: the turn's content blocks.
+    AnthropicMessages,
+    /// OpenAI's Responses API: the response's output items.
+    OpenAiResponses,
+}
 
 impl EchoedTurn {
     /// The turn's blocks, when at least one is a `thinking` or
@@ -145,20 +169,60 @@ impl EchoedTurn {
             Some("redacted_thinking") => b["data"].as_str().is_some_and(|d| !d.is_empty()),
             _ => true,
         });
-        (complete && blocks.iter().any(is_thinking_block)).then(|| Self(Arc::new(blocks)))
+        (complete && blocks.iter().any(is_thinking_block)).then(|| Self {
+            wire: EchoWire::AnthropicMessages,
+            items: Arc::new(blocks),
+        })
     }
 
-    /// The blocks, in the order the provider returned them.
+    /// A Responses API turn's output items (C7b), when at least one is a
+    /// `reasoning` item and each can go back: every item is a `reasoning`,
+    /// `message` or `function_call` item, and every `reasoning` item carries
+    /// its `encrypted_content`. The arm asks the API to store nothing
+    /// (`store: false`), and in that mode a reasoning item goes back by its
+    /// encrypted content, "populated by default" (the Responses API
+    /// reference, read 2026-11-12). `None` otherwise: the turn is rebuilt
+    /// from its text and tool calls, as before.
+    pub fn from_response_items(items: Vec<serde_json::Value>) -> Option<Self> {
+        let complete = items.iter().all(|item| match item["type"].as_str() {
+            Some("reasoning") => item["encrypted_content"]
+                .as_str()
+                .is_some_and(|e| !e.is_empty()),
+            Some("message" | "function_call") => true,
+            _ => false,
+        });
+        (complete && items.iter().any(|item| item["type"] == "reasoning")).then(|| Self {
+            wire: EchoWire::OpenAiResponses,
+            items: Arc::new(items),
+        })
+    }
+
+    /// Whose wire the items are written for.
+    pub fn wire(&self) -> EchoWire {
+        self.wire
+    }
+
+    /// The blocks or items, in the order the provider returned them.
     pub fn blocks(&self) -> &[serde_json::Value] {
-        &self.0
+        &self.items
     }
 
     /// The ids of the turn's `tool_use` blocks, in order.
     pub fn tool_use_ids(&self) -> Vec<&str> {
-        self.0
+        self.items
             .iter()
             .filter(|b| b["type"] == "tool_use")
             .filter_map(|b| b["id"].as_str())
+            .collect()
+    }
+
+    /// The `call_id`s of the turn's `function_call` items, in order (C7b):
+    /// what a tool result names on the Responses API, not the item's `id`.
+    pub fn function_call_ids(&self) -> Vec<&str> {
+        self.items
+            .iter()
+            .filter(|b| b["type"] == "function_call")
+            .filter_map(|b| b["call_id"].as_str())
             .collect()
     }
 }
@@ -443,9 +507,11 @@ pub struct ChatResponse {
     /// `assistant_with_tools()` propagates these to the ChatMessage.
     pub parts: Option<Vec<ContentPart>>,
     /// The turn's content blocks as the provider returned them, when it
-    /// carried thinking (C7a); `None` from every provider but Anthropic and
-    /// for a turn without thinking. [`ChatMessage::assistant_with_tools`]
-    /// and [`ChatMessage::assistant_answer`] carry it into the loop.
+    /// carried thinking (C7a), or its output items, when a Responses API
+    /// turn carried reasoning (C7b); `None` from every other provider and
+    /// wire, and for a turn without thinking.
+    /// [`ChatMessage::assistant_with_tools`] and
+    /// [`ChatMessage::assistant_answer`] carry it into the loop.
     pub echo: Option<EchoedTurn>,
 }
 
@@ -492,7 +558,8 @@ pub enum StreamEvent {
     /// The whole turn's content blocks, in order, once the stream has
     /// delivered them all — sent only for a turn that carried thinking
     /// (C7a; Anthropic's `thinking`, `signature_delta` and
-    /// `redacted_thinking`), so the collected response can be echoed.
+    /// `redacted_thinking`; C7b, a Responses API turn's output items with
+    /// a reasoning item), so the collected response can be echoed.
     Turn(EchoedTurn),
 }
 

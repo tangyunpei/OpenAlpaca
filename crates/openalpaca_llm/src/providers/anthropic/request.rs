@@ -108,7 +108,12 @@ fn echoed_blocks(
     msg: &ChatMessage,
     thinking_left_out: &mut bool,
 ) -> Option<Vec<serde_json::Value>> {
-    let turn = msg.echo.as_ref()?;
+    // Only a turn this wire returned: an OpenAI Responses turn reaching this
+    // arm after a fallback is rebuilt from its text and tool calls (C7b).
+    let turn = msg
+        .echo
+        .as_ref()
+        .filter(|turn| turn.wire() == EchoWire::AnthropicMessages)?;
     if *thinking_left_out {
         return None;
     }

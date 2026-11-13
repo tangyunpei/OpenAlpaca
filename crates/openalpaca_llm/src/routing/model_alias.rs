@@ -136,11 +136,11 @@ pub static ALIAS_TABLE: [AliasRow; 2] = [
         // the deprecations page, read 2026-11-12) — a holding row until
         // O-16 (a).
         balanced: "gpt-5-mini",
-        // GPT-5.2, "Previous flagship model" (developers.openai.com/api/docs/
-        // models/gpt-5.2, read 2026-11-12): the holding row until C7b, after
-        // which O-15 (a) makes it gpt-6.1-sol, whose page says "Tool calling
-        // requires the Responses API".
-        strong: "gpt-5.2",
+        // The latest GPT Sol (O-13 (a), O-15 (a)): GPT-6.1 Sol, `gpt-6.1-sol`
+        // (developers.openai.com/api/docs/models/gpt-6.1-sol, read
+        // 2026-11-12: "Tool calling requires the Responses API", which the
+        // OpenAI arm speaks for a request with tools since C7b).
+        strong: "gpt-6.1-sol",
     },
 ];
 
