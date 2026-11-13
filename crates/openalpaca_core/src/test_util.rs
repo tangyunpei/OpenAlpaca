@@ -278,6 +278,7 @@ impl openalpaca_llm::LlmProvider for RecordingProvider {
             },
             finish_reason: self.finish_reason.clone(),
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -513,6 +514,7 @@ impl openalpaca_llm::LlmProvider for CallsOneTool {
             },
             finish_reason,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }

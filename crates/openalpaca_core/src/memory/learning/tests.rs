@@ -163,6 +163,7 @@ impl LlmProvider for Scripted {
             },
             finish_reason,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -3046,6 +3047,7 @@ fn router_for(model: Arc<Scripted>, provider: ProviderType, id: &str) -> Arc<Llm
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     Arc::new(router)

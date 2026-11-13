@@ -22,6 +22,7 @@ use crate::routing::cost_tracker::CostTracker;
 use crate::routing::model_alias::{ALIAS_TABLE, ModelAlias, compiled_alias};
 use crate::routing::model_registry::ModelRegistry;
 use crate::routing::rate_limiter::{RateLimitConfig, RateLimiterRegistry};
+use crate::types::{ChatRequest, ThinkingConfig, ToolChoice};
 use arc_swap::ArcSwap;
 
 // Re-export types used by tests via `use super::*;`
@@ -112,6 +113,9 @@ pub struct LlmRouter {
     /// parent's model, or the default where the parent is not routable — was
     /// announced (M-5), so it is said once per pair.
     pub(super) alias_collapses_logged: DashSet<(ModelAlias, String)>,
+    /// Models whose refusal of a forced tool choice was announced — a forced
+    /// choice sent to one as `auto` is said once a model (C7a).
+    pub(super) forced_choices_logged: DashSet<String>,
 }
 
 /// Append `candidate` unless it is the model we are already replacing, or is
@@ -150,6 +154,7 @@ impl LlmRouter {
             discovery: DashMap::new(),
             substitutions_logged: DashSet::new(),
             alias_collapses_logged: DashSet::new(),
+            forced_choices_logged: DashSet::new(),
         }
     }
 
@@ -182,6 +187,7 @@ impl LlmRouter {
             discovery: DashMap::new(),
             substitutions_logged: DashSet::new(),
             alias_collapses_logged: DashSet::new(),
+            forced_choices_logged: DashSet::new(),
         }
     }
 
@@ -227,6 +233,7 @@ impl LlmRouter {
             discovery: DashMap::new(),
             substitutions_logged: DashSet::new(),
             alias_collapses_logged: DashSet::new(),
+            forced_choices_logged: DashSet::new(),
         }
     }
 
@@ -617,6 +624,55 @@ impl LlmRouter {
         }
     }
 
+    /// Make `request` meet the request contract of `model`, the model it is
+    /// about to be sent to (C7a, M-3d): what the model's row says its API
+    /// refuses is left out, where the request first names its model — after
+    /// the ladder has settled on it, so a fallback rung is held to its own.
+    ///
+    /// - No sampling parameters: `temperature` is not sent (the arm sends no
+    ///   `top_p` or `top_k` at all).
+    /// - Thinking always on: a `Disabled` thinking request is not sent; the
+    ///   model thinks adaptively, which is what no `thinking` field means.
+    /// - Adaptive thinking only: a manual budget (`Enabled`) is sent as
+    ///   `Adaptive`.
+    /// - No forced tool choice: `any` or a named tool goes as `auto`, and
+    ///   `daemon.log` says so at `INFO` once a model.
+    ///
+    /// A row with no contract — every row but the ones whose pages say so —
+    /// leaves the request as its caller made it.
+    pub(super) fn meet_request_contract(&self, model: &str, request: &mut ChatRequest) {
+        let contract = self.model_registry.request_contract(model);
+        if contract.no_sampling_parameters {
+            request.temperature = None;
+        }
+        match request.thinking {
+            Some(ThinkingConfig::Disabled) if contract.thinking_always_on => {
+                request.thinking = None;
+            }
+            Some(ThinkingConfig::Enabled { .. }) if contract.adaptive_thinking_only => {
+                request.thinking = Some(ThinkingConfig::Adaptive);
+            }
+            _ => {}
+        }
+        if contract.no_forced_tool_choice
+            && let Some(forced @ (ToolChoice::Any | ToolChoice::Tool(_))) = &request.tool_choice
+        {
+            if self.forced_choices_logged.insert(model.to_string()) {
+                let asked = match forced {
+                    ToolChoice::Tool(name) => format!("the tool '{name}'"),
+                    _ => "any tool".to_string(),
+                };
+                tracing::info!(
+                    model,
+                    asked = %asked,
+                    "{model} refuses a forced tool choice: a call that asks for {asked} is \
+                     sent with tool_choice auto, here and on every later call to {model}"
+                );
+            }
+            request.tool_choice = Some(ToolChoice::Auto);
+        }
+    }
+
     /// Every model a call can name right now: a catalogue entry whose
     /// provider is loaded ([`Self::is_routable`]), sorted. Not
     /// `available_models()`, which lists discovered models only.
@@ -784,3 +840,6 @@ mod transport_tests;
 
 #[cfg(all(test, feature = "anthropic", feature = "ollama", feature = "openai"))]
 mod pricing_tests;
+
+#[cfg(all(test, feature = "anthropic"))]
+mod contract_tests;

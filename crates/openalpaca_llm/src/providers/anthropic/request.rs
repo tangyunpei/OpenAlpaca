@@ -91,6 +91,40 @@ pub(super) fn build_message_content(msg: &ChatMessage) -> serde_json::Value {
     serde_json::Value::Array(blocks)
 }
 
+/// The assistant turn `msg` rebuilds, block for block as the API returned
+/// it, when it carried thinking and can still go back whole (C7a).
+///
+/// The pages ask a tool loop to send each assistant turn back "complete and
+/// unmodified" — its `thinking` blocks with their signatures, empty text
+/// included, its `redacted_thinking` blocks, in the order received — and
+/// refuse "edited, reordered, or partially dropped thinking blocks"
+/// (platform.claude.com/docs/en/models/opus-5-5/migration-guide, read
+/// 2026-11-12). So the turn goes back as kept, or, when its `tool_use` blocks
+/// no longer match the message's tool calls, with none of its thinking; and
+/// from then on no later turn of the request carries thinking ("Leave out
+/// the oldest blocks, the newest, or all of them, but none in between",
+/// .../build-with-claude/preserved-thinking/change-tools-or-instructions).
+fn echoed_blocks(
+    msg: &ChatMessage,
+    thinking_left_out: &mut bool,
+) -> Option<Vec<serde_json::Value>> {
+    let turn = msg.echo.as_ref()?;
+    if *thinking_left_out {
+        return None;
+    }
+    let calls: Vec<&str> = msg
+        .tool_calls
+        .iter()
+        .flatten()
+        .map(|tc| tc.id.as_str())
+        .collect();
+    if turn.tool_use_ids() != calls {
+        *thinking_left_out = true;
+        return None;
+    }
+    Some(turn.blocks().to_vec())
+}
+
 pub(super) fn build_request_body(
     default_model: &str,
     default_max_tokens: u32,
@@ -102,6 +136,10 @@ pub(super) fn build_request_body(
     // Extract system message (Anthropic uses top-level system field)
     let mut system_text = String::new();
     let mut messages = Vec::new();
+    // C7a: once one kept turn cannot go back as it came, no later one goes
+    // back with its thinking either — a block left out between two that are
+    // kept fails the API's check on every block after it.
+    let mut thinking_left_out = false;
 
     for msg in request.messages.iter() {
         match msg.role {
@@ -118,7 +156,12 @@ pub(super) fn build_request_body(
                 }));
             }
             Role::Assistant => {
-                if let Some(ref tool_calls) = msg.tool_calls {
+                if let Some(blocks) = echoed_blocks(msg, &mut thinking_left_out) {
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": blocks,
+                    }));
+                } else if let Some(ref tool_calls) = msg.tool_calls {
                     let mut content: Vec<serde_json::Value> = match &msg.parts {
                         Some(parts) if !parts.is_empty() => {
                             match build_message_content(msg) {

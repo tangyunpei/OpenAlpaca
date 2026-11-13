@@ -369,6 +369,35 @@ alias runs on instead. The seeded `llm.toml` carries a commented-out
 example; an existing `llm.toml` is never rewritten, so the built-in rows
 reach it with the release.
 
+### What a model's API refuses
+
+Some models refuse parts of a request that others take. The router holds
+each request to the model it is sent to, after the ladder has picked it.
+In this build one row says so: `claude-opus-5-5`. Its API refuses
+`temperature`, `top_p` and `top_k`, refuses turning thinking off (thinking
+is always on), refuses a thinking budget, and refuses a forced tool choice.
+So a request to it goes without `temperature` and without a `thinking`
+field that turns thinking off; a thinking budget would go as adaptive
+thinking, though no request this build makes sends one. That covers the conversation summary, the episode summary and
+the memory and task-output extraction when their model is Opus 5.5. A
+round that forces the `send` tool (the main loop's send hint, or a skill
+with `send`) goes with `tool_choice` `auto`, and `daemon.log` says so once
+per model at `INFO`: `claude-opus-5-5 refuses a forced tool choice: a call
+that asks for the tool 'send' is sent with tool_choice auto, here and on
+every later call to claude-opus-5-5`. A `[models."claude-opus-5-5"]` row
+of yours keeps these rules. A model that only discovery lists carries
+none. On Opus 5.5 those utility calls now think inside their `max_tokens`.
+Thinking text comes back empty unless asked for, and nothing here asks.
+
+Within one run, a model's thinking goes back to it unchanged in the next
+request of a tool loop: every thinking block, its signature and its order,
+as Anthropic's pages ask. The same holds after a truncated answer, after a
+steering message that arrived at the end of a round, and after the answer
+guard's corrective round. When the run compacts its history, or the budget
+notice changes the system prompt, every kept block is left out from then
+on: never some of them. Thinking is never written to the session log, the
+database or a conversation's history.
+
 ### Cost
 
 The cost tracker prices from the router's live registry — compiled defaults

@@ -115,6 +115,7 @@ impl LlmRouter {
                             supports_tools: model.supports_tools,
                             declared: false,
                             long_prompt: None,
+                            request_contract: crate::routing::model_registry::RequestContract::NONE,
                         },
                     );
                 }

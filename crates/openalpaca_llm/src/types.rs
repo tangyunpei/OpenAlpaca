@@ -106,6 +106,69 @@ pub struct ChatMessage {
     /// on every other message, and absent from the serialized form.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    /// The assistant turn this message rebuilds, as the provider returned
+    /// it, when that turn carried thinking (C7a): the Anthropic arm sends it
+    /// back block for block so the model keeps its reasoning across a tool
+    /// loop. Lives only within one loop — never serialized, so no session
+    /// log, database row or history line holds thinking.
+    #[serde(skip)]
+    pub echo: Option<EchoedTurn>,
+}
+
+/// An assistant turn's content blocks exactly as the provider returned them,
+/// in their order, kept only for a turn that carried thinking (C7a).
+///
+/// Anthropic's pages ask that a tool loop pass each assistant turn back
+/// "complete and unmodified": its `thinking` blocks with their `signature`s
+/// (empty `thinking` text included), its `redacted_thinking` blocks, its
+/// text and its `tool_use` blocks, in the order received — "the API rejects
+/// edited, reordered, or partially dropped thinking blocks with a 400 error"
+/// (platform.claude.com/docs/en/models/opus-5-5/migration-guide and
+/// .../build-with-claude/thinking, read 2026-11-12). A whole response keeps
+/// the API's own blocks; a streamed one is put back together by block index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EchoedTurn(Arc<Vec<serde_json::Value>>);
+
+impl EchoedTurn {
+    /// The turn's blocks, when at least one is a `thinking` or
+    /// `redacted_thinking` block and each can go back: every `thinking`
+    /// block has its `signature`, every `redacted_thinking` block its
+    /// `data` ("sent back empty", a signature is refused, the thinking
+    /// troubleshooting page). `None` otherwise — a turn without thinking is
+    /// rebuilt exactly as before, and one that cannot go back whole goes
+    /// back with none of its thinking, never some.
+    pub fn from_blocks(blocks: Vec<serde_json::Value>) -> Option<Self> {
+        let complete = blocks.iter().all(|b| match b["type"].as_str() {
+            Some("thinking") => {
+                b["thinking"].is_string() && b["signature"].as_str().is_some_and(|s| !s.is_empty())
+            }
+            Some("redacted_thinking") => b["data"].as_str().is_some_and(|d| !d.is_empty()),
+            _ => true,
+        });
+        (complete && blocks.iter().any(is_thinking_block)).then(|| Self(Arc::new(blocks)))
+    }
+
+    /// The blocks, in the order the provider returned them.
+    pub fn blocks(&self) -> &[serde_json::Value] {
+        &self.0
+    }
+
+    /// The ids of the turn's `tool_use` blocks, in order.
+    pub fn tool_use_ids(&self) -> Vec<&str> {
+        self.0
+            .iter()
+            .filter(|b| b["type"] == "tool_use")
+            .filter_map(|b| b["id"].as_str())
+            .collect()
+    }
+}
+
+/// A `thinking` or `redacted_thinking` content block.
+pub fn is_thinking_block(block: &serde_json::Value) -> bool {
+    matches!(
+        block["type"].as_str(),
+        Some("thinking" | "redacted_thinking")
+    )
 }
 
 impl ChatMessage {
@@ -117,6 +180,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         }
     }
 
@@ -128,6 +192,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         }
     }
 
@@ -149,6 +214,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         }
     }
 
@@ -160,6 +226,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         }
     }
 
@@ -175,7 +242,35 @@ impl ChatMessage {
             },
             tool_call_id: None,
             is_error: false,
+            echo: response.echo.clone(),
         }
+    }
+
+    /// The text a response answered with, as the next request's assistant
+    /// turn: the `MaxTokens` continuation, the steering drain at the
+    /// completion guard and the answer guard's corrective round (C7a).
+    ///
+    /// Like [`Self::assistant`], text only, with no parts, so a model without
+    /// thinking is sent what it always was; a turn that carried thinking and
+    /// called no tool goes back whole, all its thinking with it. A turn that
+    /// called a tool is not echoed here, since the text alone leaves its
+    /// `tool_use` blocks out.
+    pub fn assistant_answer(response: &super::ChatResponse) -> Self {
+        Self {
+            echo: if response.tool_calls.is_empty() {
+                response.echo.clone()
+            } else {
+                None
+            },
+            ..Self::assistant(&response.content)
+        }
+    }
+
+    /// Leave this message's thinking out of every later request (C7a): what
+    /// it was produced after has changed, so the API's prefix check would
+    /// fail it, and once out it stays out. Returns whether there was any.
+    pub fn forget_thinking(&mut self) -> bool {
+        self.echo.take().is_some()
     }
 
     pub fn tool_result(tool_call_id: &str, content: &str) -> Self {
@@ -186,6 +281,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
             is_error: false,
+            echo: None,
         }
     }
 
@@ -209,6 +305,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
             is_error: false,
+            echo: None,
         }
     }
 
@@ -345,6 +442,11 @@ pub struct ChatResponse {
     /// Multimodal content parts from the response. When present,
     /// `assistant_with_tools()` propagates these to the ChatMessage.
     pub parts: Option<Vec<ContentPart>>,
+    /// The turn's content blocks as the provider returned them, when it
+    /// carried thinking (C7a); `None` from every provider but Anthropic and
+    /// for a turn without thinking. [`ChatMessage::assistant_with_tools`]
+    /// and [`ChatMessage::assistant_answer`] carry it into the loop.
+    pub echo: Option<EchoedTurn>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -387,6 +489,11 @@ pub enum StreamEvent {
     Done { finish_reason: FinishReason },
     /// Stream error.
     Error { message: String },
+    /// The whole turn's content blocks, in order, once the stream has
+    /// delivered them all — sent only for a turn that carried thinking
+    /// (C7a; Anthropic's `thinking`, `signature_delta` and
+    /// `redacted_thinking`), so the collected response can be echoed.
+    Turn(EchoedTurn),
 }
 
 /// A boxed stream of chat events.
@@ -417,9 +524,61 @@ mod tests {
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
         };
         let msg = ChatMessage::assistant_with_tools(&response);
         assert_eq!(msg.parts.as_ref().unwrap().len(), 2);
+    }
+
+    /// `assistant_answer` (C7a) carries a thinking turn that called no tool
+    /// whole, and leaves out the thinking of one that called a tool: the
+    /// answer's text alone would drop its `tool_use` blocks, so its thinking
+    /// goes back none, never some.
+    #[test]
+    fn assistant_answer_echoes_only_a_turn_that_called_no_tool() {
+        let blocks = |with_tool: bool| {
+            let mut blocks = vec![
+                serde_json::json!({"type": "thinking", "thinking": "", "signature": "sig-A"}),
+                serde_json::json!({"type": "text", "text": "Answer."}),
+            ];
+            if with_tool {
+                blocks.push(serde_json::json!(
+                    {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {}}
+                ));
+            }
+            blocks
+        };
+        let response = |with_tool: bool| ChatResponse {
+            content: "Answer.".to_string(),
+            parts: None,
+            tool_calls: if with_tool {
+                vec![ToolCall {
+                    id: "toolu_1".to_string(),
+                    name: "search".to_string(),
+                    arguments: serde_json::json!({}),
+                }]
+            } else {
+                vec![]
+            },
+            model: "claude-opus-5-5".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::MaxTokens,
+            thinking: None,
+            echo: EchoedTurn::from_blocks(blocks(with_tool)),
+        };
+
+        let answered = ChatMessage::assistant_answer(&response(false));
+        assert_eq!(answered.content, "Answer.");
+        assert_eq!(answered.echo, response(false).echo);
+        assert!(answered.echo.is_some());
+
+        let called = ChatMessage::assistant_answer(&response(true));
+        assert_eq!(called.content, "Answer.");
+        assert!(called.tool_calls.is_none());
+        assert!(
+            called.echo.is_none(),
+            "a turn that called a tool is not echoed"
+        );
     }
 
     #[test]

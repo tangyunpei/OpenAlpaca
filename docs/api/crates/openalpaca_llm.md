@@ -30,7 +30,7 @@
 - `pub use keys::secret_store::{ CachingSecretStore, KeyringSecretStore, MemorySecretStore, SecretStore, };`
 - `pub use routing::cost_tracker::{ CacheStats, CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats, };`
 - `pub use routing::model_alias::{ALIAS_TABLE, AliasRow, ModelAlias, ModelChoice, compiled_alias};`
-- `pub use routing::model_registry::{ DiscoveredModel, LongPromptRate, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery, };`
+- `pub use routing::model_registry::{ DiscoveredModel, LongPromptRate, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery, RequestContract, };`
 - `pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};`
 - `pub use routing::rate_limiter::{ CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter, };`
 - `pub use routing::router::{ AliasResolution, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream, RouterRequest, };`

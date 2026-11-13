@@ -369,6 +369,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }

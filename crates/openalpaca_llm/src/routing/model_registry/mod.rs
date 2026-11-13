@@ -30,6 +30,38 @@ pub struct LongPromptRate {
     pub output_price_per_million: f64,
 }
 
+/// What a model's API refuses in a request, as its provider's own pages say
+/// (C7a, M-3d): each flag set only on a compiled row whose page, read on the
+/// day the row was written, says so, and named there with the page and the
+/// date. A row with none set gets the request its caller asked for.
+///
+/// The router meets the contract where a request first names its model
+/// (`LlmRouter::meet_request_contract`): it leaves out what the model
+/// refuses, sends `auto` for a forced tool choice and says so once a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RequestContract {
+    /// `temperature`, `top_p` and `top_k` are refused (a 400 at a non-default
+    /// value under the API version the Anthropic arm sends).
+    pub no_sampling_parameters: bool,
+    /// Thinking is always on: `thinking: {"type": "disabled"}` is refused.
+    pub thinking_always_on: bool,
+    /// Manual thinking budgets (`thinking: {"type": "enabled", ...}`) are
+    /// refused; adaptive thinking is the model's only mode.
+    pub adaptive_thinking_only: bool,
+    /// A forced tool choice (`any`, or a named tool) is refused.
+    pub no_forced_tool_choice: bool,
+}
+
+impl RequestContract {
+    /// A model whose pages state no request rule the arm would break.
+    pub const NONE: Self = Self {
+        no_sampling_parameters: false,
+        thinking_always_on: false,
+        adaptive_thinking_only: false,
+        no_forced_tool_choice: false,
+    };
+}
+
 /// Serializable model entry for API responses.
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelEntry {
@@ -128,6 +160,11 @@ pub struct ModelInfo {
     /// at any length. Only a compiled row carries one: a `[models]` row the
     /// person writes replaces the compiled row whole, rate included.
     pub long_prompt: Option<LongPromptRate>,
+    /// What the model's API refuses in a request (C7a). A compiled row's;
+    /// a `[models]` row for the same id keeps it, since it is the model's
+    /// contract rather than the person's price, and a discovered id that no
+    /// compiled row names has none.
+    pub request_contract: RequestContract,
 }
 
 /// Registry mapping model IDs to their provider and pricing metadata.
@@ -187,6 +224,27 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                // C7a: its request contract, from the pages read 2026-11-12.
+                // The Opus 5.5 migration guide (platform.claude.com/docs/en/
+                // models/opus-5-5/migration-guide), "What every request to
+                // Claude Opus 5.5 must satisfy": "Omit `temperature`, `top_p`,
+                // and `top_k`"; `thinking: {"type": "disabled"}` and manual
+                // budgets (`"enabled"`) "are rejected" — "adaptive thinking is
+                // always on"; forcing a tool call with `any` or a named tool
+                // "is rejected". The thinking troubleshooting page's table
+                // (.../build-with-claude/thinking-troubleshooting): Opus 5.5
+                // "Adaptive only", "Always on", rejecting `"enabled"` and
+                // `"disabled"`. Model deprecations (.../about-claude/
+                // model-deprecations): sampling parameters "Removed in API
+                // version `2026-10-21`"; "Earlier API versions return it [a
+                // 400] when set to a non-default value on Claude 4.7 and
+                // later models" — the arm sends `2023-06-01`.
+                request_contract: RequestContract {
+                    no_sampling_parameters: true,
+                    thinking_always_on: true,
+                    adaptive_thinking_only: true,
+                    no_forced_tool_choice: true,
+                },
             },
         );
         // Claude Opus 4.6: $5 / $25 (the pricing page, read 2026-11-12; the
@@ -206,6 +264,7 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
         // Claude Sonnet 4.6 and 4.5: $3 / $15 (the pricing page, read
@@ -227,6 +286,7 @@ impl ModelRegistry {
                     supports_tools: true,
                     declared: true,
                     long_prompt: None,
+                    request_contract: RequestContract::NONE,
                 },
             );
         }
@@ -246,6 +306,7 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
 
@@ -270,6 +331,7 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
         models.insert(
@@ -287,6 +349,7 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
         models.insert(
@@ -304,6 +367,7 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
 
@@ -326,6 +390,7 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
 
@@ -356,6 +421,7 @@ impl ModelRegistry {
                     input_price_per_million: 4.0,
                     output_price_per_million: 15.0,
                 }),
+                request_contract: RequestContract::NONE,
             },
         );
 
@@ -380,6 +446,7 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
 
@@ -417,6 +484,9 @@ impl ModelRegistry {
         config_models: &HashMap<String, crate::config::ModelConfigEntry>,
         disabled: &HashSet<ProviderType>,
     ) {
+        // A row the person writes prices a model; its request contract is
+        // the model's own, so the compiled row's is kept (C7a).
+        let compiled = Self::default_models();
         for (model_id, entry) in config_models {
             if let Some(provider) = crate::config::parse_provider_type_pub(&entry.provider) {
                 if disabled.contains(&provider) {
@@ -442,6 +512,9 @@ impl ModelRegistry {
                         supports_tools: entry.supports_tools.unwrap_or(true),
                         declared: true,
                         long_prompt: None,
+                        request_contract: compiled
+                            .get(model_id)
+                            .map_or(RequestContract::NONE, |row| row.request_contract),
                     },
                 );
             }
@@ -498,6 +571,16 @@ impl ModelRegistry {
 
     fn unpriced(info: &ModelInfo) -> bool {
         !info.declared && !info.provider.is_local()
+    }
+
+    /// What `model_id`'s API refuses in a request (C7a); none for an id the
+    /// registry has never met or whose row states nothing.
+    pub fn request_contract(&self, model_id: &str) -> RequestContract {
+        self.models
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(model_id)
+            .map_or(RequestContract::NONE, |info| info.request_contract)
     }
 
     /// Get full model info (cloned).

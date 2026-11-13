@@ -33,6 +33,7 @@ impl MockProvider {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }
     }
@@ -53,6 +54,7 @@ impl MockProvider {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         }
     }
@@ -73,6 +75,7 @@ impl MockProvider {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         }
     }
@@ -460,6 +463,7 @@ async fn test_max_tools_per_round_enforced() {
         },
         finish_reason: FinishReason::ToolUse,
         thinking: None,
+        echo: None,
         parts: None,
     };
 
@@ -771,6 +775,7 @@ fn test_context_threshold_custom() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     let registry = ModelRegistry::new(models);
@@ -805,6 +810,7 @@ async fn test_max_tokens_triggers_continuation() {
         },
         finish_reason: FinishReason::MaxTokens,
         thinking: None,
+        echo: None,
         parts: None,
     };
     let provider = MockProvider::new(vec![
@@ -846,6 +852,7 @@ async fn test_max_tokens_retries_exhausted_returns_truncated() {
         },
         finish_reason: FinishReason::MaxTokens,
         thinking: None,
+        echo: None,
         parts: None,
     };
     let provider = MockProvider::new(vec![
@@ -909,6 +916,7 @@ async fn test_cost_warning_at_80_percent() {
         },
         finish_reason: FinishReason::ToolUse,
         thinking: None,
+        echo: None,
         parts: None,
     };
     // Round 2: simple text response to complete
@@ -1022,6 +1030,7 @@ async fn test_compaction_triggers_during_agentic_loop() {
         },
         finish_reason: FinishReason::ToolUse,
         thinking: None,
+        echo: None,
         parts: None,
     };
 
@@ -1151,6 +1160,7 @@ async fn test_two_compactions_accumulate_dropped_tokens() {
         },
         finish_reason: FinishReason::ToolUse,
         thinking: None,
+        echo: None,
         parts: None,
     };
 
@@ -1515,6 +1525,7 @@ impl LlmProvider for WriterScript {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -1547,6 +1558,7 @@ async fn a_second_compaction_in_one_loop_does_not_read_the_rows_behind_again() {
         },
         finish_reason: FinishReason::ToolUse,
         thinking: None,
+        echo: None,
         parts: None,
     };
     let provider = Arc::new(WriterScript {
@@ -1774,6 +1786,7 @@ async fn test_agentic_loop_routed_completes() {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     })]));
 
@@ -1841,6 +1854,7 @@ async fn the_loop_retries_a_transient_transport_failure_and_not_a_refused_port()
         usage: Usage::default(),
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     });
 
@@ -1928,6 +1942,7 @@ async fn test_agentic_loop_routed_publishes_model_access_denied_event() {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     })]));
 
@@ -2022,6 +2037,7 @@ async fn test_agentic_loop_routed_with_tool_calls() {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         }),
         Ok(ChatResponse {
@@ -2035,6 +2051,7 @@ async fn test_agentic_loop_routed_with_tool_calls() {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }),
     ]));
@@ -2096,6 +2113,7 @@ async fn test_agentic_loop_routed_respects_max_rounds() {
         },
         finish_reason: FinishReason::ToolUse,
         thinking: None,
+        echo: None,
         parts: None,
     })]));
 
@@ -2166,6 +2184,7 @@ async fn main_loop_turn_with_prior_agent_spend_does_not_exit_cost_exceeded() {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     })]));
 
@@ -2249,6 +2268,7 @@ async fn per_turn_cap_still_trips_within_one_turn() {
         },
         finish_reason: FinishReason::ToolUse,
         thinking: None,
+        echo: None,
         parts: None,
     };
     let provider = Arc::new(MockRouterProvider::new(vec![Ok(expensive_tool_use)]));
@@ -2408,6 +2428,7 @@ async fn run_minimal_loop_for_span_test() -> LoopResult {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     })]));
 
@@ -2512,6 +2533,7 @@ async fn run_loop_with_seeded_cost(
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     })]));
 
@@ -3177,6 +3199,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         }),
         Ok(ChatResponse {
@@ -3190,6 +3213,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }),
     ]));
@@ -3362,6 +3386,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
             usage: Usage::default(),
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         }),
         Ok(ChatResponse {
@@ -3371,6 +3396,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }),
     ]));
@@ -3550,6 +3576,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
             usage: Usage::default(),
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         }),
         Ok(ChatResponse {
@@ -3559,6 +3586,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }),
     ]));
@@ -3801,6 +3829,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
             usage: Usage::default(),
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         }),
         Ok(ChatResponse {
@@ -3810,6 +3839,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }),
     ]));
@@ -4031,6 +4061,7 @@ impl LlmProvider for ModelEchoProvider {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -4170,6 +4201,7 @@ impl LlmProvider for EndlessStreamProvider {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -4236,6 +4268,7 @@ fn keyless_router(provider: Arc<dyn LlmProvider>) -> LlmRouter {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     LlmRouter::new(
@@ -5017,6 +5050,7 @@ mod stated_tool_timeout {
             usage: Usage::default(),
             finish_reason,
             thinking: None,
+            echo: None,
             parts: None,
         }
     }
@@ -5279,6 +5313,7 @@ mod tool_error_flag {
                 model: "mock-model".to_string(),
                 usage: Usage::default(),
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -5504,6 +5539,7 @@ mod no_output {
                 usage: Usage::default(),
                 finish_reason: FinishReason::ToolUse,
                 thinking: None,
+                echo: None,
                 parts: None,
             }),
             Ok(ChatResponse {
@@ -5513,6 +5549,7 @@ mod no_output {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             }),
         ]));
@@ -5724,6 +5761,7 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
             usage: Usage::default(),
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         }),
         Ok(ChatResponse {
@@ -5733,6 +5771,7 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }),
     ]));
@@ -5879,6 +5918,7 @@ mod round_groups {
             usage: Usage::default(),
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         };
         let answer = ChatResponse {
@@ -6390,5 +6430,340 @@ fn call_groups_cut_a_round_into_runs_that_go_together_and_single_calls() {
     assert_eq!(
         cut(&[true, true, false, true, false, false, true, true]),
         [(0, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 8)]
+    );
+}
+
+// ── C7a: a turn's thinking goes back whole, or not at all ───────────────
+//
+// Anthropic's pages (read 2026-11-12): a tool loop passes each assistant
+// turn's thinking blocks back "complete and unmodified"; "the API rejects
+// edited, reordered, or partially dropped thinking blocks with a 400 error"
+// (.../models/opus-5-5/migration-guide); and on the models with preserved
+// thinking a change to `system`, `tools` or an earlier message makes the
+// thinking already sent fail its prefix check — "Leave out the oldest
+// blocks, the newest, or all of them, but none in between", and "Once a
+// block is out, keep it out" (.../preserved-thinking/change-tools-or-
+// instructions). So every path that rebuilds a turn sends all of its blocks
+// or none, and a compaction or a changed system prompt takes them all out.
+
+/// Records every request the loop sends, whole.
+struct EchoRecorder {
+    responses: Vec<ChatResponse>,
+    call_count: AtomicUsize,
+    requests: std::sync::Mutex<Vec<ChatRequest>>,
+    on_call: Box<dyn Fn(usize) + Send + Sync>,
+}
+
+impl EchoRecorder {
+    fn new(responses: Vec<ChatResponse>) -> Self {
+        Self::with_hook(responses, Box::new(|_| {}))
+    }
+
+    fn with_hook(responses: Vec<ChatResponse>, on_call: Box<dyn Fn(usize) + Send + Sync>) -> Self {
+        Self {
+            responses,
+            call_count: AtomicUsize::new(0),
+            requests: std::sync::Mutex::new(Vec::new()),
+            on_call,
+        }
+    }
+
+    fn requests(&self) -> Vec<ChatRequest> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for EchoRecorder {
+    fn name(&self) -> &str {
+        "echo-recorder"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(request);
+        let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+        (self.on_call)(idx);
+        Ok(self.responses[idx.min(self.responses.len() - 1)].clone())
+    }
+}
+
+/// A turn's blocks as Anthropic returns them: two thinking blocks (the first
+/// with empty text, as Opus 5.5's default display sends it) around `text`,
+/// when there is any.
+fn turn_blocks(sig: &str, text: &str) -> Vec<serde_json::Value> {
+    let mut blocks = vec![serde_json::json!(
+        {"type": "thinking", "thinking": "", "signature": format!("{sig}-a")}
+    )];
+    if !text.is_empty() {
+        blocks.push(serde_json::json!({"type": "text", "text": text}));
+    }
+    blocks.push(serde_json::json!(
+        {"type": "thinking", "thinking": "next", "signature": format!("{sig}-b")}
+    ));
+    blocks
+}
+
+/// A response that answers in text, carrying its thinking.
+fn thinking_answer(text: &str, sig: &str, finish_reason: FinishReason) -> ChatResponse {
+    ChatResponse {
+        echo: openalpaca_llm::EchoedTurn::from_blocks(turn_blocks(sig, text)),
+        finish_reason,
+        ..MockProvider::simple_response(text)
+    }
+}
+
+/// A response that calls `search` once, carrying its thinking; `pad` makes
+/// its text long enough to push a small window into compaction.
+fn thinking_tool_turn(id: &str, sig: &str, pad: usize) -> ChatResponse {
+    let text = "x".repeat(pad);
+    let mut blocks = turn_blocks(sig, &text);
+    blocks.push(serde_json::json!({
+        "type": "tool_use", "id": id, "name": "search", "input": {"query": "test"}
+    }));
+    ChatResponse {
+        content: text,
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: id.to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"query": "test"}),
+        }],
+        finish_reason: FinishReason::ToolUse,
+        echo: openalpaca_llm::EchoedTurn::from_blocks(blocks),
+        ..MockProvider::simple_response("")
+    }
+}
+
+/// The kept turn of each assistant message, in order.
+fn echoes(request: &ChatRequest) -> Vec<Option<openalpaca_llm::EchoedTurn>> {
+    request
+        .messages
+        .iter()
+        .filter(|m| matches!(m.role, openalpaca_llm::Role::Assistant))
+        .map(|m| m.echo.clone())
+        .collect()
+}
+
+async fn run_recorded(provider: &EchoRecorder, config: &LoopConfig) -> LoopResult {
+    run_agentic_loop(
+        provider,
+        vec![ChatMessage::system("Be brief."), ChatMessage::user("start")],
+        vec![],
+        config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// A tool loop's next request carries the turn the tool was called from,
+/// every thinking block of it.
+#[tokio::test]
+async fn a_tool_loops_next_request_carries_its_turns_thinking_whole() {
+    let first = thinking_tool_turn("tc_1", "sig-1", 0);
+    let provider = EchoRecorder::new(vec![first.clone(), MockProvider::simple_response("Done.")]);
+    let config = LoopConfig {
+        enable_caching: false,
+        ..Default::default()
+    };
+
+    let result = run_recorded(&provider, &config).await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(echoes(&requests[1]), vec![first.echo]);
+}
+
+/// The `MaxTokens` continuation sends the cut turn with all its thinking.
+#[tokio::test]
+async fn a_max_tokens_continuation_sends_the_cut_turn_with_all_its_thinking() {
+    let cut = thinking_answer("Partial output...", "sig-1", FinishReason::MaxTokens);
+    let provider = EchoRecorder::new(vec![
+        cut.clone(),
+        MockProvider::simple_response("Completed."),
+    ]);
+    let config = LoopConfig {
+        enable_caching: false,
+        ..Default::default()
+    };
+
+    let result = run_recorded(&provider, &config).await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(echoes(&requests[1]), vec![cut.echo]);
+}
+
+/// The steering drain at the completion guard keeps the answer it holds
+/// back, with all its thinking.
+#[tokio::test]
+async fn a_steering_drain_sends_the_held_answer_with_all_its_thinking() {
+    let inbox = Arc::new(SteeringInbox::default());
+    let hook_inbox = Arc::clone(&inbox);
+    let first = thinking_answer("First answer", "sig-1", FinishReason::Stop);
+    let provider = EchoRecorder::with_hook(
+        vec![first.clone(), MockProvider::simple_response("Final answer")],
+        Box::new(move |idx| {
+            if idx == 0 {
+                hook_inbox.push(steering_msg("one more thing")).unwrap();
+            }
+        }),
+    );
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        ..Default::default()
+    };
+
+    let result = run_recorded(&provider, &config).await;
+
+    assert_eq!(result.final_content, "Final answer");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(echoes(&requests[1]), vec![first.echo]);
+}
+
+/// The answer guard's corrective round sends the answer it objected to with
+/// all its thinking.
+#[tokio::test]
+async fn the_answer_guards_round_sends_the_answer_with_all_its_thinking() {
+    let first = thinking_answer("a false claim", "sig-1", FinishReason::Stop);
+    let provider = EchoRecorder::new(vec![
+        first.clone(),
+        MockProvider::simple_response("the honest answer"),
+    ]);
+    let config = LoopConfig {
+        max_rounds: 2,
+        enable_caching: false,
+        answer_guard: Some(Arc::new(CountingGuard {
+            reject: "false",
+            seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+        })),
+        ..Default::default()
+    };
+
+    let result = run_recorded(&provider, &config).await;
+
+    assert_eq!(result.final_content, "the honest answer");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(echoes(&requests[1]), vec![first.echo]);
+}
+
+/// A compaction rewrites the history the kept thinking was produced after,
+/// so it takes every block out, and none comes back; a turn produced after
+/// it goes back whole.
+#[tokio::test]
+async fn a_compaction_takes_every_thinking_block_out_and_keeps_it_out() {
+    use crate::context_budget::ContextBudgetManager;
+    use crate::daemon_config::ContextBudgetConfig;
+
+    let budget = ContextBudgetManager::new(800, &ContextBudgetConfig::default());
+    let turns: Vec<ChatResponse> = (0..9)
+        .map(|i| thinking_tool_turn(&format!("tc_{i}"), &format!("sig-{i}"), 400))
+        .collect();
+    let mut responses = turns.clone();
+    responses.push(MockProvider::simple_response("Final compacted answer."));
+    let provider = EchoRecorder::new(responses);
+    let config = LoopConfig {
+        max_rounds: 15,
+        max_cost: 10.0,
+        enable_caching: false,
+        context_tail_keep: 2,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("Search for information repeatedly."),
+        ],
+        vec![],
+        &config,
+        None,
+        "test_compaction",
+        None,
+        Some(&budget),
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    let requests = provider.requests();
+    let mut compactions = 0;
+    for i in 1..requests.len() {
+        let (before, now) = (echoes(&requests[i - 1]), echoes(&requests[i]));
+        if requests[i].messages.len() == requests[i - 1].messages.len() + 2 {
+            // An ordinary round: what was out stays out, what was in stays
+            // in, and the new turn goes back whole.
+            let (old, new) = now.split_at(now.len() - 1);
+            assert_eq!(
+                old.iter().map(Option::is_some).collect::<Vec<_>>(),
+                before.iter().map(Option::is_some).collect::<Vec<_>>(),
+                "request {i}: a block once out stays out"
+            );
+            assert!(
+                new[0].is_some(),
+                "request {i}: the new turn goes back whole"
+            );
+        } else {
+            compactions += 1;
+            assert!(
+                now.iter().all(Option::is_none),
+                "request {i}, after a compaction, sends no thinking: {now:?}"
+            );
+        }
+    }
+    assert!(compactions > 0, "a compaction ran");
+}
+
+/// A budget notice changes the system prompt every block so far was
+/// produced after, so the request that first carries one sends no thinking.
+#[tokio::test]
+async fn a_changed_system_notice_takes_every_thinking_block_out() {
+    let mut responses: Vec<ChatResponse> = (0..4)
+        .map(|i| thinking_tool_turn(&format!("tc_{i}"), &format!("sig-{i}"), 0))
+        .collect();
+    responses.push(MockProvider::simple_response("Done."));
+    let provider = EchoRecorder::new(responses);
+    let config = LoopConfig {
+        max_rounds: 5,
+        enable_caching: false,
+        experimental_ephemeral_pressure: true,
+        ..Default::default()
+    };
+
+    run_recorded(&provider, &config).await;
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 5);
+    assert!(requests[3].ephemeral_system_notice.is_none());
+    assert!(echoes(&requests[3]).iter().all(Option::is_some));
+    assert!(
+        requests[4].ephemeral_system_notice.is_some(),
+        "the fifth round carries the notice"
+    );
+    assert_eq!(echoes(&requests[4]).len(), 4);
+    assert!(
+        echoes(&requests[4]).iter().all(Option::is_none),
+        "{:?}",
+        echoes(&requests[4])
     );
 }

@@ -1189,6 +1189,7 @@ impl openalpaca_llm::LlmProvider for RecordingLeadMock {
             usage: openalpaca_llm::Usage::default(),
             finish_reason: openalpaca_llm::FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -1905,6 +1906,7 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     }]));
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
@@ -2320,6 +2322,7 @@ impl ExtractionScene {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         };
         let provider = Arc::new(e2e_mock::MockProvider::new(vec![
@@ -2663,6 +2666,7 @@ async fn a_leads_history_row_names_the_template_that_ran() {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     }]));
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
@@ -3040,6 +3044,7 @@ async fn a_long_report_survives_to_the_two_thousand_character_cap() {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     }]));
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
@@ -3189,6 +3194,7 @@ async fn a_real_unattended_run_reports_the_tool_nobody_could_approve() {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         },
         // Round 2: it writes its report having been refused.
@@ -3203,6 +3209,7 @@ async fn a_real_unattended_run_reports_the_tool_nobody_could_approve() {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         },
     ]));
@@ -3312,6 +3319,7 @@ impl openalpaca_llm::LlmProvider for LeadAndSubagentMock {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         };
         let say = |text: &str| ChatResponse {
@@ -3325,6 +3333,7 @@ impl openalpaca_llm::LlmProvider for LeadAndSubagentMock {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         };
 
@@ -3462,6 +3471,7 @@ impl openalpaca_llm::LlmProvider for LeadSpawnsAPendingWorker {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }

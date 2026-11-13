@@ -1072,6 +1072,7 @@ mod tests {
                 },
                 finish_reason: openalpaca_llm::FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }

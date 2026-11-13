@@ -576,6 +576,7 @@ fn assistant_message(round: &Round) -> ChatMessage {
         tool_calls: (!round.calls.is_empty()).then(|| round.calls.clone()),
         tool_call_id: None,
         is_error: false,
+        echo: None,
     }
 }
 

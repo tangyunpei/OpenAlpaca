@@ -30,6 +30,7 @@ impl MockProvider {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }
     }
@@ -829,6 +830,7 @@ fn test_flatten_messages() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
         ChatMessage::user("Hello"),
         ChatMessage {
@@ -838,6 +840,7 @@ fn test_flatten_messages() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
     ];
     let flattened = flatten_messages(&messages);
@@ -856,6 +859,7 @@ fn test_truncate_messages_for_cli_small_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
         ChatMessage::user("Hello"),
         ChatMessage {
@@ -865,6 +869,7 @@ fn test_truncate_messages_for_cli_small_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
     ];
     let result = truncate_messages_for_cli(&messages);
@@ -886,6 +891,7 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
         ChatMessage::user(&big_content), // middle — should be dropped
         ChatMessage {
@@ -895,6 +901,7 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         }, // middle — should be dropped
         ChatMessage::user(&big_content), // middle — should be dropped
         ChatMessage {
@@ -904,6 +911,7 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         }, // second-to-last — kept
         ChatMessage::user("What next?"), // last — kept
     ];

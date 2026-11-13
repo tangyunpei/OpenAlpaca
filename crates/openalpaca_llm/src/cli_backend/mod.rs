@@ -277,6 +277,7 @@ fn parse_claude_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -289,6 +290,7 @@ fn parse_claude_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -313,6 +315,7 @@ fn parse_codex_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -325,6 +328,7 @@ fn parse_codex_output(stdout: &str) -> Result<ChatResponse, LlmError> {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }

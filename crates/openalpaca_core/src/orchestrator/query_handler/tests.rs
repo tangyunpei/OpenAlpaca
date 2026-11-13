@@ -517,6 +517,7 @@ mod main_loop_tool_timeout {
                 usage: Usage::default(),
                 finish_reason,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }

@@ -211,6 +211,7 @@ fn router_over(
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                request_contract: crate::routing::model_registry::RequestContract::NONE,
             },
         );
     }

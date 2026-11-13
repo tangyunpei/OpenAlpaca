@@ -80,6 +80,7 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -130,6 +131,7 @@ fn make_orchestrator_with_capturing_llm(
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -295,6 +297,7 @@ async fn test_simple_query_with_mock_llm() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -432,6 +435,7 @@ fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -673,6 +677,7 @@ mod request_workspace_threading {
                 },
                 finish_reason,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -872,6 +877,7 @@ mod a_list_change_mid_turn {
                 },
                 finish_reason,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -1009,6 +1015,7 @@ mod project_turn_offers {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -1149,6 +1156,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 }),
                 // Call 1: agentic loop — return tool use
@@ -1163,6 +1171,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::ToolUse,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 }),
                 // Call 2+: return final answer with Stop
@@ -1173,6 +1182,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 }),
             }
@@ -1242,6 +1252,7 @@ async fn test_tool_max_rounds_enforcement() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 });
             }
@@ -1261,6 +1272,7 @@ async fn test_tool_max_rounds_enforcement() {
                 },
                 finish_reason: FinishReason::ToolUse,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -1468,6 +1480,7 @@ fn local_only_router(
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     // `RecordingProvider` is not `OllamaProvider`, so it keeps the trait's
@@ -2000,6 +2013,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -2539,6 +2553,7 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -3141,6 +3156,7 @@ impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
                     },
                     finish_reason: FinishReason::ToolUse,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 });
             }
@@ -3156,6 +3172,7 @@ impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -4066,6 +4083,7 @@ impl openalpaca_llm::LlmProvider for SilentMockLlm {
             },
             finish_reason: openalpaca_llm::FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -4413,6 +4431,7 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
                     FinishReason::Stop
                 },
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -5277,6 +5296,7 @@ fn make_orchestrator_with_streaming_llm() -> Orchestrator {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -5564,6 +5584,7 @@ impl openalpaca_llm::LlmProvider for ParkedStreamingSkillLlm {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -6169,6 +6190,7 @@ impl openalpaca_llm::LlmProvider for AlwaysToolCallingMock {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -6333,6 +6355,7 @@ fn ollama_only_router(
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     Arc::new(router)
@@ -7758,6 +7781,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             });
         }
@@ -7782,6 +7806,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::ToolUse,
                 thinking: None,
+                echo: None,
                 parts: None,
             },
             Some(ScriptStep::Say(text)) => ChatResponse {
@@ -7791,6 +7816,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             },
             // The script ran out — anything the loop asks beyond it is a bug
@@ -7802,6 +7828,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             },
         })
@@ -9050,6 +9077,7 @@ impl openalpaca_llm::LlmProvider for MarkerExtractorLlm {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }

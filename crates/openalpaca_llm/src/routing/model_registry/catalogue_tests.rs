@@ -155,3 +155,43 @@ fn nothing_shipped_names_a_removed_row() {
         );
     }
 }
+
+/// C7a: only a row whose page, read on 2026-11-12, says the model refuses a
+/// part of the arm's request carries a contract — today `claude-opus-5-5`
+/// alone, which refuses all four. The pages: the Opus 5.5 migration guide
+/// (sampling parameters, `disabled` and `enabled` thinking, a forced
+/// `tool_choice`); `.../build-with-claude/thinking-troubleshooting`'s
+/// per-model table (Opus 4.6 and Sonnet 4.6 reject no thinking type; Haiku
+/// 4.5 and Sonnet 4.5 reject only `adaptive`, which the arm's callers never
+/// send); `.../build-with-claude/thinking` ("Limits": non-default sampling
+/// refused on Claude 4.7 and later, forced tool use on Opus 5.5, Sonnet 5.5
+/// and Fable and Mythos 5.1 and 5.2 — neither on the rows below).
+#[test]
+fn only_opus_5_5_carries_a_request_contract() {
+    let registry = ModelRegistry::with_defaults();
+    let all = RequestContract {
+        no_sampling_parameters: true,
+        thinking_always_on: true,
+        adaptive_thinking_only: true,
+        no_forced_tool_choice: true,
+    };
+    assert_eq!(row(&registry, "claude-opus-5-5").request_contract, all);
+    for id in [
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5-20250929",
+        "claude-haiku-4-5-20251001",
+        "gpt-5.2",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-4o-mini",
+        "gpt-6.1-sol",
+        "o3",
+    ] {
+        assert_eq!(
+            row(&registry, id).request_contract,
+            RequestContract::NONE,
+            "{id}"
+        );
+    }
+}

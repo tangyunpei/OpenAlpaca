@@ -71,7 +71,7 @@ impl LlmRouter {
                     .get_or_create(&key_guard.id, key_guard.rate_limit);
                 let _key_permit = key_limiter.acquire(estimated_tokens).await;
 
-                let chat_request = ChatRequest {
+                let mut chat_request = ChatRequest {
                     messages: Arc::clone(&request.messages),
                     tools: Arc::clone(&request.tools),
                     model: Some(model.to_string()),
@@ -83,6 +83,7 @@ impl LlmRouter {
                     context_management: request.context_management.clone(),
                     ephemeral_system_notice: request.ephemeral_system_notice.clone(),
                 };
+                self.meet_request_contract(model, &mut chat_request);
 
                 // The router's own clock, started before the provider's: a
                 // call its deadline or read gap ended has run at least that

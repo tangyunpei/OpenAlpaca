@@ -47,7 +47,7 @@ pub use routing::cost_tracker::{
 pub use routing::model_alias::{ALIAS_TABLE, AliasRow, ModelAlias, ModelChoice, compiled_alias};
 pub use routing::model_registry::{
     DiscoveredModel, LongPromptRate, ModelEntry, ModelInfo, ModelRegistry, PricingInfo,
-    ProviderDiscovery,
+    ProviderDiscovery, RequestContract,
 };
 pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
 pub use routing::rate_limiter::{
@@ -172,6 +172,9 @@ pub fn response_to_events(response: ChatResponse) -> Vec<StreamEvent> {
             partial_json: tc.arguments.to_string(),
         });
     }
+    if let Some(turn) = response.echo {
+        events.push(StreamEvent::Turn(turn));
+    }
     events.push(StreamEvent::Usage(response.usage));
     events.push(StreamEvent::Done {
         finish_reason: response.finish_reason,
@@ -208,6 +211,7 @@ mod tests {
             }]),
             tool_call_id: None,
             is_error: false,
+            echo: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("tool_calls"));
@@ -333,6 +337,7 @@ mod tests {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: Some("Let me think...".to_string()),
+            echo: None,
             parts: None,
         };
 
@@ -352,6 +357,39 @@ mod tests {
         assert_eq!(collected.finish_reason, FinishReason::ToolUse);
     }
 
+    /// A whole response's kept turn (C7a) survives the trait's default
+    /// `chat_streaming`, which streams a whole response as events:
+    /// `response_to_events` carries it as one `Turn` before the usage and
+    /// the end, and `collect_stream` puts it back on the response.
+    #[tokio::test]
+    async fn test_response_to_events_carries_the_kept_turn() {
+        let turn = EchoedTurn::from_blocks(vec![
+            serde_json::json!({"type": "thinking", "thinking": "", "signature": "sig-A"}),
+            serde_json::json!({"type": "text", "text": "Hello"}),
+        ])
+        .expect("a signed thinking turn is kept");
+        let response = ChatResponse {
+            content: "Hello".to_string(),
+            tool_calls: vec![],
+            model: "m".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            echo: Some(turn.clone()),
+            parts: None,
+        };
+
+        let events = response_to_events(response);
+        let n = events.len();
+        assert!(matches!(&events[n - 3], StreamEvent::Turn(t) if *t == turn));
+        assert!(matches!(&events[n - 2], StreamEvent::Usage(_)));
+        assert!(matches!(&events[n - 1], StreamEvent::Done { .. }));
+
+        let stream = Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)));
+        let collected = collect_stream(stream, "m".to_string()).await.unwrap();
+        assert_eq!(collected.echo, Some(turn));
+    }
+
     #[test]
     fn test_response_to_events_text_only() {
         let response = ChatResponse {
@@ -361,6 +399,7 @@ mod tests {
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         };
         let events = response_to_events(response);

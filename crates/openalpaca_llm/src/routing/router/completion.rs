@@ -77,7 +77,7 @@ impl LlmRouter {
                 }
             };
 
-            let chat_request = ChatRequest {
+            let mut chat_request = ChatRequest {
                 messages: Arc::clone(&request.messages),
                 tools: Arc::clone(&request.tools),
                 model: Some(model.to_string()),
@@ -89,6 +89,7 @@ impl LlmRouter {
                 context_management: request.context_management.clone(),
                 ephemeral_system_notice: request.ephemeral_system_notice.clone(),
             };
+            self.meet_request_contract(model, &mut chat_request);
 
             let started = tokio::time::Instant::now();
             match entry

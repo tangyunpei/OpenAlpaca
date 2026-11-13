@@ -2345,6 +2345,7 @@ mod tests {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }

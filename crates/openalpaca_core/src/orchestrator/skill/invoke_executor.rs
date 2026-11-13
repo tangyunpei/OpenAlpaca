@@ -595,6 +595,7 @@ mod tests {
                 },
                 finish_reason,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }

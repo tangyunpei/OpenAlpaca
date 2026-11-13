@@ -50,6 +50,7 @@ fn test_custom_registry() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            request_contract: RequestContract::NONE,
         },
     );
     let registry = ModelRegistry::new(models);
@@ -78,6 +79,7 @@ fn test_register_model() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            request_contract: RequestContract::NONE,
         },
     );
     assert_eq!(
@@ -105,6 +107,7 @@ fn test_register_if_absent() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            request_contract: RequestContract::NONE,
         },
     );
     assert_eq!(
@@ -128,6 +131,7 @@ fn test_register_if_absent() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            request_contract: RequestContract::NONE,
         },
     );
     assert_eq!(
@@ -160,6 +164,7 @@ fn test_register_discovered() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            request_contract: RequestContract::NONE,
         },
     );
     let info = registry.get_model_info("gpt-5.2").unwrap();
@@ -183,6 +188,7 @@ fn test_register_discovered() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            request_contract: RequestContract::NONE,
         },
     );
     let info = registry.get_model_info("new-api-model").unwrap();
@@ -213,6 +219,7 @@ fn test_list_discovered_models() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            request_contract: RequestContract::NONE,
         },
     );
 

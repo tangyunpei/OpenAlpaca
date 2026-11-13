@@ -46,6 +46,7 @@ fn local_model(context_window: u32) -> ModelInfo {
         supports_tools: true,
         declared: true,
         long_prompt: None,
+        request_contract: crate::routing::model_registry::RequestContract::NONE,
     }
 }
 

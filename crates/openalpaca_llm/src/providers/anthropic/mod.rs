@@ -379,3 +379,6 @@ use streaming::parse_anthropic_sse;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod echo_tests;

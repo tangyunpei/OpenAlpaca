@@ -519,6 +519,10 @@ async fn run_agentic_loop_core(
     }
     let tools_arc = Arc::new(tools);
     let mut consecutive_llm_errors: usize = 0;
+    // C7a: the ephemeral notice the last request carried in its system
+    // prompt. A request whose notice differs changes the system prompt every
+    // kept thinking block was produced after, so it sends none of them.
+    let mut last_notice: Option<Option<String>> = None;
     const MAX_LLM_RETRIES: usize = 3;
 
     // ── Steering state (Routing V2) ────────────────────────────────
@@ -767,6 +771,13 @@ async fn run_agentic_loop_core(
                         "Graduated compaction completed"
                     );
                 });
+                // C7a: the history the kept thinking was produced after has
+                // been rewritten, so every block goes, and stays gone.
+                forget_thinking(
+                    Arc::make_mut(&mut messages).as_mut_slice(),
+                    agent_id,
+                    "compaction",
+                );
 
                 cumulative_dropped_tokens += report
                     .initial_tokens
@@ -867,6 +878,19 @@ async fn run_agentic_loop_core(
                 pending_steering.extend(drained);
             }
         }
+
+        // C7a: a changed ephemeral notice is a changed system prompt.
+        if last_notice
+            .as_ref()
+            .is_some_and(|last| *last != ephemeral_notice)
+        {
+            forget_thinking(
+                Arc::make_mut(&mut messages).as_mut_slice(),
+                agent_id,
+                "system_notice",
+            );
+        }
+        last_notice = Some(ephemeral_notice.clone());
 
         // ── 5. Build request (pre-LLM-call assembly) ──────────────
         let tool_choice = {
@@ -1111,10 +1135,12 @@ async fn run_agentic_loop_core(
                 });
 
                 // ── Tool execution ─────────────────────────────────
-                // IMPORTANT: Thinking blocks are NOT included in conversation history.
-                // Only the text content and tool calls are pushed as assistant messages.
-                // Anthropic API strips thinking from re-sent messages automatically,
-                // but we also omit response.thinking from the ChatMessage to be explicit.
+                // C7a: a turn that carried thinking keeps its blocks, as the
+                // provider returned them, for the next request of this loop
+                // (`ChatMessage::echo`; Anthropic's pages ask for them back
+                // unchanged with the tool results). They live only in this
+                // loop's list: no session log, row or history line holds
+                // them, and `response.thinking`'s text is not kept.
                 if response.finish_reason == FinishReason::ToolUse
                     && !response.tool_calls.is_empty()
                 {
@@ -1393,8 +1419,7 @@ async fn run_agentic_loop_core(
                 if response.finish_reason == FinishReason::MaxTokens {
                     state.max_tokens_retries += 1;
                     if state.max_tokens_retries <= MAX_TOKENS_RETRIES {
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::assistant(&response.content));
+                        Arc::make_mut(&mut messages).push(ChatMessage::assistant_answer(&response));
                         Arc::make_mut(&mut messages).push(ChatMessage::user(
                             "Your previous response was truncated due to length limits. \
                              Continue from where you left off.",
@@ -1452,8 +1477,7 @@ async fn run_agentic_loop_core(
                                     .collect::<Vec<_>>(),
                             }),
                         );
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::assistant(&response.content));
+                        Arc::make_mut(&mut messages).push(ChatMessage::assistant_answer(&response));
                         for msg in &drained {
                             Arc::make_mut(&mut messages)
                                 .push(ChatMessage::user(&msg.to_interjection()));
@@ -1483,10 +1507,8 @@ async fn run_agentic_loop_core(
                                 "Answer guard rejected the turn's answer; granting one corrective round"
                             );
                         });
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::assistant(&response.content));
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::user(&correction.note));
+                        Arc::make_mut(&mut messages).push(ChatMessage::assistant_answer(&response));
+                        Arc::make_mut(&mut messages).push(ChatMessage::user(&correction.note));
                         continue;
                     }
                     // Said again after being told. The answer still ships —
@@ -1583,6 +1605,27 @@ async fn run_agentic_loop_core(
                 return state.result(LoopFinishReason::Error(e.to_string()));
             }
         }
+    }
+}
+
+/// Take every kept thinking block out of `messages` (C7a): something they
+/// were produced after — an earlier message, or the system prompt — has
+/// changed, so the API's prefix check would fail them. All go, never some,
+/// and none comes back.
+fn forget_thinking(messages: &mut [ChatMessage], agent_id: &str, cause: &str) {
+    let mut forgotten = 0usize;
+    for message in messages.iter_mut() {
+        if message.forget_thinking() {
+            forgotten += 1;
+        }
+    }
+    if forgotten > 0 {
+        tracing::debug!(
+            agent_id,
+            cause,
+            turns = forgotten,
+            "Kept thinking left out of later requests"
+        );
     }
 }
 

@@ -836,10 +836,16 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   `CapabilityManager::check_model_access`. A violation publishes
   `SystemEvent::ModelAccessDenied` and ends the loop with
   `LoopFinishReason::Error`.
-- **Thinking-block exclusion** — extended-thinking text is logged but
-  explicitly omitted from the `ChatMessage` appended to history. It can
-  be streamed to a watching client (see [Streaming](#streaming)) and is
-  persisted nowhere.
+- **Thinking blocks within one run** (C7a) — a turn that carried
+  Anthropic thinking keeps its content blocks as the provider returned
+  them (`ChatMessage.echo`), and the next request of the loop sends them
+  back unchanged. This holds for a tool call's turn, the `MaxTokens`
+  continuation, the steering drain and the answer guard's round. A
+  compaction, or a budget notice that changes the system prompt, takes
+  every kept block out of the run's list for good; never some of them.
+  The thinking text can be streamed to a watching client (see
+  [Streaming](#streaming)). It is persisted nowhere: the field is never
+  serialized, so no session log, row or history line holds it.
 - **Transient LLM-error retry** (router backend only) — a transient
   failure is retried up to 3 times in a row, with a 2 s, 4 s, 8 s backoff
   (capped at 30 s) that a cancellation interrupts. Each retry **costs a
