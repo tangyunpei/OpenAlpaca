@@ -390,6 +390,14 @@ rules. A model that only discovery lists carries none. On Opus 5.5 those
 utility calls now think inside their `max_tokens`. Thinking text comes back
 empty unless asked for, and nothing here asks.
 
+A round on Opus 5.5 can spend its whole `max_tokens` (4096 unless set)
+thinking, before any text or tool call. A main-loop or skill turn streamed
+to its chat continues such a turn as it continues any truncated answer, at
+most twice at the same cap, its thinking sent back. A round asked without
+streaming (every lead and subagent round, and a main-loop or skill turn
+with no chat stream) ends it as an empty completion, an error that is not
+retried: the run stops there.
+
 Within one run, a model's thinking goes back to it unchanged in the next
 request of a tool loop: every thinking block, its signature and its order,
 as Anthropic's pages ask. The same holds after a truncated answer, after a

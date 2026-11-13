@@ -844,6 +844,10 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   continuation, the steering drain and the answer guard's round. A
   compaction, or a budget notice that changes the system prompt, takes
   every kept block out of the run's list for good; never some of them.
+  A turn cut at `max_tokens` before any text or tool call is continued
+  only when its round streams (a main-loop or skill turn streamed to its
+  chat); a lead's or subagent's round ends its run on an empty-completion
+  error that nothing retries.
   What the model reads is narrower: the loop's `context_management` keeps
   the thinking of the last two turns only (`clear_thinking_20251015`,
   `keep` 2 `thinking_turns`), and a user message that is not only tool
