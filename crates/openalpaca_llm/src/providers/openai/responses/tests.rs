@@ -11,6 +11,11 @@
 //! (.../api/reference/resources/responses/methods/create and
 //! .../responses/streaming-events). Every server here is a loopback
 //! [`MockHttpServer`]; no test reaches a provider.
+//!
+//! STORE-FALSE: a Chat Completions body to OpenAI's own API says
+//! `store: false` too, and one to any other server says nothing of it
+//! (the migration guide and the Chat Completions reference, read
+//! 2026-11-14).
 
 use crate::LlmProvider;
 use crate::providers::openai::{OpenAiProvider, is_openai_api, parse_responses_sse};
@@ -1095,7 +1100,7 @@ fn cloud_at(base: &str) -> OpenAiProvider {
         Some(format!("{base}/v1")),
         None,
     )
-    .with_responses_api(true)
+    .with_openai_api(true)
 }
 
 /// A cloud request with tools goes to `/v1/responses` with
@@ -1274,6 +1279,143 @@ async fn ollama_keeps_chat_completions_byte_for_byte() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/chat/completions");
     assert_eq!(requests[0].body, OLLAMA_BODY);
+}
+
+// ── STORE-FALSE: Chat Completions to OpenAI's own API ───────────────────
+
+/// A Chat Completions answer of "done", streamed.
+fn chat_frames() -> Vec<String> {
+    vec![
+        "data: {\"model\":\"local\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":null}]}\n\n".to_string(),
+        "data: {\"model\":\"local\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n".to_string(),
+        "data: [DONE]\n\n".to_string(),
+    ]
+}
+
+/// A loopback server that answers Chat Completions, whole or streamed.
+async fn chat_server() -> MockHttpServer {
+    MockHttpServer::start(|req| match req.path.as_str() {
+        "/v1/chat/completions" if req.body.contains("\"stream\":true") => {
+            MockResponse::sse(chat_frames())
+        }
+        "/v1/chat/completions" => chat_answer(),
+        _ => MockResponse::not_found(),
+    })
+    .await
+}
+
+/// Ask `provider` for `req` once whole and once streamed, and return the
+/// two bodies the server was sent, each on Chat Completions.
+async fn chat_bodies(
+    provider: &dyn LlmProvider,
+    key: &str,
+    server: &MockHttpServer,
+    req: ChatRequest,
+) -> Vec<serde_json::Value> {
+    let whole = provider
+        .chat_with_key(key, req.clone())
+        .await
+        .expect("answers");
+    assert_eq!(whole.content, "done");
+    let stream = provider
+        .chat_streaming_with_key(key, req)
+        .await
+        .expect("streams");
+    let streamed = crate::streaming::collect_stream(stream, "local".to_string())
+        .await
+        .expect("collects");
+    assert_eq!(streamed.content, "done");
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    requests
+        .iter()
+        .map(|recorded| {
+            assert_eq!(recorded.path, "/v1/chat/completions");
+            serde_json::from_str(&recorded.body).unwrap()
+        })
+        .collect()
+}
+
+/// The summary's shape: no tools, `temperature` 0 — a call that stays on
+/// Chat Completions on OpenAI's own API.
+fn utility_request() -> ChatRequest {
+    let mut req = request(
+        vec![ChatMessage::system("Summarise."), ChatMessage::user("ping")],
+        vec![],
+    );
+    req.temperature = Some(0.0);
+    req
+}
+
+/// STORE-FALSE: a Chat Completions request to OpenAI's own API asks OpenAI
+/// to store nothing, whole and streamed, as a Responses request does.
+/// Red on the parent, which sent no `store` there.
+#[tokio::test]
+async fn a_chat_completions_request_to_openais_own_api_says_store_false() {
+    let server = chat_server().await;
+    let provider = cloud_at(&server.base_url);
+    for body in chat_bodies(&provider, "sk-test-not-a-key", &server, utility_request()).await {
+        assert_eq!(body["store"], false, "{body}");
+    }
+    assert_eq!(server.hits("/v1/responses").await, 0);
+
+    // The body as the default and a regional `base_url` build it.
+    let regional = OpenAiProvider::new(
+        "sk-test-not-a-key".to_string(),
+        Some("gpt-6.1-sol".to_string()),
+        Some("https://eu.api.openai.com/v1".to_string()),
+        None,
+    );
+    for provider in [cloud(), regional] {
+        let body = provider.build_request_body(&utility_request());
+        assert_eq!(body["store"], false, "{body}");
+    }
+}
+
+/// An OpenAI-compatible server that is not OpenAI's own API, and Ollama,
+/// are sent no `store`, whole or streamed, with tools or without
+/// (characterization: green on the parent, as on the change).
+#[tokio::test]
+async fn a_compatible_server_and_ollama_are_sent_no_store() {
+    for req in [utility_request(), tool_request()] {
+        let server = chat_server().await;
+        let compatible = OpenAiProvider::with_client(
+            loopback_client(TIMEOUT),
+            "sk-test-not-a-key".to_string(),
+            Some("local".to_string()),
+            Some(format!("{}/v1", server.base_url)),
+            None,
+        );
+        for body in chat_bodies(&compatible, "sk-test-not-a-key", &server, req.clone()).await {
+            assert!(body.get("store").is_none(), "{body}");
+        }
+
+        let server = chat_server().await;
+        let ollama = crate::providers::ollama::OllamaProvider::new(
+            "local".to_string(),
+            Some(format!("{}/v1", server.base_url)),
+            None,
+        );
+        for body in chat_bodies(&ollama, "", &server, req).await {
+            assert!(body.get("store").is_none(), "{body}");
+        }
+    }
+
+    // A keyed provider whose `base_url` only looks like OpenAI's own API.
+    for base in [
+        "http://api.openai.com/v1",
+        "https://api.openai.com.example.net/v1",
+        "http://127.0.0.1:1/v1",
+    ] {
+        let provider = OpenAiProvider::new(
+            "sk-test-not-a-key".to_string(),
+            Some("local".to_string()),
+            Some(base.to_string()),
+            None,
+        );
+        let body = provider.build_request_body(&utility_request());
+        assert!(body.get("store").is_none(), "{base}: {body}");
+    }
 }
 
 // ── CACHE-WRITE: the Responses API's write count ────────────────────────

@@ -598,8 +598,9 @@ cannot answer until you enable one:
 
   With `openai` (its default `base_url`, or one of OpenAI's regional hosts
   such as `https://eu.api.openai.com/v1`), every turn that uses tools goes
-  through OpenAI's Responses API, and the daemon asks OpenAI to store
-  nothing (`store: false`). The
+  through OpenAI's Responses API, and every request the daemon sends
+  there, on either API, asks OpenAI not to store it (`store: false`;
+  OpenAI's abuse-monitoring logs, 30 days by default, are apart). The
   model alias `strong` is `gpt-6.1-sol` there; the shipped agent templates
   start naming aliases in a later release. Ollama, and an OpenAI-compatible
   server set as the `openai` provider's `base_url`, are sent what they were

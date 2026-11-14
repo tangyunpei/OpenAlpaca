@@ -50,10 +50,12 @@ pub struct OpenAiProvider {
     request_timeout: Option<std::time::Duration>,
     /// Whose OpenAI-compatible wire this is — see [`OpenAiFlavour`].
     flavour: OpenAiFlavour,
-    /// Whether a request with tools goes to the Responses API (C7b): set
-    /// when `base_url` is OpenAI's own API ([`is_openai_api`]), never for a
-    /// keyless or Ollama provider; see [`Self::uses_responses`].
-    responses_api: bool,
+    /// Whether `base_url` is OpenAI's own API ([`is_openai_api`]), never
+    /// set for a keyless or Ollama provider. There a request with tools goes
+    /// to the Responses API (C7b, [`Self::uses_responses`]) and a Chat
+    /// Completions body says `store: false` (STORE-FALSE,
+    /// [`Self::build_request_body`]).
+    openai_api: bool,
 }
 
 /// The hosts of OpenAI's own API: `api.openai.com` and the regional hosts
@@ -110,7 +112,7 @@ impl OpenAiProvider {
             client,
             api_key: Some(api_key),
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            responses_api: is_openai_api(&base_url),
+            openai_api: is_openai_api(&base_url),
             base_url,
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             request_timeout: None,
@@ -142,16 +144,16 @@ impl OpenAiProvider {
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             request_timeout: None,
             flavour: OpenAiFlavour::OpenAi,
-            responses_api: false,
+            openai_api: false,
         }
     }
 
-    /// Send a request with tools through the Responses API, or not, whatever
-    /// the `base_url` (C7b). Only tests call it: they point the provider at a
+    /// Treat the `base_url` as OpenAI's own API, or not, whatever it is
+    /// (C7b, STORE-FALSE). Only tests call it: they point the provider at a
     /// loopback mock that stands in for OpenAI's own API.
     #[cfg(test)]
-    pub(crate) fn with_responses_api(mut self, on: bool) -> Self {
-        self.responses_api = on;
+    pub(crate) fn with_openai_api(mut self, on: bool) -> Self {
+        self.openai_api = on;
         self
     }
 
@@ -189,8 +191,29 @@ impl OpenAiProvider {
         &self.client
     }
 
+    /// Whether this provider talks to OpenAI's own API (C7b, STORE-FALSE).
+    fn own_api(&self) -> bool {
+        self.openai_api && self.flavour == OpenAiFlavour::OpenAi
+    }
+
+    /// The Chat Completions body for `request`. On OpenAI's own API it says
+    /// `store: false`, as the Responses body does (STORE-FALSE): "Chat
+    /// completions are stored by default for new accounts. To disable
+    /// storage when using either API, set `store: false`" (the migration
+    /// guide, developers.openai.com/api/docs/guides/migrate-to-responses,
+    /// read 2026-11-14), though the Chat Completions reference
+    /// (developers.openai.com/api/reference/resources/chat/subresources/
+    /// completions/methods/create, read the same day) gives the field's
+    /// default as `false`; the body says it either way. Every other
+    /// OpenAI-compatible server, Ollama included, is sent no `store`, a
+    /// field it may refuse.
     pub(crate) fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
-        request::build_request_body(&self.model, self.max_tokens, self.flavour, request)
+        let mut body =
+            request::build_request_body(&self.model, self.max_tokens, self.flavour, request);
+        if self.own_api() {
+            body["store"] = serde_json::json!(false);
+        }
+        body
     }
 
     pub(crate) fn parse_response(
@@ -215,8 +238,7 @@ impl OpenAiProvider {
     /// (their pages, the same day), as does every other OpenAI-compatible
     /// server.
     pub(crate) fn uses_responses(&self, request: &ChatRequest) -> bool {
-        self.responses_api
-            && self.flavour == OpenAiFlavour::OpenAi
+        self.own_api()
             && (!request.tools.is_empty()
                 || request
                     .messages

@@ -441,9 +441,17 @@ page says "Tool calling requires the Responses API" (read 2026-11-12). So
 the main loop, a skill, a lead and its subagents on any OpenAI model use
 it. Every other request keeps `/v1/chat/completions`: the conversation
 summary, the episode summary and the memory and task-output extraction,
-which offer no tools. Ollama and any other OpenAI-compatible server
-(llama.cpp, LM Studio, a gateway at another address) are sent exactly
-what they were sent before.
+which offer no tools. On OpenAI's own API those Chat Completions requests
+also ask OpenAI not to store them (`store: false`): OpenAI's migration
+guide says Chat Completions are "stored by default for new accounts",
+though its Chat Completions reference gives the field's default as
+`false` (both read 2026-11-14), so the daemon says it either way. The
+reference says `store` keeps output for OpenAI's distillation and evals
+products; OpenAI's abuse-monitoring logs, 30 days by default for both APIs
+by its data-controls guide (read the same day), are apart. Ollama and any
+other OpenAI-compatible server (llama.cpp, LM Studio, a gateway at
+another address) are sent exactly what they were sent before, with no
+`store`.
 
 On the Responses API each request:
 

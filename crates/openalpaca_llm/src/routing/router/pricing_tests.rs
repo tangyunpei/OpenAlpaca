@@ -969,7 +969,7 @@ fn responses_router(base: &str) -> LlmRouter {
             Some(format!("{base}/v1")),
             None,
         )
-        .with_responses_api(true),
+        .with_openai_api(true),
     );
     let mut providers = HashMap::new();
     providers.insert(
