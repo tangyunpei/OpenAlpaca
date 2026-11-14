@@ -388,7 +388,7 @@ tool 'send' is sent with tool_choice auto, here and on every later call to
 claude-opus-5-5`. A `[models."claude-opus-5-5"]` row of yours keeps these
 rules. A model that only discovery lists carries none. On Opus 5.5 those
 utility calls now think inside their `max_tokens`. Thinking text comes back
-empty unless asked for, and nothing here asks.
+as a summary, since every request to it asks for one (below).
 
 A round on Opus 5.5 can spend its whole `max_tokens` (4096 unless set)
 thinking, before any text or tool call. A main-loop or skill turn streamed
@@ -396,31 +396,36 @@ to its chat continues such a turn as it continues any truncated answer, at
 most twice at the same cap, its thinking sent back. A round asked without
 streaming (every lead and subagent round, and a main-loop or skill turn
 with no chat stream) ends it as an empty completion, an error that is not
-retried: the run stops there.
+retried: the run stops there. So does such a round that ends its turn on
+thinking alone, with no text and no tool call: its thinking now has text,
+and a round that reasoned instead of answering is an empty completion, as
+on every model that shows its thinking by default. While Opus 5.5's
+thinking came back empty, that round ended with an empty answer instead.
 
 Within one run, a model's thinking goes back to it unchanged in the next
 request of a tool loop: every thinking block, its signature and its order,
 as Anthropic's pages ask. The same holds after a truncated answer, after a
 steering message that arrived at the end of a round, and after the answer
-guard's corrective round. When the run compacts its history, or the budget
-notice changes the system prompt, every kept block is left out from then
-on: never some of them. Thinking is never written to the session log, the
-database or a conversation's history.
+guard's corrective round. When the run compacts its history, every kept
+block is left out from then on: never some of them. The budget notice
+(shown only with `[experimental] ephemeral_pressure_layer` on) is the last
+message of the request it rides on, never part of the system prompt, and
+is not repeated there in the next request; so a turn the model produced
+while a notice showed goes back without its thinking, and the thinking
+from before the first notice still goes back. Thinking is never written to
+the session log, the database or a conversation's history.
 
-What the model reads is narrower than what is sent. The loop's
-`context_management` asks the API to keep the thinking of the last two
-turns only (`clear_thinking_20251015`, `keep` 2 `thinking_turns`, the turn
-in progress counted), and by Anthropic's context-editing page (read
-2026-11-12) a user message that is not only tool results starts a new turn:
-the truncation's "continue" message, a steering message and the answer
-guard's note each do. A tool loop with none of them is one turn, and its
-thinking is all kept. From the second such message on, the server clears
-the thinking of every turn but the one in progress and the one before it,
-before the model reads the request; on a model with preserved thinking,
-Opus 5.5 among them, the page says this never makes the API refuse the
-blocks sent. Whether the API applies the edit under the beta header this
-build sends, `context-management-2025-01-15` (the page names
-`context-management-2025-06-27`), no check has confirmed yet.
+The loop's `context_management` asks the API to keep the thinking of
+every turn (`clear_thinking_20251015` with `keep` `"all"`), so the model
+reads every block that is sent; the request carries the beta header
+Anthropic's context-editing page names, `context-management-2025-06-27`
+(read 2026-11-14). Opus 5.5 hides its thinking text unless asked (its
+`display` defaults to `"omitted"`, Anthropic's thinking page, read
+2026-11-14), so every request to `claude-opus-5-5` asks for
+`"summarized"`: the reasoning stream shows a readable summary of the
+model's thinking, billed the same. No other catalogued model is asked:
+Opus 4.6 and Sonnet 4.6 summarize by default, and Haiku 4.5 and Sonnet 4.5
+refuse adaptive thinking.
 
 ### OpenAI's Responses API
 
@@ -460,14 +465,14 @@ On the Responses API each request:
 - sends a reasoning model's reasoning back to it within one run: the
   turn's items, encrypted as OpenAI returned them, before the tool results
   they led to. A compaction leaves them out from then on, as it leaves out
-  Anthropic's thinking. So does a budget notice (shown only with
+  Anthropic's thinking. A budget notice (shown only with
   `[experimental] ephemeral_pressure_layer` on, from 80% of a run's rounds
-  or cost): its text changes every round, and on this API it is the last
-  item, so a turn's reasoning comes after it; the next request moves it,
-  changing the history before that reasoning, which OpenAI's guide says
-  makes the API drop the reasoning. While a notice shows, no reasoning goes
-  back. They are never written to the session log, the database or a
-  conversation's history.
+  or cost) is the last item, so a turn's reasoning comes after it; the next
+  request moves it, changing the history before that reasoning, which
+  OpenAI's guide says makes the API drop the reasoning. So a turn produced
+  while a notice shows goes back without its reasoning, and the reasoning
+  from before the first notice still goes back. They are never written to
+  the session log, the database or a conversation's history.
 
 The usage is read as on Chat Completions: input tokens, output tokens
 (reasoning included, which OpenAI bills as output), cached input and the

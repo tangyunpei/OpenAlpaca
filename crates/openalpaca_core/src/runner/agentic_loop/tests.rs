@@ -6736,36 +6736,93 @@ async fn a_compaction_takes_every_thinking_block_out_and_keeps_it_out() {
     assert!(compactions > 0, "a compaction ran");
 }
 
-/// A budget notice changes the system prompt every block so far was
-/// produced after, so the request that first carries one sends no thinking.
+/// The budget notice is the last message of the request that carries it,
+/// and the next request does not repeat it there (ANTHROPIC-THINKING), so
+/// only a turn produced under a notice loses its thinking: the request that
+/// first carries one sends every earlier block, and each later one every
+/// block but those of the turns produced under a notice — the newest, which
+/// the pages let a request leave out (.../preserved-thinking/
+/// change-tools-or-instructions, read 2026-11-14: "Leave out the oldest
+/// blocks, the newest, or all of them, but none in between").
 #[tokio::test]
-async fn a_changed_system_notice_takes_every_thinking_block_out() {
-    let mut responses: Vec<ChatResponse> = (0..4)
+async fn a_budget_notice_takes_out_only_the_thinking_produced_under_it() {
+    let mut responses: Vec<ChatResponse> = (0..18)
         .map(|i| thinking_tool_turn(&format!("tc_{i}"), &format!("sig-{i}"), 0))
         .collect();
     responses.push(MockProvider::simple_response("Done."));
     let provider = EchoRecorder::new(responses);
     let config = LoopConfig {
-        max_rounds: 5,
+        max_rounds: 20,
         enable_caching: false,
         experimental_ephemeral_pressure: true,
         ..Default::default()
     };
 
-    run_recorded(&provider, &config).await;
+    let result = run_recorded(&provider, &config).await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 19);
+    assert!(requests[15].ephemeral_system_notice.is_none());
+    for (i, request) in requests.iter().enumerate().skip(16) {
+        assert!(
+            request.ephemeral_system_notice.is_some(),
+            "request {i} carries the notice"
+        );
+    }
+    let kept =
+        |i: usize| -> Vec<bool> { echoes(&requests[i]).iter().map(Option::is_some).collect() };
+    assert_eq!(
+        kept(16),
+        vec![true; 16],
+        "the first notice takes nothing out"
+    );
+    let mut expected = vec![true; 16];
+    expected.push(false);
+    assert_eq!(kept(17), expected, "the turn under the notice goes without");
+    expected.push(false);
+    assert_eq!(kept(18), expected, "and so does every later one");
+}
+
+/// A loop with a context budget asks the server to keep every turn's
+/// thinking (`clear_thinking_20251015` with `keep` `"all"`, the
+/// context-editing page's form, read 2026-11-14), so the blocks it sends back
+/// are the blocks Claude reads.
+#[tokio::test]
+async fn the_loop_asks_the_server_to_keep_all_thinking() {
+    use crate::context_budget::ContextBudgetManager;
+    use crate::daemon_config::ContextBudgetConfig;
+
+    let budget = ContextBudgetManager::new(200_000, &ContextBudgetConfig::default());
+    let provider = EchoRecorder::new(vec![MockProvider::simple_response("Done.")]);
+    let config = LoopConfig {
+        enable_caching: false,
+        ..Default::default()
+    };
+
+    run_agentic_loop(
+        &provider,
+        vec![ChatMessage::system("Be brief."), ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        Some(&budget),
+        None,
+        None,
+    )
+    .await;
 
     let requests = provider.requests();
-    assert_eq!(requests.len(), 5);
-    assert!(requests[3].ephemeral_system_notice.is_none());
-    assert!(echoes(&requests[3]).iter().all(Option::is_some));
-    assert!(
-        requests[4].ephemeral_system_notice.is_some(),
-        "the fifth round carries the notice"
+    let edits = requests[0]
+        .context_management
+        .as_ref()
+        .expect("a budgeted loop sends context_management")
+        .to_json();
+    assert_eq!(
+        edits["edits"][0],
+        serde_json::json!({"type": "clear_thinking_20251015", "keep": "all"})
     );
-    assert_eq!(echoes(&requests[4]).len(), 4);
-    assert!(
-        echoes(&requests[4]).iter().all(Option::is_none),
-        "{:?}",
-        echoes(&requests[4])
-    );
+    assert_eq!(edits["edits"][1]["type"], "clear_tool_uses_20250919");
 }

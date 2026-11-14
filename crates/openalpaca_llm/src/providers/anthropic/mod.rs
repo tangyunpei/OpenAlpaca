@@ -45,8 +45,11 @@ fn later_page_failed(
 fn build_beta_header(request: &ChatRequest) -> String {
     let mut flags: Vec<&str> = Vec::new();
 
+    // The context-editing page's beta header (platform.claude.com/docs/en/
+    // build-with-claude/context-editing, read 2026-11-14: "use the beta
+    // header `context-management-2025-06-27`").
     if request.context_management.is_some() {
-        flags.push("context-management-2025-01-15");
+        flags.push("context-management-2025-06-27");
     }
 
     flags.join(",")

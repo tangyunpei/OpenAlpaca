@@ -107,7 +107,7 @@ pub(crate) fn build_request_body(
     // always has.
     let effort = match request.thinking {
         Some(ThinkingConfig::Enabled { .. }) => Some("high"),
-        Some(ThinkingConfig::Adaptive) => Some("medium"),
+        Some(ThinkingConfig::Adaptive { .. }) => Some("medium"),
         Some(ThinkingConfig::Disabled) | None => None,
     };
     if let Some(effort) = effort {

@@ -61,9 +61,11 @@ pub struct LongPromptRate {
 }
 
 /// What a model's API refuses in a request, as its provider's own pages say
-/// (C7a, M-3d): each flag set only on a compiled row whose page, read on the
-/// day the row was written, says so, and named there with the page and the
-/// date. A row with none set gets the request its caller asked for.
+/// (C7a, M-3d), and what it must be asked for to give what the app shows
+/// (ANTHROPIC-THINKING): each flag set only on a compiled row whose page,
+/// read on the day the flag was written, says so, and named there with the
+/// page and the date. A row with none set gets the request its caller asked
+/// for.
 ///
 /// The router meets the contract where a request first names its model
 /// (`LlmRouter::meet_request_contract`): it leaves out what the model
@@ -80,6 +82,11 @@ pub struct RequestContract {
     pub adaptive_thinking_only: bool,
     /// A forced tool choice (`any`, or a named tool) is refused.
     pub no_forced_tool_choice: bool,
+    /// The model takes adaptive thinking and its thinking's `display`
+    /// defaults to `"omitted"`, so a request asks for `"summarized"`: the
+    /// app's reasoning stream otherwise gets no text. Never set on a row
+    /// whose model rejects `adaptive`.
+    pub summarized_thinking: bool,
 }
 
 impl RequestContract {
@@ -89,6 +96,7 @@ impl RequestContract {
         thinking_always_on: false,
         adaptive_thinking_only: false,
         no_forced_tool_choice: false,
+        summarized_thinking: false,
     };
 }
 
@@ -291,11 +299,17 @@ impl ModelRegistry {
                 // version `2026-10-21`"; "Earlier API versions return it [a
                 // 400] when set to a non-default value on Claude 4.7 and
                 // later models" — the arm sends `2023-06-01`.
+                // ANTHROPIC-THINKING, the thinking page read 2026-11-14
+                // (.../build-with-claude/thinking, *Controlling thinking
+                // display*): `"omitted"` "is the default on ... Claude Opus
+                // 5.5"; "Opt in with `thinking: {"type": "adaptive",
+                // "display": "summarized"}`".
                 request_contract: RequestContract {
                     no_sampling_parameters: true,
                     thinking_always_on: true,
                     adaptive_thinking_only: true,
                     no_forced_tool_choice: true,
+                    summarized_thinking: true,
                 },
             },
         );

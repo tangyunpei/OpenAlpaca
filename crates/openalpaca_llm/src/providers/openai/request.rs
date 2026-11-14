@@ -166,7 +166,7 @@ pub(crate) fn build_request_body(
                 body["reasoning_effort"] = serde_json::json!("high");
                 body.as_object_mut().unwrap().remove("temperature");
             }
-            ThinkingConfig::Adaptive => {
+            ThinkingConfig::Adaptive { .. } => {
                 body["reasoning_effort"] = serde_json::json!("medium");
                 body.as_object_mut().unwrap().remove("temperature");
             }

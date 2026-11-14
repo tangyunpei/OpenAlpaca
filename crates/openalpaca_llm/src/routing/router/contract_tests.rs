@@ -163,9 +163,10 @@ async fn bodies(server: &MockHttpServer) -> Vec<serde_json::Value> {
 }
 
 /// A utility call to `claude-opus-5-5` (temperature 0, thinking disabled)
-/// goes with no sampling parameter and no `thinking` field at all.
+/// goes with no sampling parameter, and its thinking, always on, asked for
+/// summarized (ANTHROPIC-THINKING).
 #[tokio::test]
-async fn a_utility_request_to_opus_5_5_goes_without_sampling_parameters_or_thinking() {
+async fn a_utility_request_to_opus_5_5_goes_without_sampling_parameters_and_summarized() {
     let server = MockHttpServer::start(|_| MockResponse::json(answer("claude-opus-5-5"))).await;
     let router = anthropic_router(&server, &HashMap::new());
 
@@ -178,12 +179,13 @@ async fn a_utility_request_to_opus_5_5_goes_without_sampling_parameters_or_think
     assert_eq!(sent.len(), 1);
     let body = &sent[0];
     assert_eq!(body["model"], "claude-opus-5-5");
-    for field in ["temperature", "top_p", "top_k", "thinking"] {
+    for field in ["temperature", "top_p", "top_k"] {
         assert!(
             body.get(field).is_none(),
             "{field} is not sent to claude-opus-5-5: {body}"
         );
     }
+    assert_eq!(body["thinking"], summarized(), "{body}");
 }
 
 /// A model whose row carries no contract gets the request its caller asked
@@ -311,11 +313,7 @@ async fn a_thinking_budget_to_opus_5_5_goes_as_adaptive_thinking() {
         .expect("the mock answers");
 
     let body = &bodies(&server).await[0];
-    assert_eq!(
-        body["thinking"],
-        serde_json::json!({"type": "adaptive"}),
-        "{body}"
-    );
+    assert_eq!(body["thinking"], summarized(), "{body}");
 }
 
 /// A `[models."claude-opus-5-5"]` row a person writes for its price keeps
@@ -347,7 +345,201 @@ async fn a_models_row_for_opus_5_5_keeps_its_contract() {
 
     let body = &bodies(&server).await[0];
     assert!(body.get("temperature").is_none(), "{body}");
-    assert!(body.get("thinking").is_none(), "{body}");
+    assert_eq!(body["thinking"], summarized(), "{body}");
+}
+
+// ── ANTHROPIC-THINKING: thinking's summary, asked of one row ────────────────
+//
+// Anthropic's thinking page (.../build-with-claude/thinking, read
+// 2026-11-14), *Controlling thinking display*: `"omitted"` "is the default on
+// ... Claude Opus 5.5"; `"summarized"` "is the default on Claude Opus 4.6,
+// Claude Sonnet 4.6, and earlier models"; "Opt in with `thinking: {"type":
+// "adaptive", "display": "summarized"}`". The troubleshooting page's table
+// (.../thinking-troubleshooting, the same day): Haiku 4.5 and Sonnet 4.5
+// reject `"adaptive"`.
+
+/// What `claude-opus-5-5` is sent for its thinking: adaptive, summarized.
+fn summarized() -> serde_json::Value {
+    serde_json::json!({"type": "adaptive", "display": "summarized"})
+}
+
+/// A chat, lead or subagent round names no thinking; to `claude-opus-5-5`
+/// it goes asking for the summary, streamed (`completion.rs`) or not
+/// (`retry.rs`).
+#[tokio::test]
+async fn a_chat_request_to_opus_5_5_asks_for_its_thinking_summarized() {
+    let server = MockHttpServer::start(|req| {
+        if req.body.contains("\"stream\":true") {
+            MockResponse::sse(answer_frames("claude-opus-5-5")).every(Duration::ZERO)
+        } else {
+            MockResponse::json(answer("claude-opus-5-5"))
+        }
+    })
+    .await;
+    let router = anthropic_router(&server, &HashMap::new());
+    let chat = || RouterRequest {
+        temperature: None,
+        thinking: None,
+        ..utility_request("claude-opus-5-5")
+    };
+
+    let routed = router
+        .complete_streaming(chat())
+        .await
+        .expect("the stream opens");
+    crate::collect_stream(routed.stream, routed.model)
+        .await
+        .expect("the stream completes");
+    router.complete(chat()).await.expect("the mock answers");
+
+    let sent = bodies(&server).await;
+    assert_eq!(sent.len(), 2);
+    for body in &sent {
+        assert_eq!(body["thinking"], summarized(), "{body}");
+    }
+}
+
+/// A row without the fact is sent what its caller asked, byte for byte
+/// (characterization): no `thinking` for a chat round, `disabled` for a
+/// utility call, never `display` — on the two rows that reject `adaptive`
+/// and the two whose summary is already the default.
+#[tokio::test]
+async fn a_model_without_the_fact_is_asked_as_before() {
+    for model in [
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5-20250929",
+        "claude-haiku-4-5-20251001",
+    ] {
+        let server = MockHttpServer::start(move |_| MockResponse::json(answer(model))).await;
+        let router = anthropic_router(&server, &HashMap::new());
+
+        router
+            .complete(RouterRequest {
+                temperature: None,
+                thinking: None,
+                ..utility_request(model)
+            })
+            .await
+            .expect("the mock answers");
+        router
+            .complete(utility_request(model))
+            .await
+            .expect("the mock answers");
+
+        let raw: Vec<String> = server
+            .requests()
+            .await
+            .iter()
+            .map(|r| r.body.clone())
+            .collect();
+        assert_eq!(raw.len(), 2);
+        assert_eq!(
+            raw[0],
+            format!(
+                "{{\"max_tokens\":512,\"messages\":[{{\"content\":\"summarise this\",\"role\":\"user\"}}],\"model\":\"{model}\"}}"
+            ),
+            "{model}"
+        );
+        assert_eq!(
+            raw[1],
+            format!(
+                "{{\"max_tokens\":512,\"messages\":[{{\"content\":\"summarise this\",\"role\":\"user\"}}],\"model\":\"{model}\",\"temperature\":0.0,\"thinking\":{{\"type\":\"disabled\"}}}}"
+            ),
+            "{model}"
+        );
+    }
+}
+
+/// The summary is asked of the model a request is sent to, not of the one it
+/// named: a fallback rung after `claude-opus-5-5` gets its caller's request.
+#[tokio::test]
+async fn a_fallback_rung_after_opus_5_5_is_not_asked_for_a_summary() {
+    let server = MockHttpServer::start(|req| {
+        let model = if req.body.contains("claude-opus-5-5") {
+            "claude-opus-5-5"
+        } else {
+            "claude-haiku-4-5-20251001"
+        };
+        MockResponse::json(answer(model))
+    })
+    .await;
+    let router = anthropic_router(&server, &HashMap::new());
+    let request = || RouterRequest {
+        fallback_models: vec!["claude-haiku-4-5-20251001".to_string()],
+        ..utility_request("claude-opus-5-5")
+    };
+
+    router.complete(request()).await.expect("the mock answers");
+    router
+        .try_fallback("claude-opus-5-5", &request(), None)
+        .await
+        .expect("the rung answers");
+
+    let sent = bodies(&server).await;
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0]["model"], "claude-opus-5-5");
+    assert_eq!(sent[0]["thinking"], summarized());
+    assert_eq!(sent[1]["model"], "claude-haiku-4-5-20251001");
+    assert_eq!(
+        sent[1]["thinking"],
+        serde_json::json!({"type": "disabled"}),
+        "{}",
+        sent[1]
+    );
+    assert_eq!(sent[1]["temperature"], serde_json::json!(0.0));
+}
+
+/// What the summary changes on the response side: `claude-opus-5-5` asked
+/// without streaming, as every lead and subagent round is, ends its turn on
+/// thinking alone — `end_turn`, no text, no call. Under the default
+/// `"omitted"` its thinking text was empty, so M2's rule
+/// (`crate::error::empty_completion_error`: no answer, and reasoning
+/// instead of one) did not meet it and the round came back an empty answer;
+/// asked `"summarized"`, the text is there and the round is the router's
+/// `EmptyCompletion`, not transient, asked once, so the loop ends the run on
+/// it, as on every row that summarizes by default. The mock answers as the
+/// API does: thinking text only when `display` asks for it. No change in
+/// `error.rs`; kept on purpose (ANTHROPIC-THINKING's body).
+#[tokio::test]
+async fn an_opus_5_5_turn_ending_on_thinking_alone_is_an_empty_completion() {
+    let server = MockHttpServer::start(|req| {
+        let asked: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+        let thought = if asked["thinking"]["display"] == "summarized" {
+            "Nothing left to do."
+        } else {
+            ""
+        };
+        MockResponse::json(
+            serde_json::json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-5-5",
+                "content": [
+                    {"type": "thinking", "thinking": thought, "signature": "EqQBsig-A=="},
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1_000, "output_tokens": 40},
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let router = anthropic_router(&server, &HashMap::new());
+
+    let refused = router
+        .complete(tool_round_request("claude-opus-5-5"))
+        .await
+        .expect_err("thinking alone, shown, is reasoning instead of an answer");
+    match &refused {
+        LlmRouterError::Llm(inner @ LlmError::EmptyCompletion { model, .. }) => {
+            assert_eq!(model, "claude-opus-5-5");
+            assert!(!inner.is_transient());
+        }
+        other => panic!("expected EmptyCompletion, got {other:?}"),
+    }
+    assert_eq!(server.hits("/v1/messages").await, 1);
 }
 
 // ── C7a: an Anthropic turn of thinking alone, cut at `max_tokens` ───────────

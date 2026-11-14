@@ -327,7 +327,12 @@ fn thinking_maps_to_reasoning_effort_as_on_chat_completions() {
             },
             "high",
         ),
-        (ThinkingConfig::Adaptive, "medium"),
+        (
+            ThinkingConfig::Adaptive {
+                display: ThinkingDisplay::Summarized,
+            },
+            "medium",
+        ),
     ] {
         req.thinking = Some(thinking);
         let body = cloud().build_responses_body(&req);

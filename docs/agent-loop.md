@@ -650,13 +650,21 @@ Prefer concluding the current task over opening new tool calls. ...
 [/budget_notice]
 ```
 
-Placement: Anthropic — second element of `system` array, no `cache_control`.
-OpenAI/Ollama — tail `system`-role message in the `messages` array (on
-OpenAI's Responses API, C7b, the last item of the `input` array).
+Placement: always last, never in the system prompt. Anthropic — a `user`
+message of one text block after the request's last message (after the tool
+results; the API combines consecutive user messages into one turn), added
+after the cache breakpoints, so it carries no `cache_control` and the
+system prompt and cached prefix are the request's without it
+(ANTHROPIC-THINKING; Anthropic's preserved-thinking pages, read 2026-11-14:
+keep `system` the same and "Put every update in a new message at the
+end"). OpenAI/Ollama — tail `system`-role message in the `messages` array
+(on OpenAI's Responses API, C7b, the last item of the `input` array).
 
 The notice is stateless (recomputed per iteration), never persisted to
 conversation history, and never mutates the `Arc<Vec<ChatMessage>>` the
-loop holds.
+loop holds. Since the next request does not repeat it where it was, a turn
+produced under a notice is kept without its thinking or reasoning (see
+*Thinking blocks within one run*).
 
 ## Cache Breakpoint Topology (Anthropic)
 
@@ -664,7 +672,8 @@ Three of Anthropic's four allowed `cache_control: ephemeral` markers:
 
 1. System prompt block.
 2. Last tool definition.
-3. Last message's last content block (spec P1).
+3. Last message's last content block (spec P1); with the budget notice on, the
+   block before the notice, which follows it with no marker.
 
 Verify via `usage.cache_read_input_tokens` in the `ChatResponse`.
 
@@ -842,31 +851,39 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   them (`ChatMessage.echo`), and the next request of the loop sends them
   back unchanged. This holds for a tool call's turn, the `MaxTokens`
   continuation, the steering drain and the answer guard's round. A
-  compaction, or a budget notice that changes the system prompt, takes
-  every kept block out of the run's list for good; never some of them.
+  compaction takes every kept block out of the run's list for good; never
+  some of them. A turn produced under a budget notice is kept without its
+  blocks (the notice was that request's last message and the next request
+  does not repeat it there); the blocks before the first notice stay
+  (ANTHROPIC-THINKING; the pages let a request leave out "the newest"
+  blocks, read 2026-11-14), though the thinking page asks for a tool-use
+  turn's thinking back (an owner item: keep the notice where it was sent).
   A turn cut at `max_tokens` before any text or tool call is continued
   only when its round streams (a main-loop or skill turn streamed to its
   chat); a lead's or subagent's round ends its run on an empty-completion
-  error that nothing retries.
-  What the model reads is narrower: the loop's `context_management` keeps
-  the thinking of the last two turns only (`clear_thinking_20251015`,
-  `keep` 2 `thinking_turns`), and a user message that is not only tool
-  results (the `MaxTokens` continuation's, a steering interjection, the
-  answer guard's note) starts a new turn, so from the second such message
-  on the server clears every earlier turn's thinking but the last one's
-  before the model reads it (Anthropic's context-editing page, read
-  2026-11-12; not yet confirmed under the `context-management-2025-01-15`
-  beta header the arm sends).
+  error that nothing retries. So does a lead's or subagent's round that
+  ends its turn on thinking alone, no text and no call, on a model whose
+  thinking has text: `claude-opus-5-5` too since it is asked for the
+  summary (M2's rule, `empty_completion_error`; while its thinking was
+  omitted, that round came back an empty answer).
+  The loop's `context_management` asks the server to keep every turn's
+  thinking (`clear_thinking_20251015` with `keep` `"all"`; without the
+  `keep` the strategy keeps one turn on every model), under the
+  context-editing page's beta header, `context-management-2025-06-27`
+  (read 2026-11-14), so the model reads every block the loop sends back.
+  On `claude-opus-5-5`, whose thinking `display` defaults to `"omitted"`,
+  the request asks for `"summarized"`, so the streamed thinking has text
+  (a per-row fact of its request contract; ANTHROPIC-THINKING).
   OpenAI's Responses API (C7b, a request with tools to OpenAI's own API)
   keeps a turn's output items the same way when the turn carried a
   reasoning item, and sends them back before the turn's tool results, its
   reasoning encrypted as OpenAI returned it; the same compaction and notice
-  rule takes them out. There the notice is the last input item, so while
-  one shows a turn's reasoning follows it, and the next request, which
-  moves it, is a prefix change after which OpenAI drops that reasoning
-  ("Keep the prefix unchanged", read 2026-11-12): no reasoning goes back
-  while a notice shows. Each arm sends back only a turn its own API
-  returned.
+  rules take them out. There the notice is the last input item, so a turn
+  produced under it follows it, and the next request, which moves it, is a
+  prefix change after which OpenAI drops that reasoning ("Keep the prefix
+  unchanged", read 2026-11-12): that turn's reasoning is not sent back, and
+  the reasoning before the first notice is. Each arm sends back only a
+  turn its own API returned.
   The thinking text can be streamed to a watching client (see
   [Streaming](#streaming)). It is persisted nowhere: the field is never
   serialized, so no session log, row or history line holds it.

@@ -22,7 +22,7 @@ use crate::routing::cost_tracker::CostTracker;
 use crate::routing::model_alias::{ALIAS_TABLE, ModelAlias, compiled_alias};
 use crate::routing::model_registry::ModelRegistry;
 use crate::routing::rate_limiter::{RateLimitConfig, RateLimiterRegistry};
-use crate::types::{ChatRequest, ThinkingConfig, ToolChoice};
+use crate::types::{ChatRequest, ThinkingConfig, ThinkingDisplay, ToolChoice};
 use arc_swap::ArcSwap;
 
 // Re-export types used by tests via `use super::*;`
@@ -637,6 +637,12 @@ impl LlmRouter {
     ///   `Adaptive`.
     /// - No forced tool choice: `any` or a named tool goes as `auto`, and
     ///   `daemon.log` says so at `INFO` once a model.
+    /// - Summarized thinking (ANTHROPIC-THINKING): a request with no
+    ///   thinking, or adaptive thinking, asks for its summary — `display`
+    ///   `"summarized"`. A `Disabled` request the contract keeps never
+    ///   carries it (the thinking page: "`display` is invalid with
+    ///   `thinking.type: "disabled"`"); nor does a manual budget, which no
+    ///   row with this fact takes.
     ///
     /// A row with no contract — every row but the ones whose pages say so —
     /// leaves the request as its caller made it.
@@ -650,9 +656,21 @@ impl LlmRouter {
                 request.thinking = None;
             }
             Some(ThinkingConfig::Enabled { .. }) if contract.adaptive_thinking_only => {
-                request.thinking = Some(ThinkingConfig::Adaptive);
+                request.thinking = Some(ThinkingConfig::Adaptive {
+                    display: ThinkingDisplay::ModelDefault,
+                });
             }
             _ => {}
+        }
+        if contract.summarized_thinking
+            && matches!(
+                request.thinking,
+                None | Some(ThinkingConfig::Adaptive { .. })
+            )
+        {
+            request.thinking = Some(ThinkingConfig::Adaptive {
+                display: ThinkingDisplay::Summarized,
+            });
         }
         if contract.no_forced_tool_choice
             && let Some(forced @ (ToolChoice::Any | ToolChoice::Tool(_))) = &request.tool_choice

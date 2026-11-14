@@ -590,7 +590,9 @@ fn test_openai_reasoning_effort_mapping() {
         max_tokens: None,
         tool_choice: None,
         enable_caching: false,
-        thinking: Some(ThinkingConfig::Adaptive),
+        thinking: Some(ThinkingConfig::Adaptive {
+            display: ThinkingDisplay::ModelDefault,
+        }),
         context_management: None,
         ephemeral_system_notice: None,
     };
@@ -678,7 +680,9 @@ fn test_ollama_flavour_leaves_the_other_thinking_arms_alone() {
         "no thinking config means the model reasons as it normally would"
     );
 
-    request.thinking = Some(ThinkingConfig::Adaptive);
+    request.thinking = Some(ThinkingConfig::Adaptive {
+        display: ThinkingDisplay::Summarized,
+    });
     let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
     assert_eq!(body["reasoning_effort"], "medium");
 

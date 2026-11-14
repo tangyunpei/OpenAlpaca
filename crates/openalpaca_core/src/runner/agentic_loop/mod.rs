@@ -519,10 +519,11 @@ async fn run_agentic_loop_core(
     }
     let tools_arc = Arc::new(tools);
     let mut consecutive_llm_errors: usize = 0;
-    // C7a: the ephemeral notice the last request carried in its system
-    // prompt. A request whose notice differs changes the system prompt every
-    // kept thinking block was produced after, so it sends none of them.
-    let mut last_notice: Option<Option<String>> = None;
+    // ANTHROPIC-THINKING: whether a request of this loop has carried the
+    // budget notice. From then on every turn is kept without its thinking,
+    // whatever a later round's notice is, so the blocks left out are always
+    // the newest, never some in between.
+    let mut notice_shown = false;
     const MAX_LLM_RETRIES: usize = 3;
 
     // ── Steering state (Routing V2) ────────────────────────────────
@@ -553,12 +554,12 @@ async fn run_agentic_loop_core(
         None
     };
 
-    // Build context_management from budget manager (Phase D)
+    // Build context_management from budget manager (Phase D): old tool
+    // results cleared, every turn's thinking kept (ANTHROPIC-THINKING).
     let context_management = context_budget.map(|budget| {
         openalpaca_llm::context_management::ContextManagement::from_budget(
             budget.compaction_trigger(),
             5, // keep 5 recent tool-use blocks
-            2, // keep 2 recent thinking turns
         )
     });
 
@@ -662,8 +663,10 @@ async fn run_agentic_loop_core(
 
         // ── Ephemeral budget-pressure notice (spec P0b) ────────────
         // Stateless: recomputed every iteration, passed to `backend.complete`
-        // as `ephemeral_system_notice`, never appended to `messages`. Fires
-        // when either the cost ratio or rounds ratio reaches 0.8.
+        // as `ephemeral_system_notice`, never appended to `messages`; every
+        // provider places it last in the request, never in the system prompt
+        // (ANTHROPIC-THINKING). Fires when either the cost ratio or rounds
+        // ratio reaches 0.8.
         let ephemeral_notice = if config.experimental_ephemeral_pressure {
             let rounds_ratio = (state.rounds as f64) / (config.max_rounds as f64).max(1.0);
             let fire = cost_ratio.max(rounds_ratio) >= 0.8;
@@ -879,19 +882,6 @@ async fn run_agentic_loop_core(
             }
         }
 
-        // C7a: a changed ephemeral notice is a changed system prompt.
-        if last_notice
-            .as_ref()
-            .is_some_and(|last| *last != ephemeral_notice)
-        {
-            forget_thinking(
-                Arc::make_mut(&mut messages).as_mut_slice(),
-                agent_id,
-                "system_notice",
-            );
-        }
-        last_notice = Some(ephemeral_notice.clone());
-
         // ── 5. Build request (pre-LLM-call assembly) ──────────────
         let tool_choice = {
             let _span = tracing::info_span!(
@@ -990,8 +980,25 @@ async fn run_agentic_loop_core(
 
         // ── 9/10. Parse response / persist or execute tools ────────
         match llm_result {
-            Ok(response) => {
+            Ok(mut response) => {
                 consecutive_llm_errors = 0;
+                // ANTHROPIC-THINKING: the notice was this request's last
+                // message and is not kept, so the next request differs
+                // before this turn's thinking and it cannot go back; it is
+                // the newest, which a request may leave out. The thinking
+                // before the notice stays. Latched, not this round's notice:
+                // were the notice ever to lapse (its ratios only rise
+                // today), a turn after it keeping its thinking would follow
+                // one without, the gap the prefix check refuses ("but not
+                // one in between", .../preserved-thinking/prefix-checks).
+                notice_shown |= ephemeral_notice.is_some();
+                if notice_shown && response.echo.take().is_some() {
+                    tracing::debug!(
+                        agent_id,
+                        cause = "budget_notice",
+                        "A turn produced under the budget notice is kept without its thinking"
+                    );
+                }
                 // Any injected steering messages were consumed by this call.
                 pending_steering.clear();
 

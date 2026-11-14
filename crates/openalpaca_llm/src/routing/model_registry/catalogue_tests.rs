@@ -174,6 +174,7 @@ fn only_opus_5_5_carries_a_request_contract() {
         thinking_always_on: true,
         adaptive_thinking_only: true,
         no_forced_tool_choice: true,
+        summarized_thinking: true,
     };
     assert_eq!(row(&registry, "claude-opus-5-5").request_contract, all);
     for id in [

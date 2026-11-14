@@ -455,9 +455,21 @@ pub enum ThinkingConfig {
     /// Thinking enabled with a fixed token budget (minimum 1024).
     Enabled { budget_tokens: u32 },
     /// Claude adaptively decides whether and how much to think.
-    Adaptive,
+    Adaptive { display: ThinkingDisplay },
     /// Thinking explicitly disabled.
     Disabled,
+}
+
+/// What an adaptive thinking request asks to get back of the thinking
+/// (Anthropic's `thinking.display`; the other providers ignore it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkingDisplay {
+    /// No `display` is sent: the model's own default.
+    #[default]
+    ModelDefault,
+    /// `display: "summarized"`: a readable summary of the thinking, asked of
+    /// a model whose default returns none (ANTHROPIC-THINKING).
+    Summarized,
 }
 
 impl ThinkingConfig {
@@ -488,9 +500,10 @@ pub struct ChatRequest {
     pub thinking: Option<ThinkingConfig>,
     /// Context management configuration (Anthropic only). Other providers ignore this.
     pub context_management: Option<crate::context_management::ContextManagement>,
-    /// Ephemeral system notice (e.g., budget pressure) injected into this
-    /// request only. Never persisted to conversation history. Providers
-    /// place it per their convention (spec P0).
+    /// Ephemeral notice (e.g., budget pressure) injected into this request
+    /// only. Never persisted to conversation history. Every provider places
+    /// it last, after the request's messages, and never in the system prompt
+    /// (spec P0; ANTHROPIC-THINKING moved Anthropic's out of `system`).
     pub ephemeral_system_notice: Option<String>,
 }
 
