@@ -427,8 +427,9 @@ impl LoopResult {
     /// error as written — never its `Debug` form — and the cost cap with its
     /// amount. Where a retry cannot change the outcome — the cost cap,
     /// credentials the provider refused, no model the agent can use, a model
-    /// it may not use — it says so, because the lead's prompt tells it to
-    /// retry a failed subagent. The last tool error follows, as there.
+    /// it may not use, a local model that used up its whole timeout — it says
+    /// so, because the lead's prompt tells it to retry a failed subagent. The
+    /// last tool error follows, as there.
     ///
     /// `max_cost` is the subagent's own cap (its template's
     /// `max_cost_per_task`, else `[execution.agent_defaults] max_cost`); the
@@ -523,6 +524,13 @@ fn usd(amount: f64) -> String {
 /// refused) or `NoApiCompatibleKeys`, each kept past the fallback ladder; the
 /// provider's own `AuthenticationFailed` and an HTTP 401 or 403 arrive
 /// unflattened only on the direct, unrouted backend.
+///
+/// A local model that used up its whole timeout ends a routed loop as
+/// `LocalCallTimedOut` (LOCAL-HOUR-NO-RETRY), which neither the router nor
+/// the loop asks again; a second subagent would wait out the same timeout on
+/// the same model, so it is named here too (LOCAL-TIMEOUT-MARK, item 18 of
+/// the owner's answer of 2026-11-14). Its text opens with the model's id, so
+/// it is matched by its shape (`fits_shape`), not a prefix.
 fn retry_cannot_help(error: &str) -> Option<&'static str> {
     use openalpaca_llm::{LlmError, LlmRouterError};
     let is = |e: LlmRouterError| error == e.to_string();
@@ -555,7 +563,47 @@ fn retry_cannot_help(error: &str) -> Option<&'static str> {
     if error.starts_with("Model access denied:") {
         return Some("this agent may not use the model that answered");
     }
+    if fits_shape(
+        error,
+        &LlmRouterError::LocalCallTimedOut {
+            model: FIELD.to_string(),
+            provider: FIELD.to_string(),
+            timeout_secs: u64::MAX,
+        }
+        .to_string()
+        .replace(&u64::MAX.to_string(), FIELD),
+    ) {
+        return Some(
+            "the local model used up its whole timeout, and every attempt waits as long — give \
+             the work a narrower objective, or do this part yourself",
+        );
+    }
     None
+}
+
+/// Where a field stands in a shape [`fits_shape`] reads: a character no
+/// router message holds.
+const FIELD: &str = "\u{0}";
+
+/// Whether `error` is `shape` with each [`FIELD`] filled by any text — the
+/// shape's fixed words in order, from its first character to its last.
+fn fits_shape(error: &str, shape: &str) -> bool {
+    let mut words = shape.split(FIELD);
+    let first = words.next().unwrap_or_default();
+    let Some(mut rest) = error.strip_prefix(first) else {
+        return false;
+    };
+    let mut words: Vec<&str> = words.collect();
+    let Some(last) = words.pop() else {
+        return rest.is_empty();
+    };
+    for word in words {
+        match rest.find(word) {
+            Some(at) => rest = &rest[at + word.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
 }
 
 /// A tool error as the person reading the turn should see it (W2).

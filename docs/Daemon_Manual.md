@@ -615,11 +615,13 @@ of the turn: the router does not try it again, does not walk the fallback chain
 to another model of the same provider, and the agentic loop does not retry it
 after a backoff. A model in the chain on another provider (a cloud model you
 listed) may still answer; when none does, the turn ends with the error, which
-names the model and the timeout. A stream that opened and then fell silent is
-still asked again once without streaming. A cloud provider's timeout keeps its
-retries: the chain, then up to three loop retries — unless a local model on its
-chain used up its own whole timeout in that call; the turn then ends naming the
-local model, since a retry would ask it again.
+names the model and the timeout. When the turn is a subagent's, its lead is
+told that a retry will not help, so it is not invited to start the subagent
+again to wait out the same timeout. A stream that opened and then fell silent
+is still asked again once without streaming. A cloud provider's timeout keeps
+its retries: the chain, then up to three loop retries — unless a local model on
+its chain used up its own whole timeout in that call; the turn then ends naming
+the local model, since a retry would ask it again.
 
 Streaming for Ollama is real (the provider forwards to the OpenAI-compatible
 streaming client), and every OpenAI-compatible base is asked for

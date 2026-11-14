@@ -257,17 +257,19 @@ the cost cap with its amount and the spend it was checked against
 (`LoopResult::cap_spend`, this attempt's — not the agent's lifetime
 total, which a singleton template's reused id would carry), the error as
 written (never the finish reason's `Debug` form), the last tool error.
-Where a retry
-cannot change the outcome — the cost cap, credentials the provider refused,
-no model the agent can use, a model it may not use — the line says *"A
-retry will not help"*, and the lead prompt's step 5 retries a failure
-unless its failure says so. Credentials the provider refused on every
-attempt reach the loop as the router's `AllKeysRefused` — on the streaming
-and the non-streaming path, and kept past the fallback ladder when no rung
-answers, as `NoApiCompatibleKeys` now is — which the loop does not retry
-as transient; before, the rotation ended as "Max retries exceeded" and the
-ladder's "All fallback models failed", retried three times and then read
-as a failure a retry could fix.
+Where a retry cannot change the outcome — the cost cap, credentials the
+provider refused, no model the agent can use, a model it may not use, a
+local model that used up its whole timeout (`LocalCallTimedOut`, read by
+its text's shape, since the text opens with the model's id;
+LOCAL-TIMEOUT-MARK) — the line says *"A retry will not help"*, and the
+lead prompt's step 5 retries a failure unless its failure says so.
+Credentials the provider refused on every attempt reach the loop as the
+router's `AllKeysRefused` — on the streaming and the non-streaming path,
+and kept past the fallback ladder when no rung answers, as
+`NoApiCompatibleKeys` now is — which the loop does not retry as transient;
+before, the rotation ended as "Max retries exceeded" and the ladder's "All
+fallback models failed", retried three times and then read as a failure a
+retry could fix.
 
 **A resumed run knows its subagents again** (N-LEAD-4). Each subagent's
 whole final answer is spilled to the session's `results/` beside its
@@ -356,9 +358,11 @@ non-streaming call. No rung of the fallback ladder served by that
 provider is asked — the model itself included — while a rung on another
 provider may answer; when none does, the round ends with
 `LlmRouterError::LocalCallTimedOut`, which names the model and the
-timeout and is not transient, so the loop does not retry it either. A
-stream that opened and then fell silent (its 90 s idle gap, or a read
-gap that came first) is still asked again without streaming.
+timeout and is not transient, so the loop does not retry it either; a
+subagent that ends this way tells its lead a retry will not help
+(`subagent_failure`). A stream that opened and then fell silent (its
+90 s idle gap, or a read gap that came first) is still asked again
+without streaming.
 
 `complete_streaming` returns `RoutedStream { model, requires_key,
 stream }`. A stream carries no model id of its own, and the router is

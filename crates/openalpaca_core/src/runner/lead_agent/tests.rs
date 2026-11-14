@@ -6995,6 +6995,123 @@ async fn a_subagent_whose_key_is_refused_is_told_a_retry_will_not_help() {
     );
 }
 
+/// A local model (a provider that needs no key, as Ollama is served) whose
+/// every non-streaming call waits out its whole figure and then times out.
+struct SpentLocalProvider {
+    timeout: std::time::Duration,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for SpentLocalProvider {
+    fn name(&self) -> &str {
+        "ollama"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    fn requires_key(&self) -> bool {
+        false
+    }
+    fn request_timeout(&self) -> Option<std::time::Duration> {
+        Some(self.timeout)
+    }
+    async fn chat(
+        &self,
+        _request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        tokio::time::sleep(self.timeout).await;
+        Err(openalpaca_llm::LlmError::Transport {
+            kind: openalpaca_llm::error::TransportKind::RequestTimeout,
+            message: "operation timed out".to_string(),
+        })
+    }
+}
+
+/// A router serving one local model, `model`, from `provider` with no key.
+fn local_router(provider: Arc<dyn openalpaca_llm::LlmProvider>, model: &str) -> LlmRouter {
+    use openalpaca_llm::ProviderType;
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        ProviderType::Ollama,
+        openalpaca_llm::ProviderEntry {
+            provider,
+            key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(
+                openalpaca_llm::KeyPool::new(vec![], openalpaca_llm::SelectionStrategy::RoundRobin),
+            )),
+        },
+    );
+    let registry = openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new());
+    registry.register(
+        model.to_string(),
+        openalpaca_llm::ModelInfo {
+            provider: ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 32_768,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
+            long_prompt: None,
+            cache_rates: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
+        },
+    );
+    LlmRouter::new(
+        providers,
+        registry,
+        std::collections::HashMap::new(),
+        Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::with_defaults(),
+        )),
+        model.to_string(),
+    )
+}
+
+/// **LOCAL-TIMEOUT-MARK** (item 18 of the owner's answer of 2026-11-14). A
+/// subagent whose local model used up its whole timeout is reported with
+/// the router's `LocalCallTimedOut`, and the lead is told a retry will not
+/// help: the lead prompt retries a failure unless its line says so, and a
+/// second attempt would wait out the same whole timeout on the same model.
+#[tokio::test(start_paused = true)]
+async fn a_subagent_whose_local_model_spent_its_whole_timeout_is_told_a_retry_will_not_help() {
+    let timeout = std::time::Duration::from_secs(5);
+    let started = tokio::time::Instant::now();
+    let failure = worker_status_after(
+        Arc::new(local_router(
+            Arc::new(SpentLocalProvider { timeout }),
+            "llama-local:8b",
+        )),
+        crate::test_util::make_agent("worker", vec![]),
+    )
+    .await
+    .unwrap_err();
+
+    // Asked once, with no backoff (LOCAL-HOUR-NO-RETRY): one timeout gone.
+    assert!(
+        started.elapsed() < timeout * 2,
+        "the spent call was retried: {:?}",
+        started.elapsed()
+    );
+    let spent = openalpaca_llm::LlmRouterError::LocalCallTimedOut {
+        model: "llama-local:8b".to_string(),
+        provider: "ollama".to_string(),
+        timeout_secs: 5,
+    }
+    .to_string();
+    assert!(
+        failure.contains(&format!("Agent 'worker' could not finish: {spent}")),
+        "the timeout as the router names it: {failure}"
+    );
+    assert!(
+        failure.contains(&format!("{spent} A retry will not help: ")),
+        "{failure}"
+    );
+}
+
 fn loop_result(finish_reason: crate::runner::LoopFinishReason) -> LoopResult {
     LoopResult {
         final_content: String::new(),
@@ -7109,6 +7226,66 @@ fn a_subagent_failure_says_a_retry_will_not_help_only_where_it_cannot() {
         assert_eq!(
             failure,
             format!("Agent 'researcher' could not finish: {transient}")
+        );
+    }
+}
+
+/// **LOCAL-TIMEOUT-MARK.** A local model's spent whole timeout is a failure
+/// a retry cannot change, read against the router's own `Display` of
+/// `LocalCallTimedOut` whatever its model, provider and figure — the line is
+/// pinned whole — while a timeout that may pass is never told it cannot.
+#[test]
+fn a_spent_local_timeout_is_one_a_retry_cannot_help() {
+    use crate::runner::LoopFinishReason;
+    use openalpaca_llm::error::TransportKind;
+    use openalpaca_llm::{LlmError, LlmRouterError};
+
+    let line = |error: String| {
+        loop_result(LoopFinishReason::Error(error)).subagent_failure("researcher", 1.0)
+    };
+    let spent = |model: &str, provider: &str, timeout_secs: u64| {
+        LlmRouterError::LocalCallTimedOut {
+            model: model.to_string(),
+            provider: provider.to_string(),
+            timeout_secs,
+        }
+        .to_string()
+    };
+
+    let error = spent("llama-local:8b", "ollama", 3600);
+    assert_eq!(
+        line(error.clone()),
+        format!(
+            "Agent 'researcher' could not finish: {error} A retry will not help: the local \
+             model used up its whole timeout, and every attempt waits as long — give the work \
+             a narrower objective, or do this part yourself."
+        )
+    );
+    // Any model, provider and figure: the id may hold the text's own words.
+    for error in [
+        spent("a (b, c", "my-local", 1),
+        spent("x", "ollama", u64::MAX),
+        spent("", "", 0),
+    ] {
+        assert!(line(error).contains("A retry will not help"));
+    }
+
+    for may_pass in [
+        LlmRouterError::Llm(LlmError::Transport {
+            kind: TransportKind::RequestTimeout,
+            message: "operation timed out".to_string(),
+        })
+        .to_string(),
+        LlmRouterError::MaxRetriesExceeded.to_string(),
+        LlmRouterError::AllFallbacksFailed.to_string(),
+        // The local timeout's text with more after it is not the router's.
+        format!("{error} Then the stream came back."),
+        // Its head alone is not either.
+        "llama-local:8b (ollama, a local model) did not finish answering".to_string(),
+    ] {
+        assert_eq!(
+            line(may_pass.clone()),
+            format!("Agent 'researcher' could not finish: {may_pass}")
         );
     }
 }
