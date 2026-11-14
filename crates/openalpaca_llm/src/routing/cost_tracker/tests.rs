@@ -46,6 +46,7 @@ fn local_model(context_window: u32) -> ModelInfo {
         supports_tools: true,
         declared: true,
         long_prompt: None,
+        cache_rates: None,
         request_contract: crate::routing::model_registry::RequestContract::NONE,
     }
 }
@@ -325,14 +326,21 @@ fn the_long_prompt_rate_applies_above_its_threshold_and_not_below() {
     assert!((long - expected).abs() < 1e-9, "one over: {long}");
 
     // The cache path: the prompt's length counts its cached tokens, and the
-    // long rate scales the cache rates with the input rate.
+    // long rate scales the cache rates with the input rate. The row's own
+    // read multiplier, 0.05x (CACHE-MULT; the pricing page, read 2026-11-14:
+    // cached input $0.10 at the standard rate, $0.20 at the long one).
     let cached = 200_000;
     let long = tracker.calculate_cost_with_cache("gpt-6.1-sol", over, 0, 0, cached);
-    let expected = (over - cached) as f64 * 4.0 / 1e6 + cached as f64 * 4.0 * 0.10 / 1e6;
+    let expected = (over - cached) as f64 * 4.0 / 1e6 + cached as f64 * 0.20 / 1e6;
     assert!((long - expected).abs() < 1e-9, "cached, one over: {long}");
     let standard = tracker.calculate_cost_with_cache("gpt-6.1-sol", at, 0, 0, cached);
-    let expected = (at - cached) as f64 * 2.0 / 1e6 + cached as f64 * 2.0 * 0.10 / 1e6;
+    let expected = (at - cached) as f64 * 2.0 / 1e6 + cached as f64 * 0.10 / 1e6;
     assert!((standard - expected).abs() < 1e-9, "cached, at: {standard}");
+    // A write at the long rate: the page's long-context "30m write", $5.00.
+    let written = 100_000;
+    let long = tracker.calculate_cost_with_cache("gpt-6.1-sol", over, 0, written, 0);
+    let expected = (over - written) as f64 * 4.0 / 1e6 + written as f64 * 5.0 / 1e6;
+    assert!((long - expected).abs() < 1e-9, "written, one over: {long}");
 }
 
 /// A model with no long-prompt rate is priced the same at any length
@@ -361,4 +369,46 @@ fn the_catalogue_carries_gpt_6_1_sols_long_prompt_rate() {
     assert_eq!(rate.above_input_tokens, 272_000);
     assert!((rate.input_price_per_million - 4.0).abs() < 1e-9);
     assert!((rate.output_price_per_million - 15.0).abs() < 1e-9);
+}
+
+// ── CACHE-MULT, CACHE-WRITE: a cache figure per row ─────────────────────────
+
+/// A row with no cache figure keeps the tracker's figures from before the
+/// per-row ones: reads at 0.1x and writes at 1.25x its input rate. Here an
+/// id no row names (counted at the $3 fallback) and a `[models]` row the
+/// person writes, which replaces the compiled row whole as it does the
+/// long-prompt rate — so a `[models]` row for `gpt-6.1-sol` reads at 0.1x,
+/// not its compiled 0.05x.
+#[test]
+fn a_row_with_no_cache_figure_keeps_0_1x_reads_and_1_25x_writes() {
+    let tracker = make_tracker();
+    let million = 1_000_000;
+    let read = tracker.calculate_cost_with_cache("never-seen", million, 0, 0, million);
+    assert!((read - 0.30).abs() < 1e-9, "fallback read: {read}");
+    let write = tracker.calculate_cost_with_cache("never-seen", million, 0, million, 0);
+    assert!((write - 3.75).abs() < 1e-9, "fallback write: {write}");
+
+    let registry = Arc::new(ModelRegistry::with_defaults());
+    let mut declared = std::collections::HashMap::new();
+    declared.insert(
+        "gpt-6.1-sol".to_string(),
+        crate::config::ModelConfigEntry {
+            provider: "openai".to_string(),
+            input_price: Some(2.0),
+            output_price: Some(10.0),
+            context: Some(1_050_000),
+            supports_image: None,
+            supports_audio: None,
+            supports_document: None,
+            supports_reasoning: None,
+            supports_tools: None,
+        },
+    );
+    registry.reload_from_config(&declared, &std::collections::HashSet::new());
+    let tracker = make_tracker();
+    tracker.use_registry(registry);
+    let read = tracker.calculate_cost_with_cache("gpt-6.1-sol", million, 0, 0, million);
+    assert!((read - 0.20).abs() < 1e-9, "[models] row read: {read}");
+    let write = tracker.calculate_cost_with_cache("gpt-6.1-sol", million, 0, million, 0);
+    assert!((write - 2.50).abs() < 1e-9, "[models] row write: {write}");
 }

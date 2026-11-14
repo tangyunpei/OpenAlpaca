@@ -775,6 +775,7 @@ fn test_context_threshold_custom() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
@@ -4268,6 +4269,7 @@ fn keyless_router(provider: Arc<dyn LlmProvider>) -> LlmRouter {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );

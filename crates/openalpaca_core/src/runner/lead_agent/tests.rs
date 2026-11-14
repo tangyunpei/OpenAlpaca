@@ -1367,6 +1367,7 @@ async fn a_subagents_brief_survives_its_loops_compaction() {
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
@@ -3695,6 +3696,7 @@ fn ollama_only_router(provider: Arc<ScriptedProvider>) -> Arc<LlmRouter> {
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
@@ -3966,6 +3968,7 @@ async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
@@ -4162,6 +4165,7 @@ async fn no_lead_or_subagent_turn_sends_its_templates_temperature() {
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
@@ -5092,6 +5096,7 @@ async fn a_lead_with_a_memory_block_keeps_its_objective_through_a_compaction() {
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
@@ -5938,6 +5943,7 @@ async fn the_leads_compaction_folds_into_the_chats_working_state() {
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );

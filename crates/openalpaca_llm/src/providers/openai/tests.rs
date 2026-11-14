@@ -472,6 +472,94 @@ async fn test_openai_sse_cached_tokens_in_usage() {
     panic!("Expected a Usage event with cached_tokens");
 }
 
+// ── CACHE-WRITE: Chat Completions' write count ──────────────────────────────
+
+/// What `usage` costs at the compiled catalogue's rates.
+fn priced(model: &str, usage: &Usage) -> f64 {
+    crate::routing::CostTracker::new(crate::routing::ModelRegistry::with_defaults())
+        .calculate_cost_with_cache(
+            model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        )
+}
+
+/// The prompt-caching guide's own example (developers.openai.com/api/docs/
+/// guides/prompt-caching, read 2026-11-14): 12,000 input tokens, 4,000 of
+/// them cached and 7,000 written, so 1,000 ordinary. On `gpt-6.1-sol` (its
+/// page: $2 input, $0.10 cached, $2.50 cache writes, $10 output) that is
+/// $0.002 + $0.0004 + $0.0175 + $0.01 for 1,000 output tokens.
+const GUIDE_INPUT: u32 = 12_000;
+const GUIDE_CACHED: u32 = 4_000;
+const GUIDE_WRITTEN: u32 = 7_000;
+const SOL_GUIDE_COST: f64 = 0.002 + 0.0004 + 0.0175 + 0.01;
+
+/// CACHE-WRITE: Chat Completions reports the write count as
+/// `usage.prompt_tokens_details.cache_write_tokens` ("The unadjusted number
+/// of prompt tokens written to cache", the chat completions reference,
+/// developers.openai.com/api/reference/resources/chat/subresources/
+/// completions/methods/create, read 2026-11-14); the arm reads it into
+/// `cache_creation_input_tokens`, and the row's write rate prices it. Red
+/// on the parent, which read only `cached_tokens`.
+#[test]
+fn a_chat_completions_answer_reads_its_cache_writes_and_is_priced_by_the_row() {
+    let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
+    let response = provider
+        .parse_response(serde_json::json!({
+            "id": "chatcmpl-cache",
+            "model": "gpt-6.1-sol",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi."},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": GUIDE_INPUT,
+                "completion_tokens": 1000,
+                "total_tokens": GUIDE_INPUT + 1000,
+                "prompt_tokens_details": {
+                    "cached_tokens": GUIDE_CACHED,
+                    "cache_write_tokens": GUIDE_WRITTEN
+                }
+            }
+        }))
+        .unwrap();
+    assert_eq!(response.usage.input_tokens, GUIDE_INPUT);
+    assert_eq!(response.usage.cache_read_input_tokens, GUIDE_CACHED);
+    assert_eq!(response.usage.cache_creation_input_tokens, GUIDE_WRITTEN);
+    let cost = priced("gpt-6.1-sol", &response.usage);
+    assert!((cost - SOL_GUIDE_COST).abs() < 1e-12, "cost={cost}");
+}
+
+/// The same count on the stream's usage chunk ("an additional chunk ...
+/// before the `data: [DONE]` message", whose `usage` is the request's; the
+/// chat completions streaming-events reference lists the same
+/// `prompt_tokens_details.cache_write_tokens`, read 2026-11-14). Red on the
+/// parent.
+#[tokio::test]
+async fn a_streamed_chat_completions_usage_reads_its_cache_writes() {
+    let raw = format!(
+        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"Hi.\"}}}}]}}\n\n\
+         data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+         data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{GUIDE_INPUT},\"completion_tokens\":1000,\"prompt_tokens_details\":{{\"cached_tokens\":{GUIDE_CACHED},\"cache_write_tokens\":{GUIDE_WRITTEN}}}}}}}\n\n\
+         data: [DONE]\n\n"
+    );
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let response = crate::streaming::collect_stream(
+        Box::pin(parse_openai_sse(byte_stream)),
+        "gpt-6.1-sol".to_string(),
+    )
+    .await
+    .expect("the stream collects");
+    assert_eq!(response.usage.input_tokens, GUIDE_INPUT);
+    assert_eq!(response.usage.cache_read_input_tokens, GUIDE_CACHED);
+    assert_eq!(response.usage.cache_creation_input_tokens, GUIDE_WRITTEN);
+    let cost = priced("gpt-6.1-sol", &response.usage);
+    assert!((cost - SOL_GUIDE_COST).abs() < 1e-12, "cost={cost}");
+}
+
 #[test]
 fn test_openai_reasoning_effort_mapping() {
     let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);

@@ -12,6 +12,36 @@ pub struct PricingInfo {
     pub output_price_per_million: f64,
     /// The higher rate a long prompt pays, when the model has one.
     pub long_prompt: Option<LongPromptRate>,
+    /// What a cache read and a cache write cost, when the row states it;
+    /// `None` is [`CacheRates::UNSTATED`]'s figures.
+    pub cache_rates: Option<CacheRates>,
+}
+
+/// What a model's prompt cache costs, as multiples of the input rate the
+/// request pays (CACHE-MULT and CACHE-WRITE, the owner's items 9 and 10 of
+/// 2026-11-14).
+///
+/// Multiples, not prices, so that a long-prompt rate scales them as the
+/// pages do ("2x input and cache rates", `gpt-6.1-sol`'s page). A write is
+/// priced at the lifetime the arm's requests get, since neither arm asks
+/// for another: Anthropic's 5-minute default and OpenAI's `"30m"` default.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CacheRates {
+    /// A cached input token read (a hit), as a multiple of the input rate.
+    pub read: f64,
+    /// An input token written to the cache, as a multiple of the input
+    /// rate; 1.0 where the page charges no more than ordinary input.
+    pub write: f64,
+}
+
+impl CacheRates {
+    /// A row that states no figure — a discovered model, an id no row
+    /// names, a `[models]` row — keeps the tracker's figures from before
+    /// the per-row ones: reads at 0.1x, writes at 1.25x.
+    pub const UNSTATED: CacheRates = CacheRates {
+        read: 0.10,
+        write: 1.25,
+    };
 }
 
 /// A second rate a model's whole request pays once its prompt is longer than
@@ -160,6 +190,12 @@ pub struct ModelInfo {
     /// at any length. Only a compiled row carries one: a `[models]` row the
     /// person writes replaces the compiled row whole, rate included.
     pub long_prompt: Option<LongPromptRate>,
+    /// What a cache read and a cache write cost on this model, for a
+    /// compiled row whose pages state them (CACHE-MULT, CACHE-WRITE);
+    /// `None` for any other row, priced at [`CacheRates::UNSTATED`]. As with
+    /// the long-prompt rate, a `[models]` row the person writes replaces the
+    /// compiled row whole, figures included.
+    pub cache_rates: Option<CacheRates>,
     /// What the model's API refuses in a request (C7a). A compiled row's;
     /// a `[models]` row for the same id keeps it, since it is the model's
     /// contract rather than the person's price, and a discovered id that no
@@ -202,6 +238,18 @@ impl ModelRegistry {
         // "Retired" on June 15, 2026 (the model-deprecations page, read
         // 2026-11-12), O-17 (a).
         //
+        // Cache rates (CACHE-MULT, CACHE-WRITE; the pricing page's "Model
+        // pricing" and .../build-with-claude/prompt-caching, read
+        // 2026-11-14): a read ("Cache hits and refreshes") costs 0.05x the
+        // input price on Opus 5.5 ("Cache hits and refreshes on Claude Opus
+        // 5.5 and Claude Sonnet 5.5 are priced at 0.05x the base input
+        // price") and "the standard 0.1x multiplier" on the other rows
+        // ($0.20, $0.50, $0.30, $0.30 and $0.10 a million); a write costs
+        // 1.25x, the "5m cache writes" column ($5, $6.25, $3.75, $3.75 and
+        // $1.25), the lifetime the arm's `cache_control: {"type":
+        // "ephemeral"}` gets ("By default, the cache has a 5-minute
+        // lifetime"). The arm never asks for the 1-hour write (2x).
+        //
         // Claude Opus 5.5, the latest Opus and `strong`'s row (O-13 (a)):
         // $4 / $20, a 1M-token window (the pricing page and the models
         // overview, platform.claude.com/docs/en/models/overview, read
@@ -224,6 +272,10 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                cache_rates: Some(CacheRates {
+                    read: 0.05,
+                    write: 1.25,
+                }),
                 // C7a: its request contract, from the pages read 2026-11-12.
                 // The Opus 5.5 migration guide (platform.claude.com/docs/en/
                 // models/opus-5-5/migration-guide), "What every request to
@@ -264,6 +316,10 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                cache_rates: Some(CacheRates {
+                    read: 0.10,
+                    write: 1.25,
+                }),
                 request_contract: RequestContract::NONE,
             },
         );
@@ -286,6 +342,10 @@ impl ModelRegistry {
                     supports_tools: true,
                     declared: true,
                     long_prompt: None,
+                    cache_rates: Some(CacheRates {
+                        read: 0.10,
+                        write: 1.25,
+                    }),
                     request_contract: RequestContract::NONE,
                 },
             );
@@ -306,6 +366,10 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                cache_rates: Some(CacheRates {
+                    read: 0.10,
+                    write: 1.25,
+                }),
                 request_contract: RequestContract::NONE,
             },
         );
@@ -316,6 +380,14 @@ impl ModelRegistry {
         // 2026-11-12); the last two "Deprecated", shut down on Dec 11, 2026
         // (the deprecations page): kept until O-16 (a) moves the aliases off
         // them. The windows stay as listed until step 19's live check.
+        //
+        // Cache rates (CACHE-MULT, CACHE-WRITE; the pricing page, each
+        // model's page and .../guides/prompt-caching, read 2026-11-14): the
+        // earlier models — these three, `gpt-4o-mini` and `o3` — read at
+        // their page's "Cached input" price ($0.175, $0.025, $0.005, $0.075
+        // and $0.50 a million: 0.1x, 0.1x, 0.1x, 0.5x and 0.25x) and write at
+        // their input rate, the guide's "Summary of model differences"
+        // giving "Other earlier models" "No additional cache-write charge".
         models.insert(
             "gpt-5.2".to_string(),
             ModelInfo {
@@ -331,6 +403,10 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                cache_rates: Some(CacheRates {
+                    read: 0.10,
+                    write: 1.0,
+                }),
                 request_contract: RequestContract::NONE,
             },
         );
@@ -349,6 +425,10 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                cache_rates: Some(CacheRates {
+                    read: 0.10,
+                    write: 1.0,
+                }),
                 request_contract: RequestContract::NONE,
             },
         );
@@ -367,6 +447,10 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                cache_rates: Some(CacheRates {
+                    read: 0.10,
+                    write: 1.0,
+                }),
                 request_contract: RequestContract::NONE,
             },
         );
@@ -390,6 +474,10 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                cache_rates: Some(CacheRates {
+                    read: 0.50,
+                    write: 1.0,
+                }),
                 request_contract: RequestContract::NONE,
             },
         );
@@ -401,7 +489,14 @@ impl ModelRegistry {
         // text and image in, audio unsupported; reasoning tokens; function
         // calling, though "Tool calling requires the Responses API", which
         // the arm reaches only with C7b (developers.openai.com/api/docs/
-        // models/gpt-6.1-sol and .../pricing, read 2026-11-12).
+        // models/gpt-6.1-sol and .../pricing, read 2026-11-12). Its cache
+        // (the same pages and .../guides/prompt-caching, read 2026-11-14):
+        // "Cached input tokens are priced at 5% of the uncached input token
+        // rate" ($0.10) and "Cache writes are billed at 1.25x the uncached
+        // input token rate" ($2.50), the default `"30m"` lifetime: the arm
+        // sends no `prompt_cache_options`, and "Omitting both settings
+        // preserves the default `"30m"` behavior". It never asks for the
+        // 12-hour write (2.5x, the Responses API only).
         models.insert(
             "gpt-6.1-sol".to_string(),
             ModelInfo {
@@ -420,6 +515,10 @@ impl ModelRegistry {
                     above_input_tokens: 272_000,
                     input_price_per_million: 4.0,
                     output_price_per_million: 15.0,
+                }),
+                cache_rates: Some(CacheRates {
+                    read: 0.05,
+                    write: 1.25,
                 }),
                 request_contract: RequestContract::NONE,
             },
@@ -446,6 +545,10 @@ impl ModelRegistry {
                 supports_tools: true,
                 declared: true,
                 long_prompt: None,
+                cache_rates: Some(CacheRates {
+                    read: 0.25,
+                    write: 1.0,
+                }),
                 request_contract: RequestContract::NONE,
             },
         );
@@ -512,6 +615,7 @@ impl ModelRegistry {
                         supports_tools: entry.supports_tools.unwrap_or(true),
                         declared: true,
                         long_prompt: None,
+                        cache_rates: None,
                         request_contract: compiled
                             .get(model_id)
                             .map_or(RequestContract::NONE, |row| row.request_contract),
@@ -550,6 +654,7 @@ impl ModelRegistry {
                 input_price_per_million: info.input_price_per_million,
                 output_price_per_million: info.output_price_per_million,
                 long_prompt: info.long_prompt,
+                cache_rates: info.cache_rates,
             })
     }
 

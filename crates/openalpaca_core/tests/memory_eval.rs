@@ -8189,6 +8189,7 @@ fn router_over(models: &[&str], stub: Arc<StubModel>) -> Arc<openalpaca_llm::Llm
                 supports_tools: true,
                 declared: false,
                 long_prompt: None,
+                cache_rates: None,
             },
         );
     }

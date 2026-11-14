@@ -195,3 +195,68 @@ fn only_opus_5_5_carries_a_request_contract() {
         );
     }
 }
+
+/// CACHE-MULT and CACHE-WRITE (the owner's items 9 and 10, 2026-11-14):
+/// every compiled row prices a cache read and a cache write as its page
+/// does, both read on 2026-11-14 and given here in dollars per million.
+///
+/// Anthropic (platform.claude.com/docs/en/about-claude/pricing, "Model
+/// pricing"): reads ("Cache hits and refreshes") $0.20 on Opus 5.5 — "0.05x
+/// the base input price" — and the "standard 0.1x multiplier" on the rest;
+/// writes at the "5m cache writes" column, the lifetime the arm's
+/// `cache_control: {"type": "ephemeral"}` gets ("By default, the cache has
+/// a 5-minute lifetime", .../build-with-claude/prompt-caching).
+///
+/// OpenAI (developers.openai.com/api/docs/pricing and each model's page):
+/// `gpt-6.1-sol` reads $0.10 ("5% of the uncached input token rate") and
+/// writes $2.50 ("Cache writes are billed at 1.25x"), the default `"30m"`
+/// lifetime the arm gets by sending no `prompt_cache_options`
+/// (.../guides/prompt-caching, "Cache lifetime"); the earlier models read
+/// at their "Cached input" price and have "No additional cache-write
+/// charge" (the same guide's "Summary of model differences"), so a write
+/// costs their input rate.
+///
+/// Red on the parent, which bills every row's reads at 0.1x and writes at
+/// 1.25x its input rate.
+#[test]
+fn every_row_prices_its_cache_reads_and_writes_as_its_page_does() {
+    // (id, cache read, cache write), $ per million tokens.
+    const PAGES: [(&str, f64, f64); 11] = [
+        ("claude-opus-5-5", 0.20, 5.00),
+        ("claude-opus-4-6", 0.50, 6.25),
+        ("claude-sonnet-4-6", 0.30, 3.75),
+        ("claude-sonnet-4-5-20250929", 0.30, 3.75),
+        ("claude-haiku-4-5-20251001", 0.10, 1.25),
+        ("gpt-6.1-sol", 0.10, 2.50),
+        ("gpt-5.2", 0.175, 1.75),
+        ("gpt-5-mini", 0.025, 0.25),
+        ("gpt-5-nano", 0.005, 0.05),
+        ("gpt-4o-mini", 0.075, 0.15),
+        ("o3", 0.50, 2.00),
+    ];
+    let registry = ModelRegistry::with_defaults();
+    let mut compiled = registry.model_ids();
+    compiled.sort();
+    let mut pinned: Vec<String> = PAGES.iter().map(|(id, ..)| id.to_string()).collect();
+    pinned.sort();
+    assert_eq!(compiled, pinned, "every compiled row is pinned here");
+
+    // 100,000 tokens, a tenth of the per-million price: below every
+    // long-prompt threshold (`gpt-6.1-sol`'s 272,000).
+    let tracker = crate::routing::cost_tracker::CostTracker::new(ModelRegistry::with_defaults());
+    let tokens = 100_000;
+    for (id, read, write) in PAGES {
+        let got = tracker.calculate_cost_with_cache(id, tokens, 0, 0, tokens);
+        assert!(
+            (got - read / 10.0).abs() < EPS,
+            "{id}: a cache read costs ${read} a million, not ${}",
+            got * 10.0
+        );
+        let got = tracker.calculate_cost_with_cache(id, tokens, 0, tokens, 0);
+        assert!(
+            (got - write / 10.0).abs() < EPS,
+            "{id}: a cache write costs ${write} a million, not ${}",
+            got * 10.0
+        );
+    }
+}

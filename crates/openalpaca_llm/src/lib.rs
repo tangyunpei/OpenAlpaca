@@ -46,7 +46,7 @@ pub use routing::cost_tracker::{
 };
 pub use routing::model_alias::{ALIAS_TABLE, AliasRow, ModelAlias, ModelChoice, compiled_alias};
 pub use routing::model_registry::{
-    DiscoveredModel, LongPromptRate, ModelEntry, ModelInfo, ModelRegistry, PricingInfo,
+    CacheRates, DiscoveredModel, LongPromptRate, ModelEntry, ModelInfo, ModelRegistry, PricingInfo,
     ProviderDiscovery, RequestContract,
 };
 pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};

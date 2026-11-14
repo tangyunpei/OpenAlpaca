@@ -79,6 +79,7 @@ fn local_model_info() -> ModelInfo {
         supports_tools: true,
         declared: true,
         long_prompt: None,
+        cache_rates: None,
         request_contract: crate::routing::model_registry::RequestContract::NONE,
     }
 }

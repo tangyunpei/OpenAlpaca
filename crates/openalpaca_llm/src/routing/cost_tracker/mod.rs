@@ -1,6 +1,6 @@
 //! Cost tracking: per-agent and per-task usage and budget enforcement.
 
-use crate::routing::model_registry::ModelRegistry;
+use crate::routing::model_registry::{CacheRates, ModelRegistry};
 use arc_swap::ArcSwap;
 use dashmap::DashSet;
 use std::collections::HashMap;
@@ -85,17 +85,24 @@ impl CostTracker {
     /// The (input, output) price per million tokens to bill one request to
     /// this model at, its prompt `input_tokens` long (cached tokens
     /// included): the model's long-prompt rate when the prompt is longer
-    /// than that rate's threshold (O-17 (a)), else its standard rate.
-    fn pricing_for(&self, model: &str, input_tokens: u32) -> (f64, f64) {
+    /// than that rate's threshold (O-17 (a)), else its standard rate. With
+    /// them, the row's cache figures (CACHE-MULT, CACHE-WRITE), multiples
+    /// of whichever input rate applies; [`CacheRates::UNSTATED`] for a row
+    /// that states none and for an id no row prices.
+    fn pricing_for(&self, model: &str, input_tokens: u32) -> (f64, f64, CacheRates) {
         let registry = self.model_registry.load();
         if let Some(pricing) = registry.get_pricing(model) {
+            let cache = pricing.cache_rates.unwrap_or(CacheRates::UNSTATED);
             return match pricing.long_prompt {
-                Some(long) if input_tokens > long.above_input_tokens => {
-                    (long.input_price_per_million, long.output_price_per_million)
-                }
+                Some(long) if input_tokens > long.above_input_tokens => (
+                    long.input_price_per_million,
+                    long.output_price_per_million,
+                    cache,
+                ),
                 _ => (
                     pricing.input_price_per_million,
                     pricing.output_price_per_million,
+                    cache,
                 ),
             };
         }
@@ -121,24 +128,26 @@ impl CostTracker {
                  llm.toml to count it at its own."
             );
         }
-        fallback
+        (fallback.0, fallback.1, CacheRates::UNSTATED)
     }
 
     /// Calculate the cost for a given model and token counts.
     /// Falls back to default pricing if model is unknown. A prompt past the
     /// model's long-prompt threshold is priced at its long-prompt rate.
     pub fn calculate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-        let (input_price, output_price) = self.pricing_for(model, input_tokens);
+        let (input_price, output_price, _) = self.pricing_for(model, input_tokens);
         (input_tokens as f64 * input_price / 1_000_000.0)
             + (output_tokens as f64 * output_price / 1_000_000.0)
     }
 
-    /// Calculate cost including Anthropic prompt-cache pricing.
+    /// Calculate cost including prompt-cache pricing.
     ///
     /// `input_tokens` is the folded total reported by the provider (cache tokens
     /// are a subset of it, per `Usage`). Non-cached input bills at the base input
-    /// rate, cache-write tokens at 1.25x, and cache-read tokens at 0.1x — so a
-    /// mostly-cached prompt is no longer charged up to ~10x its real cost.
+    /// rate, cache-write and cache-read tokens at the model row's multiples of
+    /// it (CACHE-MULT, CACHE-WRITE: 0.05x reads on Opus 5.5 and GPT-6.1 Sol,
+    /// writes at the input rate on OpenAI's earlier models); a row stating
+    /// none bills writes at 1.25x and reads at 0.1x, as every row was before.
     /// The prompt's length, for a long-prompt rate, is `input_tokens`: cache
     /// reads and writes count toward it.
     pub fn calculate_cost_with_cache(
@@ -149,12 +158,12 @@ impl CostTracker {
         cache_creation_tokens: u32,
         cache_read_tokens: u32,
     ) -> f64 {
-        let (input_price, output_price) = self.pricing_for(model, input_tokens);
+        let (input_price, output_price, cache) = self.pricing_for(model, input_tokens);
         let cached = cache_creation_tokens as u64 + cache_read_tokens as u64;
         let non_cached_input = (input_tokens as u64).saturating_sub(cached);
         (non_cached_input as f64 * input_price / 1_000_000.0)
-            + (cache_creation_tokens as f64 * input_price * 1.25 / 1_000_000.0)
-            + (cache_read_tokens as f64 * input_price * 0.10 / 1_000_000.0)
+            + (cache_creation_tokens as f64 * input_price * cache.write / 1_000_000.0)
+            + (cache_read_tokens as f64 * input_price * cache.read / 1_000_000.0)
             + (output_tokens as f64 * output_price / 1_000_000.0)
     }
 

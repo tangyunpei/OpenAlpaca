@@ -101,6 +101,7 @@ fn pulled(router: &LlmRouter, tag: &str) {
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            cache_rates: None,
             request_contract: crate::routing::model_registry::RequestContract::NONE,
         },
     );

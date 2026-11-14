@@ -101,6 +101,7 @@ mod tests {
                 supports_tools: true,
                 declared: false,
                 long_prompt: None,
+                cache_rates: None,
                 request_contract: openalpaca_llm::RequestContract::NONE,
             },
         );
@@ -176,6 +177,7 @@ mod tests {
                 supports_tools: true,
                 declared: false,
                 long_prompt: None,
+                cache_rates: None,
                 request_contract: openalpaca_llm::RequestContract::NONE,
             },
         );

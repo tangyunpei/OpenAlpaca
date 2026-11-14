@@ -989,3 +989,79 @@ fn a_failed_tool_result_carries_is_error_and_a_successful_one_is_unchanged() {
         "a failed result says so in Anthropic's own field"
     );
 }
+
+// ── CACHE-MULT: Anthropic's cache reads at the row's rate ───────────────
+
+/// Claude Opus 5.5's row (the pricing page, read 2026-11-14): $4 input,
+/// "5m cache writes" $5, "Cache hits and refreshes" $0.20 ("0.05x the base
+/// input price"), $20 output. 1,000 uncached, 7,000 written and 4,000 read
+/// input tokens and 1,000 output: $0.004 + $0.035 + $0.0008 + $0.02.
+const OPUS_5_5_COST: f64 = 0.004 + 0.035 + 0.0008 + 0.02;
+
+fn priced(model: &str, usage: &Usage) -> f64 {
+    crate::routing::CostTracker::new(crate::routing::ModelRegistry::with_defaults())
+        .calculate_cost_with_cache(
+            model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        )
+}
+
+/// CACHE-MULT: a whole answer's cache reads and writes are priced at the
+/// row's rates. Red on the parent, which read at 0.1x ($0.40 a million).
+#[test]
+fn a_whole_answers_cache_reads_and_writes_are_priced_by_the_row() {
+    let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+    let response = provider
+        .parse_response(serde_json::json!({
+            "id": "msg_cache_priced",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5-5",
+            "content": [{"type": "text", "text": "Hi."}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 1000,
+                "cache_creation_input_tokens": 7000,
+                "cache_read_input_tokens": 4000
+            }
+        }))
+        .unwrap();
+    let cost = priced("claude-opus-5-5", &response.usage);
+    assert!((cost - OPUS_5_5_COST).abs() < 1e-12, "cost={cost}");
+}
+
+/// The same on the stream: `message_start`'s usage carries the cache
+/// counts, `message_delta`'s the output. Red on the parent.
+#[tokio::test]
+async fn a_streamed_answers_cache_reads_and_writes_are_priced_by_the_row() {
+    let raw = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1000,\"cache_creation_input_tokens\":7000,\"cache_read_input_tokens\":4000}}}\n",
+        "\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi.\"}}\n",
+        "\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1000}}\n",
+        "\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n",
+        "\n",
+    );
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let response = crate::streaming::collect_stream(
+        Box::pin(parse_anthropic_sse(byte_stream)),
+        "claude-opus-5-5".to_string(),
+    )
+    .await
+    .expect("the stream collects");
+    assert_eq!(response.usage.input_tokens, 12_000);
+    assert_eq!(response.usage.cache_creation_input_tokens, 7_000);
+    assert_eq!(response.usage.cache_read_input_tokens, 4_000);
+    let cost = priced("claude-opus-5-5", &response.usage);
+    assert!((cost - OPUS_5_5_COST).abs() < 1e-12, "cost={cost}");
+}

@@ -227,17 +227,21 @@ fn input_content(msg: &ChatMessage) -> serde_json::Value {
 
 /// The usage of a Responses API answer: input and output tokens as
 /// reported — output includes reasoning, which is "billed as output tokens"
-/// (the reasoning guide) — and the cached input as the cache read, as on
-/// Chat Completions. `input_tokens_details.cache_write_tokens` is not read
-/// (pending-decisions §1, *Rev 58*'s cache-write item).
+/// (the reasoning guide) — the cached input as the cache read, as on Chat
+/// Completions, and `input_tokens_details.cache_write_tokens`, "The number
+/// of input tokens that were written to the cache" (the Responses API
+/// reference, read 2026-11-14), as the cache write (CACHE-WRITE). The
+/// count by lifetime (`cache_write_tokens_details`) is not read: the arm
+/// asks for no lifetime, so every write is a default `"30m"` one, priced at
+/// the row's write rate.
 pub(super) fn usage_of(response: &serde_json::Value) -> Usage {
     let u = &response["usage"];
     let count = |v: &serde_json::Value| v.as_u64().unwrap_or(0) as u32;
     Usage {
         input_tokens: count(&u["input_tokens"]),
         output_tokens: count(&u["output_tokens"]),
+        cache_creation_input_tokens: count(&u["input_tokens_details"]["cache_write_tokens"]),
         cache_read_input_tokens: count(&u["input_tokens_details"]["cached_tokens"]),
-        ..Default::default()
     }
 }
 

@@ -50,6 +50,7 @@ fn test_custom_registry() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            cache_rates: None,
             request_contract: RequestContract::NONE,
         },
     );
@@ -79,6 +80,7 @@ fn test_register_model() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            cache_rates: None,
             request_contract: RequestContract::NONE,
         },
     );
@@ -107,6 +109,7 @@ fn test_register_if_absent() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            cache_rates: None,
             request_contract: RequestContract::NONE,
         },
     );
@@ -131,6 +134,7 @@ fn test_register_if_absent() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            cache_rates: None,
             request_contract: RequestContract::NONE,
         },
     );
@@ -164,6 +168,7 @@ fn test_register_discovered() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            cache_rates: None,
             request_contract: RequestContract::NONE,
         },
     );
@@ -188,6 +193,7 @@ fn test_register_discovered() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            cache_rates: None,
             request_contract: RequestContract::NONE,
         },
     );
@@ -219,6 +225,7 @@ fn test_list_discovered_models() {
             supports_tools: true,
             declared: true,
             long_prompt: None,
+            cache_rates: None,
             request_contract: RequestContract::NONE,
         },
     );

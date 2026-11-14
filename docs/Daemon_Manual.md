@@ -470,7 +470,8 @@ On the Responses API each request:
   conversation's history.
 
 The usage is read as on Chat Completions: input tokens, output tokens
-(reasoning included, which OpenAI bills as output) and cached input. A
+(reasoning included, which OpenAI bills as output), cached input and the
+input written to the cache. A
 `temperature` a request names is sent. `gpt-6.1-sol` always reasons, and
 OpenAI's GPT-6 guide says to remove `temperature` while a model reasons,
 on either API. So a summary or extraction call whose model is set to
@@ -515,7 +516,20 @@ the call, announced, instead of failing at the provider, unless your own
 `[models."<id>"]` row or the provider's model list still names it: then it
 stays routable and the call goes to the provider, priced by your row, or
 at the $3 / $15 fallback when only the list names it. A `[models."<id>"]`
-row replaces a built-in row whole, its long-prompt rate included.
+row replaces a built-in row whole, its long-prompt rate and cache rates
+included.
+
+Cached input is counted at each built-in row's own rates, as the
+providers' pages gave them on 2026-11-14. A cache read costs 0.05x the
+input rate on `claude-opus-5-5` and `gpt-6.1-sol`, 0.25x on `o3`, 0.5x on
+`gpt-4o-mini` and 0.1x on the other rows. A cache write costs 1.25x on the
+Anthropic rows (the 5-minute cache, the one the daemon asks for) and on
+`gpt-6.1-sol` (OpenAI's default 30-minute cache), and the plain input rate
+on OpenAI's earlier models, which charge nothing more for a write. The
+OpenAI provider reads the written count from the usage on both of its
+APIs. A model with no built-in row — a discovered one, an unknown id, or
+one a `[models]` row describes — is counted at 0.1x for a read and 1.25x
+for a write. On a long prompt both scale with the long rate.
 
 | Cap | Default | Key in `daemon.toml` |
 |---|---|---|

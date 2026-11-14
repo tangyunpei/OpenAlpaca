@@ -1270,3 +1270,72 @@ async fn ollama_keeps_chat_completions_byte_for_byte() {
     assert_eq!(requests[0].path, "/v1/chat/completions");
     assert_eq!(requests[0].body, OLLAMA_BODY);
 }
+
+// ── CACHE-WRITE: the Responses API's write count ────────────────────────
+
+/// The prompt-caching guide's example usage (developers.openai.com/api/docs/
+/// guides/prompt-caching, "Input usage fields with both write lifetimes",
+/// read 2026-11-14) at one lifetime: 12,000 input tokens, 4,000 cached,
+/// 7,000 written at the default `"30m"`, so 1,000 ordinary.
+fn usage_with_cache_writes() -> serde_json::Value {
+    serde_json::json!({
+        "input_tokens": 12_000,
+        "input_tokens_details": {
+            "cached_tokens": 4_000,
+            "cache_write_tokens": 7_000,
+            "cache_write_tokens_details": {"ttl_30m_tokens": 7_000, "ttl_12h_tokens": 0}
+        },
+        "output_tokens": 1_000,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 13_000
+    })
+}
+
+/// `gpt-6.1-sol`'s page (read 2026-11-14): $2 input, $0.10 cached input,
+/// $2.50 cache writes, $10 output — $0.002 + $0.0004 + $0.0175 + $0.01.
+const SOL_COST: f64 = 0.002 + 0.0004 + 0.0175 + 0.01;
+
+fn priced(usage: &Usage) -> f64 {
+    crate::routing::CostTracker::new(crate::routing::ModelRegistry::with_defaults())
+        .calculate_cost_with_cache(
+            "gpt-6.1-sol",
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        )
+}
+
+/// CACHE-WRITE: the Responses API reports the write count as
+/// `usage.input_tokens_details.cache_write_tokens` ("The number of input
+/// tokens that were written to the cache", the Responses API reference,
+/// read 2026-11-14); the arm reads it into `cache_creation_input_tokens`
+/// and the row's write rate prices it. Red on the parent, which read only
+/// `cached_tokens`.
+#[test]
+fn a_whole_answer_reads_its_cache_writes_and_is_priced_by_the_row() {
+    let mut body = answer(serde_json::json!([message_item("Hello.")]));
+    body["usage"] = usage_with_cache_writes();
+    let response = cloud().parse_responses_response(body).expect("parses");
+    assert_eq!(response.usage.input_tokens, 12_000);
+    assert_eq!(response.usage.cache_read_input_tokens, 4_000);
+    assert_eq!(response.usage.cache_creation_input_tokens, 7_000);
+    let cost = priced(&response.usage);
+    assert!((cost - SOL_COST).abs() < 1e-12, "cost={cost}");
+}
+
+/// The same count on the stream, from `response.completed`'s response
+/// (the streaming-events reference lists the same `input_tokens_details`,
+/// read 2026-11-14). Red on the parent.
+#[tokio::test]
+async fn a_streamed_answer_reads_its_cache_writes_and_is_priced_by_the_row() {
+    let mut body = answer(serde_json::json!([message_item("Hello.")]));
+    body["usage"] = usage_with_cache_writes();
+    let response =
+        collected(&[serde_json::json!({"type": "response.completed", "response": body})]).await;
+    assert_eq!(response.usage.input_tokens, 12_000);
+    assert_eq!(response.usage.cache_read_input_tokens, 4_000);
+    assert_eq!(response.usage.cache_creation_input_tokens, 7_000);
+    let cost = priced(&response.usage);
+    assert!((cost - SOL_COST).abs() < 1e-12, "cost={cost}");
+}

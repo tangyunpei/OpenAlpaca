@@ -1480,6 +1480,7 @@ fn local_only_router(
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
@@ -6355,6 +6356,7 @@ fn ollama_only_router(
             supports_tools: true,
             declared: false,
             long_prompt: None,
+            cache_rates: None,
             request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
