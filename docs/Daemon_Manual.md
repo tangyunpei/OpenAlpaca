@@ -501,11 +501,18 @@ id asked for (such as `gpt-4o-mini-2024-07-18`, or `gpt-5.2-2025-12-11`,
 `gpt-5.2`'s default snapshot): a snapshot the catalogue lacks meets the
 same fallback. `gpt-6.1-sol`'s page lists no snapshot but the id itself. A
 streamed round is counted by the id it was routed to. An OpenAI-compatible
-server on this machine (a loopback `base_url`, such as llama.cpp or LM
-Studio, set up as the `openai` provider with a key) is a keyed provider
-too: its discovered models are counted at the fallback although they cost
-nothing. A `[models."<id>"]` row with `input_price = 0` and
-`output_price = 0` keeps each at `0`.
+server on this machine (a loopback `base_url`: `localhost`, `127.0.0.0/8` or
+`::1`, such as llama.cpp or LM Studio set up as the `openai` provider with a
+key) runs here though it is keyed: the models its discovery lists are
+counted at `0`, as Ollama's are, and are not announced. A `[models."<id>"]`
+row's price still wins, and a built-in row keeps its own price wherever it
+is served from. The provider must be built at that address: a `base_url`
+changed on a running daemon counts once the provider is rebuilt (a restart,
+or switching it off and on), and the Anthropic provider, which always calls
+Anthropic's API, never counts as local. An OpenAI-compatible server at any
+other address, a machine on your network included, is counted like a cloud
+one; a `[models."<id>"]` row with `input_price = 0` and `output_price = 0`
+keeps such a model at `0`.
 
 A model whose provider prices a long prompt higher carries that second rate
 in its built-in row: `gpt-6.1-sol` costs $2 / $10 per million tokens, and a

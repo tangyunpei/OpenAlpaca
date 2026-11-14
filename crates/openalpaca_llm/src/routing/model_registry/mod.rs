@@ -215,20 +215,37 @@ pub struct ModelInfo {
 /// Thread-safe via internal RwLock for dynamic model discovery.
 pub struct ModelRegistry {
     models: RwLock<HashMap<String, ModelInfo>>,
+    /// The providers, by name, the router judges to run on loopback: the
+    /// runtime config's `base_url` and the address the provider was built to
+    /// call (`LlmProvider::base_url`) both loopback. Kept in step by the
+    /// router (`LlmRouter::note_loopback_providers`) at construction, on
+    /// every runtime-config reload and whenever a provider is registered or
+    /// removed: what their discovery lists runs on this machine (item 17).
+    loopback_providers: RwLock<HashSet<String>>,
 }
 
 impl ModelRegistry {
     pub fn new(models: HashMap<String, ModelInfo>) -> Self {
         Self {
             models: RwLock::new(models),
+            loopback_providers: RwLock::new(HashSet::new()),
         }
     }
 
     /// Create a registry with well-known models pre-populated.
     pub fn with_defaults() -> Self {
-        Self {
-            models: RwLock::new(Self::default_models()),
-        }
+        Self::new(Self::default_models())
+    }
+
+    /// The providers that run on loopback from now on: both the runtime
+    /// config's `base_url` and the provider's own address loopback, as
+    /// `LlmRouter::note_loopback_providers` judges them at construction, on
+    /// each reload and on each provider registration or removal.
+    pub(crate) fn set_loopback_providers(&self, providers: HashSet<String>) {
+        *self
+            .loopback_providers
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = providers;
     }
 
     /// The compiled default catalogue — every model this build knows how to
@@ -659,11 +676,12 @@ impl ModelRegistry {
     /// discovery registered ([`Self::is_unpriced`]): that row's 0 / 0 is the
     /// absence of a price, not a price (O-18).
     pub fn get_pricing(&self, model_id: &str) -> Option<PricingInfo> {
+        let loopback = self.loopback_providers();
         self.models
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .filter(|info| !Self::unpriced(info))
+            .filter(|info| !Self::unpriced(info, &loopback))
             .map(|info| PricingInfo {
                 input_price_per_million: info.input_price_per_million,
                 output_price_per_million: info.output_price_per_million,
@@ -677,19 +695,33 @@ impl ModelRegistry {
     /// `[models]` row prices it.
     ///
     /// Such a row stays routable; the cost tracker counts it at its fallback
-    /// for an unknown id (O-18 (b)). A local provider's discovered row is
-    /// priced at 0 instead, because it runs on this machine (L8) — and
-    /// "local" is the set whose provider needs no key: only Ollama is either.
+    /// for an unknown id (O-18 (b)). A discovered row is priced at its 0
+    /// instead where it runs on this machine: a local provider's (L8; "local"
+    /// is the set whose provider needs no key, only Ollama), and a keyed
+    /// provider's the router found on loopback (item 17): its runtime-config
+    /// `base_url` (learning's LR7 test) and the address it was built to call
+    /// both loopback.
     pub fn is_unpriced(&self, model_id: &str) -> bool {
+        let loopback = self.loopback_providers();
         self.models
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .is_some_and(Self::unpriced)
+            .is_some_and(|info| Self::unpriced(info, &loopback))
     }
 
-    fn unpriced(info: &ModelInfo) -> bool {
-        !info.declared && !info.provider.is_local()
+    fn unpriced(info: &ModelInfo, loopback: &HashSet<String>) -> bool {
+        !info.declared
+            && !info.provider.is_local()
+            && !loopback.contains(&info.provider.to_string())
+    }
+
+    /// Taken before `models`, never while holding it (nothing takes the two
+    /// the other way round).
+    fn loopback_providers(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
+        self.loopback_providers
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
     }
 
     /// What `model_id`'s API refuses in a request (C7a); none for an id the

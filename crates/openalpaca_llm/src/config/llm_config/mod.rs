@@ -16,6 +16,7 @@ pub use router_config::{
 };
 pub use runtime::{
     EndpointsConfig, EnvVarsConfig, LlmRuntimeConfig, ProviderDefaults, TimeoutsConfig,
+    is_loopback_url,
 };
 
 use crate::error::LlmError;

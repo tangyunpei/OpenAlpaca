@@ -259,6 +259,10 @@ impl LlmProvider for OpenAiProvider {
         "openai"
     }
 
+    fn base_url(&self) -> Option<&str> {
+        Some(&self.base_url)
+    }
+
     fn supports_tools(&self) -> bool {
         true
     }

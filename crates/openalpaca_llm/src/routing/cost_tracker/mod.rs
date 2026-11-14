@@ -107,9 +107,10 @@ impl CostTracker {
             };
         }
         // An id the catalogue has never met, or one a keyed provider's
-        // discovery registered with no price (O-18 (b)). Where the whole
-        // catalogue is local, no call can have cost money, and billing this
-        // one at cloud rates would abort a free run on fictional spend.
+        // discovery registered with no price (O-18 (b)) off loopback — the
+        // registry prices a loopback server's at its 0 (item 17). Where the
+        // whole catalogue is local, no call can have cost money, and billing
+        // this one at cloud rates would abort a free run on fictional spend.
         let fallback = if registry.is_local_only() {
             (0.0, 0.0)
         } else {

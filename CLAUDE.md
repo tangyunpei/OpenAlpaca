@@ -12,7 +12,7 @@ This file is loaded into every session and every subagent, so it stays under 50 
 - A "default" that adds an enforcement point, widens a component's job, or reverses a row of an accepted design is a decision — present it, never adopt it silently.
 
 ## Current Work — read first (2026-11-14, branch `chore/programme-parts-2-3`)
-`main` is `36f58761` (PR #35, merged 2026-11-01); `chore/programme-parts-2-3` (draft PR #37), cut from it that day, carries everything since, pushed through `8a43502a`. Owner answers, readings the lead's: 2026-11-12, 26 items (O-18's fix, eight small fixes, C7–C7b built; `disabled:` WARN later); 2026-11-14, 35 more (retire old models for the latest; items 8–15, 17–20, 22, 24, 25 taken, 9, 10, 12–15 built): programme-plan §3.3's queue, MODELS-DESIGN first, then C8.
+`main` is `36f58761` (PR #35, merged 2026-11-01); `chore/programme-parts-2-3` (draft PR #37) carries all since, pushed through `8a43502a`. Owner answers, readings the lead's: 2026-11-12, 26 items (O-18's fix, eight small fixes, C7–C7b built; `disabled:` WARN later); 2026-11-14, 35 more (retire old models for the latest; items 8–15, 17–20, 22, 24, 25 taken, 9, 10, 12–15, 17 built): programme-plan §3.3's queue, MODELS-DESIGN first, then C8.
 
 **The toolchain, dependency and modernization programme: Part I merged, Parts II and III under way**: `tasks/deps-upgrade/programme-plan.md` §0 status, §1 rules and gates, §2 decisions, §3 sequence.
 - **Landed, `f253cc26`..`ec0695ea`, merged as `36f58761`** (programme-plan §3.1–3.2): the toolchain, frontend, the lock refresh, the crate moves, the freshness sweep, E8-PROBE, S32 (Bun 1.4.4). Then PY-PIN, B-22's notices, five owner additions, M57, step 3a, 3b's first part, SA-DESIGN (`36f58761`..`928950c8`); async-executor 1.13.3, calamine 0.38, NO-CI and step 3c with SA-DESIGN-2 (`75c6bddd`..`6e973f92`); CI-COMMENTS, the design's C1–C6 (SA-1), HELD-ROLLBACK and the follow-ups (`26f150b1`..`7e28ce4b`); the security batch (`3ffb9952`..`fe1162de`): rmcp 3.9.0, rusqlite 0.41.1, the E8 probe re-pinned, index schema 8.
@@ -190,7 +190,7 @@ openalpaca_gui          ← openalpaca_storage
 - A call refused for its credentials on every attempt ends as `LlmRouterError::AllKeysRefused` before any cooldown wait, never retried, naming the fix (Settings → Models & keys, or `openalpaca llm keys add`).
 - **The model reported is the model that answered** (`RoutedStream { model, stream }`); `POST /v1/chat`'s `model_used` is a prediction (`effective_default_model()`, `null` when nothing is routable).
 - **Discovery** (`refresh_models_for`) runs at boot, on the enable toggle, on a hot reload and on `POST /v1/models/refresh`; Ollama's (native `GET /api/tags` + `POST /api/show`, price 0) needs no key, Anthropic's (every page) and OpenAI's an API-compatible one (`KeyPool::acquire_api_compatible`), and they register every listed id the catalogue lacks, unpriced.
-- **Cost** prices from the live registry (`CostTracker::use_registry`): a discovered Ollama model costs 0, an unpriced keyed one $3 / $15, announced once (O-18); a long prompt pays its row's long-prompt rate (O-17).
+- **Cost** prices from the live registry (`CostTracker::use_registry`): a discovered Ollama or loopback `openai` model costs 0, another unpriced one $3 / $15, announced once (O-18); a long prompt pays its row's long-prompt rate (O-17).
 - **Timeouts** (`LlmRuntimeConfig::request_timeout_for`: the provider's, then `[timeouts]`, then 120s) apply to non-streaming calls only.
 
 ### State Persistence

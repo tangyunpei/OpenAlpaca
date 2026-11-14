@@ -22,8 +22,8 @@ pub use config::llm_config::{
     EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig, ModelConfigEntry,
     OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig, TimeoutsConfig,
     WebSearchConfig, build_router, build_router_with_secret_store, collect_secret_refs,
-    migrate_llm_secrets, read_config, resolve_key_from_config, reverse_migrate_llm_secrets,
-    write_config,
+    is_loopback_url, migrate_llm_secrets, read_config, resolve_key_from_config,
+    reverse_migrate_llm_secrets, write_config,
 };
 pub use config::settings_service::{
     ConfigWriter, LlmSettingsService, OrchestratorConfigResponse, ProviderEnabledOutcome,
@@ -88,6 +88,17 @@ pub trait LlmProvider: Send + Sync {
     /// from one cut short (LOCAL-HOUR-NO-RETRY); `None` keeps today's
     /// retries.
     fn request_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// The address this provider sends its requests to, as it was built;
+    /// `None` for one that does not say.
+    ///
+    /// The router exempts a keyed provider's discovered models from the
+    /// unpriced fallback only when both this address and the runtime
+    /// config's `base_url` are loopback (item 17): a hot reload rebuilds no
+    /// provider, and an arm that ignores `base_url` keeps calling its own.
+    fn base_url(&self) -> Option<&str> {
         None
     }
 

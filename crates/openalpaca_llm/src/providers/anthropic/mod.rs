@@ -148,6 +148,12 @@ impl LlmProvider for AnthropicProvider {
         "anthropic"
     }
 
+    /// Always Anthropic's API outside a test: `[providers.anthropic]
+    /// base_url` is not read by this arm.
+    fn base_url(&self) -> Option<&str> {
+        Some(&self.api_base)
+    }
+
     fn supports_tools(&self) -> bool {
         true
     }

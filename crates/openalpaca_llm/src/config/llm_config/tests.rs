@@ -470,3 +470,49 @@ strong = "  "
     let written = toml::to_string(&config).expect("serialises");
     assert!(written.contains("fastest"), "{written}");
 }
+
+/// LR7's loopback test, moved from core's learning queue with its cases
+/// unchanged (item 17), and the spellings that must not read as loopback:
+/// a false yes would price a paid host at 0, so each fails closed.
+#[test]
+fn loopback_urls_are_local() {
+    for url in [
+        "http://localhost:1234/v1",
+        "http://LOCALHOST/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://127.1.2.3/v1",
+        "http://[::1]:11434/v1",
+        "http://user:pw@localhost:1/v1",
+    ] {
+        assert!(is_loopback_url(url), "{url}");
+    }
+    for url in [
+        "https://api.openai.com/v1",
+        "http://10.0.0.5/v1",
+        "http://192.168.1.20:8080/v1",
+        "not a url",
+        "localhost:1234/v1",
+        "http://localhost.example.com/v1",
+        "http://127.0.0.1@api.openai.com/v1",
+        "http://api.openai.com\\@127.0.0.1/v1",
+        "http://[::ffff:127.0.0.1]/v1",
+    ] {
+        assert!(!is_loopback_url(url), "{url}");
+    }
+}
+
+/// A provider is on loopback by its own `base_url` in the runtime config;
+/// one with none, or an unknown one, is not.
+#[test]
+fn a_provider_is_on_loopback_by_its_base_url() {
+    let mut runtime = LlmRuntimeConfig::default();
+    assert!(!runtime.is_on_loopback(&ProviderType::OpenAI));
+    assert!(!runtime.is_on_loopback(&ProviderType::Anthropic));
+    runtime
+        .provider_defaults
+        .get_mut("openai")
+        .unwrap()
+        .base_url = Some("http://127.0.0.1:8080/v1".to_string());
+    assert!(runtime.is_on_loopback(&ProviderType::OpenAI));
+    assert!(!runtime.is_on_loopback(&ProviderType::Plugin("x".to_string())));
+}

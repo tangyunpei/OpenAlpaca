@@ -2,7 +2,29 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 use super::router_config::LlmRouterConfig;
+use crate::keys::key_pool::ProviderType;
 use crate::routing::model_alias::ModelAlias;
+
+/// Whether a base URL names this machine: `localhost`, `127.0.0.0/8` or
+/// `::1` — loopback only (ruling LR7's second clause), read with the URL
+/// parser `reqwest` connects by, so the host judged is the host reached.
+///
+/// The one locality test: learning's yield rule
+/// ([`LlmRuntimeConfig::is_on_loopback`]) and the cost tracker's exemption
+/// for what a keyed provider's discovery lists (item 17 of the owner's
+/// answer of 2026-11-14) both read it. A LAN address (`10/8`, `192.168/16`,
+/// `*.local`) is not loopback here.
+pub fn is_loopback_url(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
 
 fn default_usage_cache_ttl() -> u64 {
     300
@@ -197,6 +219,16 @@ impl LlmRuntimeConfig {
             );
         }
         std::time::Duration::from_secs(clamped)
+    }
+
+    /// Whether `provider`'s `base_url` is loopback ([`is_loopback_url`]): a
+    /// llama.cpp or LM Studio server behind the `openai` provider runs on
+    /// this machine though it is keyed.
+    pub fn is_on_loopback(&self, provider: &ProviderType) -> bool {
+        self.provider_defaults
+            .get(&provider.to_string())
+            .and_then(|d| d.base_url.as_deref())
+            .is_some_and(is_loopback_url)
     }
 }
 

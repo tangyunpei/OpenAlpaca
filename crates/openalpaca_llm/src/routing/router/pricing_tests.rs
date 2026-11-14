@@ -1,5 +1,6 @@
 //! What a model that discovery registered is counted at (O-18, taken as (b)
-//! with (c)), and how much of Anthropic's model list discovery reads.
+//! with (c); on a loopback `base_url`, item 17), and how much of Anthropic's
+//! model list discovery reads.
 //!
 //! Before the fix, keyed discovery registered every id Anthropic or OpenAI
 //! listed that the catalogue lacked at 0 / 0, and the cost tracker counted it
@@ -305,6 +306,316 @@ async fn a_discovered_ollama_model_still_costs_nothing() {
         0.0
     );
     assert!(!logs_contain("no price"));
+}
+
+// ── LOOPBACK-FREE: a keyed server on this machine (item 17) ─────────────────
+
+/// The runtime config as `llm.toml` would load it with `[providers.openai]
+/// base_url = base`: the address the locality rule (LR7) reads.
+fn openai_base_url(router: &LlmRouter, base: &str) {
+    let mut runtime = LlmRuntimeConfig::default();
+    runtime
+        .provider_defaults
+        .get_mut("openai")
+        .expect("a compiled openai row")
+        .base_url = Some(base.to_string());
+    router.reload_runtime_config(runtime);
+}
+
+/// A llama.cpp-like server: lists `id` and answers a chat with a million
+/// tokens each way.
+async fn local_openai_server(id: &'static str) -> MockHttpServer {
+    MockHttpServer::start(move |req| match req.path.as_str() {
+        "/v1/models" => MockResponse::json(models_body(&[id])),
+        "/v1/chat/completions" => MockResponse::json(
+            serde_json::json!({
+                "model": id,
+                "choices": [{
+                    "message": {"role": "assistant", "content": "pong"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": MILLION, "completion_tokens": MILLION}
+            })
+            .to_string(),
+        ),
+        _ => MockResponse::not_found(),
+    })
+    .await
+}
+
+/// A keyed `openai` provider whose `base_url` is loopback runs on this
+/// machine: what its discovery lists costs nothing, so a free local run
+/// spends none of the caps that read these records — and is not announced
+/// as unpriced.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_model_discovered_on_a_loopback_keyed_server_costs_nothing() {
+    let server = local_openai_server("local-gguf-test").await;
+    let router = openai_router(&server.base_url, &HashMap::new());
+    openai_base_url(&router, &format!("{}/v1", server.base_url));
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert!(router.is_routable("local-gguf-test"));
+
+    let mut req = request("local-gguf-test");
+    req.context.agent_id = Some("agent1".to_string());
+    req.context.task_id = Some("task1".to_string());
+    router.complete(req).await.expect("the mock answers");
+
+    let agent = router
+        .cost_tracker
+        .get_agent_usage("agent1")
+        .await
+        .expect("the call was recorded");
+    let task = router
+        .cost_tracker
+        .get_task_usage("task1")
+        .await
+        .expect("the call was recorded");
+    assert_eq!(agent.total_cost_usd, 0.0, "the turn's spend");
+    assert_eq!(task.total_cost_usd, 0.0, "the workflow's spend");
+    assert_eq!(
+        router
+            .cost_tracker
+            .calculate_cost("local-gguf-test", MILLION, MILLION),
+        0.0
+    );
+    assert!(!logs_contain("no price"));
+}
+
+/// Only loopback is exempt: a keyed server at a LAN address, like any other
+/// host, still counts an unpriced model at the fallback (LAN hosts are an
+/// open sub-question, not built).
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_keyed_server_off_loopback_still_counts_at_the_fallback() {
+    let server = local_openai_server("lan-gguf-test").await;
+    let router = openai_router(&server.base_url, &HashMap::new());
+    openai_base_url(&router, "http://192.168.1.20:8080/v1");
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+
+    let cost = router
+        .cost_tracker
+        .calculate_cost("lan-gguf-test", MILLION, MILLION);
+    assert!(close(cost, FALLBACK), "counted at $3 / $15, not {cost}");
+    assert!(logs_contain("no price"));
+}
+
+/// A `[models]` row's price wins over the exemption: the person's figure is
+/// the price, on loopback as anywhere.
+#[tokio::test]
+async fn a_declared_row_on_a_loopback_server_keeps_its_price() {
+    let server = local_openai_server("priced-gguf-test").await;
+    let config = HashMap::from([(
+        "priced-gguf-test".to_string(),
+        ModelConfigEntry {
+            provider: "openai".to_string(),
+            input_price: Some(1.0),
+            output_price: Some(2.0),
+            context: Some(32_000),
+            supports_image: None,
+            supports_audio: None,
+            supports_document: None,
+            supports_reasoning: None,
+            supports_tools: None,
+        },
+    )]);
+    let router = openai_router(&server.base_url, &config);
+    openai_base_url(&router, &format!("{}/v1", server.base_url));
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+
+    let cost = router
+        .cost_tracker
+        .calculate_cost("priced-gguf-test", MILLION, MILLION);
+    assert!(close(cost, 3.0), "counted at its row's $1 / $2, not {cost}");
+}
+
+/// The exemption needs the runtime config's `base_url` on loopback as well
+/// as the provider's own address: a reload that points the config off
+/// loopback brings the fallback back for the models discovery registered
+/// while it was there.
+#[tokio::test]
+async fn the_exemption_follows_a_reload_of_the_base_url() {
+    let server = local_openai_server("moved-gguf-test").await;
+    let router = openai_router(&server.base_url, &HashMap::new());
+    openai_base_url(&router, &format!("{}/v1", server.base_url));
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert_eq!(
+        router
+            .cost_tracker
+            .calculate_cost("moved-gguf-test", MILLION, MILLION),
+        0.0
+    );
+
+    openai_base_url(&router, "https://api.openai.com/v1");
+    let cost = router
+        .cost_tracker
+        .calculate_cost("moved-gguf-test", MILLION, MILLION);
+    assert!(close(cost, FALLBACK), "counted at $3 / $15, not {cost}");
+}
+
+/// A row as keyed discovery registers it (`refresh_models_for`), written
+/// directly where the provider must not be called.
+fn discovered_row(provider: ProviderType) -> crate::routing::model_registry::ModelInfo {
+    crate::routing::model_registry::ModelInfo {
+        provider,
+        input_price_per_million: 0.0,
+        output_price_per_million: 0.0,
+        context_window: 0,
+        discovered: true,
+        supports_image: false,
+        supports_audio: false,
+        supports_document: false,
+        supports_reasoning: false,
+        supports_tools: true,
+        declared: false,
+        long_prompt: None,
+        cache_rates: None,
+        request_contract: crate::routing::model_registry::RequestContract::NONE,
+    }
+}
+
+/// A router built on a loopback `base_url` is exempt from its first call,
+/// with no reload: the daemon builds its router with `new_with_runtime` and
+/// `llm.toml`'s runtime config, so a person who points the `openai`
+/// provider at a local server and restarts meets the exemption at boot.
+#[tokio::test]
+async fn a_router_built_on_a_loopback_base_url_is_exempt_at_boot() {
+    let server = local_openai_server("boot-gguf-test").await;
+    let provider = Arc::new(OpenAiProvider::with_client(
+        loopback_client(TIMEOUT),
+        "sk-test-not-a-key".to_string(),
+        Some("gpt-4o-mini".to_string()),
+        Some(format!("{}/v1", server.base_url)),
+        None,
+    ));
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider,
+            key_pool: keyed_pool(ProviderType::OpenAI),
+        },
+    );
+    let mut runtime = LlmRuntimeConfig::default();
+    runtime
+        .provider_defaults
+        .get_mut("openai")
+        .expect("a compiled openai row")
+        .base_url = Some(format!("{}/v1", server.base_url));
+    let router = LlmRouter::new_with_runtime(
+        providers,
+        registry_for(ProviderType::OpenAI, &HashMap::new()),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "gpt-4o-mini".to_string(),
+        runtime,
+        RateLimitConfig::default(),
+    );
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert!(router.is_routable("boot-gguf-test"));
+
+    assert_eq!(
+        router
+            .cost_tracker
+            .calculate_cost("boot-gguf-test", MILLION, MILLION),
+        0.0
+    );
+}
+
+/// A hot reload changes the runtime config but rebuilds no provider: a
+/// `base_url` edited to loopback on a running daemon leaves the provider
+/// calling its old address, so what it discovered there is not exempt
+/// until the provider itself is built at the loopback address.
+#[tokio::test]
+async fn a_provider_still_built_off_loopback_is_not_exempt_by_a_reload() {
+    let router = openai_router("http://10.0.0.5:9", &HashMap::new());
+    router.model_registry().register_discovered(
+        "cloud-listed-test".to_string(),
+        discovered_row(ProviderType::OpenAI),
+    );
+    openai_base_url(&router, "http://127.0.0.1:8080/v1");
+
+    let cost = router
+        .cost_tracker
+        .calculate_cost("cloud-listed-test", MILLION, MILLION);
+    assert!(close(cost, FALLBACK), "counted at $3 / $15, not {cost}");
+}
+
+/// The Anthropic arm sends every request to its own API whatever
+/// `[providers.anthropic] base_url` says, so a loopback value there exempts
+/// nothing it discovers.
+#[tokio::test]
+async fn a_loopback_base_url_the_anthropic_arm_does_not_call_is_not_exempt() {
+    let provider = Arc::new(AnthropicProvider::with_client(
+        loopback_client(TIMEOUT),
+        "sk-ant-test-not-a-key".to_string(),
+        None,
+        None,
+    ));
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::Anthropic,
+        ProviderEntry {
+            provider,
+            key_pool: keyed_pool(ProviderType::Anthropic),
+        },
+    );
+    let router = LlmRouter::new(
+        providers,
+        registry_for(ProviderType::Anthropic, &HashMap::new()),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "claude-haiku-4-5-20251001".to_string(),
+    );
+    router.model_registry().register_discovered(
+        "claude-listed-test".to_string(),
+        discovered_row(ProviderType::Anthropic),
+    );
+    let mut runtime = LlmRuntimeConfig::default();
+    runtime
+        .provider_defaults
+        .get_mut("anthropic")
+        .expect("a compiled anthropic row")
+        .base_url = Some("http://localhost:4000/v1".to_string());
+    router.reload_runtime_config(runtime);
+
+    let cost = router
+        .cost_tracker
+        .calculate_cost("claude-listed-test", MILLION, MILLION);
+    assert!(close(cost, FALLBACK), "counted at $3 / $15, not {cost}");
+}
+
+/// A provider registered again at another address (the settings service's
+/// toggle) takes the exemption with it.
+#[tokio::test]
+async fn re_registering_a_provider_off_loopback_ends_the_exemption() {
+    let server = local_openai_server("re-registered-test").await;
+    let router = openai_router(&server.base_url, &HashMap::new());
+    openai_base_url(&router, &format!("{}/v1", server.base_url));
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert_eq!(
+        router
+            .cost_tracker
+            .calculate_cost("re-registered-test", MILLION, MILLION),
+        0.0
+    );
+
+    let elsewhere = Arc::new(OpenAiProvider::with_client(
+        loopback_client(TIMEOUT),
+        "sk-test-not-a-key".to_string(),
+        None,
+        Some("http://10.0.0.5:9/v1".to_string()),
+        None,
+    ));
+    router.register_provider(
+        ProviderType::OpenAI,
+        elsewhere,
+        KeyPool::new(vec![], SelectionStrategy::RoundRobin),
+    );
+    let cost = router
+        .cost_tracker
+        .calculate_cost("re-registered-test", MILLION, MILLION);
+    assert!(close(cost, FALLBACK), "counted at $3 / $15, not {cost}");
 }
 
 /// One page of Anthropic's model list.
