@@ -3182,7 +3182,7 @@ fn build_agent_template_from_info(
             singleton,
             capabilities,
             denied_capabilities: Vec::new(),
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".to_string(),
             model,
             fallback_models: Vec::new(),

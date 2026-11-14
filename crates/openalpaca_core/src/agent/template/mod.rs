@@ -55,8 +55,10 @@ pub struct AgentTemplateFrontmatter {
     pub capabilities: Vec<String>,
     /// Tool/capability names explicitly denied.
     pub denied_capabilities: Vec<String>,
-    /// LLM temperature (default 0.5).
-    pub temperature: f32,
+    /// The template's `temperature`, when it sets one (none otherwise; no
+    /// default is filled in). Accepted and not sent: no agent turn sends a
+    /// temperature to the model.
+    pub temperature: Option<f32>,
     /// Verbosity level: "concise", "normal", "detailed" (default "normal").
     pub verbosity: String,
     /// Primary LLM model override.
@@ -220,7 +222,7 @@ fn parse_agent_frontmatter_lines(
     let mut singleton: bool = false;
     let mut capabilities: Vec<String> = Vec::new();
     let mut denied_capabilities: Vec<String> = Vec::new();
-    let mut temperature: f32 = 0.5;
+    let mut temperature: Option<f32> = None;
     let mut verbosity: String = "normal".to_string();
     let mut model: Option<String> = None;
     let mut fallback_models: Vec<String> = Vec::new();
@@ -287,7 +289,7 @@ fn parse_agent_frontmatter_lines(
         }
         if let Some(rest) = trimmed.strip_prefix("temperature:") {
             if let Some(v) = parse_yaml_f32(rest) {
-                temperature = v;
+                temperature = Some(v);
             }
             idx += 1;
             continue;
@@ -453,7 +455,9 @@ pub fn render_agent_markdown(template: &AgentTemplate) -> String {
             out.push_str(&format!("  - \"{}\"\n", cap));
         }
     }
-    out.push_str(&format!("temperature: {}\n", fm.temperature));
+    if let Some(v) = fm.temperature {
+        out.push_str(&format!("temperature: {}\n", v));
+    }
     out.push_str(&format!("verbosity: \"{}\"\n", fm.verbosity));
     if let Some(ref model) = fm.model {
         out.push_str(&format!("model: \"{}\"\n", model));

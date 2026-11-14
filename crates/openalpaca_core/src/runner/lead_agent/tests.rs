@@ -1517,7 +1517,7 @@ fn test_batch_spawn_tool_definition_includes_agents() {
             singleton: false,
             capabilities: vec!["web_search".to_string()],
             denied_capabilities: vec![],
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".to_string(),
             model: None,
             fallback_models: vec![],
@@ -2401,7 +2401,7 @@ async fn test_spawn_subagent_executes_plugin_backed_template() {
             singleton: false,
             capabilities: vec![],
             denied_capabilities: vec![],
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".to_string(),
             model: None,
             fallback_models: vec![],
@@ -3298,7 +3298,7 @@ async fn a_subagent_lane_is_narrated_into_the_runs_session_log() {
             singleton: false,
             capabilities: vec![],
             denied_capabilities: vec![],
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".to_string(),
             model: None,
             fallback_models: vec![],
@@ -4109,10 +4109,10 @@ async fn no_lead_or_subagent_turn_sends_its_templates_temperature() {
          capabilities:\n  - \"memory_read\"\ntemperature: 0.9\n---\n\n## Persona\n\nCount.\n",
     )
     .expect("the worker template parses");
-    assert_eq!(worker.frontmatter.temperature, 0.9);
+    assert_eq!(worker.frontmatter.temperature, Some(0.9));
     shared.agent_registry.register_template(worker);
     let mut lead = lead_subagent();
-    lead.preset.temperature = 0.9;
+    lead.preset.temperature = Some(0.9);
 
     let provider = Arc::new(TemperatureRecordingProvider {
         inner: LeadAndSubagentProvider {

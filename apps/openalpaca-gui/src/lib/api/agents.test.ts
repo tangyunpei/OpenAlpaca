@@ -6,12 +6,13 @@
  * reading a caller would show the bare word, not the sentence.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import { resetConnection } from "@/lib/connection";
 import { ApiError } from "@/lib/http";
 
-import { deleteAgentTemplate } from "./agents";
+import { deleteAgentTemplate, listAgentTemplates } from "./agents";
+import type { AgentTemplate } from "./types";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => ({
@@ -61,6 +62,18 @@ describe("deleteAgentTemplate", () => {
     expect(requests[0]?.url.pathname).toBe("/v1/agent-templates/acme%20agent");
   });
 
+  // DELETE-TEMPLATE-TYPE (item 25 of the owner's answer of 2026-11-14): the
+  // declared answer is the route's, `{template_id, status}`. The type half
+  // is checked by `bun run check`, which type-checks this file.
+  it("declares the route's answer, {template_id, status}", async () => {
+    const answer = await deleteAgentTemplate("reader");
+    expectTypeOf(answer).toEqualTypeOf<{
+      template_id: string;
+      status: string;
+    }>();
+    expect(answer).toEqual({ template_id: "reader", status: "archived" });
+  });
+
   it("shows a plugin's refusal as its sentence, naming the plugin", async () => {
     const message =
       "a plugin's template cannot be removed; it comes from the plugin acme";
@@ -96,5 +109,35 @@ describe("deleteAgentTemplate", () => {
     expect(error.status).toBe(404);
     expect(error.code).toBeNull();
     expect(error.message).toBe("Template 'x' not found");
+  });
+});
+
+// TEMPLATE-TEMP-OPTIONAL (item 24 of the owner's answer of 2026-11-14): a
+// template that sets no `temperature` is listed without one, and the type
+// says so. The type half is checked by `bun run check`.
+describe("listAgentTemplates", () => {
+  it("reads a template that sets no temperature", async () => {
+    const row: AgentTemplate = {
+      id: "reader",
+      name: "Reader",
+      description: "Reads things",
+      singleton: false,
+      capabilities: ["file_read"],
+      denied_capabilities: [],
+      verbosity: "normal",
+      fallback_models: [],
+      require_confirmation_for: [],
+      persona: "You read.",
+      body: "## Persona\n\nYou read.",
+      run_count: 0,
+      window: "7d",
+    };
+    reply = () => new Response(JSON.stringify([row]));
+    const [listed] = await listAgentTemplates();
+    expectTypeOf<AgentTemplate["temperature"]>().toEqualTypeOf<
+      number | undefined
+    >();
+    expect(listed?.temperature).toBeUndefined();
+    expect(listed).toEqual(row);
   });
 });

@@ -722,7 +722,8 @@ export interface AgentTemplate {
   singleton: boolean;
   capabilities: string[];
   denied_capabilities: string[];
-  temperature: number;
+  /** Absent when the template sets none; accepted and not sent to a model. */
+  temperature?: number;
   verbosity: string;
   model?: string;
   fallback_models: string[];

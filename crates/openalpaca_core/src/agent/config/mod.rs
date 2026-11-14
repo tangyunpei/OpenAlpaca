@@ -36,6 +36,8 @@ pub struct AgentCapabilitiesConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentPresetConfig {
     pub persona: String,
+    /// Omitted when the agent's template sets none (never a default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     pub verbosity: Option<String>,
 }
@@ -96,7 +98,7 @@ impl AgentConfigFile {
 
         let preset = AgentPresetConfig {
             persona: agent.preset.persona.clone(),
-            temperature: Some(agent.preset.temperature),
+            temperature: agent.preset.temperature,
             verbosity: Some(agent.preset.verbosity.clone()),
         };
 
@@ -198,7 +200,7 @@ impl AgentConfigFile {
 
         let preset = AgentPreset {
             persona: self.preset.persona.clone(),
-            temperature: self.preset.temperature.unwrap_or(0.5),
+            temperature: self.preset.temperature,
             verbosity: self
                 .preset
                 .verbosity
@@ -300,7 +302,7 @@ impl AgentConfigFile {
 
         let preset = AgentPresetConfig {
             persona,
-            temperature: Some(fm.temperature),
+            temperature: fm.temperature,
             verbosity: Some(fm.verbosity.clone()),
         };
 
@@ -385,7 +387,7 @@ impl AgentConfigFile {
             singleton: false, // default — only lead_agent overrides
             capabilities: self.capabilities.assigned.clone(),
             denied_capabilities: capabilities_denied,
-            temperature: self.preset.temperature.unwrap_or(0.5),
+            temperature: self.preset.temperature,
             verbosity: self
                 .preset
                 .verbosity
@@ -436,7 +438,7 @@ impl AgentConfigFile {
 
         let preset = AgentPreset {
             persona: self.preset.persona.clone(),
-            temperature: self.preset.temperature.unwrap_or(0.5),
+            temperature: self.preset.temperature,
             verbosity: self
                 .preset
                 .verbosity

@@ -72,7 +72,11 @@ pub struct Capability {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentPreset {
     pub persona: String,
-    pub temperature: f32,
+    /// The template's `temperature`, when it sets one; stored without the
+    /// key when it sets none. Accepted and not sent: no agent turn sends a
+    /// temperature to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
     pub verbosity: String,
 }
 
@@ -80,7 +84,7 @@ impl Default for AgentPreset {
     fn default() -> Self {
         Self {
             persona: "You are a helpful assistant.".to_string(),
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".to_string(),
         }
     }

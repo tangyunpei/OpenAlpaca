@@ -2899,7 +2899,7 @@ fn golden_worker(
             singleton: false,
             capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
             denied_capabilities: vec![],
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".to_string(),
             model: None,
             fallback_models: vec![],
@@ -3477,12 +3477,26 @@ fn make_agent_for_hash_test(persona: &str) -> crate::agent::subagent::SubAgent {
         capabilities: vec![],
         preset: AgentPreset {
             persona: persona.to_string(),
-            temperature: 0.7,
+            temperature: Some(0.7),
             verbosity: "normal".to_string(),
         },
         constraints: AgentConstraints::default(),
         llm_config: AgentLlmConfig::default(),
     }
+}
+
+/// TEMPLATE-TEMP-OPTIONAL: a preset that sets no temperature hashes apart
+/// from one that sets any figure — the absence is hashed, not a stand-in
+/// value.
+#[test]
+fn test_hash_agent_config_tells_no_temperature_from_one() {
+    let set = make_agent_for_hash_test("You are a coder.");
+    let mut unset = make_agent_for_hash_test("You are a coder.");
+    unset.preset.temperature = None;
+    assert_ne!(
+        super::fingerprint::hash_agent_config(&set),
+        super::fingerprint::hash_agent_config(&unset)
+    );
 }
 
 #[test]

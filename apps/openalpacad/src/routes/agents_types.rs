@@ -69,7 +69,9 @@ pub struct TemplateResponse {
     pub singleton: bool,
     pub capabilities: Vec<String>,
     pub denied_capabilities: Vec<String>,
-    pub temperature: f32,
+    /// Omitted when the template sets none; accepted and not sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
     pub verbosity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -334,5 +336,29 @@ mod tests {
             "no run means no last-run stamp, not a fabricated one"
         );
         assert_eq!(v["window"], "30d");
+    }
+
+    /// TEMPLATE-TEMP-OPTIONAL (item 24 of the owner's answer of
+    /// 2026-11-14): a template that sets no `temperature` is reported
+    /// without one — not the parser's old default 0.5, which no agent turn
+    /// sends — and one that sets it reports its figure.
+    #[test]
+    fn a_template_that_sets_no_temperature_reports_none() {
+        let v = serde_json::to_value(TemplateResponse::from_template(
+            &template(),
+            None,
+            None,
+            "7d",
+        ))
+        .unwrap();
+        assert!(v.get("temperature").is_none(), "{v}");
+
+        let set = openalpaca_core::agent::template::parse_agent_markdown(
+            "---\nid: review_agent\nname: Review\ndescription: Reviews things\ntemperature: 0.25\n---\n\n## Persona\n\nYou review.\n",
+        )
+        .expect("parses");
+        let v =
+            serde_json::to_value(TemplateResponse::from_template(&set, None, None, "7d")).unwrap();
+        assert_eq!(v["temperature"], 0.25);
     }
 }

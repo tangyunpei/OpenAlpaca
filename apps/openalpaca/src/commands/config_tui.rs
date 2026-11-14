@@ -1455,6 +1455,35 @@ fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// The `POST /v1/agents` body the creation screen sends. It carries no
+/// temperature: the screen does not ask for one, since no agent turn sends
+/// a temperature to the model.
+fn create_agent_body(
+    name: &str,
+    description: &str,
+    model: &str,
+    persona: &str,
+    skills: &[String],
+    max_cost: f64,
+) -> serde_json::Value {
+    let mut agent_config = serde_json::json!({
+        "name": name,
+        "description": description,
+        "llm": {
+            "model": model,
+        },
+        "skills": skills,
+        "persona": persona,
+    });
+
+    if max_cost > 0.0 {
+        agent_config["constraints"] = serde_json::json!({
+            "max_cost_per_task": max_cost,
+        });
+    }
+    serde_json::json!({ "config": agent_config })
+}
+
 /// Interactive agent creation wizard (mirrors agents.rs create_interactive).
 fn interactive_create_agent() -> Result<()> {
     let theme = ColorfulTheme::default();
@@ -1526,32 +1555,7 @@ fn interactive_create_agent() -> Result<()> {
         .interact_text()?;
     let max_cost: f64 = max_cost_input.parse().unwrap_or(0.0);
 
-    // 7. Temperature
-    let temp_input: String = Input::with_theme(&theme)
-        .with_prompt("Temperature (0.0-1.0)")
-        .default("0.5".to_string())
-        .interact_text()?;
-    let temperature: f64 = temp_input.parse().unwrap_or(0.5);
-
-    // Build the config JSON
-    let mut agent_config = serde_json::json!({
-        "name": name,
-        "description": description,
-        "llm": {
-            "model": model,
-        },
-        "skills": skills,
-        "persona": persona,
-        "preset": {
-            "temperature": temperature,
-        }
-    });
-
-    if max_cost > 0.0 {
-        agent_config["constraints"] = serde_json::json!({
-            "max_cost_per_task": max_cost,
-        });
-    }
+    let body = create_agent_body(&name, &description, &model, &persona, &skills, max_cost);
 
     // Confirm
     println!();
@@ -1580,7 +1584,6 @@ fn interactive_create_agent() -> Result<()> {
     }
 
     let client = DaemonClient::connect().context("Daemon is not running")?;
-    let body = serde_json::json!({ "config": agent_config });
     let result: Result<serde_json::Value> =
         block_on(async { client.post("/v1/agents", &body).await });
 
@@ -2022,3 +2025,6 @@ fn save_and_exit(repo: &ConfigRepository, config_map: &HashMap<String, String>) 
     println!("{}", style("Configuration saved!").bold().green());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

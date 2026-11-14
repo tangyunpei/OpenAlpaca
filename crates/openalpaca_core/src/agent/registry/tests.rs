@@ -35,7 +35,7 @@ fn make_template(id: &str, skills: Vec<&str>, singleton: bool) -> AgentTemplate 
             singleton,
             capabilities: skills.into_iter().map(|s| s.to_string()).collect(),
             denied_capabilities: vec![],
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".to_string(),
             model: None,
             fallback_models: vec![],
@@ -490,7 +490,7 @@ You are a test agent.
     let inst = reg.spawn_instance("test_agent", "task-1".into()).unwrap();
     assert!(inst.id.starts_with("test_agent::"));
     assert_eq!(inst.preset.persona, "You are a test agent.");
-    assert_eq!(inst.preset.temperature, 0.3);
+    assert_eq!(inst.preset.temperature, Some(0.3));
     // 1 explicit skill + 2 injected workspace tools + the ambient memory
     // search every internal template is granted (design 09 §5)
     assert_eq!(inst.capabilities.len(), 4);

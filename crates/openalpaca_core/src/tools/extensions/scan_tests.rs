@@ -67,7 +67,7 @@ fn template(id: &str, caps: &[&str]) -> AgentTemplate {
             singleton: false,
             capabilities: caps.iter().map(|c| c.to_string()).collect(),
             denied_capabilities: vec![],
-            temperature: 0.5,
+            temperature: None,
             verbosity: "normal".into(),
             model: None,
             fallback_models: vec![],

@@ -57,6 +57,9 @@ What step 5's request leaves out: it carries no `temperature`.
 any of its paths, so the model answers at its own default. A template's
 `temperature`, and an agent's `preset.temperature`, is accepted and not
 sent, so the shipped templates no longer set it (TEMPLATE-TEMPERATURE).
+One that sets none has none — no default is filled in — and
+`GET /v1/agent-templates` and `GET /v1/agents/{id}/config` leave the
+field out for it (TEMPLATE-TEMP-OPTIONAL).
 
 ## How a Loop Ends
 

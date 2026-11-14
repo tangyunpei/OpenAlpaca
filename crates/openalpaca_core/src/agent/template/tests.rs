@@ -77,7 +77,7 @@ fn test_parse_frontmatter_full() {
     assert!(!fm.singleton);
     assert_eq!(fm.capabilities, vec!["file_read", "file_write", "shell_execute"]);
     assert_eq!(fm.denied_capabilities, vec!["web_search", "web_fetch"]);
-    assert_eq!(fm.temperature, 0.3);
+    assert_eq!(fm.temperature, Some(0.3));
     assert_eq!(fm.verbosity, "detailed");
     assert_eq!(fm.model, Some("claude-sonnet-4-5-20250929".to_string()));
     assert_eq!(fm.fallback_models, vec!["claude-opus-4-6"]);
@@ -109,7 +109,7 @@ fn test_parse_minimal() {
     assert!(!doc.frontmatter.singleton);
     assert!(doc.frontmatter.capabilities.is_empty());
     assert!(doc.frontmatter.denied_capabilities.is_empty());
-    assert_eq!(doc.frontmatter.temperature, 0.5); // default
+    assert_eq!(doc.frontmatter.temperature, None); // none set, none filled in
     assert_eq!(doc.frontmatter.verbosity, "normal"); // default
     assert_eq!(doc.frontmatter.model, None);
     assert!(doc.frontmatter.fallback_models.is_empty());
@@ -175,7 +175,7 @@ verbosity: concise
     assert_eq!(fm.id, "my_agent");
     assert_eq!(fm.name, "My Agent");
     assert_eq!(fm.description, "A test agent without quotes");
-    assert_eq!(fm.temperature, 0.7);
+    assert_eq!(fm.temperature, Some(0.7));
     assert_eq!(fm.verbosity, "concise");
 }
 
@@ -974,9 +974,9 @@ fn a_template_that_sets_timeout_seconds_still_parses_and_loads() {
 
 /// TEMPLATE-TEMPERATURE: no agent turn sends a template's `temperature`
 /// (`LlmBackend::complete` sends none), so no shipped template sets one —
-/// read from the file's frontmatter lines, since the parser fills its
-/// default, 0.5, whether the key is there or not; the parsed value is that
-/// default.
+/// read from the file's frontmatter lines and from the parsed value, which
+/// is none when the key is absent (TEMPLATE-TEMP-OPTIONAL: no default is
+/// filled in).
 #[test]
 fn no_shipped_template_sets_temperature() {
     let mut seen = 0;
@@ -992,7 +992,7 @@ fn no_shipped_template_sets_temperature() {
             .skip(1)
             .take_while(|line| line.trim() != "---")
             .any(|line| line.trim_start().starts_with("temperature:"));
-        if in_frontmatter || doc.frontmatter.temperature != 0.5 {
+        if in_frontmatter || doc.frontmatter.temperature.is_some() {
             setting.push(path.to_string());
         }
         seen += 1;
@@ -1012,16 +1012,33 @@ fn no_shipped_template_sets_temperature() {
 fn a_template_that_sets_temperature_still_parses_and_loads() {
     assert!(VALID_AGENT.contains("\ntemperature: 0.3\n"));
     let doc = parse_agent_markdown(VALID_AGENT).expect("should parse");
-    assert_eq!(doc.frontmatter.temperature, 0.3);
+    assert_eq!(doc.frontmatter.temperature, Some(0.3));
 
     let registry = crate::agent::AgentRegistry::new();
     assert!(registry.register_template(doc.clone()));
     let loaded = registry
         .get_template("code_agent")
         .expect("the template is in the catalog");
-    assert_eq!(loaded.frontmatter.temperature, 0.3);
+    assert_eq!(loaded.frontmatter.temperature, Some(0.3));
     let agent = loaded.to_subagent("a1", "task-1");
-    assert_eq!(agent.preset.temperature, 0.3);
+    assert_eq!(agent.preset.temperature, Some(0.3));
+}
+
+/// TEMPLATE-TEMP-OPTIONAL (item 24 of the owner's answer of 2026-11-14):
+/// a template that sets no `temperature` has none — not a default 0.5 —
+/// so rendering it back (a template saved through the API) writes no
+/// `temperature:` line, and it parses back the same; one that sets it keeps
+/// its line.
+#[test]
+fn a_template_that_sets_no_temperature_is_rendered_without_one() {
+    let doc = parse_agent_markdown(MINIMAL_AGENT).expect("should parse");
+    let out = render_agent_markdown(&doc);
+    assert!(!out.contains("temperature"), "{out}");
+    let back = parse_agent_markdown(&out).expect("the render parses");
+    assert_eq!(back.frontmatter, doc.frontmatter);
+
+    let set = parse_agent_markdown(VALID_AGENT).expect("should parse");
+    assert!(render_agent_markdown(&set).contains("\ntemperature: 0.3\n"));
 }
 
 /// Design 09 §5 (LQ3): the owner's installed `config/agents/` is never

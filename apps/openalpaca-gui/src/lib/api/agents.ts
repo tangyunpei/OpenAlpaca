@@ -56,13 +56,13 @@ export async function updateAgentTemplate(
  * a plugin's naming it in `plugin` and in the sentence (subagent design
  * §2.10 T-2). The shared parser hands a string `error` through as the
  * message, so the refusal is read here: the sentence becomes the message
- * and the word the `code`.
+ * and the word the `code`. Answers `{template_id, status: "archived"}`.
  */
 export async function deleteAgentTemplate(
   id: string,
-): Promise<{ id: string; status: string }> {
+): Promise<{ template_id: string; status: string }> {
   try {
-    return await apiFetch<{ id: string; status: string }>(
+    return await apiFetch<{ template_id: string; status: string }>(
       `/v1/agent-templates/${encodeURIComponent(id)}`,
       { method: "DELETE" },
     );
