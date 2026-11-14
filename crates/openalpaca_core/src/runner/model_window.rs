@@ -100,6 +100,8 @@ mod tests {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: false,
+                long_prompt: None,
+                request_contract: openalpaca_llm::RequestContract::NONE,
             },
         );
         router.register_provider(
@@ -173,6 +175,8 @@ mod tests {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: false,
+                long_prompt: None,
+                request_contract: openalpaca_llm::RequestContract::NONE,
             },
         );
         assert_eq!(routed_context_window(&router, Some("broken:0")), None);

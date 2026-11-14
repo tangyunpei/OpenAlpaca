@@ -10,8 +10,33 @@ use reqwest::header::HeaderMap;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
+/// Where the Messages and Models APIs live; [`AnthropicProvider::with_api_base`]
+/// points a test at a loopback server instead.
+const API_BASE: &str = "https://api.anthropic.com/v1";
+/// Ids asked for per page of the Models API's list: the most it allows
+/// (1 to 1000, default 20 — its reference page, read 2026-11-12).
+const MODELS_PAGE_LIMIT: u32 = 1000;
 const API_VERSION: &str = "2023-06-01";
+
+/// How a models-list page that failed in transit or did not decode ends the
+/// walk: the first page's failure is the call's error, as before; a later
+/// page's keeps the ids already read, with one WARN.
+fn later_page_failed(
+    after_id: Option<&str>,
+    models: Vec<String>,
+    error: LlmError,
+) -> Result<Vec<String>, LlmError> {
+    if after_id.is_none() {
+        return Err(error);
+    }
+    tracing::warn!(
+        provider = "anthropic",
+        error = %error,
+        read = models.len(),
+        "A later page of the model list failed — keeping the ids read so far"
+    );
+    Ok(models)
+}
 
 /// Build the `anthropic-beta` header value by collecting all active beta features.
 ///
@@ -45,6 +70,8 @@ pub struct AnthropicProvider {
     /// [`with_request_timeout`](Self::with_request_timeout). `None` leaves the
     /// bound to the client's connect and idle timeouts alone (L7).
     request_timeout: Option<std::time::Duration>,
+    /// [`API_BASE`], unless a test points the provider at its own server.
+    api_base: String,
 }
 
 impl AnthropicProvider {
@@ -65,7 +92,20 @@ impl AnthropicProvider {
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             request_timeout: None,
+            api_base: API_BASE.to_string(),
         }
+    }
+
+    /// Send every request to `api_base` (`http://127.0.0.1:<port>/v1`) — a
+    /// test's loopback server, never a provider.
+    #[cfg(test)]
+    pub(crate) fn with_api_base(mut self, api_base: String) -> Self {
+        self.api_base = api_base;
+        self
+    }
+
+    fn messages_url(&self) -> String {
+        format!("{}/messages", self.api_base)
     }
 
     /// Give one non-streaming call this much wall clock, and no more.
@@ -113,37 +153,80 @@ impl LlmProvider for AnthropicProvider {
         self.chat_with_key(&self.api_key, request).await
     }
 
+    /// Every page of the Models API's list, newest first.
+    ///
+    /// The list is paged — at most [`MODELS_PAGE_LIMIT`] ids a page, the next
+    /// asked for `after_id` the page's `last_id` while `has_more` holds — so
+    /// one request saw only the newest 20 (the API's default `limit`). A page
+    /// after the first that fails — an error status, a failed request or a
+    /// body that does not decode — ends the walk with the ids read, one WARN;
+    /// a failed first page answers as before. A `last_id` that is missing or
+    /// repeats the cursor just sent ends it too.
     async fn list_models_with_key(&self, key: &str) -> Result<Vec<String>, LlmError> {
-        let response = self
-            .deadline(
-                self.client
-                    .get("https://api.anthropic.com/v1/models")
-                    .header("x-api-key", key)
-                    .header("anthropic-version", API_VERSION),
-            )
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+        let mut models: Vec<String> = Vec::new();
+        let mut after_id: Option<String> = None;
+        loop {
+            let mut url = reqwest::Url::parse(&format!("{}/models", self.api_base))
+                .map_err(|e| LlmError::Config(format!("the models URL: {e}")))?;
+            url.query_pairs_mut()
+                .append_pair("limit", &MODELS_PAGE_LIMIT.to_string());
+            if let Some(ref cursor) = after_id {
+                url.query_pairs_mut().append_pair("after_id", cursor);
+            }
+            let response = self
+                .deadline(
+                    self.client
+                        .get(url)
+                        .header("x-api-key", key)
+                        .header("anthropic-version", API_VERSION),
+                )
+                .send()
+                .await
+                .map_err(crate::providers::reqwest_error);
+            let response = match response {
+                Ok(response) => response,
+                Err(e) => return later_page_failed(after_id.as_deref(), models, e),
+            };
 
-        if !response.status().is_success() {
-            return Ok(vec![]);
+            if !response.status().is_success() {
+                if after_id.is_some() {
+                    tracing::warn!(
+                        provider = "anthropic",
+                        status = response.status().as_u16(),
+                        read = models.len(),
+                        "A later page of the model list failed — keeping the ids read so far"
+                    );
+                }
+                return Ok(models);
+            }
+
+            let body: serde_json::Value = match response
+                .json()
+                .await
+                .map_err(crate::providers::reqwest_error)
+            {
+                Ok(body) => body,
+                Err(e) => return later_page_failed(after_id.as_deref(), models, e),
+            };
+
+            if let Some(page) = body["data"].as_array() {
+                models.extend(
+                    page.iter()
+                        .filter_map(|m| m["id"].as_str().map(|s| s.to_string())),
+                );
+            }
+
+            let next = body["last_id"].as_str().filter(|id| !id.is_empty());
+            match next {
+                Some(next)
+                    if body["has_more"].as_bool() == Some(true)
+                        && after_id.as_deref() != Some(next) =>
+                {
+                    after_id = Some(next.to_string());
+                }
+                _ => return Ok(models),
+            }
         }
-
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| LlmError::Serialization(e.to_string()))?;
-
-        let models = body["data"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(models)
     }
 
     async fn chat_with_key(
@@ -156,7 +239,7 @@ impl LlmProvider for AnthropicProvider {
 
         let mut req_builder = self.deadline(
             self.client
-                .post(API_URL)
+                .post(self.messages_url())
                 .header("x-api-key", key)
                 .header("anthropic-version", API_VERSION)
                 .header("content-type", "application/json"),
@@ -172,7 +255,7 @@ impl LlmProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let status = response.status().as_u16();
 
@@ -208,7 +291,7 @@ impl LlmProvider for AnthropicProvider {
         let response_body: serde_json::Value = response
             .json()
             .await
-            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         if status >= 400 {
             let message = response_body["error"]["message"]
@@ -236,7 +319,7 @@ impl LlmProvider for AnthropicProvider {
 
         let mut req_builder = self
             .client
-            .post(API_URL)
+            .post(self.messages_url())
             .header("x-api-key", key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json");
@@ -251,7 +334,7 @@ impl LlmProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .map_err(crate::providers::reqwest_error)?;
 
         let status = response.status().as_u16();
 
@@ -272,7 +355,7 @@ impl LlmProvider for AnthropicProvider {
             let error_body: serde_json::Value = response
                 .json()
                 .await
-                .map_err(|e| LlmError::Serialization(e.to_string()))?;
+                .map_err(crate::providers::reqwest_error)?;
             let message = error_body["error"]["message"]
                 .as_str()
                 .unwrap_or("Unknown error")
@@ -296,3 +379,6 @@ use streaming::parse_anthropic_sse;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod echo_tests;

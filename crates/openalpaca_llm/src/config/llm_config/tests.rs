@@ -142,7 +142,11 @@ fn the_seeded_template_describes_a_discoverable_ollama() {
         "empty means 'whatever is installed', not a tag nobody pulled"
     );
     assert_eq!(ollama.default_max_tokens, Some(8192));
-    assert_eq!(ollama.request_timeout_secs, Some(600));
+    assert_eq!(
+        ollama.request_timeout_secs,
+        Some(3600),
+        "a call to a local model may run up to an hour (LOCAL-CALL-HOUR)"
+    );
     assert!(
         config.models.is_none(),
         "discovery writes the catalogue; the owner writes no [models] rows"
@@ -155,7 +159,7 @@ fn the_seeded_template_describes_a_discoverable_ollama() {
     let runtime = LlmRuntimeConfig::from(&config);
     assert_eq!(
         runtime.request_timeout_for("ollama"),
-        std::time::Duration::from_secs(600),
+        std::time::Duration::from_secs(3600),
         "the local provider's own budget"
     );
     assert_eq!(
@@ -182,8 +186,8 @@ fn the_request_timeout_defaults_to_two_minutes() {
 }
 
 /// `[timeouts]` moves every provider; `[providers.<name>] request_timeout_secs`
-/// moves one — a local model that generates for ten minutes without the cloud
-/// providers waiting that long for a dead socket.
+/// moves one — a local model that generates for an hour without the cloud
+/// providers waiting that long for a dead socket. An hour is inside the clamp.
 #[test]
 fn a_per_provider_timeout_outranks_the_global_one() {
     let config: LlmRouterConfig = toml::from_str(
@@ -195,7 +199,7 @@ llm_request_timeout_secs = 45
 
 [providers.ollama]
 enabled = true
-request_timeout_secs = 600
+request_timeout_secs = 3600
 "#,
     )
     .unwrap();
@@ -203,7 +207,7 @@ request_timeout_secs = 600
 
     assert_eq!(
         runtime.request_timeout_for("ollama"),
-        std::time::Duration::from_secs(600),
+        std::time::Duration::from_secs(3600),
         "the provider's own value wins"
     );
     assert_eq!(
@@ -420,4 +424,49 @@ context = 262144
         assert_eq!(collected.content, "tick tock done");
         assert_eq!(collected.usage.output_tokens, 3);
     }
+}
+
+/// M-3: `[providers.<name>.model_aliases]` takes `fast`, `balanced` and
+/// `strong` (any case); any other key is warned at load and ignored, and so
+/// is a pin naming no model.
+#[test]
+#[tracing_test::traced_test]
+fn an_unknown_model_aliases_key_is_warned_and_ignored() {
+    use crate::routing::model_alias::ModelAlias;
+    let config: LlmRouterConfig = toml::from_str(
+        r#"
+[providers.ollama.model_aliases]
+Fast = "qwen3:4b"
+fastest = "qwen3:0.6b"
+strong = "  "
+"#,
+    )
+    .expect("parses");
+    let runtime = LlmRuntimeConfig::from(&config);
+    let pins = &runtime.provider_defaults["ollama"].model_aliases;
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[&ModelAlias::Fast], "qwen3:4b");
+    // Both are said at WARN: the unknown key, and the pin naming no model.
+    logs_assert(|lines: &[&str]| {
+        let warned = |needles: &[&str]| {
+            lines
+                .iter()
+                .filter(|l| l.contains("WARN") && needles.iter().all(|n| l.contains(n)))
+                .count()
+        };
+        let unknown = warned(&[
+            "[providers.ollama.model_aliases] has a key 'fastest' that is no model alias",
+            "fast, balanced or strong",
+        ]);
+        let empty = warned(&["[providers.ollama.model_aliases] strong names no model"]);
+        match (unknown, empty) {
+            (1, 1) => Ok(()),
+            (u, e) => Err(format!(
+                "one WARN each: the unknown key {u} times, the empty pin {e} times"
+            )),
+        }
+    });
+    // The raw table survives a write of the file's typed form.
+    let written = toml::to_string(&config).expect("serialises");
+    assert!(written.contains("fastest"), "{written}");
 }

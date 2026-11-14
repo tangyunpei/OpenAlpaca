@@ -129,6 +129,8 @@ tasks/storage-design/maps/
 tasks/storage-design/panel/
 tasks/storage-design/plan-drafts/
 !tasks/approval-hidden-chars.md
+# The subagent brief design (SA-DESIGN: SA-1, SA-3, SA-4), programme step 3b.
+!tasks/subagent-brief-design.md
 # The toolchain, dependency and modernization programme (2026-09-25…): the
 # plans and reports are tracked; the evidence archives (patches, logs, tools)
 # stay local — they are 3–20 MB each and reproducible from the reports.
@@ -141,6 +143,8 @@ tasks/storage-design/plan-drafts/
 !tasks/deps-upgrade/baselines/*/*.md
 # E6's corpus (P30; A-07 (2)): the SKILL.md edge-case fixtures beside its comparators.
 !tasks/deps-upgrade/tools/e6/corpus/*/SKILL.md
+# The earlier builds' shipped templates and skill files, as committed (subagent design §9).
+!crates/openalpaca_core/src/bundled/fixtures/**/*.md
 tasks/deps-upgrade/*.tar.gz
 !tasks/deps-upgrade-audit-*.md
 !tasks/pending-decisions.md

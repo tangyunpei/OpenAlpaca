@@ -11,11 +11,14 @@ use super::approval_preview::command_card;
 use super::helpers::acting_folder;
 
 /// The defence-in-depth bound on one command. The primary timeout is the
-/// SandboxManager's (default 60s, `daemon_config.execution.agent_defaults.
-/// max_tool_runtime_secs`); this one holds when the sandbox layer is bypassed
-/// (e.g. ToolRegistry used directly). Either way the command and what it
-/// started are killed (R45, `run_bounded`).
-const SHELL_TIMEOUT_SECS: u64 = 300;
+/// SandboxManager's: `[execution.agent_defaults] max_tool_runtime_secs`
+/// (120 s by default), or the call's own `timeout_secs` clamped to
+/// `max_tool_runtime_ceiling_secs` (N-TOOL-1b). This one is the highest the
+/// ceiling may be set to, so it never cuts below a figure a loop states: it
+/// holds only when the sandbox layer is bypassed (e.g. ToolRegistry used
+/// directly). Either way the command and what it started are killed (R45,
+/// `run_bounded`).
+const SHELL_TIMEOUT_SECS: u64 = crate::daemon_config::MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS;
 
 /// What the input sanitizer admits in a `shell_execute` command
 /// (`security::sanitizer`, `check_string_safety`: backticks, `$(`, `\n` and
@@ -25,24 +28,37 @@ const WHAT_A_COMMAND_MAY_HOLD: &str = "One command line: `;`, `&&`, `||`, pipes 
     redirections are allowed; command substitution (`$(…)` or backticks) and line breaks \
     are refused.";
 
-/// `shell_execute`'s description, stating `timeout_secs` — the limit a call
-/// really runs under — or, with `None`, no figure at all.
+/// `shell_execute`'s description, stating `limits` — the bound a call that
+/// asks for nothing really runs under, and the ceiling its `timeout_secs` is
+/// clamped to — or, with `None`, no figure at all.
 ///
-/// The figure belongs to the loop that hands the definition to a model: its
-/// sandbox cuts a call at `max_tool_runtime_secs` ([`state_enforced_timeout`]).
-/// The registered definition states none, so no surface that shows it
-/// without a loop can state a wrong one.
-fn shell_execute_description(timeout_secs: Option<u64>) -> String {
-    let limit = match timeout_secs {
-        Some(1) => "A command still running after 1 second is stopped, with every process \
-            it started."
-            .to_string(),
-        Some(secs) => format!(
-            "A command still running after {secs} seconds is stopped, with every process it \
-             started."
-        ),
+/// The figures belong to the loop that hands the definition to a model: its
+/// sandbox cuts a call at `max_tool_runtime_secs`, or at the call's own
+/// `timeout_secs` up to `max_tool_runtime_ceiling_secs`
+/// ([`state_enforced_timeout`]). The registered definition states none, so
+/// no surface that shows it without a loop can state a wrong one.
+fn shell_execute_description(limits: Option<(u64, u64)>) -> String {
+    let limit = match limits {
+        Some((secs, ceiling)) => {
+            let after = match secs {
+                1 => "1 second".to_string(),
+                secs => format!("{secs} seconds"),
+            };
+            if ceiling > secs {
+                format!(
+                    "A command still running after {after} is stopped, with every process it \
+                     started; set timeout_secs to let one run up to {ceiling} seconds."
+                )
+            } else {
+                format!(
+                    "A command still running after {after} is stopped, with every process it \
+                     started — the most a command may run here."
+                )
+            }
+        }
         None => "A command still running at the calling agent's time limit is stopped, with \
-            every process it started."
+            every process it started; timeout_secs may set another limit, up to that agent's \
+            ceiling."
             .to_string(),
     };
     format!(
@@ -55,15 +71,19 @@ fn shell_execute_description(timeout_secs: Option<u64>) -> String {
     )
 }
 
-/// N-TOOL-1 (Z1-05): state on `shell_execute`'s definition the limit a loop
-/// whose sandbox cuts a tool at `sandbox_secs` really enforces — the
-/// sandbox's cut, or the tool's own [`SHELL_TIMEOUT_SECS`] where that comes
-/// first. Every loop calls it with its policy (`run_agentic_loop_core`); the
-/// other definitions are left as they are.
-pub(crate) fn state_enforced_timeout(tools: &mut [ToolDefinition], sandbox_secs: u64) {
-    let secs = sandbox_secs.min(SHELL_TIMEOUT_SECS);
+/// N-TOOL-1 (Z1-05), N-TOOL-1b: state on `shell_execute`'s definition the
+/// limits a loop whose sandbox cuts a tool at `sandbox_secs`, or at a call's
+/// `timeout_secs` up to `ceiling_secs`, really enforces. The tool's own
+/// [`SHELL_TIMEOUT_SECS`] is past every ceiling, so it never comes first.
+/// Every loop calls it with its policy (`run_agentic_loop_core`); the other
+/// definitions are left as they are.
+pub(crate) fn state_enforced_timeout(
+    tools: &mut [ToolDefinition],
+    sandbox_secs: u64,
+    ceiling_secs: u64,
+) {
     for definition in tools.iter_mut().filter(|d| d.name == "shell_execute") {
-        definition.description = shell_execute_description(Some(secs));
+        definition.description = shell_execute_description(Some((sandbox_secs, ceiling_secs)));
     }
 }
 
@@ -141,7 +161,7 @@ const NO_SUCH_COMMAND_HINT: &str =
 fn timed_out(secs: u64) -> String {
     format!(
         "Command timed out after {secs}s\n{}",
-        crate::tools::platform::COMMAND_TIMED_OUT_HINT
+        crate::tools::platform::TIMED_OUT_HINT
     )
 }
 
@@ -196,6 +216,12 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
                     "command": {
                         "type": "string",
                         "description": format!("The shell command to run. {WHAT_A_COMMAND_MAY_HOLD}")
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Optional: the seconds this command may run before it is \
+                            stopped. Without it the default this tool's description states \
+                            applies; a figure above the most it states runs under that most."
                     }
                 },
                 "required": ["command"]
@@ -256,7 +282,8 @@ mod tests {
     }
 
     /// The path that matters in production: the sandbox's per-tool timeout
-    /// (60 s by default) is far shorter than the tool's own 300 s.
+    /// (120 s by default, a call's `timeout_secs` at most the ceiling) comes
+    /// before the tool's own bound, the highest ceiling there is.
     #[tokio::test]
     async fn a_shell_command_the_sandbox_times_out_takes_the_processes_it_started_with_it() {
         use crate::bus::EventBus;
@@ -279,6 +306,7 @@ mod tests {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 1,
+            max_tool_runtime_ceiling_secs: 1,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -301,8 +329,8 @@ mod tests {
         // it cut what to do — never to raise a `timeout` (N-TOOL-1).
         assert_eq!(
             err,
-            "Tool 'shell_execute' timed out after 1s\nHint: that is the most a command may run \
-             here; split the work into smaller commands that each finish sooner."
+            "Tool 'shell_execute' timed out after 1s\nHint: that is the most this tool may run \
+             here; split the work into smaller calls that each finish sooner."
         );
         assert!(
             wait_until_gone(pid, GONE_WITHIN).await,
@@ -390,6 +418,7 @@ mod preview_tests {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 60,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: Some(5),
@@ -574,17 +603,38 @@ mod preview_tests {
     }
 
     /// N-TOOL-4: the shell's own bound — what holds when the sandbox is
-    /// bypassed — tells a command it stopped the same thing the sandbox
-    /// does, and names no `timeout` parameter (N-TOOL-1).
+    /// bypassed — tells a command it stopped the same thing the sandbox does
+    /// at the ceiling. N-TOOL-1b: that bound is the highest ceiling there is,
+    /// so it is the most the tool may run and names no `timeout_secs`.
     #[test]
     fn the_shells_own_bound_tells_a_command_what_to_do() {
+        assert_eq!(
+            SHELL_TIMEOUT_SECS,
+            crate::daemon_config::MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS
+        );
         let text = super::timed_out(SHELL_TIMEOUT_SECS);
         assert_eq!(
             text,
-            "Command timed out after 300s\nHint: that is the most a command may run here; \
-             split the work into smaller commands that each finish sooner."
+            "Command timed out after 3600s\nHint: that is the most this tool may run here; \
+             split the work into smaller calls that each finish sooner."
         );
         assert!(!text.to_lowercase().contains("timeout"), "{text}");
+    }
+
+    /// N-TOOL-1b (B-11): the model may set `timeout_secs` — an optional whole
+    /// number of seconds, beside the one required `command` — and the
+    /// registered definition names no figure for it: the loop states those.
+    #[test]
+    fn the_definition_takes_an_optional_timeout_secs() {
+        let definition = shell_execute_tool().definition;
+        let timeout = &definition.parameters["properties"]["timeout_secs"];
+        assert_eq!(timeout["type"], "integer");
+        let text = timeout["description"].as_str().expect("it is described");
+        assert!(!text.chars().any(|c| c.is_ascii_digit()), "{text}");
+        assert_eq!(
+            definition.parameters["required"],
+            serde_json::json!(["command"])
+        );
     }
 
     #[cfg(unix)]

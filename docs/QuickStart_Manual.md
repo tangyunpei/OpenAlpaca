@@ -52,10 +52,12 @@ openalpaca daemon status
 
 Terminal only? Use `openalpaca daemon start --daemon-only`.
 
-The first start writes the default config, agent templates and skills into
-`~/.openalpaca/config`. It downloads nothing — memory is Markdown files plus a
-keyword index, with no model of its own — so `openalpaca daemon status` reports
-`Daemon is running` within seconds. Wait for that before step 4.
+The first start writes the default config into `~/.openalpaca/config`; the
+nine agent templates and the four skills are built in, and `config/agents/`
+and `config/skills/` start empty, for your own and overrides. It
+downloads nothing — memory is Markdown files plus a keyword index, with no
+model of its own — so `openalpaca daemon status` reports `Daemon is running`
+within seconds. Wait for that before step 4.
 
 ## 4. Connect a model
 

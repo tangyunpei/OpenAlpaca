@@ -22,7 +22,7 @@
 # README's table):
 #   old equals new   every word and count line equal between the variants
 #                    (old records the search, new compares, old compares
-#                    again), sqlite 3.51.1 against 3.53.2, mismatches 0, each
+#                    again), sqlite 3.51.1 against 3.54.1, mismatches 0, each
 #                    live snapshot `key=equal` and an earlier build's (no
 #                    project id) `key=absent`, `folder=orphan`, its notes
 #                    `unlocated`, not `missing`; search `different 0` with
@@ -114,7 +114,7 @@ sq() { env -i PATH=/usr/bin:/bin HOME=/var/empty LC_ALL=C "$SQLITE" -batch "$@";
 # `rank` settings whose values are the file's RANK_WEIGHTS and
 # HEAD_RANK_WEIGHTS lines, each matched exactly once). The schema_version is
 # 6, the pre-wave build's SCHEMA_VERSION and so the owner's copy's, not the
-# tip's 7 (the sweep's S12 changed no table: SCHEMA_SQL and the weights are
+# tip's 8 (the sweep's S12 changed no table: SCHEMA_SQL and the weights are
 # the same at the branch point and the tip).
 index_schema() {   # -> stdout
   local n
@@ -253,7 +253,7 @@ make_corpus() {
   chmod 700 "$o/state"
   cat "$MIG"/001_*.sql "$MIG"/002_*.sql "$MIG"/003_*.sql "$MIG"/004_*.sql | sq "$o/state/openalpaca.db"
   db_rows "$o" | sq "$o/state/openalpaca.db" >/dev/null
-  python3 -I -c "$GEN_PY" "$o" "$o" "$OWNER_ID" "$PROJECT_ID" "$d/projroot-$MARK" "$MARK" "$d/index-rows.sql"
+  python3.11 -I -c "$GEN_PY" "$o" "$o" "$OWNER_ID" "$PROJECT_ID" "$d/projroot-$MARK" "$MARK" "$d/index-rows.sql"
   { echo "PRAGMA journal_mode=WAL;"; index_schema; cat "$d/index-rows.sql"; } |
     sq "$o/state/cache/memory-index-v1.sqlite" >/dev/null
   # The system sqlite3 keeps a checkpointed, zero-length -wal and its -shm
@@ -377,7 +377,7 @@ ORIG=$X/corpus/orig-$MARK/store
 # WAL mode read from each file's header (bytes 18 and 19 both 2).
 check "corpus B: a schema-4 database in WAL mode, the index at schema 6, three snapshots, five notes; no -wal, no -shm" \
   test "$(sq "file:$ORIG/state/openalpaca.db?immutable=1" 'SELECT max(version) FROM schema_version;')" = 4 -a \
-  "$(python3 -I -c 'import sys; print(all(open(f, "rb").read(20)[18:20] == bytes([2, 2]) for f in sys.argv[1:]))' \
+  "$(python3.11 -I -c 'import sys; print(all(open(f, "rb").read(20)[18:20] == bytes([2, 2]) for f in sys.argv[1:]))' \
     "$ORIG/state/openalpaca.db" "$ORIG/state/cache/memory-index-v1.sqlite")" = True -a \
   "$(sq "file:$ORIG/state/cache/memory-index-v1.sqlite?immutable=1" "SELECT value FROM meta WHERE key='schema_version'; SELECT count(*) FROM note; SELECT count(*) FROM fts_word_data;" | head -2 | tr '\n' ' ')" = "6 5 " -a \
   -z "$(find "$A" \( -name '*-wal' -o -name '*-shm' \) -print)" -a \
@@ -385,7 +385,7 @@ check "corpus B: a schema-4 database in WAL mode, the index at schema 6, three s
   "$(find "$A/memory" "$A/projects" -name '*--*.md' | wc -l | tr -d ' ')" = 5
 check "corpus B: a recorded revision equals shasum -a 256 of its file" \
   test "$(shasum -a 256 "$(find "$A/memory" -name '*--*.md' | LC_ALL=C sort | head -1)" | cut -d' ' -f1)" = \
-  "$(python3 -I -c 'import json,sys; s=json.load(open(sys.argv[1])); print(sorted(s["notes"].items())[0][1]["revision"])' "$(find "$A/state/memory-control" -name 'home-*.json')")"
+  "$(python3.11 -I -c 'import json,sys; s=json.load(open(sys.argv[1])); print(sorted(s["notes"].items())[0][1]["revision"])' "$(find "$A/state/memory-control" -name 'home-*.json')")"
 # A cleanly stopped daemon's store has no -wal and no -shm (its bundled
 # SQLite removes both at the last close). The system sqlite3 (3.54.0) cannot
 # open such a WAL database read-only — "unable to open database file" — while
@@ -433,7 +433,7 @@ for r in all-1-old all-2-new all-3-old; do
   check "[$r] every stdout line inside the paste alphabet" in_alphabet "$r"
 done
 check "[old] sqlite 3.51.1" has all-1-old "db	sqlite 3.51.1"
-check "[new] sqlite 3.53.2" has all-2-new "db	sqlite 3.53.2"
+check "[new] sqlite 3.54.1" has all-2-new "db	sqlite 3.54.1"
 check "[old record] search recorded with results" grep -q -E $'^search\trecorded queries [0-9]+ with-results [1-9][0-9]* error 0$' "$RUNS/all-1-old.out"
 for r in all-2-new all-3-old; do
   check "[$r] search compared: query-list equal, different 0, error 0, with-results > 0" \
@@ -455,7 +455,7 @@ check "the --out file is 0600" test "$(stat -f '%Lp' "$X/out/all-2-new.txt")" = 
 # ---- one flipped byte; a missing file --------------------------------------------------
 B=$(fresh flip)
 F=$(find "$B/memory/owners" -name '*--*.md' | LC_ALL=C sort | head -1)
-python3 -I -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[-2] ^= 1; open(p,"wb").write(bytes(b))' "$F"
+python3.11 -I -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[-2] ^= 1; open(p,"wb").write(bytes(b))' "$F"
 M=$(fresh missing)
 rm -f "$(find "$M/projects" -name '*--*.md' | LC_ALL=C sort | head -1)"
 for v in old new; do
@@ -479,7 +479,7 @@ for f in "$A"/memory/owners/*/notes/*.md "$A"/projects/*/memory/owners/*/notes/*
 done
 RR=$(fresh root)
 for s in "$RR"/state/memory-control/*.json; do
-  python3 -I -c 'import json,sys; p,r=sys.argv[1:3]; s=json.load(open(p)); s["root"]=r; open(p,"w").write(json.dumps(s, indent=2)+"\n")' "$s" "$MK/"
+  python3.11 -I -c 'import json,sys; p,r=sys.argv[1:3]; s=json.load(open(p)); s["root"]=r; open(p,"w").write(json.dumps(s, indent=2)+"\n")' "$s" "$MK/"
 done
 for v in old new; do run "clean-snap-$v" "$v" snapshots --store "$A" --out "$X/out/clean-snap-$v.txt"; done
 for v in old new; do
@@ -564,7 +564,7 @@ WV=$(fresh wal)
 for v in old new; do run "wal-before-$v" "$v" db --db "$WV/state/openalpaca.db" --out "$X/out/wal-before-$v.txt"; done
 BEFORE=$(sed -n 's/^db\trows-total \([0-9]*\)$/\1/p' "$RUNS/wal-before-new.out")
 # shellcheck disable=SC2016  # Python code
-python3 -I -c '
+python3.11 -I -c '
 import os, sqlite3, sys
 c = sqlite3.connect(sys.argv[1], isolation_level=None)
 c.execute("PRAGMA wal_autocheckpoint=0")
@@ -634,10 +634,10 @@ cp -Rp "$PD" "$PD-copied"
 mkdir -p "$PJ/projects/.registering"
 cp -p "$PD/project.json" "$PJ/projects/.registering/project.json"
 PN=$(fresh proj-no-created-at)
-python3 -I -c 'import json,sys; p=sys.argv[1]; s=json.load(open(p)); del s["created_at"]; open(p,"w").write(json.dumps(s))' \
+python3.11 -I -c 'import json,sys; p=sys.argv[1]; s=json.load(open(p)); del s["created_at"]; open(p,"w").write(json.dumps(s))' \
   "$(find "$PN/projects" -name project.json)"
 PR=$(fresh proj-relative-root)
-python3 -I -c 'import json,sys; p=sys.argv[1]; s=json.load(open(p)); s["root"]="relative/root"; open(p,"w").write(json.dumps(s))' \
+python3.11 -I -c 'import json,sys; p=sys.argv[1]; s=json.load(open(p)); s["root"]="relative/root"; open(p,"w").write(json.dumps(s))' \
   "$(find "$PR/projects" -name project.json)"
 HL=$(fresh history-link)
 mkdir -p "$X/history-elsewhere"

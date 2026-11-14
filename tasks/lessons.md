@@ -169,3 +169,15 @@ Each entry: what went wrong → the rule that prevents it.
 **What happened:** Two of the sweep's runs pointed `HOME` at a scratch folder. S05's set no `RUSTUP_HOME` or `CARGO_HOME`; S18's passed its environment as one zsh string, so `HOME` took the whole string and `RUSTUP_HOME`, `CARGO_HOME` and `OPENALPACA_HOME_STORE` were unset. Each time rustup downloaded a second copy of the pinned toolchain from static.rust-lang.org, outside the hosts the run's brief allowed, and S18's cargo fetched 249 crates into the scratch `HOME`: 2.5 GB and 2.8 GB, deleted as not evidence. S18's probe panicked before any scan, so nothing reached a store.
 
 **Rule:** A run that sets a scratch `HOME` sets `RUSTUP_HOME` and `CARGO_HOME` to the real ones, and `OPENALPACA_HOME_STORE` wherever a store is in play, each assignment its own shell word or one `env VAR=… VAR=…` — never a string held in a variable, which zsh passes as one word (the zsh entry above). The run's log shows the toolchain resolved from the real `RUSTUP_HOME` before its first build.
+
+## 2026-11 — `find -not -path` filters output but does not prune the walk
+
+**What happened:** The agent re-pinning the E8 probe looked for a bins folder with `find / -xdev ( -name … ) -not -path '*/.openalpaca/*'`. `-not -path` only hides matches; `find` still descended into `~/.openalpaca` and stat'ed its entries, against the standing rule never to read, stat, ls or find the real store. No file contents were read and nothing was written.
+
+**Rule:** Never walk from `/` or `~` (find, du, rg, fd or the like); search a named scratch or repository root. To exclude a directory from a walk, `-prune` it, never `-not -path`.
+
+## 2026-11 — A reading of the owner's words that picks between two behaviours is a choice, not a build
+
+**What happened:** The owner's answer on CMD-TIMEOUT's two said the sandbox's cut for a call that sent no `timeout_secs` is the Command tool author's figure "above the per-tool bound". `4029af50` built the literal reading (below the bound the tool's own clock stops the call; at or above it the sandbox cuts) and recorded the other reading (the sandbox the one clock for every call) as passed over, for a cost it stated: "a `security_violation` event and a breaker record to every default kill". On 2026-11-14 the owner chose the passed-over reading ("the sandbox should be the one clock for every call"), so the commit is to be reversed. The code read that day also showed the stated cost half wrong: the breaker record was never new, since the tool's own clock's kill already counted.
+
+**Rule:** Where the owner's words allow two behaviours, present both to him as a choice with each side's consequence, the consequence read from the code, before building either; the lead's reading is a recommendation, never the build. A cost claimed for the side not built is checked against the code before it is written into a commit body or a record.

@@ -66,6 +66,14 @@ pub struct ProviderConfig {
     /// [`LlmRuntimeConfig::request_timeout_for`](super::runtime::LlmRuntimeConfig::request_timeout_for).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
+    /// `[providers.<name>.model_aliases]`: this provider's pins for the
+    /// model aliases, `fast`, `balanced` and `strong` (the subagent design's
+    /// M-3), each a model id that replaces the compiled one when a parent
+    /// runs on this provider. Kept as written, so a write of the file keeps
+    /// every key; [`ProviderDefaults::model_aliases`](super::runtime::ProviderDefaults::model_aliases)
+    /// holds the ones that name an alias, and the load warns of the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_aliases: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -100,7 +100,7 @@ const MEMORY_WRITE_TOOLS: [&str; 3] = ["memory_store", "memory_update", "memory_
 // ─── Data files ─────────────────────────────────────────────────────────────
 //
 // The data files' types, the corpus's included (design 09 §7.1), are shared
-// with `tests/memory_eval_corpus.rs`, which runs in default CI.
+// with `tests/memory_eval_corpus.rs`, which a plain `cargo test` runs.
 
 #[path = "common/eval.rs"]
 mod eval;
@@ -8188,6 +8188,7 @@ fn router_over(models: &[&str], stub: Arc<StubModel>) -> Arc<openalpaca_llm::Llm
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: false,
+                long_prompt: None,
             },
         );
     }

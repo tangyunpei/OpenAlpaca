@@ -106,8 +106,10 @@ fn test_daemon_keys_in_category() {
     // conversation summaries' `learning.episode_max_per_day` (§13.3) came
     // and went: a summary is projected with no call (design 11 §8, CQ-2) —
     // plus the carry-over's `carry_over_turns` (design 11 §8, CQ-5), plus
-    // the skill catalog's `skills_catalog_budget` (N-SKILL-1).
-    assert_eq!(keys.len(), 50);
+    // the skill catalog's `skills_catalog_budget` (N-SKILL-1) — and the
+    // per-tool bound's ceiling in place of the lead's retired bound
+    // (N-TOOL-1b), plus the run's subagent bound (N-LEAD-6).
+    assert_eq!(keys.len(), 51);
     for gone in [
         "daemon.orchestrator.extract_every_n_turns",
         "daemon.orchestrator.learning.episode_max_per_day",
@@ -545,4 +547,55 @@ fn test_validate_key_for_provider_dispatches() {
 
     // unknown → always Ok
     assert!(validate_key_for_provider("unknown_provider", "anything").is_ok());
+}
+
+/// N-TOOL-1b (B-11): the per-tool bound is 120 s by default, its ceiling has
+/// a row (1–3600 s, 600 by default), and the lead's retired bound has none.
+#[test]
+fn test_the_per_tool_bound_its_ceiling_and_no_lead_bound() {
+    let bound = lookup("daemon.execution.max_tool_runtime_secs").unwrap();
+    assert_eq!(bound.default, Some("120"));
+    let ceiling = lookup("daemon.execution.max_tool_runtime_ceiling_secs")
+        .expect("the ceiling has a registry row");
+    assert_eq!(ceiling.default, Some("600"));
+    assert!(validate("daemon.execution.max_tool_runtime_ceiling_secs", "3600").is_ok());
+    assert!(validate("daemon.execution.max_tool_runtime_ceiling_secs", "3601").is_err());
+    assert!(validate("daemon.execution.max_tool_runtime_ceiling_secs", "0").is_err());
+    assert!(lookup("daemon.execution.lead_max_tool_runtime_secs").is_none());
+}
+
+/// PLUGIN-WAIT: a plugin tool's call may ask for its own `timeout_secs` as a
+/// command's may, so the ceiling's row names both, not commands alone.
+#[test]
+fn test_the_ceilings_row_names_command_and_plugin_tools() {
+    let ceiling = lookup("daemon.execution.max_tool_runtime_ceiling_secs").unwrap();
+    let said = ceiling.description;
+    assert!(said.contains("command"), "{said}");
+    assert!(said.contains("plugin"), "{said}");
+}
+
+/// N-SKILL-5: the skill catalog's budget row names the daemon's default,
+/// 20,000 characters — the top of its range, 100–20,000.
+#[test]
+fn test_the_skills_catalog_budget_row_defaults_to_twenty_thousand() {
+    let key = "daemon.orchestrator.skills_catalog_budget";
+    let row = lookup(key).expect("the skill catalog's budget has a registry row");
+    assert_eq!(row.default, Some("20000"));
+    assert!(validate(key, "20000").is_ok());
+    assert!(validate(key, "100").is_ok());
+    assert!(validate(key, "20001").is_err());
+    assert!(validate(key, "99").is_err());
+}
+
+/// N-LEAD-6: the run's subagent bound has a row beside the concurrency
+/// bound's — 48 by default, 1–1000.
+#[test]
+fn test_the_subagent_bound_has_a_row() {
+    let key = "daemon.execution.lead_max_subagents_per_run";
+    let row = lookup(key).expect("the subagent bound has a registry row");
+    assert_eq!(row.default, Some("48"));
+    assert!(validate(key, "1").is_ok());
+    assert!(validate(key, "1000").is_ok());
+    assert!(validate(key, "0").is_err());
+    assert!(validate(key, "1001").is_err());
 }

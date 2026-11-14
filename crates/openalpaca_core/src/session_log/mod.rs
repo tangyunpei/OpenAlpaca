@@ -43,6 +43,7 @@ pub use reader::{
     LIVE_SEGMENT, LoggedRecord, read_records, read_records_after, read_records_page, segments,
     spill_failure,
 };
+pub(crate) use record::no_output_line;
 pub use record::{
     ENVELOPE_DATA_CAP_BYTES, ENVELOPE_VERSION, PREVIEW_CHARS, RESULTS_DIR, Record, RecordType,
     SNAPSHOTS_DIR, Spill, command_spill_stub, command_stub_marker, spill_preview, spill_stub,

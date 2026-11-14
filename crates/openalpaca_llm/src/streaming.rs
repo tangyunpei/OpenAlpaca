@@ -51,6 +51,7 @@ pub async fn collect_stream(
     let mut tool_meta: HashMap<usize, (String, String)> = HashMap::new();
     let mut usage = Usage::default();
     let mut finish_reason = FinishReason::Stop;
+    let mut echo = None;
 
     while let Some(event) = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next())
         .await
@@ -81,6 +82,7 @@ pub async fn collect_stream(
             StreamEvent::Error { message } => {
                 return Err(LlmError::Stream(message));
             }
+            StreamEvent::Turn(turn) => echo = Some(turn),
         }
     }
 
@@ -109,6 +111,7 @@ pub async fn collect_stream(
         finish_reason,
         thinking,
         parts: None,
+        echo,
     })
 }
 

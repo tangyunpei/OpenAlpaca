@@ -31,7 +31,7 @@ MCP server — that an agent may invoke during an agentic loop iteration.
 | 3 | **Extensibility without recompilation** | Users add tools via TOML config files, external MCP servers (`config/mcp.toml`), or out-of-process plugins; no Rust code required. |
 | 4 | **Two governance axes** | **ALLOW** is per agent (which capabilities a template or skill declares). **ENABLE** is per extension (one switch per MCP server and per plugin). Built-in tools are never switched off. |
 | 5 | **No silent degradation** | A tool that is withheld is refused with a message naming the extension that owns it, and the refusal is logged. A skill that lost a required tool is refused rather than run without it. |
-| 6 | **Parallel execution** | All tool calls within a single LLM round execute concurrently via `join_all`. |
+| 6 | **Parallel reads, ordered writes** | Within a single LLM round, consecutive read-only calls execute concurrently via `join_all`; every other call runs alone, in the model's order (N-TOOL-3, 2026-11-01). |
 | 7 | **Runtime registration** | The registry is lock-free and mutable: MCP and plugin tools register and unregister while the daemon runs. Per-request tools live in a per-request copy of the registry. |
 | 8 | **Owner-scoped data isolation** | Tools accessing user-specific data (memory, persona, artifacts) take identity only from a trusted per-invocation `ToolContext`, never from LLM-supplied arguments. |
 
@@ -120,7 +120,7 @@ directory name), never from the free-form `author` string.
 │  run_agentic_loop_routed()                                       │
 │  • Receives LLM response with tool_calls                         │
 │  • Enforces max_tools_per_round budget (overflow calls errored)  │
-│  • Executes tools in parallel via SandboxManager                 │
+│  • Runs tools via SandboxManager: reads together, others alone   │
 │  • Spills or cuts oversized results, feeds them back to the LLM  │
 ├──────────────────────────────────────────────────────────────────┤
 │                     SECURITY SANDBOX                             │
@@ -322,19 +322,27 @@ directory.
 - Non-BuiltIn backends (HTTP, Command, Plugin, MCP) never receive identity;
   the registry discards the context for them.
 
-### 4.5 Parallel Tool Execution
+### 4.5 Grouped Tool Execution
 
-**Decision:** All tool calls in a single LLM response execute concurrently
-via `futures::join_all()`, capped at `max_tools_per_round`; calls beyond
-the cap receive error results instead of executing.
+**Decision:** The tool calls in a single LLM response, capped at
+`max_tools_per_round` (calls beyond the cap receive error results instead
+of executing), run in groups, in the model's order: consecutive calls whose
+tool declares `read_only_hint` (an MCP tool also `idempotent_hint`), and
+the lead's `spawn_subagents_batch`, `check_subagent_status` and
+`wait_for_subagents` whatever they declare, run together via
+`futures::join_all()`; every other call runs alone; the groups run one
+after another (`ToolRegistry::runs_concurrently`; N-TOOL-3, 2026-11-01).
 
 **Rationale:**
 - LLMs often emit multiple independent tool calls (e.g., `web_search` +
-  `file_read`).  Sequential execution would be unnecessarily slow.
-- The security sandbox is stateless per-call (circuit breaker state is
-  shared but accessed atomically via `Mutex`), so parallel execution is safe.
-- The task's cancellation token is raced against `join_all` for responsive
-  cancellation.
+  `file_read`).  Running reads one after another would be needlessly slow.
+- Running every call together was not safe.  The sandbox keeps no state
+  between calls, but the file tools take no lock, and `file_edit` reads
+  the file and writes it with await points between: two edits of one file
+  let through together (an Always allow, `auto_approve`) both read the
+  original, and the later write dropped the earlier edit.
+- The task's cancellation token is raced against the whole round, every
+  group, for responsive cancellation.
 
 ### 4.6 Circuit Breaker Pattern
 
@@ -676,7 +684,15 @@ Optional fields: `version` (default `"0.0.0"`), `author` (default
 virtual capabilities).  Validation rules enforced at load time:
 
 - HTTP URLs must start with `http://` or `https://`
-- `timeout_secs` must be in `[1, 300]` (default 30)
+- `timeout_secs` must be in `[1, 300]` (default 30). An `http` tool's
+  request stops at it; a `command` tool's is its calls' default: a call
+  that asks nothing runs to it, killed by the tool's own clock below
+  `[execution.agent_defaults] max_tool_runtime_secs` (120 s) and cut by the
+  sandbox at it from the bound up, clamped to
+  `max_tool_runtime_ceiling_secs` (600 s by default; CMD-TIMEOUT-2), and a
+  call may lift it with its own `timeout_secs`, up to that ceiling
+  (CMD-TIMEOUT); either way a call stopped below the ceiling is told it may
+  ask for more
 - Any `annotation:*` entries in `provides_capabilities` must be one of the
   eight known annotation capability names
 - Names colliding with protected tools are skipped (§4.10)
@@ -840,7 +856,11 @@ tools are registered into a per-run copy of the registry
 (`register_coordination_tools`), so they pass through the same
 sandbox/registry path as every other tool.  `check_subagent_status` and
 `wait_for_subagents` are flagged `exempt_from_timeout` — they manage their
-own deadlines and must not be killed by the per-tool sandbox timeout.
+own deadlines and must not be killed by the per-tool sandbox timeout.  So
+is `invoke_skill`, wherever it is registered (the main loop's per-request
+set, the lead's per-run copy), as a skill's nested `invoke_skill:<id>`
+calls are: a skill is bounded by its own loop — its rounds, its cost cap,
+and each of its tools under the per-tool timeout (SKILL-NO-CUT).
 
 ### 8.2 Budget Enforcement
 
@@ -849,8 +869,9 @@ own deadlines and must not be killed by the per-tool sandbox timeout.
 | `max_tools_per_round` | Per LLM round | 5 (subagent), 3 (lead), 3 (skill), 4 (chat) | `[execution.agent_defaults]`, `[execution.lead_agent_defaults]`, `[execution.skill_defaults]`, `[orchestrator.routing] main_loop_max_tools_per_round` |
 | `max_rounds` | Per agentic loop | 15 (subagent), 18 (lead), 6 (skill), 8 (chat) | Same sections; `main_loop_max_rounds` for chat; per template `max_rounds` |
 | `max_tool_calls` | Per agent run / skill invocation | Unset | Agent template frontmatter (`config/agents/*.md`); a skill's `tools.rate_limit.max_calls` |
-| `max_tool_runtime_secs` | Per individual tool | 60 s (300 s for the lead) | `daemon.toml`; per template `timeout_seconds` |
+| `max_tool_runtime_secs` | Per individual tool, every loop, but the exempt tools (§8.1): `check_subagent_status`, `wait_for_subagents`, `invoke_skill` and `invoke_skill:<id>` | 120 s, the sandbox's cut; a command's or a plugin tool's `timeout_secs` up to `max_tool_runtime_ceiling_secs`, 600 s. An outer bound: a tool with a clock of its own stops at whichever comes first, with its own error — among them an `Http`-backend tool's TOML `timeout_secs` (30 s by default), a `Command`-backend tool's — its calls' default, killing a call that asks for nothing where it is below the bound (the kill's message names the ceiling a call may ask up to), while from the bound up the sandbox cuts such a call at it, clamped to the ceiling, and one that sends `timeout_secs` runs under the sandbox's figure alone — and an MCP server's `request_timeout_secs` (30 s by default). A plugin tool waits for its plugin's answer past the sandbox's figure, so the sandbox's cut ends it (PLUGIN-WAIT) — cut below the ceiling, it is told it may ask for more, in the words a command's cut gets, and its request leaves the plugin's channel, no cancel sent (PLUGIN-WAIT-2); outside the sandbox it waits 60 s, set by no key | `[execution.agent_defaults]` (a template's `timeout_seconds` is not read for it) |
 | `confirmation_timeout_secs` | Per confirmation prompt | 300 s | `[execution.agent_defaults]` |
+| `max_subagents_per_run` | Per lead-agent run, every spawn (retries included) | 48 — the next spawn is refused, naming it | `[execution.lead_agent_defaults]` |
 | `max_cost` | Per agent run / per chat turn | $1.00 ($5.00 for a lead-agent workflow) | `daemon.toml`; per template `max_cost_per_task` |
 | `drain_timeout_secs` | In-flight calls at disable/reload | 10 s | `[extensions]` |
 

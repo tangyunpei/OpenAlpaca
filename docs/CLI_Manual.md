@@ -225,7 +225,7 @@ openalpaca tasks status <task_id> [--format table|json]
 openalpaca tasks log <task_id> [--limit <n>]
 openalpaca tasks create [description] [--priority <n>]
 openalpaca tasks cancel <task_id>
-openalpaca tasks pause <task_id>
+openalpaca tasks pause <task_id>    # not supported: prints the refusal, exits 1 (Notes)
 openalpaca tasks resume <task_id>
 openalpaca tasks confirmations list [--format table|json]
 openalpaca tasks confirmations watch
@@ -242,6 +242,7 @@ Notes:
 - `log` prints one line per event of the run: time, event, `[agent]` and the event's detail. An approval prompt's rows (`tool_confirmation_requested`, `tool_confirmation_resolved`) name a tool and an agent that can come from a third party, so the agent is shown with every hidden character as `<U+XXXX>` and a detail printed as JSON writes them with JSON's own `\u` escapes — never raw.
 - `status` prints the task and, under `Lanes:`, one line per subagent it spawned. With `--format json` the subagents are the `lanes` array; `lanes_error` is present when the timeline could not be read, so an empty array is never mistaken for "spawned nothing".
 - Every command that takes a `<task_id>` needs the **full** id; the daemon does not match a prefix. The `list` table shortens it, so copy it from `openalpaca tasks list --format json`.
+- `pause` is **not supported** until a later design: it prints the sentence the chat's `/pause` answers ("Pause and resume are not supported — a workflow runs until it finishes or /cancel stops it.") on stderr and exits 1, without reaching the daemon, so it answers with no daemon running. A pause never stopped a run — its work went on and its completion wrote over `paused` — so the daemon refuses it on every surface (`POST /v1/tasks/{id}/action`, the chat, the GUI). `cancel` stops a run; `resume` still works (below).
 
 #### Creating a task
 
@@ -254,7 +255,7 @@ Notes:
 
 `resume` is one word over two verbs:
 
-- On a **paused** run it is the plain transition back to running.
+- On a **paused** run — one an earlier build paused — it is the plain transition back to running, so no run is left stuck.
 - On an **interrupted** run it is *replay resume* — **experimental, and off by default**. The daemon rebuilds the run's loop history from its session log (the lead's rounds and their tool results) and continues it under the same id, telling the model not to repeat side-effecting calls it already made. The run's subagents come back too: one that finished is known again with its whole answer, kept beside the log, and one the stop interrupted is reported as interrupted, so the lead can collect the first and spawn the second again. Nothing recorded is re-executed.
 - Turn replay resume on with `resume_enabled = true` under `[orchestrator.routing]` in `daemon.toml`. Until then an interrupted run answers `RESUME_DISABLED`.
 - The other way to redo an interrupted run is a re-run: the GUI's `Re-run` button, or `POST /v1/tasks/{id}/rerun` directly. The CLI has no `rerun` verb yet.
@@ -297,13 +298,18 @@ openalpaca agents resume <agent_id>
 openalpaca agents set <agent_id> <dotted.path> <value>
 openalpaca agents create [--from-file <path>] [--interactive]
 openalpaca agents remove <agent_id>
+openalpaca agents tidy [--apply]
 ```
 
 Notes:
 - `openalpaca agents` with no subcommand enters interactive creation mode. So does `agents create` with no flags.
 - `--from-file <path>` creates the agent from a TOML file.
 - `set` takes a dotted config path, for example `openalpaca agents set <agent_id> llm.model <model-id>`. Every section on the way to the last key must already exist in the agent's config (`agents config <agent_id>` shows it). The value is read as a number, then `true`/`false`, then a string.
+- For a template, `config` and `set` read and change the agent the daemon builds from it, rebuilt whenever the template changes; `set` writes nothing to the template's file. The lead's, `lead_agent`, is there before its first run and after each, so a `set` on it holds for its later runs until its template changes or the daemon restarts.
 - `remove` archives the agent.
+- A template's `temperature`, and the one the `openalpaca config` screen asks for when it creates an agent, is kept and not sent: no lead or subagent turn sends a temperature to the model, which answers at its own default. The built-in templates set none, so `config <agent_id>` shows the default, `0.5`, for them.
+- `list` and `status` show one row per agent template, built-in ones included. A template a file in `~/.openalpaca/config/agents` switches off — a file holding its `id:` and `disabled: true` — reads `disabled` in the STATUS column and has no instance, so `config` and `set` do not find it; delete that file, or remove the line, and it reads `idle` again once a template runs under that `id`. An `id` switched off before this store ever ran a template of it has no row: `list` leaves it out and `status` does not find it, while `GET /v1/agent-templates` and Settings → Agents still list it. The file, not a command, is the switch; `GET /v1/agent-templates` names the file (`state: "disabled"`, `path`).
+- `tidy` lists the files in `~/.openalpaca/config/agents` that are unedited copies of a template OpenAlpaca shipped — what an earlier build wrote there, or a copy of the repository's `config/` — which this build does not read (the built-in template runs in its place): each file, its `version` (`current`, or `earlier` for a version an earlier build shipped), its `edit` when it is a copy as the Installation Manual's step 7 or 8 left it, and where it would go. It moves nothing. `tidy --apply` moves each to `agents/.archived/<file name without .md>.<UTC timestamp>.md`, one line per move, and ends with what that means for an earlier build: one started afterwards finds `agents/` without these files and does not write them again (Installation Manual → *Keep the builds apart*). Nothing else is moved: a template you edited, one of your own, a file that switches a template off, a file that does not parse. No start, reload or route ever moves a file; only this command does, when you run it. It reads the files itself and needs no daemon. When a daemon is running, it asks that daemon first and moves only the copies the daemon also lists as unused (a daemon of an earlier build may read a copy as yours); it names each copy it leaves. The config directory is `OPENALPACA_CONFIG_DIR` when that names a directory, else `~/.openalpaca/config` — the one `openalpaca daemon start` and the app give the daemon. Inside a git work tree `tidy --apply` moves nothing: when the config directory is in one (a `.git` folder or file in it or a folder above it), it stops with an error naming the config directory and the work tree, before it moves anything or asks the daemon, and `tidy` alone still lists the copies and says so in its last line. A development checkout's `config/` is where the built-in templates come from, so every file there is an unedited copy; a store you keep under git (a home folder that is a work tree, say) is refused the same way. Move such copies yourself if you mean to.
 
 ### `llm`
 
@@ -358,7 +364,7 @@ openalpaca config set ai.ollama.enabled true      # also ai.anthropic.enabled, a
 
 #### Other notes
 
-- `--format json` echoes the daemon's own field names. For `llm models` those are `id`, `input_price_per_million`, `output_price_per_million` and `supports_tools`. For `llm keys list` the row carries the daemon's `priority` string and a `keyless` flag.
+- `--format json` echoes the daemon's own field names. For `llm models` those are `id`, `input_price_per_million`, `output_price_per_million` and `supports_tools`. A `0` price on an Anthropic or OpenAI model that discovery found and nothing prices is no price: its calls are counted at the $3 / $15 fallback (the Daemon Manual's *Cost*). For `llm keys list` the row carries the daemon's `priority` string and a `keyless` flag.
 - `llm usage --date` only applies together with `--daily`.
 - **`llm strategy` has no effect at present.** The command prints a success line, but the daemon route it calls (`PUT /v1/orchestrator/config`) reads only `model` and `fallback_models` and ignores the strategy. Key selection is read from `llm.toml`: `strategy = "round_robin"` (the default), `"lru"` or `"primary_fallback"` under `[providers.<name>]`.
 
@@ -969,15 +975,17 @@ Notes:
 
 ### `skills`
 
-The skills the daemon loaded from `config/skills/`, and every problem its last
-scan of that directory found, through `GET /v1/skills` and
-`GET /v1/skills/diagnostics`. Both are reads: a skill has no on/off switch.
+The skills the daemon loaded — the ones built into it and those in
+`config/skills/` — and every problem its last scan of that directory found,
+through `GET /v1/skills` and `GET /v1/skills/diagnostics`. Both are reads: a
+skill has no on/off switch.
 
 ```bash
 openalpaca skills list                 # the catalog, then the problems
 openalpaca skills list --format json   # {"skills": [...], "diagnostics": [...]}
 openalpaca skills info review          # one skill, by id or slash command
 openalpaca skills info /review
+openalpaca skills tidy [--apply]       # the unedited copies in config/skills
 ```
 
 Notes:
@@ -994,12 +1002,35 @@ Notes:
   `requires_capabilities` leaves the skill with no tools), `deprecated_field`,
   `id_mismatch` (the frontmatter's `id` is not the directory's name, which is
   the id), `slash_conflict` (two skills claim one slash command; the one
-  named answers it) and `no_tools` (no `requires_capabilities`, `tools.allow`,
-  `scripts` or `depends_on`: the skill runs with no tools), warnings. Each line gives the file and the daemon's message.
+  named answers it), `no_tools` (no `requires_capabilities`, `tools.allow`,
+  `scripts` or `depends_on`: the skill runs with no tools) and
+  `stale_shipped_file` (a folder overriding a built-in skill runs a file an
+  earlier build shipped, which the built-in skill has since changed),
+  warnings. Each line gives the file and the daemon's message.
+- The SOURCE column says where each skill comes from: `file:bundled` (built
+  into the daemon), `file:project` (a folder in `config/skills/`),
+  `file:override` (a folder there that overrides the built-in skill of the
+  same id — the route's `file:project` with `overrides_bundled: true`) or
+  `plugin:<id>`. `info` keeps the route's word on its `source:` line, adds
+  `overrides:   the bundled skill <id>` for an override, and a `not used:`
+  line for each definition of the id that does not run: the built-in skill
+  under your folder, or a folder set aside because it is an unedited copy of
+  a version OpenAlpaca shipped (the built-in skill runs in its place). With
+  `--format json` each skill carries the route's `overrides_bundled` and
+  `not_used` as they are.
 - `info` on a skill the daemon skipped says it is not loaded and shows why; a
   name that is neither a loaded skill nor in the problems is an error.
 - The scan runs when the daemon starts, and a skill's problems are re-read when
   its directory changes.
+- `tidy` is `agents tidy` for `config/skills/`: it lists each folder there that
+  is an unedited copy of a skill OpenAlpaca shipped (every file in it a version
+  shipped at its path; a missing file allowed), which this build does not read,
+  and moves nothing; `tidy --apply` moves each folder, whole, to
+  `skills/.archived/<id>.<UTC timestamp>/` and ends with the same warning for
+  an earlier build. A folder you edited or added a file to stays. A folder
+  moved there is not read as a skill. Inside a git work tree `tidy --apply`
+  moves nothing and stops with an error naming it, as `agents tidy --apply`
+  does; `tidy` alone still lists.
 
 ### `chat`
 
@@ -1111,7 +1142,7 @@ A tool on the confirm list suspends the turn and asks before it runs.
 
 #### Slash commands
 
-- The daemon answers these chat-level commands itself, without asking a model: `/status [task_id]`, `/tasks`, `/cancel`/`/pause`/`/resume` (bare forms target the lane's active workflows, or pass an explicit task id), and `/steer <text>` (inject a correction into the running workflow).
+- The daemon answers these chat-level commands itself, without asking a model: `/status [task_id]`, `/tasks`, `/cancel` (the bare form targets the lane's active workflows, or pass an explicit task id), `/pause` and `/resume` (each answers that pause is not supported — `/cancel` stops a run — and changes nothing), and `/steer <text>` (inject a correction into the running workflow).
 - `/<skill>` runs that skill directly, without the main loop choosing it.
 - In the REPL, only the client-side commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`) are handled locally. Every other slash line — the daemon commands here, the [memory commands](#memory-commands), and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt. `/help` lists them and Tab completes them.
 - One-shot mode works too: `openalpaca chat --message "/steer focus on the tests"`.

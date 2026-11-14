@@ -302,20 +302,16 @@ fn test_to_subagent_non_orchestration_denies_coordination_tools() {
 fn every_shipped_template_grants_read_result() {
     use crate::security::capabilities::{Allowlist, CapabilityManager};
 
-    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
     let mut seen = 0;
-    for entry in std::fs::read_dir(&agents).expect("the shipped templates are in the checkout") {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let body = std::fs::read_to_string(&path).unwrap();
-        let doc = parse_agent_markdown(&body)
-            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    for file in crate::bundled::BUNDLED_AGENTS {
+        let path = file.path;
+        let body = file.contents;
+        let doc =
+            parse_agent_markdown(body).unwrap_or_else(|e| panic!("{} does not parse: {e}", path));
         assert!(
             doc.frontmatter.capabilities.iter().any(|c| c == "read_result"),
             "{} must grant read_result",
-            path.display()
+            path
         );
 
         // And the grant is what the gate reads: resolved allowlist, not the raw
@@ -330,7 +326,7 @@ fn every_shipped_template_grants_read_result() {
             )
             .is_ok(),
             "{} resolves read_result into its allowlist",
-            path.display()
+            path
         );
         seen += 1;
     }
@@ -356,16 +352,12 @@ fn shipped_templates_are_handed_the_stage_2_readers_by_the_capabilities_they_nam
     }
     let registry = std::sync::Arc::new(registry);
 
-    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
     let mut seen = 0;
-    for entry in std::fs::read_dir(&agents).expect("the shipped templates are in the checkout") {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let body = std::fs::read_to_string(&path).unwrap();
-        let doc = parse_agent_markdown(&body)
-            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    for file in crate::bundled::BUNDLED_AGENTS {
+        let path = file.path;
+        let body = file.contents;
+        let doc =
+            parse_agent_markdown(body).unwrap_or_else(|e| panic!("{} does not parse: {e}", path));
         let agent = doc.to_subagent("a1", "task-1");
         let surface: Vec<String> = crate::tools::resolve_agent_tools(&agent, &registry, None)
             .into_iter()
@@ -374,9 +366,9 @@ fn shipped_templates_are_handed_the_stage_2_readers_by_the_capabilities_they_nam
         let has = |name: &str| surface.iter().any(|n| n == name);
         let names_file_read = doc.frontmatter.capabilities.iter().any(|c| c == "file_read");
 
-        assert_eq!(has("file_read"), names_file_read, "{}: {surface:?}", path.display());
-        assert_eq!(has("file_list"), names_file_read, "{}: {surface:?}", path.display());
-        assert!(has("artifact_read"), "{}: {surface:?}", path.display());
+        assert_eq!(has("file_read"), names_file_read, "{}: {surface:?}", path);
+        assert_eq!(has("file_list"), names_file_read, "{}: {surface:?}", path);
+        assert!(has("artifact_read"), "{}: {surface:?}", path);
         if doc.frontmatter.id == "writing_agent" {
             assert!(names_file_read, "writing_agent reads files (§15)");
         }
@@ -394,7 +386,7 @@ fn shipped_templates_are_handed_the_stage_2_readers_by_the_capabilities_they_nam
 /// `destructive_hint` annotations, and no tool is named `file_delete`, so
 /// that agent's `shell_execute` and `file_write` never prompted — live, the
 /// lead delegated to it a shell write the person had just denied another
-/// agent. The template is read from the checkout and walked exactly as the
+/// agent. The template is read from the bundle and walked exactly as the
 /// subagent spawn walks it: `to_subagent`, then `SandboxPolicy::from_constraints`,
 /// then the effective set over a registry holding the builtins.
 ///
@@ -409,12 +401,13 @@ fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
     use crate::tools::ToolRegistry;
     use crate::tools::builtins::builtin_tools;
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../config/agents/system_agent.md");
-    let body = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    let doc = parse_agent_markdown(&body)
-        .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    let path = "agents/system_agent.md";
+    let body = crate::bundled::BUNDLED_AGENTS
+        .iter()
+        .find(|file| file.path == path)
+        .expect("the bundle carries system_agent.md")
+        .contents;
+    let doc = parse_agent_markdown(body).unwrap_or_else(|e| panic!("{path} does not parse: {e}"));
     assert_eq!(doc.frontmatter.id, "system_agent");
 
     // The registry the spawn checks against: the builtins, with the
@@ -425,7 +418,11 @@ fn the_shipped_system_agent_template_prompts_for_its_shell_and_file_writes() {
     }
 
     let agent = doc.to_subagent("system_agent::t34", "task-1");
-    let policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+    let policy = SandboxPolicy::from_constraints(
+        &agent.id,
+        &agent.constraints,
+        &crate::daemon_config::AgentDefaults::default(),
+    );
     let set = effective_confirmation_set(&policy, &registry);
 
     for name in ["shell_execute", "file_write", "file_edit"] {
@@ -459,7 +456,6 @@ fn file_edit_comes_with_the_file_write_capability_in_every_shipped_template() {
     for tool in builtin_tools(None, None, None) {
         registry.register(tool).unwrap();
     }
-    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
     for (id, writes) in [
         ("code_agent", true),
         ("general_agent", true),
@@ -471,11 +467,14 @@ fn file_edit_comes_with_the_file_write_capability_in_every_shipped_template() {
         ("review_agent", false),
         ("lead_agent", false),
     ] {
-        let path = agents.join(format!("{id}.md"));
-        let body = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-        let doc = parse_agent_markdown(&body)
-            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        let path = format!("agents/{id}.md");
+        let body = crate::bundled::BUNDLED_AGENTS
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("the bundle carries {path}"))
+            .contents;
+        let doc =
+            parse_agent_markdown(body).unwrap_or_else(|e| panic!("{path} does not parse: {e}"));
         let agent = doc.to_subagent(&format!("{id}::r48"), "task-1");
 
         let surface = crate::tools::resolve_agent_tools(&agent, &registry, None);
@@ -491,7 +490,11 @@ fn file_edit_comes_with_the_file_write_capability_in_every_shipped_template() {
             "{id}: file_edit on {names:?}"
         );
 
-        let mut policy = SandboxPolicy::from_constraints(&agent.id, &agent.constraints);
+        let mut policy = SandboxPolicy::from_constraints(
+            &agent.id,
+            &agent.constraints,
+            &crate::daemon_config::AgentDefaults::default(),
+        );
         policy.admit_tool_surface(&surface);
         assert_eq!(
             CapabilityManager::check_agent_capability(
@@ -612,35 +615,413 @@ fn from_plugin(mut template: AgentTemplate) -> AgentTemplate {
 /// search memory.
 #[test]
 fn all_nine_templates_name_memory_read() {
-    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
     let mut seen = 0;
-    for entry in std::fs::read_dir(&agents).expect("the shipped templates are in the checkout") {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let body = std::fs::read_to_string(&path).unwrap();
-        let doc = parse_agent_markdown(&body)
-            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+    for file in crate::bundled::BUNDLED_AGENTS {
+        let path = file.path;
+        let body = file.contents;
+        let doc =
+            parse_agent_markdown(body).unwrap_or_else(|e| panic!("{} does not parse: {e}", path));
         assert!(
             doc.frontmatter
                 .capabilities
                 .iter()
                 .any(|c| c == "memory_read"),
             "{} must name memory_read",
-            path.display()
+            path
         );
         let agent = doc.to_subagent("a1", "task-1");
         assert_eq!(
             memory_read_entries(&agent),
             (1, 1),
             "{}: listed once, never appended a second time",
-            path.display()
+            path
         );
-        assert!(memory_read_admitted(&agent), "{}", path.display());
+        assert!(memory_read_admitted(&agent), "{}", path);
         seen += 1;
     }
     assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
+/// SA-1 (subagent design §3.3): the nine templates become capability
+/// profiles — their `description` and `## Persona` change — and everything
+/// else each grants or bounds stays as it was: the capabilities and denials
+/// (so `read_result`, `memory_read` and `writing_agent`'s `file_read` stay),
+/// `singleton`, the caps, `verbosity`, `require_confirmation_for`, the name
+/// and the icon (`temperature`, sent nowhere, is out of all nine since
+/// TEMPLATE-TEMPERATURE: `no_shipped_template_sets_temperature`). A table of
+/// the values before SA-1, checked against the bundled bytes. The `model:`
+/// lines are pinned too: SA-3's commit (C8), not SA-1's, moves them.
+#[test]
+fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
+    struct Kept {
+        id: &'static str,
+        name: &'static str,
+        icon: Option<&'static str>,
+        singleton: bool,
+        capabilities: &'static [&'static str],
+        denied: &'static [&'static str],
+        verbosity: &'static str,
+        max_tool_calls: Option<u32>,
+        max_cost_per_task: Option<f64>,
+        max_rounds: Option<usize>,
+        model: &'static str,
+        fallback_models: &'static [&'static str],
+    }
+    const SONNET: &str = "claude-sonnet-4-6";
+    const HAIKU: &str = "claude-haiku-4-5-20251001";
+    const OPUS: &[&str] = &["claude-opus-4-6"];
+    let table = [
+        Kept {
+            id: "code_agent",
+            name: "Code Agent",
+            icon: Some("code"),
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "file_write",
+                "artifact_write",
+                "shell_execute",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["web_access"],
+            verbosity: "detailed",
+            max_tool_calls: Some(50),
+            max_cost_per_task: Some(3.0),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "explore_agent",
+            name: "Explore Agent",
+            icon: Some("eye"),
+            singleton: false,
+            capabilities: &["file_read", "memory_read", "workspace_read", "read_result"],
+            denied: &["file_write", "shell_execute", "web_access"],
+            verbosity: "concise",
+            max_tool_calls: Some(40),
+            max_cost_per_task: Some(0.25),
+            max_rounds: None,
+            model: HAIKU,
+            fallback_models: &[SONNET],
+        },
+        Kept {
+            id: "general_agent",
+            name: "General Purpose Agent",
+            icon: Some("swiss_knife"),
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "file_write",
+                "artifact_write",
+                "shell_execute",
+                "web_access",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "messaging",
+                "read_result",
+            ],
+            denied: &["persona_write"],
+            verbosity: "detailed",
+            max_tool_calls: Some(50),
+            max_cost_per_task: Some(5.0),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "lead_agent",
+            name: "Lead Agent",
+            icon: Some("brain"),
+            singleton: true,
+            capabilities: &[
+                "orchestration",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "artifact_write",
+                "read_result",
+            ],
+            denied: &[],
+            verbosity: "detailed",
+            max_tool_calls: Some(50),
+            max_cost_per_task: Some(3.0),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "planning_agent",
+            name: "Planning Agent",
+            icon: Some("clipboard"),
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "web_access",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["file_write", "shell_execute"],
+            verbosity: "detailed",
+            max_tool_calls: Some(30),
+            max_cost_per_task: Some(1.5),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "research_agent",
+            name: "Research Agent",
+            icon: Some("magnifying_glass"),
+            singleton: false,
+            capabilities: &[
+                "web_access",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["shell_execute", "file_write"],
+            verbosity: "detailed",
+            max_tool_calls: Some(12),
+            max_cost_per_task: Some(0.35),
+            max_rounds: Some(8),
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "review_agent",
+            name: "Review Agent",
+            icon: Some("magnifying_glass_tilted"),
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "shell_execute",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["file_write", "web_access"],
+            verbosity: "detailed",
+            max_tool_calls: Some(40),
+            max_cost_per_task: Some(1.0),
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: OPUS,
+        },
+        Kept {
+            id: "system_agent",
+            name: "System Agent",
+            icon: None,
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "file_write",
+                "artifact_write",
+                "shell_execute",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["web_access"],
+            verbosity: "concise",
+            max_tool_calls: Some(30),
+            max_cost_per_task: None,
+            max_rounds: None,
+            model: HAIKU,
+            fallback_models: &[],
+        },
+        Kept {
+            id: "writing_agent",
+            name: "Writing Agent",
+            icon: None,
+            singleton: false,
+            capabilities: &[
+                "file_read",
+                "file_write",
+                "artifact_write",
+                "memory_read",
+                "workspace_read",
+                "workspace_write",
+                "read_result",
+            ],
+            denied: &["shell_execute", "web_access"],
+            verbosity: "detailed",
+            max_tool_calls: Some(10),
+            max_cost_per_task: None,
+            max_rounds: None,
+            model: SONNET,
+            fallback_models: &[],
+        },
+    ];
+    let mut shipped: Vec<AgentTemplate> = crate::bundled::BUNDLED_AGENTS
+        .iter()
+        .map(|file| {
+            parse_agent_markdown(file.contents)
+                .unwrap_or_else(|e| panic!("{} does not parse: {e}", file.path))
+        })
+        .collect();
+    shipped.sort_by(|a, b| a.frontmatter.id.cmp(&b.frontmatter.id));
+    let ids: Vec<&str> = shipped.iter().map(|t| t.frontmatter.id.as_str()).collect();
+    let expected: Vec<&str> = table.iter().map(|k| k.id).collect();
+    assert_eq!(ids, expected, "all nine stay, none added (A-5)");
+    let strings = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for (template, kept) in shipped.iter().zip(&table) {
+        let fm = &template.frontmatter;
+        let id = kept.id;
+        assert_eq!(fm.name, kept.name, "{id}");
+        assert_eq!(fm.icon.as_deref(), kept.icon, "{id}");
+        assert_eq!(fm.singleton, kept.singleton, "{id}");
+        assert_eq!(fm.capabilities, strings(kept.capabilities), "{id}");
+        assert_eq!(fm.denied_capabilities, strings(kept.denied), "{id}");
+        assert_eq!(fm.verbosity, kept.verbosity, "{id}");
+        assert_eq!(fm.max_tool_calls, kept.max_tool_calls, "{id}");
+        assert_eq!(fm.max_cost_per_task, kept.max_cost_per_task, "{id}");
+        assert_eq!(fm.max_rounds, kept.max_rounds, "{id}");
+        assert_eq!(fm.timeout_seconds, None, "{id}");
+        assert!(fm.require_confirmation_for.is_empty(), "{id}");
+        assert_eq!(fm.model.as_deref(), Some(kept.model), "{id}");
+        assert_eq!(fm.fallback_models, strings(kept.fallback_models), "{id}");
+    }
+}
+
+/// SA-1 (subagent design §3.3, A-6): a shipped template's persona says how
+/// to work in one `## Persona` section of at most 400 bytes — its
+/// description says what the profile can do, and neither restates the tool
+/// list. Measured on the section the subagent is sent (`extract_persona`).
+#[test]
+fn every_shipped_persona_is_at_most_400_bytes() {
+    let mut long = Vec::new();
+    let mut seen = 0;
+    for file in crate::bundled::BUNDLED_AGENTS {
+        let doc = parse_agent_markdown(file.contents)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", file.path));
+        assert_eq!(
+            doc.sections.keys().collect::<Vec<_>>(),
+            ["Persona"],
+            "{}: one ## Persona section",
+            file.path
+        );
+        let persona = extract_persona(&doc);
+        assert!(!persona.trim().is_empty(), "{}", file.path);
+        if persona.len() > 400 {
+            long.push(format!("{} ({} bytes)", file.path, persona.len()));
+        }
+        seen += 1;
+    }
+    assert!(long.is_empty(), "personas past 400 bytes: {long:?}");
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
+/// TEMPLATE-TIMEOUT: nothing enforces a template's `timeout_seconds` since
+/// N-TOOL-1b (every loop's per-tool bound is `[execution.agent_defaults]
+/// max_tool_runtime_secs`), so no shipped template sets one — read from the
+/// file's frontmatter lines, not only from what the parser keeps.
+#[test]
+fn no_shipped_template_sets_timeout_seconds() {
+    let mut seen = 0;
+    let mut setting = Vec::new();
+    for file in crate::bundled::BUNDLED_AGENTS {
+        let path = file.path;
+        let body = file.contents;
+        let doc =
+            parse_agent_markdown(body).unwrap_or_else(|e| panic!("{} does not parse: {e}", path));
+        let in_frontmatter = body
+            .lines()
+            .skip_while(|line| line.trim() != "---")
+            .skip(1)
+            .take_while(|line| line.trim() != "---")
+            .any(|line| line.trim_start().starts_with("timeout_seconds:"));
+        if in_frontmatter || doc.frontmatter.timeout_seconds.is_some() {
+            setting.push(path.to_string());
+        }
+        seen += 1;
+    }
+    setting.sort();
+    assert!(
+        setting.is_empty(),
+        "shipped templates still set timeout_seconds: {setting:?}"
+    );
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
+/// TEMPLATE-TIMEOUT: the key's declarations stay, so a person's own template
+/// that still sets `timeout_seconds` parses and loads — accepted, carried to
+/// the subagent's constraints, and enforced by nothing.
+#[test]
+fn a_template_that_sets_timeout_seconds_still_parses_and_loads() {
+    assert!(VALID_AGENT.contains("\ntimeout_seconds: 600\n"));
+    let doc = parse_agent_markdown(VALID_AGENT).expect("should parse");
+    assert_eq!(doc.frontmatter.timeout_seconds, Some(600));
+
+    let registry = crate::agent::AgentRegistry::new();
+    assert!(registry.register_template(doc.clone()));
+    let loaded = registry
+        .get_template("code_agent")
+        .expect("the template is in the catalog");
+    assert_eq!(loaded.frontmatter.timeout_seconds, Some(600));
+    let agent = loaded.to_subagent("a1", "task-1");
+    assert_eq!(agent.constraints.timeout_seconds, Some(600));
+}
+
+/// TEMPLATE-TEMPERATURE: no agent turn sends a template's `temperature`
+/// (`LlmBackend::complete` sends none), so no shipped template sets one —
+/// read from the file's frontmatter lines, since the parser fills its
+/// default, 0.5, whether the key is there or not; the parsed value is that
+/// default.
+#[test]
+fn no_shipped_template_sets_temperature() {
+    let mut seen = 0;
+    let mut setting = Vec::new();
+    for file in crate::bundled::BUNDLED_AGENTS {
+        let path = file.path;
+        let body = file.contents;
+        let doc =
+            parse_agent_markdown(body).unwrap_or_else(|e| panic!("{} does not parse: {e}", path));
+        let in_frontmatter = body
+            .lines()
+            .skip_while(|line| line.trim() != "---")
+            .skip(1)
+            .take_while(|line| line.trim() != "---")
+            .any(|line| line.trim_start().starts_with("temperature:"));
+        if in_frontmatter || doc.frontmatter.temperature != 0.5 {
+            setting.push(path.to_string());
+        }
+        seen += 1;
+    }
+    setting.sort();
+    assert!(
+        setting.is_empty(),
+        "shipped templates still set temperature: {setting:?}"
+    );
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}
+
+/// TEMPLATE-TEMPERATURE: the key's declarations stay, so a person's own
+/// template that still sets `temperature` parses and loads — accepted and
+/// carried to the subagent's preset, which no request reads.
+#[test]
+fn a_template_that_sets_temperature_still_parses_and_loads() {
+    assert!(VALID_AGENT.contains("\ntemperature: 0.3\n"));
+    let doc = parse_agent_markdown(VALID_AGENT).expect("should parse");
+    assert_eq!(doc.frontmatter.temperature, 0.3);
+
+    let registry = crate::agent::AgentRegistry::new();
+    assert!(registry.register_template(doc.clone()));
+    let loaded = registry
+        .get_template("code_agent")
+        .expect("the template is in the catalog");
+    assert_eq!(loaded.frontmatter.temperature, 0.3);
+    let agent = loaded.to_subagent("a1", "task-1");
+    assert_eq!(agent.preset.temperature, 0.3);
 }
 
 /// Design 09 §5 (LQ3): the owner's installed `config/agents/` is never

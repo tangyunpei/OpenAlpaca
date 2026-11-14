@@ -103,6 +103,22 @@ fn warn_on_removed_keys(value: &toml::Value) {
             );
         }
     }
+
+    // N-TOOL-1b (B-11): the lead's own per-tool figure reached no policy;
+    // every loop, the lead's included, reads `agent_defaults`'.
+    let lead_runtime = value
+        .get("execution")
+        .and_then(|e| e.get("lead_agent_defaults"))
+        .and_then(|l| l.get("max_tool_runtime_secs"))
+        .is_some();
+    if lead_runtime {
+        tracing::warn!(
+            "`execution.lead_agent_defaults.max_tool_runtime_secs` was removed — every loop, \
+             the lead's included, cuts a tool at `execution.agent_defaults.\
+             max_tool_runtime_secs`, and a call may ask for up to \
+             `max_tool_runtime_ceiling_secs`. The key is being ignored."
+        );
+    }
 }
 
 /// Warn about keys this daemon **parses and serves but does not act on**, when

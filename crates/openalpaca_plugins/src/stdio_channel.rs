@@ -1,18 +1,51 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
-use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tracing::{debug, error, trace, warn};
 
 use crate::error::PluginError;
 
 /// Map of in-flight request IDs to their response senders.
+///
+/// Held behind a std mutex, never across an `.await`: every hold is a single
+/// insert, remove or drain, so the waiter's [`PendingEntry`] can take it in
+/// `Drop`, where nothing may be awaited.
 type PendingMap = HashMap<u64, oneshot::Sender<Result<Value, PluginError>>>;
+
+/// The pending map, recovered from a poisoned lock: a panic elsewhere while
+/// it was held leaves the map itself whole.
+fn lock_pending(pending: &Mutex<PendingMap>) -> MutexGuard<'_, PendingMap> {
+    pending.lock().unwrap_or_else(|poisoned| {
+        warn!("plugin channel pending-request map poisoned — recovering");
+        poisoned.into_inner()
+    })
+}
+
+/// A request's entry in the pending map, removed when its waiter goes —
+/// answered, failed, timed out, or **dropped mid-wait** (PLUGIN-WAIT-2): the
+/// sandbox's cut drops a plugin tool call's wait, and so may any caller, and
+/// without this its id stayed in the map until the plugin answered — forever,
+/// for a plugin that never does. With the entry gone, a late answer finds no
+/// waiter and is discarded by the reader. The plugin is not told: no
+/// JSON-RPC cancel is sent, so it runs the request on.
+struct PendingEntry<'a> {
+    pending: &'a Mutex<PendingMap>,
+    id: u64,
+}
+
+impl Drop for PendingEntry<'_> {
+    fn drop(&mut self) {
+        // A no-op where the reader already took it to hand over the answer,
+        // or drained it when the process exited.
+        lock_pending(self.pending).remove(&self.id);
+    }
+}
 
 /// Multiplexed JSON-RPC 2.0 transport over a child process's stdin/stdout.
 ///
@@ -97,11 +130,13 @@ impl StdioChannel {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
-        // Register the pending request — lock is dropped before any await.
-        {
-            let mut map = self.pending.lock().await;
-            map.insert(id, tx);
-        }
+        // Register the pending request; the entry removes it however this
+        // wait ends, a dropped future included.
+        lock_pending(&self.pending).insert(id, tx);
+        let _entry = PendingEntry {
+            pending: &self.pending,
+            id,
+        };
 
         let request = serde_json::json!({
             "jsonrpc": "2.0",
@@ -116,22 +151,15 @@ impl StdioChannel {
         debug!(id, method, "sending JSON-RPC request");
 
         if let Err(_e) = self.writer.send(frame.into_bytes()).await {
-            self.pending.lock().await.remove(&id);
             return Err(PluginError::ChannelClosed);
         }
 
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => {
-                // oneshot sender was dropped — process crashed
-                self.pending.lock().await.remove(&id);
-                Err(PluginError::ProcessCrashed)
-            }
-            Err(_) => {
-                // Timed out waiting for response
-                self.pending.lock().await.remove(&id);
-                Err(PluginError::Timeout)
-            }
+            // oneshot sender was dropped — process crashed
+            Ok(Err(_)) => Err(PluginError::ProcessCrashed),
+            // Timed out waiting for response
+            Err(_) => Err(PluginError::Timeout),
         }
     }
 
@@ -156,11 +184,18 @@ impl StdioChannel {
         Ok(())
     }
 
+    /// How many requests are waiting for their answer — for the tests that
+    /// pin a dropped wait's removal.
+    #[cfg(test)]
+    pub(crate) async fn pending_len(&self) -> usize {
+        lock_pending(&self.pending).len()
+    }
+
     /// Drain all pending requests, sending `ProcessCrashed` to each.
     ///
     /// Called when the child process exits or crashes to unblock all waiters.
     pub async fn drain_pending(&self) {
-        let mut map = self.pending.lock().await;
+        let mut map = lock_pending(&self.pending);
         let count = map.len();
         for (_id, sender) in map.drain() {
             let _ = sender.send(Err(PluginError::ProcessCrashed));
@@ -274,15 +309,18 @@ async fn reader_task<R>(
             };
 
             // Look up and notify the waiter — lock is not held across await.
-            let sender = {
-                let mut map = pending.lock().await;
-                map.remove(&id)
-            };
+            let sender = lock_pending(&pending).remove(&id);
 
             if let Some(tx) = sender {
                 let _ = tx.send(result);
             } else {
-                warn!(id, "received response for unknown request id");
+                // No waiter: the late answer of a call that was cut, dropped
+                // or timed out (its entry went with its wait), or an id this
+                // channel never sent. Discarded either way.
+                warn!(
+                    id,
+                    "discarding a response no request awaits (a late answer, or an unknown id)"
+                );
             }
         } else {
             // Notification — no `id` field. Use try_send so the reader loop can
@@ -310,7 +348,7 @@ async fn reader_task<R>(
     }
 
     // Process exited or stdout closed — drain all pending requests.
-    let mut map = pending.lock().await;
+    let mut map = lock_pending(&pending);
     let count = map.len();
     for (_id, sender) in map.drain() {
         let _ = sender.send(Err(PluginError::ProcessCrashed));
@@ -441,7 +479,7 @@ mod tests {
         let (notification_tx, notification_rx) = mpsc::channel::<Value>(64);
         let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = oneshot::channel();
-        pending.lock().await.insert(1, tx);
+        lock_pending(&pending).insert(1, tx);
 
         tokio::spawn(reader_task(server, Arc::clone(&pending), notification_tx));
 

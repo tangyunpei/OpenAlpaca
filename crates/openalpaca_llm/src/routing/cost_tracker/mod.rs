@@ -2,6 +2,7 @@
 
 use crate::routing::model_registry::ModelRegistry;
 use arc_swap::ArcSwap;
+use dashmap::DashSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -57,6 +58,9 @@ pub struct CostTracker {
     agent_usage: RwLock<HashMap<String, UsageStats>>,
     task_usage: RwLock<HashMap<String, UsageStats>>,
     provider_usage: RwLock<HashMap<String, UsageStats>>,
+    /// Ids already announced as counted at the fallback for want of a price,
+    /// so each is said once, not once per call (O-18).
+    unpriced_announced: DashSet<String>,
 }
 
 impl CostTracker {
@@ -66,6 +70,7 @@ impl CostTracker {
             agent_usage: RwLock::new(HashMap::new()),
             task_usage: RwLock::new(HashMap::new()),
             provider_usage: RwLock::new(HashMap::new()),
+            unpriced_announced: DashSet::new(),
         }
     }
 
@@ -77,29 +82,53 @@ impl CostTracker {
         self.model_registry.store(model_registry);
     }
 
-    /// The (input, output) price per million tokens to bill this model at.
-    fn pricing_for(&self, model: &str) -> (f64, f64) {
+    /// The (input, output) price per million tokens to bill one request to
+    /// this model at, its prompt `input_tokens` long (cached tokens
+    /// included): the model's long-prompt rate when the prompt is longer
+    /// than that rate's threshold (O-17 (a)), else its standard rate.
+    fn pricing_for(&self, model: &str, input_tokens: u32) -> (f64, f64) {
         let registry = self.model_registry.load();
         if let Some(pricing) = registry.get_pricing(model) {
-            return (
-                pricing.input_price_per_million,
-                pricing.output_price_per_million,
+            return match pricing.long_prompt {
+                Some(long) if input_tokens > long.above_input_tokens => {
+                    (long.input_price_per_million, long.output_price_per_million)
+                }
+                _ => (
+                    pricing.input_price_per_million,
+                    pricing.output_price_per_million,
+                ),
+            };
+        }
+        // An id the catalogue has never met, or one a keyed provider's
+        // discovery registered with no price (O-18 (b)). Where the whole
+        // catalogue is local, no call can have cost money, and billing this
+        // one at cloud rates would abort a free run on fictional spend.
+        let fallback = if registry.is_local_only() {
+            (0.0, 0.0)
+        } else {
+            // Otherwise stay conservative: $3/1M input, $15/1M output
+            // (Sonnet-like). Counting high stops a run early; counting a paid
+            // model at 0 would let it pass every cost cap (N4).
+            (3.0, 15.0)
+        };
+        if registry.is_unpriced(model) && self.unpriced_announced.insert(model.to_string()) {
+            tracing::warn!(
+                model = model,
+                input_price_per_million = fallback.0,
+                output_price_per_million = fallback.1,
+                "Discovered model has no price in the catalogue — its calls are counted \
+                 at the fallback rate. Add a [models.\"<id>\"] row with its price to \
+                 llm.toml to count it at its own."
             );
         }
-        // An id the catalogue has never met. Where the whole catalogue is
-        // local, no call can have cost money, and billing this one at cloud
-        // rates would abort a free run on fictional spend.
-        if registry.is_local_only() {
-            return (0.0, 0.0);
-        }
-        // Otherwise stay conservative: $3/1M input, $15/1M output (Sonnet-like).
-        (3.0, 15.0)
+        fallback
     }
 
     /// Calculate the cost for a given model and token counts.
-    /// Falls back to default pricing if model is unknown.
+    /// Falls back to default pricing if model is unknown. A prompt past the
+    /// model's long-prompt threshold is priced at its long-prompt rate.
     pub fn calculate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-        let (input_price, output_price) = self.pricing_for(model);
+        let (input_price, output_price) = self.pricing_for(model, input_tokens);
         (input_tokens as f64 * input_price / 1_000_000.0)
             + (output_tokens as f64 * output_price / 1_000_000.0)
     }
@@ -110,6 +139,8 @@ impl CostTracker {
     /// are a subset of it, per `Usage`). Non-cached input bills at the base input
     /// rate, cache-write tokens at 1.25x, and cache-read tokens at 0.1x — so a
     /// mostly-cached prompt is no longer charged up to ~10x its real cost.
+    /// The prompt's length, for a long-prompt rate, is `input_tokens`: cache
+    /// reads and writes count toward it.
     pub fn calculate_cost_with_cache(
         &self,
         model: &str,
@@ -118,7 +149,7 @@ impl CostTracker {
         cache_creation_tokens: u32,
         cache_read_tokens: u32,
     ) -> f64 {
-        let (input_price, output_price) = self.pricing_for(model);
+        let (input_price, output_price) = self.pricing_for(model, input_tokens);
         let cached = cache_creation_tokens as u64 + cache_read_tokens as u64;
         let non_cached_input = (input_tokens as u64).saturating_sub(cached);
         (non_cached_input as f64 * input_price / 1_000_000.0)

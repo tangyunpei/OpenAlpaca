@@ -85,8 +85,8 @@ The accuracy bar defaults to **0.8**. Override per run:
 OPENALPACA_EVAL_ACCURACY_BAR=0.9 OPENALPACA_LIVE_EVAL=1 cargo test ...
 ```
 
-CI can gate on this later by exporting the env vars and providing keys via
-`secret_env`.
+A local gate can use it later by exporting the env vars and providing keys
+via `secret_env` (there is no remote CI).
 
 ## Extending the corpus
 

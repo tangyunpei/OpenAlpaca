@@ -1358,6 +1358,7 @@ fn test_assembly_budget_trim_drops_oldest_non_system_history() {
     };
     let history = HistoryOutput {
         messages: history_messages.clone(),
+        ends_with_current_turn: false,
         fingerprint: [0u8; 32],
     };
     let layer_trace = LayerTrace {
@@ -1404,6 +1405,7 @@ fn test_assembly_budget_trim_preserves_system_message() {
     let big: String = "a".repeat(4000);
     let history = HistoryOutput {
         messages: vec![ChatMessage::user(&big), ChatMessage::assistant(&big)],
+        ends_with_current_turn: false,
         fingerprint: [0u8; 32],
     };
     let persona = PersonaOutput {
@@ -1446,6 +1448,225 @@ fn test_assembly_budget_trim_preserves_system_message() {
     assert!(!out.messages.is_empty());
 }
 
+/// Layer 5's inputs for SA-2b's trim tests: a two-message system prompt and
+/// Layer 3 block, and Layer 4's own output for `recent` and `current`.
+fn sa2b_assembly(
+    block: &str,
+    recent: Vec<ChatMessage>,
+    current: Option<ChatMessage>,
+    window: u32,
+) -> ComposedRequest {
+    use super::assembly::{self, AssemblyInput};
+
+    let persona = PersonaOutput {
+        blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let static_prompt = StaticPromptOutput {
+        system_message: Arc::from("system"),
+        section_registry: vec!["system"],
+        fingerprint: [0u8; 32],
+    };
+    let dyn_ctx = DynamicContextOutput {
+        context_messages: vec![],
+        additional_system_blocks: vec![SystemBlock {
+            name: "task_context",
+            content: Arc::from(block),
+            priority: SectionPriority::Normal,
+        }],
+        fingerprint: [0u8; 32],
+    };
+    let history = super::history::compute(&HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        working_state: None,
+        previous: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(recent),
+        current_user_turn: current,
+        mode: HistoryMode::Default,
+    });
+    assembly::compose(AssemblyInput {
+        persona: &persona,
+        static_prompt: &static_prompt,
+        dynamic_context: &dyn_ctx,
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: window,
+        layer_trace: LayerTrace {
+            persona_mode: PersonaMode::Minimal,
+            static_prompt_mode: StaticPromptMode::Default,
+            dynamic_context_mode: DynamicContextMode::Default,
+            history_mode: HistoryMode::Default,
+            memo_hits: LayerMemoHits::default(),
+        },
+    })
+}
+
+/// SA-2b (2): Layer 5's trim never takes the current user turn. Past the
+/// threshold (2,000-token window, 1,500) it takes the history first, oldest
+/// first, then Layer 3's system blocks — never the system prompt at
+/// `messages[0]` — and stops with the turn whole. Until SA-2b it took the
+/// oldest non-system message, the current turn among them, and kept every
+/// system message.
+#[test]
+fn layer5_trims_history_then_system_blocks_and_keeps_the_current_turn() {
+    let current = format!("CURRENT-TURN {}", "c".repeat(2_000));
+    let out = sa2b_assembly(
+        &"b".repeat(8_000),
+        vec![
+            ChatMessage::user(&"u".repeat(4_000)),
+            ChatMessage::assistant(&"a".repeat(4_000)),
+        ],
+        Some(ChatMessage::user(&current)),
+        2_000,
+    );
+    let shape: Vec<(Role, usize)> = out
+        .messages
+        .iter()
+        .map(|m| (m.role.clone(), m.content.len()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![(Role::System, 6), (Role::User, current.len())],
+        "the system prompt and the current turn, nothing else"
+    );
+    assert_eq!(out.messages[0].content, "system");
+    assert_eq!(out.messages[1].content, current, "the current turn whole");
+    assert_eq!(out.history_head_dropped, 2, "both history rows went");
+    assert!(out.section_registry.contains(&"<trimmed:history>"));
+    assert!(out.section_registry.contains(&"<trimmed:system_blocks>"));
+    assert_eq!(
+        out.token_budget.dynamic_context_tokens, 0,
+        "the dropped block is no longer counted"
+    );
+
+    // Within the threshold once the history is gone, the block stays.
+    let out = sa2b_assembly(
+        &"b".repeat(2_000),
+        vec![ChatMessage::user(&"u".repeat(4_000))],
+        Some(ChatMessage::user(&current)),
+        2_000,
+    );
+    assert_eq!(
+        out.messages
+            .iter()
+            .map(|m| m.role.clone())
+            .collect::<Vec<_>>(),
+        vec![Role::System, Role::System, Role::User],
+        "the history went first, and that was enough"
+    );
+    assert_eq!(out.messages[2].content, current);
+}
+
+/// A Layer 3 section routed as a user message (`InjectionMode::UserMessage`:
+/// a predecessor's output, a conversation summary, a workspace artifact)
+/// stands below the history, so the trim takes it before any history row.
+/// It is not a history row: its tokens come off the dynamic context's
+/// figure, which counted them — the one the main loop and a skill register
+/// as the loop's `system_prompt` section — the history's stays whole, and
+/// no `<trimmed:history>` is recorded. Until this test the trim took its
+/// tokens off `history_tokens` and marked the history trimmed.
+#[test]
+fn layer5_counts_a_dropped_context_message_against_the_dynamic_context() {
+    use super::assembly::{self, AssemblyInput};
+
+    let persona = PersonaOutput {
+        blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let static_prompt = StaticPromptOutput {
+        system_message: Arc::from("system"),
+        section_registry: vec!["system"],
+        fingerprint: [0u8; 32],
+    };
+    let context = format!("PREDECESSOR {}", "p".repeat(4_000));
+    let dyn_ctx = DynamicContextOutput {
+        context_messages: vec![ChatMessage::user(&context)],
+        additional_system_blocks: vec![],
+        fingerprint: [0u8; 32],
+    };
+    let current = format!("CURRENT-TURN {}", "c".repeat(400));
+    let history = super::history::compute(&HistoryInput {
+        lane_tip_fingerprint: [0u8; 32],
+        working_state: None,
+        previous: None,
+        summary_wrap_mode: SummaryWrapMode::Plain,
+        recent_messages: Arc::new(vec![
+            ChatMessage::user(&"u".repeat(400)),
+            ChatMessage::assistant(&"a".repeat(400)),
+        ]),
+        current_user_turn: Some(ChatMessage::user(&current)),
+        mode: HistoryMode::Default,
+    });
+    let history_estimate = crate::runner::estimate_messages_tokens(&history.messages);
+    let out = assembly::compose(AssemblyInput {
+        persona: &persona,
+        static_prompt: &static_prompt,
+        dynamic_context: &dyn_ctx,
+        history: &history,
+        tools: Arc::new(vec![]),
+        model_window: 1_000, // threshold 750: the context message alone passes it
+        layer_trace: LayerTrace {
+            persona_mode: PersonaMode::Minimal,
+            static_prompt_mode: StaticPromptMode::Default,
+            dynamic_context_mode: DynamicContextMode::Default,
+            history_mode: HistoryMode::Default,
+            memo_hits: LayerMemoHits::default(),
+        },
+    });
+
+    let contents: Vec<&str> = out.messages.iter().map(|m| m.content.as_ref()).collect();
+    assert_eq!(
+        contents,
+        vec![
+            "system",
+            "u".repeat(400).as_str(),
+            "a".repeat(400).as_str(),
+            current.as_str()
+        ],
+        "the context message went, and that was enough"
+    );
+    assert_eq!(out.history_head_dropped, 0, "no history row went");
+    assert_eq!(
+        out.token_budget.dynamic_context_tokens, 0,
+        "the dropped context message is no longer counted"
+    );
+    assert_eq!(
+        out.token_budget.history_tokens, history_estimate,
+        "the history's figure is what was sent of it"
+    );
+    assert!(
+        !out.section_registry.contains(&"<trimmed:history>"),
+        "no history row was trimmed: {:?}",
+        out.section_registry
+    );
+    assert!(!out.section_registry.contains(&"<trimmed:system_blocks>"));
+}
+
+/// SA-2b (2): a current user turn that alone passes the threshold goes
+/// whole — the provider's context-length error, if any, is the caller's —
+/// and the request always holds a non-system message (an Anthropic request
+/// with an empty `messages` list is what the old trim could send).
+#[test]
+fn layer5_sends_a_current_turn_past_the_threshold_whole() {
+    let current = format!("CURRENT-TURN {}", "c".repeat(8_000));
+    let out = sa2b_assembly(
+        "block",
+        vec![ChatMessage::assistant("earlier")],
+        Some(ChatMessage::user(&current)),
+        2_000,
+    );
+    let last = out.messages.last().unwrap();
+    assert_eq!(
+        (last.role.clone(), last.content.len()),
+        (Role::User, current.len()),
+        "the current turn, last"
+    );
+    assert!(last.content == current, "the current turn whole");
+    assert!(out.messages.iter().any(|m| m.role != Role::System));
+    assert_eq!(out.messages[0].content, "system");
+}
+
 #[test]
 fn test_assembly_populates_per_layer_token_budget() {
     use super::assembly::{self, AssemblyInput};
@@ -1470,6 +1691,7 @@ fn test_assembly_populates_per_layer_token_budget() {
     };
     let history = HistoryOutput {
         messages: vec![ChatMessage::user("history message")],
+        ends_with_current_turn: false,
         fingerprint: [0u8; 32],
     };
     let layer_trace = LayerTrace {
@@ -2660,96 +2882,67 @@ fn test_golden_dag_node_byte_identical() {
     assert_eq!(second_to_last.content, task_description);
 }
 
-/// Phase 6 Commit 3 — Lead Agent (build_lead_agent_prompt_from_templates) golden fixture.
-///
-/// Asserts byte-identical system message content between:
-///   (a) the pre-migration `PromptBuilder` chain, its eight raw blocks spelled
-///       out here, and
-///   (b) the **real** `build_lead_agent_prompt_from_templates`, which carries
-///       the same blocks through `ComposeEngine::compose(ComposeRequest::LeadAgent{...})`
-///       with `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
-///       `DynamicContextMode::Skip` + `HistoryMode::Skip`.
-///
-/// Until the S6text review's M4 the second half re-built those blocks here
-/// and composed them itself, so the test compared two copies it owned and
-/// never called the builder: a change to the lead's prompt passed it. It now
-/// calls the builder, so any change to the lead's system prompt fails here
-/// until the reference below is changed with it.
-///
-/// `build_lead_agent_prompt_from_templates` returns ONLY the system prompt
-/// string; `run_lead_agent` then concatenates `format_tool_guidance` + the
-/// connector, extension and workflow-contract suffixes inline before building
-/// the message vec — none of them is part of this fixture. No user document
-/// is passed, so no profile block is carried. A skill catalog is (N-SKILL-1),
-/// and it is carried as the last raw block.
-#[test]
-fn test_golden_lead_agent_byte_identical() {
+/// A worker template for the lead goldens: only what `<agents>` reads is set.
+fn golden_worker(
+    id: &str,
+    name: &str,
+    description: &str,
+    capabilities: &[&str],
+) -> crate::agent::template::AgentTemplate {
     use crate::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
+    AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            icon: None,
+            singleton: false,
+            capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+            denied_capabilities: vec![],
+            temperature: 0.5,
+            verbosity: "normal".to_string(),
+            model: None,
+            fallback_models: vec![],
+            max_tool_calls: None,
+            timeout_seconds: None,
+            max_cost_per_task: None,
+            max_rounds: None,
+            require_confirmation_for: vec![],
+        },
+        body: String::new(),
+        sections: std::collections::HashMap::new(),
+        source: AgentSource::default(),
+    }
+}
+
+/// The lead golden's reference and the real builder's output, for
+/// `templates` and the two blocks that differ between the two forms of
+/// step 3 (subagent design §3.2): `<workflow>` and `<failure-recovery>`.
+///
+/// The reference is the pre-migration `PromptBuilder` chain, its raw blocks
+/// spelled out here; the builder carries the same blocks through
+/// `ComposeEngine::compose(ComposeRequest::LeadAgent{...})` with
+/// `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal` +
+/// `DynamicContextMode::Skip` + `HistoryMode::Skip`.
+fn golden_lead_prompts(
+    templates: &[crate::agent::template::AgentTemplate],
+    workflow_text: &str,
+    failure_recovery_text: &str,
+) -> (String, String) {
     use crate::prompt::PromptBuilder;
     use crate::prompt_ctx::SectionPriority;
     use crate::runner::lead_agent::build_lead_agent_prompt_from_templates;
-    use std::collections::HashMap;
 
     // ── Canned Lead Agent scene: the builder's arguments, as `run_lead_agent`
     //    passes them with no user document. ──
     let base_persona = "I am a Lead Agent persona for the golden test.";
     let model_window: usize = 200_000;
 
-    // Two worker-agent templates so `<agents>` block is non-empty.
-    let templates = vec![
-        AgentTemplate {
-            frontmatter: AgentTemplateFrontmatter {
-                id: "researcher".to_string(),
-                name: "Researcher".to_string(),
-                description: "Does research and fact-finding.".to_string(),
-                icon: None,
-                singleton: false,
-                capabilities: vec!["web_search".to_string(), "read_docs".to_string()],
-                denied_capabilities: vec![],
-                temperature: 0.5,
-                verbosity: "normal".to_string(),
-                model: None,
-                fallback_models: vec![],
-                max_tool_calls: None,
-                timeout_seconds: None,
-                max_cost_per_task: None,
-                max_rounds: None,
-                require_confirmation_for: vec![],
-            },
-            body: String::new(),
-            sections: HashMap::new(),
-            source: AgentSource::default(),
-        },
-        AgentTemplate {
-            frontmatter: AgentTemplateFrontmatter {
-                id: "coder".to_string(),
-                name: "Coder".to_string(),
-                description: "Writes production Rust.".to_string(),
-                icon: None,
-                singleton: false,
-                capabilities: vec![],
-                denied_capabilities: vec![],
-                temperature: 0.5,
-                verbosity: "normal".to_string(),
-                model: None,
-                fallback_models: vec![],
-                max_tool_calls: None,
-                timeout_seconds: None,
-                max_cost_per_task: None,
-                max_rounds: None,
-                require_confirmation_for: vec![],
-            },
-            body: String::new(),
-            sections: HashMap::new(),
-            source: AgentSource::default(),
-        },
-    ];
-
     // ── Pre-migration reference: PromptBuilder chain at prompt.rs:41-135. ──
     // Rebuild the `<agents>` block the same way `build_lead_agent_prompt_from_templates`
     // does — including the `capabilities=[...]` rendering.
     let mut agents_block = String::from("<agents>\n");
-    for t in &templates {
+    for t in templates {
         let fm = &t.frontmatter;
         let capabilities_str = if fm.capabilities.is_empty() {
             "none".to_string()
@@ -2779,26 +2972,11 @@ fn test_golden_lead_agent_byte_identical() {
     // writes them — the reference the real builder is held to below.
     let role_text = "<role>\n\
          You are a Lead Agent orchestrating a complex task. You are responsible for analyzing \
-         the user's request, decomposing it into sub-objectives, delegating work to specialized \
+         the user's request, decomposing it into sub-objectives, delegating work to \
          subagents, and synthesizing their results into a final response.\n\
          Do not attempt to perform specialized work (coding, research, analysis) yourself when \
          a suitable subagent is available. Your value is in orchestration and synthesis.\n\
          </role>";
-    let workflow_text = "<workflow>\n\
-         Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
-         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent.\n\
-         Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
-         sub-objective to the best agent by skills. Spawning is always immediate — the system \
-         automatically manages execution ordering based on available LLM capacity. Subagents may \
-         be queued if capacity is limited — this is handled automatically and transparently.\n\
-         Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
-         queued ones), or check_subagent_status for individual progress.\n\
-         Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
-         retry with an adjusted objective or a different agent — unless its failure says a \
-         retry will not help.\n\
-         Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
-         that directly addresses the user's original request.\n\
-         </workflow>";
     let delegation_text = "<delegation-criteria>\n\
          Spawn subagents when:\n\
          - Tasks can run in parallel (e.g., research + implementation are independent)\n\
@@ -2810,9 +2988,10 @@ fn test_golden_lead_agent_byte_identical() {
          - The task requires maintaining context across sequential steps that one agent handles best\n\
          </delegation-criteria>";
     let tool_patterns_text = "<tools>\n\
-         spawn_subagent: Spawning is always immediate — returns a run_id instantly. The system \
-         automatically queues execution if LLM capacity is limited. Spawn all independent \
-         objectives in a single round before waiting — this is the preferred pattern.\n\
+         spawn_subagent: Spawning is always immediate — returns a run_id instantly, and a \
+         subagent spawned past this run's concurrency bound is queued and starts when a slot \
+         frees. Spawn all independent objectives in a single round before waiting — this is the \
+         preferred pattern.\n\
          spawn_subagents_batch: When spawning 3+ independent subagents, use spawn_subagents_batch \
          for parallel spawning instead of individual spawn_subagent calls. This is more efficient \
          and reduces round-trips.\n\
@@ -2829,14 +3008,6 @@ fn test_golden_lead_agent_byte_identical() {
          workspace_read / workspace_write: Share context between subagents. Write setup data before spawning; \
          read results after completion.\n\
          </tools>";
-    let failure_recovery_text = "<failure-recovery>\n\
-         If a subagent fails:\n\
-         1. Read the error message to understand the failure type.\n\
-         2. If the objective was too broad, split it into smaller sub-objectives and retry.\n\
-         3. If the agent lacked the right skills, try a different agent.\n\
-         4. If repeated failures occur, complete that sub-objective directly yourself.\n\
-         5. Never silently drop a failed sub-objective — always report what succeeded and what did not.\n\
-         </failure-recovery>";
     let output_expectations_text = "<output>\n\
          Your final response must directly address the user's original request. \
          Synthesize all subagent results into a single coherent answer. \
@@ -2865,14 +3036,163 @@ fn test_golden_lead_agent_byte_identical() {
     let got = build_lead_agent_prompt_from_templates(
         &engine,
         base_persona,
-        &templates,
+        templates,
         model_window,
         None,
         None,
         Some(&skills_catalog),
+        // The stock bound on a run's subagents (N-LEAD-6), named in step 3.
+        48,
     );
+    (got, expected_system)
+}
+
+/// Phase 6 Commit 3 — Lead Agent (build_lead_agent_prompt_from_templates) golden fixture.
+///
+/// Asserts byte-identical system message content between the pre-migration
+/// `PromptBuilder` chain, its raw blocks spelled out, and the **real**
+/// `build_lead_agent_prompt_from_templates` (`golden_lead_prompts`).
+///
+/// Until the S6text review's M4 the second half re-built those blocks here
+/// and composed them itself, so the test compared two copies it owned and
+/// never called the builder: a change to the lead's prompt passed it. It now
+/// calls the builder, so any change to the lead's system prompt fails here
+/// until the reference below is changed with it.
+///
+/// `build_lead_agent_prompt_from_templates` returns ONLY the system prompt
+/// string; `run_lead_agent` then concatenates `format_tool_guidance` + the
+/// connector, extension and workflow-contract suffixes inline before building
+/// the message vec — none of them is part of this fixture. No user document
+/// is passed, so no profile block is carried. A skill catalog is (N-SKILL-1),
+/// and it is carried as the last raw block.
+///
+/// SA-1 (subagent design §3.2): the workers include `general_agent`, so step
+/// 3 gives work to it by default, with the `explore_agent` and
+/// `system_agent` clauses both workers bring; the workers are sorted by id,
+/// as `run_lead_agent` hands them over (G-2).
+#[test]
+fn test_golden_lead_agent_byte_identical() {
+    let templates = vec![
+        golden_worker("coder", "Coder", "Writes production Rust.", &[]),
+        golden_worker(
+            "explore_agent",
+            "Explore Agent",
+            "Read-only and cheap.",
+            &["file_read", "memory_read"],
+        ),
+        golden_worker(
+            "general_agent",
+            "General Purpose Agent",
+            "The default subagent.",
+            &["file_read", "file_write", "shell_execute", "web_access"],
+        ),
+        golden_worker(
+            "researcher",
+            "Researcher",
+            "Does research and fact-finding.",
+            &["web_search", "read_docs"],
+        ),
+        golden_worker(
+            "system_agent",
+            "System Agent",
+            "This machine's files and commands.",
+            &["file_read", "file_write", "shell_execute"],
+        ),
+    ];
+    let workflow_text = "<workflow>\n\
+         Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
+         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
+         constraints, and what to return and where — since a subagent is given neither the \
+         user's request nor this conversation, only its brief.\n\
+         Step 3: Spawn ALL subagents for independent objectives in a single round. Give each \
+         sub-objective to general_agent — the default when you leave agent_id out — unless its \
+         brief needs fewer powers: explore_agent only reads files and memory. Name another \
+         agent from <agents> only when its capabilities fit the brief better; system_agent \
+         works on this machine's files and commands, without the web. Spawning is always \
+         immediate — each spawn returns its run_id at once, and a subagent spawned past this \
+         run's concurrency bound is queued and starts when a slot frees, as the spawn's reply \
+         says. This run may spawn at most 48 subagents in all, retries included; a spawn past \
+         that is refused.\n\
+         Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
+         queued ones), or check_subagent_status for individual progress.\n\
+         Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
+         retry with an adjusted objective or a different agent — unless its failure says a \
+         retry will not help.\n\
+         Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
+         that directly addresses the user's original request.\n\
+         </workflow>";
+    let failure_recovery_text = "<failure-recovery>\n\
+         If a subagent fails:\n\
+         1. Read the error message to understand the failure type.\n\
+         2. If the objective was too broad, split it into smaller sub-objectives and retry.\n\
+         3. If a subagent lacked a power its brief needed, give the brief to an agent whose \
+         capabilities include it — usually general_agent.\n\
+         4. If repeated failures occur, complete that sub-objective directly yourself.\n\
+         5. Never silently drop a failed sub-objective — always report what succeeded and what did not.\n\
+         </failure-recovery>";
+
+    let (got, expected_system) =
+        golden_lead_prompts(&templates, workflow_text, failure_recovery_text);
 
     // ── Byte-identical assertion on system message content. ─────────────
+    assert_eq!(
+        got, expected_system,
+        "Lead Agent system prompt mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",
+        got, expected_system
+    );
+}
+
+/// SA-1 (subagent design §3.2), the second form of step 3: when
+/// `general_agent` is not among the lead's `<agents>` — the lead is
+/// `general_agent` itself (A-4 (i)), or it is withheld or switched off — step
+/// 3 has the lead name an agent for each sub-objective and says `agent_id`
+/// is required, so the prompt never offers a default the spawn tool
+/// refuses; `<failure-recovery>` names no default either.
+#[test]
+fn test_golden_lead_agent_without_general_agent_byte_identical() {
+    let templates = vec![
+        golden_worker("coder", "Coder", "Writes production Rust.", &[]),
+        golden_worker(
+            "researcher",
+            "Researcher",
+            "Does research and fact-finding.",
+            &["web_search", "read_docs"],
+        ),
+    ];
+    let workflow_text = "<workflow>\n\
+         Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
+         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
+         constraints, and what to return and where — since a subagent is given neither the \
+         user's request nor this conversation, only its brief.\n\
+         Step 3: Spawn ALL subagents for independent objectives in a single round. Name an \
+         agent from <agents> for each sub-objective by the powers its brief needs; agent_id is \
+         required in this run. Spawning is always immediate — each spawn returns its run_id at \
+         once, and a subagent spawned past this run's concurrency bound is queued and starts \
+         when a slot frees, as the spawn's reply says. This run may spawn at most 48 subagents \
+         in all, retries included; a spawn past that is refused.\n\
+         Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
+         queued ones), or check_subagent_status for individual progress.\n\
+         Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
+         retry with an adjusted objective or a different agent — unless its failure says a \
+         retry will not help.\n\
+         Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
+         that directly addresses the user's original request.\n\
+         </workflow>";
+    let failure_recovery_text = "<failure-recovery>\n\
+         If a subagent fails:\n\
+         1. Read the error message to understand the failure type.\n\
+         2. If the objective was too broad, split it into smaller sub-objectives and retry.\n\
+         3. If a subagent lacked a power its brief needed, give the brief to an agent whose \
+         capabilities include it.\n\
+         4. If repeated failures occur, complete that sub-objective directly yourself.\n\
+         5. Never silently drop a failed sub-objective — always report what succeeded and what did not.\n\
+         </failure-recovery>";
+
+    let (got, expected_system) =
+        golden_lead_prompts(&templates, workflow_text, failure_recovery_text);
+
     assert_eq!(
         got, expected_system,
         "Lead Agent system prompt mismatch:\n--- GOT ---\n{}\n--- EXPECTED ---\n{}\n",

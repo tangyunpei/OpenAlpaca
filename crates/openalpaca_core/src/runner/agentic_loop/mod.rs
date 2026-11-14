@@ -25,7 +25,8 @@ use crate::runner::steering::SteeringMsg;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::session_log::{
-    Record, RecordType, command_spill_stub, command_stub_marker, spill_preview, spill_stub,
+    Record, RecordType, command_spill_stub, command_stub_marker, no_output_line, spill_preview,
+    spill_stub,
 };
 use crate::tools::registry::ToolContext;
 use serde_json::{Value, json};
@@ -283,8 +284,12 @@ fn log_spill_event(
 ///
 /// `command` is whether the call ran a command (`ToolRegistry::is_command_tool`):
 /// a command's stub previews its output's head **and** tail (N-TOOL-7).
+///
+/// `tool` is the name the model called, which the line standing in for a
+/// success with nothing to read names (N-TOOL-6).
 fn model_visible_result(
     config: &LoopConfig,
+    tool: &str,
     result_text: &str,
     ok: bool,
     spill_ref: Option<&str>,
@@ -305,7 +310,15 @@ fn model_visible_result(
             command_spill_stub(result_text, config.tool_result_inline_bytes, rel)
         }
         Some(rel) => spill_stub(result_text.len(), &spill_preview(result_text), rel),
-        None => truncate_tool_result_to(result_text.to_string(), config.tool_result_inline_bytes),
+        // N-TOOL-6 (Z1-15): a success with nothing to read — a command that
+        // printed nothing, an MCP result with no content — is a line naming
+        // the tool, never an empty result the model could take for a missing
+        // one. Only here, inline: whitespace that spilled keeps the stub its
+        // file and `read_result` stand behind, and the record keeps the
+        // tool's own output, from which a replay takes the same line.
+        None => no_output_line(tool, result_text).unwrap_or_else(|| {
+            truncate_tool_result_to(result_text.to_string(), config.tool_result_inline_bytes)
+        }),
     }
 }
 
@@ -347,6 +360,32 @@ fn tool_extension(sandbox: Option<&SandboxManager>, tool_name: &str) -> Option<V
         "id": id.name,
         "generation": tool.incarnation(),
     }))
+}
+
+/// One call of a round, through the sandbox.
+///
+/// N-TOOL-4 (Z1-13): it yields its text and whether it failed — the call's
+/// own `Err`. The flag decides everything after; the text keeps the
+/// `[tool_error]` marker for the wires that have no error field. A hint is
+/// the failing tool's (or the sandbox's) own words.
+async fn execute_call(
+    sandbox: Option<&SandboxManager>,
+    sandbox_policy: Option<&SandboxPolicy>,
+    tc: &ToolCall,
+    ctx: &ToolContext,
+) -> (String, bool) {
+    if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
+        match sbx.execute_tool(tc, policy, ctx).await {
+            Ok(output) => (output, false),
+            Err(err) => (format_tool_error(&err), true),
+        }
+    } else {
+        let err = format_tool_error(&format!(
+            "tool '{}' not available — sandbox not configured",
+            tc.name
+        ));
+        (err, true)
+    }
 }
 
 /// Return drained-but-unsent steering messages to the inbox on a loop exit
@@ -466,15 +505,24 @@ async fn run_agentic_loop_core(
     let cost_acc = cost_accumulator.unwrap_or_default();
     let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
     // N-TOOL-1 (Z1-05): a definition that states a time limit states this
-    // loop's — the cut its sandbox enforces — so the model is never told
-    // 300 s by a tool its sandbox stops at 60. With no policy nothing runs
-    // (every call answers "sandbox not configured"), and no figure is added.
+    // loop's — the cut its sandbox enforces, and the ceiling a call's own
+    // `timeout_secs` is clamped to (N-TOOL-1b) — so the model is never told a
+    // figure its sandbox does not keep. With no policy nothing runs (every
+    // call answers "sandbox not configured"), and no figure is added.
     let mut tools = tools;
     if let Some(policy) = sandbox_policy {
-        crate::tools::builtins::state_enforced_timeout(&mut tools, policy.max_tool_runtime_secs);
+        crate::tools::builtins::state_enforced_timeout(
+            &mut tools,
+            policy.max_tool_runtime_secs,
+            policy.max_tool_runtime_ceiling_secs,
+        );
     }
     let tools_arc = Arc::new(tools);
     let mut consecutive_llm_errors: usize = 0;
+    // C7a: the ephemeral notice the last request carried in its system
+    // prompt. A request whose notice differs changes the system prompt every
+    // kept thinking block was produced after, so it sends none of them.
+    let mut last_notice: Option<Option<String>> = None;
     const MAX_LLM_RETRIES: usize = 3;
 
     // ── Steering state (Routing V2) ────────────────────────────────
@@ -675,6 +723,7 @@ async fn run_agentic_loop_core(
                     budget,
                     &backend,
                     config.writer.max_chars,
+                    config.kept_head,
                 );
                 // Design 11 §3.3: the state the older messages are folded
                 // into — this loop's last one, else the one it was handed
@@ -722,6 +771,13 @@ async fn run_agentic_loop_core(
                         "Graduated compaction completed"
                     );
                 });
+                // C7a: the history the kept thinking was produced after has
+                // been rewritten, so every block goes, and stays gone.
+                forget_thinking(
+                    Arc::make_mut(&mut messages).as_mut_slice(),
+                    agent_id,
+                    "compaction",
+                );
 
                 cumulative_dropped_tokens += report
                     .initial_tokens
@@ -823,6 +879,19 @@ async fn run_agentic_loop_core(
             }
         }
 
+        // C7a: a changed ephemeral notice is a changed system prompt.
+        if last_notice
+            .as_ref()
+            .is_some_and(|last| *last != ephemeral_notice)
+        {
+            forget_thinking(
+                Arc::make_mut(&mut messages).as_mut_slice(),
+                agent_id,
+                "system_notice",
+            );
+        }
+        last_notice = Some(ephemeral_notice.clone());
+
         // ── 5. Build request (pre-LLM-call assembly) ──────────────
         let tool_choice = {
             let _span = tracing::info_span!(
@@ -886,6 +955,7 @@ async fn run_agentic_loop_core(
                     config.thinking.clone(),
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
+                    config.max_keyless_stream_duration,
                     context_management.clone(),
                     ephemeral_notice.clone(),
                 ).instrument(llm_call_span.clone()) => result,
@@ -910,6 +980,7 @@ async fn run_agentic_loop_core(
                     config.thinking.clone(),
                     config.stream_callback.as_ref(),
                     config.max_stream_duration,
+                    config.max_keyless_stream_duration,
                     context_management.clone(),
                     ephemeral_notice.clone(),
                 )
@@ -1064,10 +1135,12 @@ async fn run_agentic_loop_core(
                 });
 
                 // ── Tool execution ─────────────────────────────────
-                // IMPORTANT: Thinking blocks are NOT included in conversation history.
-                // Only the text content and tool calls are pushed as assistant messages.
-                // Anthropic API strips thinking from re-sent messages automatically,
-                // but we also omit response.thinking from the ChatMessage to be explicit.
+                // C7a: a turn that carried thinking keeps its blocks, as the
+                // provider returned them, for the next request of this loop
+                // (`ChatMessage::echo`; Anthropic's pages ask for them back
+                // unchanged with the tool results). They live only in this
+                // loop's list: no session log, row or history line holds
+                // them, and `response.thinking`'s text is not kept.
                 if response.finish_reason == FinishReason::ToolUse
                     && !response.tool_calls.is_empty()
                 {
@@ -1092,6 +1165,20 @@ async fn run_agentic_loop_core(
                     let executable: Vec<_> = executable.into_iter().map(|(_, tc)| tc).collect();
                     let over_budget: Vec<_> = over_budget.into_iter().map(|(_, tc)| tc).collect();
 
+                    // N-TOOL-3 (Z1-01): the round runs in groups, in the
+                    // model's order — consecutive calls the registry lets
+                    // run together (read-only tools, the lead's coordination
+                    // tools) share one; every other call runs alone. Neither
+                    // `file_edit` nor `file_write` takes a lock, so two calls
+                    // past their gate at once (an Always allow, `auto_approve`)
+                    // could read one file before either wrote it. With no
+                    // sandbox there is no registry to ask: each call alone.
+                    let together: Vec<bool> = executable
+                        .iter()
+                        .map(|tc| sandbox.is_some_and(|s| s.registry().runs_concurrently(&tc.name)))
+                        .collect();
+                    let groups = tool_helpers::call_groups(&together);
+
                     persist_span.in_scope(|| {
                         if sandbox.is_none() {
                             tracing::warn!(
@@ -1105,7 +1192,8 @@ async fn run_agentic_loop_core(
                             agent_id = agent_id,
                             round = state.rounds,
                             tools = executable.len(),
-                            "Executing tools in parallel"
+                            groups = groups.len(),
+                            "Executing tools in groups"
                         );
                     });
 
@@ -1147,8 +1235,6 @@ async fn run_agentic_loop_core(
                             }),
                         );
                     }
-                    let tool_started = Instant::now();
-
                     let effective_ctx = effective_ctx;
                     // The **untruncated** output. §5.4 makes the JSONL the
                     // source of truth for tool payloads, so the cut to
@@ -1156,59 +1242,55 @@ async fn run_agentic_loop_core(
                     // that goes into the model's context — never on the copy
                     // the log records. The envelope cap still bounds what
                     // lands inline in the record.
-                    // N-TOOL-4 (Z1-13): each call yields its text and whether
-                    // it failed — the call's own `Err`. The flag decides
-                    // everything below; the text keeps the `[tool_error]`
-                    // marker for the wires that have no error field. A hint
-                    // is the failing tool's (or the sandbox's) own words.
-                    let tool_futures = executable.iter().map(|&tc| {
-                        let ctx_ref = &effective_ctx;
-                        async move {
-                            if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
-                                match sbx.execute_tool(tc, policy, ctx_ref).await {
-                                    Ok(output) => (output, false),
-                                    Err(err) => (format_tool_error(&err), true),
-                                }
-                            } else {
-                                let err = format_tool_error(&format!(
-                                    "tool '{}' not available — sandbox not configured",
-                                    tc.name
-                                ));
-                                (err, true)
-                            }
+                    // The groups run one after another and the calls of one
+                    // under `join_all`, so `results` keeps the model's order.
+                    // Each result carries its group's wall-clock: a group of
+                    // one is its call's own time; the calls of a larger group
+                    // share one, since `join_all` runs them together and
+                    // per-call durations would be fiction.
+                    let round = async {
+                        let mut results = Vec::with_capacity(executable.len());
+                        for group in groups {
+                            let started = Instant::now();
+                            let calls = executable[group].iter().map(|&tc| {
+                                execute_call(sandbox, sandbox_policy, tc, &effective_ctx)
+                            });
+                            let outcomes = futures_util::future::join_all(calls).await;
+                            let duration_ms = started.elapsed().as_millis() as i64;
+                            results.extend(
+                                outcomes
+                                    .into_iter()
+                                    .map(|(text, failed)| (text, failed, duration_ms)),
+                            );
                         }
-                    });
+                        results
+                    };
 
-                    // Race tool execution against cancellation; instrument
-                    // the join_all future so events/spans inside tool
+                    // Race the whole round, every group, against
+                    // cancellation; instrument it so events/spans inside tool
                     // execution nest under persist_or_tools.
                     let results = if let Some(ref token) = cancel_token {
                         tokio::select! {
-                            results = futures_util::future::join_all(tool_futures)
-                                .instrument(persist_span.clone()) => results,
+                            results = round.instrument(persist_span.clone()) => results,
                             _ = token.cancelled() => {
                                 persist_span.in_scope(|| {
                                     tracing::info!(
                                         agent_id = agent_id,
                                         round = state.rounds,
-                                        "Cancelled during parallel tool execution"
+                                        "Cancelled during tool execution"
                                     );
                                 });
                                 return state.result(LoopFinishReason::Cancelled);
                             }
                         }
                     } else {
-                        futures_util::future::join_all(tool_futures)
-                            .instrument(persist_span.clone())
-                            .await
+                        round.instrument(persist_span.clone()).await
                     };
 
-                    // The batch shares one wall-clock: `join_all` runs them
-                    // together, so per-call durations would be fiction.
-                    let batch_duration_ms = tool_started.elapsed().as_millis() as i64;
-
-                    // Collect results in order (join_all preserves input order)
-                    for (tc, (result_text, failed)) in executable.iter().zip(results.iter()) {
+                    // Collect results in the model's order
+                    for (tc, (result_text, failed, duration_ms)) in
+                        executable.iter().zip(results.iter())
+                    {
                         state.tool_calls_made += 1;
                         let ok = !*failed;
                         if !ok {
@@ -1242,7 +1324,7 @@ async fn run_agentic_loop_core(
                             "tool_use_id": tc.id,
                             "name": tc.name,
                             "ok": ok,
-                            "duration_ms": batch_duration_ms,
+                            "duration_ms": duration_ms,
                             // On a refusal this is the S4 string the gate
                             // answered with, which is what makes a
                             // withheld capability auditable per session.
@@ -1289,6 +1371,7 @@ async fn run_agentic_loop_core(
                         // and the head is better than a reference to nothing.
                         let model_text = model_visible_result(
                             config,
+                            &tc.name,
                             result_text,
                             ok,
                             spill_ref.as_deref().filter(|_| emitted),
@@ -1336,8 +1419,7 @@ async fn run_agentic_loop_core(
                 if response.finish_reason == FinishReason::MaxTokens {
                     state.max_tokens_retries += 1;
                     if state.max_tokens_retries <= MAX_TOKENS_RETRIES {
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::assistant(&response.content));
+                        Arc::make_mut(&mut messages).push(ChatMessage::assistant_answer(&response));
                         Arc::make_mut(&mut messages).push(ChatMessage::user(
                             "Your previous response was truncated due to length limits. \
                              Continue from where you left off.",
@@ -1395,8 +1477,7 @@ async fn run_agentic_loop_core(
                                     .collect::<Vec<_>>(),
                             }),
                         );
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::assistant(&response.content));
+                        Arc::make_mut(&mut messages).push(ChatMessage::assistant_answer(&response));
                         for msg in &drained {
                             Arc::make_mut(&mut messages)
                                 .push(ChatMessage::user(&msg.to_interjection()));
@@ -1426,10 +1507,8 @@ async fn run_agentic_loop_core(
                                 "Answer guard rejected the turn's answer; granting one corrective round"
                             );
                         });
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::assistant(&response.content));
-                        Arc::make_mut(&mut messages)
-                            .push(ChatMessage::user(&correction.note));
+                        Arc::make_mut(&mut messages).push(ChatMessage::assistant_answer(&response));
+                        Arc::make_mut(&mut messages).push(ChatMessage::user(&correction.note));
                         continue;
                     }
                     // Said again after being told. The answer still ships —
@@ -1472,6 +1551,8 @@ async fn run_agentic_loop_core(
             Err(e) => {
                 // Router backend: retry transient errors with exponential backoff.
                 // Direct backend: return error immediately (no retry).
+                // `LocalCallTimedOut` is not among them: a local call that
+                // used its whole timeout is not asked again (LOCAL-HOUR-NO-RETRY).
                 if backend.supports_retry() {
                     let is_transient = matches!(
                         e,
@@ -1524,6 +1605,27 @@ async fn run_agentic_loop_core(
                 return state.result(LoopFinishReason::Error(e.to_string()));
             }
         }
+    }
+}
+
+/// Take every kept thinking block out of `messages` (C7a): something they
+/// were produced after — an earlier message, or the system prompt — has
+/// changed, so the API's prefix check would fail them. All go, never some,
+/// and none comes back.
+fn forget_thinking(messages: &mut [ChatMessage], agent_id: &str, cause: &str) {
+    let mut forgotten = 0usize;
+    for message in messages.iter_mut() {
+        if message.forget_thinking() {
+            forgotten += 1;
+        }
+    }
+    if forgotten > 0 {
+        tracing::debug!(
+            agent_id,
+            cause,
+            turns = forgotten,
+            "Kept thinking left out of later requests"
+        );
     }
 }
 

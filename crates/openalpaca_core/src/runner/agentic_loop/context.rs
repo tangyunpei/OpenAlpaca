@@ -75,8 +75,14 @@ pub(crate) fn estimate_messages_tokens(messages: &[ChatMessage]) -> u32 {
 ///   4. Group summary by conversation rounds
 ///
 /// When `budget` is `None`, uses legacy `tail_keep × 3` boundary.
+///
+/// `messages[..head]` is never compressed: the system prompt and the
+/// initial query by default (`context_budget::compaction::DEFAULT_KEPT_HEAD`),
+/// a spawned subagent's whole handed list (SA-2b), a lead's list through its
+/// objective (SA-2b-LEAD).
 pub(crate) fn compress_context(
     messages: &mut Vec<ChatMessage>,
+    head: usize,
     tail_keep: usize,
     budget: Option<&crate::context_budget::ContextBudgetManager>,
 ) {
@@ -95,8 +101,8 @@ pub(crate) fn compress_context(
             let mut tail_tokens = 0usize;
             let mut boundary = messages.len();
             for (i, msg) in messages.iter().enumerate().rev() {
-                if i <= 1 {
-                    break; // Never compress system + initial query
+                if i < head {
+                    break; // Never compress the head (system + initial query)
                 }
                 let msg_tokens = if let Some(ref parts) = msg.parts {
                     parts.iter().map(|p| estimate_part_tokens(p) as usize).sum()
@@ -116,13 +122,13 @@ pub(crate) fn compress_context(
         tail_keep * 3
     };
 
-    if messages.len() <= 2 + keep_tail {
+    if messages.len() <= head + keep_tail {
         return; // Nothing to compress
     }
 
     let compress_end = messages.len() - keep_tail;
 
-    // Phase 3: Build round-grouped summary from messages[2..compress_end]
+    // Phase 3: Build round-grouped summary from messages[head..compress_end]
     let mut summary_parts = Vec::new();
     let mut round = 1u32;
     let mut current_round_parts: Vec<String> = Vec::new();
@@ -137,7 +143,7 @@ pub(crate) fn compress_context(
     // summary, as the LLM-summary tier and the assembly trim keep it.
     let mut kept_state: Vec<ChatMessage> = Vec::new();
 
-    for msg in &messages[2..compress_end] {
+    for msg in &messages[head..compress_end] {
         if msg
             .content
             .starts_with(crate::orchestrator::working_state::BLOCK_PREFIX)
@@ -236,7 +242,7 @@ pub(crate) fn compress_context(
 
     let mut summary = format!(
         "[Context compressed: {} earlier messages in {} rounds]\n{}",
-        compress_end - 2 - kept_interjections.len() - kept_state.len(),
+        compress_end - head - kept_interjections.len() - kept_state.len(),
         round,
         summary_parts.join("\n")
     );
@@ -251,10 +257,10 @@ pub(crate) fn compress_context(
         }
     }
 
-    // Replace messages[2..compress_end] with the working state's block, the
-    // summary, and any preserved interjections (both kept verbatim).
+    // Replace messages[head..compress_end] with the working state's block,
+    // the summary, and any preserved interjections (both kept verbatim).
     messages.splice(
-        2..compress_end,
+        head..compress_end,
         kept_state
             .into_iter()
             .chain(std::iter::once(ChatMessage::user(&summary)))
@@ -275,6 +281,7 @@ pub(crate) fn truncate_for_summary(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_budget::compaction::DEFAULT_KEPT_HEAD;
 
     #[test]
     fn test_estimate_empty_messages_returns_zero() {
@@ -324,7 +331,7 @@ mod tests {
                 .chain(std::iter::once(ChatMessage::user(&block)))
                 .chain(rows.clone())
                 .collect();
-            compress_context(&mut messages, 1, None);
+            compress_context(&mut messages, DEFAULT_KEPT_HEAD, 1, None);
 
             let blocks: Vec<usize> = messages
                 .iter()
@@ -460,7 +467,7 @@ mod tests {
             }
         }
 
-        compress_context(&mut messages, 1, None); // legacy: keep tail of 3
+        compress_context(&mut messages, DEFAULT_KEPT_HEAD, 1, None); // legacy: keep tail of 3
 
         // The summary replaces the compressed range…
         assert!(messages[2].content.starts_with("[Context compressed"));
@@ -494,7 +501,7 @@ mod tests {
         }
         let len_before = messages.len();
 
-        compress_context(&mut messages, 4, Some(&budget));
+        compress_context(&mut messages, DEFAULT_KEPT_HEAD, 4, Some(&budget));
 
         assert!(
             messages.len() > 2,

@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Split the re-cut's source diff into the three per-step patches gbase.sh applies.
 
-Usage: python3 -I split-recut-diff.py recut-source-only.diff patches/
+Usage: python3.11 -I split-recut-diff.py recut-source-only.diff patches/
 
 The whole wave's source changes against 7295f91b (`recut-source-only.diff`, cut on
 2026-10-10, plan-rev3 §5.1 item 6) carry hunks of three steps of the eight-step

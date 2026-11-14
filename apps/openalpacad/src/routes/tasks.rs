@@ -4,7 +4,8 @@
 //! GET  /v1/tasks           -> list tasks (query: created_by, status, limit)
 //! GET  /v1/tasks/{id}      -> get a single task + agent runs
 //! GET  /v1/tasks/{id}/timeline -> the run's swimlanes (GAP-09)
-//! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume, start)
+//! POST /v1/tasks/{id}/action -> perform action (cancel, resume, start; `pause`
+//!                               is refused `409` until a later design)
 //!                               `resume` un-pauses a paused run, and — on an
 //!                               `interrupted` one, with `resume_enabled` —
 //!                               replays it from its session log (§5.6c, S2)
@@ -31,8 +32,8 @@ use openalpaca_core::context::SharedContext;
 use openalpaca_core::daemon_config::RoutingConfig;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::orchestrator::{
-    Orchestrator, ParsedOutcomeFields, TaskActionError, TaskLaunchError, apply_task_action,
-    parse_outcome,
+    Orchestrator, PAUSE_UNSUPPORTED, ParsedOutcomeFields, TaskActionError, TaskLaunchError,
+    apply_task_action, parse_outcome,
 };
 use openalpaca_core::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
 use openalpaca_core::security::confirmation::ConfirmationBroker;
@@ -500,38 +501,73 @@ pub async fn task_action_handler(
         );
     }
 
-    // Shared with the orchestrator chat handler: registry-first resolution with
-    // DB fallback, transition validation, token cancel, persistence, lane sync,
-    // and TaskUpdated event all live in core.
-    let outcome = apply_task_action(
+    match transition_task(
         &state.gateway.shared_context,
         &state.gateway.lane_manager,
         &state.gateway.bus,
-        Some(&state.db),
+        &state.db,
         &id,
         &request.action,
-    );
+    ) {
+        Some(answer) => answer,
+        // §5.6c — `resume` is two verbs sharing one word, and the row decides
+        // which. `apply_task_action` owns the original: paused → running, a
+        // pure transition. Everything it refuses (`CannotResume`) is where
+        // S2's replay resume takes over, so the un-pause path is untouched
+        // byte for byte and the new verb answers exactly the cases the old one
+        // never could — starting with `interrupted`, which is the only status
+        // it accepts.
+        None => {
+            resume_task(
+                &state.orchestrator,
+                &state.db,
+                &state.local_user_id,
+                &id,
+                request.unattended,
+            )
+            .await
+        }
+    }
+}
 
-    // §5.6c — `resume` is two verbs sharing one word, and the row decides
-    // which. `apply_task_action` owns the original: paused → running, a pure
-    // transition. Everything it refuses (`CannotResume`) is where S2's replay
-    // resume takes over, so the un-pause path is untouched byte for byte and
-    // the new verb answers exactly the cases the old one never could —
-    // starting with `interrupted`, which is the only status it accepts.
-    if request.action == RESUME_ACTION
-        && matches!(outcome, Err(TaskActionError::CannotResume { .. }))
-    {
-        return resume_task(
-            &state.orchestrator,
-            &state.db,
-            &state.local_user_id,
-            &id,
-            request.unattended,
-        )
-        .await;
+/// The route's transitions — `cancel` and the un-pause `resume` — and its
+/// refusal of `pause`, split out so every status code is provable without an
+/// `AppState`. `None` is a `resume` that [`apply_task_action`] refused
+/// (`CannotResume`): §5.6c's replay resume answers it, in the handler.
+///
+/// PAUSE-OFF: `pause` is refused first, `409` with the chat's own sentence
+/// ([`PAUSE_UNSUPPORTED`]), until a later design: a pause never stopped a
+/// run, so no row, registry entry or lane moves and no `TaskUpdated` is
+/// published. It stays one of [`VALID_ACTIONS`] — a known word, refused, not
+/// a typo's `400`.
+fn transition_task(
+    shared_context: &SharedContext,
+    lane_manager: &openalpaca_core::lane::LaneManager,
+    bus: &EventBus,
+    db: &Database,
+    id: &str,
+    action: &str,
+) -> Option<Response> {
+    if action == PAUSE_ACTION {
+        return Some(
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": PAUSE_UNSUPPORTED })),
+            )
+                .into_response(),
+        );
     }
 
-    match outcome {
+    // Shared with the orchestrator chat handler: registry-first resolution with
+    // DB fallback, transition validation, token cancel, persistence, lane sync,
+    // and TaskUpdated event all live in core.
+    let outcome = apply_task_action(shared_context, lane_manager, bus, Some(db), id, action);
+
+    if action == RESUME_ACTION && matches!(outcome, Err(TaskActionError::CannotResume { .. })) {
+        return None;
+    }
+
+    let answer = match outcome {
         Ok(new_status) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -549,6 +585,8 @@ pub async fn task_action_handler(
                 "error": format!("Cannot cancel a task in '{}' state", current)
             })),
         ),
+        // Not reached from here since PAUSE-OFF (`pause` is refused above);
+        // the match stays exhaustive over core's error.
         Err(TaskActionError::CannotPause { current }) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -561,18 +599,20 @@ pub async fn task_action_handler(
                 "error": format!("Can only resume a paused task, current state: '{}'", current)
             })),
         ),
-        Err(TaskActionError::UnknownAction) => unknown_action(&request.action),
+        Err(TaskActionError::UnknownAction) => unknown_action(action),
         Err(TaskActionError::Db(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
         ),
-    }
-    .into_response()
+    };
+    Some(answer.into_response())
 }
 
-/// Every word `POST /v1/tasks/{id}/action` accepts: the three transitions
+/// Every word `POST /v1/tasks/{id}/action` knows: the three transitions
 /// `apply_task_action` knows, plus [`START_ACTION`], which this route answers
 /// itself. Named so the refusal cannot list a set the route does not honour.
+/// `pause` is among them though the route refuses it ([`PAUSE_ACTION`]):
+/// a word the route knows and refuses is a `409`, not an unknown one's `400`.
 ///
 /// `resume` is one word over two verbs — un-pause a paused run, or (§5.6c,
 /// opt-in) replay-resume an interrupted one — so the set does not grow.
@@ -621,6 +661,10 @@ const START_ACTION: &str = "start";
 /// The action word the route hands to §5.6c's replay resume **after**
 /// [`apply_task_action`] has refused it — see [`task_action_handler`].
 const RESUME_ACTION: &str = "resume";
+
+/// The action word the route refuses before [`apply_task_action`]
+/// (PAUSE-OFF) — see [`transition_task`].
+const PAUSE_ACTION: &str = "pause";
 
 /// `Ok(())` when `id` names a run this owner started **on a lane this owner
 /// owns**; the refusal otherwise.
@@ -2301,6 +2345,7 @@ mod tests {
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -2851,6 +2896,56 @@ mod tests {
         let new_status = apply_task_action(&ctx, &lanes, &bus, Some(&db), "task-1", "resume")
             .expect("a paused run resumes");
         assert_eq!(new_status.as_str(), "running");
+        let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+        assert_eq!(row.status, TaskStatus::Running);
+    }
+
+    // ── PAUSE-OFF: the route refuses pause until a later design ──
+
+    /// **PAUSE-OFF.** `pause` on a running row is the chat's own sentence as a
+    /// `409`, and nothing moves: the row stays `running` and no `TaskUpdated`
+    /// reaches a subscriber taken before the call. A pause never stopped the
+    /// run it labelled.
+    #[tokio::test]
+    async fn pausing_a_running_run_is_a_409_that_moves_nothing() {
+        let (_dir, db) = launch_db(TaskStatus::Running, Some("write the changelog"));
+        let ctx = SharedContext::new();
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let bus = EventBus::default();
+        let mut events = bus.subscribe();
+
+        let answer = transition_task(&ctx, &lanes, &bus, &db, "task-1", "pause")
+            .expect("pause is answered here, never by the replay resume");
+        let (status, body) = split(answer).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, serde_json::json!({ "error": PAUSE_UNSUPPORTED }));
+        let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+        assert_eq!(row.status, TaskStatus::Running, "the row is not paused");
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "no TaskUpdated is published"
+        );
+    }
+
+    /// The kept path: a row an earlier build left `paused` is still un-paused
+    /// by the route's `resume`, `200` and `running`, so no row is stuck.
+    #[tokio::test]
+    async fn a_row_left_paused_is_still_resumed_by_the_route() {
+        let (_dir, db) = launch_db(TaskStatus::Paused, Some("write the changelog"));
+        let ctx = SharedContext::new();
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let bus = EventBus::default();
+
+        let answer = transition_task(&ctx, &lanes, &bus, &db, "task-1", "resume")
+            .expect("a paused row is un-paused here, not replayed");
+        let (status, body) = split(answer).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "running");
         let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
         assert_eq!(row.status, TaskStatus::Running);
     }

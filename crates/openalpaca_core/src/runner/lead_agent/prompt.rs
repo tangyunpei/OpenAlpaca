@@ -8,6 +8,7 @@ use crate::middleware::prompt::SystemPersona;
 use crate::middleware::user::UserDocument;
 use crate::prompt_ctx::section::{ContextBundle, SectionPriority};
 use crate::prompt_ctx::ExecutionPath;
+use crate::runner::lead_agent::DEFAULT_SUBAGENT_TEMPLATE;
 use std::sync::Arc;
 
 /// Skill + integration guidance, appended by `run_lead_agent` after the tool
@@ -90,6 +91,11 @@ pub(super) fn workflow_contract_suffix(steering_attached: bool) -> String {
 /// skills. `SubagentMinimal` renders raw blocks only, so it is carried as
 /// the last raw block, `skills_catalog`, the nearest to that suffix. Absent
 /// or empty, nothing is emitted.
+///
+/// `max_subagents_per_run` is the run's bound on the subagents it spawns in
+/// all (N-LEAD-6), which `<workflow>`'s step 3 names: the figure the run's
+/// spawn tool enforces (`SpawnSubagentTool::max_subagents_per_run`).
+#[allow(clippy::too_many_arguments)]
 pub fn build_lead_agent_prompt_from_templates(
     compose_engine: &ComposeEngine,
     base_persona: &str,
@@ -98,6 +104,7 @@ pub fn build_lead_agent_prompt_from_templates(
     user_document: Option<&UserDocument>,
     user_budget: Option<usize>,
     skills_catalog: Option<&str>,
+    max_subagents_per_run: usize,
 ) -> String {
 
     // Available agents catalog (High — important for delegation decisions).
@@ -121,23 +128,69 @@ pub fn build_lead_agent_prompt_from_templates(
         block
     };
 
+    // SA-1 (subagent design §3.2): step 3 gives work to `general_agent`, the
+    // default subagent, unless a brief needs fewer powers — naming
+    // `explore_agent` and `system_agent` only when the lead is offered them.
+    // Where `general_agent` is not among `<agents>` (the lead is it, A-4 (i),
+    // or a file withholds or switches it off), step 3 has the lead name an
+    // agent and say `agent_id` is required, and `<failure-recovery>` names no
+    // default: the prompt never offers a default the spawn tool refuses.
+    let offered = |id: &str| templates.iter().any(|t| t.frontmatter.id == id);
+    let (choose_agent, retry_with) = if offered(DEFAULT_SUBAGENT_TEMPLATE) {
+        let fewer = if offered("explore_agent") {
+            ": explore_agent only reads files and memory."
+        } else {
+            "."
+        };
+        let system = if offered("system_agent") {
+            "; system_agent works on this machine's files and commands, without the web."
+        } else {
+            "."
+        };
+        (
+            format!(
+                "Give each sub-objective to general_agent — the default when you leave agent_id \
+                 out — unless its brief needs fewer powers{fewer} Name another agent from \
+                 <agents> only when its capabilities fit the brief better{system}"
+            ),
+            " — usually general_agent",
+        )
+    } else {
+        (
+            "Name an agent from <agents> for each sub-objective by the powers its brief needs; \
+             agent_id is required in this run."
+                .to_string(),
+            "",
+        )
+    };
+
     // ── The 8 lead-agent raw blocks in canonical registration order. ──────
     // String constants copied verbatim from the pre-migration
-    // PromptBuilder chain; the exact bytes are load-bearing.
+    // PromptBuilder chain, but for step 2's brief (SA-2), what step 3 and
+    // the `<tools>` line say queues a spawn (N-LLM-1), step 3's last
+    // sentence (N-LEAD-6), and the default subagent (SA-1: step 3's agent
+    // choice, `<role>`, `<failure-recovery>`'s item 3); the exact bytes are
+    // load-bearing.
     let role_text = "<role>\n\
          You are a Lead Agent orchestrating a complex task. You are responsible for analyzing \
-         the user's request, decomposing it into sub-objectives, delegating work to specialized \
+         the user's request, decomposing it into sub-objectives, delegating work to \
          subagents, and synthesizing their results into a final response.\n\
          Do not attempt to perform specialized work (coding, research, analysis) yourself when \
          a suitable subagent is available. Your value is in orchestration and synthesis.\n\
          </role>";
-    let workflow_text = "<workflow>\n\
+    let workflow_text = format!(
+        "<workflow>\n\
          Step 1: Analyze the user's request. Identify the core goal and any constraints.\n\
-         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent.\n\
-         Step 3: Spawn ALL subagents for independent objectives in a single round. Match each \
-         sub-objective to the best agent by skills. Spawning is always immediate — the system \
-         automatically manages execution ordering based on available LLM capacity. Subagents may \
-         be queued if capacity is limited — this is handled automatically and transparently.\n\
+         Step 2: Decompose into sub-objectives. Each sub-objective should map to one subagent. \
+         Write each objective as a self-contained brief — the goal, the inputs it needs, the \
+         constraints, and what to return and where — since a subagent is given neither the \
+         user's request nor this conversation, only its brief.\n\
+         Step 3: Spawn ALL subagents for independent objectives in a single round. \
+         {choose_agent} Spawning is always immediate — each spawn \
+         returns its run_id at once, and a subagent spawned past this run's concurrency bound is \
+         queued and starts when a slot frees, as the spawn's reply says. \
+         This run may spawn at most {max_subagents_per_run} subagents in all, retries included; \
+         a spawn past that is refused.\n\
          Step 4: Collect results. Call wait_for_subagents to block until all complete (including \
          queued ones), or check_subagent_status for individual progress.\n\
          Step 5: Evaluate and iterate. If a subagent failed or produced incomplete results, \
@@ -145,7 +198,8 @@ pub fn build_lead_agent_prompt_from_templates(
          retry will not help.\n\
          Step 6: Synthesize. Combine all subagent outputs into a coherent final response \
          that directly addresses the user's original request.\n\
-         </workflow>";
+         </workflow>"
+    );
     let delegation_text = "<delegation-criteria>\n\
          Spawn subagents when:\n\
          - Tasks can run in parallel (e.g., research + implementation are independent)\n\
@@ -157,9 +211,10 @@ pub fn build_lead_agent_prompt_from_templates(
          - The task requires maintaining context across sequential steps that one agent handles best\n\
          </delegation-criteria>";
     let tool_patterns_text = "<tools>\n\
-         spawn_subagent: Spawning is always immediate — returns a run_id instantly. The system \
-         automatically queues execution if LLM capacity is limited. Spawn all independent \
-         objectives in a single round before waiting — this is the preferred pattern.\n\
+         spawn_subagent: Spawning is always immediate — returns a run_id instantly, and a \
+         subagent spawned past this run's concurrency bound is queued and starts when a slot \
+         frees. Spawn all independent objectives in a single round before waiting — this is the \
+         preferred pattern.\n\
          spawn_subagents_batch: When spawning 3+ independent subagents, use spawn_subagents_batch \
          for parallel spawning instead of individual spawn_subagent calls. This is more efficient \
          and reduces round-trips.\n\
@@ -176,14 +231,17 @@ pub fn build_lead_agent_prompt_from_templates(
          workspace_read / workspace_write: Share context between subagents. Write setup data before spawning; \
          read results after completion.\n\
          </tools>";
-    let failure_recovery_text = "<failure-recovery>\n\
+    let failure_recovery_text = format!(
+        "<failure-recovery>\n\
          If a subagent fails:\n\
          1. Read the error message to understand the failure type.\n\
          2. If the objective was too broad, split it into smaller sub-objectives and retry.\n\
-         3. If the agent lacked the right skills, try a different agent.\n\
+         3. If a subagent lacked a power its brief needed, give the brief to an agent whose \
+         capabilities include it{retry_with}.\n\
          4. If repeated failures occur, complete that sub-objective directly yourself.\n\
          5. Never silently drop a failed sub-objective — always report what succeeded and what did not.\n\
-         </failure-recovery>";
+         </failure-recovery>"
+    );
     let output_expectations_text = "<output>\n\
          Your final response must directly address the user's original request. \
          Synthesize all subagent results into a single coherent answer. \
@@ -214,7 +272,7 @@ pub fn build_lead_agent_prompt_from_templates(
         },
         SystemBlock {
             name: "workflow",
-            content: Arc::<str>::from(workflow_text.to_string()),
+            content: Arc::<str>::from(workflow_text),
             priority: SectionPriority::High,
         },
         SystemBlock {
@@ -229,7 +287,7 @@ pub fn build_lead_agent_prompt_from_templates(
         },
         SystemBlock {
             name: "failure_recovery",
-            content: Arc::<str>::from(failure_recovery_text.to_string()),
+            content: Arc::<str>::from(failure_recovery_text),
             priority: SectionPriority::Normal,
         },
         SystemBlock {

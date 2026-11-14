@@ -82,5 +82,10 @@ pub(super) fn parse_response(
         } else {
             Some(parts_vec)
         },
+        // C7a: a turn with thinking goes back in the next request of a tool
+        // loop exactly as the API returned it, every block in its order.
+        echo: body["content"]
+            .as_array()
+            .and_then(|blocks| EchoedTurn::from_blocks(blocks.clone())),
     })
 }

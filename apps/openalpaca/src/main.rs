@@ -7,13 +7,13 @@
 //! - config: Manage system configuration
 //! - gui: Manage GUI process
 //! - connector: Manage platform connectors
-//! - tasks: Manage tasks (list, status, create, cancel, pause, resume)
-//! - agents: Manage agents (list, status, config, create, remove)
+//! - tasks: Manage tasks (list, status, create, cancel, resume; pause refused)
+//! - agents: Manage agents (list, status, config, create, remove, tidy)
 //! - llm: Manage LLM settings, keys, and usage
 //! - chat: Chat with the Orchestrator
 //! - sessions: List the conversations a lane holds
 //! - store: Manage projects (list them, re-point a moved one, delete one's data)
-//! - skills: Show the skill catalog and the problems its last scan found (list, info)
+//! - skills: Show the skill catalog and the problems its last scan found (list, info, tidy)
 
 mod chat_stream;
 mod client;
@@ -50,10 +50,10 @@ enum Commands {
     /// Manage platform connectors (Telegram, etc.)
     Connector(commands::connector::ConnectorArgs),
 
-    /// Manage tasks (list, status, create, cancel, pause, resume)
+    /// Manage tasks (list, status, create, cancel, resume; pause refused)
     Tasks(commands::tasks::TasksArgs),
 
-    /// Manage agents (list, status, config, create, remove)
+    /// Manage agents (list, status, config, create, remove, tidy)
     Agents(commands::agents::AgentsArgs),
 
     /// Manage LLM settings, keys, and usage
@@ -80,7 +80,7 @@ enum Commands {
     /// Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt)
     Memory(commands::memory::MemoryArgs),
 
-    /// Show the skill catalog and the problems its last scan found (list, info)
+    /// Show the skill catalog and the problems its last scan found (list, info, tidy)
     Skills(commands::skills::SkillsArgs),
 }
 

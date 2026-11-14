@@ -105,7 +105,10 @@ pub fn delta_forwarder(sink: &TurnSinkHandle) -> crate::runner::StreamCallback {
         | openalpaca_llm::StreamEvent::InputJsonDelta { .. }
         | openalpaca_llm::StreamEvent::Usage(_)
         | openalpaca_llm::StreamEvent::Done { .. }
-        | openalpaca_llm::StreamEvent::Error { .. } => {}
+        | openalpaca_llm::StreamEvent::Error { .. }
+        // C7a: the turn's blocks, kept for the next request of a tool
+        // loop; a client is shown its thinking as `ThinkingDelta` above.
+        | openalpaca_llm::StreamEvent::Turn(_) => {}
     })
 }
 

@@ -191,6 +191,38 @@ pub struct ToolContext {
     /// same discipline, only on the context the sandbox hands a tool's
     /// [`BuiltInTool::on_confirmation_denied`] hook. `None` everywhere else.
     pub human_denial: Option<HumanDenial>,
+    /// The seconds this call's own `timeout_secs` asked for, clamped to the
+    /// ceiling — the figure the sandbox cuts it at (CMD-TIMEOUT,
+    /// `SandboxPolicy::asked_runtime_secs`). Set by
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// alone, under the discipline of the approval fact: `None` on a context
+    /// a caller built with it set, on an exempt call and on one that asked
+    /// nothing. A `Command`-backend tool reads it: where it is set, the
+    /// sandbox's cut is the call's one clock, and the tool's own
+    /// `timeout_secs` — its default — stands back.
+    pub asked_runtime_secs: Option<u64>,
+    /// The seconds the sandbox cuts this call at, whether asked for, a
+    /// `Command`-backend tool's own figure above the bound (CMD-TIMEOUT-2)
+    /// or the per-tool bound (PLUGIN-WAIT, `SandboxPolicy::runtime_secs_for`).
+    /// Set by
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// alone, under the same discipline: `None` on a context a caller built
+    /// with it set and on an exempt call. A `Plugin`-backend tool reads it:
+    /// its plugin's answer is waited for past this figure, so the sandbox's
+    /// cut, not the plugin channel's default, is what ends a slow call. A
+    /// `Command`-backend tool reads it too: where it is at or below the
+    /// tool's own figure, that tool's own clock stands back (one clock).
+    pub sandbox_cut_secs: Option<u64>,
+    /// The most this call may ask for with its `timeout_secs` — the
+    /// policy's ceiling, `[execution.agent_defaults]
+    /// max_tool_runtime_ceiling_secs` (CMD-TIMEOUT-2). Set by
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// alone, under the same discipline, for a call that may ask: `None` on
+    /// a context a caller built with it set, on an exempt call and on every
+    /// other tool's. A `Command`-backend tool its own clock stopped names
+    /// it in its hint, as the sandbox's cut does; with none set it says
+    /// nothing of asking, since nothing would lift its figure.
+    pub runtime_ceiling_secs: Option<u64>,
 }
 
 /// The fact that a person approved one call on its confirmation card
@@ -260,6 +292,16 @@ impl ToolContext {
         }
     }
 }
+
+/// The lead's coordination builtins that run beside the other calls of their
+/// round whatever they declare (N-TOOL-3, Z1-01; [`ToolRegistry::runs_concurrently`]).
+/// They are registered with no annotations. `spawn_subagent` is not among
+/// them: it runs alone, and returns as soon as its run is queued.
+const CONCURRENT_COORDINATION_TOOLS: [&str; 3] = [
+    "spawn_subagents_batch",
+    "check_subagent_status",
+    "wait_for_subagents",
+];
 
 /// Coarse permission tier derived from MCP tool annotations.
 /// Used for introspection and policy decisions; not stored on RegisteredTool.
@@ -695,7 +737,8 @@ impl ToolRegistry {
     /// Execute a tool by name with per-invocation context.
     /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends; a
     /// command tool runs in the call's working folder (storage design §10,
-    /// R26); Http, Plugin and MCP backends do not read the context.
+    /// R26); a plugin tool waits past the sandbox's cut (PLUGIN-WAIT); Http
+    /// and MCP backends do not read the context.
     pub async fn execute_with_context(
         &self,
         tool_name: &str,
@@ -788,9 +831,10 @@ impl ToolRegistry {
             guard: _guard,
         } = self.admit(tool_name, arguments, ctx)?;
 
-        // A command tool reads the context for its working folder (R26);
-        // these two do not.
-        if ctx.is_some() && matches!(backend, ToolBackend::Http { .. } | ToolBackend::Plugin(_)) {
+        // A command tool reads the context for its working folder (R26) and
+        // the figure its call asked for (CMD-TIMEOUT), a plugin tool the
+        // sandbox's cut (PLUGIN-WAIT); this one does not.
+        if ctx.is_some() && matches!(backend, ToolBackend::Http { .. }) {
             tracing::trace!(
                 tool_name,
                 agent_id = ?ctx.and_then(|c| c.agent_id.as_ref()),
@@ -817,10 +861,51 @@ impl ToolRegistry {
                 args_template,
                 timeout_secs,
             } => {
-                execute_command(command, args_template.as_deref(), *timeout_secs, arguments, ctx)
-                    .await
+                // CMD-TIMEOUT: the author's `timeout_secs` is the call's
+                // default. A call that asked for its own figure runs under the
+                // sandbox's cut at it — one clock, which kills the command's
+                // process group when it drops the call (R45) — and so, since
+                // CMD-TIMEOUT-2, does one that asked nothing where the
+                // sandbox cuts it at or below its author's figure (that
+                // figure, above the per-tool bound, clamped to the ceiling).
+                // There the backend's own clock stands back to the ceiling's
+                // highest setting, as `shell_execute`'s does, and never comes
+                // first below that highest setting: two clocks at one figure
+                // would race, and the backend's words could win where the
+                // sandbox's event and breaker record belong. With the
+                // ceiling at 3600 s and a call asking that much the two
+                // coincide, and the sandbox's, armed first, all but always
+                // wins. Only an author's figure below the sandbox's cut — or
+                // a call no sandbox cuts — keeps the backend's clock.
+                let sandbox_cuts_it = ctx.is_some_and(|c| {
+                    c.asked_runtime_secs.is_some()
+                        || c.sandbox_cut_secs.is_some_and(|cut| cut <= *timeout_secs)
+                });
+                let timeout_secs = if sandbox_cuts_it {
+                    crate::daemon_config::MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS
+                } else {
+                    *timeout_secs
+                };
+                execute_command(
+                    command,
+                    args_template.as_deref(),
+                    timeout_secs,
+                    arguments,
+                    ctx,
+                )
+                .await
             }
-            ToolBackend::Plugin(executor) => executor.execute(tool_name, arguments).await,
+            // PLUGIN-WAIT: where the sandbox cuts this call, the plugin's
+            // answer is waited for past that figure, so the sandbox's clock is
+            // the one that ends it; a call no sandbox cuts waits as before.
+            ToolBackend::Plugin(executor) => match ctx.and_then(|c| c.sandbox_cut_secs) {
+                Some(secs) => {
+                    executor
+                        .execute_within(tool_name, arguments, std::time::Duration::from_secs(secs))
+                        .await
+                }
+                None => executor.execute(tool_name, arguments).await,
+            },
             ToolBackend::Mcp {
                 client,
                 remote_name,
@@ -1323,6 +1408,29 @@ impl ToolRegistry {
         }
     }
 
+    /// Whether a call of `tool_name` may run beside the other calls of its
+    /// round (N-TOOL-3, Z1-01): a tool that declares `read_only_hint` — an
+    /// MCP tool also `idempotent_hint`, since its server's word is all there
+    /// is to go on — or one of the lead's coordination builtins
+    /// ([`CONCURRENT_COORDINATION_TOOLS`]), whatever they declare. Every
+    /// other call runs alone: a tool that is not read-only, one that declares
+    /// nothing (a plugin's tool, which carries no annotations), and a name
+    /// nothing is registered under.
+    pub(crate) fn runs_concurrently(&self, tool_name: &str) -> bool {
+        self.tools.get(tool_name).is_some_and(|entry| {
+            if matches!(entry.backend, ToolBackend::BuiltIn(_))
+                && CONCURRENT_COORDINATION_TOOLS.contains(&tool_name)
+            {
+                return true;
+            }
+            entry.annotations.as_ref().is_some_and(|declared| {
+                declared.read_only_hint == Some(true)
+                    && (!matches!(entry.backend, ToolBackend::Mcp { .. })
+                        || declared.idempotent_hint == Some(true))
+            })
+        })
+    }
+
     /// Whether `tool_name` runs a command: the sanitizer's shell set — the
     /// builtin `shell_execute` ([`InputSanitizer::SHELL_TOOLS`]) and every
     /// `Command`-backend tool, the two it checks for injection. What a
@@ -1336,6 +1444,29 @@ impl ToolRegistry {
                 .tools
                 .get(tool_name)
                 .is_some_and(|entry| matches!(entry.backend, ToolBackend::Command { .. }))
+    }
+
+    /// Whether `tool_name` is a plugin's tool (`ToolBackend::Plugin`): a call
+    /// to one may ask for its own figure, as a command tool's may
+    /// (PLUGIN-WAIT, `SandboxPolicy::asked_runtime_secs`).
+    pub(crate) fn is_plugin_tool(&self, tool_name: &str) -> bool {
+        self.tools
+            .get(tool_name)
+            .is_some_and(|entry| matches!(entry.backend, ToolBackend::Plugin(_)))
+    }
+
+    /// A `Command`-backend tool's own `timeout_secs` (its TOML's): its
+    /// calls' default, which the sandbox cuts an unasked call at where it is
+    /// above the per-tool bound, clamped to the ceiling (CMD-TIMEOUT-2,
+    /// `SandboxPolicy::runtime_secs_for`). `None` for every other tool,
+    /// `shell_execute` among them: its default is the bound.
+    pub(crate) fn command_default_secs(&self, tool_name: &str) -> Option<u64> {
+        self.tools
+            .get(tool_name)
+            .and_then(|entry| match entry.backend {
+                ToolBackend::Command { timeout_secs, .. } => Some(timeout_secs),
+                _ => None,
+            })
     }
 
     /// Return the names of tools that use command backends (i.e., execute via shell).
@@ -1494,10 +1625,30 @@ async fn execute_http(
     }
 }
 
+/// What a `Command`-backend tool its own clock stopped after `secs` is told
+/// (CMD-TIMEOUT-2): where the sandbox put the ceiling on its context — the
+/// most its call may ask for — the hint the sandbox's cut gives
+/// (`platform::timed_out_hint`): below the ceiling, that a larger
+/// `timeout_secs` gives it longer; at it, that this is the most. With no
+/// ceiling the call ran outside the sandbox, where nothing would lift its
+/// figure, and the message is the limit alone.
+fn command_timed_out(secs: u64, ceiling_secs: Option<u64>) -> String {
+    match ceiling_secs {
+        Some(most_secs) => format!(
+            "Command timed out after {secs}s\n{}",
+            crate::tools::platform::timed_out_hint(secs, most_secs)
+        ),
+        None => format!("Command timed out after {secs}s"),
+    }
+}
+
 /// Execute a command backend tool call in the call's working folder
 /// (storage design §10, R26): the template's placeholders are substituted
 /// and checked first — a missing argument is named as such whatever the
 /// context — then the folder is resolved, and a call with none is refused.
+/// It is killed after `timeout_secs`: its author's, or — under a figure the
+/// sandbox cuts it at (CMD-TIMEOUT, CMD-TIMEOUT-2) — the ceiling's highest
+/// setting.
 async fn execute_command(
     command: &str,
     args_template: Option<&str>,
@@ -1540,7 +1691,10 @@ async fn execute_command(
     let output = match run_bounded(cmd, timeout).await {
         Ok(output) => output,
         Err(RunFailure::TimedOut) => {
-            return Err(format!("Command timed out after {}s", timeout_secs));
+            return Err(command_timed_out(
+                timeout_secs,
+                ctx.and_then(|c| c.runtime_ceiling_secs),
+            ));
         }
         Err(RunFailure::Spawn(e) | RunFailure::Io(e)) => {
             return Err(format!("Failed to execute command: {}", e));
@@ -1588,13 +1742,15 @@ fn command_folder(ctx: Option<&ToolContext>) -> Result<PathBuf, String> {
 /// * Then [`validate_tool_arguments`] names every problem it finds.
 ///
 /// Nothing is decoded here. A JSON string whose text is an object is read as
-/// that object where a provider's answer is parsed (`openalpaca_llm`'s
-/// reader), before the sandbox sees the call; one that reaches the registry by
-/// another path — a plugin's proxied call — stays the string it is, refused by
-/// a schema that asks for an object, as it always was. The sanitizer saw only
-/// its outer text, where a backtick, a newline, `../` or a NUL inside it are
-/// still JSON escapes, so reading it here would hand the tool what the
-/// sanitizer never checked (found by review; pinned by
+/// that object where a streamed or OpenAI-compatible answer is parsed
+/// (`openalpaca_llm`'s reader), and one that reaches the sandbox still a
+/// string — a plugin's call, an Anthropic-compatible server's non-streamed
+/// `tool_use` — at the sandbox's entry, before the sanitizer (N-TOOL-8,
+/// `SandboxManager::execute_tool`); one that still reaches the registry as a
+/// string stays the string it is, refused by a schema that asks for an object,
+/// as it always was. Read here, after the sanitizer, it would hand the tool
+/// what the sanitizer never checked: a backtick, a newline, `../` or a NUL
+/// inside it are JSON escapes in its outer text (found by review; pinned by
 /// `a_json_string_cannot_carry_past_the_sanitizer_what_it_refuses_in_an_object`).
 fn check_arguments(
     definition: &ToolDefinition,

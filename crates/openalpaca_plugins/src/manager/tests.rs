@@ -234,6 +234,13 @@ mcp_compatible = true
             Self::build(root, Some(HomeStoreGuard::set(&root.join(".home"))))
         }
 
+        /// [`Self::new`], its plugins' channel default `wait` — a test-scale
+        /// stand-in for the production 60 s.
+        fn with_channel_timeout(root: &Path, wait: std::time::Duration) -> Self {
+            let home = HomeStoreGuard::set(&root.join(".home"));
+            Self::build_waiting(root, Some(home), wait)
+        }
+
         /// A second supervisor over the same plugins root, as a restart is —
         /// fresh in-memory state, the same two files on disk.
         fn restart(root: &Path) -> Self {
@@ -241,6 +248,14 @@ mcp_compatible = true
         }
 
         fn build(root: &Path, home: Option<HomeStoreGuard>) -> Self {
+            Self::build_waiting(root, home, CHANNEL_DEFAULT_TIMEOUT)
+        }
+
+        fn build_waiting(
+            root: &Path,
+            home: Option<HomeStoreGuard>,
+            wait: std::time::Duration,
+        ) -> Self {
             let bus = EventBus::new(256);
             // The production shape from C4 (`services/tools.rs`): the ledger
             // holds the bus, so `mark_failed` announces its own `failed` and
@@ -256,7 +271,8 @@ mcp_compatible = true
                     Some(Arc::clone(&agents)),
                 )
                 .with_event_bus(bus.clone())
-                .with_notice_lane(NOTICE_LANE),
+                .with_notice_lane(NOTICE_LANE)
+                .with_channel_timeout(wait),
             );
             Self {
                 manager,
@@ -596,6 +612,475 @@ mcp_compatible = true
             .await
             .expect_err("the gate must refuse a stale handle");
         assert!(gated.contains("previous load"), "{gated}");
+    }
+
+    /// The committed stub at `tests/fixtures/named-plugin/`: one process that
+    /// lists an `echo` tool and answers `tools/call` only for that name (a
+    /// JSON-RPC error naming any other), and leads a process group of its own.
+    fn named_stub_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/named-plugin")
+    }
+
+    /// Lay the named stub out under `root` as the plugin its manifest names.
+    fn install_named_stub(root: &Path) -> PathBuf {
+        let dir = root.join("named-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        // fs::copy carries the mode across on Unix, so the entry stays executable.
+        for file in ["named-server.py", "plugin.toml"] {
+            std::fs::copy(named_stub_dir().join(file), dir.join(file)).unwrap();
+        }
+        dir
+    }
+
+    /// SIGKILL to a stub's whole process group when this guard drops, so a
+    /// test that fails before its teardown leaves nothing behind. The stub
+    /// leads its group, so its pid is the group's id; one already gone
+    /// answers ESRCH, which `kill` reports and the guard ignores.
+    struct KillGroupOnDrop(u32);
+
+    impl Drop for KillGroupOnDrop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("kill -9 -- -{} 2>/dev/null", self.0))
+                .status();
+        }
+    }
+
+    /// Bring the named stub up and hand back its pid under the group guard.
+    async fn load_named_stub(h: &Harness) -> (u32, KillGroupOnDrop) {
+        load_running_stub_with_caps(h, "named-test", &["testing"]).await;
+        let pid = h.child_pid("named-test").await;
+        (pid, KillGroupOnDrop(pid))
+    }
+
+    /// Disable the named stub and assert its child is gone (T4 awaits the
+    /// child's `wait()`, so the pid really is gone, not a zombie).
+    async fn tear_down_named_stub(h: &Harness, pid: u32) {
+        h.manager.disable(&ext("named-test")).await.unwrap();
+        assert!(
+            !pid_alive(pid),
+            "the named stub {pid} outlived its teardown"
+        );
+    }
+
+    /// **A plugin tool is called by the name it listed.** The registry holds
+    /// the tool as `<plugin>::<tool>` and hands that name to the plugin's
+    /// executor; the plugin listed `echo` and must be asked for `echo`. The
+    /// committed echo stub ignores the name, which is how sending the
+    /// namespaced one went unseen.
+    #[tokio::test]
+    async fn a_plugin_tool_is_called_by_the_name_it_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "by its own name"}),
+            )
+            .await;
+        assert_eq!(
+            answer.as_deref(),
+            Ok("echo: by its own name"),
+            "the plugin was not asked for the tool by the name it listed"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A failed plugin call names the tool once**: `plugin <plugin>::<tool>:
+    /// …`, never `<plugin>::<plugin>::<tool>`. The error is the plugin's own
+    /// (a JSON-RPC error while the plugin is `Enabled`), so the wording is
+    /// the proxy's fallback, not a ledger refusal.
+    #[tokio::test]
+    async fn a_failed_plugin_call_names_the_tool_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let error = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "x", "fail": true}),
+            )
+            .await
+            .expect_err("the stub answers fail = true with a JSON-RPC error");
+        assert!(
+            error.starts_with("plugin named-test::echo: "),
+            "the failure does not name the tool once: {error}"
+        );
+        assert!(
+            !error.contains("named-test::named-test::"),
+            "the failure doubles the plugin's prefix: {error}"
+        );
+        assert!(
+            error.contains("echo was asked to fail"),
+            "the error is not the listed tool's own: {error}"
+        );
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    // ── PLUGIN-WAIT: a plugin tool waits the sandbox's figure ────────
+
+    /// The channel default these tests run under: a test-scale stand-in for
+    /// the production 60 s, which every plugin tool call waited before.
+    const CHANNEL_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Call `named-test::echo` through a sandbox over the harness's registry,
+    /// under a policy whose per-tool bound is `bound_secs` (its ceiling the
+    /// shipped 600 s) and which admits every tool — the path every loop's
+    /// tool calls take.
+    async fn call_through_sandbox(
+        h: &Harness,
+        bound_secs: u64,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
+        use openalpaca_core::security::capabilities::Allowlist;
+        use openalpaca_core::security::sandbox::{SandboxManager, SandboxPolicy};
+
+        let sandbox = SandboxManager::with_defaults(Arc::clone(&h.tools), h.bus.clone());
+        let policy = SandboxPolicy {
+            agent_id: "plugin-wait".to_string(),
+            allowed_capabilities: Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: bound_secs,
+            max_tool_runtime_ceiling_secs: 600,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tc_wait".to_string(),
+            name: "named-test::echo".to_string(),
+            arguments,
+        };
+        let ctx = openalpaca_core::tools::registry::ToolContext {
+            agent_id: Some("plugin-wait".to_string()),
+            ..Default::default()
+        };
+        sandbox.execute_tool(&call, &policy, &ctx).await
+    }
+
+    /// **A plugin tool waits the sandbox's figure, not the channel's.** The
+    /// stub answers after 2 s; the channel's default is 1 s and the
+    /// sandbox's bound 3 s, so the answer is due — where the call used to end
+    /// at the channel's default with "timeout waiting for plugin response".
+    #[tokio::test]
+    async fn a_slow_plugin_tool_waits_the_sandboxs_figure_not_the_channels() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = call_through_sandbox(
+            &h,
+            3,
+            serde_json::json!({"message": "late", "delay_secs": 2}),
+        )
+        .await;
+        assert_eq!(
+            answer.as_deref(),
+            Ok("echo: late"),
+            "a plugin tool did not wait the sandbox's figure"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **Past the sandbox's figure a plugin tool is cut with the sandbox's
+    /// message**, "Tool '<name>' timed out after <n>s", not the plugin
+    /// channel's: the sandbox's clock is the one that ends it. Cut below the
+    /// ceiling, it is told it may ask for more, as a command is
+    /// (PLUGIN-WAIT-2). The row stays `Enabled` — a cut is no crash.
+    #[tokio::test]
+    async fn past_the_sandboxs_figure_a_plugin_tool_is_cut_with_its_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let error = call_through_sandbox(
+            &h,
+            2,
+            serde_json::json!({"message": "too late", "delay_secs": 4}),
+        )
+        .await
+        .expect_err("the stub answers after the sandbox's bound");
+        assert_eq!(
+            error,
+            "Tool 'named-test::echo' timed out after 2s\nHint: this tool may run up to 600 \
+             seconds here — call it again with a larger timeout_secs, or split the work into \
+             smaller calls that each finish sooner.",
+            "the call was not cut by the sandbox's clock, or not told it may ask for more"
+        );
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A plugin tool's call may ask for its own figure**, as a command's
+    /// may: its `timeout_secs` (3) lifts the sandbox's bound (1 s) for that
+    /// call, and the argument reaches the plugin as it was sent.
+    #[tokio::test]
+    async fn a_plugin_tool_call_may_ask_for_its_own_figure() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = call_through_sandbox(
+            &h,
+            1,
+            serde_json::json!({"message": "asked", "delay_secs": 2, "timeout_secs": 3}),
+        )
+        .await;
+        assert_eq!(
+            answer.as_deref(),
+            Ok("echo: asked (timeout_secs 3)"),
+            "a plugin tool's timeout_secs did not lift the bound for its call"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A call no sandbox cuts keeps the channel's default**: one made on
+    /// the registry directly names no figure, so its plugin's answer is
+    /// waited for as long as every other request's.
+    #[tokio::test]
+    async fn without_the_sandboxs_figure_a_plugin_tool_waits_the_channels_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let error = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "unbounded", "delay_secs": 2}),
+            )
+            .await
+            .expect_err("the stub answers after the channel's default");
+        assert_eq!(
+            error, "plugin named-test::echo: timeout waiting for plugin response",
+            "a call no sandbox cuts did not wait the channel's default"
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **The plugin's other requests still wait the channel's default** —
+    /// `tools/list`, `skill/invoke`, the agent bridge's — which names no
+    /// figure of its own.
+    #[tokio::test]
+    async fn the_channels_other_requests_still_wait_its_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let channel = {
+            let plugins = h.manager.plugins.read().await;
+            let state = plugins.get("named-test").expect("the stub is loaded");
+            state
+                .process
+                .as_ref()
+                .expect("it holds its child")
+                .channel
+                .clone()
+        };
+        let started = std::time::Instant::now();
+        let result = channel
+            .call("ping", serde_json::json!({"delay_secs": 2}))
+            .await;
+        assert!(
+            matches!(result, Err(PluginError::Timeout)),
+            "a request with no figure of its own did not end at the channel's default: {result:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1900),
+            "it waited past the channel's default: {:?}",
+            started.elapsed()
+        );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **`initialize` keeps its own figure, 10 s** — neither the channel's
+    /// default nor a tool call's: a plugin that answers it after 2 s, under
+    /// a channel default of 1 s, starts.
+    #[tokio::test]
+    async fn initialize_keeps_its_own_figure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_named_stub(tmp.path());
+        let manifest_path = dir.join("plugin.toml");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("mcp_compatible = true", "mcp_compatible = false")
+            .replace(
+                "\n[capabilities]",
+                "\n[plugin.env]\nNAMED_STUB_INIT_DELAY_SECS = \"2\"\n\n[capabilities]",
+            );
+        std::fs::write(&manifest_path, manifest).unwrap();
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        assert_eq!(
+            manifest
+                .plugin
+                .env
+                .get("NAMED_STUB_INIT_DELAY_SECS")
+                .map(String::as_str),
+            Some("2")
+        );
+
+        let mut process = PluginProcess::spawn(&manifest, &dir, CHANNEL_WAIT).unwrap();
+        let pid = process.child.id().expect("the stub has a pid");
+        let _group = KillGroupOnDrop(pid);
+        let ready = process
+            .initialize("named-test", "0.1.0", &[], HashMap::new())
+            .await;
+        assert!(
+            ready.is_ok(),
+            "initialize did not wait its own figure: {ready:?}"
+        );
+
+        process.kill();
+        let _ = process.child.wait().await;
+        assert!(!pid_alive(pid), "the stub {pid} outlived the test");
+    }
+
+    // ── PLUGIN-WAIT-2: a cut call leaves nothing waiting ─────────────
+
+    /// The named stub's channel — the one its tool calls and its other
+    /// requests travel on.
+    async fn named_channel(h: &Harness) -> crate::stdio_channel::StdioChannel {
+        let plugins = h.manager.plugins.read().await;
+        let state = plugins.get("named-test").expect("the stub is loaded");
+        state
+            .process
+            .as_ref()
+            .expect("it holds its child")
+            .channel
+            .clone()
+    }
+
+    /// **A cut plugin call leaves no request waiting in its channel**
+    /// (PLUGIN-WAIT-2): the sandbox's cut drops the proxy's wait, and the
+    /// request's entry goes with it, so a plugin that never answers does not
+    /// grow the channel's map. Nothing tells the plugin (no JSON-RPC cancel);
+    /// its next call is answered as before.
+    #[tokio::test]
+    async fn a_cut_plugin_call_leaves_no_request_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+        let channel = named_channel(&h).await;
+
+        let error = call_through_sandbox(
+            &h,
+            1,
+            serde_json::json!({"message": "never", "silent": true}),
+        )
+        .await
+        .expect_err("the stub never answers");
+        assert!(
+            error.starts_with("Tool 'named-test::echo' timed out after 1s"),
+            "the call was not cut by the sandbox: {error}"
+        );
+        assert_eq!(
+            channel.pending_len().await,
+            0,
+            "the cut call's request is still waiting in the channel"
+        );
+
+        let next = call_through_sandbox(&h, 3, serde_json::json!({"message": "next"})).await;
+        assert_eq!(next.as_deref(), Ok("echo: next"));
+        assert_eq!(channel.pending_len().await, 0);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **A cut call's late answer reaches no caller** (PLUGIN-WAIT-2): its
+    /// entry went with the cut, so when the plugin answers it after all the
+    /// channel discards the answer, and the next call is handed its own.
+    #[tokio::test]
+    async fn a_late_answer_to_a_cut_plugin_call_is_discarded() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+        let channel = named_channel(&h).await;
+
+        let error = call_through_sandbox(
+            &h,
+            1,
+            serde_json::json!({"message": "late", "delay_secs": 2}),
+        )
+        .await
+        .expect_err("the stub answers after the sandbox's bound");
+        assert!(
+            error.starts_with("Tool 'named-test::echo' timed out after 1s"),
+            "the call was not cut by the sandbox: {error}"
+        );
+        assert_eq!(
+            channel.pending_len().await,
+            0,
+            "the cut call's request is still waiting for its late answer"
+        );
+
+        // One process: the stub answers the cut call, at about 2 s, before
+        // it reads this one.
+        let next = call_through_sandbox(&h, 3, serde_json::json!({"message": "next"})).await;
+        assert_eq!(
+            next.as_deref(),
+            Ok("echo: next"),
+            "the next call was not handed its own answer"
+        );
+        assert_eq!(channel.pending_len().await, 0);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **Any dropped wait removes its request**, not only the sandbox's cut
+    /// (PLUGIN-WAIT-2): a caller that gives up on a request long before the
+    /// request's own timeout leaves nothing behind in the channel.
+    #[tokio::test]
+    async fn a_dropped_wait_removes_its_request_from_the_channel() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        let (pid, _group) = load_named_stub(&h).await;
+        let channel = named_channel(&h).await;
+
+        let params = serde_json::json!({
+            "name": "echo",
+            "arguments": {"message": "never", "silent": true},
+        });
+        let gave_up = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            channel.call_with_timeout("tools/call", params, std::time::Duration::from_secs(30)),
+        )
+        .await;
+        assert!(gave_up.is_err(), "the stub never answers: {gave_up:?}");
+        assert_eq!(
+            channel.pending_len().await,
+            0,
+            "the dropped wait's request is still in the channel"
+        );
+
+        tear_down_named_stub(&h, pid).await;
     }
 
     /// **Redundant enable registers no second capability provider** (design
@@ -1005,6 +1490,52 @@ mcp_compatible = true
             h.row("echo-test").await.agents.is_empty(),
             "a refused id is never recorded as the plugin's"
         );
+    }
+
+    /// The holder's row names a plugin refused its id (`plugin_refused`).
+    fn refused_by(plugin: &str) -> Vec<openalpaca_core::agent::registry::NotUsed> {
+        use openalpaca_core::agent::registry::{NotUsed, NotUsedReason, TemplateLayer};
+        vec![NotUsed {
+            layer: TemplateLayer::Plugin,
+            path: None,
+            reason: NotUsedReason::PluginRefused,
+            plugin: Some(plugin.to_string()),
+        }]
+    }
+
+    /// **A disabled plugin is no longer listed `plugin_refused` on the
+    /// holder's row** (subagent design §2.4 L-1). The refusal is recorded at
+    /// the plugin's load; T2 forgets it, so `GET /v1/agent-templates` does
+    /// not go on naming a plugin that is off, and a re-enable records it
+    /// again.
+    #[tokio::test]
+    async fn a_disabled_plugin_is_no_longer_listed_as_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"writing_agent"}"#).unwrap();
+        let h = Harness::new(tmp.path());
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        let not_used = |h: &Harness| h.agents.provenance("writing_agent").unwrap().not_used;
+
+        load_running_stub(&h, "echo-test").await;
+        assert_eq!(not_used(&h), refused_by("echo-test"), "listed at load");
+
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+        assert!(
+            not_used(&h).is_empty(),
+            "a disabled plugin is still listed as refused: {:?}",
+            not_used(&h)
+        );
+
+        h.manager.enable(&ext("echo-test")).await.unwrap();
+        assert_eq!(not_used(&h), refused_by("echo-test"), "listed again");
     }
 
     /// Lay out a file skill directory, as `config/skills/<dir>/SKILL.md`.
@@ -2395,7 +2926,7 @@ mcp_compatible = true
         // A second bring-up of the same plugin, published behind the live one's
         // back.
         let manifest = PluginManifest::from_dir(&dir).unwrap();
-        let intruder = PluginProcess::spawn(&manifest, &dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir, CHANNEL_DEFAULT_TIMEOUT).unwrap();
         let intruder_pid = intruder.child.id().expect("the second child has a pid");
         let discovered = Discovered {
             tools: vec![mock_plugin_tool("echo-test::intruder", "echo-test")],
@@ -2438,6 +2969,125 @@ mcp_compatible = true
         assert_eq!(h.provider_handle("echo-test").await, live_handle);
         assert!(h.has_tool("echo-test::echo"));
         assert_eq!(h.stub_caps(), 1);
+    }
+
+    /// **The `HandleHeld` unwind takes back the refusal its attempt
+    /// recorded** (subagent design §2.4 L-1): an attempt refused at E5 whose
+    /// agent template was refused an id at E4 leaves no `plugin_refused`
+    /// entry on the holder's row.
+    #[tokio::test]
+    async fn a_refused_publish_leaves_no_plugin_refused_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        load_running_stub(&h, "echo-test").await;
+
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir, CHANNEL_DEFAULT_TIMEOUT).unwrap();
+        let generation = h.manager.ledger.generation(&ext("echo-test")).unwrap();
+        let bridge = Arc::new(PluginAgentBridge::new(
+            "echo-test".to_string(),
+            "writing_agent".to_string(),
+            intruder.channel.clone(),
+            generation,
+            Arc::clone(&h.manager.ledger),
+        ));
+        let discovered = Discovered {
+            tools: Vec::new(),
+            connector: None,
+            provider: None,
+            models: Vec::new(),
+            skill: None,
+            agent: Some(build_agent_template_from_info(
+                &serde_json::json!({"id": "writing_agent"}),
+                "echo-test",
+                bridge,
+            )),
+        };
+
+        let err = h
+            .manager
+            .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
+            .await
+            .expect_err("E5 published over a live handle");
+        assert!(
+            matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test"),
+            "expected HandleHeld, got {err:?}"
+        );
+
+        let not_used = h.agents.provenance("writing_agent").unwrap().not_used;
+        assert!(
+            not_used.is_empty(),
+            "the refused attempt left its refusal listed: {not_used:?}"
+        );
+    }
+
+    /// **The `HandleHeld` unwind leaves the live load's refusal listed**
+    /// (subagent design §2.4 L-1): when the live load of the plugin was
+    /// itself refused the id, a second attempt refused at E5 recorded
+    /// nothing, so it takes nothing back. The unwind used to forget every
+    /// refusal of the plugin's, and the holder's row stopped naming a
+    /// plugin that is still on until its next load.
+    #[tokio::test]
+    async fn a_refused_publish_leaves_the_live_loads_refusal_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\nagent = true\n",
+        );
+        std::fs::write(dir.join("agent-info.json"), r#"{"id":"writing_agent"}"#).unwrap();
+        let h = Harness::new(tmp.path());
+        assert!(
+            h.agents
+                .register_template(agent_template("writing_agent", &["file_read"]))
+        );
+        load_running_stub(&h, "echo-test").await;
+        let not_used = |h: &Harness| h.agents.provenance("writing_agent").unwrap().not_used;
+        assert_eq!(not_used(&h), refused_by("echo-test"), "listed at load");
+
+        let manifest = PluginManifest::from_dir(&dir).unwrap();
+        let intruder = PluginProcess::spawn(&manifest, &dir, CHANNEL_DEFAULT_TIMEOUT).unwrap();
+        let generation = h.manager.ledger.generation(&ext("echo-test")).unwrap();
+        let bridge = Arc::new(PluginAgentBridge::new(
+            "echo-test".to_string(),
+            "writing_agent".to_string(),
+            intruder.channel.clone(),
+            generation,
+            Arc::clone(&h.manager.ledger),
+        ));
+        let discovered = Discovered {
+            tools: Vec::new(),
+            connector: None,
+            provider: None,
+            models: Vec::new(),
+            skill: None,
+            agent: Some(build_agent_template_from_info(
+                &serde_json::json!({"id": "writing_agent"}),
+                "echo-test",
+                bridge,
+            )),
+        };
+
+        let err = h
+            .manager
+            .publish(&ext("echo-test"), &dir, manifest, intruder, discovered)
+            .await
+            .expect_err("E5 published over a live handle");
+        assert!(
+            matches!(err, PluginError::HandleHeld(ref id) if id == "echo-test"),
+            "expected HandleHeld, got {err:?}"
+        );
+
+        assert_eq!(
+            not_used(&h),
+            refused_by("echo-test"),
+            "the refused attempt took back the live load's refusal"
+        );
     }
 
     /// **A reload over an unreadable store leaves the row alone** (design §3.2:

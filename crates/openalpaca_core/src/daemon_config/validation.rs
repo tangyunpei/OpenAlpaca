@@ -235,6 +235,26 @@ impl DaemonConfig {
             "agent_defaults.max_tool_runtime_secs",
         );
         clamp_val(
+            &mut self.execution.agent_defaults.max_tool_runtime_ceiling_secs,
+            1,
+            super::MAX_TOOL_RUNTIME_CEILING_LIMIT_SECS,
+            "agent_defaults.max_tool_runtime_ceiling_secs",
+        );
+        // A call that asks for nothing runs under the bound; one that asks
+        // for more is clamped to the ceiling — so the ceiling is never below
+        // the bound (ZCode's rule for its two figures).
+        let tools = &mut self.execution.agent_defaults;
+        if tools.max_tool_runtime_ceiling_secs < tools.max_tool_runtime_secs {
+            tracing::warn!(
+                "Config 'agent_defaults.max_tool_runtime_ceiling_secs': {} below \
+                 max_tool_runtime_secs {}, raising it to {}",
+                tools.max_tool_runtime_ceiling_secs,
+                tools.max_tool_runtime_secs,
+                tools.max_tool_runtime_secs
+            );
+            tools.max_tool_runtime_ceiling_secs = tools.max_tool_runtime_secs;
+        }
+        clamp_val(
             &mut self.execution.agent_defaults.max_cost,
             0.0,
             1000.0,
@@ -254,12 +274,6 @@ impl DaemonConfig {
             "lead_agent_defaults.max_tools_per_round",
         );
         clamp_val(
-            &mut self.execution.lead_agent_defaults.max_tool_runtime_secs,
-            1,
-            3600,
-            "lead_agent_defaults.max_tool_runtime_secs",
-        );
-        clamp_val(
             &mut self.execution.lead_agent_defaults.max_cost,
             0.0,
             1000.0,
@@ -270,6 +284,12 @@ impl DaemonConfig {
             1,
             32,
             "lead_agent_defaults.max_concurrent_subagents",
+        );
+        clamp_val(
+            &mut self.execution.lead_agent_defaults.max_subagents_per_run,
+            1,
+            1000,
+            "lead_agent_defaults.max_subagents_per_run",
         );
         // ── Execution > Skill Defaults ──
         clamp_val(

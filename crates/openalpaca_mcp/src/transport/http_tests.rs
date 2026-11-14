@@ -20,6 +20,10 @@
 //!   headers, more than ten hops for anyone else. The second origin's stub
 //!   records every request it receives, so the test sees what a refused hop
 //!   would have carried there.
+//! * **A JSON answer that never ends is refused, not buffered**
+//!   (RUSTSEC-2026-0462, fixed in rmcp 3.9.0): rmcp caps a JSON body at
+//!   16 MiB, so a server streaming whitespace forever ends the handshake
+//!   once the cap is passed instead of holding the daemon's memory.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -77,6 +81,9 @@ struct StubConfig {
     /// long, then the result. `None` answers it as one JSON body.
     call_streams_for: Option<Duration>,
     get: GetStream,
+    /// Every POST is answered `application/json` with a body of spaces that
+    /// runs to [`ENDLESS_BODY_CAP`]: a server that never ends its answer.
+    endless_json: bool,
 }
 
 /// One request a stub received.
@@ -94,6 +101,8 @@ struct StubState {
     seen: Mutex<Vec<Seen>>,
     /// GET streams the stub is serving right now.
     open_gets: Arc<AtomicUsize>,
+    /// Bytes of endless JSON bodies the client has taken off the stub.
+    endless_sent: Arc<AtomicUsize>,
 }
 
 /// A running stub. Every path that is not redirected is an MCP endpoint.
@@ -116,6 +125,7 @@ impl Stub {
             config: make(&origin),
             seen: Mutex::new(Vec::new()),
             open_gets: Arc::new(AtomicUsize::new(0)),
+            endless_sent: Arc::new(AtomicUsize::new(0)),
         });
         let app = axum::Router::new()
             .fallback(handle)
@@ -195,6 +205,7 @@ async fn handle(
     }
 
     match method {
+        Method::POST if config.endless_json => endless_json(&stub.endless_sent),
         Method::POST => {
             let id = message
                 .as_ref()
@@ -296,6 +307,38 @@ fn rpc_json(id: Value, result: Value) -> Response {
     (
         [(header::CONTENT_TYPE, "application/json")],
         json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string(),
+    )
+        .into_response()
+}
+
+/// Where an endless body stops: far past rmcp's 16 MiB cap on a JSON
+/// answer, so a client without the cap takes all of it.
+const ENDLESS_BODY_CAP: usize = 256 * 1024 * 1024;
+
+/// One chunk of an endless body.
+const ENDLESS_CHUNK: usize = 64 * 1024;
+
+/// An `application/json` answer of spaces, sent in chunks with no
+/// `Content-Length` until [`ENDLESS_BODY_CAP`]; `sent` counts the bytes the
+/// client takes.
+fn endless_json(sent: &Arc<AtomicUsize>) -> Response {
+    let sent = Arc::clone(sent);
+    let chunks = futures_util::stream::unfold(0usize, move |total| {
+        let sent = Arc::clone(&sent);
+        async move {
+            if total >= ENDLESS_BODY_CAP {
+                return None;
+            }
+            sent.fetch_add(ENDLESS_CHUNK, Ordering::SeqCst);
+            Some((
+                Ok::<_, Infallible>(Bytes::from(vec![b' '; ENDLESS_CHUNK])),
+                total + ENDLESS_CHUNK,
+            ))
+        }
+    });
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        axum::body::Body::from_stream(chunks),
     )
         .into_response()
 }
@@ -749,4 +792,39 @@ async fn a_call_redirected_mid_session_is_refused_without_a_reconnect() {
     );
     assert_eq!(first.rpc_count("initialize"), 1, "no second handshake");
     let _ = client.disconnect().await;
+}
+
+// ============================================================================
+// A JSON answer that never ends
+// ============================================================================
+
+/// **RUSTSEC-2026-0462.** A server whose JSON answer never ends cannot make
+/// the client buffer it: the handshake fails once rmcp's 16 MiB cap is
+/// passed, and the stub sees the client stop reading long before the 256 MiB
+/// it would otherwise send (each attempt reads past the cap by at most what
+/// the socket buffers hold).
+#[tokio::test]
+async fn a_json_answer_that_never_ends_is_refused_not_buffered() {
+    let stub = Stub::spawn(|_| StubConfig {
+        endless_json: true,
+        ..Default::default()
+    })
+    .await;
+
+    let error = McpClient::connect(http_config(&stub.url("/mcp"), None, &[]))
+        .await
+        .err()
+        .expect("the handshake fails");
+
+    let posts = stub.count(Method::POST);
+    let sent = stub.state.endless_sent.load(Ordering::SeqCst);
+    assert!(posts >= 1, "the client asked at least once");
+    assert!(
+        sent < posts * 32 * 1024 * 1024,
+        "the client read {sent} bytes over {posts} answers ({error})"
+    );
+    assert!(
+        error.to_string().contains("ResponseBodyTooLarge"),
+        "the cap, not another failure, ended it: {error}"
+    );
 }

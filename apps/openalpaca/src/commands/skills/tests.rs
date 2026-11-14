@@ -228,3 +228,373 @@ fn a_hidden_character_is_printed_escaped() {
     assert!(text.contains("x<U+200B>/SKILL.md"), "{text}");
     assert!(!text.contains('\u{1b}'), "{text:?}");
 }
+
+/// What the daemon serves for a store whose `config/skills/code-review/` is
+/// the person's own folder over the built-in skill, beside a built-in skill
+/// nothing overrides and one whose config folder is an unedited copy of an
+/// earlier shipped version, set aside (subagent design §2.7 R-2).
+const PROVENANCE: &str = r#"[
+  {"id": "code-review", "name": "Code Review", "description": "Review code",
+   "source": "file", "origin": null, "requires_capabilities": [],
+   "triggers": {"slash": "review", "keywords": []}, "schedule": null,
+   "invocations_today": 0, "version": null, "author": "file:project",
+   "overrides_bundled": true,
+   "not_used": [{"source": "bundled", "path": "/store/state/cache/bundled-skills/code-review",
+                 "plugin": null, "reason": "overridden", "version": null, "edit": null}]},
+  {"id": "create-skill", "name": "Create Skill", "description": "Create a skill",
+   "source": "file", "origin": null, "requires_capabilities": [],
+   "triggers": {"slash": "create-skill", "keywords": []}, "schedule": null,
+   "invocations_today": 2, "version": null, "author": "file:bundled",
+   "overrides_bundled": false,
+   "not_used": [{"source": "file", "path": "/store/config/skills/create-skill",
+                 "plugin": null, "reason": "unedited_copy", "version": "earlier", "edit": null}]},
+  {"id": "daily-digest", "name": "Daily Digest", "description": "A digest",
+   "source": "file", "origin": null, "requires_capabilities": [],
+   "triggers": {"slash": null, "keywords": []}, "schedule": null,
+   "invocations_today": 0, "version": null, "author": "file:project",
+   "overrides_bundled": false, "not_used": []}
+]"#;
+
+/// R-3: the SOURCE column says `file:bundled` for a built-in skill and
+/// `file:override` for a config folder over one (the route's
+/// `file:project` with `overrides_bundled: true`), each whole in the
+/// 16-character column; a folder of the person's own that overrides
+/// nothing stays `file:project`.
+#[test]
+fn skills_list_shows_file_bundled_and_overrides() {
+    plain();
+    let skills: Vec<SkillRow> = serde_json::from_str(PROVENANCE).unwrap();
+    let lines = list_lines(&skills, &[]);
+    for row in [
+        "code-review              /review          file:override    0     Review code",
+        "create-skill             /create-skill    file:bundled     2     Create a skill",
+        "daily-digest             -                file:project     0     A digest",
+    ] {
+        assert!(lines.iter().any(|l| l == row), "{row:?} in {lines:#?}");
+    }
+}
+
+/// R-3: `info` prints the override in full and one line per definition of
+/// the key that is not used — the built-in skill under the person's folder,
+/// a folder set aside as an unedited copy — while `source` keeps the
+/// route's word.
+#[test]
+fn skills_info_prints_the_override_and_each_not_used_line() {
+    plain();
+    let skills: Vec<SkillRow> = serde_json::from_str(PROVENANCE).unwrap();
+
+    let review = info_lines(&lookup(&skills, &[], "code-review"), "code-review")
+        .unwrap()
+        .join("\n");
+    assert!(review.contains("  source:      file:project"), "{review}");
+    assert!(
+        review.contains("  overrides:   the bundled skill code-review"),
+        "{review}"
+    );
+    assert!(
+        review.contains(
+            "  not used:    the bundled skill, /store/state/cache/bundled-skills/code-review \
+             (this skill's folder overrides it)"
+        ),
+        "{review}"
+    );
+
+    let create = info_lines(&lookup(&skills, &[], "create-skill"), "create-skill")
+        .unwrap()
+        .join("\n");
+    assert!(create.contains("  source:      file:bundled"), "{create}");
+    assert!(!create.contains("overrides:"), "{create}");
+    assert!(
+        create.contains(
+            "  not used:    /store/config/skills/create-skill \
+             (an unedited copy of a version an earlier build shipped)"
+        ),
+        "{create}"
+    );
+
+    let digest = info_lines(&lookup(&skills, &[], "daily-digest"), "daily-digest")
+        .unwrap()
+        .join("\n");
+    assert!(!digest.contains("overrides:"), "{digest}");
+    assert!(!digest.contains("not used:"), "{digest}");
+}
+
+/// A not-used entry's path is the daemon's string: a hidden character in
+/// it is printed as `<U+XXXX>`, never raw.
+#[test]
+fn a_hidden_character_in_a_not_used_path_is_printed_escaped() {
+    plain();
+    let skills: Vec<SkillRow> = serde_json::from_str(&PROVENANCE.replace(
+        "/store/config/skills/create-skill",
+        "/store/config/skills/create\u{202E}-skill\u{200B}",
+    ))
+    .unwrap();
+    let text = info_lines(&lookup(&skills, &[], "create-skill"), "create-skill")
+        .unwrap()
+        .join("\n");
+    assert!(
+        text.contains("/store/config/skills/create<U+202E>-skill<U+200B>"),
+        "{text}"
+    );
+    assert!(!text.contains('\u{202E}'), "{text:?}");
+    assert!(!text.contains('\u{200B}'), "{text:?}");
+}
+
+// ── tidy (subagent design §2.12 D-1, D-2) ─────────────────────────────
+
+/// The instant every tidy test runs at, so the archive's name is pinned.
+fn now() -> chrono::DateTime<chrono::Utc> {
+    use chrono::TimeZone;
+    chrono::Utc.with_ymd_and_hms(2026, 11, 7, 12, 0, 0).unwrap()
+}
+
+const TIDY_WARNING: &str = "An earlier build started after this finds skills/ without these \
+     folders and does not seed them again; to go back, move skills/ aside and let that build \
+     seed it (Installation Manual, Keep the builds apart).";
+
+/// The five files `82022776`'s seeding wrote as `create-skill/`, as core's
+/// tests hold them.
+const CREATE_SKILL_82022776: [&str; 5] = [
+    "SKILL.md",
+    "scripts/check_exists.sh",
+    "scripts/list_skills.sh",
+    "scripts/scaffold.sh",
+    "scripts/write_skill_md.sh",
+];
+
+fn create_skill_fixture(name: &str) -> Vec<u8> {
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/openalpaca_core/src/bundled/fixtures/82022776/skills/create-skill")
+        .join(name);
+    std::fs::read(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()))
+}
+
+/// A scratch config directory under the sandbox whose `skills/create-skill/`
+/// is what `82022776`'s seeding wrote — an earlier build's unedited copy.
+struct TidyStore {
+    // Declared first, so it drops first.
+    _env: crate::test_util::EnvSandbox,
+    _dir: tempfile::TempDir,
+    config: std::path::PathBuf,
+    skills: std::path::PathBuf,
+}
+
+impl TidyStore {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let env = crate::test_util::EnvSandbox::enter(dir.path());
+        let config = dir.path().join("config");
+        let skills = config.join("skills");
+        for name in CREATE_SKILL_82022776 {
+            let target = skills.join("create-skill").join(name);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(&target, create_skill_fixture(name)).unwrap();
+        }
+        Self {
+            _env: env,
+            _dir: dir,
+            config,
+            skills,
+        }
+    }
+}
+
+#[test]
+fn tidy_is_a_verb_and_apply_its_one_flag() {
+    assert!(matches!(
+        parse(&["skills", "tidy"]),
+        SkillsCommands::Tidy { apply: false }
+    ));
+    assert!(matches!(
+        parse(&["skills", "tidy", "--apply"]),
+        SkillsCommands::Tidy { apply: true }
+    ));
+}
+
+/// `--apply` moves the whole unedited folder to
+/// `skills/.archived/<key>.<UTC timestamp>/`, every file in it as it was,
+/// says so, and ends with the warning for an earlier build.
+#[tokio::test]
+async fn skills_tidy_apply_moves_an_unedited_create_skill_folder_to_archived() {
+    plain();
+    let store = TidyStore::new();
+
+    let listed = tidy_lines(&store.config, None, false, now())
+        .await
+        .unwrap()
+        .join("\n");
+    assert!(
+        listed.starts_with(&format!(
+            "Unedited copies of shipped skills in {}, not read — the built-in ones, or a \
+             plugin's skill of the same name, run in their place:",
+            store.skills.display()
+        )),
+        "{listed}"
+    );
+    let from = store.skills.join("create-skill");
+    let to = store.skills.join(".archived/create-skill.20261107120000");
+    assert!(
+        listed.contains(&format!("{} (version: earlier)", from.display())),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(&format!("would move to {}", to.display())),
+        "{listed}"
+    );
+    assert!(from.join("SKILL.md").is_file(), "the listing moves nothing");
+
+    let lines = tidy_lines(&store.config, None, true, now()).await.unwrap();
+    let text = lines.join("\n");
+    assert!(!from.exists());
+    for name in CREATE_SKILL_82022776 {
+        assert_eq!(
+            std::fs::read(to.join(name)).unwrap(),
+            create_skill_fixture(name)
+        );
+    }
+    assert!(
+        text.contains(&format!("Moved {} to {}", from.display(), to.display())),
+        "{text}"
+    );
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some(TIDY_WARNING),
+        "{text}"
+    );
+}
+
+/// A folder with one file edited is the person's override: it is neither
+/// listed nor moved.
+#[tokio::test]
+async fn skills_tidy_leaves_an_override_folder() {
+    plain();
+    let store = TidyStore::new();
+    let skill_md = store.skills.join("create-skill/SKILL.md");
+    let edited = format!(
+        "{}\nAsk before writing.\n",
+        String::from_utf8(create_skill_fixture("SKILL.md")).unwrap()
+    );
+    std::fs::write(&skill_md, &edited).unwrap();
+
+    for apply in [false, true] {
+        let text = tidy_lines(&store.config, None, apply, now())
+            .await
+            .unwrap()
+            .join("\n");
+        assert_eq!(
+            text,
+            format!(
+                "No unedited copies of shipped skills in {}: nothing to tidy.",
+                store.skills.display()
+            )
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&skill_md).unwrap(), edited);
+    for name in &CREATE_SKILL_82022776[1..] {
+        assert_eq!(
+            std::fs::read(store.skills.join("create-skill").join(name)).unwrap(),
+            create_skill_fixture(name)
+        );
+    }
+    assert!(!store.skills.join(".archived").exists());
+}
+
+/// With a daemon answering, `--apply` reads `GET /v1/skills` and moves only
+/// a folder its listing names as an unedited copy not used.
+#[tokio::test]
+async fn skills_tidy_apply_moves_nothing_the_running_daemon_reads() {
+    plain();
+    let store = TidyStore::new();
+    let rows = serde_json::json!([
+        {"id": "create-skill", "name": "Create Skill", "author": "file:project",
+         "overrides_bundled": true, "not_used": [{
+            "source": "bundled", "path": "/store/state/cache/bundled-skills/create-skill",
+            "plugin": null, "reason": "overridden", "version": null, "edit": null}]}
+    ])
+    .to_string();
+    let (addr, server) = serve(vec![json_answer("200 OK", "skills", &rows)]);
+    let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+
+    let text = tidy_lines(&store.config, Some(&client), true, now())
+        .await
+        .unwrap()
+        .join("\n");
+
+    let requests = server.join().expect("the server finishes");
+    assert!(
+        requests[0].starts_with("GET /v1/skills HTTP/1.1"),
+        "{}",
+        requests[0]
+    );
+    let folder = store.skills.join("create-skill");
+    assert!(folder.join("SKILL.md").is_file());
+    assert!(
+        text.contains(&format!(
+            "Left {}: the running daemon does not list it as an unused copy",
+            folder.display()
+        )),
+        "{text}"
+    );
+    assert!(!text.contains(TIDY_WARNING), "nothing moved: {text}");
+    assert!(!store.skills.join(".archived").exists());
+}
+
+/// A `.git` file in the config directory — the form a linked worktree or a
+/// submodule has — makes it a work tree's: `skills tidy --apply` is refused,
+/// naming it, and the folder stays whole; without `--apply` it is listed.
+/// The `.git` entry is this test's own, in its scratch directory.
+#[tokio::test]
+async fn skills_tidy_apply_in_a_git_work_tree_is_refused_naming_it() {
+    plain();
+    let store = TidyStore::new();
+    std::fs::write(store.config.join(".git"), "gitdir: ../elsewhere/.git\n").unwrap();
+    let root = store.config.canonicalize().unwrap();
+
+    let error = tidy_lines(&store.config, None, true, now())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "`openalpaca skills tidy --apply` moves nothing inside a git work tree, and {} is \
+             inside {}: a copy there may be a file the repository holds, as in a development \
+             checkout, whose config/ is the source of the built-in ones. Nothing was moved; \
+             `openalpaca skills tidy` lists the copies, for you to move yourself.",
+            store.config.display(),
+            root.display()
+        )
+    );
+    for name in CREATE_SKILL_82022776 {
+        assert_eq!(
+            std::fs::read(store.skills.join("create-skill").join(name)).unwrap(),
+            create_skill_fixture(name)
+        );
+    }
+    assert!(!store.skills.join(".archived").exists());
+
+    let text = tidy_lines(&store.config, None, false, now())
+        .await
+        .unwrap()
+        .join("\n");
+    assert!(
+        text.contains(&format!(
+            "would move to {}",
+            store
+                .skills
+                .join(".archived/create-skill.20261107120000")
+                .display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(&format!(
+            "Nothing was moved; `openalpaca skills tidy --apply` moves nothing here: {} is \
+             inside the git work tree {}.",
+            store.config.display(),
+            root.display()
+        )),
+        "{text}"
+    );
+    assert!(!store.skills.join(".archived").exists());
+}

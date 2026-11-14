@@ -100,13 +100,15 @@ impl Orchestrator {
         };
         match &intent {
             Intent::TaskQuery { .. } | Intent::TaskControl { .. } => {
-                self.bus.publish(SystemEvent::IntentClassified {
-                    request_id,
-                    intent_type: intent.intent_type().to_string(),
-                    timestamp: Utc::now(),
-                });
                 let result = match intent {
                     Intent::TaskQuery { task_id } => self.handle_task_query(task_id, &owner_id_str),
+                    // N-ROUTE-1: /pause and /resume, bare or with an id, answer
+                    // one sentence before any target is resolved; nothing moves.
+                    Intent::TaskControl { action, .. }
+                        if action == "pause" || action == "resume" =>
+                    {
+                        Ok(super::task_ops::PAUSE_UNSUPPORTED.to_string())
+                    }
                     Intent::TaskControl {
                         task_id: Some(task_id),
                         action,
@@ -115,8 +117,8 @@ impl Orchestrator {
                         task_id: None,
                         action,
                     } => {
-                        // Bare /cancel|/pause|/resume: resolve the target from
-                        // the lane's active workflows (Routing V2 Phase 3).
+                        // Bare /cancel: resolve the target from the lane's
+                        // active workflows (Routing V2 Phase 3).
                         self.handle_bare_task_control(&action, &lane_key)
                     }
                     _ => unreachable!(),
@@ -145,11 +147,6 @@ impl Orchestrator {
         // chosen. The command's text is the message as typed, never the
         // model input an attachment turn augments.
         if let Intent::MemoryCommand { verb, args } = &intent {
-            self.bus.publish(SystemEvent::IntentClassified {
-                request_id,
-                intent_type: intent.intent_type().to_string(),
-                timestamp: Utc::now(),
-            });
             let turn = ChatCommandTurn {
                 principal: principal.clone(),
                 source: source.clone(),

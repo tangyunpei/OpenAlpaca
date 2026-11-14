@@ -10,7 +10,7 @@ pub struct CompactionReport {
     pub initial_tokens: usize,
     pub final_tokens: usize,
     /// The working state the LlmSummary phase wrote, and its boundary:
-    /// `messages[2..boundary]` of the list as the phase found it lie behind
+    /// `messages[head..boundary]` of the list as the phase found it lie behind
     /// it (design 11 §3.3). `None` when the phase was not reached or fell
     /// back to the heuristic.
     pub working_state: Option<(WorkingState, usize)>,
@@ -35,6 +35,9 @@ pub struct GraduatedCompactor<'a> {
     summarizer: &'a dyn Summarizer,
     /// The rendered working state's limit (`summary_max_chars`).
     max_chars: usize,
+    /// The messages at the head of the list no tier touches
+    /// (`LoopConfig::kept_head`).
+    kept_head: usize,
 }
 
 impl<'a> GraduatedCompactor<'a> {
@@ -42,11 +45,13 @@ impl<'a> GraduatedCompactor<'a> {
         budget: &'a ContextBudgetManager,
         summarizer: &'a dyn Summarizer,
         max_chars: usize,
+        kept_head: usize,
     ) -> Self {
         Self {
             budget,
             summarizer,
             max_chars,
+            kept_head,
         }
     }
 
@@ -84,12 +89,19 @@ impl<'a> GraduatedCompactor<'a> {
                     let min_recent = self.budget.min_recent_messages();
                     let cleaned =
                         crate::context_budget::compaction::CompactionPipeline::discard_social(
-                            messages, min_recent,
+                            messages,
+                            self.kept_head,
+                            min_recent,
                         );
                     *messages = cleaned;
                 }
                 CompactionTier::HeuristicSummary => {
-                    crate::runner::compress_context(messages, tail_keep, Some(self.budget));
+                    crate::runner::compress_context(
+                        messages,
+                        self.kept_head,
+                        tail_keep,
+                        Some(self.budget),
+                    );
                 }
                 CompactionTier::LlmSummary => {
                     // Use existing CompactionPipeline for LLM-based summarization
@@ -98,7 +110,7 @@ impl<'a> GraduatedCompactor<'a> {
                     let result = if let Some(ref token) = cancel_token {
                         tokio::select! {
                             res = crate::context_budget::compaction::CompactionPipeline::compact(
-                                owned.clone(), min_recent, previous, behind, self.summarizer, self.max_chars,
+                                owned.clone(), self.kept_head, min_recent, previous, behind, self.summarizer, self.max_chars,
                             ) => res,
                             _ = token.cancelled() => {
                                 *messages = owned;
@@ -109,6 +121,7 @@ impl<'a> GraduatedCompactor<'a> {
                     } else {
                         crate::context_budget::compaction::CompactionPipeline::compact(
                             owned,
+                            self.kept_head,
                             min_recent,
                             previous,
                             behind,
@@ -246,7 +259,12 @@ mod tests {
         messages.push(ChatMessage::user("recent"));
         messages.push(ChatMessage::assistant("recent resp"));
 
-        let compactor = GraduatedCompactor::new(&budget, &StateSummarizer, 4000);
+        let compactor = GraduatedCompactor::new(
+            &budget,
+            &StateSummarizer,
+            4000,
+            crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
+        );
         let report = compactor.compact(&mut messages, 2, None, None, &[]).await;
 
         let (state, boundary) = report
@@ -269,6 +287,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 is_error: false,
+                echo: None,
             },
         ];
         truncate_tool_results(&mut messages);
@@ -306,7 +325,12 @@ mod tests {
         messages.push(ChatMessage::user("thanks!"));
         messages.push(ChatMessage::assistant("You're welcome!"));
 
-        let compactor = GraduatedCompactor::new(&budget, &StateSummarizer, 4000);
+        let compactor = GraduatedCompactor::new(
+            &budget,
+            &StateSummarizer,
+            4000,
+            crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
+        );
         let report = compactor.compact(&mut messages, 2, None, None, &[]).await;
 
         assert!(
@@ -347,7 +371,12 @@ mod tests {
         messages.push(ChatMessage::user("thanks!"));
         messages.push(ChatMessage::assistant("You're welcome!"));
 
-        let compactor = GraduatedCompactor::new(&budget, &StateSummarizer, 4000);
+        let compactor = GraduatedCompactor::new(
+            &budget,
+            &StateSummarizer,
+            4000,
+            crate::context_budget::compaction::DEFAULT_KEPT_HEAD,
+        );
         let report = compactor.compact(&mut messages, 2, None, None, &[]).await;
 
         // messages_discarded should accumulate across all tiers that remove messages
@@ -398,6 +427,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 is_error: false,
+                echo: None,
             },
         ];
         drop_multimedia(&mut messages);

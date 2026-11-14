@@ -10,6 +10,56 @@ use std::sync::RwLock;
 pub struct PricingInfo {
     pub input_price_per_million: f64,
     pub output_price_per_million: f64,
+    /// The higher rate a long prompt pays, when the model has one.
+    pub long_prompt: Option<LongPromptRate>,
+}
+
+/// A second rate a model's whole request pays once its prompt is longer than
+/// a threshold (O-17 (a)).
+///
+/// The prompt's length is its input tokens, cached ones included — the
+/// folded `Usage.input_tokens` — and the request is priced on its own:
+/// above the threshold every input, cache and output token takes this rate,
+/// the cache rates scaling with the input rate as they do at the standard
+/// one. At the threshold itself the standard rate holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LongPromptRate {
+    /// The longest prompt, in input tokens, still priced at the standard rate.
+    pub above_input_tokens: u32,
+    pub input_price_per_million: f64,
+    pub output_price_per_million: f64,
+}
+
+/// What a model's API refuses in a request, as its provider's own pages say
+/// (C7a, M-3d): each flag set only on a compiled row whose page, read on the
+/// day the row was written, says so, and named there with the page and the
+/// date. A row with none set gets the request its caller asked for.
+///
+/// The router meets the contract where a request first names its model
+/// (`LlmRouter::meet_request_contract`): it leaves out what the model
+/// refuses, sends `auto` for a forced tool choice and says so once a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RequestContract {
+    /// `temperature`, `top_p` and `top_k` are refused (a 400 at a non-default
+    /// value under the API version the Anthropic arm sends).
+    pub no_sampling_parameters: bool,
+    /// Thinking is always on: `thinking: {"type": "disabled"}` is refused.
+    pub thinking_always_on: bool,
+    /// Manual thinking budgets (`thinking: {"type": "enabled", ...}`) are
+    /// refused; adaptive thinking is the model's only mode.
+    pub adaptive_thinking_only: bool,
+    /// A forced tool choice (`any`, or a named tool) is refused.
+    pub no_forced_tool_choice: bool,
+}
+
+impl RequestContract {
+    /// A model whose pages state no request rule the arm would break.
+    pub const NONE: Self = Self {
+        no_sampling_parameters: false,
+        thinking_always_on: false,
+        adaptive_thinking_only: false,
+        no_forced_tool_choice: false,
+    };
 }
 
 /// Serializable model entry for API responses.
@@ -88,7 +138,8 @@ pub struct ModelInfo {
     pub supports_audio: bool,
     /// Whether this model accepts document (PDF) content parts natively.
     pub supports_document: bool,
-    /// Whether this model supports reasoning (OpenAI o-series).
+    /// Whether this model reports reasoning tokens (OpenAI's reasoning models).
+    /// Recorded, not read by any call path.
     pub supports_reasoning: bool,
     /// Whether this model can be given tools.
     ///
@@ -104,6 +155,16 @@ pub struct ModelInfo {
     /// the picker without the owner's declaration being deleted behind their
     /// back (L2).
     pub declared: bool,
+    /// The rate a request pays once its prompt passes a length, for a model
+    /// whose page prices long prompts higher; `None` for one priced the same
+    /// at any length. Only a compiled row carries one: a `[models]` row the
+    /// person writes replaces the compiled row whole, rate included.
+    pub long_prompt: Option<LongPromptRate>,
+    /// What the model's API refuses in a request (C7a). A compiled row's;
+    /// a `[models]` row for the same id keeps it, since it is the model's
+    /// contract rather than the person's price, and a discovered id that no
+    /// compiled row names has none.
+    pub request_contract: RequestContract,
 }
 
 /// Registry mapping model IDs to their provider and pricing metadata.
@@ -131,26 +192,85 @@ impl ModelRegistry {
     fn default_models() -> HashMap<String, ModelInfo> {
         let mut models = HashMap::new();
 
-        // Anthropic models (discovered: false — only for internal routing/pricing)
-        for id in &["claude-opus-4-20250514", "claude-opus-4-6"] {
-            models.insert(
-                id.to_string(),
-                ModelInfo {
-                    provider: ProviderType::Anthropic,
-                    input_price_per_million: 15.0,
-                    output_price_per_million: 75.0,
-                    context_window: 200_000,
-                    discovered: false,
-                    supports_image: true,
-                    supports_audio: false,
-                    supports_document: true,
-                    supports_reasoning: false,
-                    supports_tools: true,
-                    declared: true,
+        // Anthropic models (discovered: false — only for internal routing/pricing).
+        // Prices from platform.claude.com/docs/en/about-claude/pricing, read
+        // 2026-11-12. The windows of the rows before Opus 5.5 stay as listed
+        // until step 19's live check (O-17 (a)); the pricing page's "Long
+        // context pricing" gives Claude 4.6 and later (but Haiku 5.5) their
+        // whole window at the standard rate, so none has a long-prompt rate.
+        // `claude-opus-4-20250514` and `claude-sonnet-4-20250514` are gone:
+        // "Retired" on June 15, 2026 (the model-deprecations page, read
+        // 2026-11-12), O-17 (a).
+        //
+        // Claude Opus 5.5, the latest Opus and `strong`'s row (O-13 (a)):
+        // $4 / $20, a 1M-token window (the pricing page and the models
+        // overview, platform.claude.com/docs/en/models/overview, read
+        // 2026-11-12); text and image in and tool use ("All current models
+        // support text and image input, ... vision, and tool use", the
+        // overview); PDFs ("All active models support PDF processing",
+        // .../build-with-claude/pdf-support, read 2026-11-12).
+        models.insert(
+            "claude-opus-5-5".to_string(),
+            ModelInfo {
+                provider: ProviderType::Anthropic,
+                input_price_per_million: 4.0,
+                output_price_per_million: 20.0,
+                context_window: 1_000_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: true,
+                supports_reasoning: false,
+                supports_tools: true,
+                declared: true,
+                long_prompt: None,
+                // C7a: its request contract, from the pages read 2026-11-12.
+                // The Opus 5.5 migration guide (platform.claude.com/docs/en/
+                // models/opus-5-5/migration-guide), "What every request to
+                // Claude Opus 5.5 must satisfy": "Omit `temperature`, `top_p`,
+                // and `top_k`"; `thinking: {"type": "disabled"}` and manual
+                // budgets (`"enabled"`) "are rejected" — "adaptive thinking is
+                // always on"; forcing a tool call with `any` or a named tool
+                // "is rejected". The thinking troubleshooting page's table
+                // (.../build-with-claude/thinking-troubleshooting): Opus 5.5
+                // "Adaptive only", "Always on", rejecting `"enabled"` and
+                // `"disabled"`. Model deprecations (.../about-claude/
+                // model-deprecations): sampling parameters "Removed in API
+                // version `2026-10-21`"; "Earlier API versions return it [a
+                // 400] when set to a non-default value on Claude 4.7 and
+                // later models" — the arm sends `2023-06-01`.
+                request_contract: RequestContract {
+                    no_sampling_parameters: true,
+                    thinking_always_on: true,
+                    adaptive_thinking_only: true,
+                    no_forced_tool_choice: true,
                 },
-            );
-        }
-        for id in &["claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-sonnet-4-20250514"] {
+            },
+        );
+        // Claude Opus 4.6: $5 / $25 (the pricing page, read 2026-11-12; the
+        // catalogue had $15 / $75, Opus 4's and 4.1's rate).
+        models.insert(
+            "claude-opus-4-6".to_string(),
+            ModelInfo {
+                provider: ProviderType::Anthropic,
+                input_price_per_million: 5.0,
+                output_price_per_million: 25.0,
+                context_window: 200_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: true,
+                supports_reasoning: false,
+                supports_tools: true,
+                declared: true,
+                long_prompt: None,
+                request_contract: RequestContract::NONE,
+            },
+        );
+        // Claude Sonnet 4.6 and 4.5: $3 / $15 (the pricing page, read
+        // 2026-11-12). Sonnet 4.5 is "Deprecated", retiring November 30,
+        // 2026 (the model-deprecations page): kept until then.
+        for id in &["claude-sonnet-4-6", "claude-sonnet-4-5-20250929"] {
             models.insert(
                 id.to_string(),
                 ModelInfo {
@@ -165,9 +285,12 @@ impl ModelRegistry {
                     supports_reasoning: false,
                     supports_tools: true,
                     declared: true,
+                    long_prompt: None,
+                    request_contract: RequestContract::NONE,
                 },
             );
         }
+        // Claude Haiku 4.5: $1 / $5 (the pricing page, read 2026-11-12).
         models.insert(
             "claude-haiku-4-5-20251001".to_string(),
             ModelInfo {
@@ -182,10 +305,17 @@ impl ModelRegistry {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
 
-        // OpenAI models
+        // OpenAI models. `gpt-5.2` $1.75 / $14, `gpt-5-mini` $0.25 / $2 and
+        // `gpt-5-nano` $0.05 / $0.40, as the catalogue had them
+        // (developers.openai.com/api/docs/pricing and each model's page, read
+        // 2026-11-12); the last two "Deprecated", shut down on Dec 11, 2026
+        // (the deprecations page): kept until O-16 (a) moves the aliases off
+        // them. The windows stay as listed until step 19's live check.
         models.insert(
             "gpt-5.2".to_string(),
             ModelInfo {
@@ -200,6 +330,8 @@ impl ModelRegistry {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
         models.insert(
@@ -216,6 +348,8 @@ impl ModelRegistry {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
         models.insert(
@@ -232,40 +366,89 @@ impl ModelRegistry {
                 supports_reasoning: false,
                 supports_tools: true,
                 declared: true,
+                long_prompt: None,
+                request_contract: RequestContract::NONE,
             },
         );
 
-        // OpenAI o-series reasoning models
-        for id in &["o3", "o3-mini", "o1", "o1-mini"] {
-            models.insert(
-                id.to_string(),
-                ModelInfo {
-                    provider: ProviderType::OpenAI,
-                    input_price_per_million: match *id {
-                        "o3" => 10.0,
-                        "o3-mini" => 1.10,
-                        "o1" => 15.0,
-                        "o1-mini" => 1.10,
-                        _ => 0.0,
-                    },
-                    output_price_per_million: match *id {
-                        "o3" => 40.0,
-                        "o3-mini" => 4.40,
-                        "o1" => 60.0,
-                        "o1-mini" => 4.40,
-                        _ => 0.0,
-                    },
-                    context_window: 200_000,
-                    discovered: false,
-                    supports_image: matches!(*id, "o1" | "o3"),
-                    supports_audio: false,
-                    supports_document: false,
-                    supports_reasoning: true,
-                    supports_tools: true,
-                    declared: true,
-                },
-            );
-        }
+        // The seeded `llm.toml`'s OpenAI default (O-18 (c)), at the rates and
+        // window of OpenAI's own model page (developers.openai.com, "GPT-4o
+        // mini", read 2026-11-12): text and image in, no audio, function
+        // calling; the page marks it deprecated.
+        models.insert(
+            "gpt-4o-mini".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 0.15,
+                output_price_per_million: 0.60,
+                context_window: 128_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: false,
+                supports_reasoning: false,
+                supports_tools: true,
+                declared: true,
+                long_prompt: None,
+                request_contract: RequestContract::NONE,
+            },
+        );
+
+        // GPT-6.1 Sol, the latest Sol (O-13 (a); `strong`'s OpenAI row once
+        // C7b lands, O-15 (a)): $2 / $10, and "API prompts with more than
+        // 272K input tokens are priced at 2x input and cache rates and 1.5x
+        // output for the full request" — $4 / $15; a 1,050,000-token window;
+        // text and image in, audio unsupported; reasoning tokens; function
+        // calling, though "Tool calling requires the Responses API", which
+        // the arm reaches only with C7b (developers.openai.com/api/docs/
+        // models/gpt-6.1-sol and .../pricing, read 2026-11-12).
+        models.insert(
+            "gpt-6.1-sol".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 2.0,
+                output_price_per_million: 10.0,
+                context_window: 1_050_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: false,
+                supports_reasoning: true,
+                supports_tools: true,
+                declared: true,
+                long_prompt: Some(LongPromptRate {
+                    above_input_tokens: 272_000,
+                    input_price_per_million: 4.0,
+                    output_price_per_million: 15.0,
+                }),
+                request_contract: RequestContract::NONE,
+            },
+        );
+
+        // o3: $2 / $8 (its page, developers.openai.com/api/docs/models/o3,
+        // and the pricing page, read 2026-11-12; the catalogue had $10 /
+        // $40), a 200,000-token window. "Deprecated", shut down on Dec 11,
+        // 2026 (the deprecations page): kept until then. `o3-mini`, `o1` and
+        // `o1-mini` are gone: "Shut down" (.../models/all and the
+        // deprecations page, read 2026-11-12), O-17 (a).
+        models.insert(
+            "o3".to_string(),
+            ModelInfo {
+                provider: ProviderType::OpenAI,
+                input_price_per_million: 2.0,
+                output_price_per_million: 8.0,
+                context_window: 200_000,
+                discovered: false,
+                supports_image: true,
+                supports_audio: false,
+                supports_document: false,
+                supports_reasoning: true,
+                supports_tools: true,
+                declared: true,
+                long_prompt: None,
+                request_contract: RequestContract::NONE,
+            },
+        );
 
         models
     }
@@ -301,6 +484,9 @@ impl ModelRegistry {
         config_models: &HashMap<String, crate::config::ModelConfigEntry>,
         disabled: &HashSet<ProviderType>,
     ) {
+        // A row the person writes prices a model; its request contract is
+        // the model's own, so the compiled row's is kept (C7a).
+        let compiled = Self::default_models();
         for (model_id, entry) in config_models {
             if let Some(provider) = crate::config::parse_provider_type_pub(&entry.provider) {
                 if disabled.contains(&provider) {
@@ -325,6 +511,10 @@ impl ModelRegistry {
                         // until they say otherwise.
                         supports_tools: entry.supports_tools.unwrap_or(true),
                         declared: true,
+                        long_prompt: None,
+                        request_contract: compiled
+                            .get(model_id)
+                            .map_or(RequestContract::NONE, |row| row.request_contract),
                     },
                 );
             }
@@ -345,16 +535,52 @@ impl ModelRegistry {
         self.resolve_provider(model_id).map(|p| p.to_string())
     }
 
-    /// Get pricing info for a model.
+    /// The price the registry knows for a model.
+    ///
+    /// `None` for an id it has never met, and for one only a keyed provider's
+    /// discovery registered ([`Self::is_unpriced`]): that row's 0 / 0 is the
+    /// absence of a price, not a price (O-18).
     pub fn get_pricing(&self, model_id: &str) -> Option<PricingInfo> {
         self.models
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
+            .filter(|info| !Self::unpriced(info))
             .map(|info| PricingInfo {
                 input_price_per_million: info.input_price_per_million,
                 output_price_per_million: info.output_price_per_million,
+                long_prompt: info.long_prompt,
             })
+    }
+
+    /// Whether this id is registered with no price anyone stated: a keyed
+    /// provider's discovery listed it, and neither a compiled row nor a
+    /// `[models]` row prices it.
+    ///
+    /// Such a row stays routable; the cost tracker counts it at its fallback
+    /// for an unknown id (O-18 (b)). A local provider's discovered row is
+    /// priced at 0 instead, because it runs on this machine (L8) — and
+    /// "local" is the set whose provider needs no key: only Ollama is either.
+    pub fn is_unpriced(&self, model_id: &str) -> bool {
+        self.models
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(model_id)
+            .is_some_and(Self::unpriced)
+    }
+
+    fn unpriced(info: &ModelInfo) -> bool {
+        !info.declared && !info.provider.is_local()
+    }
+
+    /// What `model_id`'s API refuses in a request (C7a); none for an id the
+    /// registry has never met or whose row states nothing.
+    pub fn request_contract(&self, model_id: &str) -> RequestContract {
+        self.models
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(model_id)
+            .map_or(RequestContract::NONE, |info| info.request_contract)
     }
 
     /// Get full model info (cloned).
@@ -630,3 +856,6 @@ impl ModelRegistry {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod catalogue_tests;

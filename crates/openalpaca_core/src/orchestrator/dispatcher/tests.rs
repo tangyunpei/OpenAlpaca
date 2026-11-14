@@ -1,7 +1,9 @@
 use super::*;
 use crate::agent::subagent::SubAgent;
+use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::test_util::{make_agent, template_from_agent};
+use chrono::Utc;
 
 fn setup(agents: Vec<SubAgent>) -> TaskDispatcher {
     setup_with_config(agents, DaemonConfig::default())
@@ -263,9 +265,11 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
     );
 }
 
-/// L9. An install with no agent templates at all is the shape a packaged
-/// daemon really had, and it never clears on its own — so it must not be
-/// reported as the one thing that does.
+/// L9, S-5. A catalog with no template that can be spawned never clears on
+/// its own — so it must not be reported as the one thing that does. With
+/// the bundle always registered it is reached only through files that
+/// withhold the built-in templates (or a registry built empty, as here), so
+/// the message no longer says a first boot seeds them.
 #[test]
 fn test_dispatch_lead_agent_says_no_templates_are_installed() {
     let dispatcher = setup(vec![]);
@@ -283,13 +287,216 @@ fn test_dispatch_lead_agent_says_no_templates_are_installed() {
 
     let err = result.unwrap_err();
     assert!(
-        err.contains("No agent templates are installed") && err.contains("config/agents"),
-        "the message must name the cause and where the fix goes: {err}"
+        err.contains("No agent template can act as Lead Agent")
+            && err.contains("config/agents")
+            && err.contains("daemon.log"),
+        "the message must name the cause, where the fix goes and where to read more: {err}"
+    );
+    assert!(
+        !err.contains("seeds"),
+        "no first boot seeds the templates any more (S-5): {err}"
     );
     assert!(
         !err.contains("busy"),
         "nothing is busy — there is nothing at all: {err}"
     );
+}
+
+/// Dispatch one workflow and answer the template its lead was spawned from.
+fn dispatch_one(dispatcher: &TaskDispatcher, title: &str) -> String {
+    let task_id = dispatcher
+        .dispatch_lead_agent(
+            title,
+            title.to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .expect("a lead is spawned")
+        .task_id;
+    dispatcher
+        .shared_context
+        .agent_registry
+        .list_instances()
+        .into_iter()
+        .find(|a| a.current_task.as_deref() == Some(task_id.as_str()))
+        .expect("the run's lead holds the task")
+        .template_id
+}
+
+/// G-1: the `orchestration` templates are tried in one order, by id — no
+/// longer the map's — so of twelve singleton leads the first by id leads,
+/// and while it is busy the next one does.
+#[test]
+fn orchestration_templates_are_tried_in_id_order() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let ids = [
+        "lead_k", "lead_c", "lead_h", "lead_a", "lead_l", "lead_e", "lead_b", "lead_j", "lead_f",
+        "lead_d", "lead_i", "lead_g",
+    ];
+    let dispatcher = setup(
+        ids.iter()
+            .map(|id| make_agent(id, vec!["orchestration"]))
+            .collect(),
+    );
+
+    assert_eq!(dispatch_one(&dispatcher, "First"), "lead_a");
+    assert_eq!(dispatch_one(&dispatcher, "Second"), "lead_b");
+    assert_eq!(dispatch_one(&dispatcher, "Third"), "lead_c");
+}
+
+/// G-1's fallback: with every `orchestration` template busy, the lead is
+/// borrowed from the first template by id that can be spawned — no longer
+/// any template the map gave first.
+#[test]
+fn a_borrowed_lead_is_the_first_template_by_id() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let mut agents = vec![make_agent("lead_agent", vec!["orchestration"])];
+    for id in [
+        "worker_k", "worker_c", "worker_h", "worker_e", "worker_b", "worker_j", "worker_f",
+        "worker_d", "worker_i", "worker_g",
+    ] {
+        agents.push(make_agent(id, vec!["web_search"]));
+    }
+    let dispatcher = setup(agents);
+
+    assert_eq!(dispatch_one(&dispatcher, "First"), "lead_agent");
+    assert_eq!(dispatch_one(&dispatcher, "Second"), "worker_b");
+    assert_eq!(dispatch_one(&dispatcher, "Third"), "worker_b");
+}
+
+/// G-1 from C3: with the seeded `lead_agent.md` an unedited copy, set aside
+/// (subagent design §2.2), the bundled `lead_agent` is under the person's
+/// own `orchestration` template, which leads though `lead_agent` sorts
+/// first by id.
+#[test]
+fn a_persons_own_lead_is_chosen_before_the_bundled_lead() {
+    use crate::agent::file_layer::{LoadMode, rescan_file_layer};
+    use crate::bundled::{BUNDLED_AGENTS, bundled_templates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().canonicalize().unwrap());
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let seeded = BUNDLED_AGENTS
+        .iter()
+        .find(|file| file.path == "agents/lead_agent.md")
+        .unwrap();
+    std::fs::write(agents.join("lead_agent.md"), seeded.contents).unwrap();
+    std::fs::write(
+        agents.join("my_lead.md"),
+        "---\nid: my_lead\nname: Mine\ndescription: leads my way\nsingleton: true\n\
+         capabilities:\n  - \"orchestration\"\n---\n\n## Persona\n\nLeads.\n",
+    )
+    .unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup(vec![]);
+    let registry = &dispatcher.shared_context.agent_registry;
+    registry.set_bundled_layer(bundled_templates());
+    rescan_file_layer(
+        &agents,
+        LoadMode::Start,
+        registry,
+        &crate::tools::ToolRegistry::default(),
+        &db,
+    )
+    .unwrap();
+
+    assert_eq!(dispatch_one(&dispatcher, "First"), "my_lead");
+    assert_eq!(dispatch_one(&dispatcher, "Second"), "lead_agent");
+}
+
+/// G-1, as today: a file switching `lead_agent` off (subagent design §2.4
+/// L-4a) does not stop workflows — no `orchestration` template is left, so
+/// the fallback borrows another template as lead, the first by id
+/// (`code_agent` on a stock store). §7 O-1's changed premise is the owner's
+/// to confirm; nothing here changes the fallback.
+#[test]
+fn switching_off_lead_agent_alone_still_borrows_a_lead() {
+    use crate::agent::file_layer::{LoadMode, rescan_file_layer};
+    use crate::bundled::bundled_templates;
+
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().canonicalize().unwrap());
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("lead_agent.md"),
+        "---\nid: lead_agent\ndisabled: true\n---\n",
+    )
+    .unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup(vec![]);
+    let registry = &dispatcher.shared_context.agent_registry;
+    registry.set_bundled_layer(bundled_templates());
+    rescan_file_layer(
+        &agents,
+        LoadMode::Start,
+        registry,
+        &crate::tools::ToolRegistry::default(),
+        &db,
+    )
+    .unwrap();
+
+    assert!(
+        registry
+            .find_templates_by_capability("orchestration")
+            .is_empty()
+    );
+    assert_eq!(dispatch_one(&dispatcher, "First"), "code_agent");
+}
+
+/// G-1's fallback tries `general_agent` last (SA-1, subagent design §3.1
+/// A-4): an edited `general_agent.md` is a file of the person's, so first in
+/// the fallback's order, and before this a second concurrent workflow —
+/// `lead_agent` busy — borrowed it as lead, so every default spawn of that
+/// run was refused as a self-spawn. The borrowed lead is now the next
+/// template, `code_agent`, and `general_agent` stays spawnable.
+#[test]
+fn the_fallback_lead_tries_general_agent_last() {
+    use crate::agent::file_layer::{LoadMode, rescan_file_layer};
+    use crate::agent::registry::TemplateLayer;
+    use crate::bundled::{BUNDLED_AGENTS, bundled_templates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&dir.path().canonicalize().unwrap());
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let shipped = BUNDLED_AGENTS
+        .iter()
+        .find(|file| file.path == "agents/general_agent.md")
+        .unwrap();
+    std::fs::write(
+        agents.join("general_agent.md"),
+        format!("{}\nMy own line: an edit.\n", shipped.contents),
+    )
+    .unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup(vec![]);
+    let registry = &dispatcher.shared_context.agent_registry;
+    registry.set_bundled_layer(bundled_templates());
+    rescan_file_layer(
+        &agents,
+        LoadMode::Start,
+        registry,
+        &crate::tools::ToolRegistry::default(),
+        &db,
+    )
+    .unwrap();
+    assert_eq!(
+        registry.provenance("general_agent").unwrap().layer,
+        TemplateLayer::File,
+        "the edited copy is the person's file"
+    );
+
+    assert_eq!(dispatch_one(&dispatcher, "First"), "lead_agent");
+    assert_eq!(dispatch_one(&dispatcher, "Second"), "code_agent");
+    assert_eq!(dispatch_one(&dispatcher, "Third"), "code_agent");
 }
 
 /// …and the capacity case still reads as capacity.
@@ -982,6 +1189,7 @@ impl openalpaca_llm::LlmProvider for RecordingLeadMock {
             usage: openalpaca_llm::Usage::default(),
             finish_reason: openalpaca_llm::FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -1698,6 +1906,7 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     }]));
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
@@ -2113,6 +2322,7 @@ impl ExtractionScene {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         };
         let provider = Arc::new(e2e_mock::MockProvider::new(vec![
@@ -2456,6 +2666,7 @@ async fn a_leads_history_row_names_the_template_that_ran() {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     }]));
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
@@ -2833,6 +3044,7 @@ async fn a_long_report_survives_to_the_two_thousand_character_cap() {
         },
         finish_reason: FinishReason::Stop,
         thinking: None,
+        echo: None,
         parts: None,
     }]));
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
@@ -2982,6 +3194,7 @@ async fn a_real_unattended_run_reports_the_tool_nobody_could_approve() {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         },
         // Round 2: it writes its report having been refused.
@@ -2996,6 +3209,7 @@ async fn a_real_unattended_run_reports_the_tool_nobody_could_approve() {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         },
     ]));
@@ -3105,6 +3319,7 @@ impl openalpaca_llm::LlmProvider for LeadAndSubagentMock {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         };
         let say = |text: &str| ChatResponse {
@@ -3118,6 +3333,7 @@ impl openalpaca_llm::LlmProvider for LeadAndSubagentMock {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         };
 
@@ -3255,6 +3471,7 @@ impl openalpaca_llm::LlmProvider for LeadSpawnsAPendingWorker {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }

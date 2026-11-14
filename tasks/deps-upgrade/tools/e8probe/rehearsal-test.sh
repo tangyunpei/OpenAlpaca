@@ -153,8 +153,8 @@ check "[real] exit 0, status complete, verdict pass" eval 'rc_is real 0 && has r
 check "[real] stdout is the block alone" framed real
 check "[real] stderr is the one line naming the work dir" trailer_only real
 check "[real] no marker on either stream, no .openalpaca, nothing dropped" clean_streams real
-check "[real] bins checked; e8probe-old on 3.51.1 and e8probe-new on 3.53.2" \
-  eval 'has real "bins-checksums ok" && grep -q -x -F "e8probe-old e8probe	sqlite 3.51.1" "$X/runs/real.out" && grep -q -x -F "e8probe-new e8probe	sqlite 3.53.2" "$X/runs/real.out"'
+check "[real] bins checked; e8probe-old on 3.51.1 and e8probe-new on 3.54.1" \
+  eval 'has real "bins-checksums ok" && grep -q -x -F "e8probe-old e8probe	sqlite 3.51.1" "$X/runs/real.out" && grep -q -x -F "e8probe-new e8probe	sqlite 3.54.1" "$X/runs/real.out"'
 check "[real] step 3: the probe first, then sqlite3, schema 4, the same row total" \
   eval 'has real "step3-probe db	schema-version 4" && has real "step3 schema-version 4" && has real "step3 tables=29 rows-total=10" && has real "step3 error-lines 0"'
 check "[real] both doctors scanned locally, exit 0, nothing on stderr" \
@@ -183,7 +183,7 @@ check "[no index] exit 0, cache-copies index-absent, the three cache checks abse
 # ---- flipped byte --------------------------------------------------------------------------------
 C=$(copy flipped)
 F=$(find "$C/memory" -name '*--*.md' | LC_ALL=C sort | head -n 1)
-python3 -I -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[-2] ^= 1; open(p,"wb").write(bytes(b))' "$F"
+python3.11 -I -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[-2] ^= 1; open(p,"wb").write(bytes(b))' "$F"
 rh flipped --copy "$C" --bins "$BINS"
 check "[flipped] exit 0, verdict fail naming note-mismatch, the doctors still local" \
   eval 'rc_is flipped 0 && grep -q -E "^verdict fail reasons=(.*,)?note-mismatch(,.*)?$" "$X/runs/flipped.out" && has flipped "doctor-tip local" && clean_streams flipped'

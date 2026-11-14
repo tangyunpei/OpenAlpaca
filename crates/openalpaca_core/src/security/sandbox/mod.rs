@@ -5,7 +5,7 @@
 
 use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
-use crate::daemon_config::CircuitBreakerConfig;
+use crate::daemon_config::{AgentDefaults, CircuitBreakerConfig};
 use crate::events::SystemEvent;
 use crate::security::capabilities::{Allowlist, CapabilityManager};
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
@@ -39,7 +39,14 @@ pub struct SandboxPolicy {
     pub denied_capabilities: Vec<String>,
     pub require_confirmation_for: Vec<String>,
     pub max_tool_calls: Option<u32>,
+    /// The per-tool bound (N-TOOL-1b, B-11): `[execution.agent_defaults]
+    /// max_tool_runtime_secs` on every loop. A call that runs a command, or
+    /// a plugin's tool, may ask for another figure
+    /// ([`Self::asked_runtime_secs`]).
     pub max_tool_runtime_secs: u64,
+    /// The most such a call may ask for: `[execution.agent_defaults]
+    /// max_tool_runtime_ceiling_secs`.
+    pub max_tool_runtime_ceiling_secs: u64,
     /// SSE stream ID for routing confirmation prompts to the active chat stream.
     pub stream_id: Option<String>,
     /// Lane key for routing confirmation prompts to connectors (e.g. Telegram).
@@ -65,15 +72,23 @@ pub struct SandboxPolicy {
 }
 
 impl SandboxPolicy {
-    /// Build a SandboxPolicy from agent constraints.
-    pub fn from_constraints(agent_id: &str, constraints: &AgentConstraints) -> Self {
+    /// Build a SandboxPolicy from agent constraints, its per-tool bound and
+    /// ceiling from `tools` — the daemon's `[execution.agent_defaults]`, the
+    /// one bound every loop reads (N-TOOL-1b). A template's `timeout_seconds`
+    /// is not read: it names the task's budget, not a tool's.
+    pub fn from_constraints(
+        agent_id: &str,
+        constraints: &AgentConstraints,
+        tools: &AgentDefaults,
+    ) -> Self {
         Self {
             agent_id: agent_id.to_string(),
             allowed_capabilities: Allowlist::from_agent_constraints(constraints),
             denied_capabilities: constraints.denied_capabilities.clone(),
             require_confirmation_for: constraints.require_confirmation_for.clone(),
             max_tool_calls: constraints.max_tool_calls,
-            max_tool_runtime_secs: constraints.timeout_seconds.unwrap_or(60),
+            max_tool_runtime_secs: tools.max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs: tools.max_tool_runtime_ceiling_secs,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -82,6 +97,60 @@ impl SandboxPolicy {
             // template says nothing about it.
             unattended: false,
         }
+    }
+
+    /// The seconds the sandbox lets one call run (N-TOOL-1b, B-11): what the
+    /// call asked for ([`Self::asked_runtime_secs`]), else its default
+    /// ([`Self::default_runtime_secs`]) — `own_secs` is a `Command`-backend
+    /// tool's own `timeout_secs` (`ToolRegistry::command_default_secs`),
+    /// `None` for every other tool. ZCode's `min(asked || default, max)`.
+    pub fn runtime_secs_for(
+        &self,
+        arguments: &serde_json::Value,
+        may_ask: bool,
+        own_secs: Option<u64>,
+    ) -> u64 {
+        self.asked_runtime_secs(arguments, may_ask)
+            .unwrap_or_else(|| self.default_runtime_secs(own_secs))
+    }
+
+    /// What a call that asked for nothing runs under: the per-tool bound,
+    /// or — for a `Command`-backend tool whose author's `timeout_secs`
+    /// (`own_secs`) is above it — that figure clamped to the ceiling
+    /// (CMD-TIMEOUT-2), never below the bound. An author's figure below the
+    /// bound leaves the bound: that tool's own clock stops it first. One at
+    /// the bound is cut here, the sandbox's the one clock (the backend
+    /// stands back where this cut is at or below its figure).
+    pub fn default_runtime_secs(&self, own_secs: Option<u64>) -> u64 {
+        let bound = self.max_tool_runtime_secs;
+        own_secs.map_or(bound, |own| {
+            own.min(self.max_tool_runtime_ceiling_secs).max(bound)
+        })
+    }
+
+    /// What a call that may ask for its own figure (`may_ask`: one that runs
+    /// a command, `ToolRegistry::is_command_tool`, or a plugin's tool,
+    /// `ToolRegistry::is_plugin_tool` — PLUGIN-WAIT) asked for with a
+    /// `timeout_secs` of 1 or more: that figure, clamped to the ceiling — a
+    /// larger one runs under the ceiling, never refused, and a smaller one
+    /// under itself. `None` for a `timeout_secs` that is not a whole number
+    /// of seconds above 0, and for every other tool, whose `timeout_secs` is
+    /// its own argument. A plugin's tool is handed the argument as it was
+    /// sent. A `Command`-backend tool's call that asked runs under
+    /// this figure alone; one that asked nothing, under its author's own
+    /// `timeout_secs` (its TOML's), its default (CMD-TIMEOUT,
+    /// `ToolContext::asked_runtime_secs`) — the sandbox's cut where that
+    /// figure is at or above the bound, its own clock's below
+    /// ([`Self::default_runtime_secs`], CMD-TIMEOUT-2).
+    pub fn asked_runtime_secs(&self, arguments: &serde_json::Value, may_ask: bool) -> Option<u64> {
+        if !may_ask {
+            return None;
+        }
+        arguments
+            .get("timeout_secs")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|secs| *secs > 0)
+            .map(|secs| secs.min(self.max_tool_runtime_ceiling_secs))
     }
 
     /// Admit the tools this loop was handed.
@@ -216,6 +285,9 @@ impl SandboxManager {
     /// Execute a tool call within the sandbox.
     ///
     /// Flow:
+    /// 0. A call whose arguments are a top-level JSON string holding an
+    ///    object is read as that object, once (N-TOOL-8,
+    ///    `decoded_json_string_call`); every step below sees the object
     /// 1. Capability check (deny/allow lists)
     /// 2. Input sanitization (null bytes, command injection, and `../` for a tool whose arguments reach a program — R29)
     /// 3. Confirmation check (fail-closed if tool requires confirmation),
@@ -239,6 +311,13 @@ impl SandboxManager {
         // is what lets the session writer find this call's audit row and add
         // the `log_seq` half to it (R51).
         let session_id = ctx.session_id.as_deref();
+
+        // 0. N-TOOL-8: a JSON string holding an object, read as that object
+        //    here, before the sanitizer, so the sanitizer, the registry's
+        //    schema check, the card, the approval cache and the tool all read
+        //    the one decoded value.
+        let decoded = decoded_json_string_call(tool_call, agent_id);
+        let tool_call = decoded.as_ref().unwrap_or(tool_call);
 
         // 1. Capability check
         if let Err(violation) = CapabilityManager::check_agent_capability(
@@ -534,6 +613,17 @@ impl SandboxManager {
         // to the per-tool sandbox timeout.
         let is_exempt = self.registry.is_exempt_from_timeout(&tool_call.name);
 
+        // N-TOOL-1b: the sandbox's cut for this call — the policy's bound, or
+        // a command's own `timeout_secs` clamped to the ceiling, and since
+        // PLUGIN-WAIT a plugin tool's as a command's; since CMD-TIMEOUT-2 a
+        // `Command`-backend tool's author's figure above the bound, clamped
+        // to the ceiling, where the call asked nothing.
+        let may_ask = self.registry.is_command_tool(&tool_call.name)
+            || self.registry.is_plugin_tool(&tool_call.name);
+        let asked_secs = policy.asked_runtime_secs(&tool_call.arguments, may_ask);
+        let own_secs = self.registry.command_default_secs(&tool_call.name);
+        let runtime_secs = policy.runtime_secs_for(&tool_call.arguments, may_ask, own_secs);
+
         let registry = self.registry.clone();
         let tool_name = tool_call.name.clone();
         let arguments = tool_call.arguments.clone();
@@ -548,12 +638,24 @@ impl SandboxManager {
         // It is also where the approval fact is written, **always** (design
         // 09 §4.2 rule 1): the sandbox's own answer from step 3 or nothing, so
         // a context a caller built with the field set arrives with `None`.
+        //
+        // So is the figure a call asked for (CMD-TIMEOUT), under the same
+        // discipline: set here, where this sandbox cuts the call at it, and
+        // `None` on every other path, so a `Command`-backend tool stands its
+        // own clock back only for a cut that is really there — and so is the
+        // figure it cuts at (PLUGIN-WAIT), which a plugin tool waits past, and
+        // the ceiling such a call may ask up to (CMD-TIMEOUT-2), which a
+        // `Command`-backend tool's own kill names in its hint.
         let ctx_owned = {
             let mut owned = disciplined(ctx);
             if owned.event_bus.is_none() {
                 owned.event_bus = Some(self.bus.clone());
             }
             owned.human_approval = human_approval;
+            owned.asked_runtime_secs = asked_secs.filter(|_| !is_exempt);
+            owned.sandbox_cut_secs = (!is_exempt).then_some(runtime_secs);
+            owned.runtime_ceiling_secs =
+                (may_ask && !is_exempt).then_some(policy.max_tool_runtime_ceiling_secs);
             owned
         };
 
@@ -561,7 +663,7 @@ impl SandboxManager {
         let result = if is_exempt {
             Ok(registry.execute_with_context(&tool_name, &arguments, &ctx_owned).await)
         } else {
-            let timeout = Duration::from_secs(policy.max_tool_runtime_secs);
+            let timeout = Duration::from_secs(runtime_secs);
             tokio::time::timeout(timeout, async move {
                 registry.execute_with_context(&tool_name, &arguments, &ctx_owned).await
             })
@@ -595,21 +697,26 @@ impl SandboxManager {
                 Err(err)
             }
             Err(_timeout) => {
-                let reason = format!(
-                    "Tool '{}' timed out after {}s",
-                    tool_call.name, policy.max_tool_runtime_secs
-                );
+                let reason = format!("Tool '{}' timed out after {runtime_secs}s", tool_call.name);
                 self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
                 // Timeouts are transient — record for circuit breaker
                 self.circuit_breaker
                     .record_failure_for_task(agent_id, &tool_call.name, task_id);
-                // N-TOOL-4 (Z1-13): the limit is enforced here, so a command
+                // N-TOOL-4 (Z1-13): the limit is enforced here, so a call
                 // cut at it is told what to do here — the hint is this
                 // message's own, not a guess the loop makes from its words.
-                if self.registry.is_command_tool(&tool_call.name) {
+                // Below the most it may run it names `timeout_secs`
+                // (N-TOOL-1b): the ceiling, for every call that may ask —
+                // `shell_execute`, a `Command`-backend tool (a call's figure
+                // lifts the tool's own, CMD-TIMEOUT) and, since
+                // PLUGIN-WAIT-2, a plugin's tool — in one text.
+                if may_ask {
                     return Err(format!(
                         "{reason}\n{}",
-                        crate::tools::platform::COMMAND_TIMED_OUT_HINT
+                        crate::tools::platform::timed_out_hint(
+                            runtime_secs,
+                            policy.max_tool_runtime_ceiling_secs,
+                        )
                     ));
                 }
                 Err(reason)
@@ -768,15 +875,60 @@ impl Drop for OpenPrompt<'_> {
     }
 }
 
-/// A copy of `ctx` with neither person-fact set (design 09 §4.2 rule 1).
+/// The call `tool_call` stands for when its arguments are a top-level JSON
+/// string whose text is a JSON object (N-TOOL-8): the same call with that
+/// object, read once — a string inside it, or a string the text itself
+/// holds, is never read — and one WARN naming the tool and `source`, the
+/// agent the sandbox attributes the call to, never the text. `None` for
+/// anything else: an object, or a string that is not JSON or holds JSON of
+/// another kind, which the registry's schema check refuses as it always did.
+///
+/// A model's string is read so before the sandbox sees the call where its
+/// answer is streamed or OpenAI-compatible (the provider layer's reader,
+/// N-TOOL-5); one that reaches the sandbox as a string comes from a plugin —
+/// a plugin agent's proxied call (`runner/plugin_agent.rs`) or a plugin
+/// skill's tool callback (`SandboxToolCallback`) — or from an
+/// Anthropic-compatible server's non-streamed answer, whose `tool_use`
+/// `input` its parser passes as sent (`providers/anthropic/response.rs`; the
+/// Anthropic API itself sends an object). Read here, before the sanitizer, a
+/// backtick, a line break, `../` or a NUL escaped inside the string is
+/// checked as one sent in an object is; the registry, after the sanitizer,
+/// decodes nothing. Learned from ZCode's input normalisation (a top-level
+/// string decoded before validation, hooks and permission), a design written
+/// fresh.
+fn decoded_json_string_call(tool_call: &ToolCall, source: &str) -> Option<ToolCall> {
+    let serde_json::Value::String(text) = &tool_call.arguments else {
+        return None;
+    };
+    let object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).ok()?;
+    tracing::warn!(
+        tool = %tool_call.name,
+        source = %source,
+        bytes = text.len(),
+        "a tool call's arguments arrived as a JSON string holding an object; \
+         read as that object, once, before the sanitizer"
+    );
+    Some(ToolCall {
+        arguments: serde_json::Value::Object(object),
+        ..tool_call.clone()
+    })
+}
+
+/// A copy of `ctx` with neither person-fact set (design 09 §4.2 rule 1),
+/// nor the figure a call asked for (CMD-TIMEOUT), nor the one the sandbox
+/// cuts it at (PLUGIN-WAIT), nor the ceiling it may ask up to
+/// (CMD-TIMEOUT-2).
 ///
 /// Every context the sandbox hands onward — to a preview hook, to a denial
 /// hook, to the tool itself — starts from this, and only the sandbox then
-/// adds the one fact it made. A caller cannot pass one through.
+/// adds the facts it made. A caller cannot pass one through.
 fn disciplined(ctx: &ToolContext) -> ToolContext {
     let mut out = ctx.clone();
     out.human_approval = None;
     out.human_denial = None;
+    out.asked_runtime_secs = None;
+    out.sandbox_cut_secs = None;
+    out.runtime_ceiling_secs = None;
     out
 }
 
@@ -822,3 +974,6 @@ mod tests;
 
 #[cfg(test)]
 mod precheck_tests;
+
+#[cfg(test)]
+mod json_string_tests;

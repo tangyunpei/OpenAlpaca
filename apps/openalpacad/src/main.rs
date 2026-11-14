@@ -592,6 +592,7 @@ async fn async_main(
             agents_dir,
             orchestrator: orchestrator.clone(),
             agent_registry: svcs.shared_context.agent_registry.clone(),
+            db: db.clone(),
             llm_router: llm_router_for_reload,
             llm_settings_service: llm_settings_for_reload,
             secret_store: svcs.secret_store,

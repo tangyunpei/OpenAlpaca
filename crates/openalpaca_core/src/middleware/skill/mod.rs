@@ -25,7 +25,7 @@ pub enum SkillParseError {
     MissingField(&'static str),
     InvalidYaml(String),
     // What the catalog's scan meets beside a parse (its diagnostics,
-    // N-SKILL-2): the first two skip the skill, the last five load it anyway.
+    // N-SKILL-2): the first two skip the skill, the last six load it anyway.
     ReadFailed(String),
     TooLarge {
         bytes: u64,
@@ -45,6 +45,15 @@ pub enum SkillParseError {
     },
     UnknownKey(String),
     NoTools,
+    /// A file of a folder that overrides a bundled skill is the version an
+    /// earlier build shipped at its path, which the bundle has since changed:
+    /// the override runs the old file (subagent design §2.8 W-2).
+    StaleShippedFile {
+        /// The file, as on disk.
+        file: String,
+        /// The bundled skill's key.
+        skill: String,
+    },
 }
 
 impl fmt::Display for SkillParseError {
@@ -78,6 +87,10 @@ impl fmt::Display for SkillParseError {
             Self::NoTools => write!(
                 f,
                 "The skill declares no tools: 'requires_capabilities', 'tools.allow', 'scripts' and 'depends_on' are all empty, so it runs with none"
+            ),
+            Self::StaleShippedFile { file, skill } => write!(
+                f,
+                "{file} is the version an earlier build shipped; the built-in {skill}'s differs, and this override runs the old file"
             ),
         }
     }

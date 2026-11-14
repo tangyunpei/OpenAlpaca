@@ -976,6 +976,7 @@ mod tests {
             },
             finish_reason: finish,
             thinking: None,
+            echo: None,
             parts: None,
         }
     }

@@ -1075,6 +1075,78 @@ async fn test_plugin_backend_execution() {
     assert_eq!(result.unwrap(), "plugin: test::echo");
 }
 
+/// PLUGIN-WAIT: the `Plugin` arm hands the executor the sandbox's cut where
+/// the context carries one (`execute_within`) and calls `execute` where it
+/// carries none, or there is no context.
+#[tokio::test]
+async fn a_plugin_backend_is_handed_the_sandboxs_cut_from_the_context() {
+    struct Says;
+    #[async_trait]
+    impl openalpaca_api::plugin_traits::PluginToolExecutor for Says {
+        async fn execute(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<String, String> {
+            Ok("no cut".to_string())
+        }
+        async fn execute_within(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+            sandbox_cut: std::time::Duration,
+        ) -> Result<String, String> {
+            Ok(format!("cut at {}s", sandbox_cut.as_secs()))
+        }
+        fn plugin_id(&self) -> &str {
+            "test"
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "test::echo".into(),
+                description: "".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Plugin(Arc::new(Says)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let args = serde_json::json!({});
+    let cut = ToolContext {
+        sandbox_cut_secs: Some(42),
+        ..Default::default()
+    };
+    assert_eq!(
+        registry
+            .execute_with_context("test::echo", &args, &cut)
+            .await
+            .as_deref(),
+        Ok("cut at 42s")
+    );
+    assert_eq!(
+        registry
+            .execute_with_context("test::echo", &args, &ToolContext::default())
+            .await
+            .as_deref(),
+        Ok("no cut")
+    );
+    assert_eq!(
+        registry.execute("test::echo", &args).await.as_deref(),
+        Ok("no cut")
+    );
+}
+
 #[test]
 fn test_tool_name_validation() {
     let registry = ToolRegistry::default();
@@ -2681,6 +2753,7 @@ async fn auto_approve_cannot_undo_the_extension_gate_on_either_arm() {
         require_confirmation_for: vec!["github__create_issue".to_string()],
         max_tool_calls: None,
         max_tool_runtime_secs: 30,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: None,
@@ -3008,9 +3081,214 @@ async fn a_command_tool_that_times_out_takes_the_processes_it_started_with_it() 
         .unwrap_err();
     let pid = pid_from_file(&pidfile, Duration::from_secs(1)).await;
     let _kill = KillOnFail(pid);
+    // Outside the sandbox no ceiling is on the context, so nothing is said
+    // of asking for more (CMD-TIMEOUT-2).
     assert_eq!(err, "Command timed out after 1s");
     assert!(
         wait_until_gone(pid, GONE_WITHIN).await,
         "the command's background sleep {pid} outlived its timeout"
     );
+}
+
+/// CMD-TIMEOUT-2, the one clock, without a race: where the sandbox cuts an
+/// unasked call at or below a `Command`-backend tool's own figure, that
+/// tool's own clock stands back, so with no sandbox around the call (the
+/// cut set by hand) a 2-second command outlives its author's 1 s; where the
+/// cut is above that figure, the tool's own clock still kills it at 1 s.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_tools_own_clock_stands_back_where_the_sandbox_cuts_at_its_figure() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(make_tool_with_backend(
+            "slow_tool",
+            ToolBackend::Command {
+                command: "sh".to_string(),
+                args_template: Some("-c {script}".to_string()),
+                timeout_secs: 1,
+            },
+        ))
+        .unwrap();
+    let args = serde_json::json!({"script": "sleep 2"});
+    let gp = crate::test_util::GuardedProject::new();
+
+    let at_its_figure = ToolContext {
+        sandbox_cut_secs: Some(1),
+        ..gp.ctx()
+    };
+    let ran = registry
+        .execute_with_context("slow_tool", &args, &at_its_figure)
+        .await;
+    assert!(
+        ran.is_ok(),
+        "the tool's own clock did not stand back: {ran:?}"
+    );
+
+    let above_its_figure = ToolContext {
+        sandbox_cut_secs: Some(2),
+        ..gp.ctx()
+    };
+    let err = registry
+        .execute_with_context("slow_tool", &args, &above_its_figure)
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Command timed out after 1s");
+}
+
+/// N-TOOL-3 (Z1-01): which calls may run beside the other calls of their
+/// round — a tool that declares read-only (an MCP tool also idempotent) and
+/// the lead's three coordination builtins, whatever they declare; every
+/// other call runs alone.
+#[test]
+fn runs_concurrently_admits_read_only_tools_and_the_leads_coordination_tools() {
+    let registry = ToolRegistry::default();
+    let register = |tool: RegisteredTool| registry.register(tool).unwrap();
+    register(make_tool_with_annotations(
+        "reads",
+        vec![],
+        Some(readonly_annotations()),
+    ));
+    register(make_tool_with_annotations(
+        "edits",
+        vec![],
+        Some(destructive_annotations()),
+    ));
+    register(make_tool_with_annotations(
+        "writes_quietly",
+        vec![],
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false),
+        ),
+    ));
+    register(make_tool_with_annotations("declares_nothing", vec![], None));
+    // As the lead registers them: no annotations.
+    for name in [
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
+        "spawn_subagent",
+    ] {
+        register(make_tool(name, "ok"));
+    }
+    let mcp = |name: &str, annotations: Option<openalpaca_mcp::ToolAnnotations>| {
+        let mut tool = mcp_tool(name, "srv", 0);
+        tool.annotations = annotations;
+        tool
+    };
+    register(mcp("srv__reads", Some(readonly_annotations())));
+    register(mcp(
+        "srv__reads_not_idempotent",
+        Some(
+            openalpaca_mcp::ToolAnnotations::new()
+                .read_only(true)
+                .idempotent(false),
+        ),
+    ));
+    register(mcp(
+        "srv__reads_idempotence_unsaid",
+        Some(openalpaca_mcp::ToolAnnotations::new().read_only(true)),
+    ));
+    register(make_tool_with_backend(
+        "plug::reads",
+        ToolBackend::Plugin(Arc::new(ExtMockPluginExec)),
+    ));
+
+    for together in [
+        "reads",
+        "spawn_subagents_batch",
+        "check_subagent_status",
+        "wait_for_subagents",
+        "srv__reads",
+    ] {
+        assert!(
+            registry.runs_concurrently(together),
+            "{together} runs alone"
+        );
+    }
+    for alone in [
+        "edits",
+        "writes_quietly",
+        "declares_nothing",
+        "spawn_subagent",
+        "srv__reads_not_idempotent",
+        "srv__reads_idempotence_unsaid",
+        "plug::reads",
+        "never_registered",
+    ] {
+        assert!(!registry.runs_concurrently(alone), "{alone} runs together");
+    }
+
+    // A coordination tool's name is the lead's builtin only: an extension's
+    // tool registered under it declares nothing, and runs alone.
+    let other = ToolRegistry::default();
+    other
+        .register(mcp_tool("wait_for_subagents", "srv", 0))
+        .unwrap();
+    assert!(!other.runs_concurrently("wait_for_subagents"));
+}
+
+/// CMD-TIMEOUT-2: a `Command`-backend tool its own clock stopped is told, as
+/// the sandbox's cut is, that it may ask for up to the ceiling the sandbox
+/// put on its context; at the ceiling (the edge where its clock stands back
+/// to 3600 s and a call asked that much), that this is the most; with no
+/// ceiling, outside the sandbox, the limit alone.
+#[test]
+fn a_command_tools_own_kill_names_the_ceiling_it_may_ask_up_to() {
+    assert_eq!(
+        command_timed_out(30, Some(600)),
+        format!(
+            "Command timed out after 30s\n{}",
+            crate::tools::platform::timed_out_hint(30, 600)
+        )
+    );
+    assert!(
+        command_timed_out(30, Some(600)).contains("may run up to 600 seconds here"),
+        "{}",
+        command_timed_out(30, Some(600))
+    );
+    assert_eq!(
+        command_timed_out(3600, Some(3600)),
+        format!(
+            "Command timed out after 3600s\n{}",
+            crate::tools::platform::TIMED_OUT_HINT
+        )
+    );
+    assert_eq!(command_timed_out(30, None), "Command timed out after 30s");
+}
+
+/// CMD-TIMEOUT-2: the sandbox reads a `Command`-backend tool's own figure;
+/// every other tool has none.
+#[test]
+fn only_a_command_backend_tool_has_its_own_default_figure() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: ToolDefinition {
+                name: "lint_project".to_string(),
+                description: "lint".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Command {
+                command: "true".to_string(),
+                args_template: None,
+                timeout_secs: 300,
+            },
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    registry
+        .register(make_tool_with_caps("file_read", vec!["file_read"]))
+        .unwrap();
+    assert_eq!(registry.command_default_secs("lint_project"), Some(300));
+    assert_eq!(registry.command_default_secs("file_read"), None);
+    assert_eq!(registry.command_default_secs("no_such_tool"), None);
 }

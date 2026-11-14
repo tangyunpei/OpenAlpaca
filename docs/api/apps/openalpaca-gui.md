@@ -1,6 +1,6 @@
 # openalpaca-gui (Tauri + React)
 
-> Generated from source by `python3 scripts/gen_api_docs.py`.
+> Generated from source by `python3.11 scripts/gen_api_docs.py`.
 
 ## Overview
 
@@ -154,6 +154,12 @@
 - Commands: `await_daemon_stopped`, `ensure_daemon_running`, `get_connection_info`, `read_daemon_log_tail`, `reveal_path`
 
 ## API Module Map
+
+### `agents.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/agents.test.ts`
+- Exported functions: none
+- Endpoints: none
 
 ### `agents.ts`
 

@@ -267,7 +267,11 @@ fn annotations_for_builtin_by_product_writers_never_prompt() {
     for tool in builtin_tools(None, None, None) {
         registry.register(tool).unwrap();
     }
-    let policy = SandboxPolicy::from_constraints("writing_agent", &AgentConstraints::default());
+    let policy = SandboxPolicy::from_constraints(
+        "writing_agent",
+        &AgentConstraints::default(),
+        &crate::daemon_config::AgentDefaults::default(),
+    );
     let set = effective_confirmation_set(&policy, &registry);
     for name in ["artifact_write", "workspace_write"] {
         assert!(!set.contains(&name.to_string()), "{name} asks; the set is {set:?}");
@@ -315,6 +319,7 @@ async fn reading_tools_raise_no_card_under_a_broker() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 60,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: Some(1),
@@ -476,6 +481,7 @@ async fn file_list_and_artifact_read_run_with_no_approval_card() {
         require_confirmation_for: vec![],
         max_tool_calls: None,
         max_tool_runtime_secs: 30,
+        max_tool_runtime_ceiling_secs: 600,
         stream_id: None,
         lane_key: None,
         confirmation_timeout_secs: Some(300),
@@ -1430,6 +1436,7 @@ mod read_result {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 30,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -1481,6 +1488,7 @@ mod read_result {
             require_confirmation_for: vec![],
             max_tool_calls: None,
             max_tool_runtime_secs: 30,
+            max_tool_runtime_ceiling_secs: 600,
             stream_id: None,
             lane_key: None,
             confirmation_timeout_secs: None,
@@ -1731,10 +1739,45 @@ fn openai_strict_accepts(schema: &serde_json::Value) -> Result<(), String> {
 /// builtin with an optional property or an open object must lose `strict`
 /// here rather than every tool-carrying turn on OpenAI. The schema itself is
 /// always sent as written.
+///
+/// C7b: the same holds for a request sent through the Responses API, whose
+/// function tool carries `strict` at its top level beside `type`, `name` and
+/// `parameters` — `true` where Chat Completions' carries it, and an explicit
+/// `false` everywhere else, since there an omitted `strict` asks the API to
+/// make the schema strict (developers.openai.com/api/docs/guides/
+/// function-calling, read 2026-11-12).
 #[test]
 fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() {
     use crate::bus::EventBus;
-    use openalpaca_llm::providers::openai_tools::openai_function_tool;
+    use openalpaca_llm::providers::openai_tools::{
+        openai_function_tool, openai_responses_function_tool,
+    };
+    // The Responses form of `def`, checked against the Chat Completions
+    // form's verdict: same name, description and schema, `strict` always
+    // present and equal to whether Chat Completions sends it.
+    let responses_form_agrees = |def: &ToolDefinition, sent_strict: bool| {
+        let entry = openai_responses_function_tool(def);
+        assert_eq!(entry["type"], "function", "{}", def.name);
+        assert_eq!(entry["name"], def.name.as_str(), "{}", def.name);
+        assert_eq!(
+            entry["description"],
+            def.description.as_str(),
+            "{}",
+            def.name
+        );
+        assert_eq!(
+            entry["parameters"], def.parameters,
+            "{} is sent as written",
+            def.name
+        );
+        assert!(entry.get("function").is_none(), "{}", def.name);
+        assert_eq!(
+            entry.get("strict"),
+            Some(&serde_json::json!(sent_strict)),
+            "{}: strict at the top level, true exactly where Chat Completions sends it",
+            def.name
+        );
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
@@ -1768,6 +1811,16 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
         steer_workflow_tool_definition(),
         task_status_tool_definition(),
     ]);
+    // SA-1 (subagent design §4.7 M-9): the lead's two spawn definitions —
+    // `agent_id` optional, so left out of `required` — stay non-strict.
+    let spawns = [
+        crate::runner::lead_agent::spawn_subagent_tool_definition_from_templates(&[]),
+        crate::runner::lead_agent::spawn_subagents_batch_tool_definition(&[]),
+    ];
+    for def in &spawns {
+        assert_eq!(def.strict, None, "{} is pinned non-strict", def.name);
+    }
+    definitions.extend(spawns);
 
     let mut kept = Vec::new();
     let mut marked = 0;
@@ -1781,6 +1834,7 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
             def.name
         );
         let sent_strict = function.get("strict") == Some(&serde_json::json!(true));
+        responses_form_agrees(def, sent_strict);
         if def.strict != Some(true) {
             assert!(!sent_strict, "{} is not strict-marked", def.name);
             continue;
@@ -1869,6 +1923,7 @@ fn every_builtin_goes_to_openai_with_strict_only_where_strict_mode_accepts_it() 
         let sent =
             openai_function_tool(&def)["function"].get("strict") == Some(&serde_json::json!(true));
         assert_eq!(sent, compliant, "{schema}");
+        responses_form_agrees(&def, compliant);
     }
 }
 
@@ -1933,9 +1988,64 @@ fn a_skill_script_says_its_arguments_reach_a_program() {
             interpreter: Some("sh".to_string()),
             timeout_secs: 5,
         },
+        SkillRoots::default(),
     )
     .unwrap();
     assert!(script.arguments_reach_a_program());
+}
+
+/// Subagent design §2.6 K-5: a skill script is told the config directory's
+/// `skills/` and the built-in skills' pack by name — the built-in
+/// `create-skill` runs from the pack, where its own location says nothing of
+/// where skills are written — and a root not known is not set at all.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_skill_script_sees_both_skills_roots_in_its_environment() {
+    let skill = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(skill.path().join("scripts")).unwrap();
+    std::fs::write(
+        skill.path().join("scripts/roots.sh"),
+        "printf '%s|%s' \"${OPENALPACA_SKILLS_DIR-unset}\" \"${OPENALPACA_BUNDLED_SKILLS_DIR-unset}\"\n",
+    )
+    .unwrap();
+    let cfg = crate::middleware::skill::ScriptConfig {
+        file: "roots.sh".to_string(),
+        name: "roots".to_string(),
+        description: "Prints the roots".to_string(),
+        parameters: serde_json::json!({"type": "object"}),
+        interpreter: Some("sh".to_string()),
+        timeout_secs: 5,
+    };
+    let config = skill.path().join("config/skills");
+    let pack = skill.path().join("state/cache/bundled-skills");
+
+    let both = ScriptToolBuiltIn::new(
+        skill.path(),
+        &cfg,
+        SkillRoots {
+            config: Some(config.clone()),
+            bundled: Some(pack.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        both.execute(&serde_json::json!({})).await.unwrap(),
+        format!("{}|{}", config.display(), pack.display())
+    );
+
+    let config_only = ScriptToolBuiltIn::new(
+        skill.path(),
+        &cfg,
+        SkillRoots {
+            config: Some(config.clone()),
+            bundled: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        config_only.execute(&serde_json::json!({})).await.unwrap(),
+        format!("{}|unset", config.display())
+    );
 }
 
 // --- R45: a skill script is killed with what it started (storage design §11) ---
@@ -1966,6 +2076,7 @@ async fn a_skill_script_that_times_out_takes_the_processes_it_started_with_it() 
             interpreter: Some("sh".to_string()),
             timeout_secs: 1,
         },
+        SkillRoots::default(),
     )
     .unwrap();
     let pidfile = skill.path().join("pid");

@@ -75,6 +75,8 @@ fn enabling_a_provider_keeps_the_comments_and_the_order() {
     let keys: Vec<&str> = block
         .lines()
         .take_while(|l| !l.trim_start().starts_with('['))
+        // A commented-out example (the `model_aliases` pin) is not a key.
+        .filter(|l| !l.trim_start().starts_with('#'))
         .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim()))
         .collect();
     assert_eq!(
@@ -335,4 +337,40 @@ fn an_array_of_tables_keeps_its_sections() {
             .len(),
         2
     );
+}
+
+/// C7: a `[providers.<name>.model_aliases]` table the person wrote — its
+/// comment, its key order and a key that is no alias — survives the
+/// in-place write a provider switch performs, now that the field is typed.
+#[test]
+fn a_model_aliases_table_survives_a_provider_write() {
+    let text = format!(
+        "{SEEDED}\n# My pins.\n[providers.ollama.model_aliases]\nstrong = \"qwen3:32b\"\n\
+         fast = \"qwen3:4b\"\nfastest = \"qwen3:0.6b\"\n"
+    );
+    let before = parse(&text);
+    let mut after = before.clone();
+    after
+        .providers
+        .as_mut()
+        .expect("the template declares providers")
+        .get_mut("ollama")
+        .expect("the template declares ollama")
+        .enabled = Some(true);
+
+    let written = render_config_preserving(&text, &before, &after).expect("the edit succeeds");
+
+    assert_eq!(enabled(&parse(&written), "ollama"), Some(true));
+    // The template's own example is commented out; this is the person's.
+    let table = written
+        .split("# My pins.\n[providers.ollama.model_aliases]")
+        .nth(1)
+        .expect("the table and its comment are still there");
+    let keys: Vec<&str> = table
+        .lines()
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim()))
+        .collect();
+    assert_eq!(keys, vec!["strong", "fast", "fastest"]);
+    assert!(table.contains("qwen3:32b") && table.contains("qwen3:0.6b"));
 }

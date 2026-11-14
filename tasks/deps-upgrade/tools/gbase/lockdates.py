@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Registry dates for the dependency wave: an annotation of a lock report, and DU-23's gate.
 
 Usage:
@@ -91,8 +91,9 @@ which would answer for a check nobody asked for.
 
 Exit status of --gate, --pins and --bun-lock: 0 — every entry eligible or waived; 1 — at
 least one entry too young (the gate printed its sequence) and only then; 2 — no verdict:
-a usage error (two modes among them), a file that is not a Cargo.lock (or, for
---bun-lock, a bun.lock), a bad waiver line, or a failed lookup (in these modes a lookup
+a usage error (two modes among them), a file that is not a Cargo.lock (not UTF-8,
+not TOML, or no [[package]] with a name and a version; or, for --bun-lock, a
+bun.lock), a bad waiver line, or a failed lookup (in these modes a lookup
 that fails fails the run, it never passes as "unavailable").
 """
 import calendar
@@ -101,6 +102,7 @@ import os
 import re
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -336,41 +338,32 @@ def crate_published(reg, name, version):
 
 # ------------------------------------------------------------------ Cargo.lock with its edges
 def parse_lock(path):
-    """[{name, version, source, deps}] — deps as written: `name`, `name ver` or `name ver (src)`."""
+    """[{name, version, source, deps}] — deps as written: `name`, `name ver` or `name ver (src)`.
+
+    Read by tomllib: each `[[package]]` with a string name and version, its `source` when it
+    has one (else None) and its `dependencies` strings."""
     try:
         with open(path, encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+            text = fh.read()
     except (OSError, UnicodeDecodeError) as e:
         raise NoVerdict("cannot read %s as UTF-8 text: %s" % (path, e))
-    pkgs, cur, in_deps = [], None, False
-    for line in lines:
-        if line == "[[package]]":
-            cur = {"name": None, "version": None, "source": None, "deps": []}
-            pkgs.append(cur)
-            in_deps = False
+    try:
+        doc = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise NoVerdict("%s is not TOML (%s): not a Cargo.lock" % (path, e))
+    pkgs = []
+    for p in doc.get("package", []):
+        if not isinstance(p, dict):
             continue
-        if cur is None:
-            continue
-        if in_deps:
-            if line.strip() == "]":
-                in_deps = False
-            else:
-                m = re.match(r'^\s*"(.*)",?\s*$', line)
-                if m:
-                    cur["deps"].append(m.group(1))
-            continue
-        m = re.match(r'^(name|version|source) = "(.*)"$', line)
-        if m:
-            cur[m.group(1)] = m.group(2)
-            continue
-        m = re.match(r"^dependencies = \[(.*)$", line)
-        if m:
-            rest = m.group(1).strip()
-            if rest.endswith("]"):
-                cur["deps"] += re.findall(r'"([^"]*)"', rest)
-            else:
-                in_deps = True
-    pkgs = [p for p in pkgs if p["name"] and p["version"]]
+        name, version, source = p.get("name"), p.get("version"), p.get("source")
+        deps = p.get("dependencies", [])
+        if isinstance(name, str) and name and isinstance(version, str) and version:
+            pkgs.append({
+                "name": name,
+                "version": version,
+                "source": source if isinstance(source, str) else None,
+                "deps": [d for d in deps if isinstance(d, str)] if isinstance(deps, list) else [],
+            })
     if not pkgs:
         raise NoVerdict("%s holds no [[package]] with a name and a version: not a Cargo.lock" % path)
     return pkgs

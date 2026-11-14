@@ -1,0 +1,9 @@
+The SPDX standard texts THIRD-PARTY-NOTICES substitutes for a package that ships
+no licence file (scripts/release/gen_notices.py, B-22): text/<id>.txt from
+https://github.com/spdx/license-list-data at tag v3.29.0 for every id
+deny.toml's [licenses] allow list and gen_notices.py's JS_ALSO_ALLOWED name
+(LLVM-exception.txt the exception's own text, for Apache-2.0 WITH
+LLVM-exception), each line's trailing whitespace stripped (one line each in
+BSD-3-Clause, ISC and MPL-2.0; none in the others). An id with no text here is
+no refusal: the package is listed under a marked entry saying no licence text
+is available.

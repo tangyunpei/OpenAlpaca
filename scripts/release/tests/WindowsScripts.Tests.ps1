@@ -2,10 +2,10 @@
 <#
     Pester tests for the Windows release scripts.
 
-    The installer and uninstaller are the only shipped code nothing else in CI
-    can exercise — the Rust and bun gates run on ubuntu — so
-    `.github/workflows/ci.yml` has one small `windows-latest` job that runs this
-    file and nothing else. Run it locally on a Windows box with:
+    The installer and uninstaller are the only shipped code no other gate can
+    exercise — the Rust and bun gates run on macOS — and there is no remote CI
+    (the owner, 2026-11-06), so this file runs only by hand, on a Windows box,
+    on Pester 6.2.0:
 
         Invoke-Pester -Path scripts/release/tests
 
@@ -15,7 +15,7 @@
     third dot-sources package-windows.ps1 for the two digest helpers that hold
     the packaged daemon to the staged sidecar's sha256 and the two that hold
     the bun on PATH to the root package.json's pin; the packaging itself
-    (cargo, bun, tauri, msiexec) runs nowhere in CI.
+    (cargo, bun, tauri, msiexec) runs in no test.
 #>
 
 BeforeAll {

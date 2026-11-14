@@ -80,6 +80,7 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -130,6 +131,7 @@ fn make_orchestrator_with_capturing_llm(
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -295,6 +297,7 @@ async fn test_simple_query_with_mock_llm() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -432,6 +435,7 @@ fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -673,6 +677,7 @@ mod request_workspace_threading {
                 },
                 finish_reason,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -872,6 +877,7 @@ mod a_list_change_mid_turn {
                 },
                 finish_reason,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -1009,6 +1015,7 @@ mod project_turn_offers {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -1149,6 +1156,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 }),
                 // Call 1: agentic loop — return tool use
@@ -1163,6 +1171,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::ToolUse,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 }),
                 // Call 2+: return final answer with Stop
@@ -1173,6 +1182,7 @@ async fn test_tool_intent_detected_and_executes() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 }),
             }
@@ -1242,6 +1252,7 @@ async fn test_tool_max_rounds_enforcement() {
                     usage: Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
                     finish_reason: FinishReason::Stop,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 });
             }
@@ -1261,6 +1272,7 @@ async fn test_tool_max_rounds_enforcement() {
                 },
                 finish_reason: FinishReason::ToolUse,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -1467,6 +1479,8 @@ fn local_only_router(
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     // `RecordingProvider` is not `OllamaProvider`, so it keeps the trait's
@@ -1999,6 +2013,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -2538,6 +2553,7 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -2578,7 +2594,6 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 
     let mut saw_skill_started = false;
-    let mut saw_intent_classified = false;
     let mut stage_mode = None;
     while let Ok(event) = rx.try_recv() {
         match event {
@@ -2586,16 +2601,11 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
                 assert_eq!(skill_id, "Code Review");
                 saw_skill_started = true;
             }
-            SystemEvent::IntentClassified { intent_type, .. } => {
-                assert_eq!(intent_type, "skill_invocation");
-                saw_intent_classified = true;
-            }
             SystemEvent::OrchestrationStage { mode, .. } => stage_mode = Some(mode),
             _ => {}
         }
     }
     assert!(saw_skill_started, "handle_skill_invocation was not reached");
-    assert!(saw_intent_classified, "IntentClassified was not emitted");
     assert_eq!(stage_mode.as_deref(), Some("skill_command"));
 }
 
@@ -2648,21 +2658,19 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
     );
 
     let mut saw_skill_started = false;
-    let mut intent_classified_count = 0;
+    let mut stage_modes = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event {
             SystemEvent::SkillInvocationStarted { .. } => saw_skill_started = true,
-            SystemEvent::IntentClassified { intent_type, .. } => {
-                assert_eq!(intent_type, "skill_invocation");
-                intent_classified_count += 1;
-            }
+            SystemEvent::OrchestrationStage { mode, .. } => stage_modes.push(mode),
             _ => {}
         }
     }
     assert!(saw_skill_started, "handle_skill_invocation was not reached");
     assert_eq!(
-        intent_classified_count, 1,
-        "IntentClassified must be emitted exactly once"
+        stage_modes,
+        vec!["skill_command".to_string()],
+        "the turn is routed once, by the skill tier"
     );
 }
 
@@ -3148,6 +3156,7 @@ impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
                     },
                     finish_reason: FinishReason::ToolUse,
                     thinking: None,
+                    echo: None,
                     parts: None,
                 });
             }
@@ -3163,6 +3172,7 @@ impl openalpaca_llm::LlmProvider for ToolModeMockLlm {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -3671,25 +3681,204 @@ async fn test_task_query_emits_task_ops_stage() {
     assert_eq!(orchestration_modes(&mut rx), vec!["task_ops".to_string()]);
 }
 
+// ── N-ROUTE-1: `/pause` and `/resume` say pause is unsupported ──
+//
+// A paused row never stopped its run: the lead kept spending and its
+// completion overwrote `paused`. So the two chat commands answer one
+// sentence naming `/cancel` and change nothing — no status, no lane, no
+// `TaskUpdated` — whatever the lane holds and whether an id is given.
+
+/// The one sentence, told apart from the task-control JSON a status change
+/// answers with.
+fn assert_pause_unsupported(reply: &str) {
+    assert!(reply.contains("not supported"), "unexpected reply: {reply}");
+    assert!(reply.contains("/cancel"), "unexpected reply: {reply}");
+    assert!(!reply.contains("new_status"), "a status changed: {reply}");
+    assert!(!reply.contains('\n'), "more than one sentence: {reply}");
+}
+
+/// Drain the bus: the `(task_id, status)` of every `TaskUpdated` and the mode
+/// of every `OrchestrationStage`, in the order they came.
+fn task_updates_and_modes(
+    rx: &mut tokio::sync::broadcast::Receiver<SystemEvent>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let (mut updates, mut modes) = (Vec::new(), Vec::new());
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            SystemEvent::TaskUpdated {
+                task_id, status, ..
+            } => updates.push((task_id, status)),
+            SystemEvent::OrchestrationStage { mode, .. } => modes.push(mode),
+            _ => {}
+        }
+    }
+    (updates, modes)
+}
+
+/// An orchestrator over `db` whose lane `user1:cli` runs `task-1`, its row and
+/// its registry entry `status`.
+fn orchestrator_with_one_workflow(
+    db: openalpaca_storage::Database,
+    status: TaskStatus,
+) -> Orchestrator {
+    openalpaca_storage::repository::TaskRepository::new(&db)
+        .create(&openalpaca_storage::Task {
+            status,
+            completed_at: None,
+            ..make_test_task()
+        })
+        .unwrap();
+    let ctx = Arc::new(SharedContext::new());
+    ctx.task_registry
+        .register("task-1".to_string(), "Test task".to_string());
+    let entry_status = match status {
+        TaskStatus::Running => crate::context::TaskEntryStatus::Running,
+        TaskStatus::Paused => crate::context::TaskEntryStatus::Paused,
+        other => panic!("not a live status: {other:?}"),
+    };
+    ctx.task_registry.update_status("task-1", entry_status);
+    ctx.register_workflow_for_lane("user1:cli", "task-1");
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    Orchestrator::new(
+        ctx,
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db),
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    )
+}
+
+/// Send `command` to an orchestrator whose lane runs one workflow with a row
+/// at `status`, and check that the sentence came back and that nothing
+/// moved: the row, the registry entry, the bus.
+async fn assert_command_changes_nothing(command: &str, status: TaskStatus) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let orch = orchestrator_with_one_workflow(db, status);
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, command).await;
+
+    assert_pause_unsupported(&reply);
+    let db = orch.db.as_ref().unwrap();
+    let row = openalpaca_storage::repository::TaskRepository::new(db)
+        .get("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, status, "{command} changed the row");
+    assert_eq!(
+        orch.shared_context
+            .task_registry
+            .get("task-1")
+            .unwrap()
+            .status
+            .as_str(),
+        status.as_str(),
+        "{command} changed the registry entry"
+    );
+    let (updates, modes) = task_updates_and_modes(&mut rx);
+    assert!(updates.is_empty(), "{command} published {updates:?}");
+    // Still a task op: answered with no model, and observable as one.
+    assert_eq!(modes, vec!["task_ops".to_string()], "{command}");
+}
+
 #[tokio::test]
-async fn test_bare_pause_resume_resolve_via_lane() {
-    let orch = make_orchestrator();
-    orch.shared_context
-        .task_registry
-        .register("task-1".to_string(), "Runner".to_string());
-    orch.shared_context
-        .task_registry
-        .update_status("task-1", crate::context::TaskEntryStatus::Running);
-    orch.shared_context
-        .register_workflow_for_lane("user1:cli", "task-1");
+async fn bare_pause_on_one_running_workflow_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/pause", TaskStatus::Running).await;
+}
 
-    let reply = send_steer(&orch, "/pause").await;
-    let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
-    assert_eq!(json["new_status"], "paused");
+#[tokio::test]
+async fn pause_with_an_id_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/pause task-1", TaskStatus::Running).await;
+}
 
-    let reply = send_steer(&orch, "/resume").await;
+#[tokio::test]
+async fn bare_resume_on_one_running_workflow_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/resume", TaskStatus::Running).await;
+}
+
+#[tokio::test]
+async fn resume_with_an_id_answers_the_sentence_and_changes_nothing() {
+    assert_command_changes_nothing("/resume task-1", TaskStatus::Running).await;
+}
+
+/// A row an earlier build — or the route, which still pauses — left `paused`
+/// is not un-paused from the chat either: its run never stopped, and its
+/// completion writes over `paused` as it always did.
+#[tokio::test]
+async fn resume_on_a_paused_row_answers_the_sentence_and_leaves_it_paused() {
+    for command in ["/resume", "/resume task-1"] {
+        assert_command_changes_nothing(command, TaskStatus::Paused).await;
+    }
+}
+
+/// The bare forms answer before any target is resolved: with no workflow or
+/// with several on the lane, the same sentence — not "No running workflow"
+/// and not "Which task should I pause?".
+#[tokio::test]
+async fn bare_pause_and_resume_answer_the_sentence_with_no_or_several_workflows() {
+    for command in ["/pause", "/resume"] {
+        let orch = make_orchestrator();
+        assert_pause_unsupported(&send_steer(&orch, command).await);
+
+        let orch = make_orchestrator();
+        for id in ["task-1", "task-2"] {
+            orch.shared_context
+                .task_registry
+                .register(id.to_string(), format!("Title {id}"));
+            orch.shared_context
+                .task_registry
+                .update_status(id, crate::context::TaskEntryStatus::Running);
+            orch.shared_context
+                .register_workflow_for_lane("user1:cli", id);
+        }
+        let mut rx = orch.bus.subscribe();
+        assert_pause_unsupported(&send_steer(&orch, command).await);
+        for id in ["task-1", "task-2"] {
+            assert_eq!(
+                orch.shared_context.task_registry.get(id).unwrap().status,
+                crate::context::TaskEntryStatus::Running,
+                "{command} changed {id}"
+            );
+        }
+        let (updates, _) = task_updates_and_modes(&mut rx);
+        assert!(updates.is_empty(), "{command} published {updates:?}");
+    }
+}
+
+/// `/cancel` is untouched: on the same lane it still stops the run, writes
+/// the row and publishes the change.
+#[tokio::test]
+async fn cancel_on_one_running_workflow_still_cancels_and_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let orch = orchestrator_with_one_workflow(db, TaskStatus::Running);
+    let mut rx = orch.bus.subscribe();
+
+    let reply = send_steer(&orch, "/cancel").await;
+
     let json: serde_json::Value = serde_json::from_str(&reply).unwrap();
-    assert_eq!(json["new_status"], "running");
+    assert_eq!(json["new_status"], "cancelled");
+    let db = orch.db.as_ref().unwrap();
+    let row = openalpaca_storage::repository::TaskRepository::new(db)
+        .get("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, TaskStatus::Cancelled);
+    let (updates, modes) = task_updates_and_modes(&mut rx);
+    assert_eq!(
+        updates,
+        vec![("task-1".to_string(), "cancelled".to_string())]
+    );
+    assert_eq!(modes, vec!["task_ops".to_string()]);
 }
 
 // ── C4: S4 moment 2 on the legacy `tools.allow` branch (design §6.2 #10) ──
@@ -3847,6 +4036,8 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
         true,
         crate::daemon_config::CircuitBreakerConfig::default(),
         30,
+        120,
+        600,
     );
     let mut rx = bus.subscribe();
     let _ = nested
@@ -3892,6 +4083,7 @@ impl openalpaca_llm::LlmProvider for SilentMockLlm {
             },
             finish_reason: openalpaca_llm::FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -4098,6 +4290,8 @@ fn nested_executor(
         true,
         crate::daemon_config::CircuitBreakerConfig::default(),
         30,
+        120,
+        600,
     )
 }
 
@@ -4237,6 +4431,7 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
                     FinishReason::Stop
                 },
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -5101,6 +5296,7 @@ fn make_orchestrator_with_streaming_llm() -> Orchestrator {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -5388,6 +5584,7 @@ impl openalpaca_llm::LlmProvider for ParkedStreamingSkillLlm {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -5993,6 +6190,7 @@ impl openalpaca_llm::LlmProvider for AlwaysToolCallingMock {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -6156,6 +6354,8 @@ fn ollama_only_router(
             supports_reasoning: false,
             supports_tools: true,
             declared: false,
+            long_prompt: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
         },
     );
     Arc::new(router)
@@ -7581,6 +7781,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             });
         }
@@ -7605,6 +7806,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::ToolUse,
                 thinking: None,
+                echo: None,
                 parts: None,
             },
             Some(ScriptStep::Say(text)) => ChatResponse {
@@ -7614,6 +7816,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             },
             // The script ran out — anything the loop asks beyond it is a bug
@@ -7625,6 +7828,7 @@ impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
                 usage,
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             },
         })
@@ -8873,6 +9077,7 @@ impl openalpaca_llm::LlmProvider for MarkerExtractorLlm {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         })
     }
@@ -10803,4 +11008,98 @@ mod memory_store_on_a_turn_with_no_project {
         );
         assert!(!scene.home_store.join("projects").exists());
     }
+}
+
+// ── N-TOOL-1b (B-11): the file-skill tier's per-tool bound ──────────────
+
+/// A file skill's tool calls are cut at `[execution.agent_defaults]
+/// max_tool_runtime_secs` (1 s here) — the bound every loop reads — and its
+/// `shell_execute` definition states that figure and the configured ceiling
+/// (7 s here, not the default 600).
+#[tokio::test]
+async fn the_skill_tier_cuts_a_tool_at_the_daemons_per_tool_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("builder");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: "Builder"
+description: "Builds things"
+tools:
+  allow:
+    - shell_execute
+---
+
+## Instructions
+
+Build it.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    let registry = Arc::new(ToolRegistry::default());
+    registry.register(crate::test_util::slow_shell()).unwrap();
+    let provider = crate::test_util::CallsOneTool::new(
+        "shell_execute",
+        serde_json::json!({"command": "make"}),
+    );
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-6".to_string(),
+    ));
+    let bus = EventBus::default();
+    let gate = make_security_gate_with_registry(&bus, registry.clone());
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(
+            crate::test_util::daemon_config_with_agent_defaults(
+                "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 7",
+            ),
+        )),
+    );
+
+    orch.handle_skill_invocation(
+        Uuid::new_v4(),
+        "cli",
+        "Builder",
+        "build it",
+        "test:cli",
+        None,
+        &ConversationContext::default(),
+        None,
+        &crate::memory::scope_context::MemoryScopeContext::new(None),
+        None,
+        false,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .expect("the skill runs");
+
+    let result = provider.tool_result();
+    assert!(
+        result.contains("Tool 'shell_execute' timed out after 1s"),
+        "the skill's call ran past the daemon's bound: {result:?}"
+    );
+    let description = provider.description_of("shell_execute");
+    assert!(
+        description.contains("still running after 1 second is stopped"),
+        "{description}"
+    );
+    assert!(description.contains("up to 7 seconds"), "{description}");
 }

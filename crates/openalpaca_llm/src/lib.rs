@@ -44,15 +44,17 @@ pub use keys::secret_store::{
 pub use routing::cost_tracker::{
     CacheStats, CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats,
 };
+pub use routing::model_alias::{ALIAS_TABLE, AliasRow, ModelAlias, ModelChoice, compiled_alias};
 pub use routing::model_registry::{
-    DiscoveredModel, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery,
+    DiscoveredModel, LongPromptRate, ModelEntry, ModelInfo, ModelRegistry, PricingInfo,
+    ProviderDiscovery, RequestContract,
 };
 pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
 pub use routing::rate_limiter::{
     CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
 };
 pub use routing::router::{
-    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext,
+    AliasResolution, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext,
     RoutedStream, RouterRequest,
 };
 pub use streaming::collect_stream;
@@ -76,6 +78,17 @@ pub trait LlmProvider: Send + Sync {
     /// the owner (L1).
     fn requires_key(&self) -> bool {
         true
+    }
+
+    /// The deadline one non-streaming call to this provider is given — the
+    /// figure its client was built with, which is also a streamed call's read
+    /// gap (`providers::build_http_client`) — or `None` when it sets none.
+    ///
+    /// The router reads it to tell a call that used up its whole timeout
+    /// from one cut short (LOCAL-HOUR-NO-RETRY); `None` keeps today's
+    /// retries.
+    fn request_timeout(&self) -> Option<std::time::Duration> {
+        None
     }
 
     /// Chat using a specific API key. Default delegates to `chat()`.
@@ -159,6 +172,9 @@ pub fn response_to_events(response: ChatResponse) -> Vec<StreamEvent> {
             partial_json: tc.arguments.to_string(),
         });
     }
+    if let Some(turn) = response.echo {
+        events.push(StreamEvent::Turn(turn));
+    }
     events.push(StreamEvent::Usage(response.usage));
     events.push(StreamEvent::Done {
         finish_reason: response.finish_reason,
@@ -195,6 +211,7 @@ mod tests {
             }]),
             tool_call_id: None,
             is_error: false,
+            echo: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("tool_calls"));
@@ -240,44 +257,67 @@ mod tests {
         assert!(LlmError::Stream("broken pipe".to_string()).is_transient());
     }
 
+    /// The retry table's rows by kind (M57, (a)). Each kind is produced from a
+    /// real reqwest error in `providers::transport_tests`; here, only what the
+    /// router and the loop read from it.
     #[test]
-    fn test_http_timeout_is_transient() {
-        assert!(LlmError::Http("error sending request: operation timed out".into()).is_transient());
+    fn transport_kinds_are_retried_as_the_retry_table_says() {
+        use crate::error::TransportKind;
+        for (kind, transient, retried_on_key) in [
+            (TransportKind::ConnectTimeout, true, true),
+            (TransportKind::RequestTimeout, true, false),
+            (TransportKind::ResetOrClosed, true, true),
+            (TransportKind::ConnectRefused, false, false),
+            (TransportKind::Dns, false, false),
+            (TransportKind::TlsOrOther, false, false),
+        ] {
+            let err = LlmError::Transport {
+                kind,
+                message: "error sending request for url (http://127.0.0.1:1/)".to_string(),
+            };
+            assert_eq!(err.is_transient(), transient, "{kind:?}");
+            assert_eq!(err.is_retryable_on_key(), retried_on_key, "{kind:?}");
+        }
     }
 
+    /// The key layer's predicate is `is_transient` but for a request timeout.
     #[test]
-    fn test_http_connection_reset_is_transient() {
-        assert!(LlmError::Http("connection reset by peer".into()).is_transient());
+    fn the_key_layer_retries_every_other_transient_error() {
+        for err in [
+            LlmError::Stream("broken pipe".to_string()),
+            LlmError::RateLimited { retry_after_ms: 1 },
+            LlmError::Api {
+                status: 500,
+                message: "boom".to_string(),
+            },
+            LlmError::Http("operation timed out".to_string()),
+        ] {
+            assert!(err.is_transient() && err.is_retryable_on_key(), "{err}");
+        }
     }
 
+    /// The `Http` arm still reads its text: no provider here builds it any
+    /// more, but a plugin's provider bridge does (`provider/chat` failed), and
+    /// these are the words it is read for. These strings pinned the providers'
+    /// errors before M57, which never carried them.
     #[test]
-    fn test_http_broken_pipe_is_transient() {
-        assert!(LlmError::Http("error sending request: broken pipe".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_dns_error_not_transient() {
-        assert!(!LlmError::Http("dns error: failed to lookup address".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_tls_error_not_transient() {
-        assert!(!LlmError::Http("error trying to connect: ssl connect error: certificate verify failed".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_connection_refused_not_transient() {
-        assert!(!LlmError::Http("tcp connect error: Connection refused (os error 61)".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_connection_closed_is_transient() {
-        assert!(LlmError::Http("connection closed before message completed".into()).is_transient());
-    }
-
-    #[test]
-    fn test_http_incomplete_message_is_transient() {
-        assert!(LlmError::Http("error reading response: incomplete message".into()).is_transient());
+    fn the_http_arm_reads_its_own_text() {
+        for (text, transient) in [
+            ("error sending request: operation timed out", true),
+            ("connection reset by peer", true),
+            ("error sending request: broken pipe", true),
+            ("connection closed before message completed", true),
+            ("error reading response: incomplete message", true),
+            ("dns error: failed to lookup address", false),
+            (
+                "error trying to connect: ssl connect error: certificate verify failed",
+                false,
+            ),
+            ("tcp connect error: Connection refused (os error 61)", false),
+        ] {
+            let err = LlmError::Http(text.into());
+            assert_eq!(err.is_transient(), transient, "{text}");
+        }
     }
 
     #[tokio::test]
@@ -297,6 +337,7 @@ mod tests {
             },
             finish_reason: FinishReason::ToolUse,
             thinking: Some("Let me think...".to_string()),
+            echo: None,
             parts: None,
         };
 
@@ -316,6 +357,39 @@ mod tests {
         assert_eq!(collected.finish_reason, FinishReason::ToolUse);
     }
 
+    /// A whole response's kept turn (C7a) survives the trait's default
+    /// `chat_streaming`, which streams a whole response as events:
+    /// `response_to_events` carries it as one `Turn` before the usage and
+    /// the end, and `collect_stream` puts it back on the response.
+    #[tokio::test]
+    async fn test_response_to_events_carries_the_kept_turn() {
+        let turn = EchoedTurn::from_blocks(vec![
+            serde_json::json!({"type": "thinking", "thinking": "", "signature": "sig-A"}),
+            serde_json::json!({"type": "text", "text": "Hello"}),
+        ])
+        .expect("a signed thinking turn is kept");
+        let response = ChatResponse {
+            content: "Hello".to_string(),
+            tool_calls: vec![],
+            model: "m".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            echo: Some(turn.clone()),
+            parts: None,
+        };
+
+        let events = response_to_events(response);
+        let n = events.len();
+        assert!(matches!(&events[n - 3], StreamEvent::Turn(t) if *t == turn));
+        assert!(matches!(&events[n - 2], StreamEvent::Usage(_)));
+        assert!(matches!(&events[n - 1], StreamEvent::Done { .. }));
+
+        let stream = Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)));
+        let collected = collect_stream(stream, "m".to_string()).await.unwrap();
+        assert_eq!(collected.echo, Some(turn));
+    }
+
     #[test]
     fn test_response_to_events_text_only() {
         let response = ChatResponse {
@@ -325,6 +399,7 @@ mod tests {
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         };
         let events = response_to_events(response);

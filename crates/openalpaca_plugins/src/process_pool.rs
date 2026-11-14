@@ -12,6 +12,12 @@ use crate::error::PluginError;
 use crate::manifest::PluginManifest;
 use crate::stdio_channel::StdioChannel;
 
+/// How long a JSON-RPC request to a plugin waits for its answer when its
+/// caller names no figure of its own ([`StdioChannel::call`]). `initialize`
+/// (10 s) and `shutdown` (3 s) name theirs, and so does a tool call the
+/// sandbox cuts (`PluginToolProxy`); set by no key.
+pub const CHANNEL_DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// A running plugin child process with its JSON-RPC transport channel.
 pub struct PluginProcess {
     pub child: Child,
@@ -29,8 +35,14 @@ impl PluginProcess {
     ///
     /// Resolves the entry path relative to `plugin_dir`, configures stdin/stdout/stderr
     /// as piped, applies manifest-defined args and environment variables, and creates
-    /// the multiplexed JSON-RPC channel over stdio.
-    pub fn spawn(manifest: &PluginManifest, plugin_dir: &Path) -> Result<Self, PluginError> {
+    /// the multiplexed JSON-RPC channel over stdio, whose requests wait
+    /// `channel_timeout` when their caller names no figure
+    /// ([`CHANNEL_DEFAULT_TIMEOUT`] but in this crate's tests).
+    pub fn spawn(
+        manifest: &PluginManifest,
+        plugin_dir: &Path,
+        channel_timeout: Duration,
+    ) -> Result<Self, PluginError> {
         let entry = manifest.entry_path(plugin_dir);
 
         let mut cmd = Command::new(&entry);
@@ -88,7 +100,7 @@ impl PluginProcess {
             stdin,
             stdout,
             manifest.plugin.max_concurrent,
-            Duration::from_secs(60),
+            channel_timeout,
         );
 
         debug!(

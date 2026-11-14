@@ -58,6 +58,29 @@ pub(super) fn truncate_tool_result_to(text: String, limit: usize) -> String {
     )
 }
 
+/// A round's calls cut into the groups they run in (N-TOOL-3, Z1-01), in the
+/// model's order: `together[i]` says whether call `i` may run beside others
+/// ([`ToolRegistry::runs_concurrently`]). A run of consecutive such calls is
+/// one group; every other call is a group of one. The groups run one after
+/// another, the calls within one together.
+///
+/// [`ToolRegistry::runs_concurrently`]: crate::tools::ToolRegistry::runs_concurrently
+pub(super) fn call_groups(together: &[bool]) -> Vec<std::ops::Range<usize>> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < together.len() {
+        let mut end = start + 1;
+        if together[start] {
+            while end < together.len() && together[end] {
+                end += 1;
+            }
+        }
+        groups.push(start..end);
+        start = end;
+    }
+    groups
+}
+
 /// The text of a failed tool call as the model reads it: the error, marked
 /// `[tool_error]`.
 ///

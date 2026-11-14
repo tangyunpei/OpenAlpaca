@@ -30,6 +30,7 @@ impl MockProvider {
             },
             finish_reason: FinishReason::Stop,
             thinking: None,
+            echo: None,
             parts: None,
         }
     }
@@ -829,6 +830,7 @@ fn test_flatten_messages() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
         ChatMessage::user("Hello"),
         ChatMessage {
@@ -838,6 +840,7 @@ fn test_flatten_messages() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
     ];
     let flattened = flatten_messages(&messages);
@@ -856,6 +859,7 @@ fn test_truncate_messages_for_cli_small_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
         ChatMessage::user("Hello"),
         ChatMessage {
@@ -865,6 +869,7 @@ fn test_truncate_messages_for_cli_small_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
     ];
     let result = truncate_messages_for_cli(&messages);
@@ -886,6 +891,7 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         },
         ChatMessage::user(&big_content), // middle — should be dropped
         ChatMessage {
@@ -895,6 +901,7 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         }, // middle — should be dropped
         ChatMessage::user(&big_content), // middle — should be dropped
         ChatMessage {
@@ -904,6 +911,7 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_calls: None,
             tool_call_id: None,
             is_error: false,
+            echo: None,
         }, // second-to-last — kept
         ChatMessage::user("What next?"), // last — kept
     ];
@@ -921,238 +929,6 @@ fn test_truncate_messages_for_cli_large_input() {
 fn test_truncate_messages_for_cli_empty() {
     let result = truncate_messages_for_cli(&[]);
     assert!(result.is_empty());
-}
-
-// ── estimated_llm_capacity tests ─────────────────────────────────
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_single_key() {
-    // Single provider, single key, default rate config (per_key_concurrency=2, global=4)
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
-
-    // 1 available key * 5 per-key concurrency = 5, capped by global (10) = 5
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 1);
-    assert_eq!(info.per_key_concurrency, 5);
-    assert_eq!(info.key_capacity, 5);
-    assert!(!info.has_cli_fallback);
-    assert_eq!(info.effective_capacity, 5);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_multiple_keys() {
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-
-    let key_pool = KeyPool::new(
-        vec![
-            ApiKey::new(
-                "k1".to_string(),
-                ProviderType::Anthropic,
-                "sk-1".to_string(),
-            ),
-            ApiKey::new(
-                "k2".to_string(),
-                ProviderType::Anthropic,
-                "sk-2".to_string(),
-            ),
-            ApiKey::new(
-                "k3".to_string(),
-                ProviderType::Anthropic,
-                "sk-3".to_string(),
-            ),
-        ],
-        SelectionStrategy::RoundRobin,
-    );
-
-    let mut providers = HashMap::new();
-    providers.insert(
-        ProviderType::Anthropic,
-        ProviderEntry {
-            provider,
-            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
-        },
-    );
-
-    let router = LlmRouter::new(
-        providers,
-        ModelRegistry::with_defaults(),
-        HashMap::new(),
-        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
-    );
-
-    // 3 keys * 5 per-key = 15, capped by global concurrency (10) = 10
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 3);
-    assert_eq!(info.key_capacity, 15);
-    assert!(!info.has_cli_fallback);
-    assert_eq!(info.effective_capacity, 10);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_rate_limited_keys() {
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-
-    let key_pool = KeyPool::new(
-        vec![
-            ApiKey::new(
-                "k1".to_string(),
-                ProviderType::Anthropic,
-                "sk-1".to_string(),
-            ),
-            ApiKey::new(
-                "k2".to_string(),
-                ProviderType::Anthropic,
-                "sk-2".to_string(),
-            ),
-        ],
-        SelectionStrategy::RoundRobin,
-    );
-
-    // Rate-limit one key
-    key_pool
-        .report_result(
-            "k1",
-            CallResult::RateLimited {
-                retry_after_ms: 60_000,
-            },
-        )
-        .await;
-
-    let mut providers = HashMap::new();
-    providers.insert(
-        ProviderType::Anthropic,
-        ProviderEntry {
-            provider,
-            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
-        },
-    );
-
-    let router = LlmRouter::new(
-        providers,
-        ModelRegistry::with_defaults(),
-        HashMap::new(),
-        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
-    );
-
-    // 1 available key * 5 per-key = 5, capped by global (10) = 5
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 1);
-    assert_eq!(info.key_capacity, 5);
-    assert_eq!(info.effective_capacity, 5);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_unknown_model() {
-    let provider = Arc::new(MockProvider::new("anthropic", vec![]));
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
-
-    let info = router
-        .estimated_llm_capacity(Some("nonexistent-model"))
-        .await;
-    assert_eq!(info.effective_capacity, 0);
-    assert_eq!(info.available_api_keys, 0);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_with_cli_fallback() {
-    // Single key + CLI backend: CLI is fallback-only, NOT added to parallel capacity
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-    let cli_provider = Arc::new(MockProvider::new(
-        "claude_cli",
-        vec![Ok(MockProvider::ok_response("claude_cli"))],
-    ));
-
-    let router = make_router_with_mock(
-        provider,
-        ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929",
-    );
-    router.register_cli_backend(ProviderType::Anthropic, cli_provider);
-
-    // 1 key * 5 per-key = 5, CLI NOT counted as parallel bandwidth
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 1);
-    assert_eq!(info.key_capacity, 5);
-    assert!(info.has_cli_fallback);
-    assert_eq!(info.effective_capacity, 5);
-}
-
-#[tokio::test]
-async fn test_estimated_llm_capacity_all_keys_limited_with_cli() {
-    // All keys rate-limited but CLI available — CLI provides fallback capacity of 1
-    let provider = Arc::new(MockProvider::new(
-        "anthropic",
-        vec![Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))],
-    ));
-    let cli_provider = Arc::new(MockProvider::new(
-        "claude_cli",
-        vec![Ok(MockProvider::ok_response("claude_cli"))],
-    ));
-
-    let key_pool = KeyPool::new(
-        vec![ApiKey::new(
-            "k1".to_string(),
-            ProviderType::Anthropic,
-            "sk-1".to_string(),
-        )],
-        SelectionStrategy::RoundRobin,
-    );
-    key_pool
-        .report_result(
-            "k1",
-            CallResult::RateLimited {
-                retry_after_ms: 60_000,
-            },
-        )
-        .await;
-
-    let mut providers = HashMap::new();
-    providers.insert(
-        ProviderType::Anthropic,
-        ProviderEntry {
-            provider,
-            key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
-        },
-    );
-
-    let router = LlmRouter::new(
-        providers,
-        ModelRegistry::with_defaults(),
-        HashMap::new(),
-        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-5-20250929".to_string(),
-    );
-    router.register_cli_backend(ProviderType::Anthropic, cli_provider);
-
-    // 0 available keys, CLI fallback = effective capacity 1
-    let info = router.estimated_llm_capacity(None).await;
-    assert_eq!(info.available_api_keys, 0);
-    assert_eq!(info.key_capacity, 0);
-    assert!(info.has_cli_fallback);
-    assert_eq!(info.effective_capacity, 1);
 }
 
 #[tokio::test]
@@ -1321,7 +1097,7 @@ async fn the_cli_backend_will_not_serve_a_provider_that_is_not_loaded() {
     router.register_cli_backend(ProviderType::Anthropic, cli_provider.clone());
 
     let err = router
-        .try_fallback("claude-sonnet-4-5-20250929", &make_request(None))
+        .try_fallback("claude-sonnet-4-5-20250929", &make_request(None), None)
         .await
         .expect_err("a provider that is not loaded may not be served at all");
 

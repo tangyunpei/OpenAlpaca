@@ -21,7 +21,9 @@ pub use tools::{
     CheckSubagentStatusTool, PostUpdateTool, QueueFollowupTool, SpawnSubagentTool,
     SpawnSubagentsBatchTool, WaitForSubagentsTool,
 };
-pub use tools::{SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL};
+pub use tools::{
+    DEFAULT_SUBAGENT_TEMPLATE, SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL,
+};
 pub use tracker::{SubagentStatus, SubagentTracker};
 
 use crate::agent::subagent::SubAgent;
@@ -133,7 +135,9 @@ pub async fn run_lead_agent(
         "Lead agent starting execution"
     );
 
-    // 1. List worker agent templates (all templates except the lead itself)
+    // 1. List worker agent templates (all templates except the lead itself),
+    // sorted by id (G-2): the `<agents>` block and both spawn descriptions
+    // read the same from run to run.
     let all_templates = shared_context.agent_registry.list_templates();
     let worker_templates: Vec<AgentTemplate> = all_templates
         .into_iter()
@@ -376,12 +380,17 @@ pub async fn run_lead_agent(
         wait_for_subagents_tool_definition(),
     );
     // invoke_skill is per-request like the coordination tools — inject its
-    // backend into the per-request registry, never the global one.
+    // backend into the per-request registry, never the global one. Exempt
+    // from the per-tool time limit, as the main loop registers it
+    // (SKILL-NO-CUT): the skill's own loop bounds it.
+    let invoke_skill_def = crate::tools::builtins::invoke_skill_tool_definition();
     if let Err(e) = lead_registry.register(crate::tools::registry::RegisteredTool {
-        definition: crate::tools::builtins::invoke_skill_tool_definition(),
+        exempt_from_timeout: crate::tools::builtins::builtin_is_exempt_from_timeout(
+            &invoke_skill_def.name,
+        ),
+        definition: invoke_skill_def,
         backend: crate::tools::registry::ToolBackend::BuiltIn(invoke_skill_tool),
         provides_capabilities: vec![],
-        exempt_from_timeout: false,
         annotations: None,
         version: env!("CARGO_PKG_VERSION").to_string(),
         author: "builtin".to_string(),
@@ -429,7 +438,13 @@ pub async fn run_lead_agent(
     if let Some(ref broker) = confirmation_broker {
         sandbox.set_confirmation_broker(broker.clone());
     }
-    let mut sandbox_policy = SandboxPolicy::from_constraints(&lead_agent.id, &lead_agent.constraints);
+    // N-TOOL-1b: the lead's per-tool bound is the daemon's, read at the run's
+    // start; its template's `timeout_seconds` is not a tool's bound.
+    let mut sandbox_policy = SandboxPolicy::from_constraints(
+        &lead_agent.id,
+        &lead_agent.constraints,
+        &daemon_config.load().execution.agent_defaults,
+    );
     sandbox_policy.confirmation_timeout_secs = Some(
         daemon_config
             .load()
@@ -475,6 +490,9 @@ pub async fn run_lead_agent(
                 .user_profile_budget,
         ),
         Some(&skills_catalog_block),
+        // N-LEAD-6: the bound the spawn tool read at its construction, so the
+        // prompt names the figure enforced.
+        spawn_tool.max_subagents_per_run(),
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {
@@ -527,6 +545,9 @@ pub async fn run_lead_agent(
     }
 
     messages.push(ChatMessage::user(task_description));
+    // SA-2b-LEAD: the loop's kept head runs through the objective — the
+    // system prompt, the memory block if one was delivered, the objective.
+    let objective_head = messages.len();
 
     // Design 11 §4, owner decision CQ-6: the working state of the
     // conversation the run was started from — what the chat decided —
@@ -561,10 +582,10 @@ pub async fn run_lead_agent(
     //
     // It goes in **here**, after the persona layers and the objective and
     // before anything the loop will add, because that is the shape the loop
-    // itself produced the first time: `messages[0..=1]` is the pair every
-    // compaction is forbidden to touch, and the rounds follow it. The
-    // recorded calls arrive as messages and nothing dispatches them — a
-    // replay re-primes context, it never re-runs work.
+    // itself produced the first time: `messages[..objective_head]` is the
+    // head every compaction is forbidden to touch, and the rounds follow
+    // it. The recorded calls arrive as messages and nothing dispatches
+    // them — a replay re-primes context, it never re-runs work.
     if let Some(history) = resume {
         let plan = history.plan;
         tracing::info!(
@@ -638,6 +659,12 @@ pub async fn run_lead_agent(
     loop_config.writer =
         crate::orchestrator::working_state::WriterConfig::new(&daemon_config.load(), db.clone());
     loop_config.working_state = chat_state.map(|(state, _)| state);
+    // SA-2b-LEAD (the owner's answer of 2026-11-12, item 7, (a)): every
+    // compaction keeps the objective, which an opening memory block puts at
+    // `messages[2]`, outside the default head (the system prompt and one
+    // message). The chat's working state, the working-folder line and a
+    // replayed history stay behind it, for the loop to fold.
+    loop_config.kept_head = objective_head;
     loop_config.event_bus = Some(bus.clone());
     loop_config.experimental_ephemeral_pressure =
         daemon_config.load().experimental.ephemeral_pressure_layer;

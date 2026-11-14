@@ -65,7 +65,9 @@ pub struct AgentTemplateFrontmatter {
     pub fallback_models: Vec<String>,
     /// Maximum tool calls per task.
     pub max_tool_calls: Option<u32>,
-    /// Task timeout in seconds.
+    /// Task timeout in seconds — a budget nothing enforces yet: no tool
+    /// call's limit is it (that is `[execution.agent_defaults]
+    /// max_tool_runtime_secs`, N-TOOL-1b).
     pub timeout_seconds: Option<u64>,
     /// Maximum cost per task in USD.
     pub max_cost_per_task: Option<f64>,
@@ -387,6 +389,37 @@ pub fn parse_agent_markdown(input: &str) -> Result<AgentTemplate, AgentParseErro
         sections,
         source: AgentSource::default(),
     })
+}
+
+/// The id a template file names, read leniently from its raw text for a
+/// file that does not parse (subagent design §2.4 L-4): the frontmatter's
+/// `id:` line by the parser's own quoting rule, whatever else is wrong with
+/// the file. None when the text opens no frontmatter or names no id.
+pub fn lenient_template_id(input: &str) -> Option<String> {
+    let mut lines = input.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    lines
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| line.trim().strip_prefix("id:").map(strip_outer_quotes))
+        .filter(|id| !id.is_empty())
+}
+
+/// Whether a template file's frontmatter says `disabled: true` (subagent
+/// design §2.4 L-4a, §7 O-1 (b)), read leniently from its raw text by the
+/// parser's boolean rule (`true`, `yes` or `1`), whether or not the rest of
+/// the file parses: a file that says it switches off the id it names, and
+/// its other keys are not read. False when the text opens no frontmatter.
+pub fn lenient_disabled(input: &str) -> bool {
+    let mut lines = input.lines();
+    if lines.next().is_none_or(|first| first.trim() != "---") {
+        return false;
+    }
+    lines
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| line.trim().strip_prefix("disabled:"))
+        .is_some_and(parse_yaml_bool)
 }
 
 /// Render an `AgentTemplate` back to valid Markdown with YAML frontmatter.

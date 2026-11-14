@@ -1,6 +1,6 @@
 # openalpaca (CLI)
 
-> Generated from source by `python3 scripts/gen_api_docs.py`.
+> Generated from source by `python3.11 scripts/gen_api_docs.py`.
 
 ## Overview
 
@@ -21,8 +21,8 @@
 | `openalpaca config` | Manage system configuration (interactive if no subcommands) | `apps/openalpaca/src/commands/config.rs` |
 | `openalpaca gui` | Manage GUI process | `apps/openalpaca/src/commands/gui.rs` |
 | `openalpaca connector` | Manage platform connectors (Telegram, etc.) | `apps/openalpaca/src/commands/connector.rs` |
-| `openalpaca tasks` | Manage tasks (list, status, create, cancel, pause, resume) | `apps/openalpaca/src/commands/tasks.rs` |
-| `openalpaca agents` | Manage agents (list, status, config, create, remove) | `apps/openalpaca/src/commands/agents.rs` |
+| `openalpaca tasks` | Manage tasks (list, status, create, cancel, resume; pause refused) | `apps/openalpaca/src/commands/tasks.rs` |
+| `openalpaca agents` | Manage agents (list, status, config, create, remove, tidy) | `apps/openalpaca/src/commands/agents.rs` |
 | `openalpaca llm` | Manage LLM settings, keys, and usage | `apps/openalpaca/src/commands/llm.rs` |
 | `openalpaca chat` | Chat with the Orchestrator | `apps/openalpaca/src/commands/chat.rs` |
 | `openalpaca sessions` | List the conversations a lane holds (plan §5.7) | `apps/openalpaca/src/commands/sessions.rs` |
@@ -31,7 +31,7 @@
 | `openalpaca store` | Manage projects (list them, re-point a moved one, delete one's data) | `apps/openalpaca/src/commands/store.rs` |
 | `openalpaca persona` | Show or edit the persona documents (USER.md) through the daemon | `apps/openalpaca/src/commands/persona.rs` |
 | `openalpaca memory` | Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt) | `apps/openalpaca/src/commands/memory.rs` |
-| `openalpaca skills` | Show the skill catalog and the problems its last scan found (list, info) | `apps/openalpaca/src/commands/skills.rs` |
+| `openalpaca skills` | Show the skill catalog and the problems its last scan found (list, info, tidy) | `apps/openalpaca/src/commands/skills.rs` |
 
 ## Request/Query Types
 
@@ -66,7 +66,8 @@
   - `set` (fields: `agent_id`, `key_path`, `value`)
   - `create` (fields: `from_file`, `interactive`)
   - `remove` (fields: `agent_id`)
-- Parsed flags: `--format`, `--from-file`, `--interactive`, `--status`
+  - `tidy` (fields: `apply`)
+- Parsed flags: `--apply`, `--format`, `--from-file`, `--interactive`, `--status`
 
 ### `ai_config`
 
@@ -249,7 +250,8 @@
 - Enum `SkillsCommands` variants:
   - `list` (fields: `format`)
   - `info` (fields: `skill`, `format`)
-- Parsed flags: `--format`
+  - `tidy` (fields: `apply`)
+- Parsed flags: `--apply`, `--format`
 
 ### `status`
 
@@ -285,3 +287,9 @@
   - `resume` (fields: `task_id`)
   - `confirmations` (fields: `command`)
 - Parsed flags: `--format`, `--limit`, `--priority`, `--status`
+
+### `tidy`
+
+- Source: `apps/openalpaca/src/commands/tidy.rs`
+- No `Subcommand` enum found in module.
+- Parsed flags: none

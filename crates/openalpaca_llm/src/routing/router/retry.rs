@@ -71,7 +71,7 @@ impl LlmRouter {
                     .get_or_create(&key_guard.id, key_guard.rate_limit);
                 let _key_permit = key_limiter.acquire(estimated_tokens).await;
 
-                let chat_request = ChatRequest {
+                let mut chat_request = ChatRequest {
                     messages: Arc::clone(&request.messages),
                     tools: Arc::clone(&request.tools),
                     model: Some(model.to_string()),
@@ -83,7 +83,12 @@ impl LlmRouter {
                     context_management: request.context_management.clone(),
                     ephemeral_system_notice: request.ephemeral_system_notice.clone(),
                 };
+                self.meet_request_contract(model, &mut chat_request);
 
+                // The router's own clock, started before the provider's: a
+                // call its deadline or read gap ended has run at least that
+                // long by it (LOCAL-HOUR-NO-RETRY).
+                let started = tokio::time::Instant::now();
                 match entry
                     .provider
                     .chat_with_key(&key_guard.secret, chat_request)
@@ -211,7 +216,12 @@ impl LlmRouter {
                             .await;
                         continue;
                     }
-                    Err(e) if e.is_transient() => {
+                    // A request timeout is transient but not retried here: it
+                    // leaves through the arm below, and the fallback chain and
+                    // the agentic loop take it (M57, (a)) — but for a local
+                    // call that used its whole timeout, which leaves as
+                    // `LocalCallTimedOut` (LOCAL-HOUR-NO-RETRY).
+                    Err(e) if e.is_retryable_on_key() => {
                         other_outcomes += 1;
                         // Exponential backoff with full jitter
                         let backoff =
@@ -234,6 +244,17 @@ impl LlmRouter {
                         pool.report_result(&key_guard.id, CallResult::Error(e.to_string()))
                             .await;
                         self.rate_limiter_registry.report_failure().await;
+                        if let Some(spent) =
+                            super::spent_local_call(entry, model, &e, started.elapsed())
+                        {
+                            tracing::warn!(
+                                model = model,
+                                provider = entry.provider.name(),
+                                error = %e,
+                                "A local call used its whole timeout; it is not asked again"
+                            );
+                            return Err(spent);
+                        }
                         return Err(LlmRouterError::Llm(e));
                     }
                 }

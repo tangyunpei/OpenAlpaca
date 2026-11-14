@@ -45,6 +45,8 @@ fn local_model(context_window: u32) -> ModelInfo {
         supports_reasoning: false,
         supports_tools: true,
         declared: true,
+        long_prompt: None,
+        request_contract: crate::routing::model_registry::RequestContract::NONE,
     }
 }
 
@@ -295,4 +297,68 @@ async fn test_cache_stats_aggregation() {
         "ratio={}",
         stats.hit_ratio
     );
+}
+
+// ── O-17 (a): a long-prompt rate, applied per request ───────────────────────
+
+/// `gpt-6.1-sol`'s page (developers.openai.com, read 2026-11-12): "API
+/// prompts with more than 272K input tokens are priced at 2x input and cache
+/// rates and 1.5x output for the full request" — $4 / $15 against $2 / $10.
+/// At the threshold the standard rate holds; one token over, the whole
+/// request takes the long rate, its cache tokens included. Red on the
+/// parent, which has no such rate (and no row).
+#[test]
+fn the_long_prompt_rate_applies_above_its_threshold_and_not_below() {
+    let tracker = make_tracker();
+    let at = 272_000;
+    let over = 272_001;
+
+    let standard = tracker.calculate_cost("gpt-6.1-sol", at, 1_000_000);
+    let expected = at as f64 * 2.0 / 1e6 + 10.0;
+    assert!(
+        (standard - expected).abs() < 1e-9,
+        "at the threshold: {standard}"
+    );
+
+    let long = tracker.calculate_cost("gpt-6.1-sol", over, 1_000_000);
+    let expected = over as f64 * 4.0 / 1e6 + 15.0;
+    assert!((long - expected).abs() < 1e-9, "one over: {long}");
+
+    // The cache path: the prompt's length counts its cached tokens, and the
+    // long rate scales the cache rates with the input rate.
+    let cached = 200_000;
+    let long = tracker.calculate_cost_with_cache("gpt-6.1-sol", over, 0, 0, cached);
+    let expected = (over - cached) as f64 * 4.0 / 1e6 + cached as f64 * 4.0 * 0.10 / 1e6;
+    assert!((long - expected).abs() < 1e-9, "cached, one over: {long}");
+    let standard = tracker.calculate_cost_with_cache("gpt-6.1-sol", at, 0, 0, cached);
+    let expected = (at - cached) as f64 * 2.0 / 1e6 + cached as f64 * 2.0 * 0.10 / 1e6;
+    assert!((standard - expected).abs() < 1e-9, "cached, at: {standard}");
+}
+
+/// A model with no long-prompt rate is priced the same at any length
+/// (Anthropic's 4.6 and later models carry their whole window at the
+/// standard rate, its pricing page, read 2026-11-12).
+#[test]
+fn a_model_without_a_long_prompt_rate_is_priced_the_same_at_any_length() {
+    let tracker = make_tracker();
+    let info = ModelRegistry::with_defaults()
+        .get_model_info("claude-opus-5-5")
+        .expect("catalogued");
+    assert!(info.long_prompt.is_none());
+    let cost = tracker.calculate_cost("claude-opus-5-5", 900_000, 0);
+    assert!((cost - 900_000.0 * 4.0 / 1e6).abs() < 1e-9, "cost={cost}");
+}
+
+/// The catalogue row carries the rate the page gives, and the registry
+/// hands it to the tracker with the price.
+#[test]
+fn the_catalogue_carries_gpt_6_1_sols_long_prompt_rate() {
+    let registry = ModelRegistry::with_defaults();
+    let rate = registry
+        .get_pricing("gpt-6.1-sol")
+        .and_then(|p| p.long_prompt)
+        .expect("a long-prompt rate");
+    assert_eq!(rate.above_input_tokens, 272_000);
+    assert!((rate.input_price_per_million - 4.0).abs() < 1e-9);
+    assert!((rate.output_price_per_million - 15.0).abs() < 1e-9);
 }

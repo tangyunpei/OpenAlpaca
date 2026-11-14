@@ -24,7 +24,7 @@ mod task_ops;
 
 pub use background_jobs::BackgroundJobs;
 pub use task_launch::{RerunOutcome, StartOutcome, TaskLaunchError};
-pub use task_ops::{TaskActionError, apply_task_action};
+pub use task_ops::{PAUSE_UNSUPPORTED, TaskActionError, apply_task_action};
 // Routing V2 shared core, re-exported for the main-loop `task_status` tool.
 pub(crate) use task_ops::task_status_query;
 

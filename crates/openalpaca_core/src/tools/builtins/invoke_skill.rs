@@ -183,12 +183,20 @@ impl BuiltInTool for InvokeSkillTool {
         });
 
         // Snapshot hot-reloadable config values before the await.
-        let (auto_approve, circuit_breaker, confirmation_timeout_secs) = {
+        let (
+            auto_approve,
+            circuit_breaker,
+            confirmation_timeout_secs,
+            max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs,
+        ) = {
             let cfg = self.daemon_config.load();
             (
                 cfg.security.auto_approve_confirmations,
                 cfg.security.circuit_breaker.clone(),
                 cfg.execution.agent_defaults.confirmation_timeout_secs,
+                cfg.execution.agent_defaults.max_tool_runtime_secs,
+                cfg.execution.agent_defaults.max_tool_runtime_ceiling_secs,
             )
         };
 
@@ -211,6 +219,8 @@ impl BuiltInTool for InvokeSkillTool {
             auto_approve,
             circuit_breaker,
             confirmation_timeout_secs,
+            max_tool_runtime_secs,
+            max_tool_runtime_ceiling_secs,
         );
 
         // Map an error finish with no content to Err BEFORE events/telemetry,
@@ -351,7 +361,7 @@ mod tests {
             Ok(ChatResponse {
                 content: "skill output".to_string(),
                 tool_calls: vec![],
-                model: "claude-sonnet-4-20250514".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
@@ -359,6 +369,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }
@@ -392,7 +403,7 @@ Echo the user's query back to them.
         let router = Arc::new(LlmRouter::single_provider(
             provider,
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         InvokeSkillTool::new(
             catalog,
@@ -598,7 +609,7 @@ Never runs.
         let router = Arc::new(LlmRouter::single_provider(
             Arc::new(FailingProvider),
             ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
         ));
         let tool = InvokeSkillTool::new(
             catalog,
@@ -650,5 +661,76 @@ Never runs.
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(required, vec!["skill", "query"]);
+    }
+
+    // ── N-TOOL-1b (B-11): the nested skill tier's per-tool bound ──
+
+    /// A skill run through `invoke_skill` — the nested tier, its executor
+    /// built from the daemon config — has its tool calls cut at
+    /// `[execution.agent_defaults] max_tool_runtime_secs` (1 s here), and its
+    /// `shell_execute` definition states that figure and the configured
+    /// ceiling (7 s here, not the default 600).
+    #[tokio::test]
+    async fn a_nested_skills_tool_call_is_cut_at_the_daemons_per_tool_bound() {
+        let gp = crate::test_util::GuardedProject::new();
+        let tmp = TempDir::new().unwrap();
+        write_skill(
+            tmp.path(),
+            "builder",
+            r#"---
+name: "Builder"
+description: "Builds things"
+tools:
+  allow:
+    - shell_execute
+---
+Build it.
+"#,
+        );
+        let catalog = Arc::new(SkillCatalog::new());
+        catalog.scan_directory(tmp.path(), SkillScope::Project);
+        let registry = Arc::new(ToolRegistry::new().unwrap());
+        registry.register(crate::test_util::slow_shell()).unwrap();
+        let provider = crate::test_util::CallsOneTool::new(
+            "shell_execute",
+            serde_json::json!({"command": "make"}),
+        );
+        let router = Arc::new(LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-6".to_string(),
+        ));
+        let tool = InvokeSkillTool::new(
+            catalog,
+            registry,
+            router,
+            EventBus::new(64),
+            None,
+            Arc::new(ArcSwap::from_pointee(
+                crate::test_util::daemon_config_with_agent_defaults(
+                    "max_tool_runtime_secs = 1\nmax_tool_runtime_ceiling_secs = 7",
+                ),
+            )),
+            1.0,
+        );
+
+        tool.execute_with_context(
+            &serde_json::json!({"skill": "builder", "query": "build it"}),
+            &gp.ctx(),
+        )
+        .await
+        .expect("the skill runs");
+
+        let result = provider.tool_result();
+        assert!(
+            result.contains("Tool 'shell_execute' timed out after 1s"),
+            "the nested skill's call ran past the daemon's bound: {result:?}"
+        );
+        let description = provider.description_of("shell_execute");
+        assert!(
+            description.contains("still running after 1 second is stopped"),
+            "{description}"
+        );
+        assert!(description.contains("up to 7 seconds"), "{description}");
     }
 }

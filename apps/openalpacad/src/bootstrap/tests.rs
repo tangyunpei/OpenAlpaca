@@ -392,40 +392,45 @@ fn an_interrupted_run_is_announced_on_its_session() {
 /// A packaged daemon's config directory holds only what it seeds. Before L9
 /// that was three files, and `GET /v1/agents` answered `[]` on a live install:
 /// no template could act as Lead Agent, and no skill could be invoked.
+///
+/// Since the bundle (subagent design §2.5 S-1) the templates come from the
+/// binary at every start, so a first boot writes none: `agents/` is created
+/// empty, for the person's own and overriding files, while `tools/` is
+/// seeded as before.
 #[test]
-fn a_first_boot_seeds_the_agents_skills_and_tools_it_carries() {
+fn a_first_boot_creates_an_empty_agents_directory_and_writes_no_template() {
     let tmp = make_temp_dir("openalpaca-seed-content");
     let dir = tmp.path();
 
     seed_default_configs(dir);
 
-    assert!(dir.join("agents").join("lead_agent.md").exists());
-    let lead = std::fs::read_to_string(dir.join("agents").join("lead_agent.md"))
-        .expect("read the seeded lead template");
-    assert!(
-        lead.contains("orchestration"),
-        "the seeded lead template must carry the capability the dispatcher looks for"
-    );
+    assert!(dir.join("agents").is_dir(), "agents/ is created");
     assert_eq!(
         std::fs::read_dir(dir.join("agents")).unwrap().count(),
-        9,
-        "all nine shipped templates land"
+        0,
+        "and no template is written into it"
     );
 
-    assert!(dir.join("skills").join("code-review").join("SKILL.md").exists());
-    let script = dir
-        .join("skills")
-        .join("create-skill")
-        .join("scripts")
-        .join("scaffold.sh");
-    assert!(script.exists(), "a skill's nested helper scripts land too");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&script).unwrap().permissions().mode();
-        assert_eq!(mode & 0o111, 0o111, "a script the skill runs is executable");
-    }
+    assert!(dir.join("tools").join("example.toml").exists());
+}
 
+/// The skills are a bundled layer too (S-1, for `skills/`): run from the pack
+/// the daemon writes under `state/cache/bundled-skills/`, so a first boot
+/// writes none into the config directory — `skills/` is created empty, for
+/// the person's own skills, their overrides and what `create-skill` writes.
+#[test]
+fn a_first_boot_creates_an_empty_skills_directory() {
+    let tmp = make_temp_dir("openalpaca-seed-skills");
+    let dir = tmp.path();
+
+    seed_default_configs(dir);
+
+    assert!(dir.join("skills").is_dir(), "skills/ is created");
+    assert_eq!(
+        std::fs::read_dir(dir.join("skills")).unwrap().count(),
+        0,
+        "and no skill is written into it"
+    );
     assert!(dir.join("tools").join("example.toml").exists());
 }
 
@@ -475,4 +480,464 @@ fn a_second_boot_seeds_nothing_again() {
         std::fs::read_to_string(dir.join("agents").join("lead_agent.md")).unwrap(),
         "edited by hand"
     );
+}
+
+// ── N-SKILL-3: create-skill writes only where the daemon reads ───────────────
+
+/// The daemon reads skills from one directory, `<config>/skills` (the
+/// catalog's config layer in `services::initialize_services`). The built-in
+/// `create-skill` runs from the pack under `state/cache/bundled-skills/`, so
+/// the daemon tells its scripts where skills are written and where the
+/// built-in ones are (`OPENALPACA_SKILLS_DIR`, `OPENALPACA_BUNDLED_SKILLS_DIR`,
+/// subagent design §2.6 K-5); a copy in `config/skills` run by hand finds the
+/// root from its own location. So each test runs both ways (K-7): from a pack
+/// written into a scratch store with both variables set, as
+/// `ScriptToolBuiltIn` sets them, and from a copy under a scratch
+/// `config/skills` without them — the script itself, from its skill's
+/// directory, with a scratch `HOME` and only `PATH` beside it. No script runs
+/// in the repository.
+#[cfg(unix)]
+mod create_skill {
+    use super::*;
+    use openalpaca_core::bundled::{BUNDLED_SKILLS, write_skill_pack};
+    use openalpaca_core::middleware::skill::SkillScope;
+    use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+
+    /// Every directory and file under a root, each file with its bytes.
+    type Tree = BTreeMap<PathBuf, Option<Vec<u8>>>;
+
+    fn tree_of(root: &Path) -> Tree {
+        fn walk(dir: &Path, root: &Path, out: &mut Tree) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+                    out.insert(rel, None);
+                    walk(&path, root, out);
+                } else {
+                    out.insert(rel, Some(std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = Tree::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// Where the `create-skill` that runs comes from.
+    #[derive(Clone, Copy, Debug)]
+    enum Leg {
+        /// The built-in one, from the pack, told both roots.
+        Pack,
+        /// A copy under `config/skills`, told nothing: its own location.
+        ConfigCopy,
+    }
+
+    const LEGS: [Leg; 2] = [Leg::Pack, Leg::ConfigCopy];
+
+    /// A first boot's config directory, `<tmp>/<config_name>`, the pack under
+    /// `<tmp>/state/cache/bundled-skills`, and an empty `<tmp>/home`. The
+    /// root is canonical, as the daemon's script path is
+    /// (`ScriptToolBuiltIn::new`), so the paths a script prints compare equal.
+    struct ScratchInstall {
+        _guard: crate::test_util::HomeStoreGuard,
+        _tmp: TempDir,
+        root: PathBuf,
+        config: PathBuf,
+        pack: PathBuf,
+        home: PathBuf,
+        leg: Leg,
+    }
+
+    impl ScratchInstall {
+        fn new(config_name: &str, leg: Leg) -> Self {
+            let tmp = make_temp_dir("openalpaca-create-skill");
+            let root = tmp.path().canonicalize().unwrap();
+            let config = root.join(config_name);
+            let home = root.join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let guard = crate::test_util::HomeStoreGuard::set(&root.join("store"));
+            seed_default_configs(&config);
+            let pack = root.join("state/cache/bundled-skills");
+            write_skill_pack(&pack).unwrap();
+            let install = Self {
+                _guard: guard,
+                _tmp: tmp,
+                root,
+                config,
+                pack,
+                home,
+                leg,
+            };
+            if let Leg::ConfigCopy = leg {
+                install.copy_create_skill_into_config();
+            }
+            install
+        }
+
+        /// This build's `create-skill`, as `<config>/skills/create-skill/`.
+        fn copy_create_skill_into_config(&self) {
+            for file in BUNDLED_SKILLS {
+                let Some(rel) = file.path.strip_prefix("skills/create-skill/") else {
+                    continue;
+                };
+                let target = self.skills_root().join("create-skill").join(rel);
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(&target, file.contents).unwrap();
+                if rel.ends_with(".sh") {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+            }
+        }
+
+        /// The one directory the daemon reads skills from.
+        fn skills_root(&self) -> PathBuf {
+            self.config.join("skills")
+        }
+
+        /// The `create-skill` folder this leg runs.
+        fn skill(&self) -> PathBuf {
+            match self.leg {
+                Leg::Pack => self.pack.join("create-skill"),
+                Leg::ConfigCopy => self.skills_root().join("create-skill"),
+            }
+        }
+
+        fn run(&self, script: &str, args: &[&str]) -> Output {
+            self.run_from(&self.skill(), self.leg, script, args)
+        }
+
+        /// Run `script` of the `create-skill` at `skill`, told the roots as
+        /// `leg` is.
+        fn run_from(&self, skill: &Path, leg: Leg, script: &str, args: &[&str]) -> Output {
+            let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+            let mut cmd = Command::new(skill.join("scripts").join(script));
+            cmd.args(args)
+                .current_dir(skill)
+                .env_clear()
+                .env("PATH", path)
+                .env("HOME", &self.home);
+            if let Leg::Pack = leg {
+                cmd.env("OPENALPACA_SKILLS_DIR", self.skills_root())
+                    .env("OPENALPACA_BUNDLED_SKILLS_DIR", &self.pack);
+            }
+            cmd.output().unwrap_or_else(|e| panic!("run {script}: {e}"))
+        }
+    }
+
+    fn text(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    /// `--scope=user` wrote under `~/.config/openalpaca/skills`, a directory
+    /// no build reads, outside the home store (D1), and reported success.
+    /// Every script that takes a scope now refuses any scope but `project`,
+    /// naming the root the daemon reads, prints no result, and writes
+    /// nothing anywhere — under `HOME`, in the config directory or in the
+    /// pack. The lister's old `both` is refused the same way. Each call gets
+    /// a fresh install, so what one writes cannot hide what another does.
+    #[test]
+    fn every_scope_but_project_is_refused_naming_the_root_the_daemon_reads() {
+        let calls: [(&str, &[&str]); 5] = [
+            (
+                "write_skill_md.sh",
+                &[
+                    "--id=hello-world",
+                    "--name=Hello World",
+                    "--description=Says hello",
+                    "--scope=user",
+                ],
+            ),
+            ("scaffold.sh", &["--id=hello-world", "--scope=user"]),
+            ("check_exists.sh", &["--id=hello-world", "--scope=user"]),
+            ("list_skills.sh", &["--scope=user"]),
+            ("list_skills.sh", &["--scope=both"]),
+        ];
+        let mut failures = Vec::new();
+        for leg in LEGS {
+            for (script, args) in calls {
+                let install = ScratchInstall::new("config", leg);
+                let root = install.skills_root().display().to_string();
+                let before = tree_of(&install.root);
+                let out = install.run(script, args);
+                let after = tree_of(&install.root);
+                let mut wrong = Vec::new();
+                if out.status.success() {
+                    wrong.push("exit 0".to_string());
+                }
+                if !out.stdout.is_empty() {
+                    wrong.push(format!("prints {:?}", text(&out.stdout)));
+                }
+                let stderr = text(&out.stderr);
+                if !stderr.contains(&root) {
+                    wrong.push(format!("does not name {root}: stderr {stderr:?}"));
+                }
+                let written: Vec<&PathBuf> = before
+                    .keys()
+                    .chain(after.keys())
+                    .filter(|path| before.get(*path) != after.get(*path))
+                    .collect();
+                if !written.is_empty() {
+                    wrong.push(format!("writes {written:?}"));
+                }
+                if !wrong.is_empty() {
+                    failures.push(format!("{leg:?} {script} {args:?}: {}", wrong.join("; ")));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// With the default scope the new skill lands in `<config>/skills`, the
+    /// checker finds it there, and the catalog the daemon builds from that
+    /// directory loads it; nothing else is written — nothing in the pack.
+    fn a_new_skill_lands_where_the_daemon_reads(config_name: &str, leg: Leg) {
+        let install = ScratchInstall::new(config_name, leg);
+        let root = install.skills_root();
+        let skill_md = root.join("hello-world").join("SKILL.md");
+        let before = tree_of(&install.root);
+
+        let scaffold = install.run("scaffold.sh", &["--id=hello-world", "--dirs=scripts"]);
+        assert!(
+            scaffold.status.success(),
+            "{leg:?}: {}",
+            text(&scaffold.stderr)
+        );
+        let write = install.run(
+            "write_skill_md.sh",
+            &[
+                "--id=hello-world",
+                "--name=Hello World",
+                "--description=Says hello",
+                "--tools=file_read",
+                "--scope=project",
+            ],
+        );
+        assert!(write.status.success(), "{leg:?}: {}", text(&write.stderr));
+        assert!(
+            text(&write.stdout).contains(&skill_md.display().to_string()),
+            "{leg:?}: the result names {}: {}",
+            skill_md.display(),
+            text(&write.stdout)
+        );
+
+        let after = tree_of(&install.root);
+        let added: Vec<PathBuf> = after
+            .keys()
+            .filter(|path| !before.contains_key(*path))
+            .cloned()
+            .collect();
+        let rel = |path: PathBuf| path.strip_prefix(&install.root).unwrap().to_path_buf();
+        assert_eq!(
+            added,
+            vec![
+                rel(root.join("hello-world")),
+                rel(skill_md.clone()),
+                rel(root.join("hello-world").join("scripts")),
+            ],
+            "{leg:?}: only the new skill is written"
+        );
+        for (path, contents) in &before {
+            assert_eq!(
+                after.get(path),
+                Some(contents),
+                "{leg:?}: {}",
+                path.display()
+            );
+        }
+
+        let exists = install.run("check_exists.sh", &["--id=hello-world"]);
+        assert!(exists.status.success(), "{leg:?}: {}", text(&exists.stderr));
+        assert_eq!(
+            text(&exists.stdout).trim(),
+            format!("{{\"exists\": true, \"path\": \"{}\"}}", skill_md.display()),
+            "{leg:?}"
+        );
+
+        let catalog = SkillCatalog::new();
+        catalog.scan_directory(&root, SkillScope::Project);
+        let entry = catalog
+            .get("hello-world")
+            .expect("the daemon's scan of <config>/skills loads the new skill");
+        assert_eq!(entry.skill_md_path.as_deref(), Some(skill_md.as_path()));
+    }
+
+    #[test]
+    fn a_new_skill_lands_in_the_config_directory_s_skills() {
+        for leg in LEGS {
+            a_new_skill_lands_where_the_daemon_reads("config", leg);
+        }
+    }
+
+    /// `OPENALPACA_CONFIG_DIR` may name a directory of any name (the
+    /// Installation Manual's *Runtime Overrides*); the scripts wrote to a
+    /// `config/skills` beside it, which the daemon does not read.
+    #[test]
+    fn a_new_skill_lands_there_whatever_the_config_directory_is_called() {
+        for leg in LEGS {
+            a_new_skill_lands_where_the_daemon_reads("my-config", leg);
+        }
+    }
+
+    /// The lister's output, parsed: `(id, slash, source)` per entry.
+    fn listed(out: &Output) -> Vec<(String, String, String)> {
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {}", text(&out.stdout)));
+        let mut rows: Vec<(String, String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["id"].as_str().unwrap().to_string(),
+                    row["slash"].as_str().unwrap().to_string(),
+                    row["source"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    fn row(id: &str, slash: &str, source: &str) -> (String, String, String) {
+        (id.to_string(), slash.to_string(), source.to_string())
+    }
+
+    /// K-6: create-skill's conflict check sees the built-in skills — run
+    /// from the pack, the lister lists the config directory's skills and the
+    /// pack's, each with its slash command and where it comes from.
+    #[test]
+    fn list_skills_lists_bundled_skills_and_their_slashes() {
+        let install = ScratchInstall::new("config", Leg::Pack);
+        let scaffold = install.run("scaffold.sh", &["--id=hello-world"]);
+        assert!(scaffold.status.success(), "{}", text(&scaffold.stderr));
+        std::fs::write(
+            install.skills_root().join("hello-world/SKILL.md"),
+            "---\nname: Hello\ndescription: d\ninvoke:\n  slash: /hi\n---\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            listed(&install.run("list_skills.sh", &[])),
+            vec![
+                row("code-review", "/review", "bundled"),
+                row("commit-message", "/commit", "bundled"),
+                row("create-skill", "/create-skill", "bundled"),
+                row("explain-code", "/explain-code", "bundled"),
+                row("hello-world", "/hi", "config"),
+            ]
+        );
+    }
+
+    /// K-6: an override of `create-skill` in `config/skills` — whose own
+    /// skills directory is the config root — still lists the built-in skills
+    /// when the daemon runs it, and its own folder as the config's.
+    #[test]
+    fn list_skills_from_an_override_create_skill_still_lists_the_bundled_ones() {
+        let install = ScratchInstall::new("config", Leg::ConfigCopy);
+        let out = install.run_from(
+            &install.skills_root().join("create-skill"),
+            Leg::Pack,
+            "list_skills.sh",
+            &[],
+        );
+
+        assert_eq!(
+            listed(&out),
+            vec![
+                row("code-review", "/review", "bundled"),
+                row("commit-message", "/commit", "bundled"),
+                row("create-skill", "/create-skill", "bundled"),
+                row("create-skill", "/create-skill", "config"),
+                row("explain-code", "/explain-code", "bundled"),
+            ]
+        );
+    }
+
+    /// K-6: an id only a built-in skill holds is free to write, and is said
+    /// to be a built-in one's — a new skill there overrides it, which the
+    /// person should choose knowingly. The path is the config directory's.
+    #[test]
+    fn check_exists_says_when_only_a_bundled_skill_holds_the_id() {
+        let install = ScratchInstall::new("config", Leg::Pack);
+        let out = install.run("check_exists.sh", &["--id=code-review"]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert_eq!(
+            text(&out.stdout).trim(),
+            format!(
+                "{{\"exists\": false, \"bundled\": true, \"path\": \"{}\"}}",
+                install.skills_root().join("code-review/SKILL.md").display()
+            )
+        );
+
+        let out = install.run("check_exists.sh", &["--id=not-a-skill"]);
+        assert_eq!(
+            text(&out.stdout).trim(),
+            format!(
+                "{{\"exists\": false, \"path\": \"{}\"}}",
+                install.skills_root().join("not-a-skill/SKILL.md").display()
+            )
+        );
+    }
+
+    /// §1.2's skills row 1 as K-6 meets it: on a store an earlier build
+    /// seeded, a built-in id's folder in `config/skills` is an unedited copy
+    /// the daemon sets aside — not read, the built-in skill runs. The
+    /// checker answered `exists` alone, as for a skill of the person's, and
+    /// the scaffolder refused the id with no way on. Now the checker says a
+    /// built-in skill holds the id too, and the refusal says the folder may
+    /// be such a copy and names `openalpaca skills tidy --apply`; it still
+    /// writes nothing. `82022776`'s `create-skill` is the seeded copy.
+    #[test]
+    fn a_seeded_copy_of_a_built_in_skill_is_said_to_be_one_and_scaffold_names_tidy() {
+        let install = ScratchInstall::new("config", Leg::Pack);
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/openalpaca_core/src/bundled/fixtures/82022776/skills/create-skill");
+        let seeded = install.skills_root().join("create-skill");
+        for name in [
+            "SKILL.md",
+            "scripts/check_exists.sh",
+            "scripts/list_skills.sh",
+            "scripts/scaffold.sh",
+            "scripts/write_skill_md.sh",
+        ] {
+            let target = seeded.join(name);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(fixture.join(name), &target).unwrap();
+        }
+        assert!(
+            matches!(
+                openalpaca_core::bundled::classify_skill_dir("create-skill", &seeded),
+                Some(openalpaca_core::bundled::SkillFolder::UneditedCopy(_))
+            ),
+            "the fixture is no longer an unedited copy"
+        );
+
+        let out = install.run("check_exists.sh", &["--id=create-skill"]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert_eq!(
+            text(&out.stdout).trim(),
+            format!(
+                "{{\"exists\": true, \"bundled\": true, \"path\": \"{}\"}}",
+                seeded.join("SKILL.md").display()
+            )
+        );
+
+        let before = tree_of(&install.root);
+        let out = install.run("scaffold.sh", &["--id=create-skill"]);
+        assert!(!out.status.success(), "scaffold.sh wrote over the copy");
+        let stderr = text(&out.stderr);
+        for needle in [
+            seeded.join("SKILL.md").display().to_string(),
+            "built-in skill".to_string(),
+            "openalpaca skills tidy --apply".to_string(),
+        ] {
+            assert!(stderr.contains(&needle), "{needle:?} not in {stderr:?}");
+        }
+        assert_eq!(before, tree_of(&install.root), "the refusal wrote");
+    }
 }

@@ -1,6 +1,6 @@
 /** `/v1/agents*`, `/v1/agent-templates*`, `/v1/agent-instances`. */
 
-import { apiFetch } from "../http";
+import { ApiError, apiFetch } from "../http";
 import type {
   AgentActionResponse,
   AgentConfigFile,
@@ -49,14 +49,40 @@ export async function updateAgentTemplate(
   );
 }
 
-/** `DELETE /v1/agent-templates/{id}` — archives the template. */
+/**
+ * `DELETE /v1/agent-templates/{id}` — archives the file that holds the
+ * template. A built-in template no file holds and a plugin's template are
+ * refused, nothing changed: `409 {error: "bundled" | "plugin", message}`,
+ * a plugin's naming it in `plugin` and in the sentence (subagent design
+ * §2.10 T-2). The shared parser hands a string `error` through as the
+ * message, so the refusal is read here: the sentence becomes the message
+ * and the word the `code`.
+ */
 export async function deleteAgentTemplate(
   id: string,
 ): Promise<{ id: string; status: string }> {
-  return await apiFetch<{ id: string; status: string }>(
-    `/v1/agent-templates/${encodeURIComponent(id)}`,
-    { method: "DELETE" },
-  );
+  try {
+    return await apiFetch<{ id: string; status: string }>(
+      `/v1/agent-templates/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    );
+  } catch (error) {
+    throw templateRefusal(error);
+  }
+}
+
+/** A `409 {error: "<word>", message}` refusal read as its sentence. */
+function templateRefusal(error: unknown): unknown {
+  if (!(error instanceof ApiError) || error.status !== 409) return error;
+  const body = error.detail as Record<string, unknown> | null;
+  if (
+    typeof body?.error !== "string" ||
+    typeof body.message !== "string" ||
+    body.message.length === 0
+  ) {
+    return error;
+  }
+  return new ApiError(body.message, error.status, body.error, error.detail);
 }
 
 /** `GET /v1/agent-instances` */

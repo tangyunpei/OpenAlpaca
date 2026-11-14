@@ -50,6 +50,13 @@ pub struct RouterRequest {
 pub struct RoutedStream {
     /// The ladder's effective model: what answered, not what was asked for.
     pub model: String,
+    /// Whether the provider serving the stream needs a key
+    /// ([`LlmProvider::requires_key`]): `false` for a local model, whose
+    /// streamed round the agentic loop allows an hour where it allows any
+    /// other ten minutes (LOCAL-CALL-HOUR).
+    ///
+    /// [`LlmProvider::requires_key`]: crate::LlmProvider::requires_key
+    pub requires_key: bool,
     pub stream: ChatStream,
 }
 
@@ -112,30 +119,34 @@ pub enum LlmRouterError {
     )]
     NoRoutableModel,
 
+    /// A call to a provider that needs no key — a local model — used up its
+    /// whole timeout with no answer: the deadline of a non-streaming call, the
+    /// read gap of a streamed one before its stream opened, or a streamed
+    /// round's own bound
+    /// (LOCAL-HOUR-NO-RETRY, the owner's answer of 2026-11-12). Not
+    /// transient: that provider is not asked again — not on its slot, not on
+    /// the fallback ladder, not by the agentic loop, and a streamed round not
+    /// again without streaming. A rung on another provider may still answer
+    /// (`LlmRouter::complete_elsewhere`); when none does, this is the call's
+    /// error, so the turn ends naming it.
+    #[error(
+        "{model} ({provider}, a local model) did not finish answering within its whole \
+         timeout of {timeout_secs} s, so it was not asked again. A smaller model or a shorter \
+         request may finish in time. A non-streaming call's timeout is \
+         `request_timeout_secs` under `[providers.{provider}]` in llm.toml; a streamed \
+         round's is fixed."
+    )]
+    LocalCallTimedOut {
+        model: String,
+        provider: String,
+        timeout_secs: u64,
+    },
+
     #[error("No fallback chain configured for model: {0}")]
     NoFallbackAvailable(String),
 
     #[error("LLM error: {0}")]
     Llm(#[from] LlmError),
-}
-
-/// Structured LLM capacity information for adaptive concurrency decisions.
-///
-/// Returned by [`super::LlmRouter::estimated_llm_capacity`] so callers can base
-/// stagger delay on the raw key count and reserve slots for the lead agent.
-#[derive(Debug, Clone)]
-pub struct LlmCapacityInfo {
-    /// Number of API-compatible keys currently available (not in cooldown).
-    pub available_api_keys: usize,
-    /// Max concurrent calls allowed per key (from rate limiter config).
-    pub per_key_concurrency: usize,
-    /// `available_api_keys * per_key_concurrency`.
-    pub key_capacity: usize,
-    /// Whether a CLI fallback backend is registered for this provider.
-    pub has_cli_fallback: bool,
-    /// Effective parallel capacity: `min(key_capacity, global_available)`.
-    /// When `key_capacity == 0` and `has_cli_fallback`, this is 1 (fallback only).
-    pub effective_capacity: usize,
 }
 
 /// A provider entry with its key pool (swappable for hot-reload).
@@ -148,4 +159,16 @@ pub struct LlmCapacityInfo {
 pub struct ProviderEntry {
     pub provider: Arc<dyn LlmProvider>,
     pub key_pool: Arc<ArcSwap<KeyPool>>,
+}
+
+/// What [`LlmRouter::resolve_alias`](super::LlmRouter::resolve_alias)
+/// settled on for an alias (M-4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasResolution {
+    /// The routable model the alias names here.
+    pub model: String,
+    /// The candidates passed over on the way, because they were not
+    /// routable: the parent's provider's pin, then its compiled id. Each is
+    /// announced once (M-5).
+    pub passed_over: Vec<String>,
 }

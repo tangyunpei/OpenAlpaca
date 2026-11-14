@@ -97,7 +97,8 @@ const TIMEOUT_TAIL_LINES: usize = 40;
 /// the file directly, so it answers even when nothing is serving `/v1/*`.
 /// Reads at most `store::LOG_TAIL_READ_BYTES` from the end of the file; the
 /// line handling is `store::read_log_tail`'s, which is where it is tested —
-/// CI compiles none of this crate.
+/// the workspace's gate set (`default-members`) leaves this crate out, and
+/// it is checked and tested only by hand (`-p openalpaca_gui`).
 #[tauri::command]
 fn read_daemon_log_tail(lines: usize) -> Result<String, String> {
     let path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;

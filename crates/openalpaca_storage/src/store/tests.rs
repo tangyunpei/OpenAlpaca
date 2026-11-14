@@ -212,6 +212,28 @@ fn test_paths_are_consistent() {
     assert!(plugins.is_dir() && config.is_dir());
 }
 
+/// Subagent design §2.6 K-1: the built-in skills' files live under
+/// `state/cache/bundled-skills/`, the machine's, beside the memory index —
+/// a path query that creates nothing, and the home README names it.
+#[test]
+fn the_bundled_skills_dir_is_under_state_cache_and_creates_nothing() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("home");
+    let _guard = HomeStoreGuard::set(&root);
+
+    let pack = bundled_skills_dir().unwrap();
+
+    assert_eq!(
+        pack,
+        root.join("state").join("cache").join("bundled-skills")
+    );
+    assert!(!root.exists(), "a path query created {}", root.display());
+    assert!(
+        HOME_README.contains("`bundled-skills/`, the built-in skills' files"),
+        "the home README's state/cache/ row names bundled-skills/"
+    );
+}
+
 #[test]
 fn path_queries_do_not_create_the_store() {
     let tmp = tempdir().unwrap();

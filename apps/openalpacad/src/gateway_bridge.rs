@@ -174,6 +174,7 @@ mod tests {
                 usage: openalpaca_llm::Usage::default(),
                 finish_reason: openalpaca_llm::FinishReason::Stop,
                 thinking: None,
+                echo: None,
                 parts: None,
             })
         }

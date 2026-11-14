@@ -663,6 +663,7 @@ mod tests {
                 allowed_capabilities: vec!["echo".to_string()],
                 ..Default::default()
             },
+            &crate::daemon_config::AgentDefaults::default(),
         )
     }
 
@@ -772,6 +773,74 @@ mod tests {
         let results = received[1].as_ref().expect("second step carries results");
         assert_eq!(results[0]["tool"], "echo");
         assert_eq!(results[0]["result"], "echo:hi");
+    }
+
+    /// N-TOOL-8: a plugin that sends a call's arguments as the JSON string of
+    /// an object has them read as that object at the sandbox's entry, so the
+    /// tool runs on the object — and the log says so in one WARN naming the
+    /// tool and the source (the agent the call came from), never the
+    /// arguments themselves.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_proxied_json_string_call_reaches_the_tool_as_its_object() {
+        let value = "a-value-the-log-never-shows";
+        let text = serde_json::json!({ "q": value }).to_string();
+        let executor = StubExecutor::new(
+            true,
+            vec![
+                (
+                    "tool_request".into(),
+                    String::new(),
+                    vec![serde_json::json!({"tool": "echo", "arguments": text})],
+                ),
+                ("complete".into(), "used the tool".into(), vec![]),
+            ],
+        );
+        let (sandbox, _registry) = make_sandbox();
+        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        // What the spawn path hands the loop: the template's id, which the
+        // sandbox attributes every call to (`lead_agent/tools.rs`).
+        let ctx = ToolContext {
+            agent_id: Some("stub_agent".to_string()),
+            ..Default::default()
+        };
+        let outcome = run_plugin_agent_loop(
+            &exec,
+            "plugin-instance",
+            "task-1",
+            "do the thing",
+            &serde_json::json!({}),
+            &sandbox,
+            &policy(),
+            &ctx,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(outcome.success(), "{outcome:?}");
+        let received = executor.results_received();
+        let results = received[1].as_ref().expect("second step carries results");
+        assert_eq!(results[0]["result"], format!("echo:{value}"));
+        logs_assert(|lines: &[&str]| {
+            let warned: Vec<&&str> = lines
+                .iter()
+                .filter(|line| line.contains("read as that object"))
+                .collect();
+            match warned.as_slice() {
+                [one]
+                    if one.contains("WARN")
+                        && one.contains("tool=echo")
+                        && one.contains("source=stub_agent") =>
+                {
+                    Ok(())
+                }
+                other => Err(format!(
+                    "one WARN naming the tool and the source, got {other:?}"
+                )),
+            }
+        });
+        assert!(!logs_contain(value), "the log shows the arguments");
     }
 
     #[tokio::test]
@@ -905,18 +974,19 @@ mod tests {
         Arc::new(sandbox)
     }
 
-    /// A plugin template granting `shell_execute`, its per-tool timeout far
-    /// past every bound these tests wait, so only the cancel can end the call.
+    /// A plugin template granting `shell_execute`, its per-tool bound — the
+    /// daemon's default, 120 s (N-TOOL-1b) — far past every bound these
+    /// tests wait, so only the cancel can end the call.
     #[cfg(unix)]
     fn shell_policy(auto_approve: bool) -> SandboxPolicy {
         let mut policy = SandboxPolicy::from_constraints(
             "plugin-instance",
             &crate::agent::subagent::AgentConstraints {
                 allowed_capabilities: vec!["shell_execute".to_string()],
-                timeout_seconds: Some(120),
                 auto_approve,
                 ..Default::default()
             },
+            &crate::daemon_config::AgentDefaults::default(),
         );
         policy.confirmation_timeout_secs = Some(300);
         policy

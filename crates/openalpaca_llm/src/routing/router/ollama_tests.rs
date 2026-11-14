@@ -78,6 +78,8 @@ fn local_model_info() -> ModelInfo {
         supports_reasoning: false,
         supports_tools: true,
         declared: true,
+        long_prompt: None,
+        request_contract: crate::routing::model_registry::RequestContract::NONE,
     }
 }
 
@@ -699,6 +701,95 @@ async fn the_router_reports_a_local_provider_as_needing_no_key() {
             .expect("the provider is loaded")
             .is_empty()
     );
+}
+
+// ── LOCAL-CALL-HOUR: a call to a local model may run up to an hour ──────────
+
+/// The loop allows a streamed round an hour only where the provider needs no
+/// key, and it learns which from the stream the router hands it: the router
+/// is the one place that knows which provider is serving the round.
+#[tokio::test]
+async fn a_routed_stream_says_whether_its_provider_needs_a_key() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::sse(sse_frames(&["pong"], 11, 3))
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+
+    let local = keyless_router(&server.base_url, "local-model");
+    let routed = local
+        .complete_streaming(request("local-model"))
+        .await
+        .expect("a keyless provider streams");
+    assert!(!routed.requires_key, "Ollama needs no key");
+
+    let provider = Arc::new(crate::providers::openai::OpenAiProvider::new(
+        "sk-test".to_string(),
+        Some("gpt-5.2".to_string()),
+        Some(format!("{}/v1", server.base_url)),
+        None,
+    ));
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider,
+            key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
+                vec![ApiKey::new(
+                    "k1".to_string(),
+                    ProviderType::OpenAI,
+                    "sk-test".to_string(),
+                )],
+                SelectionStrategy::RoundRobin,
+            ))),
+        },
+    );
+    let keyed = LlmRouter::new(
+        providers,
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "gpt-5.2".to_string(),
+    );
+    let routed = keyed
+        .complete_streaming(request("gpt-5.2"))
+        .await
+        .expect("a keyed provider streams");
+    assert!(
+        routed.requires_key,
+        "an OpenAI-compatible cloud provider needs one"
+    );
+    assert_eq!(server.hits("/v1/chat/completions").await, 2);
+}
+
+/// N-LLM-1 gave the keyless slot the per-key limiter of eight concurrent
+/// calls, and an hour's call does not change it: the slot still admits eight.
+#[tokio::test]
+async fn the_keyless_slot_still_admits_eight_calls() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::json(completion_body("local-model", "pong"))
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+    let router = keyless_router(&server.base_url, "local-model");
+
+    router
+        .complete(request("local-model"))
+        .await
+        .expect("a keyless provider answers");
+
+    let slot = keyless_slot("ollama").id;
+    let limiter = router
+        .rate_limiter_registry
+        .get(&slot)
+        .expect("the call was accounted to the keyless slot");
+    assert_eq!(limiter.concurrency.available_permits(), 8);
 }
 
 // ── M2: a small budget on a thinking model ──────────────────────────────────

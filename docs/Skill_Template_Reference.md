@@ -46,20 +46,25 @@ config/skills/<skill-id>/
 
 The **directory name is the canonical skill ID** (lowercased). Every direct child directory of the skills directory that contains a `SKILL.md` is treated as a skill.
 
-`config/` here means the daemon's config directory. That is `./config` when you run from a repo checkout, and `~/.openalpaca/config` for a daemon started by the GUI or the CLI. On first boot the daemon seeds `skills/` with the four shipped skills (`code-review`, `commit-message`, `create-skill`, `explain-code`). A `skills/` directory that already exists is left alone, even if it is empty.
+`config/` here means the daemon's config directory. That is `./config` when you run from a repo checkout, and `~/.openalpaca/config` for a daemon started by the GUI or the CLI. The four shipped skills (`code-review`, `commit-message`, `create-skill`, `explain-code`) are built in: the daemon carries them in its binary and writes none into `config/skills/`, which a first boot creates empty for your own skills and overrides (see *Scopes*).
 
 ### Scopes
 
-The catalog API supports two scopes with project-overrides-user semantics (`SkillCatalog::scan_multi_scope`):
+The daemon's catalog has three layers, highest first:
 
-| Scope | Path | Priority |
-|-------|------|----------|
-| **Project** | `config/skills/` (relative to config dir) | Higher — overrides User scope |
-| **User** | e.g. `~/.config/openalpaca/skills/` | Lower — fallback |
+| Layer | Where | Listed as (`GET /v1/skills` `author`) |
+|-------|-------|------|
+| **Plugin** | a plugin's `skill/info` | `plugin:<id>` — goes over a config or built-in skill of the same id, as it always went over a file skill (until B-05) |
+| **Config** | `<config-dir>/skills/<id>/` | `file:project` — a folder named like a built-in skill overrides it whole (its slash command and aliases with it), `overrides_bundled: true` |
+| **Bundled** | the binary, run from `~/.openalpaca/state/cache/bundled-skills/<id>/` | `file:bundled` |
 
-**In practice, the daemon currently loads only the project scope**: at startup it scans `<config-dir>/skills/` as `Project` scope and does not pass a user directory. Multi-scope discovery is implemented in the catalog but not wired into the daemon.
+The **bundled** skills are written, whole and read-only, into `state/cache/bundled-skills/` at every daemon start (and again if that folder is deleted while the daemon runs), and run from there; edit them by overriding, never there. A folder under `config/skills/` named like a built-in skill whose every file is byte-identical to a version OpenAlpaca shipped at its path — an earlier build's seeded copy, say — is **set aside**: not read, not touched, listed in its row's `not_used` as `unedited_copy`, and the built-in skill runs. A `.DS_Store` does not count, and a missing file is allowed; change or add any other file and the folder is yours. An override that still holds a file an earlier build shipped, which the built-in skill has since changed, is reported by `stale_shipped_file` (below).
 
-Skills with `invoke.mode: "disabled"` are skipped during the scan and never enter the catalog.
+An override whose `SKILL.md` says `invoke.mode: "disabled"` switches the built-in skill of its name off: nothing runs under the id. One whose `SKILL.md` does not parse holds its id too — never the built-in skill in its place — with its diagnostic. A disabled skill of your own is skipped as before and never enters the catalog.
+
+A skill's scripts are told where skills live: `OPENALPACA_SKILLS_DIR` is `<config-dir>/skills` (where a script that writes skills writes) and `OPENALPACA_BUNDLED_SKILLS_DIR` the built-in skills' folder (unset when it could not be written). The shipped `create-skill` writes only into `OPENALPACA_SKILLS_DIR` — its scripts take `--scope=project` alone and refuse any other scope, naming that directory — and its `list_skills` and `check_exists` see the built-in skills too, so a new skill named like a built-in one is created only once you confirm the override. A folder named like a built-in skill already in `<config-dir>/skills` is reported as both — your override, or an unedited copy an earlier build seeded, which this build does not read — and `create-skill` will not write over it: `openalpaca skills tidy --apply` moves such a copy aside. Run by hand, the scripts fall back to their own location.
+
+The catalog API still supports a user scope under the project one (`SkillCatalog::scan_multi_scope`, a directory the caller passes); the daemon passes none.
 
 ---
 
@@ -278,7 +283,7 @@ Skills can bundle executable scripts in a `scripts/` directory and expose them a
 | `scripts[].description` | `String` | — (required) | Human-readable description shown in the tool definition. |
 | `scripts[].parameters` | JSON Schema | `{"type": "object", "properties": {}}` | JSON Schema describing the tool's input parameters. |
 | `scripts[].interpreter` | `Option<String>` | `None` | Interpreter to run the script (e.g., `"python3"`, `"node"`). If omitted, the script is executed directly — it must be executable (`chmod +x`) with a shebang. |
-| `scripts[].timeout_secs` | `u64` | `30` | Maximum execution time in seconds before the script is killed. |
+| `scripts[].timeout_secs` | `u64` | `30` | Maximum execution time in seconds before the script is killed. The sandbox also ends every tool call at `[execution.agent_defaults] max_tool_runtime_secs` in `config/daemon.toml` (120 by default), and a script may not ask for more, so set this below that bound: at or above it, the sandbox's cut comes first. |
 
 A missing required field (`file`, `name`, or `description`) is a YAML parse error that prevents the **whole skill** from loading.
 
@@ -430,7 +435,7 @@ Auto-selection requires **all three conditions**:
 2. `invoke.mode == "auto"`
 3. No other skill has already been auto-selected (scores sorted descending; first qualifying skill wins)
 
-An auto-selection emits a `SkillSelected` event with the score and a query preview.
+An auto-selected invocation's score and `was_auto_selected` are recorded in `skill_execution_log` (Section 10).
 
 ### Worked Example: `code-review` Skill
 
@@ -483,8 +488,6 @@ The body is truncated to `context.budget_tokens * 4` characters — **16,000 cha
 --- context: <relative-path> ---
 <file contents>
 ```
-
-When context is injected, a `SkillContextInjected` event is emitted with the byte count.
 
 ### Source Resolution
 
@@ -686,13 +689,10 @@ Skill activity is published on the system event bus:
 
 | Event | When |
 |-------|------|
-| `SkillSelected` | Router auto-selects a skill (includes score + query preview). |
 | `SkillInvocationStarted` | Invocation begins. |
 | `SkillCompleted` / `SkillFailed` | Invocation ends (duration, output preview / error). |
-| `SkillContextInjected` | `context.sources` produced injected context (byte count). |
 | `ContextBudgetComputed` | Token budget breakdown for the invocation's prompt. |
 | `SkillCatalogUpdated` | A skill was hot-reloaded by the file watcher (`action: "reloaded"`), or an edit to it could not be loaded (`"reload_failed"`). |
-| `SkillDiscovered` | A `SKILL.md` was loaded into the catalog (startup scan or reload). |
 
 ### Execution Telemetry
 
@@ -718,6 +718,7 @@ The catalog keeps what its last scan of the skills directory found — and what 
 | `id_mismatch` | warning | The frontmatter's `id` is not the directory's name, which is the skill's id. |
 | `slash_conflict` | warning | Two skills claim one slash command; the diagnostic is on the skill that answers it, once per other claimant. A plugin skill's claim is not compared. |
 | `no_tools` | warning | The skill declares no tools at all — `requires_capabilities`, `tools.allow`, `scripts` and `depends_on` are all empty — so it runs with none. A skill that needs none may ignore it; a misspelt `requires_capabilities` shows here beside its `unknown_key`. |
+| `stale_shipped_file` | warning | A folder that overrides a built-in skill holds a file (its `path`) that is the version an earlier build shipped at that path, which the built-in skill has since changed: the override runs the old file. An edited `create-skill` with an earlier build's scripts is the case it is for. Move the folder out of `skills/` to run the built-in one, or replace the file. |
 
 The `message` is the parser's own sentence (`SkillParseError`'s text). Dependency errors are not diagnostics: they stay warnings in the log (see §8, *Skill Composition*).
 
@@ -856,7 +857,7 @@ scripts:                           # Scripts in <skill-dir>/scripts/ exposed as 
           enum: [express, fastapi, actix, rails]
           description: "API framework to target"
       required: [directory]
-    timeout_secs: 120              # 2 minutes for large codebases
+    timeout_secs: 110              # under the sandbox's 120 s per-tool bound
   - file: check_deps.py            # Python script with explicit interpreter
     name: check_dependencies
     description: "Check project dependencies against known vulnerability databases"
@@ -1114,6 +1115,9 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 
 **"Script timed out after Ns"**
 - The script exceeded its `timeout_secs` (default 30). Increase the timeout in the `scripts:` declaration or optimize the script.
+
+**"Tool 'skill_script:X' timed out after 120s"**
+- The sandbox's per-tool bound, `[execution.agent_defaults] max_tool_runtime_secs` (120 by default), ended the call before the script's own `timeout_secs`. A script cannot ask for more, so a `timeout_secs` above the bound changes nothing: raise `max_tool_runtime_secs` in `config/daemon.toml` (it applies to every tool call), or make the script faster.
 
 **"Script failed (exit N): ..."**
 - Non-zero exit status; the first 500 characters of stderr are included. Debug manually: `cd config/skills/<id> && ./scripts/<file> --key=value`.

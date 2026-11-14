@@ -88,6 +88,7 @@ pub(super) fn parse_response(
         usage,
         finish_reason,
         thinking: reasoning_text(message),
+        echo: None,
         parts,
     })
 }

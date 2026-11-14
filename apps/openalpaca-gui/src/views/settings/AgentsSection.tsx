@@ -8,9 +8,18 @@
  * (`GET /v1/agent-instances`) — the design's rows are templates, so the
  * running count is shown as meta rather than conflated with them.
  *
- * Unavailable: the per-template on/off switch. There is no enabled flag on a
- * template and nothing would enforce one in the spawn path (GAP-20's remaining
- * half).
+ * A template a file in `config/agents` switches off (`disabled: true`,
+ * subagent design §2.4 L-4a) is listed with its file and a "Switched off"
+ * chip, its toggle off.
+ *
+ * Where each template comes from (subagent design §2.7 R-4): one chip per
+ * row — "Built in", "Yours", "Yours · replaces built-in", "Plugin · <id>",
+ * "Withheld" (a file holds the id and cannot be used, named with its error)
+ * or "Switched off" — and a line for every definition of the id that does
+ * not run, from the row's `not_used`, and for each of its `warnings`.
+ *
+ * Unavailable: the toggle as a control. The switch is the person's file and
+ * no route writes it (GAP-20's remaining half).
  */
 
 import { Button, Tag, chipVariant } from "@/components/ui";
@@ -19,7 +28,7 @@ import {
   useAgentInstances,
   useAgentTemplates,
 } from "@/hooks/useAgents";
-import type { AgentTemplate } from "@/lib/api/types";
+import type { AgentTemplate, NotUsedEntry } from "@/lib/api/types";
 
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 
@@ -55,6 +64,62 @@ function templateMeta(template: AgentTemplate, running: number): string {
   return parts.join(" · ");
 }
 
+/**
+ * The row's one source chip (R-4), or none for a daemon older than
+ * `source`. A file that switches the id off or withholds it says so over
+ * where the id would come from: nothing of the id runs.
+ */
+function sourceChip(
+  template: AgentTemplate,
+): { label: string; tone: "warn" | "neutral" } | undefined {
+  if (template.state === "disabled")
+    return { label: "Switched off", tone: "neutral" };
+  if (template.state === "withheld") return { label: "Withheld", tone: "warn" };
+  switch (template.source) {
+    case "bundled":
+      return { label: "Built in", tone: "neutral" };
+    case "file":
+      return {
+        label: template.overrides_bundled
+          ? "Yours · replaces built-in"
+          : "Yours",
+        tone: "neutral",
+      };
+    case "plugin":
+      return {
+        label: template.plugin ? `Plugin · ${template.plugin}` : "Plugin",
+        tone: "neutral",
+      };
+    default:
+      return undefined;
+  }
+}
+
+/** What a definition of the id that does not run is, in a sentence. */
+function notUsedLine(entry: NotUsedEntry): string {
+  const at = entry.path ? `, ${entry.path},` : "";
+  switch (entry.reason) {
+    case "unedited_copy":
+      if (entry.edit === "manual_step_7" || entry.edit === "manual_step_8") {
+        const step = entry.edit === "manual_step_7" ? 7 : 8;
+        return `An earlier build's copy as the Installation Manual's step ${step} left it${at} is not used`;
+      }
+      return entry.version === "current"
+        ? `An unedited copy of the built-in template${at} is not used`
+        : `An earlier build's unedited copy${at} is not used`;
+    case "overridden":
+      return "The built-in template is not used";
+    case "duplicate":
+      return `${entry.path ?? "Another file"} also holds this id and is not used`;
+    case "does_not_parse":
+      return `${entry.path ?? "A file"} holds this id, does not parse and is not used`;
+    case "plugin_refused":
+      return `The template the plugin ${entry.plugin ?? "?"} offers for this id is not used`;
+    default:
+      return `${entry.path ?? entry.source} is not used (${String(entry.reason)})`;
+  }
+}
+
 export function AgentsSection() {
   const templates = useAgentTemplates();
   const instances = useAgentInstances();
@@ -79,14 +144,53 @@ export function AgentsSection() {
         >
           {rows.map((template) => {
             const running = runningByTemplate.get(template.id) ?? 0;
+            const switchedOff = template.state === "disabled";
+            const chip = sourceChip(template);
+            const said =
+              switchedOff && template.path
+                ? `Switched off by ${template.path}`
+                : template.state === "withheld" && template.path
+                  ? `Withheld by ${template.path}`
+                  : template.description;
+            const warnings = template.warnings ?? [];
+            const notUsed = template.not_used ?? [];
             return (
               <ListRow
                 key={template.id}
                 name={template.name}
                 tags={
-                  template.singleton ? <Tag value="singleton" /> : undefined
+                  chip || template.singleton ? (
+                    <>
+                      {template.singleton && <Tag value="singleton" />}
+                      {chip && <Tag value={chip.label} tone={chip.tone} />}
+                    </>
+                  ) : undefined
                 }
-                description={template.description}
+                description={
+                  warnings.length === 0 && notUsed.length === 0 ? (
+                    said
+                  ) : (
+                    <>
+                      <span className="block">{said}</span>
+                      {warnings.map((warning) => (
+                        <span
+                          key={warning}
+                          className="block text-sm wrap-anywhere text-amber-ink"
+                        >
+                          {warning}
+                        </span>
+                      ))}
+                      {notUsed.map((entry, i) => (
+                        <span
+                          key={`${entry.reason}:${entry.path ?? entry.plugin ?? i}`}
+                          className="block text-sm wrap-anywhere text-faint"
+                        >
+                          {notUsedLine(entry)}
+                        </span>
+                      ))}
+                    </>
+                  )
+                }
                 chips={
                   template.model === undefined ? undefined : (
                     <Button variant={chipVariant(false)} disabled>
@@ -97,7 +201,7 @@ export function AgentsSection() {
                 meta={templateMeta(template, running)}
                 control={
                   <Toggle
-                    checked
+                    checked={!switchedOff}
                     label={`Enable ${template.name}`}
                     disabled
                     disabledReason={TEMPLATE_TOGGLE_NOTE}

@@ -106,7 +106,7 @@ describe("gap registry", () => {
     expect(GAPS["GAP-20"].missingApi).not.toMatch(/run count/i);
     expect(GAPS["GAP-20"].blocks).not.toMatch(/runs/);
     expect(GAPS["GAP-20"].proposedEndpoint).not.toMatch(/window/);
-    expect(gapNote(GAPS["GAP-20"])).toMatch(/enabled flag/);
+    expect(gapNote(GAPS["GAP-20"])).toMatch(/disabled: true/);
   });
 });
 
@@ -124,7 +124,7 @@ describe("Unavailable results", () => {
 
   it("uses the override phrasing where the generic sentence would read wrong", () => {
     expect(gapNote(GAPS["GAP-20"])).toBe(
-      "Templates have no enabled flag — the per-template toggle is not served",
+      "Templates are switched off by a file in config/agents saying disabled: true — the per-template toggle is not served",
     );
   });
 

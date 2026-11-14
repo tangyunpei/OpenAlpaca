@@ -241,6 +241,7 @@ fn parse_response(
     };
 
     Ok(ChatResponse {
+        echo: None,
         content,
         tool_calls,
         model,

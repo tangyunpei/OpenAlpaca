@@ -9,7 +9,9 @@ use std::sync::Arc;
 /// the ephemeral instance from the registry entirely.
 ///
 /// For **singleton** instances (like lead_agent): calls `destroy_instance()`
-/// which resets the singleton to Idle so it can be reused.
+/// which resets the singleton to Idle so it can be reused — unless its
+/// template left the catalog or was switched off while it ran, when the
+/// synced instance is removed instead (`DestroyOutcome::Removed`).
 ///
 /// This ensures the instance is not permanently stuck in Busy state if the
 /// subagent loop panics or returns early without cleanup.

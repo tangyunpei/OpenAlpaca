@@ -1,7 +1,7 @@
 //! The memory evaluation's data files and their types (design 09 §7),
 //! shared by the live harness (`tests/memory_eval.rs`, `--features
 //! live-eval`) and the corpus validation (`tests/memory_eval_corpus.rs`,
-//! default CI). Each test crate includes this file with
+//! a plain `cargo test`). Each test crate includes this file with
 //! `#[path = "common/eval.rs"] mod eval;` and uses what it needs.
 #![allow(dead_code)]
 

@@ -24,3 +24,4 @@ pub mod status;
 pub mod store;
 pub mod tail;
 pub mod tasks;
+mod tidy;

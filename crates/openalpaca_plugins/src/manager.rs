@@ -39,7 +39,7 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::{debug, error, info, warn};
 
-use openalpaca_core::agent::registry::AgentRegistry;
+use openalpaca_core::agent::registry::{AgentRegistry, Registration};
 use openalpaca_core::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::daemon_config::DaemonConfig;
@@ -66,7 +66,7 @@ use crate::manifest::PluginManifest;
 use crate::permission_gate::{
     PermissionGate, PermissionTable, REDACTED, SecretReference, secret_reference,
 };
-use crate::process_pool::PluginProcess;
+use crate::process_pool::{CHANNEL_DEFAULT_TIMEOUT, PluginProcess};
 
 /// How long a teardown waits for a killed plugin child to actually exit
 /// before giving up and letting the kernel finish the job (design §3.2 T4).
@@ -270,6 +270,10 @@ pub struct PluginManager {
     /// out of every build but this crate's tests — no production flag.
     #[cfg(test)]
     pub(crate) fail_swap_commit: std::sync::atomic::AtomicBool,
+    /// What a plugin's JSON-RPC request waits when its caller names no
+    /// figure: [`CHANNEL_DEFAULT_TIMEOUT`], set by no key — a test sets its
+    /// own at test scale (`with_channel_timeout`, this crate's tests only).
+    channel_timeout: std::time::Duration,
 }
 
 impl PluginManager {
@@ -305,7 +309,16 @@ impl PluginManager {
             notice_lane: String::new(),
             #[cfg(test)]
             fail_swap_commit: std::sync::atomic::AtomicBool::new(false),
+            channel_timeout: CHANNEL_DEFAULT_TIMEOUT,
         }
+    }
+
+    /// A channel default at test scale for the plugins this supervisor
+    /// spawns from now on; this crate's tests only.
+    #[cfg(test)]
+    pub(crate) fn with_channel_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.channel_timeout = timeout;
+        self
     }
 
     /// Attach the daemon's default lane, `{local_user_id}:gui` — where T1 step
@@ -1030,6 +1043,9 @@ impl PluginManager {
                 registry.remove_plugin_template(agent_id, id);
                 debug!(plugin = id, agent = %agent_id, "unregistered plugin agent template");
             }
+            // A template it was refused is no longer listed on the holder's
+            // row (`plugin_refused`, subagent design §2.4 L-1).
+            registry.forget_plugin_refusals(id);
         }
 
         // 4. connector + provider.
@@ -1221,7 +1237,7 @@ impl PluginManager {
         }
 
         // `spawn` failing is the one exit with nothing to unwind.
-        let process = match PluginProcess::spawn(&manifest, dir) {
+        let process = match PluginProcess::spawn(&manifest, dir, self.channel_timeout) {
             Ok(process) => process,
             Err(e) => {
                 warn!(plugin = %id, error = %e, "plugin failed to spawn");
@@ -1495,24 +1511,35 @@ impl PluginManager {
         }
 
         let mut registered_agents = Vec::new();
+        // The id whose refusal this attempt recorded (`plugin_refused`), the
+        // one refusal its `HandleHeld` unwind may take back: one the
+        // plugin's live load recorded stays listed while that load does.
+        let mut recorded_refusal = None;
         if let (Some(registry), Some(template)) = (self.agent_registry.as_ref(), discovered.agent) {
             let agent_id = template.frontmatter.id.clone();
-            // `register_template` refuses an id another template holds by
-            // answering `false`. N-PLUG-6: that answer is honoured — the id is
-            // recorded as this plugin's only when it registered, so T2 can
-            // never take a template the plugin never had (a plugin answering
-            // `agent/info` with `writing_agent` used to delete the shipped
-            // one at its next disable). What a plugin may claim over a live
-            // incumbent is the skip rule, B-05, not this.
-            if registry.register_template(template) {
-                info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
-                registered_agents.push(agent_id);
-            } else {
-                warn!(
-                    plugin = %id,
-                    agent = %agent_id,
-                    "another template already holds this id; the plugin's agent template is not registered"
-                );
+            // `register_template_reporting` refuses an id another template
+            // holds (`Registration::Refused`). N-PLUG-6: that answer is
+            // honoured — the id is recorded as this plugin's only when it
+            // registered, so T2 can never take a template the plugin never
+            // had (a plugin answering `agent/info` with `writing_agent` used
+            // to delete the shipped one at its next disable). What a plugin
+            // may claim over a live incumbent is the skip rule, B-05, not
+            // this.
+            match registry.register_template_reporting(template) {
+                Registration::Registered => {
+                    info!(plugin = %id, agent = %agent_id, "registered plugin agent template");
+                    registered_agents.push(agent_id);
+                }
+                Registration::Refused { recorded } => {
+                    warn!(
+                        plugin = %id,
+                        agent = %agent_id,
+                        "another template already holds this id; the plugin's agent template is not registered"
+                    );
+                    if recorded {
+                        recorded_refusal = Some(agent_id);
+                    }
+                }
             }
         }
 
@@ -1561,6 +1588,9 @@ impl PluginManager {
             if let Some(registry) = &self.agent_registry {
                 for agent_id in &registered_agents {
                     registry.remove_template(agent_id);
+                }
+                if let Some(agent_id) = &recorded_refusal {
+                    registry.forget_plugin_refusal(agent_id, &id);
                 }
             }
             shutdown_child(&id, process, None).await;

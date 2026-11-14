@@ -9,68 +9,6 @@ use crate::keys::key_pool::ProviderType;
 const DEFAULT_LOCAL_CONTEXT_WINDOW: u32 = 8192;
 
 impl LlmRouter {
-    /// Estimate the parallel LLM capacity given the current state of API keys
-    /// and rate limiters.
-    ///
-    /// Returns a [`LlmCapacityInfo`] struct so callers can base stagger delay
-    /// on the raw key count and reserve slots for the lead agent.
-    ///
-    /// CLI fallback is **not** counted as parallel bandwidth — it is only used
-    /// when all API keys are exhausted (see `try_fallback()`). When
-    /// `key_capacity == 0` and a CLI backend exists, `effective_capacity` is 1
-    /// so at least one subagent can proceed via fallback.
-    ///
-    /// Used by `SpawnSubagentTool` to dynamically reduce parallelism when
-    /// the number of available API keys cannot support `max_concurrent_subagents`.
-    pub async fn estimated_llm_capacity(&self, model: Option<&str>) -> LlmCapacityInfo {
-        let zero = LlmCapacityInfo {
-            available_api_keys: 0,
-            per_key_concurrency: 0,
-            key_capacity: 0,
-            has_cli_fallback: false,
-            effective_capacity: 0,
-        };
-
-        let default = self.default_model();
-        let model_id = model.unwrap_or(&default);
-
-        let provider_type = match self.model_registry.resolve_provider(model_id) {
-            Some(pt) => pt,
-            None => return zero,
-        };
-
-        // Cloned out before the await — see `LlmRouter::provider_entry` (R59).
-        let available_keys = match self.provider_entry(&provider_type) {
-            Some(entry) => {
-                let pool = entry.key_pool.load();
-                pool.available_api_key_count().await
-            }
-            None => return zero,
-        };
-
-        let per_key = self.rate_limiter_registry.config().per_key_concurrency;
-        let key_capacity = available_keys * per_key;
-        let has_cli_fallback = self.cli_backends.contains_key(&provider_type);
-
-        let effective_capacity = if key_capacity > 0 {
-            let global_available = self.concurrency_limiter.available_permits();
-            key_capacity.min(global_available)
-        } else if has_cli_fallback {
-            // All keys exhausted but CLI fallback can handle 1 request
-            1
-        } else {
-            0
-        };
-
-        LlmCapacityInfo {
-            available_api_keys: available_keys,
-            per_key_concurrency: per_key,
-            key_capacity,
-            has_cli_fallback,
-            effective_capacity,
-        }
-    }
-
     /// List models confirmed by provider API refresh (for GUI dropdowns).
     /// Returns only discovered models so the dropdown reflects real availability.
     pub fn available_models(&self) -> Vec<ModelEntry> {
@@ -176,6 +114,8 @@ impl LlmRouter {
                             supports_reasoning: false,
                             supports_tools: model.supports_tools,
                             declared: false,
+                            long_prompt: None,
+                            request_contract: crate::routing::model_registry::RequestContract::NONE,
                         },
                     );
                 }
