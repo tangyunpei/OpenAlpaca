@@ -202,6 +202,32 @@ impl<'a> LlmBackend<'a> {
         matches!(self, LlmBackend::Router { .. })
     }
 
+    /// What one answered request cost, priced as it was counted: on the
+    /// Router backend by the function `CostTracker::record_usage` and the
+    /// router's own recording use, on the response's model and its usage
+    /// (its prompt's length against a long-prompt threshold, its cache
+    /// reads and writes at its row's multiples), so the figure is the one
+    /// the cost caps counted for it; on the Direct backend the local
+    /// estimate `agent_cost` uses (USAGE-PER-REQUEST).
+    pub(super) fn request_cost(&self, response: &ChatResponse) -> f64 {
+        let usage = &response.usage;
+        match self {
+            LlmBackend::Direct { .. } => estimate_cost(
+                usage.input_tokens,
+                usage.output_tokens,
+                FALLBACK_INPUT_RATE,
+                FALLBACK_OUTPUT_RATE,
+            ),
+            LlmBackend::Router { router, .. } => router.cost_tracker.calculate_cost_with_cache(
+                &response.model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+            ),
+        }
+    }
+
     /// Accumulated cost attributable to THIS agent (not the whole task).
     ///
     /// The agentic loop's budget (`config.max_cost`) is per-agent, so it must be

@@ -7127,6 +7127,7 @@ fn loop_result(finish_reason: crate::runner::LoopFinishReason) -> LoopResult {
         // pinned line proves which one the lead is told.
         estimated_cost: 2.59,
         cap_spend: 1.04,
+        requests_cost: 1.04,
         last_tool_error: None,
         working_state: None,
     }

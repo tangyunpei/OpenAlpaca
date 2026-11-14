@@ -368,6 +368,17 @@ pub struct LoopResult {
     /// tracker, which for a singleton template's reused instance id includes
     /// its earlier runs (N-LEAD-5).
     pub cap_spend: f64,
+    /// What this loop's own requests cost, each priced as it was counted
+    /// when it was answered (`CostTracker::record_usage`'s pricing, on that
+    /// response's model and usage; the local estimate on the Direct
+    /// backend): its own prompt's length against a long-prompt threshold,
+    /// its cache reads and writes at its row's multiples. The usage row of
+    /// a chat turn and of a skill's invocation is written from it
+    /// (USAGE-PER-REQUEST), never from `total_input_tokens`, a sum that can
+    /// pass a threshold no request passed. Only the requests this loop
+    /// received an answer to: a call the router counted and then refused
+    /// (an empty completion) is no more in it than in the token totals.
+    pub requests_cost: f64,
     /// The last tool result that came back an error, verbatim (V3).
     ///
     /// A turn that ends with no answer usually ends that way because a tool

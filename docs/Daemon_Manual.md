@@ -525,7 +525,11 @@ keeps such a model at `0`.
 A model whose provider prices a long prompt higher carries that second rate
 in its built-in row: `gpt-6.1-sol` costs $2 / $10 per million tokens, and a
 request whose prompt is longer than 272,000 input tokens (cached ones
-included) is counted whole at $4 / $15. Each request is priced on its own.
+included) is counted whole at $4 / $15. Each request is priced on its own,
+and a chat turn's or a chat skill's spend in the usage figures
+(`GET /v1/usage/summary`) is the sum of its requests' costs as the caps
+counted them, cache rates included: a turn of several requests is counted
+at the long rate only for a request that passed the threshold itself.
 The built-in rows follow the providers' pages as read on 2026-11-12:
 `claude-opus-5-5` ($4 / $20) and `gpt-6.1-sol` are listed, `claude-opus-4-6`
 is counted at $5 / $25 and `o3` at $2 / $8, and the rows of models the

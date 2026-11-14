@@ -375,6 +375,19 @@ on, so the loop takes `.stream` and reports `.model`. That id is what reaches
 `done` frame — the model that answered, not the model that was asked
 for.
 
+**A turn's usage row is priced per request** (USAGE-PER-REQUEST). Beside
+its token totals the loop sums what each answered request cost as the
+cost tracker counted it — `LlmBackend::request_cost`, the tracker's
+`calculate_cost_with_cache` on that response's model and usage, its own
+prompt against a long-prompt threshold and its cache reads and writes at
+its row's multiples — as `LoopResult::requests_cost`. A chat turn's row
+(the main loop's and the social fast path's) and a skill invocation's,
+with the `LlmCallCompleted` event each publishes, record that sum, never
+the turn's summed tokens priced at once, which can pass a threshold no
+request passed. `estimated_cost` and `cap_spend` are read at the top of a
+round, before its request, so neither holds the request that ended the
+loop.
+
 Because a multi-round turn streams the text written before each tool
 call, the deltas of a turn need not add up to its answer.
 `LoopResult.final_content` — `done.content` on the wire — is

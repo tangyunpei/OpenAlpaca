@@ -68,6 +68,8 @@ struct LoopState {
     last_cost: f64,
     /// The spend the cost cap was last checked against (`LoopResult::cap_spend`).
     cap_spend: f64,
+    /// `LoopResult::requests_cost`: each answered request's cost, as counted.
+    requests_cost: f64,
     /// V3: the last tool result that was an error, so a turn that ends with
     /// nothing can say what it last tripped over.
     last_tool_error: Option<String>,
@@ -89,6 +91,7 @@ impl LoopState {
             max_tokens_retries: 0,
             last_cost: 0.0,
             cap_spend: 0.0,
+            requests_cost: 0.0,
             last_tool_error: None,
             working_state: None,
         }
@@ -107,6 +110,7 @@ impl LoopState {
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
             cap_spend: self.cap_spend,
+            requests_cost: self.requests_cost,
             last_tool_error: self.last_tool_error.clone(),
             working_state: self.working_state.clone(),
         }
@@ -129,6 +133,7 @@ impl LoopState {
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
             cap_spend: self.cap_spend,
+            requests_cost: self.requests_cost,
             last_tool_error: self.last_tool_error.clone(),
             working_state: self.working_state.clone(),
         }
@@ -1016,6 +1021,7 @@ async fn run_agentic_loop_core(
                     // were consumed regardless of whether we accept the response.
                     state.total_input += response.usage.input_tokens;
                     state.total_output += response.usage.output_tokens;
+                    state.requests_cost += backend.request_cost(&response);
                     state.rounds += 1;
                     state.last_model = Some(response.model.clone());
 

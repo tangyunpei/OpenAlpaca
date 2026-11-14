@@ -11105,3 +11105,5 @@ Build it.
     );
     assert!(description.contains("up to 7 seconds"), "{description}");
 }
+
+mod usage_rows;

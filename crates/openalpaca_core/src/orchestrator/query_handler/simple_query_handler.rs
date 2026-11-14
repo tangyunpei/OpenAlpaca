@@ -1014,11 +1014,10 @@ impl Orchestrator {
                 .resolve_provider(actual_model)
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let call_cost = router.cost_tracker.calculate_cost(
-                actual_model,
-                result.total_input_tokens,
-                result.total_output_tokens,
-            );
+            // The turn's requests as each was counted, never its summed
+            // tokens: a sum can pass a long-prompt threshold no request
+            // passed (USAGE-PER-REQUEST).
+            let call_cost = result.requests_cost;
 
             let call_status = match &result.finish_reason {
                 LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
@@ -1319,11 +1318,8 @@ impl Orchestrator {
             .resolve_provider(actual_model)
             .map(|p| p.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let call_cost = router.cost_tracker.calculate_cost(
-            actual_model,
-            result.total_input_tokens,
-            result.total_output_tokens,
-        );
+        // As on the main loop: the request as it was counted.
+        let call_cost = result.requests_cost;
 
         let call_status = match &result.finish_reason {
             LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",

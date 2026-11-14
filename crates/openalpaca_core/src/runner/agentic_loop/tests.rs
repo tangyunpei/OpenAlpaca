@@ -4619,6 +4619,7 @@ fn result_with(finish_reason: LoopFinishReason, content: &str) -> LoopResult {
         elapsed: std::time::Duration::from_secs(1),
         estimated_cost: 0.0,
         cap_spend: 0.0,
+        requests_cost: 0.0,
         last_tool_error: None,
         working_state: None,
     }
