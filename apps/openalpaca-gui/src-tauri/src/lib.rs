@@ -21,7 +21,15 @@
 //! The shell logs to `state/logs/gui.log` (Q14): its `tracing` lines and
 //! Tauri's `log` records, its startup marks, a panic, and a web content
 //! process that ended — after which the window is reloaded.
+//!
+//! The daemon it spawns runs on the `PATH` of the account's login shell,
+//! captured once at the app's start, or on a fixed list when that capture
+//! fails (Q21, [`login_path`]); `ensure_daemon_running` and
+//! `get_connection_info` answer which, for a daemon this app spawned.
 
+mod login_path;
+
+use login_path::{DaemonPath, DaemonPathReport};
 use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
 use openalpaca_storage::store;
@@ -31,6 +39,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::webview::PageLoadEvent;
 use tracing_subscriber::EnvFilter;
@@ -124,6 +133,62 @@ fn did_not_start(log_path: &Path, tail: String) -> ShellError {
 }
 
 // ============================================================================
+// The connection the webview reads
+// ============================================================================
+
+/// What `ensure_daemon_running` and `get_connection_info` answer: the
+/// daemon's [`ConnectionInfo`] (`{ baseUrl, token, instanceId }`) and
+/// `daemonPath`, where the `PATH` of a daemon this app spawned came from
+/// (Q21) — `null` for a daemon this run of the app did not spawn: one started
+/// from a terminal, or by an earlier run of the app.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellConnection {
+    #[serde(flatten)]
+    info: ConnectionInfo,
+    daemon_path: Option<DaemonPathReport>,
+}
+
+/// Every daemon this run of the app spawned, by its process id, with the
+/// `PATH` it was given — every one, not the last: two starts that overlap (a
+/// reload while the first waits for the capture) each spawn a daemon, and
+/// the one that takes the store's lock and writes `discovery.json` may be
+/// either. The capture is taken once, so each carries the same report.
+static SPAWNED: Mutex<Vec<(u32, DaemonPathReport)>> = Mutex::new(Vec::new());
+
+/// Remember the daemon just spawned as `pid`, with the `PATH` it was given;
+/// nothing where the app captures none.
+fn record_spawned(pid: u32, report: Option<DaemonPathReport>) {
+    if let Some(report) = report {
+        SPAWNED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((pid, report));
+    }
+}
+
+/// Forget every daemon spawned so far, so no test inherits another's.
+#[cfg(test)]
+fn forget_spawned() {
+    SPAWNED.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
+/// `d`'s connection, with `daemonPath` when `d` names a daemon this run
+/// spawned (its `pid`).
+fn shell_connection(d: &discovery::Discovery) -> ShellConnection {
+    let daemon_path = SPAWNED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|(pid, _)| *pid == d.pid)
+        .map(|(_, report)| report.clone());
+    ShellConnection {
+        info: ConnectionInfo::from(d),
+        daemon_path,
+    }
+}
+
+// ============================================================================
 // Tauri Commands
 // ============================================================================
 
@@ -132,7 +197,7 @@ fn did_not_start(log_path: &Path, tail: String) -> ShellError {
 ///
 /// The file is read on the blocking pool.
 #[tauri::command]
-async fn get_connection_info() -> Result<ConnectionInfo, ShellError> {
+async fn get_connection_info() -> Result<ShellConnection, ShellError> {
     tauri::async_runtime::spawn_blocking(read_connection_info)
         .await
         .map_err(|e| ShellError::DiscoveryUnreadable {
@@ -141,7 +206,7 @@ async fn get_connection_info() -> Result<ConnectionInfo, ShellError> {
 }
 
 /// [`get_connection_info`]'s work: read discovery.json and check its token.
-fn read_connection_info() -> Result<ConnectionInfo, ShellError> {
+fn read_connection_info() -> Result<ShellConnection, ShellError> {
     let Some(d) = discovery::read_discovery().map_err(|e| ShellError::DiscoveryUnreadable {
         message: e.to_string(),
     })?
@@ -155,7 +220,7 @@ fn read_connection_info() -> Result<ConnectionInfo, ShellError> {
         message: e.to_string(),
     })?;
 
-    Ok(ConnectionInfo::from(&d))
+    Ok(shell_connection(&d))
 }
 
 /// Ensure the daemon is running, spawning it if necessary.
@@ -165,7 +230,7 @@ fn read_connection_info() -> Result<ConnectionInfo, ShellError> {
 /// the blocking pool, and the probe is tokio's, so the command holds no
 /// runtime thread while it waits on a disk, a connect or the new process.
 #[tauri::command]
-async fn ensure_daemon_running() -> Result<ConnectionInfo, ShellError> {
+async fn ensure_daemon_running() -> Result<ShellConnection, ShellError> {
     // Step 1: Check if a daemon is already running AND actually alive. A stale
     // discovery.json (left by a crashed/killed daemon or a reboot) would
     // otherwise be trusted forever, so the GUI would never respawn. Liveness is
@@ -176,10 +241,12 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, ShellError> {
     }
 
     // Step 2: Spawn the daemon process
-    let log_start = tauri::async_runtime::spawn_blocking(spawn_daemon)
+    let spawned = tauri::async_runtime::spawn_blocking(spawn_daemon)
         .await
         .map_err(|e| spawn_failed(format!("Failed to spawn daemon: {e}")))?
         .map_err(|e| spawn_failed(format!("Failed to spawn daemon: {e:#}")))?;
+    let log_start = spawned.log_start;
+    record_spawned(spawned.pid, spawned.path);
 
     // Step 3: Wait for the new daemon to appear AND accept connections.
     for _ in 0..25 {
@@ -408,12 +475,12 @@ fn without_verbatim_prefix(path: &Path) -> PathBuf {
 /// The daemon discovery.json names, if there is one and it answers the
 /// probe. The file is read on the blocking pool; a missing, unreadable or
 /// unparsable file is no daemon, as is a read that could not be run.
-async fn live_daemon() -> Option<ConnectionInfo> {
+async fn live_daemon() -> Option<ShellConnection> {
     let d = tauri::async_runtime::spawn_blocking(discovery::read_discovery)
         .await
         .ok()?
         .ok()??;
-    daemon_is_alive(&d).await.then(|| ConnectionInfo::from(&d))
+    daemon_is_alive(&d).await.then(|| shell_connection(&d))
 }
 
 /// How long the probe waits for one address's connect.
@@ -451,12 +518,22 @@ where
     false
 }
 
+/// What [`spawn_daemon`] started.
+struct Spawned {
+    /// The log's length just before the spawn — where this run's output
+    /// begins — so a failed start quotes only what this run wrote.
+    log_start: u64,
+    /// The daemon's process id, as its `discovery.json` will name it.
+    pid: u32,
+    /// The `PATH` it was given, `None` where the app captures none.
+    path: Option<DaemonPathReport>,
+}
+
 /// Spawn the daemon as a detached background process, its stdout and stderr
-/// appended to `daemon.log`.
-///
-/// Returns the log's length just before the spawn — where this run's output
-/// begins — so a failed start quotes only what this run wrote.
-fn spawn_daemon() -> anyhow::Result<u64> {
+/// appended to `daemon.log`, on the `PATH` [`login_path::for_the_daemon`]
+/// answers — the login shell's, or the fallback list — waiting for the
+/// app's capture at most until its deadline.
+fn spawn_daemon() -> anyhow::Result<Spawned> {
     // Find the daemon executable
     // In development: should be in the same target directory
     // In production: should be bundled with the app
@@ -521,22 +598,24 @@ fn spawn_daemon() -> anyhow::Result<u64> {
     let stdout = std::process::Stdio::from(log_file.try_clone()?);
     let stderr = std::process::Stdio::from(log_file);
 
+    let daemon_path = login_path::for_the_daemon();
+
     tracing::info!("Spawning daemon: {}", path_to_use.display());
     tracing::info!("Daemon runtime dir: {}", app_dir.display());
     tracing::info!("Daemon config dir: {}", config_dir.display());
+    if let Some(path) = &daemon_path {
+        announce_daemon_path(path);
+    }
 
-    let mut cmd = Command::new(&path_to_use);
+    let mut cmd = daemon_command(&path_to_use, &app_dir, &config_dir, daemon_path.as_ref());
     cmd.stdin(std::process::Stdio::null())
         .stdout(stdout)
-        .stderr(stderr)
-        .current_dir(&app_dir)
-        .env("OPENALPACA_CONFIG_DIR", &config_dir)
-        .env(store::MANAGED_LOG_ENV, "1");
+        .stderr(stderr);
 
     // Only the detachment differs by platform. A platform that is neither
     // builds the command and never spawns it, as it never did.
     #[cfg(unix)]
-    {
+    let pid = {
         use std::os::unix::process::CommandExt;
 
         // On Unix, use setsid to detach from terminal: a new session,
@@ -547,11 +626,14 @@ fn spawn_daemon() -> anyhow::Result<u64> {
                 Ok(())
             });
         }
-        reap_when_it_exits(cmd.spawn()?);
-    }
+        let child = cmd.spawn()?;
+        let pid = child.id();
+        reap_when_it_exits(child);
+        pid
+    };
 
     #[cfg(windows)]
-    {
+    let pid = {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x00000008;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -559,10 +641,58 @@ fn spawn_daemon() -> anyhow::Result<u64> {
         // The `Child` is dropped, not reaped: that closes its handle and
         // leaves the detached daemon running.
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
-            .spawn()?;
-    }
+            .spawn()?
+            .id()
+    };
 
-    Ok(log_start)
+    #[cfg(not(any(unix, windows)))]
+    let pid = {
+        let _ = &mut cmd;
+        0
+    };
+
+    Ok(Spawned {
+        log_start,
+        pid,
+        path: daemon_path.as_ref().map(DaemonPath::report),
+    })
+}
+
+/// The spawn's line in `gui.log`: the daemon's `PATH` source and the
+/// capture's duration, never the `PATH`.
+fn announce_daemon_path(path: &DaemonPath) {
+    tracing::info!(
+        source = path.source.as_str(),
+        capture_ms = path.capture_ms(),
+        "Daemon PATH source"
+    );
+}
+
+/// The daemon's command but its stdio: its working directory the store's
+/// root, `OPENALPACA_CONFIG_DIR`, [`store::MANAGED_LOG_ENV`], and — with a
+/// [`DaemonPath`] — `PATH` set to it and [`store::PATH_SOURCE_ENV`] to its
+/// source and capture time (`login-shell 212`), never the `PATH` itself.
+/// Nothing else is set or removed: every other variable is the app's own,
+/// inherited as before.
+///
+/// On Unix a `PATH` set on the command is also the one a bare program name
+/// is looked up on, so a debug build's `openalpacad` fallback (no daemon
+/// beside the app) is looked up on the daemon's `PATH`, not the app's.
+fn daemon_command(
+    program: &Path,
+    app_dir: &Path,
+    config_dir: &Path,
+    path: Option<&DaemonPath>,
+) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.current_dir(app_dir)
+        .env("OPENALPACA_CONFIG_DIR", config_dir)
+        .env(store::MANAGED_LOG_ENV, "1");
+    if let Some(path) = path {
+        cmd.env("PATH", path.value())
+            .env(store::PATH_SOURCE_ENV, path.announcement());
+    }
+    cmd
 }
 
 /// Wait on the spawned daemon from a thread of its own, so that when it exits
@@ -797,6 +927,9 @@ pub fn run() {
         install_panic_hook(log_path);
     }
     t0_mark(t0);
+    // Q21: the login shell's PATH for the daemon, captured once, on a thread
+    // of its own — the window's first paint never waits on it.
+    login_path::start();
     with_app_hooks(with_commands(tauri::Builder::default()), t0)
         .run(tauri::generate_context!())
         .expect("Error while running Tauri application");

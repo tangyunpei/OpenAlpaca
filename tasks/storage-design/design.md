@@ -1,4 +1,4 @@
-# Storage and project work — design (rev 1.4, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built; the owner's blanket answer of 2026-10-17 recorded; the freshness sweep's S12 residue in §18; R30 and §18's `writing_agent.md` bullet amended for unedited copies by the bundled templates)
+# Storage and project work — design (rev 1.5, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built; the owner's blanket answer of 2026-10-17 recorded; the freshness sweep's S12 residue in §18; R30 and §18's `writing_agent.md` bullet amended for unedited copies by the bundled templates; §21's *App PATH* line marked built by Q21)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
@@ -1266,7 +1266,13 @@ Three things a beta needs that no stage covers:
   `tasks/pending-decisions.md` §2 adds (audit A-41) stay limitations under that answer — the app is unsigned and not
   notarised (*Signing*, taken as (a) for a first beta through the installer), and a daemon the app spawns may lack the
   terminal's PATH until the shell captures the login environment (*App PATH*, taken as (a) with (c) as its fallback,
-  not built).
+  not built). *Rev 1.5:* App PATH is built (Q21, `feat(gui-shell,daemon): the app's daemon gets the login shell's
+  PATH`): the app's daemon runs on the login shell's `PATH`, read once at the app's start as a non-interactive login
+  shell, or on the fallback list (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`, `~/.cargo/bin`)
+  when that capture fails. What a tester still meets: a folder added to `PATH` only in `~/.zshrc` or `~/.bashrc` (where
+  this project's installer writes `~/.local/bin`) is missing for that daemon, as is one outside the fallback list when
+  the capture fails (a csh or tcsh login shell always fails it); the workaround (an absolute `command`, or `env.PATH`
+  in `mcp.toml`) stands for those cases. The owner's items on it: `tasks/pending-decisions.md` §1 *Rev 91*.
 
 Which stages the beta waits for is the owner's call. Stage 0 with B1–B3 is enough for a few testers who know the
 limits; Stage 1 is what keeps every tester's repository clean; Stage 2 is what a tester who expects help with their
@@ -1276,6 +1282,10 @@ beta waits for, so it stays the owner's call (Stages 0–2 are all built).
 
 ## Revision log
 
+- **rev 1.5 (2026-11-15).** The toolchain programme's Q21 (`tasks/deps-upgrade/programme-plan.md` §3.3, step 4;
+  `feat(gui-shell,daemon): the app's daemon gets the login shell's PATH`): §21's B3 paragraph keeps its *App PATH*
+  line and adds that it is built, what a beta tester still meets (the `~/.zshrc` / `~/.bashrc` case and the fallback
+  list) and where the owner's items on it are (`tasks/pending-decisions.md` §1 *Rev 91*). Nothing else moves.
 - **rev 1.4 (2026-11-07).** The subagent design's C3 (`tasks/subagent-brief-design.md` rev 2.1, §8, §11): the
   shipped agent templates are a bundled layer, and a config file byte-identical to a shipped version is set aside at
   load. §0.3's R30 row and §18's `writing_agent.md` bullet are amended — changed for unedited copies by the taken

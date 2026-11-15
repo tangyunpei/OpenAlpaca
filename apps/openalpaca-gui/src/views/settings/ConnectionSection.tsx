@@ -38,6 +38,13 @@
  * to `Start daemon` — reconnecting to a daemon that is not there is not a
  * thing to offer — and nothing polls.
  *
+ * **Where a daemon this app spawned got its `PATH`** (Q21): the shell's
+ * `daemonPath` on the connection — the login shell's, read once when the app
+ * started, or the app's fallback list and why — with the capture's
+ * duration, never the `PATH` itself; nothing for a daemon this run of the
+ * app did not spawn (one started from a terminal logs `inherited` in its own
+ * `daemon.log`).
+ *
  * **Why the daemon would not start** is shown here too, verbatim: the shell's
  * `ensure_daemon_running` rejection ends with what the daemon wrote to its
  * log before it gave up, and `Show daemon log` reads the file directly — both
@@ -58,6 +65,7 @@ import { useConnectionStatus, useDaemonStatus } from "@/hooks/useConnection";
 import { useConnectors } from "@/hooks/useConnectors";
 import {
   readDaemonLogTail,
+  type DaemonPath,
   type StopIntent,
   type StopPhase,
 } from "@/lib/connection";
@@ -198,6 +206,9 @@ export function ConnectionSection() {
             started by hand.
           </GapNote>
         )}
+        {!stopped && connection.info?.daemonPath ? (
+          <GapNote>{daemonPathNote(connection.info.daemonPath)}</GapNote>
+        ) : null}
         {!stopped && !connection.connected && connection.lastError ? (
           <LogBlock label="Why the daemon is unreachable">
             {connection.lastError}
@@ -276,6 +287,18 @@ export function statusTitle(
   }
   if (intent === "stopped_elsewhere") return "Daemon stopped from elsewhere";
   return connected ? "Daemon connected" : "Daemon unreachable";
+}
+
+/**
+ * Where the `PATH` of the daemon this app spawned came from, and how long
+ * the capture took — never the `PATH` (Q21).
+ */
+export function daemonPathNote(path: DaemonPath): string {
+  if (path.source === "login-shell") {
+    return `This daemon's PATH is your login shell's, read when the app started (${path.captureMs} ms).`;
+  }
+  const why = path.reason ?? "the login shell's could not be read";
+  return `This daemon's PATH is the app's fallback list: ${why} (${path.captureMs} ms).`;
 }
 
 function stoppedMeta(stoppedAt: number | null, phase: StopPhase): string {

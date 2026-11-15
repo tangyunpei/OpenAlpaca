@@ -140,7 +140,8 @@ whole bridge (`src-tauri/src/lib.rs`):
   lines this spawn wrote to the log — the daemon's own refusal, verbatim (a
   database this build does not know, another daemon holding the lock) — or
   says the daemon wrote nothing at all. Only this spawn's lines are quoted,
-  never an earlier run's.
+  never an earlier run's. The daemon it spawns runs on your login shell's
+  `PATH` (below).
 - `get_connection_info` — the reconnect path. It re-reads discovery and checks
   the expiry without spawning anything.
 - `await_daemon_stopped` — waits until a daemon asked to stop is really gone:
@@ -162,7 +163,31 @@ whole bridge (`src-tauri/src/lib.rs`):
   and a refusal is one sentence, shown as a toast. Behind `Reveal in Finder`
   (Library, below).
 
-The first two return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
+**The daemon's `PATH`.** An app opened from the Finder or the Dock gets the
+minimal environment macOS gives apps, not your shell's. So when the app starts
+it asks your account's login shell (the one your user account names, run as a
+non-interactive login shell, `-l -c`) for its `PATH`, once, in the background
+— the window never waits on it — and gives that `PATH` to the daemon it
+spawns. It waits for the answer at most 3 seconds from the app's start; a login
+shell still running then is stopped, with everything it started. If the
+capture fails — the login shell exits with an error (a csh or tcsh login
+shell always does), takes too long, or prints no `PATH` — the daemon gets
+a fixed list instead: `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
+`/bin`, `/usr/sbin`, `/sbin` and `~/.cargo/bin`. Only `PATH` is taken: an API
+key or any other variable your profile exports does not reach the daemon this
+way. A non-interactive login shell reads your login files (`~/.zprofile`,
+`~/.zshenv`, `/etc/zprofile` for zsh; `~/.bash_profile` or `~/.profile` for
+bash), not `~/.zshrc` or `~/.bashrc`: a folder added to `PATH` only there is
+not in the daemon's `PATH`. Where the `PATH` came from, and how long the capture
+took, is written to `state/logs/gui.log`, to the daemon's boot line in
+`daemon.log` (`PATH source: login-shell`, `fallback-list`, or `inherited` for a
+daemon started from a terminal), and to Settings → Connection for a daemon this
+run of the app started — not for one an earlier launch started and this one
+found running — never the `PATH` itself.
+
+The first two return `{ baseUrl, token, instanceId, daemonPath }`;
+`daemonPath` is where the `PATH` of a daemon this run of the app spawned came
+from, `null` for any other. `instanceId` is the identity
 guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
 `request_id` the client holds is dead and the app re-bootstraps rather than
 merely reopening its socket (`src/lib/connection.ts`).
@@ -1122,6 +1147,14 @@ and `openalpaca daemon start` — write `daemon.log` and claim it, so the path i
 merely found an older daemon's leftover log; the button is inert there, because
 a path to a file this daemon did not write is worse than no path.
 
+For a daemon this run of the app started, a line under the buttons says where
+its `PATH` came from and how long reading it took — `This daemon's PATH is your
+login shell's, read when the app started (212 ms).`, or `This daemon's PATH is
+the app's fallback list:` and why — never the `PATH` itself ([Connection
+lifecycle](#connection-lifecycle)). There is no line for a daemon started from a
+terminal, or for one an earlier launch of the app started and this one found
+running, or while the daemon is stopped.
+
 **The project.** The Project card holds this window's project. Type a folder
 and press `Use`: the daemon resolves it (`POST /v1/workspaces`) — the nearest
 recorded project or git repository at or above it, else the folder itself,
@@ -1572,13 +1605,16 @@ keeps its switch on with a failure tag — that is the bit you set, not the stat
 it reached.
 
 **An MCP server starts from a terminal but not from the app.** A daemon the
-app starts inherits the app's environment, and an app opened from the Finder or
-the Dock gets the minimal `PATH` macOS gives apps, not your shell's — so `npx`,
-`uvx`, Homebrew's `node` or `claude` can be found by a daemon that `openalpaca
-daemon start` started and be missing for the one the app started (reasoned from
-how macOS starts apps, not measured). Give the server an absolute `command`, or
-set `PATH` in its `env`, in `config/mcp.toml` ([Daemon Manual → MCP
-Servers](Daemon_Manual.md#mcp-servers)); or start the daemon from a terminal
+app starts runs on your login shell's `PATH`, or on the app's fallback list
+when that could not be read ([Connection lifecycle](#connection-lifecycle));
+Settings → Connection says which, and `daemon.log`'s `PATH source:` line too. A
+program found through a folder your `~/.zshrc` or `~/.bashrc` adds to `PATH`
+(where some installers write it), or one outside the fallback list when the
+capture failed, can still be found by a daemon that `openalpaca daemon start`
+started from a terminal and be missing for the one the app started. Give the
+server an absolute `command`, or set `PATH` in its `env`, in
+`config/mcp.toml` ([Daemon Manual → MCP Servers](Daemon_Manual.md#mcp-servers));
+move the `PATH` line to `~/.zprofile`; or start the daemon from a terminal
 first, and the app uses that one.
 
 **Connector failures.** The connector row distinguishes a connector that

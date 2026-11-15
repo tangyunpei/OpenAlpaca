@@ -1,0 +1,12 @@
+{
+  "login_shell": {
+    "source": "login-shell",
+    "captureMs": 212,
+    "reason": null
+  },
+  "fallback_list": {
+    "source": "fallback-list",
+    "captureMs": 3000,
+    "reason": "the login shell did not finish within 3000 ms"
+  }
+}

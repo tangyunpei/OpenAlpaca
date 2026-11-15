@@ -86,6 +86,8 @@ impl HomeStoreGuard {
             // SAFETY: serialized by ENV_LOCK — this binary's only writer.
             unsafe { std::env::set_var(name, value) };
         }
+        // No test inherits another's spawned daemon (Q21's `daemonPath`).
+        forget_spawned();
         Self {
             _lock: lock,
             prev,
@@ -96,6 +98,11 @@ impl HomeStoreGuard {
     /// The scratch home store (`OPENALPACA_HOME_STORE`).
     fn store(&self) -> PathBuf {
         self.root.join("store")
+    }
+
+    /// The scratch root itself, which holds the store, `HOME` and `PATH`.
+    fn root(&self) -> &Path {
+        &self.root
     }
 }
 
@@ -192,7 +199,8 @@ fn write_discovery(port: u16, expired: bool) -> Discovery {
     d
 }
 
-/// `{ baseUrl, token, instanceId }`, exactly those keys.
+/// `{ baseUrl, token, instanceId, daemonPath }`, exactly those keys, with
+/// `daemonPath` `null`: no test spawns, so no daemon is this run's (Q21).
 fn assert_connection_info(answer: &Value, d: &Discovery) {
     let mut keys: Vec<&str> = answer
         .as_object()
@@ -201,7 +209,8 @@ fn assert_connection_info(answer: &Value, d: &Discovery) {
         .map(String::as_str)
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["baseUrl", "instanceId", "token"]);
+    assert_eq!(keys, ["baseUrl", "daemonPath", "instanceId", "token"]);
+    assert_eq!(answer["daemonPath"], Value::Null);
     assert_eq!(
         answer["baseUrl"],
         format!("http://127.0.0.1:{}", d.listen.port)
@@ -1173,6 +1182,580 @@ fn the_panic_hook_writes_a_panic_to_gui_log() {
         assert!(
             l.starts_with("20") && l.as_bytes().get(4) == Some(&b'-'),
             "a line without its time: {l:?} in {text:?}"
+        );
+    }
+}
+
+// ============================================================================
+// The daemon's PATH (Q21)
+// ============================================================================
+
+use login_path::{
+    Account, CAPTURE_COMMAND, Capture, CaptureFailure, DaemonPathReport, PathSource,
+    capture_login_path, fallback_path,
+};
+
+/// A capture of `shell`'s `PATH`, the fallback list's home `home`: the
+/// account as the capture's thread would resolve it, given.
+fn capture_of(
+    shell: Option<PathBuf>,
+    home: Option<PathBuf>,
+    deadline: Duration,
+) -> std::sync::Arc<Capture> {
+    Capture::start(move || Account { shell, home }, deadline)
+}
+
+/// The `PATH` the noisy login shell exports, and the two values it exports
+/// beside it that must never reach the daemon.
+const CAPTURED_PATH: &str = "/q21/captured/bin:/usr/bin:/bin";
+const CAPTURED_API_KEY: &str = "sk-q21-captured-not-passed";
+const CAPTURED_PROFILE: &str = "q21-profile-captured-not-passed";
+
+/// A stand-in login shell: a `/bin/sh` script at `<root>/<name>` running
+/// `body`, which reaches the command it is given as `"$3"` (`-l -c <cmd>`).
+/// Every program in it is named by its absolute path: the guard's `PATH`
+/// is an empty folder.
+#[cfg(unix)]
+fn fake_login_shell(root: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("the fake login shell");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    path
+}
+
+/// A login shell that prints noise around the markers — `PATH=` lines
+/// before and after them, one NUL-terminated as `env -0` writes — and
+/// exports an API key and a credential pointer beside its `PATH`; it records
+/// each run's arguments.
+#[cfg(unix)]
+fn noisy_login_shell(root: &Path) -> PathBuf {
+    let runs = root.join("runs");
+    fake_login_shell(
+        root,
+        "noisy-shell",
+        &format!(
+            "printf '%s\\n' \"$@\" >> '{runs}'\n\
+             echo 'PATH=/noise/before/bin'\n\
+             PATH='{CAPTURED_PATH}'; export PATH\n\
+             OPENAI_API_KEY='{CAPTURED_API_KEY}'; export OPENAI_API_KEY\n\
+             AWS_PROFILE='{CAPTURED_PROFILE}'; export AWS_PROFILE\n\
+             eval \"$3\"\n\
+             echo 'PATH=/noise/after/bin'\n\
+             printf 'PATH=/noise/after/nul/bin\\0'",
+            runs = runs.display()
+        ),
+    )
+}
+
+/// A login shell that prints its environment, then fails.
+#[cfg(unix)]
+fn failing_login_shell(root: &Path) -> PathBuf {
+    fake_login_shell(
+        root,
+        "failing-shell",
+        &format!("PATH='{CAPTURED_PATH}'; export PATH\neval \"$3\"\nexit 3"),
+    )
+}
+
+/// Every variable the daemon's command would start with: the app's own,
+/// with what the command sets over them.
+fn effective_env(cmd: &Command) -> std::collections::BTreeMap<OsString, OsString> {
+    let mut env: std::collections::BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    for (key, value) in cmd.get_envs() {
+        match value {
+            Some(value) => env.insert(key.to_owned(), value.to_owned()),
+            None => env.remove(key),
+        };
+    }
+    env
+}
+
+/// Whether `pid` is still a process (a zombie counts until it is reaped).
+#[cfg(unix)]
+fn process_exists(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Kills `pid` on drop if it is still there, so a test that failed leaves
+/// nothing running.
+#[cfg(unix)]
+struct KillOnDrop(i32);
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if self.0 > 0 && process_exists(self.0) {
+            // SAFETY: a plain signal to the test's own stray child.
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+        }
+    }
+}
+
+/// The login shell's `PATH` is taken from between the markers and nothing
+/// else: the noise around them, the `PATH=` lines among it, the API key and the
+/// credential pointer it exports are not; it is run as `-l -c <the
+/// command>`, once, however often the daemon asks. The daemon's command
+/// gets that `PATH` and the source beside it, and neither exported value.
+#[cfg(unix)]
+#[test]
+fn the_login_shells_path_and_nothing_else_reaches_the_daemons_command() {
+    let guard = HomeStoreGuard::set("path-captured");
+    let shell = noisy_login_shell(guard.root());
+    let home = guard.root().join("home");
+    let capture = capture_of(Some(shell), Some(home), Duration::from_secs(10));
+    let path = capture.wait();
+
+    assert_eq!(path.source, PathSource::LoginShell);
+    assert_eq!(path.failure, None);
+    assert_eq!(path.value(), &OsString::from(CAPTURED_PATH));
+    let again = capture.wait();
+    assert_eq!(again.value(), path.value());
+    assert_eq!(
+        again.capture, path.capture,
+        "the one capture, answered again"
+    );
+    let runs = std::fs::read_to_string(guard.root().join("runs")).expect("the shell ran");
+    assert_eq!(
+        runs,
+        format!("-l\n-c\n{CAPTURE_COMMAND}\n"),
+        "run once, as a non-interactive login command"
+    );
+
+    let app_dir = guard.store();
+    let config_dir = guard.store().join("config");
+    let cmd = daemon_command(
+        Path::new("/nonexistent/openalpacad"),
+        &app_dir,
+        &config_dir,
+        Some(&path),
+    );
+    let set: std::collections::BTreeMap<_, _> = cmd
+        .get_envs()
+        .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
+        .collect();
+    assert_eq!(
+        set.keys().cloned().collect::<Vec<_>>(),
+        [
+            OsString::from("OPENALPACA_CONFIG_DIR"),
+            OsString::from(store::MANAGED_LOG_ENV),
+            OsString::from(store::PATH_SOURCE_ENV),
+            OsString::from("PATH"),
+        ],
+        "the command sets these four and removes nothing"
+    );
+    assert_eq!(
+        set[&OsString::from("PATH")],
+        Some(OsString::from(CAPTURED_PATH))
+    );
+    assert_eq!(
+        set[&OsString::from(store::PATH_SOURCE_ENV)],
+        Some(OsString::from(format!("login-shell {}", path.capture_ms())))
+    );
+    assert_eq!(cmd.get_current_dir(), Some(app_dir.as_path()));
+    let env = effective_env(&cmd);
+    for value in env.values() {
+        let value = value.to_string_lossy();
+        assert!(
+            !value.contains(CAPTURED_API_KEY) && !value.contains(CAPTURED_PROFILE),
+            "a captured value besides PATH reached the daemon"
+        );
+    }
+}
+
+/// A login shell still running at the deadline is killed with its process
+/// group — the child it started is gone too — and the daemon gets the
+/// fallback list, `~/.cargo/bin` last, under the home given.
+#[cfg(unix)]
+#[test]
+fn a_shell_past_the_deadline_is_killed_with_its_group() {
+    let guard = HomeStoreGuard::set("path-deadline");
+    let pid_file = guard.root().join("child.pid");
+    let shell = fake_login_shell(
+        guard.root(),
+        "hanging-shell",
+        &format!("/bin/sleep 47 &\necho $! > '{}'\nwait", pid_file.display()),
+    );
+    let deadline = Duration::from_millis(1500);
+    let started = Instant::now();
+    let outcome = capture_login_path(&shell, started, deadline);
+    let took = started.elapsed();
+    let child: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the shell started its child")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let _stray = KillOnDrop(child);
+
+    assert_eq!(outcome, Err(CaptureFailure::TimedOut(deadline)));
+    assert!(
+        took >= deadline && took < deadline + Duration::from_millis(900),
+        "settled at the deadline, not before or long after: {took:?}"
+    );
+    let gone_by = Instant::now() + Duration::from_secs(5);
+    while process_exists(child) && Instant::now() < gone_by {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !process_exists(child),
+        "the shell's child outlived the kill"
+    );
+
+    let home = guard.root().join("home");
+    let path = capture_of(Some(shell), Some(home.clone()), deadline).wait();
+    assert_eq!(path.source, PathSource::FallbackList);
+    assert_eq!(path.failure, Some(CaptureFailure::TimedOut(deadline)));
+    assert_eq!(
+        path.value(),
+        &OsString::from(format!(
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:{}/.cargo/bin",
+            home.display()
+        ))
+    );
+    let second: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the second run's child")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let _stray_too = KillOnDrop(second);
+    let gone_by = Instant::now() + Duration::from_secs(5);
+    while process_exists(second) && Instant::now() < gone_by {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !process_exists(second),
+        "the second shell's child outlived the kill"
+    );
+}
+
+/// A login shell that exits non-zero gives the fallback list, though it
+/// printed a `PATH`; one that prints no markers, or an environment with no
+/// `PATH`, does too; no shell at all does too.
+#[cfg(unix)]
+#[test]
+fn a_failed_capture_gives_the_fallback_list() {
+    let guard = HomeStoreGuard::set("path-failed");
+    let home = guard.root().join("home");
+    let list = fallback_path(Some(&home));
+    let deadline = Duration::from_secs(10);
+
+    let failing = failing_login_shell(guard.root());
+    let path = capture_of(Some(failing), Some(home.clone()), deadline).wait();
+    assert_eq!(path.source, PathSource::FallbackList);
+    assert_eq!(
+        path.failure,
+        Some(CaptureFailure::Exited("exit status: 3".into()))
+    );
+    assert_eq!(path.value(), &list);
+
+    let silent = fake_login_shell(guard.root(), "silent-shell", "echo hello");
+    let no_path = fake_login_shell(guard.root(), "no-path-shell", "unset PATH\neval \"$3\"");
+    for (shell, failure) in [
+        (Some(silent), CaptureFailure::NoMarkers),
+        (Some(no_path), CaptureFailure::NoPath),
+        (None, CaptureFailure::NoShell),
+    ] {
+        let path = capture_of(shell, Some(home.clone()), deadline).wait();
+        assert_eq!(path.source, PathSource::FallbackList);
+        assert_eq!(path.failure, Some(failure));
+        assert_eq!(path.value(), &list);
+    }
+    assert_eq!(
+        fallback_path(None),
+        OsString::from("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    );
+}
+
+/// The capture starts without waiting for the account's lookup or the login
+/// shell (the window's first paint never waits on either: the lookup runs on
+/// the capture's thread too), and a daemon spawned meanwhile waits for it at
+/// most until its deadline, then gets the fallback list.
+#[cfg(unix)]
+#[test]
+fn the_capture_holds_no_caller_and_the_wait_ends_at_its_deadline() {
+    let guard = HomeStoreGuard::set("path-async");
+    let pid_file = guard.root().join("shell.pid");
+    let shell = fake_login_shell(
+        guard.root(),
+        "sleeping-shell",
+        &format!("echo $$ > '{}'\nexec /bin/sleep 47", pid_file.display()),
+    );
+    let deadline = Duration::from_millis(1200);
+    let before = Instant::now();
+    let capture = Capture::start(
+        move || {
+            // A slow user database: the lookup holds the capture's thread.
+            std::thread::sleep(Duration::from_millis(400));
+            Account {
+                shell: Some(shell),
+                home: None,
+            }
+        },
+        deadline,
+    );
+    assert!(
+        before.elapsed() < Duration::from_millis(200),
+        "start waited on the login shell: {:?}",
+        before.elapsed()
+    );
+    let path = capture.wait();
+    let waited = before.elapsed();
+    if let Some(pid) = std::fs::read_to_string(&pid_file)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+    {
+        drop(KillOnDrop(pid));
+    }
+    assert_eq!(path.source, PathSource::FallbackList);
+    assert!(
+        waited >= deadline && waited < deadline + Duration::from_millis(900),
+        "the wait ended at the deadline: {waited:?}"
+    );
+}
+
+/// The wait's own bound: a capture whose thread has concluded nothing by
+/// the deadline (here its account's lookup is still running) is taken as
+/// timed out there by the wait itself — the fallback list, without
+/// `~/.cargo/bin` while the home is unknown — and every later wait answers
+/// the same, the thread's own conclusion after it ignored.
+#[cfg(unix)]
+#[test]
+fn the_wait_takes_the_fallback_list_itself_at_the_deadline() {
+    let guard = HomeStoreGuard::set("path-wait-bound");
+    let home = guard.root().join("home");
+    let deadline = Duration::from_millis(600);
+    let before = Instant::now();
+    let capture = Capture::start(
+        move || {
+            std::thread::sleep(Duration::from_secs(4));
+            Account {
+                shell: None,
+                home: Some(home),
+            }
+        },
+        deadline,
+    );
+    let path = capture.wait();
+    let waited = before.elapsed();
+
+    assert!(
+        waited >= deadline && waited < deadline + Duration::from_millis(900),
+        "the wait ended at the deadline: {waited:?}"
+    );
+    assert_eq!(path.source, PathSource::FallbackList);
+    assert_eq!(path.failure, Some(CaptureFailure::TimedOut(deadline)));
+    assert_eq!(path.value(), &fallback_path(None));
+    let again = capture.wait();
+    assert_eq!(again.failure, path.failure);
+    assert_eq!(
+        again.capture, path.capture,
+        "the same conclusion, answered again"
+    );
+}
+
+/// The capture is settled when the login shell exits, not when its output
+/// ends: a child the profile put in the background, holding the shell's
+/// standard output open, holds nothing — the `PATH` is taken at once, long
+/// before the deadline.
+#[cfg(unix)]
+#[test]
+fn the_capture_settles_on_the_shells_exit_not_the_end_of_its_output() {
+    let guard = HomeStoreGuard::set("path-settle-on-exit");
+    let pid_file = guard.root().join("background.pid");
+    let shell = fake_login_shell(
+        guard.root(),
+        "backgrounding-shell",
+        &format!(
+            "/bin/sleep 47 &\n\
+             echo $! > '{pid}'\n\
+             PATH='{CAPTURED_PATH}'; export PATH\n\
+             eval \"$3\"",
+            pid = pid_file.display()
+        ),
+    );
+    let deadline = Duration::from_secs(10);
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let outcome = capture_login_path(&shell, started, deadline);
+        let _ = sent.send((outcome, started.elapsed()));
+    });
+    let answer = received.recv_timeout(Duration::from_secs(5));
+    let background: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the shell started its background child")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let _stray = KillOnDrop(background);
+
+    let (outcome, took) = answer.expect("the capture settled while the child held the pipe");
+    assert_eq!(outcome, Ok(OsString::from(CAPTURED_PATH)));
+    assert!(
+        took < Duration::from_secs(2),
+        "settled on the exit: {took:?}"
+    );
+}
+
+/// The announcement names the source and the capture's duration and never
+/// the value: `gui.log`'s lines for a captured `PATH` and for the fallback
+/// list, and the variable the daemon's boot line reads.
+#[cfg(unix)]
+#[test]
+fn the_announcement_names_the_source_and_the_duration_never_the_value() {
+    let guard = HomeStoreGuard::set("path-announced");
+    let home = guard.root().join("home");
+    let noisy = noisy_login_shell(guard.root());
+    let failing = failing_login_shell(guard.root());
+    let deadline = Duration::from_secs(10);
+    let (captured, fallback) = with_the_shell_log(|| {
+        let captured = capture_of(Some(noisy), Some(home.clone()), deadline).wait();
+        announce_daemon_path(&captured);
+        let fallback = capture_of(Some(failing), Some(home.clone()), deadline).wait();
+        announce_daemon_path(&fallback);
+        (captured, fallback)
+    });
+
+    let text = gui_log_text();
+    for (path, level, source) in [
+        (&captured, " INFO ", "login-shell"),
+        (&fallback, " WARN ", "fallback-list"),
+    ] {
+        let fields = format!("source=\"{source}\" capture_ms={}", path.capture_ms());
+        assert!(
+            text.lines()
+                .any(|l| l.contains(level) && l.contains(&fields)),
+            "the capture's line, {fields}: {text:?}"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.contains("Daemon PATH source") && l.contains(&fields)),
+            "the spawn's line, {fields}: {text:?}"
+        );
+        assert_eq!(
+            path.announcement(),
+            format!("{source} {}", path.capture_ms())
+        );
+    }
+    assert!(
+        text.contains("reason=the login shell failed (exit status: 3)"),
+        "{text:?}"
+    );
+    for value in [
+        CAPTURED_PATH,
+        "/q21/captured",
+        "/opt/homebrew/bin",
+        ".cargo/bin",
+    ] {
+        assert!(
+            !text.contains(value),
+            "gui.log names the PATH ({value}): {text:?}"
+        );
+    }
+}
+
+/// The connection answers `daemonPath` for the daemon this run spawned —
+/// its `pid` the one `discovery.json` names — and `null` for any other.
+#[test]
+fn the_connection_names_the_path_of_the_daemon_this_app_spawned() {
+    let _guard = HomeStoreGuard::set("path-carried");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    let d = write_discovery(listener.local_addr().expect("port").port(), false);
+    let report = DaemonPathReport {
+        source: PathSource::LoginShell,
+        capture_ms: 212,
+        reason: None,
+    };
+
+    record_spawned(d.pid, Some(report));
+    for cmd in ["ensure_daemon_running", "get_connection_info"] {
+        let answer = invoke(cmd, json!({})).expect("connection info");
+        assert_eq!(
+            answer["daemonPath"],
+            json!({ "source": "login-shell", "captureMs": 212, "reason": null }),
+            "{cmd}"
+        );
+        assert_eq!(answer["instanceId"], "instance-q11");
+    }
+
+    forget_spawned();
+    record_spawned(
+        d.pid.wrapping_add(1),
+        Some(DaemonPathReport {
+            source: PathSource::LoginShell,
+            capture_ms: 212,
+            reason: None,
+        }),
+    );
+    for cmd in ["ensure_daemon_running", "get_connection_info"] {
+        let answer = invoke(cmd, json!({})).expect("connection info");
+        assert_connection_info(&answer, &d);
+    }
+    drop(listener);
+}
+
+/// Two starts that overlap each spawn a daemon, and the one `discovery.json`
+/// names — the one that took the store's lock — may be the first: a later
+/// spawn does not take its `daemonPath` away.
+#[test]
+fn a_daemon_this_run_spawned_keeps_its_path_after_a_later_spawn() {
+    let _guard = HomeStoreGuard::set("path-two-spawns");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    let d = write_discovery(listener.local_addr().expect("port").port(), false);
+    let report = DaemonPathReport {
+        source: PathSource::FallbackList,
+        capture_ms: 3000,
+        reason: Some(CaptureFailure::TimedOut(Duration::from_secs(3)).to_string()),
+    };
+
+    record_spawned(d.pid, Some(report.clone()));
+    record_spawned(d.pid.wrapping_add(1), Some(report));
+    for cmd in ["ensure_daemon_running", "get_connection_info"] {
+        let answer = invoke(cmd, json!({})).expect("connection info");
+        assert_eq!(
+            answer["daemonPath"]["source"],
+            json!("fallback-list"),
+            "{cmd}: the first spawn's daemon keeps its PATH line"
+        );
+    }
+    drop(listener);
+}
+
+/// Each `daemonPath`'s wire form is its row in `src/lib/daemon-path.json`,
+/// which the TypeScript side reads too; a failure's reason is its sentence.
+#[test]
+fn every_daemon_path_is_its_row_in_the_table_the_webview_reads() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/daemon-path.json");
+    let table: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("daemon-path.json")).expect("JSON");
+    let rows = [
+        (
+            "login_shell",
+            DaemonPathReport {
+                source: PathSource::LoginShell,
+                capture_ms: 212,
+                reason: None,
+            },
+        ),
+        (
+            "fallback_list",
+            DaemonPathReport {
+                source: PathSource::FallbackList,
+                capture_ms: 3000,
+                reason: Some(CaptureFailure::TimedOut(Duration::from_secs(3)).to_string()),
+            },
+        ),
+    ];
+    assert_eq!(
+        table.as_object().expect("an object").len(),
+        rows.len(),
+        "one row per case"
+    );
+    for (name, report) in rows {
+        assert_eq!(
+            serde_json::to_value(&report).expect("serializes"),
+            table[name],
+            "{name}"
         );
     }
 }

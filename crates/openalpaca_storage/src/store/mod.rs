@@ -203,6 +203,13 @@ const GUI_DEV_LOG_FILE: &str = "gui-dev.log";
 /// reason alone (T30).
 pub const MANAGED_LOG_ENV: &str = "OPENALPACA_MANAGED_LOG";
 
+/// Set by the app on the daemon it spawns, beside [`MANAGED_LOG_ENV`]: where
+/// the daemon's `PATH` came from and how long the app's capture of it took,
+/// `<source> <milliseconds>` — `login-shell 212` or `fallback-list 3001` —
+/// never the `PATH` itself (Q21). The daemon logs it in one boot line; a
+/// daemon started without it (from a terminal) logs `inherited`.
+pub const PATH_SOURCE_ENV: &str = "OPENALPACA_PATH_SOURCE";
+
 /// `daemon.log` is rotated once it is past this size — 16 MB.
 pub const DAEMON_LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;
 

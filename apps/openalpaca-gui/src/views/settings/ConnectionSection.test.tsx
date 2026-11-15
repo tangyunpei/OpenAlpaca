@@ -19,10 +19,13 @@ import type { DaemonStatus, SessionSweep } from "@/lib/api/types";
 import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
+import daemonPaths from "@/lib/daemon-path.json";
+
 import {
   ConnectionSection,
   DAEMON_LOG_LINES,
   StorageCard,
+  daemonPathNote,
   homeStoreLabel,
   projectCardRoot,
 } from "./ConnectionSection";
@@ -128,6 +131,12 @@ const daemon = vi.hoisted(() => ({ data: undefined as unknown }));
 
 /** The window's own view of the connection, mutable per test. */
 const link = vi.hoisted(() => ({
+  /** The connection's `daemonPath` (Q21), `null` for none. */
+  daemonPath: null as {
+    source: "login-shell" | "fallback-list";
+    captureMs: number;
+    reason: string | null;
+  } | null,
   connected: true,
   lastError: null as string | null,
   stopIntent: null as "stopped_here" | "stopped_elsewhere" | null,
@@ -145,7 +154,15 @@ const link = vi.hoisted(() => ({
 
 vi.mock("@/hooks/useConnection", () => ({
   useConnectionStatus: () => ({
-    info: null,
+    info:
+      link.daemonPath === null
+        ? null
+        : {
+            baseUrl: "http://127.0.0.1:51823",
+            token: "t",
+            instanceId: "7f3a",
+            daemonPath: link.daemonPath,
+          },
     health: undefined,
     socket: link.connected ? "connected" : "error",
     connected: link.connected,
@@ -192,6 +209,7 @@ vi.mock("@/lib/connection", async (importOriginal) => ({
 }));
 
 afterEach(() => {
+  link.daemonPath = null;
   link.connected = true;
   link.lastError = null;
   link.stopIntent = null;
@@ -396,6 +414,58 @@ describe("where a project-less run's files go (G7)", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/~\/\.openalpaca/)).toBeNull();
     daemon.data = undefined;
+  });
+});
+
+/**
+ * Where the `PATH` of a daemon this app spawned came from (Q21): the shell's
+ * `daemonPath`, its source and the capture's duration, never the `PATH`.
+ */
+describe("the daemon's PATH (Q21)", () => {
+  it("says the login shell's, with the capture's duration", () => {
+    link.daemonPath = { source: "login-shell", captureMs: 212, reason: null };
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        "This daemon's PATH is your login shell's, read when the app started (212 ms).",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says the fallback list and why, with the capture's duration", () => {
+    link.daemonPath = {
+      source: "fallback-list",
+      captureMs: 3001,
+      reason: "the login shell did not finish within 3000 ms",
+    };
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        "This daemon's PATH is the app's fallback list: the login shell did not finish within 3000 ms (3001 ms).",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says nothing for a daemon this app did not spawn, or while stopped", () => {
+    render(<ConnectionSection />);
+    expect(screen.queryByText(/This daemon's PATH/)).toBeNull();
+
+    link.daemonPath = { source: "login-shell", captureMs: 212, reason: null };
+    link.stopIntent = "stopped_here";
+    link.stopPhase = "stopped";
+    render(<ConnectionSection />);
+    expect(screen.queryByText(/This daemon's PATH/)).toBeNull();
+  });
+
+  it("words each row of the shell's table", () => {
+    expect(daemonPathNote(daemonPaths.login_shell as never)).toBe(
+      "This daemon's PATH is your login shell's, read when the app started (212 ms).",
+    );
+    expect(daemonPathNote(daemonPaths.fallback_list as never)).toBe(
+      "This daemon's PATH is the app's fallback list: the login shell did not finish within 3000 ms (3000 ms).",
+    );
   });
 });
 

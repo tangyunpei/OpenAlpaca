@@ -16,7 +16,11 @@
  *                             waits until the process and its lock are gone.
  *
  * The first two return `ConnectionInfo`, serialized to the webview in
- * camelCase. A refusal of the shell's is typed, `{ kind, message }`
+ * camelCase, with `daemonPath` (Q21): where the `PATH` of a daemon this run
+ * of the app spawned came from — the login shell's, captured at the app's
+ * start, or the fallback list — and how long the capture took, never the
+ * `PATH` itself; `null` for a daemon the app did not spawn this run. A
+ * refusal of the shell's is typed, `{ kind, message }`
  * (`lib/shell-error.ts`, Q13): it becomes a `ConnectionError` carrying that
  * `kind` and the shell's sentence as it is.
  *
@@ -33,6 +37,37 @@ export interface ConnectionInfo {
   baseUrl: string;
   token: string;
   instanceId: string;
+  /**
+   * Where the `PATH` of the daemon this app spawned came from (Q21); `null`
+   * for a daemon this run of the app did not spawn. Absent only in a test's
+   * hand-written `ConnectionInfo`.
+   */
+  daemonPath?: DaemonPath | null;
+}
+
+/**
+ * The shell's `daemonPath` (`src-tauri/src/login_path.rs`'s
+ * `DaemonPathReport`), pinned from both sides by `daemon-path.json`.
+ */
+export interface DaemonPath {
+  /** `login-shell`: the login shell's; `fallback-list`: the fixed list. */
+  source: "login-shell" | "fallback-list";
+  /** How long the capture took, from the app's start. */
+  captureMs: number;
+  /** Why the capture failed, the shell's sentence; `null` for `login-shell`. */
+  reason: string | null;
+}
+
+/** `value` as a `DaemonPath`, or `null` when it is not one. */
+export function daemonPathOf(value: unknown): DaemonPath | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  if (v.source !== "login-shell" && v.source !== "fallback-list") return null;
+  if (typeof v.captureMs !== "number" || !Number.isFinite(v.captureMs)) {
+    return null;
+  }
+  if (v.reason !== null && typeof v.reason !== "string") return null;
+  return { source: v.source, captureMs: v.captureMs, reason: v.reason };
 }
 
 /** Thrown when discovery is missing/expired or the Tauri bridge is absent. */
@@ -109,7 +144,12 @@ async function invokeConnection(
       raw,
     );
   }
-  return raw;
+  return {
+    baseUrl: raw.baseUrl,
+    token: raw.token,
+    instanceId: raw.instanceId,
+    daemonPath: daemonPathOf(raw.daemonPath),
+  };
 }
 
 /**

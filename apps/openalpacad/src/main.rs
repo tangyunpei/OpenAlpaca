@@ -212,6 +212,13 @@ async fn async_main(
     // exists at the usual path (Important #3, T44 fix round 1).
     let managed_log = std::env::var_os(store::MANAGED_LOG_ENV).is_some();
 
+    // Step 0c (Q21): where this daemon's PATH came from — the app's capture
+    // of the login shell's, its fallback list, or, with no word from the
+    // app, whatever started it. The source and the capture's time, never
+    // the PATH.
+    let path_source = bootstrap::read_path_source();
+    info!("{}", bootstrap::path_source_line(path_source));
+
     // Step 1: Bind to dynamic port (127.0.0.1:0 -> OS assigns port)
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await

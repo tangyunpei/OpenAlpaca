@@ -8,10 +8,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import daemonPaths from "./daemon-path.json";
+
 import {
   ConnectionError,
   awaitDaemonStopped,
   bootstrapConnection,
+  daemonPathOf,
   readDaemonLogTail,
   refreshConnection,
   resetConnection,
@@ -138,5 +141,48 @@ describe("a refusal that is not the shell's", () => {
     expect(error.kind).toBeNull();
     expect(error.message).toBe("Tauri command `ensure_daemon_running` failed");
     expect(error.detail).toBe(answer);
+  });
+});
+
+/**
+ * The connection's `daemonPath` (Q21): the shell's table, `daemon-path.json`,
+ * read as it is; `null` for a daemon this app did not spawn and for anything
+ * that is not one of the shell's.
+ */
+describe("the daemon's PATH on the connection", () => {
+  const info = {
+    baseUrl: "http://127.0.0.1:51823",
+    token: "t",
+    instanceId: "i-1",
+  };
+
+  it("carries each row of the shell's table as it is, at boot and on reconnect", async () => {
+    for (const row of Object.values(daemonPaths)) {
+      resetConnection();
+      vi.mocked(invoke).mockResolvedValue({ ...info, daemonPath: row });
+      expect(await bootstrapConnection()).toEqual({ ...info, daemonPath: row });
+      expect(await refreshConnection()).toEqual({ ...info, daemonPath: row });
+    }
+  });
+
+  it("is null for a daemon the app did not spawn", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ...info, daemonPath: null });
+    expect(await bootstrapConnection()).toEqual({ ...info, daemonPath: null });
+  });
+
+  it("is null for anything that is not one of the shell's", () => {
+    for (const value of [
+      undefined,
+      "login-shell",
+      { source: "inherited", captureMs: 1, reason: null },
+      { source: "login-shell", captureMs: "1", reason: null },
+      { source: "login-shell", captureMs: 1, reason: 7 },
+      { source: "fallback-list", captureMs: Number.NaN, reason: "x" },
+    ]) {
+      expect(daemonPathOf(value)).toBeNull();
+    }
+    expect(daemonPathOf(daemonPaths.fallback_list)).toEqual(
+      daemonPaths.fallback_list,
+    );
   });
 });
