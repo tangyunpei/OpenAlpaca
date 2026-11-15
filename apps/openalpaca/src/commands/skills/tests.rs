@@ -598,3 +598,74 @@ async fn skills_tidy_apply_in_a_git_work_tree_is_refused_naming_it() {
     );
     assert!(!store.skills.join(".archived").exists());
 }
+
+/// A `skills/` linked into a git work tree, the config directory outside
+/// one (the owner's item 6 of the second answers of 2026-11-14,
+/// TIDY-LINKED): `skills tidy --apply` is refused, naming `skills/` (as
+/// given) and the work tree, and the folder stays whole, with no
+/// `.archived/` made through the link; without `--apply` it is listed. The
+/// work tree is this test's own, `.git` and all, beside the config
+/// directory in its scratch directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn skills_tidy_apply_with_skills_linked_into_a_git_work_tree_is_refused_naming_it() {
+    plain();
+    let store = TidyStore::new();
+    let repo = store._dir.path().join("repo");
+    let target = repo.join("config/skills");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::rename(&store.skills, &target).unwrap();
+    std::os::unix::fs::symlink(&target, &store.skills).unwrap();
+    assert!(!store._dir.path().join(".git").exists());
+    assert!(!store.config.join(".git").exists());
+    let root = repo.canonicalize().unwrap();
+
+    let error = tidy_lines(&store.config, None, true, now())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "`openalpaca skills tidy --apply` moves nothing inside a git work tree, and {} is \
+             a link into {}: a copy there may be a file the repository holds, as in a \
+             development checkout, whose config/ is the source of the built-in ones. Nothing \
+             was moved; `openalpaca skills tidy` lists the copies, for you to move yourself.",
+            store.skills.display(),
+            root.display()
+        )
+    );
+    for name in CREATE_SKILL_82022776 {
+        assert_eq!(
+            std::fs::read(store.skills.join("create-skill").join(name)).unwrap(),
+            create_skill_fixture(name)
+        );
+    }
+    assert!(!store.skills.join(".archived").exists());
+
+    let text = tidy_lines(&store.config, None, false, now())
+        .await
+        .unwrap()
+        .join("\n");
+    assert!(
+        text.contains(&format!(
+            "would move to {}",
+            store
+                .skills
+                .join(".archived/create-skill.20261107120000")
+                .display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(&format!(
+            "Nothing was moved; `openalpaca skills tidy --apply` moves nothing here: {} is \
+             a link into the git work tree {}.",
+            store.skills.display(),
+            root.display()
+        )),
+        "{text}"
+    );
+    assert!(!store.skills.join(".archived").exists());
+}

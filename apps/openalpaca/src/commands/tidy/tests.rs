@@ -132,3 +132,66 @@ fn a_git_work_tree_is_the_nearest_ancestor_holding_a_git_entry() {
     std::fs::create_dir(config.join(".git")).unwrap();
     assert_eq!(git_work_tree(&config), Some(config.clone()));
 }
+
+/// Which work tree a tidy of a config directory's `agents/` would move
+/// inside, and the path it names (TIDY-LINKED): the config directory's,
+/// naming it, first; else, for an `agents/` that is a link resolving into
+/// one, that one, naming `agents/` as given; nothing for a missing
+/// `agents/`, a folder of its own (with or without a `.git` entry), a link
+/// to a folder in no work tree, or a link naming nothing. Every `.git` and
+/// link here is this test's own, in its scratch directory; no git runs.
+#[cfg(unix)]
+#[test]
+fn a_linked_folder_is_checked_after_the_config_directory_and_only_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(dir.path());
+    let scratch = dir.path().canonicalize().unwrap();
+    let config = dir.path().join("store/config");
+    let agents = config.join("agents");
+    std::fs::create_dir_all(&config).unwrap();
+    let repo = scratch.join("repo");
+    let in_repo = repo.join("config/agents");
+    std::fs::create_dir_all(&in_repo).unwrap();
+    std::fs::create_dir(repo.join(".git")).unwrap();
+    let outside = scratch.join("plain/agents");
+    std::fs::create_dir_all(&outside).unwrap();
+
+    // Missing, then a folder of its own, then one holding a `.git` entry.
+    assert_eq!(work_tree_of(&config, &agents), None);
+    std::fs::create_dir(&agents).unwrap();
+    assert_eq!(work_tree_of(&config, &agents), None);
+    std::fs::create_dir(agents.join(".git")).unwrap();
+    assert_eq!(work_tree_of(&config, &agents), None);
+    std::fs::remove_dir_all(&agents).unwrap();
+
+    // A link to a folder in no work tree, then one naming nothing.
+    std::os::unix::fs::symlink(&outside, &agents).unwrap();
+    assert_eq!(work_tree_of(&config, &agents), None);
+    std::fs::remove_file(&agents).unwrap();
+    std::os::unix::fs::symlink(scratch.join("missing"), &agents).unwrap();
+    assert_eq!(work_tree_of(&config, &agents), None);
+    std::fs::remove_file(&agents).unwrap();
+
+    // A link into a work tree: that one, naming `agents/` as given.
+    std::os::unix::fs::symlink(&in_repo, &agents).unwrap();
+    assert_eq!(
+        work_tree_of(&config, &agents),
+        Some(WorkTree {
+            named: agents.clone(),
+            root: repo.clone(),
+            linked: true,
+        })
+    );
+
+    // The config directory inside a work tree of its own: that one, naming
+    // the config directory, whatever its `agents/` links to.
+    std::fs::create_dir(scratch.join("store/.git")).unwrap();
+    assert_eq!(
+        work_tree_of(&config, &agents),
+        Some(WorkTree {
+            named: config.clone(),
+            root: scratch.join("store"),
+            linked: false,
+        })
+    );
+}

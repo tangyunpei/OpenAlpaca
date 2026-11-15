@@ -402,6 +402,31 @@ fn listing_end(path: &Path, root: &Path) -> String {
     )
 }
 
+/// What `--apply` answers with `agents/` a link into a git work tree:
+/// `path` is the link, as given, and `root` the work tree it resolves into.
+#[cfg(unix)]
+fn linked_refusal(path: &Path, root: &Path) -> String {
+    format!(
+        "`openalpaca agents tidy --apply` moves nothing inside a git work tree, and {} is \
+         a link into {}: a copy there may be a file the repository holds, as in a development \
+         checkout, whose config/ is the source of the built-in ones. Nothing was moved; \
+         `openalpaca agents tidy` lists the copies, for you to move yourself.",
+        path.display(),
+        root.display()
+    )
+}
+
+/// The listing's last line with `agents/` a link into a git work tree.
+#[cfg(unix)]
+fn linked_listing_end(path: &Path, root: &Path) -> String {
+    format!(
+        "Nothing was moved; `openalpaca agents tidy --apply` moves nothing here: {} is a link \
+         into the git work tree {}.",
+        path.display(),
+        root.display()
+    )
+}
+
 /// A `.git` directory above the config directory — a development
 /// checkout's `config/`, named by `OPENALPACA_CONFIG_DIR` — makes `--apply`
 /// a refusal naming the work tree: nothing moves, no `.archived/` is made,
@@ -464,4 +489,123 @@ async fn agents_tidy_apply_in_a_git_work_tree_is_refused_with_nothing_to_tidy() 
     assert_eq!(error.to_string(), refusal(&store.config, &root));
     assert!(store.snapshot().is_empty());
     assert!(!store.agents.join(".archived").exists());
+}
+
+// ── An `agents/` linked into a git work tree (the owner's item 6 of the
+// second answers of 2026-11-14, TIDY-LINKED) ──
+//
+// The config directory is outside any work tree; `agents/` is a link to a
+// folder inside one this test makes, `.git` and all, in its own scratch
+// directory, beside the config directory, never above it.
+
+/// Moves `store`'s `agents/` into `repo/config/agents` under the scratch
+/// directory, makes `repo` a work tree with a `.git` directory, and puts a
+/// link at `agents/` naming the moved folder. Returns the work tree, as the
+/// file system resolves it.
+#[cfg(unix)]
+fn link_agents_into_a_work_tree(store: &Store) -> PathBuf {
+    let repo = store._dir.path().join("repo");
+    let target = repo.join("config/agents");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::rename(&store.agents, &target).unwrap();
+    std::os::unix::fs::symlink(&target, &store.agents).unwrap();
+    assert!(!store._dir.path().join(".git").exists());
+    assert!(!store.config.join(".git").exists());
+    repo.canonicalize().unwrap()
+}
+
+/// With `agents/` a link into a git work tree, the config directory outside
+/// one, `--apply` is refused naming `agents/` (as given) and the work tree:
+/// nothing moves, no `.archived/` is made through the link, and no daemon
+/// is needed to say so. Without `--apply` the copy is still listed, and the
+/// last line says `--apply` moves nothing there.
+#[cfg(unix)]
+#[tokio::test]
+async fn agents_tidy_apply_with_agents_linked_into_a_git_work_tree_is_refused_naming_it() {
+    plain();
+    let store = Store::new();
+    let root = link_agents_into_a_work_tree(&store);
+    let before = store.snapshot();
+    assert_eq!(before.len(), 4);
+
+    let error = tidy_lines(&store.config, None, true, now())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), linked_refusal(&store.agents, &root));
+    assert_eq!(store.snapshot(), before);
+    assert!(!store.agents.join(".archived").exists());
+
+    let text = tidy_lines(&store.config, None, false, now())
+        .await
+        .unwrap()
+        .join("\n");
+    assert!(
+        text.contains(&format!(
+            "  {} (version: earlier)\n    would move to {}",
+            store.agents.join("system_agent.md").display(),
+            store
+                .agents
+                .join(".archived/system_agent.20261107120000.md")
+                .display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(&linked_listing_end(&store.agents, &root)),
+        "{text}"
+    );
+    assert_eq!(store.snapshot(), before);
+    assert!(!store.agents.join(".archived").exists());
+}
+
+/// The linked `agents/` is refused before a copy is read, as the config
+/// directory is: with nothing to tidy in it, `--apply` is refused the same
+/// way, and nothing is made in it.
+#[cfg(unix)]
+#[tokio::test]
+async fn agents_tidy_apply_with_agents_linked_into_a_work_tree_and_nothing_to_tidy_is_refused() {
+    plain();
+    let store = Store::new();
+    for entry in std::fs::read_dir(&store.agents).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let root = link_agents_into_a_work_tree(&store);
+
+    let error = tidy_lines(&store.config, None, true, now())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), linked_refusal(&store.agents, &root));
+    assert!(store.snapshot().is_empty());
+    assert!(!store.agents.join(".archived").exists());
+}
+
+/// Only a link is checked, as the owner took it: an `agents/` that is a
+/// folder of the config directory's own holding a `.git` entry — the
+/// config directory outside any work tree — is tidied as before.
+#[tokio::test]
+async fn agents_tidy_apply_in_an_agents_folder_holding_its_own_git_entry_moves_as_before() {
+    plain();
+    let store = Store::new();
+    std::fs::create_dir(store.agents.join(".git")).unwrap();
+
+    let text = tidy_lines(&store.config, None, true, now())
+        .await
+        .unwrap()
+        .join("\n");
+
+    assert!(
+        text.starts_with(&format!(
+            "Moved {} to {}",
+            store.agents.join("system_agent.md").display(),
+            store
+                .agents
+                .join(".archived/system_agent.20261107120000.md")
+                .display()
+        )),
+        "{text}"
+    );
+    assert!(!store.agents.join("system_agent.md").exists());
 }

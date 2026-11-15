@@ -857,7 +857,8 @@ with `--apply` to move them into `agents/.archived/` or `skills/.archived/`,
 where this build never reads them ([CLI Manual →
 `agents`](CLI_Manual.md#agents)). A running daemon is asked first, and a
 copy it still reads is left. Inside a git work tree `--apply` moves nothing
-and says so; move those copies yourself. Leave them if you may go back to
+and says so, and the same when `agents/` or `skills/` is a link into one;
+move those copies yourself. Leave them if you may go back to
 an earlier build (*Keep the builds apart*).
 
 An emptied `agents/` no longer means "no templates". To switch a built-in
