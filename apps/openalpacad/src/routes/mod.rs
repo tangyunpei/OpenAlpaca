@@ -196,10 +196,25 @@ pub(crate) fn content_token_ok(
         .is_some_and(|token| expected.accepts_token(token))
 }
 
-/// The plain-text `401` the other inline-auth route answers with
-/// (`chat_stream_handler`), so the two speak with one voice.
+/// The plain-text `401` the query-token routes answer with
+/// ([`query_token_refusal`]), so the content routes speak with their voice.
 pub(crate) fn invalid_token() -> Response {
     (StatusCode::UNAUTHORIZED, "Invalid token").into_response()
+}
+
+/// The token check of the two routes a browser opens by URL alone and which
+/// carry the token as `?token=<t>` only: `/v1/events` (a WebSocket) and
+/// `/v1/chat/stream/{id}` (an `EventSource`). `None` lets the request in;
+/// otherwise the [`invalid_token`] refusal to answer with.
+///
+/// `expected` is the daemon's token set (T21 (2)), or one fixed token in a
+/// test.
+pub(crate) fn query_token_refusal(
+    params: &std::collections::HashMap<String, String>,
+    expected: &(impl AcceptsToken + ?Sized),
+) -> Option<Response> {
+    let token = params.get("token").map(String::as_str).unwrap_or("");
+    (!expected.accepts_token(token)).then(invalid_token)
 }
 
 /// The MIME types a browser will execute script from when it *navigates* to a

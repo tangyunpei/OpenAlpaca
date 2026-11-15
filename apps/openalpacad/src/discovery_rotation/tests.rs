@@ -1,7 +1,10 @@
 //! T21 (2): the rotation task driven on an injected wall clock and tokio's
 //! paused time, writing the real `discovery.json` under a guarded scratch
-//! home store; and the daemon's token check, through the real middleware.
+//! home store; and the daemon's token check, through the real middleware,
+//! the content routes' inline check and the query-token check of the
+//! events socket and the chat stream.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -404,4 +407,64 @@ async fn a_token_neither_current_nor_an_honoured_previous_one_is_refused() {
     let mut bearer = HeaderMap::new();
     bearer.insert("authorization", HeaderValue::from_static("Bearer token-b"));
     assert!(crate::routes::content_token_ok(&bearer, None, &*lapsed));
+}
+
+/// What the query-token check of the events socket and the chat stream
+/// answers for `?token=<token>` (`None`: no parameter): `None` when the
+/// request is let in, else the refusal's status and body.
+async fn query_refusal(tokens: &DaemonTokens, token: Option<&str>) -> Option<(StatusCode, String)> {
+    let params: HashMap<String, String> = token
+        .map(|token| ("token".to_string(), token.to_string()))
+        .into_iter()
+        .collect();
+    let refusal = crate::routes::query_token_refusal(&params, tokens)?;
+    let status = refusal.status();
+    let body = axum::body::to_bytes(refusal.into_body(), usize::MAX)
+        .await
+        .expect("the refusal's body");
+    Some((status, String::from_utf8(body.to_vec()).expect("text")))
+}
+
+/// The entry's third case for the two routes a browser opens by URL alone,
+/// `/v1/events` and `/v1/chat/stream/{id}`, whose URL keeps its token
+/// across a rotation: the current token and an honoured previous one are
+/// let in; an unknown, a lapsed, an empty or a missing one gets the plain
+/// `401` "Invalid token".
+#[tokio::test]
+async fn the_events_socket_and_chat_stream_refuse_a_token_neither_current_nor_honoured() {
+    let now = Utc::now();
+    let refused = Some((StatusCode::UNAUTHORIZED, "Invalid token".to_string()));
+
+    let honoured = DaemonTokens::new("token-a".into());
+    honoured.rotate("token-b".into(), now + TimeDelta::hours(1));
+    assert_eq!(
+        query_refusal(&honoured, Some("token-b")).await,
+        None,
+        "the current token"
+    );
+    assert_eq!(
+        query_refusal(&honoured, Some("token-a")).await,
+        None,
+        "the honoured previous token"
+    );
+    assert_eq!(
+        query_refusal(&honoured, Some("token-c")).await,
+        refused,
+        "an unknown token"
+    );
+    assert_eq!(query_refusal(&honoured, Some("")).await, refused, "empty");
+    assert_eq!(query_refusal(&honoured, None).await, refused, "missing");
+
+    let lapsed = DaemonTokens::new("token-a".into());
+    lapsed.rotate("token-b".into(), now - TimeDelta::seconds(1));
+    assert_eq!(
+        query_refusal(&lapsed, Some("token-b")).await,
+        None,
+        "the current token"
+    );
+    assert_eq!(
+        query_refusal(&lapsed, Some("token-a")).await,
+        refused,
+        "a previous token past its expires_at"
+    );
 }

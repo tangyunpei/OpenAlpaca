@@ -9,7 +9,7 @@
 //! through from a local origin; whether `capabilities/default.json` admits a
 //! command is G-bundle leg A's to prove, never these tests'.
 //!
-//! **Nothing here spawns (C-12).** Until Q04 removes the debug `PATH`
+//! **Nothing here spawns a daemon (C-12).** Until Q04 removes the debug `PATH`
 //! fallback in `spawn_daemon` (or injects its locator and spawner), the tests
 //! drive only the paths that spawn nothing: `ensure_daemon_running`'s reuse of
 //! a discovery file whose address an in-test loopback listener holds open (the
@@ -20,6 +20,11 @@
 //! folder, and the reuse tests check that no `openalpacad` sits beside the
 //! test binary and that no daemon log was opened: a reuse that regressed
 //! fails to find a daemon instead of starting one.
+//!
+//! The Q21 capture tests do spawn, but no daemon: each runs a stand-in
+//! `/bin/sh` login shell, and three start a `/bin/sleep 47` from it; the
+//! capture kills a shell past its deadline with its process group, and
+//! `KillOnDrop` kills a child still there when its test ends.
 //!
 //! Every test holds [`HomeStoreGuard`], this crate's copy of the home-store
 //! guard: a scratch `OPENALPACA_HOME_STORE`, `OPENALPACA_CONFIG_DIR`, `HOME`

@@ -8,7 +8,6 @@ use axum::{
         Query, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
-    http::StatusCode,
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -17,7 +16,6 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 use crate::AppState;
-use crate::discovery_rotation::AcceptsToken;
 use crate::events::EventBroadcaster;
 
 /// Everything one open socket needs, and nothing else.
@@ -49,9 +47,8 @@ pub async fn events_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Validate token from query parameter
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    if !state.tokens.accepts_token(token) {
-        return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
+    if let Some(refusal) = super::query_token_refusal(&params, &*state.tokens) {
+        return refusal;
     }
 
     let deps = SocketDeps {

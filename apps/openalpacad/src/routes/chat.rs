@@ -38,7 +38,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::chat_types::*;
 use crate::AppState;
-use crate::discovery_rotation::AcceptsToken;
 
 // ── Session targeting ───────────────────────────────────────────────
 
@@ -461,10 +460,9 @@ pub async fn chat_stream_handler(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    // Inline auth (same pattern as WebSocket events)
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    if !state.tokens.accepts_token(token) {
-        return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
+    // Inline auth (the same check as the WebSocket events route)
+    if let Some(refusal) = super::query_token_refusal(&params, &*state.tokens) {
+        return refusal;
     }
 
     let chat_service = &state.chat_service;
