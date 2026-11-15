@@ -603,9 +603,18 @@ cannot answer until you enable one:
   OpenAI's abuse-monitoring logs, 30 days by default, are apart). The
   model alias `strong` is `gpt-6.1-sol` there, and `fast` is `gpt-6-luna`:
   a workflow's lead and the six agents that follow it run on `strong`,
-  `explore_agent` and `system_agent` on `fast`. Ollama, and an OpenAI-compatible
-  server set as the `openai` provider's `base_url`, are sent what they were
-  sent before. See
+  `explore_agent` and `system_agent` on `fast`. Ollama is sent what it was
+  sent before. An OpenAI-compatible server set as the `openai` provider's
+  `base_url` (llama.cpp, LM Studio, vLLM, a gateway on your network) keeps
+  Chat Completions, but the aliases name OpenAI's own models there too: a
+  workflow's lead and its six followers ask that server for `gpt-6.1-sol`
+  and the two `fast` agents for `gpt-6-luna`, which it likely does not
+  serve. A server that checks the name refuses the call and the workflow
+  fails; one that answers any name is counted at `gpt-6.1-sol`'s price
+  ($2 / $10 per million tokens, OpenAI's pricing page, read 2026-11-15). A
+  pin naming a model the server lists sends them there:
+  `fast`, `balanced` and `strong` under `[providers.openai.model_aliases]`.
+  Whether the daemon should do that itself is an open question. See
   [Daemon Manual → OpenAI's Responses API](Daemon_Manual.md#openais-responses-api).
 
 `openalpaca llm status` shows the result, and names the fix when nothing is
@@ -716,16 +725,19 @@ openalpaca chat --message "say hello in five words"
   `reasoning` frame: the GUI shows it in the thinking indicator and the CLI
   dims it at a terminal, so the wait before the first answer token does not
   look like a hang. Nothing stores reasoning; it is live or it is gone.
-- **The configured model may not be yours.** Every shipped agent template, and
-  the seeded `[orchestrator] model`, names a Claude id. Those are right when
-  Anthropic is configured and fall through a fallback ladder when it is not:
-  the request ends up on the first routable model, preferring one that can use
-  tools. The substitution is never silent — `openalpaca llm status` reads
-  `Model: X — not available, using Y`, Settings → Models & keys shows
-  `configured: X — not available, using Y`, and the daemon logs one `WARN` per
-  pair. To stop substituting, set `[orchestrator] model` to one of your local
-  tags, by hand or with `openalpaca config set ai.default_model <tag>`. With
-  nothing routable at all, one error names the fix instead of "Unknown model".
+- **The configured model may not be yours.** The seeded `[orchestrator]
+  model` names a Claude id. It is right when Anthropic is configured and falls
+  through a fallback ladder when it is not: the request ends up on the first
+  routable model, preferring one that can use tools. The substitution is never
+  silent — `openalpaca llm status` reads `Model: X — not available, using Y`,
+  Settings → Models & keys shows `configured: X — not available, using Y`,
+  and the daemon logs one `WARN` per pair. To stop substituting, set
+  `[orchestrator] model` to one of your local tags, by hand or with
+  `openalpaca config set ai.default_model <tag>`. With nothing routable at
+  all, one error names the fix instead of "Unknown model". The shipped agent
+  templates name no model id: a model alias (`strong`, `fast`) or `inherit`,
+  which on a machine with only Ollama is the model already answering, with
+  no substitution line (the `[providers.ollama.model_aliases]` row below).
 
 ### 5. Knobs worth knowing
 
@@ -849,7 +861,8 @@ What a workflow runs on, per install, with the pin that keeps the old one:
   ran on Claude Sonnet 4.6 and Haiku 4.5; since that move, until this build,
   the templates named those retired ids, so with a key whose model list
   still named them they ran on them counted at $3 / $15, and otherwise on
-  the main model. To keep the lead off Opus:
+  `claude-sonnet-5-5`, the seeded `[orchestrator] fallback_models`. To
+  keep the lead off Opus:
   `[providers.anthropic.model_aliases] strong = "claude-sonnet-5-5"`.
 - **OpenAI only:** the lead and its six on `gpt-6.1-sol`, the two `fast`
   agents on `gpt-6-luna`, where they all ran on the main model before; a
