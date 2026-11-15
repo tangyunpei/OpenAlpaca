@@ -424,16 +424,22 @@ reaches you only if you name it; Anthropic's migration guide says it needs
 Anthropic allows it) and returns a 400 when its prefix check fails.
 
 A round on a model that thinks — every built-in Claude row (Haiku 5.5 unless
-the request turns thinking off) — can spend its whole `max_tokens` (4096
-unless set) thinking, before any text or tool call. A main-loop or skill
-turn streamed to its chat continues such a turn as it continues any
-truncated answer, at most twice at the same cap, its thinking sent back. A
-round asked without streaming (every lead and subagent round, and a
-main-loop or skill turn with no chat stream) ends it as an empty completion,
-an error that is not retried: the run stops there. So does such a round that
-ends its turn on thinking alone, with no text and no tool call: its thinking
-now has text, and a round that reasoned instead of answering is an empty
-completion, as on every model that shows its thinking by default.
+the request turns thinking off) — can spend its whole `max_tokens` (16,000
+unless set; a store seeded before this build keeps the 4096 its `llm.toml`
+says, see *Timeouts and output ceiling*) thinking, before any text or tool
+call. A streamed round continues such a turn as it continues any truncated
+answer, at most twice at the same cap, its thinking sent back; every lead
+round and every round of a built-in template's subagent is streamed, and so
+is a main-loop or skill turn streamed to its chat. A round asked without
+streaming (a main-loop or skill turn with no chat stream: a connector's, a
+scheduled skill's, the follow-up runner's, a nested `invoke_skill`'s) ends it
+as an empty completion, an error that is not retried: the run stops there.
+So does such a round that ends its turn on thinking alone, with no text and
+no tool call, not cut: its thinking now has text, and a round that reasoned
+instead of answering is an empty completion, as on every model that shows
+its thinking by default. A lead's or a subagent's round that ends so is the
+same error though it is streamed; only a main-loop or skill turn streamed to
+its chat completes with an empty answer.
 
 Within one run, a model's thinking goes back to it unchanged in the next
 request of a tool loop: every thinking block, its signature and its order,
@@ -490,15 +496,16 @@ On the Responses API each request:
 - carries the whole conversation, as before, and asks OpenAI to store
   nothing (`store: false`). Left out, the API keeps a response for at least
   30 days;
-- names `max_output_tokens` (`default_max_tokens`, 4096 unless set), which
-  counts the model's reasoning as well as its answer. OpenAI's reasoning
-  guide advises reserving at least 25,000. A reasoning model can therefore
-  spend the whole cap before any text or tool call. A main-loop or skill
-  turn streamed to its chat continues such a turn as it continues any
-  truncated answer, at most twice at the same cap. A round asked without
-  streaming (every lead and subagent round, and a main-loop or skill turn
-  with no chat stream) ends it as an empty completion, an error that is
-  not retried: the run stops there;
+- names `max_output_tokens` (`default_max_tokens`, 16,000 unless set),
+  which counts the model's reasoning as well as its answer. OpenAI's
+  reasoning guide advises reserving at least 25,000. A reasoning model can
+  therefore spend the whole cap before any text or tool call. A streamed
+  round (every lead round, every round of a built-in template's subagent,
+  and a main-loop or skill turn streamed to its chat) continues such a
+  turn as it continues any truncated answer, at most twice at the same
+  cap. A round asked without streaming (a main-loop or skill turn with no
+  chat stream) ends it as an empty completion, an error that is not
+  retried: the run stops there;
 - sends each tool with `strict` written out: `true` where Chat Completions
   sends it, `false` everywhere else, since on this API a tool without the
   field is made strict wherever the API can;
@@ -645,7 +652,7 @@ shipped `lead_agent` template sets `3.0`). At price `0` none of the caps bite.
 |---|---|---|
 | `[timeouts] llm_request_timeout_secs` | 120 | Wall clock for one **non-streaming** LLM call, any provider that sets no override. Clamped to 1…86400 s with a `WARN`. |
 | `[providers.<name>] request_timeout_secs` | unset | Per-provider override of the above. The seeded template sets **3600** for Ollama: a call to a local model may run up to an hour, and one that uses up its whole figure is not asked again (below). |
-| `[providers.<name>] default_max_tokens` | 4096 (8192 for the seeded Ollama) | Output ceiling for one answer; a request-level `max_tokens` still wins. |
+| `[providers.<name>] default_max_tokens` | 16,000 (8192 for the seeded Ollama) | Output ceiling for one answer, thinking and reasoning included; a request-level `max_tokens` still wins. A store seeded before this build says 4096 for Anthropic and OpenAI and keeps it: no build rewrites a written `llm.toml`, so set 16000 by hand. A configuration reset (`openalpaca config reset`, or `--factory`) leaves the key unset, so the compiled 16,000 applies, but it also clears every provider setting and API key in the file. |
 
 The HTTP client carries **no total deadline**: it bounds the connect (30 s,
 never longer than the budget) and the idle gap between reads, so a healthy long
@@ -654,21 +661,32 @@ request instead. Both provider-construction paths — the boot builder and the
 registration a toggle or a hot reload performs — resolve the budget through the
 same function, so they cannot disagree.
 
-Three bounds sit over a **streamed** turn, and it is worth knowing which one
-fires:
+Every lead round, and every round of a subagent on a built-in template (a
+plugin's agent runs its plugin's own loop), is streamed with nothing
+watching it (its events are collected and forwarded nowhere), so these
+bounds, not the non-streaming 120 s, hold a long answer; a main-loop or
+skill turn is streamed only to its chat. Three bounds sit over a
+**streamed** turn, and it is worth knowing which one fires:
 
 | Bound | Value | Where | What happens |
 |---|---|---|---|
-| Idle between SSE chunks | **90 s**, not configurable | `STREAM_IDLE_TIMEOUT`, `crates/openalpaca_llm/src/streaming.rs` | The stream errors, the loop logs it and **retries the turn without streaming**. |
+| Idle between stream events | **90 s**, not configurable; a turn streamed to its chat only — a lead's or subagent's round has none | `STREAM_IDLE_TIMEOUT`, `crates/openalpaca_llm/src/streaming.rs` | The stream errors, the loop logs it and **retries the turn without streaming**. A `ping` and a reasoning step that streams no text are not events and do not reset it. |
 | Streaming wall clock | 600 s, or 3,600 s when the provider serving the round needs no key (Ollama); not configurable | `LoopConfig::max_stream_duration`, `LoopConfig::max_keyless_stream_duration` | Same fallback: the collection is cancelled and the turn is retried non-streaming — but not a local round that ran its whole hour (below). |
 | HTTP read gap | `request_timeout_secs` (3,600 s for the seeded Ollama, else `[timeouts] llm_request_timeout_secs`) | `build_http_client` | The request fails at the transport. |
 
-The first is by far the tightest, so on a local model it is the one that fires,
-and the symptom is a turn that stalls and then answers un-streamed rather than
-one that fails. The case that reaches it in practice is a model still being
-loaded into memory: warm the tag once before a long run. The read timeout at
-3,600 s for the seeded Ollama is an hour of silence and is effectively
-unreachable while the loop is the consumer.
+On a turn streamed to its chat the first is by far the tightest, so it is the
+one that fires, and the symptom is a turn that stalls and then answers
+un-streamed rather than one that fails. It is reached by a local model still
+being loaded into memory (warm the tag once before a long run), by a local
+model building a tool call it sends in one piece, and by a reasoning model
+that streams no reasoning text (an OpenAI Responses turn asks for no
+reasoning summary). A lead's or subagent's round has no idle clock: silence
+there is bounded by the HTTP read gap, `request_timeout_secs` (120 s on a
+cloud provider unless set, the hour for the seeded Ollama), past which the
+request fails at the transport and the round is asked again without
+streaming; bytes the provider sends while silent, such as Anthropic's `ping`,
+reset that gap. The read timeout at 3,600 s for the seeded Ollama is an hour
+of silence and is effectively unreachable while the loop is the consumer.
 
 **A local call that uses up its whole timeout is not asked again.** For a
 provider that needs no key (Ollama), a non-streaming call that ran its whole

@@ -188,6 +188,23 @@ pub struct LlmRuntimeConfig {
     pub provider_defaults: HashMap<String, ProviderDefaults>,
 }
 
+/// The output budget of a request that names no `max_tokens`, when the
+/// provider's `[providers.<name>] default_max_tokens` names none either:
+/// 16,000 tokens on every provider (OUTPUT-BUDGET; the owner's item 8,
+/// "budget can be 16000 or higher"), where it was 4096. It counts thinking
+/// and reasoning as well as the answer. Every catalogued row takes it: each
+/// of the eight latest models' pages gives a maximum output of 128K
+/// (platform.claude.com/docs/en/models/{fable-5-2,opus-5-5,sonnet-5-5,
+/// haiku-5-5}/overview; developers.openai.com/api/docs/models/{gpt-6-astra,
+/// gpt-6.1-sol,gpt-6.1-terra,gpt-6-luna}; read 2026-11-15T05:47Z), so no
+/// row is clamped. It stays under the figure above which Anthropic's SDK
+/// "requires streaming", 21,333 (platform.claude.com/docs/en/
+/// build-with-claude/thinking, read 2026-11-15T05:52Z); a lead's and a
+/// subagent's rounds are streamed all the same (`LoopConfig::stream_rounds`
+/// in `openalpaca_core`), so a long answer is not cut by the non-streaming
+/// request timeout.
+pub(crate) const DEFAULT_MAX_TOKENS: u32 = 16_000;
+
 impl Default for LlmRuntimeConfig {
     fn default() -> Self {
         let mut provider_defaults = HashMap::new();
@@ -199,7 +216,7 @@ impl Default for LlmRuntimeConfig {
                 // `claude-sonnet-5-5` (platform.claude.com/docs/en/
                 // about-claude/model-deprecations, read 2026-11-14).
                 default_model: "claude-sonnet-5-5".to_string(),
-                default_max_tokens: 4096,
+                default_max_tokens: DEFAULT_MAX_TOKENS,
                 base_url: None,
                 request_timeout_secs: None,
                 model_aliases: BTreeMap::new(),
@@ -212,7 +229,7 @@ impl Default for LlmRuntimeConfig {
                 // `gpt-6-luna` (developers.openai.com/api/docs/deprecations,
                 // read 2026-11-14).
                 default_model: "gpt-6-luna".to_string(),
-                default_max_tokens: 4096,
+                default_max_tokens: DEFAULT_MAX_TOKENS,
                 base_url: Some("https://api.openai.com/v1".to_string()),
                 request_timeout_secs: None,
                 model_aliases: BTreeMap::new(),
@@ -222,7 +239,7 @@ impl Default for LlmRuntimeConfig {
             "ollama".to_string(),
             ProviderDefaults {
                 default_model: "llama3".to_string(),
-                default_max_tokens: 4096,
+                default_max_tokens: DEFAULT_MAX_TOKENS,
                 base_url: Some("http://localhost:11434/v1".to_string()),
                 request_timeout_secs: None,
                 model_aliases: BTreeMap::new(),
@@ -334,7 +351,7 @@ impl From<&LlmRouterConfig> for LlmRuntimeConfig {
                     default_max_tokens: pc
                         .default_max_tokens
                         .or_else(|| existing.map(|e| e.default_max_tokens))
-                        .unwrap_or(4096),
+                        .unwrap_or(DEFAULT_MAX_TOKENS),
                     base_url: pc
                         .base_url
                         .clone()

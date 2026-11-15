@@ -9,14 +9,17 @@ fallback_models = ["claude-sonnet-5-5"]
 enabled = false
 strategy = "round_robin"
 default_model = "claude-sonnet-5-5"
-default_max_tokens = 4096
+# The output ceiling for one answer, thinking included; a request that names
+# its own max_tokens still wins.
+default_max_tokens = 16000
 
 [providers.openai]
 enabled = false
 base_url = "https://api.openai.com/v1"
 strategy = "round_robin"
 default_model = "gpt-6-luna"
-default_max_tokens = 4096
+# The output ceiling for one answer, reasoning included.
+default_max_tokens = 16000
 
 # Local models, served by the Ollama you run yourself.
 # Turning this on is the only action needed: the daemon then asks the running
@@ -30,9 +33,9 @@ strategy = "round_robin"
 # Empty means "whatever is installed": the router picks a discovered model,
 # preferring one that can use tools. Name a tag here to pin one instead.
 default_model = ""
-# The output ceiling for one answer. A local model bills nothing, and a
-# reasoning model spends tokens thinking before it answers, so this is more
-# generous than the cloud default of 4096.
+# The output ceiling for one answer. A reasoning model spends tokens thinking
+# before it answers; a local model's window is often small, so this is less
+# than the cloud providers' 16000.
 default_max_tokens = 8192
 # How long one non-streaming call to this provider may take: a call to a local
 # model may run up to an hour. A large model on a laptop answers in minutes, not

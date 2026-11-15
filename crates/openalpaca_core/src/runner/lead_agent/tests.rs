@@ -1451,6 +1451,325 @@ async fn a_subagents_brief_survives_its_loops_compaction() {
     );
 }
 
+// ── OUTPUT-BUDGET (item 8, (a)): the lead's and a subagent's rounds stream ──
+
+/// Which entry each of a lead's and a subagent's rounds came in by:
+/// `chat_streaming` (streamed) or `chat` (asked whole), each side's rounds
+/// scripted as [`SubagentCompactionProvider`] tells them apart. The
+/// working-state writer's call is answered and not counted.
+struct PathTally {
+    lead: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    /// `(side, streamed, the request's messages)`, in the order asked.
+    seen: std::sync::Mutex<Vec<(&'static str, bool, Vec<openalpaca_llm::ChatMessage>)>>,
+    /// How long a streamed answer stays silent before its first event.
+    silence: std::time::Duration,
+}
+
+impl PathTally {
+    fn new(
+        lead: Vec<openalpaca_llm::ChatResponse>,
+        subagent: Vec<openalpaca_llm::ChatResponse>,
+    ) -> Arc<Self> {
+        Self::silent(lead, subagent, std::time::Duration::ZERO)
+    }
+
+    /// As [`Self::new`], each streamed answer yielding nothing for `silence`
+    /// first, as a model reasoning with no text to stream does.
+    fn silent(
+        lead: Vec<openalpaca_llm::ChatResponse>,
+        subagent: Vec<openalpaca_llm::ChatResponse>,
+        silence: std::time::Duration,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            lead: std::sync::Mutex::new(lead.into()),
+            subagent: std::sync::Mutex::new(subagent.into()),
+            seen: std::sync::Mutex::new(Vec::new()),
+            silence,
+        })
+    }
+
+    fn answer(
+        &self,
+        request: &openalpaca_llm::ChatRequest,
+        streamed: bool,
+    ) -> openalpaca_llm::ChatResponse {
+        let (writer, _) = crate::orchestrator::working_state::render_prompt(None, "");
+        let first = request.messages.first();
+        if first.is_some_and(|m| m.content == writer) {
+            return scripted_response(
+                r#"{"topic":"t","goal":"g","done":[],"decisions":[],"open":[],"next":"n","refs":[]}"#,
+                vec![],
+            );
+        }
+        let (side, queue) = if first.is_some_and(|m| m.content.contains("You are a subagent")) {
+            ("subagent", &self.subagent)
+        } else {
+            ("lead", &self.lead)
+        };
+        self.seen.lock().unwrap_or_else(|p| p.into_inner()).push((
+            side,
+            streamed,
+            request.messages.as_ref().clone(),
+        ));
+        let next = queue.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+        next.unwrap_or_else(|| scripted_response("done", vec![]))
+    }
+
+    /// Each side's rounds, as `(streamed, messages)`.
+    fn rounds(&self, side: &str) -> Vec<(bool, Vec<openalpaca_llm::ChatMessage>)> {
+        self.seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(s, ..)| *s == side)
+            .map(|(_, streamed, messages)| (*streamed, messages.clone()))
+            .collect()
+    }
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for PathTally {
+    fn name(&self) -> &str {
+        "path-tally"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        Ok(self.answer(&request, false))
+    }
+    async fn chat_streaming(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatStream, openalpaca_llm::LlmError> {
+        use futures_util::StreamExt;
+        let events = openalpaca_llm::response_to_events(self.answer(&request, true));
+        let silence = self.silence;
+        Ok(Box::pin(
+            futures_util::stream::once(async move {
+                tokio::time::sleep(silence).await;
+                futures_util::stream::iter(events.into_iter().map(Ok))
+            })
+            .flatten(),
+        ))
+    }
+}
+
+/// A lead run on [`PathTally`], under the default daemon config.
+async fn run_tallied_lead(provider: Arc<PathTally>, shared: Arc<SharedContext>) -> LeadAgentResult {
+    let router = LlmRouter::single_provider(
+        provider,
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-5-5".to_string(),
+    );
+    run_lead_agent(
+        &lead_subagent(),
+        "weigh the herd",
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        Some("conv-stream"),
+    )
+    .await
+}
+
+/// OUTPUT-BUDGET (item 8, the owner's "A"): every round of a lead and of the
+/// subagent it spawns is asked streamed, with no chat to forward it to, so a
+/// long answer runs under the streamed round's bound (`KEYED_STREAM_ROUND`)
+/// and never under the non-streaming request timeout (120 s by default).
+/// Until OUTPUT-BUDGET only a main-loop or skill turn with a chat stream was
+/// streamed; a lead's and a subagent's `LoopConfig` carried no callback, so
+/// every one of their rounds was asked whole.
+#[tokio::test]
+async fn a_lead_and_its_subagent_ask_every_round_streamed() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let shared = Arc::new(SharedContext::new());
+    let worker = crate::test_util::make_agent("worker", vec!["memory_read"]);
+    shared
+        .agent_registry
+        .register_template(crate::test_util::template_from_agent(&worker));
+    let call = |id: &str, name: &str, arguments: serde_json::Value| openalpaca_llm::ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
+    };
+    let provider = PathTally::new(
+        vec![
+            scripted_response(
+                "",
+                vec![call(
+                    "call-1",
+                    "spawn_subagent",
+                    serde_json::json!({"agent_id": "worker", "objective": "Weigh every alpaca."}),
+                )],
+            ),
+            scripted_response(
+                "",
+                vec![call("call-2", "wait_for_subagents", serde_json::json!({}))],
+            ),
+            scripted_response("all done", vec![]),
+        ],
+        vec![scripted_response("seventeen", vec![])],
+    );
+
+    let result = run_tallied_lead(provider.clone(), shared).await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+
+    let lead = provider.rounds("lead");
+    assert_eq!(lead.len(), 3, "the lead answered in three rounds");
+    assert!(
+        lead.iter().all(|(streamed, _)| *streamed),
+        "every lead round streamed: {:?}",
+        lead.iter().map(|(s, _)| s).collect::<Vec<_>>()
+    );
+    let subagent = provider.rounds("subagent");
+    assert_eq!(subagent.len(), 1, "the subagent answered in one round");
+    assert!(subagent[0].0, "the subagent's round streamed");
+}
+
+/// OUTPUT-BUDGET: a lead round cut at its output budget before any text or
+/// call — its thinking alone, as an always-thinking model's can be — is now
+/// continued. Asked whole it was the router's `EmptyCompletion`, not
+/// transient, and the run ended there (the router's half is pinned by
+/// `an_anthropic_turn_of_thinking_alone_cut_at_max_tokens_ends_unless_streamed`
+/// and `a_responses_turn_cut_before_any_text_ends_unless_streamed`); streamed,
+/// it collects as a `MaxTokens` turn with no text, and the loop sends it back
+/// with the continuation prompt and asks again.
+#[tokio::test]
+async fn a_lead_round_cut_before_any_text_is_continued() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let cut = openalpaca_llm::ChatResponse {
+        finish_reason: openalpaca_llm::FinishReason::MaxTokens,
+        thinking: Some("Plan the weigh-in.".to_string()),
+        usage: openalpaca_llm::Usage {
+            input_tokens: 10,
+            output_tokens: 16_000,
+            ..Default::default()
+        },
+        ..scripted_response("", vec![])
+    };
+    let provider = PathTally::new(vec![cut, scripted_response("all done", vec![])], vec![]);
+
+    let result = run_tallied_lead(provider.clone(), Arc::new(SharedContext::new())).await;
+    assert!(
+        result.success,
+        "a cut round is continued, not the run's end: {:?}",
+        result.loop_result.finish_reason
+    );
+    assert_eq!(result.loop_result.final_content, "all done");
+
+    let lead = provider.rounds("lead");
+    assert_eq!(lead.len(), 2, "the cut round and its continuation");
+    let last = lead[1].1.last().expect("a message");
+    assert_eq!(last.role, openalpaca_llm::Role::User);
+    assert!(
+        last.content
+            .starts_with("Your previous response was truncated"),
+        "the continuation prompt: {}",
+        last.content
+    );
+}
+
+/// OUTPUT-BUDGET keeps *Rev 68*'s built (a) (M2): a lead round that ends on
+/// its thinking alone — `end_turn`, no text, no call, not cut — is still an
+/// `EmptyCompletion` that ends the run, now that the round is streamed with
+/// nothing to forward to, as it was asked whole (`retry.rs`;
+/// `an_opus_5_5_turn_ending_on_thinking_alone_is_an_empty_completion`). It
+/// is not asked again whole: the round is spent and counted once.
+#[tokio::test]
+async fn a_streamed_lead_round_ending_on_thinking_alone_is_still_an_empty_completion() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let thought = openalpaca_llm::ChatResponse {
+        thinking: Some("Nothing left to do.".to_string()),
+        ..scripted_response("", vec![])
+    };
+    let provider = PathTally::new(vec![thought], vec![]);
+
+    let result = run_tallied_lead(provider.clone(), Arc::new(SharedContext::new())).await;
+    assert!(!result.success, "the run ends on the error");
+    match &result.loop_result.finish_reason {
+        crate::runner::LoopFinishReason::Error(why) => {
+            assert!(why.contains("empty completion"), "{why}");
+        }
+        other => panic!("an EmptyCompletion, got {other:?}"),
+    }
+    let lead = provider.rounds("lead");
+    assert_eq!(lead.len(), 1, "asked once, not again whole");
+    assert!(lead[0].0, "the round streamed");
+}
+
+/// OUTPUT-BUDGET, the owner's "A" (the round's bound becomes the streamed
+/// one): a lead round with nothing to forward to carries no 90 s idle clock
+/// of its own (`collect_stream`'s, which a chat turn keeps), so a model
+/// silent for 100 s before its first event — reasoning with no text to
+/// stream — is answered on that one streamed request, not dropped at 90 s
+/// and asked again whole under the non-streaming request timeout.
+#[tokio::test(start_paused = true)]
+async fn a_lead_round_silent_past_ninety_seconds_is_not_asked_again_whole() {
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let provider = PathTally::silent(
+        vec![scripted_response("all done", vec![])],
+        vec![],
+        std::time::Duration::from_secs(100),
+    );
+
+    let result = run_tallied_lead(provider.clone(), Arc::new(SharedContext::new())).await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    assert_eq!(result.loop_result.final_content, "all done");
+    let lead = provider.rounds("lead");
+    assert_eq!(
+        lead.iter()
+            .map(|(streamed, _)| *streamed)
+            .collect::<Vec<_>>(),
+        vec![true],
+        "one streamed request, none asked whole"
+    );
+}
+
 #[tokio::test]
 async fn test_check_subagent_status_tool() {
     let tracker = Arc::new(SubagentTracker::new());

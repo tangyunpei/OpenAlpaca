@@ -733,7 +733,7 @@ All in `~/.openalpaca/config/llm.toml`:
 | Key | Default (seeded) | What it does |
 |---|---|---|
 | `[providers.ollama] default_model` | `""` | Empty means "whatever is installed" — the router picks a discovered model, preferring a tools-capable one. Name a tag to pin it. |
-| `[providers.ollama] default_max_tokens` | `8192` | The output ceiling for one answer (the cloud default is 4096). A request that names its own `max_tokens` still wins. |
+| `[providers.ollama] default_max_tokens` | `8192` | The output ceiling for one answer (the cloud providers' is 16000). A request that names its own `max_tokens` still wins. |
 | `[providers.ollama] request_timeout_secs` | `3600` | Wall clock for one **non-streaming** call to this provider: a call to a local model may run up to an hour, and one that uses up the whole figure is not asked again. An install seeded before this build keeps `600` (see [Upgrade](#upgrade)). |
 | `[timeouts] llm_request_timeout_secs` | `120` | The same budget for any provider that sets no override. |
 | `[providers.ollama.model_aliases]` | none (a commented-out example) | Pins for the model aliases `fast`, `balanced` and `strong`. Ollama has no built-in model for any of them, so each alias is the model the asking agent already runs on; a pin names another, e.g. `fast = "qwen3:4b"` for a smaller pulled model. A pin may name any model the router can reach, a cloud one included; another key is warned of and ignored. No shipped template names an alias in this build. See the Daemon Manual's *Model aliases*. |
@@ -819,6 +819,22 @@ request_timeout_secs = 3600
 ```
 
 A streamed round to a local model is allowed the hour either way.
+
+The same holds for the output budget: an install seeded before this build
+keeps `default_max_tokens = 4096` under `[providers.anthropic]` and
+`[providers.openai]`, so an answer there, thinking or reasoning included, is
+cut at 4,096 tokens where a new install allows 16,000. Set it by hand (a
+configuration reset, `openalpaca config reset`, also leaves it unset, so the
+compiled 16,000 applies, but it clears every provider setting and API key in
+the file too):
+
+```toml
+[providers.anthropic]
+default_max_tokens = 16000
+
+[providers.openai]
+default_max_tokens = 16000
+```
 
 An upgrade from any build before the schema re-baseline of 2026-09-28 is the one
 exception — a pre-redesign build at schema 42 as well as an earlier

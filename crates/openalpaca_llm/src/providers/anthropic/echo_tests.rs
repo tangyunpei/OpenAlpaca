@@ -454,7 +454,8 @@ fn a_tool_loop_without_thinking_is_sent_as_before() {
             body,
             serde_json::json!({
                 "model": model,
-                "max_tokens": 4096,
+                // The default budget: 16,000 since OUTPUT-BUDGET.
+                "max_tokens": 16_000,
                 "system": "Be brief.",
                 "messages": [
                     {"role": "user", "content": "find it"},

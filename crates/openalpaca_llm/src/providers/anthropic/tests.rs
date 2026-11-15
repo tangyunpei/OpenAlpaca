@@ -34,6 +34,27 @@ fn test_request_serialization() {
     assert_eq!(messages[0]["content"], "Hello");
 }
 
+/// OUTPUT-BUDGET (item 8): a request that names no `max_tokens` asks for
+/// 16,000 output tokens, the owner's figure ("budget can be 16000 or
+/// higher"), where it asked for 4096.
+#[test]
+fn a_request_naming_no_budget_asks_for_sixteen_thousand_tokens() {
+    let provider = AnthropicProvider::new("test-key".to_string(), None, None);
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("Hello")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: None,
+    };
+    assert_eq!(provider.build_request_body(&request)["max_tokens"], 16_000);
+}
+
 #[test]
 fn test_response_parsing() {
     let provider = AnthropicProvider::new("test-key".to_string(), None, None);

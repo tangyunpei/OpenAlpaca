@@ -45,7 +45,7 @@ fn enabling_a_provider_keeps_the_comments_and_the_order() {
         "# Local models, served by the Ollama you run yourself.",
         "# Turning this on is the only action needed: the daemon then asks the running",
         "# Empty means \"whatever is installed\": the router picks a discovered model,",
-        "# The output ceiling for one answer. A local model bills nothing, and a",
+        "# The output ceiling for one answer. A reasoning model spends tokens thinking",
         "# Wall clock for one non-streaming LLM call, for any provider that does not set",
     ] {
         assert!(

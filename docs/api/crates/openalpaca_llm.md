@@ -34,7 +34,7 @@
 - `pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};`
 - `pub use routing::rate_limiter::{ CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter, };`
 - `pub use routing::router::{ AliasResolution, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext, RoutedStream, RouterRequest, };`
-- `pub use streaming::collect_stream;`
+- `pub use streaming::{collect_stream, collect_stream_idle};`
 - `pub use tool_arguments::UnreadableArguments;`
 - `pub use types::*;`
 

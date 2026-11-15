@@ -30,7 +30,8 @@ impl OllamaProvider {
     ///
     /// `max_tokens` is `[providers.ollama] default_max_tokens`. Both
     /// construction paths pass it: it was dropped on the floor here, so a local
-    /// model was capped at 4096 output tokens whatever the file said (L6).
+    /// model was capped at the then 4096-token default whatever the file said
+    /// (L6).
     pub fn with_client(
         client: reqwest::Client,
         model: String,

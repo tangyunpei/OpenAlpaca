@@ -248,7 +248,8 @@ fn build_router_from_hierarchical(
                         .clone()
                         .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
                     // Read like the other two arms: the file's output ceiling
-                    // reaches the request body instead of the 4096 default (L6).
+                    // reaches the request body instead of the compiled default
+                    // (L6; `DEFAULT_MAX_TOKENS`, 16,000 since OUTPUT-BUDGET).
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));

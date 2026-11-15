@@ -73,6 +73,20 @@ pub struct LoopConfig {
     /// streaming first, forwarding each event to this callback, then falls
     /// back to non-streaming on failure.
     pub stream_callback: Option<StreamCallback>,
+    /// Ask every round streamed on the Router backend even with no
+    /// `stream_callback`, the events collected and forwarded nowhere: a
+    /// streamed round runs under `max_stream_duration` (the keyless bound
+    /// for a local model), never under the non-streaming request timeout
+    /// (`[timeouts] llm_request_timeout_secs`, 120 s seeded), which a full
+    /// answer at the default output budget can outlast. Such a round has no
+    /// 90 s idle clock (the HTTP read gap, `request_timeout_secs`, bounds a
+    /// silent stream) and keeps the router's empty-completion rule for an
+    /// answer with nothing in it that was not cut. On for a lead and the
+    /// subagents of a built-in template ([`Self::from_defaults`]; a plugin
+    /// agent runs its plugin's own loop; OUTPUT-BUDGET, item 8, the owner's
+    /// "A"); off by default, where a turn streams only to its chat. A failed
+    /// stream falls back to non-streaming, as with a callback.
+    pub stream_rounds: bool,
     /// Maximum wall-clock duration for streaming collection when the routed
     /// provider needs a key. If `collect_stream()` exceeds this, it is
     /// cancelled and the loop falls back to non-streaming. Default: 10
@@ -151,6 +165,7 @@ impl Clone for LoopConfig {
             enable_caching: self.enable_caching,
             thinking: self.thinking.clone(),
             stream_callback: self.stream_callback.clone(),
+            stream_rounds: self.stream_rounds,
             max_stream_duration: self.max_stream_duration,
             max_keyless_stream_duration: self.max_keyless_stream_duration,
             writer: self.writer.clone(),
@@ -181,6 +196,7 @@ impl std::fmt::Debug for LoopConfig {
             .field("enable_caching", &self.enable_caching)
             .field("thinking", &self.thinking)
             .field("stream_callback", &self.stream_callback.is_some())
+            .field("stream_rounds", &self.stream_rounds)
             .field("max_stream_duration", &self.max_stream_duration)
             .field(
                 "max_keyless_stream_duration",
@@ -220,6 +236,7 @@ impl Default for LoopConfig {
             enable_caching: true,
             thinking: None,
             stream_callback: None,
+            stream_rounds: false,
             max_stream_duration: KEYED_STREAM_ROUND,
             max_keyless_stream_duration: KEYLESS_STREAM_ROUND,
             writer: WriterConfig::default(),
@@ -243,6 +260,9 @@ impl LoopConfig {
     ///
     /// Validates the agent's configured model against its model access constraints.
     /// If the model is denied, falls back to `None` (router default) with a warning.
+    ///
+    /// Every round of a loop built here — a lead's, a built-in template's
+    /// subagent's — is asked streamed ([`Self::stream_rounds`]; OUTPUT-BUDGET).
     pub fn from_defaults(
         max_rounds: usize,
         max_tools_per_round: usize,
@@ -287,6 +307,7 @@ impl LoopConfig {
             enable_caching: true,
             thinking: None,
             stream_callback: None,
+            stream_rounds: true,
             max_stream_duration: KEYED_STREAM_ROUND,
             max_keyless_stream_duration: KEYLESS_STREAM_ROUND,
             writer: WriterConfig::default(),

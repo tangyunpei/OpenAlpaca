@@ -3,6 +3,7 @@ mod response;
 mod streaming;
 
 use crate::LlmProvider;
+use crate::config::llm_config::runtime::DEFAULT_MAX_TOKENS;
 use crate::error::LlmError;
 use crate::types::*;
 use async_trait::async_trait;
@@ -13,7 +14,6 @@ use reqwest::header::HeaderMap;
 /// platform.claude.com/docs/en/about-claude/models/overview, read
 /// 2026-11-14).
 const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
-const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Where the Messages and Models APIs live; [`AnthropicProvider::with_api_base`]
 /// points a test at a loopback server instead.
 const API_BASE: &str = "https://api.anthropic.com/v1";

@@ -1156,13 +1156,14 @@ async fn a_streamed_responses_round_is_routed_under_the_asked_id() {
 // ── C7b: a Responses turn cut before any text ───────────────────────────────
 
 /// A Responses answer cut at `max_output_tokens` before any text or call,
-/// a reasoning item alone, as the arm's 4096 default can end a
-/// `gpt-6.1-sol` turn. No change made; what this pins (pending-decisions
-/// §1, *Rev 63*): asked without streaming, as every lead and subagent
-/// round is, it is the router's `EmptyCompletion`, not transient, asked
-/// once, so nothing retries it and the loop ends the run on it; streamed,
-/// the same answer collects as a `MaxTokens` turn, which the loop
-/// continues.
+/// a reasoning item alone, as a `gpt-6.1-sol` turn can end inside its
+/// budget (16,000 by default since OUTPUT-BUDGET, 4096 before). What this
+/// pins, at the router (pending-decisions §1, *Rev 63*): asked without
+/// streaming, it is the router's `EmptyCompletion`, not transient, asked
+/// once, so nothing retries it and a loop ends its run on it; streamed, the
+/// same answer collects as a `MaxTokens` turn, which the loop continues.
+/// Since OUTPUT-BUDGET every lead and subagent round is asked streamed; a
+/// main-loop or skill turn with no chat stream is still asked whole.
 #[tokio::test]
 async fn a_responses_turn_cut_before_any_text_ends_unless_streamed() {
     let cut = serde_json::json!({

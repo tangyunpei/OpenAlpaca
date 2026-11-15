@@ -335,17 +335,32 @@ error events stay inside the loop.
 A **plugin-contributed** skill does not stream: `invoke_plugin_skill`
 gets a finished answer back over the plugin protocol, so it keeps the
 chat service's single fallback delta — nothing simulates chunks for it.
-Every caller with nobody watching a stream (scheduled skills,
-connectors, the follow-up runner, the nested `invoke_skill` tool, the
-lead and its subagents) passes no sink and runs the non-streaming path.
+Every other caller with nobody watching a stream (scheduled skills,
+connectors, the follow-up runner, the nested `invoke_skill` tool) passes
+no sink and runs the non-streaming path. The lead and the subagents of a
+built-in template (a plugin's agent runs its plugin's own loop) pass no
+sink either, but ask every round streamed: `LoopConfig::from_defaults`
+sets `LoopConfig.stream_rounds` (OUTPUT-BUDGET, the owner's item 8), and
+step 8 collects the events and forwards them nowhere, so a long answer
+runs under the streamed bounds below, not the non-streaming request
+timeout (`[timeouts] llm_request_timeout_secs`, 120 s seeded). Such a
+round has no 90 s idle clock (`collect_stream_idle` with none; the HTTP
+read gap bounds a silent stream). A streamed round cut at its output
+budget before any text or call is continued (step 9), where asked whole
+it was the router's `EmptyCompletion`; one that ends on thinking alone,
+not cut, is still that error, the backend applying the router's rule
+(`empty_completion_error`) to a round streamed with no sink, and is not
+asked again.
 
-With a callback set and a router backend, step 8 tries
+With a callback set, or `stream_rounds`, and a router backend, step 8 tries
 `LlmRouter::complete_streaming` first and **falls back to the
 non-streaming call** — same round, no extra round charged — when:
 
 - the streaming request itself fails;
-- collecting the stream fails, which includes 90 s of silence between
-  chunks (`STREAM_IDLE_TIMEOUT`, `openalpaca_llm/src/streaming.rs`);
+- collecting the stream fails, which includes, on a turn with a callback,
+  90 s with no stream event (`STREAM_IDLE_TIMEOUT`,
+  `openalpaca_llm/src/streaming.rs`; a `ping` is not an event), and on any
+  round a read gap (`request_timeout_secs`) with no byte;
 - the collection outlives `LoopConfig.max_stream_duration` (600 s),
   or `LoopConfig.max_keyless_stream_duration` (3,600 s) when the
   provider serving the round needs no key — a local model, whose call
@@ -364,8 +379,8 @@ provider may answer; when none does, the round ends with
 timeout and is not transient, so the loop does not retry it either; a
 subagent that ends this way tells its lead a retry will not help
 (`subagent_failure`). A stream that opened and then fell silent (its
-90 s idle gap, or a read gap that came first) is still asked again
-without streaming.
+90 s idle gap on a turn with a callback, or a read gap that came first)
+is still asked again without streaming.
 
 `complete_streaming` returns `RoutedStream { model, requires_key,
 stream }`. A stream carries no model id of its own, and the router is

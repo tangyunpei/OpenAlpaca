@@ -588,14 +588,18 @@ fn tool_round_request(model: &str) -> RouterRequest {
 }
 
 /// An Anthropic answer cut at `max_tokens` before any text or call, its
-/// thinking alone, as the arm's 4096 default can end a `claude-opus-5-5`
-/// round. No change made; what this pins: asked without streaming, as
-/// every lead and subagent round is, it is the router's `EmptyCompletion`
+/// thinking alone, as a `claude-opus-5-5` round can end inside its budget
+/// (16,000 by default since OUTPUT-BUDGET, 4096 before). What this pins, at
+/// the router: asked without streaming, it is the router's `EmptyCompletion`
 /// (`crate::error::empty_completion_error`, called in `retry.rs`), not
-/// transient, asked once, so nothing retries it and the loop ends the run
-/// on it; streamed, the same answer collects as a `MaxTokens` turn with no
+/// transient, asked once, so nothing retries it and a loop ends its run on
+/// it; streamed, the same answer collects as a `MaxTokens` turn with no
 /// text whose kept thinking `ChatMessage::assistant_answer` carries into
-/// the loop's continuation (the Responses wire's twin is
+/// the loop's continuation. Since OUTPUT-BUDGET every lead and subagent
+/// round is asked streamed, so theirs is continued
+/// (`runner::lead_agent::tests::a_lead_round_cut_before_any_text_is_continued`
+/// in `openalpaca_core`); a main-loop or skill turn with no chat stream is
+/// still asked whole (the Responses wire's twin is
 /// `pricing_tests::a_responses_turn_cut_before_any_text_ends_unless_streamed`).
 #[tokio::test]
 async fn an_anthropic_turn_of_thinking_alone_cut_at_max_tokens_ends_unless_streamed() {

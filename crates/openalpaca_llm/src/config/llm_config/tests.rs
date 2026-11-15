@@ -169,6 +169,57 @@ fn the_seeded_template_describes_a_discoverable_ollama() {
     );
 }
 
+// ── OUTPUT-BUDGET (item 8): 16,000 output tokens by default ────────────────
+
+/// The owner's figure ("budget can be 16000 or higher") on both cloud
+/// providers of the seeded template, where they said 4096; the local
+/// provider keeps its 8192.
+#[test]
+fn the_seeded_template_gives_both_cloud_providers_sixteen_thousand_tokens() {
+    const TEMPLATE: &str = include_str!("../../../../../scripts/release/templates/config/llm.toml");
+    let config: LlmRouterConfig = toml::from_str(TEMPLATE).expect("the seeded template parses");
+    let providers = config.providers.as_ref().expect("providers");
+    assert_eq!(providers["anthropic"].default_max_tokens, Some(16_000));
+    assert_eq!(providers["openai"].default_max_tokens, Some(16_000));
+    assert_eq!(providers["ollama"].default_max_tokens, Some(8192));
+
+    let runtime = LlmRuntimeConfig::from(&config);
+    for (name, budget) in [("anthropic", 16_000), ("openai", 16_000), ("ollama", 8192)] {
+        assert_eq!(
+            runtime.provider_defaults[name].default_max_tokens, budget,
+            "{name}"
+        );
+    }
+}
+
+/// The compiled defaults a file that names no `default_max_tokens` falls
+/// back on: every built-in provider's row and a provider the defaults do
+/// not know are 16,000.
+#[test]
+fn a_file_naming_no_budget_gets_sixteen_thousand_tokens() {
+    let compiled = LlmRuntimeConfig::default();
+    for name in ["anthropic", "openai", "ollama"] {
+        assert_eq!(
+            compiled.provider_defaults[name].default_max_tokens, 16_000,
+            "{name}"
+        );
+    }
+
+    let config: LlmRouterConfig = toml::from_str(
+        "[providers.anthropic]\nenabled = true\n\n[providers.elsewhere]\nenabled = true\n",
+    )
+    .expect("parses");
+    let runtime = LlmRuntimeConfig::from(&config);
+    assert_eq!(
+        runtime.provider_defaults["anthropic"].default_max_tokens,
+        16_000
+    );
+    assert_eq!(
+        runtime.provider_defaults["elsewhere"].default_max_tokens,
+        16_000
+    );
+}
+
 // ── L7: the request timeout is configuration, not a constant ───────────────
 
 /// The default is the number the HTTP client used to be hard-coded with, so a

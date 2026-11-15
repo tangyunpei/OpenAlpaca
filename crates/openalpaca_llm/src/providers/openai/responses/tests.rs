@@ -252,7 +252,7 @@ fn a_responses_body_names_max_output_tokens_input_and_store_false() {
         vec![ChatMessage::user("Hello")],
         vec![closed_tool("search")],
     ));
-    assert_eq!(defaulted["max_output_tokens"], 4096);
+    assert_eq!(defaulted["max_output_tokens"], 16_000);
 }
 
 /// The tools in the Responses form: `strict` beside `type`, `name` and
@@ -642,11 +642,13 @@ fn an_anthropic_answer_turn_is_rebuilt_on_the_responses_wire() {
 }
 
 /// A turn cut at `max_output_tokens` before any text — what a reasoning
-/// model can do inside the arm's 4096 default — goes back, in the
-/// `MaxTokens` continuation, as its reasoning item when it has one, and as
-/// an empty assistant message when it has none: the shape step 19's check
-/// meets, which no page read settles. Only a streamed round reaches that
-/// continuation; a non-streamed one ends as the router's `EmptyCompletion`
+/// model can do inside its budget (16,000 by default since OUTPUT-BUDGET) —
+/// goes back, in the `MaxTokens` continuation, as its reasoning item when
+/// it has one, and as an empty assistant message when it has none: the
+/// shape step 19's check meets, which no page read settles. Only a streamed
+/// round reaches that continuation — a main-loop or skill turn streamed to
+/// its chat, and since OUTPUT-BUDGET every lead and subagent round; a
+/// round asked whole ends as the router's `EmptyCompletion`
 /// (`routing/router/pricing_tests.rs`).
 #[test]
 fn a_turn_cut_before_any_text_goes_back_as_its_items_or_as_empty_text() {
@@ -1146,7 +1148,7 @@ async fn a_cloud_request_with_tools_goes_to_the_responses_api() {
     assert_eq!(server.hits("/v1/chat/completions").await, 0);
     for recorded in server.requests().await {
         let body: serde_json::Value = serde_json::from_str(&recorded.body).unwrap();
-        assert_eq!(body["max_output_tokens"], 4096);
+        assert_eq!(body["max_output_tokens"], 16_000);
         assert_eq!(body["store"], false);
         assert_eq!(body["tools"][0]["name"], "search");
         assert_eq!(body["tools"][0]["strict"], true);
@@ -1223,13 +1225,15 @@ fn chat_answer() -> MockResponse {
 
 /// The body the parent sent for [`tool_request`] to an OpenAI-compatible
 /// server, byte for byte (captured on `9d17a178` with C7b's inert
-/// seam, which left the Chat Completions path as it was).
-const COMPATIBLE_BODY: &str = r#"{"max_tokens":4096,"messages":[{"content":"Be brief.","role":"system"},{"content":"go","role":"user"},{"content":"Looking.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"q\":\"a\"}","name":"search"},"id":"call_1","type":"function"}]},{"content":"found","role":"tool","tool_call_id":"call_1"}],"model":"local","tool_choice":"auto","tools":[{"function":{"description":"search things","name":"search","parameters":{"additionalProperties":false,"properties":{"q":{"type":"string"}},"required":["q"],"type":"object"},"strict":true},"type":"function"},{"function":{"description":"fetch things","name":"fetch","parameters":{"properties":{"n":{"type":"integer"},"q":{"type":"string"}},"required":["q"],"type":"object"}},"type":"function"}]}"#;
+/// seam, which left the Chat Completions path as it was; its `max_tokens`
+/// the default budget, 16,000 since OUTPUT-BUDGET, where it was 4096).
+const COMPATIBLE_BODY: &str = r#"{"max_tokens":16000,"messages":[{"content":"Be brief.","role":"system"},{"content":"go","role":"user"},{"content":"Looking.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"q\":\"a\"}","name":"search"},"id":"call_1","type":"function"}]},{"content":"found","role":"tool","tool_call_id":"call_1"}],"model":"local","tool_choice":"auto","tools":[{"function":{"description":"search things","name":"search","parameters":{"additionalProperties":false,"properties":{"q":{"type":"string"}},"required":["q"],"type":"object"},"strict":true},"type":"function"},{"function":{"description":"fetch things","name":"fetch","parameters":{"properties":{"n":{"type":"integer"},"q":{"type":"string"}},"required":["q"],"type":"object"}},"type":"function"}]}"#;
 
 /// The body the parent sent for [`tool_request`] to Ollama, byte for byte
 /// (captured on `9d17a178` with C7b's inert seam, which left the Chat
-/// Completions path as it was).
-const OLLAMA_BODY: &str = r#"{"max_tokens":4096,"messages":[{"content":"Be brief.","role":"system"},{"content":"go","role":"user"},{"content":"Looking.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"q\":\"a\"}","name":"search"},"id":"call_1","type":"function"}]},{"content":"found","role":"tool","tool_call_id":"call_1"}],"model":"local","tool_choice":"auto","tools":[{"function":{"description":"search things","name":"search","parameters":{"additionalProperties":false,"properties":{"q":{"type":"string"}},"required":["q"],"type":"object"},"strict":true},"type":"function"},{"function":{"description":"fetch things","name":"fetch","parameters":{"properties":{"n":{"type":"integer"},"q":{"type":"string"}},"required":["q"],"type":"object"}},"type":"function"}]}"#;
+/// Completions path as it was; its `max_tokens` the compiled default,
+/// 16,000 since OUTPUT-BUDGET, where it was 4096).
+const OLLAMA_BODY: &str = r#"{"max_tokens":16000,"messages":[{"content":"Be brief.","role":"system"},{"content":"go","role":"user"},{"content":"Looking.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"q\":\"a\"}","name":"search"},"id":"call_1","type":"function"}]},{"content":"found","role":"tool","tool_call_id":"call_1"}],"model":"local","tool_choice":"auto","tools":[{"function":{"description":"search things","name":"search","parameters":{"additionalProperties":false,"properties":{"q":{"type":"string"}},"required":["q"],"type":"object"},"strict":true},"type":"function"},{"function":{"description":"fetch things","name":"fetch","parameters":{"properties":{"n":{"type":"integer"},"q":{"type":"string"}},"required":["q"],"type":"object"}},"type":"function"}]}"#;
 
 /// An OpenAI-compatible server that is not OpenAI's own API keeps Chat
 /// Completions, the body byte for byte as before (characterization).

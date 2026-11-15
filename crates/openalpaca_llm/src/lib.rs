@@ -57,7 +57,7 @@ pub use routing::router::{
     AliasResolution, LlmRouter, LlmRouterError, ProviderEntry, RateHeadroom, RequestContext,
     RoutedStream, RouterRequest,
 };
-pub use streaming::collect_stream;
+pub use streaming::{collect_stream, collect_stream_idle};
 pub use tool_arguments::UnreadableArguments;
 pub use types::*;
 

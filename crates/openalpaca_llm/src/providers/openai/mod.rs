@@ -4,6 +4,7 @@ mod responses;
 mod streaming;
 
 use crate::LlmProvider;
+use crate::config::llm_config::runtime::DEFAULT_MAX_TOKENS;
 use crate::error::LlmError;
 use crate::types::*;
 use async_trait::async_trait;
@@ -14,7 +15,6 @@ use reqwest::header::HeaderMap;
 /// developers.openai.com/api/docs/deprecations, read 2026-11-14).
 const DEFAULT_MODEL: &str = "gpt-6-luna";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// Which OpenAI-compatible server is on the other end.
 ///
@@ -132,8 +132,9 @@ impl OpenAiProvider {
     /// Create a provider without auth, using a shared client.
     ///
     /// `max_tokens` is the output ceiling the caller's config asked for; `None`
-    /// keeps the 4096 default. It used to be hard-coded here, which is how
-    /// `[providers.ollama] default_max_tokens` came to be silently ignored (L6).
+    /// keeps the default, [`DEFAULT_MAX_TOKENS`] (16,000). It used to be
+    /// hard-coded here, which is how `[providers.ollama] default_max_tokens`
+    /// came to be silently ignored (L6).
     pub fn new_without_auth_with_client(
         client: reqwest::Client,
         model: String,

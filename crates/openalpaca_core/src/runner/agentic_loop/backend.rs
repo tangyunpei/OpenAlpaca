@@ -1,7 +1,7 @@
 use super::StreamCallback;
 use crate::orchestrator::working_state::{self, TranscriptLine, WorkingState, WriterConfig};
 use openalpaca_llm::{
-    ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmRouter, LlmRouterError,
+    ChatMessage, ChatRequest, ChatResponse, FinishReason, LlmProvider, LlmRouter, LlmRouterError,
     RequestContext, RouterRequest, ThinkingConfig, ToolChoice, ToolDefinition,
     context_management::ContextManagement,
 };
@@ -28,8 +28,16 @@ pub(super) enum LlmBackend<'a> {
 impl<'a> LlmBackend<'a> {
     /// Complete a request via the appropriate backend.
     ///
-    /// When `stream_callback` is `Some` and the backend is Router, attempts
-    /// streaming first. On streaming failure, falls back to non-streaming.
+    /// When `stream_callback` is `Some` or `stream_rounds` is set and the
+    /// backend is Router, attempts streaming first, forwarding each event to
+    /// the callback when there is one and only collecting them when there is
+    /// none (a lead's or a subagent's round, OUTPUT-BUDGET). On streaming
+    /// failure, falls back to non-streaming.
+    /// A round streamed with no callback keeps what it had asked whole: no
+    /// 90 s idle clock of its own (its round bound and the HTTP read gap
+    /// bound a silent stream), and the router's empty-completion rule (M2)
+    /// for an answer with nothing in it that was not cut at its budget — a
+    /// cut one comes back `MaxTokens`, which the loop continues.
     /// A streamed round is bounded by `max_stream_duration`, or by
     /// `max_keyless_stream_duration` when the provider serving it needs no
     /// key (a local model, LOCAL-CALL-HOUR); past it, the same fallback —
@@ -49,6 +57,7 @@ impl<'a> LlmBackend<'a> {
         enable_caching: bool,
         thinking: Option<ThinkingConfig>,
         stream_callback: Option<&StreamCallback>,
+        stream_rounds: bool,
         max_stream_duration: Duration,
         max_keyless_stream_duration: Duration,
         context_management: Option<ContextManagement>,
@@ -74,8 +83,10 @@ impl<'a> LlmBackend<'a> {
                 // A local call that used its whole timeout on the streamed
                 // attempt: not asked again of its provider (LOCAL-HOUR-NO-RETRY).
                 let mut spent: Option<LlmRouterError> = None;
-                // Try streaming if callback is set
-                if let Some(callback) = stream_callback {
+                // Stream when there is a callback to forward to, or when
+                // the loop asks every round streamed with nothing to forward
+                // to (`LoopConfig::stream_rounds`).
+                if stream_callback.is_some() || stream_rounds {
                     let stream_request = RouterRequest {
                         model: model.clone(),
                         messages: Arc::clone(&messages),
@@ -95,9 +106,9 @@ impl<'a> LlmBackend<'a> {
                         Ok(routed) => {
                             // Forward events to callback while collecting
                             use futures_util::StreamExt;
-                            let callback = Arc::clone(callback);
+                            let callback = stream_callback.map(Arc::clone);
                             let forwarding_stream = routed.stream.map(move |event| {
-                                if let Ok(ref e) = event {
+                                if let (Some(callback), Ok(e)) = (&callback, &event) {
                                     callback(e);
                                 }
                                 event
@@ -118,11 +129,22 @@ impl<'a> LlmBackend<'a> {
                             } else {
                                 max_keyless_stream_duration
                             };
+                            // A chat turn keeps `collect_stream`'s 90 s idle
+                            // clock; a round with nothing to forward to has
+                            // none, so a model reasoning with no text to
+                            // stream is not dropped and asked again whole
+                            // under the non-streaming timeout (OUTPUT-BUDGET).
+                            let idle = if stream_callback.is_some() {
+                                Some(openalpaca_llm::streaming::STREAM_IDLE_TIMEOUT)
+                            } else {
+                                None
+                            };
                             match tokio::time::timeout(
                                 round_bound,
-                                openalpaca_llm::collect_stream(
+                                openalpaca_llm::collect_stream_idle(
                                     Box::pin(forwarding_stream),
                                     model_str.clone(),
+                                    idle,
                                 ),
                             )
                             .await
@@ -135,6 +157,28 @@ impl<'a> LlmBackend<'a> {
                                         &response.model,
                                         &response.usage,
                                     ).await;
+                                    // *Rev 68*'s (a), kept: asked whole, a
+                                    // round with nothing in it — thinking
+                                    // alone, not cut — is the router's
+                                    // `EmptyCompletion` (M2, `retry.rs`), and
+                                    // streamed with nothing to forward to it
+                                    // still is, counted once and not asked
+                                    // again. A cut round is `MaxTokens`, which
+                                    // the loop continues; a chat turn streamed
+                                    // to its chat completes as it always has.
+                                    if stream_callback.is_none()
+                                        && response.finish_reason != FinishReason::MaxTokens
+                                        && let Some(empty) =
+                                            openalpaca_llm::error::empty_completion_error(&response)
+                                    {
+                                        tracing::warn!(
+                                            model = %response.model,
+                                            output_tokens = response.usage.output_tokens,
+                                            finish_reason = ?response.finish_reason,
+                                            "Model returned an empty completion"
+                                        );
+                                        return Err(LlmRouterError::Llm(empty));
+                                    }
                                     return Ok(response);
                                 }
                                 Ok(Err(e)) => {
