@@ -352,11 +352,36 @@ impl LlmRouter {
     // ── L3: which model a request actually reaches ──────────────────────────
 
     /// Can a call naming this model be made at all — is the id in the
-    /// catalogue *and* its provider loaded?
+    /// catalogue *and* its provider loaded? And, where that provider is
+    /// built to call another server than its vendor's own API, is it a row
+    /// that server serves rather than a compiled one (COMPAT-SERVER, the
+    /// owner's answer of 2026-11-15): what it listed, or a `[models]` row
+    /// the person wrote ([`ModelRegistry::is_compiled_only`]).
     pub fn is_routable(&self, model_id: &str) -> bool {
-        self.model_registry
-            .resolve_provider(model_id)
-            .is_some_and(|pt| self.has_provider(&pt))
+        let Some(provider) = self.model_registry.resolve_provider(model_id) else {
+            return false;
+        };
+        let serves_compiled = self
+            .providers
+            .get(&provider)
+            .map(|entry| entry.value().provider.serves_compiled_rows());
+        match serves_compiled {
+            None => false,
+            Some(true) => true,
+            Some(false) => !self.model_registry.is_compiled_only(model_id),
+        }
+    }
+
+    /// Whether the rows this build compiles for `provider` — its
+    /// [`ALIAS_TABLE`] row and its catalogue rows — apply to it: true but
+    /// for a loaded provider built to call another server than its
+    /// vendor's own API (`LlmProvider::serves_compiled_rows`;
+    /// COMPAT-SERVER). An unloaded provider answers true, so a compiled id
+    /// of its is passed over as not routable, as before.
+    fn serves_compiled_rows(&self, provider: &ProviderType) -> bool {
+        self.providers
+            .get(provider)
+            .is_none_or(|entry| entry.value().provider.serves_compiled_rows())
     }
 
     /// Loaded providers, in the order the ladder prefers them.
@@ -400,8 +425,9 @@ impl LlmRouter {
             return Some(model);
         }
         self.model_registry
-            .first_model_for_provider(provider_type)
-            .filter(|m| self.is_routable(m))
+            .models_for_provider_in_order(provider_type)
+            .into_iter()
+            .find(|m| self.is_routable(m))
     }
 
     /// The default model the owner actually configured, if they configured one.
@@ -532,7 +558,10 @@ impl LlmRouter {
     /// In order: (1) the parent's provider's pin,
     /// `[providers.<name>.model_aliases]`, if routable — it may name another
     /// provider's model, the person's choice; (2) that provider's compiled id
-    /// ([`ALIAS_TABLE`]), if routable; (3) the parent's model itself — an
+    /// ([`ALIAS_TABLE`]), if routable and the provider calls its vendor's own
+    /// API (COMPAT-SERVER: an `openai` provider built to call another server
+    /// skips the step, as a provider with no row does); (3) the parent's
+    /// model itself — an
     /// alias with no model of its own here collapses to the parent's (the
     /// effective default when the parent is not routable either); (4) `None`,
     /// nothing routable. **No step goes to another loaded provider's row or
@@ -581,7 +610,9 @@ impl LlmRouter {
         if let Some(provider) = &provider {
             let candidates = [
                 self.alias_pin(provider, alias),
-                compiled_alias(provider, alias).map(str::to_string),
+                compiled_alias(provider, alias)
+                    .filter(|_| self.serves_compiled_rows(provider))
+                    .map(str::to_string),
             ];
             for candidate in candidates.into_iter().flatten() {
                 if self.is_routable(&candidate) {
@@ -649,8 +680,10 @@ impl LlmRouter {
 
     /// M-5's `INFO` for a collapse on a mixed install: the parent's provider
     /// has no model for `alias`, and another loaded provider has one, which
-    /// the alias does not move to. Once per (alias, provider); nothing where
-    /// no loaded provider has one (an Ollama-only install). Where the parent
+    /// the alias does not move to (a compiled row counts only for a provider
+    /// that calls its vendor's own API, COMPAT-SERVER). Once per (alias,
+    /// provider); nothing where no loaded provider has one (an Ollama-only
+    /// install, or one beside an OpenAI-compatible server). Where the parent
     /// is not routable either, step 3 answered the effective default, and
     /// the line says so rather than call it the parent's model.
     fn announce_collapse(
@@ -664,7 +697,8 @@ impl LlmRouter {
             let other = entry.key();
             other != provider
                 && (self.alias_pin(other, alias).is_some()
-                    || ALIAS_TABLE.iter().any(|row| &row.provider == other))
+                    || (ALIAS_TABLE.iter().any(|row| &row.provider == other)
+                        && entry.value().provider.serves_compiled_rows()))
         });
         if elsewhere
             && self
@@ -832,19 +866,36 @@ impl LlmRouter {
 
     /// Register a provider that was not in the original config.
     /// Used when auto-discovered credentials exist but no provider was configured.
+    ///
+    /// A provider rebuilt in place at another address (a `base_url` edit,
+    /// then the enable toggle) forgets what the old address's discovery
+    /// found: its rows only discovery wrote go and the rest are no longer
+    /// marked served, until a refresh asks the new address
+    /// (COMPAT-SERVER). A rebuild at the same address changes nothing.
     pub fn register_provider(
         &self,
         provider_type: ProviderType,
         provider: Arc<dyn LlmProvider>,
         pool: KeyPool,
     ) -> bool {
-        self.providers.insert(
-            provider_type,
+        let address = provider.base_url().map(str::to_string);
+        let replaced = self.providers.insert(
+            provider_type.clone(),
             ProviderEntry {
                 provider,
                 key_pool: Arc::new(ArcSwap::from_pointee(pool)),
             },
         );
+        if replaced.is_some_and(|old| old.provider.base_url() != address.as_deref()) {
+            let forgotten = self
+                .model_registry
+                .withdraw_absent_for_provider(&provider_type, &std::collections::HashSet::new());
+            tracing::info!(
+                provider = %provider_type,
+                forgotten = ?forgotten,
+                "Provider rebuilt at another address — what its old address listed is forgotten"
+            );
+        }
         self.note_local_server_providers();
         true
     }
@@ -964,3 +1015,6 @@ mod contract_tests;
 
 #[cfg(all(test, feature = "anthropic", feature = "ollama", feature = "openai"))]
 mod latest_models_tests;
+
+#[cfg(all(test, feature = "openai"))]
+mod compat_server_tests;

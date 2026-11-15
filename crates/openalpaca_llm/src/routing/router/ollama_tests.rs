@@ -181,12 +181,16 @@ async fn a_keyless_provider_completes_through_the_streaming_path() {
 async fn an_empty_pool_still_refuses_a_provider_that_needs_a_key() {
     let server = MockHttpServer::start(|_| MockResponse::json(completion_body("gpt-6.1-sol", "hi"))).await;
 
-    let provider = Arc::new(crate::providers::openai::OpenAiProvider::new(
-        "sk-test".to_string(),
-        Some("gpt-6.1-sol".to_string()),
-        Some(format!("{}/v1", server.base_url)),
-        None,
-    ));
+    // The mock stands in for OpenAI's own API (COMPAT-SERVER).
+    let provider = Arc::new(
+        crate::providers::openai::OpenAiProvider::new(
+            "sk-test".to_string(),
+            Some("gpt-6.1-sol".to_string()),
+            Some(format!("{}/v1", server.base_url)),
+            None,
+        )
+        .with_openai_api(true),
+    );
     let mut providers = HashMap::new();
     providers.insert(
         ProviderType::OpenAI,
@@ -727,12 +731,16 @@ async fn a_routed_stream_says_whether_its_provider_needs_a_key() {
         .expect("a keyless provider streams");
     assert!(!routed.requires_key, "Ollama needs no key");
 
-    let provider = Arc::new(crate::providers::openai::OpenAiProvider::new(
-        "sk-test".to_string(),
-        Some("gpt-6.1-sol".to_string()),
-        Some(format!("{}/v1", server.base_url)),
-        None,
-    ));
+    // The mock stands in for OpenAI's own API (COMPAT-SERVER).
+    let provider = Arc::new(
+        crate::providers::openai::OpenAiProvider::new(
+            "sk-test".to_string(),
+            Some("gpt-6.1-sol".to_string()),
+            Some(format!("{}/v1", server.base_url)),
+            None,
+        )
+        .with_openai_api(true),
+    );
     let mut providers = HashMap::new();
     providers.insert(
         ProviderType::OpenAI,

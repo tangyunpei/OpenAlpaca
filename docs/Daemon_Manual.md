@@ -360,7 +360,7 @@ plugin's own model. The spawn's reply names the model the subagent runs on,
 what chose it, and that the lead stays on its own; the lane's
 `subagent_open` record carries `model_choice` and `model`.
 
-| Alias | Anthropic | OpenAI | Ollama, or any provider with no row |
+| Alias | Anthropic | OpenAI (its own API) | Ollama, an OpenAI-compatible server, or any provider with no row |
 |---|---|---|---|
 | `fast` | `claude-haiku-5-5` | `gpt-6-luna` | the parent's model |
 | `balanced` | `claude-sonnet-5-5` | `gpt-6.1-terra` | the parent's model |
@@ -373,6 +373,18 @@ is routable. An alias never moves a
 run to another provider by itself: on a machine whose main model is a local
 Ollama model, `strong` stays on that model even with an Anthropic key
 loaded, unless you pin it elsewhere.
+
+OpenAI's built-in row, and its built-in `gpt-*` models, are OpenAI's own
+API's: they count only where the `openai` provider calls
+`https://api.openai.com` or one of OpenAI's regional hosts, such as
+`https://eu.api.openai.com`. With its `base_url` at another server
+(llama.cpp, LM Studio, vLLM, a gateway), the built-in row is skipped, as
+for a provider with no row, so every alias is the parent's model unless
+you pin one; a built-in `gpt-*` id is routable there only when the
+server lists it or one of your `[models]` rows names it; and where the configured main model is not routable, the
+main model is a model the server lists, or one of your
+`[models]` rows. The spawn tools offer what the server lists, and a
+per-call `model` it does not list is refused.
 
 A pin is yours, per provider, under `[providers.<name>.model_aliases]` in
 `llm.toml`, with the keys `fast`, `balanced` and `strong`:

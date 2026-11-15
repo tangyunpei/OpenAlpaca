@@ -95,16 +95,20 @@ fn anthropic_router(server: &MockHttpServer, default: &str) -> LlmRouter {
     )
 }
 
-/// A keyed OpenAI-compatible install answered by `server` (a loopback
-/// address, so Chat Completions for every request).
+/// A keyed install answered by `server`, standing in for OpenAI's own API,
+/// whose compiled rows are routable only there (COMPAT-SERVER): a request
+/// with tools takes the Responses API, a tool-less one Chat Completions.
 fn openai_router(server: &MockHttpServer, config: &HashMap<String, ModelConfigEntry>) -> LlmRouter {
-    let provider = Arc::new(OpenAiProvider::with_client(
-        loopback_client(TIMEOUT),
-        "sk-test-not-a-key".to_string(),
-        None,
-        Some(format!("{}/v1", server.base_url)),
-        None,
-    ));
+    let provider = Arc::new(
+        OpenAiProvider::with_client(
+            loopback_client(TIMEOUT),
+            "sk-test-not-a-key".to_string(),
+            None,
+            Some(format!("{}/v1", server.base_url)),
+            None,
+        )
+        .with_openai_api(true),
+    );
     let mut providers = HashMap::new();
     providers.insert(
         ProviderType::OpenAI,
@@ -339,15 +343,8 @@ async fn a_stock_anthropic_install_runs_on_haiku_5_5_and_its_utility_calls_are_a
 /// parent, whose seed names `gpt-4o-mini`.
 #[tokio::test]
 async fn a_stock_openai_install_runs_on_luna_and_its_utility_calls_are_accepted() {
-    let server = MockHttpServer::start(|req| {
-        if req.path == "/v1/chat/completions" {
-            MockResponse::json(chat_answer("gpt-6-luna"))
-        } else {
-            MockResponse::not_found()
-        }
-    })
-    .await;
-    let (_dir, router) = router_from(&seeded_with("openai", Some(&server.base_url)));
+    // The seeded `base_url`, OpenAI's own API: nothing is sent there.
+    let (_dir, router) = router_from(&seeded_with("openai", None));
     assert_eq!(
         router.effective_default_model().as_deref(),
         Some("gpt-6-luna")
@@ -358,8 +355,15 @@ async fn a_stock_openai_install_runs_on_luna_and_its_utility_calls_are_accepted(
         .calculate_cost("gpt-6-luna", 100_000, 100_000);
     assert!((cost - 0.06).abs() < 1e-9, "Luna at $0.10 / $0.50: {cost}");
 
-    router
-        .complete(utility_request(None))
+    // The wire is a router standing in for OpenAI's own API, its default
+    // the template's, answered by the mock.
+    let server = MockHttpServer::start(|_| MockResponse::json(chat_answer("gpt-6-luna"))).await;
+    let wire = openai_router(&server, &HashMap::new());
+    assert_eq!(
+        wire.effective_default_model(),
+        router.effective_default_model()
+    );
+    wire.complete(utility_request(None))
         .await
         .expect("the mock answers");
     let sent = bodies(&server, "/v1/chat/completions").await;

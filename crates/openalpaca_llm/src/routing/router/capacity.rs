@@ -59,9 +59,7 @@ impl LlmRouter {
             Err(_) if !prov_entry.provider.requires_key() => String::new(),
             Err(_) => {
                 // No API-compatible key — fall back to hardcoded defaults
-                let count = self
-                    .model_registry
-                    .mark_defaults_discovered_for_provider(provider_type);
+                let count = self.mark_unlisted_served(provider_type, &prov_entry);
                 if count > 0 {
                     tracing::info!(
                         "No API key for {:?}, marked {} default models as discovered",
@@ -82,9 +80,7 @@ impl LlmRouter {
         let status = match prov_entry.provider.discover_models(&key_secret).await {
             Ok(models) => {
                 if models.is_empty() {
-                    let dc = self
-                        .model_registry
-                        .mark_defaults_discovered_for_provider(provider_type);
+                    let dc = self.mark_unlisted_served(provider_type, &prov_entry);
                     tracing::info!(
                         "Provider {:?} returned 0 models, marked {} defaults",
                         provider_type,
@@ -146,8 +142,7 @@ impl LlmRouter {
                     error = %e,
                     "Could not list models — the provider stays registered with the catalogue it has"
                 );
-                self.model_registry
-                    .mark_defaults_discovered_for_provider(provider_type);
+                self.mark_unlisted_served(provider_type, &prov_entry);
                 ProviderDiscovery {
                     models: 0,
                     error: Some(e.to_string()),
@@ -156,6 +151,21 @@ impl LlmRouter {
         };
 
         self.record_discovery(provider_type, status)
+    }
+
+    /// Where a provider's list could not be read, or was empty, take its
+    /// catalogue as served: every row, for a provider that calls its
+    /// vendor's own API; for one built to call another server
+    /// (COMPAT-SERVER), its declared rows but the compiled ones, which that
+    /// server does not serve.
+    fn mark_unlisted_served(&self, provider_type: &ProviderType, entry: &ProviderEntry) -> usize {
+        if entry.provider.serves_compiled_rows() {
+            self.model_registry
+                .mark_defaults_discovered_for_provider(provider_type)
+        } else {
+            self.model_registry
+                .mark_declared_discovered_for_provider(provider_type)
+        }
     }
 
     fn record_discovery(

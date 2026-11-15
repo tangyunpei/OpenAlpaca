@@ -290,6 +290,12 @@ impl LlmProvider for OpenAiProvider {
         Some(&self.base_url)
     }
 
+    /// OpenAI's own API only (COMPAT-SERVER): the rule C7b's Responses API
+    /// and STORE-FALSE read.
+    fn serves_compiled_rows(&self) -> bool {
+        self.own_api()
+    }
+
     fn supports_tools(&self) -> bool {
         true
     }

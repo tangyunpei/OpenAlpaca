@@ -103,6 +103,20 @@ pub trait LlmProvider: Send + Sync {
         None
     }
 
+    /// Whether this provider calls its vendor's own API, so that the rows
+    /// this build compiles for its provider type — its `ALIAS_TABLE` row
+    /// and its catalogue rows — name models it serves (COMPAT-SERVER, the
+    /// owner's answer of 2026-11-15). True but for the OpenAI arm built to
+    /// call another server than OpenAI's own API (`is_openai_api`): a
+    /// llama.cpp, LM Studio or vLLM server, or a gateway, behind
+    /// `[providers.openai]`. There an alias collapses to the parent's model
+    /// and a compiled row the server did not list is not routable. Read
+    /// from the address the provider was built to call, which a hot reload
+    /// does not change.
+    fn serves_compiled_rows(&self) -> bool {
+        true
+    }
+
     /// Chat using a specific API key. Default delegates to `chat()`.
     /// Providers override this to inject the key into their HTTP requests.
     async fn chat_with_key(

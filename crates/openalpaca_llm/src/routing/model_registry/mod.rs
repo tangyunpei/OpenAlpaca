@@ -3,7 +3,11 @@
 use crate::keys::key_pool::ProviderType;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
+use std::sync::{LazyLock, RwLock};
+
+/// The ids of this build's compiled catalogue ([`ModelRegistry::default_models`]).
+static COMPILED_IDS: LazyLock<HashSet<String>> =
+    LazyLock::new(|| ModelRegistry::default_models().into_keys().collect());
 
 /// Pricing information for a model.
 #[derive(Debug, Clone)]
@@ -226,6 +230,11 @@ pub struct ModelRegistry {
     /// removed: what their discovery lists runs on a machine of the
     /// person's own (item 17).
     local_server_providers: RwLock<HashSet<String>>,
+    /// The ids a `[models]` row the person wrote put here
+    /// ([`Self::reload_from_config`]): such a row replaces the compiled row
+    /// whole, so it is the person's, not a compiled one
+    /// ([`Self::is_compiled_only`], COMPAT-SERVER).
+    person_rows: RwLock<HashSet<String>>,
 }
 
 impl ModelRegistry {
@@ -233,6 +242,7 @@ impl ModelRegistry {
         Self {
             models: RwLock::new(models),
             local_server_providers: RwLock::new(HashSet::new()),
+            person_rows: RwLock::new(HashSet::new()),
         }
     }
 
@@ -530,6 +540,10 @@ impl ModelRegistry {
                 if disabled.contains(&provider) {
                     continue;
                 }
+                self.person_rows
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(model_id.clone());
                 self.register(
                     model_id.clone(),
                     ModelInfo {
@@ -572,6 +586,29 @@ impl ModelRegistry {
     /// Resolve provider name as a string for a model ID.
     pub fn resolve_provider_name(&self, model_id: &str) -> Option<String> {
         self.resolve_provider(model_id).map(|p| p.to_string())
+    }
+
+    /// Whether `model_id`'s row is this build's compiled row and nothing
+    /// more: no discovery listed it and no `[models]` row of the person's
+    /// wrote it. Such a row names a model of its provider type's vendor,
+    /// which a provider built to call another server does not serve
+    /// (`LlmProvider::serves_compiled_rows`, COMPAT-SERVER): the router
+    /// does not route it there. `false` for an id with no row.
+    pub fn is_compiled_only(&self, model_id: &str) -> bool {
+        if !COMPILED_IDS.contains(model_id)
+            || self
+                .person_rows
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(model_id)
+        {
+            return false;
+        }
+        self.models
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(model_id)
+            .is_some_and(|info| !info.discovered)
     }
 
     /// The price the registry knows for a model.
@@ -719,6 +756,16 @@ impl ModelRegistry {
     /// provider with no alias row (Ollama), or whose `fast` row is not
     /// registered, keeps the order above.
     pub fn first_model_for_provider(&self, provider: &ProviderType) -> Option<String> {
+        self.models_for_provider_in_order(provider)
+            .into_iter()
+            .next()
+    }
+
+    /// Every model of `provider`, in [`Self::first_model_for_provider`]'s
+    /// order: the router takes the first it can route, since a compiled
+    /// row leads with no discovery and is not routable on a provider built
+    /// to call another server than its vendor's (COMPAT-SERVER).
+    pub fn models_for_provider_in_order(&self, provider: &ProviderType) -> Vec<String> {
         let models = self.models.read().unwrap_or_else(|p| p.into_inner());
         let fast = crate::routing::model_alias::compiled_alias(
             provider,
@@ -736,7 +783,7 @@ impl ModelRegistry {
                 .then(b.supports_tools.cmp(&a.supports_tools))
                 .then(a_id.cmp(b_id))
         });
-        candidates.first().map(|(id, _)| (*id).clone())
+        candidates.into_iter().map(|(id, _)| id.clone()).collect()
     }
 
     /// Withdraw the models a provider no longer reports, returning what went.
@@ -801,6 +848,10 @@ impl ModelRegistry {
 
     /// Remove a model from the registry. Returns true if it existed.
     pub fn remove(&self, model_id: &str) -> bool {
+        self.person_rows
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(model_id);
         self.models.write().unwrap_or_else(|p| p.into_inner()).remove(model_id).is_some()
     }
 
@@ -815,6 +866,11 @@ impl ModelRegistry {
             .collect();
         for id in &to_remove {
             models.remove(id);
+        }
+        drop(models);
+        let mut person_rows = self.person_rows.write().unwrap_or_else(|p| p.into_inner());
+        for id in &to_remove {
+            person_rows.remove(id);
         }
         to_remove
     }
@@ -872,10 +928,28 @@ impl ModelRegistry {
     /// Mark all default models for a provider as discovered.
     /// Fallback for providers with only managed keys.
     pub fn mark_defaults_discovered_for_provider(&self, provider: &ProviderType) -> usize {
+        self.mark_discovered_for_provider(provider, true)
+    }
+
+    /// [`Self::mark_defaults_discovered_for_provider`] for a provider built
+    /// to call another server than its vendor's (COMPAT-SERVER): its
+    /// declared rows but the compiled ones, which that server does not
+    /// serve ([`Self::is_compiled_only`]).
+    pub fn mark_declared_discovered_for_provider(&self, provider: &ProviderType) -> usize {
+        self.mark_discovered_for_provider(provider, false)
+    }
+
+    fn mark_discovered_for_provider(&self, provider: &ProviderType, compiled: bool) -> usize {
+        let person_rows = self
+            .person_rows
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
         let mut count = 0;
-        for info in models.values_mut() {
-            if info.provider == *provider && !info.discovered {
+        for (id, info) in models.iter_mut() {
+            let compiled_only = COMPILED_IDS.contains(id) && !person_rows.contains(id);
+            if info.provider == *provider && !info.discovered && (compiled || !compiled_only) {
                 info.discovered = true;
                 count += 1;
             }

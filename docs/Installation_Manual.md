@@ -606,16 +606,24 @@ cannot answer until you enable one:
   `explore_agent` and `system_agent` on `fast`. Ollama is sent what it was
   sent before. An OpenAI-compatible server set as the `openai` provider's
   `base_url` (llama.cpp, LM Studio, vLLM, a gateway on your network) keeps
-  Chat Completions, but the aliases name OpenAI's own models there too: a
-  workflow's lead and its six followers ask that server for `gpt-6.1-sol`
-  and the two `fast` agents for `gpt-6-luna`, which it likely does not
-  serve. A server that checks the name refuses the call and the workflow
-  fails; one that answers any name is counted at `gpt-6.1-sol`'s price
-  ($2 / $10 per million tokens, OpenAI's pricing page, read 2026-11-15). A
-  pin naming a model the server lists sends them there:
-  `fast`, `balanced` and `strong` under `[providers.openai.model_aliases]`.
-  Whether the daemon should do that itself is an open question. See
-  [Daemon Manual → OpenAI's Responses API](Daemon_Manual.md#openais-responses-api).
+  Chat Completions and is asked only for the models it lists: OpenAI's own
+  model ids are not offered there unless the server lists them or one of
+  your `[models]` rows names them, the main model is one it lists (or one
+  of your `[models]` rows) when the configured one is not, and every alias
+  is the model the asking agent runs on, so a workflow's lead and every
+  agent it starts run on the server's model, counted at 0 on a server on
+  this machine or your home network (elsewhere, at $3 / $15 per million
+  tokens unless a `[models]` row prices it). The server's list gives no
+  context window, so a run is budgeted at 200,000 tokens unless a
+  `[models."<id>"]` row with `provider = "openai"` gives the model's
+  `context`; give one for a small local model, or its runs overrun its
+  window. A pin naming another model the server lists moves an alias
+  there: `fast`, `balanced` or `strong` under
+  `[providers.openai.model_aliases]`. A server whose model list cannot be
+  read is run only on models you name for it: add each as a
+  `[models."<id>"]` row with `provider = "openai"` in `llm.toml`.
+  See [Daemon Manual → Model aliases](Daemon_Manual.md#model-aliases) and
+  [OpenAI's Responses API](Daemon_Manual.md#openais-responses-api).
 
 `openalpaca llm status` shows the result, and names the fix when nothing is
 routable.
@@ -868,6 +876,12 @@ What a workflow runs on, per install, with the pin that keeps the old one:
   agents on `gpt-6-luna`, where they all ran on the main model before; a
   main model you set no longer carries the lead — the `strong` row does —
   and `strong = "<id>"` under `[providers.openai.model_aliases]` puts it back.
+- **An OpenAI-compatible server as the `openai` provider** (a `base_url`
+  that is not OpenAI's own): every agent runs on the server's own model, as
+  it did before, never on `gpt-6.1-sol` or `gpt-6-luna`, and OpenAI's
+  model ids are offered there only if the server lists them or one of
+  your `[models]` rows names them; a pin under
+  `[providers.openai.model_aliases]` still names another of its models.
 - **Ollama only:** every agent runs on the main model, as before, and the
   "Requested model is not available" warning is no longer logged for them.
 - **A local main model with a cloud provider also loaded:** workflows stay on

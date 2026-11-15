@@ -21,7 +21,8 @@ use openalpaca_llm::{
     ProviderType, SelectionStrategy, ToolCall, ToolDefinition, Usage, compiled_alias,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// What one request asked for.
 #[derive(Clone)]
@@ -46,6 +47,13 @@ struct Models {
     /// provider answers a key it will not take: the router then walks the
     /// ladder from it (`LlmRouterError::AllKeysRefused`).
     refused: Mutex<Option<String>>,
+    /// The address it says it was built to call ([`Models::at`]); none
+    /// unless a test sets one.
+    address: OnceLock<String>,
+    /// Whether it says it calls its vendor's own API, as the OpenAI arm
+    /// does for OpenAI's own hosts only (COMPAT-SERVER); true unless a
+    /// test says otherwise.
+    own_api: AtomicBool,
 }
 
 impl Models {
@@ -55,7 +63,19 @@ impl Models {
             children: Mutex::new(Vec::new()),
             seen: Mutex::new(Vec::new()),
             refused: Mutex::new(None),
+            address: OnceLock::new(),
+            own_api: AtomicBool::new(true),
         })
+    }
+
+    /// It stands in for a provider built to call `address`, which is its
+    /// vendor's own API when `own_api` (the OpenAI arm: OpenAI's own hosts
+    /// only) and, otherwise, an OpenAI-compatible server. Nothing is sent
+    /// to the address.
+    fn at(self: &Arc<Self>, address: &str, own_api: bool) -> Arc<Self> {
+        self.address.set(address.to_string()).expect("set once");
+        self.own_api.store(own_api, Ordering::SeqCst);
+        self.clone()
     }
 
     /// Every request naming `model` is refused for its credentials.
@@ -169,6 +189,14 @@ impl LlmProvider for Models {
 
     fn requires_key(&self) -> bool {
         false
+    }
+
+    fn base_url(&self) -> Option<&str> {
+        self.address.get().map(String::as_str)
+    }
+
+    fn serves_compiled_rows(&self) -> bool {
+        self.own_api.load(Ordering::SeqCst)
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
@@ -1319,5 +1347,233 @@ async fn on_ollama_main_with_openai_loaded_workflows_stay_on_the_local_model() {
             ("fast".to_string(), "ollama".to_string()),
             ("strong".to_string(), "ollama".to_string()),
         ]
+    );
+}
+
+// ── An OpenAI-compatible server behind [providers.openai] (COMPAT-SERVER) ───
+//
+// The owner's answer of 2026-11-15 to pending-decisions §1 *Rev 86*'s first
+// item, (a): OpenAI's compiled rows count only where the `openai` provider
+// calls OpenAI's own API. The provider here stands in for one built to call
+// a llama.cpp-like server on loopback (`Models::at`, nothing is sent there),
+// whose discovery listed one model of its own; `llm.toml` names the same
+// `base_url`, so what it serves is priced as a local server's (item 17).
+
+/// The compatible server's address; never reached.
+const COMPAT_BASE: &str = "http://127.0.0.1:1/v1";
+/// The one model the compatible server listed.
+const SERVED: &str = "qwen3-32b";
+/// The window a lead is budgeted at when its model's row gives none.
+const DEFAULT_WINDOW: usize = 200_000;
+
+/// A model the `openai` provider's discovery listed, as it registers one: no
+/// price, no `[models]` row, no window (OpenAI's model list gives none).
+fn listed(router: &LlmRouter, id: &str) {
+    router.model_registry().register_discovered(
+        id.to_string(),
+        ModelInfo {
+            provider: ProviderType::OpenAI,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 0,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+            long_prompt: None,
+            cache_rates: None,
+            request_contract: openalpaca_llm::RequestContract::NONE,
+        },
+    );
+}
+
+/// An OpenAI-only install whose `[providers.openai] base_url` is `base`
+/// (`own_api`: one of OpenAI's own hosts), with the seeded main model,
+/// `extra` added to `llm.toml`, and [`SERVED`] discovered.
+fn openai_install_at(
+    models: &Arc<Models>,
+    base: &str,
+    own_api: bool,
+    extra: &str,
+) -> Arc<LlmRouter> {
+    models.at(base, own_api);
+    let router = install(models, &[ProviderType::OpenAI], "gpt-6-luna");
+    load(
+        &router,
+        &format!("[providers.openai]\nbase_url = \"{base}\"\n{extra}"),
+    );
+    listed(&router, SERVED);
+    router
+}
+
+/// The window the lead's loop was sized to, from its budget event.
+fn budgeted_window(
+    events: &mut tokio::sync::broadcast::Receiver<crate::events::SystemEvent>,
+) -> Option<usize> {
+    while let Ok(event) = events.try_recv() {
+        if let crate::events::SystemEvent::ContextBudgetComputed { window_size, .. } = event {
+            return Some(window_size);
+        }
+    }
+    None
+}
+
+/// On a compatible server the lead (`strong`), the two `fast` profiles and
+/// the six on `inherit` all run on the server's own model, at the loopback
+/// rule's 0, unannounced (M-5: no other loaded provider has a model for an
+/// alias); the spawn tools' menu offers only that model. The lead is
+/// budgeted at the 200,000-token default, since the listed row gives no
+/// window. On the parent the lead and its six asked the server for
+/// `gpt-6.1-sol` and the two `fast` agents for `gpt-6-luna`, counted at
+/// their rates and sized to `gpt-6.1-sol`'s window.
+#[tokio::test]
+async fn on_a_compatible_openai_server_every_shipped_template_runs_on_its_own_model() {
+    let models = Models::new(batch_lead(every_worker()));
+    let router = openai_install_at(&models, COMPAT_BASE, false, "");
+    let shared = shipped();
+    let lead = instance(&shared, "lead_agent");
+    let bus = EventBus::default();
+    let mut events = bus.subscribe();
+    let result = run(&lead, router.clone(), shared, bus).await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+    assert!(models.tool_results()[0].contains("8/8 subagents spawned"));
+
+    assert_eq!(models.lead_model(), SERVED);
+    for id in WORKERS {
+        assert_eq!(models.child_model(id), SERVED, "{id}");
+    }
+    let asked: Vec<String> = models
+        .models_asked(true)
+        .into_iter()
+        .chain(models.models_asked(false))
+        .collect();
+    assert!(asked.iter().all(|m| m == SERVED), "{asked:?}");
+
+    let spent = router
+        .cost_tracker
+        .get_task_usage("task-1")
+        .await
+        .expect("the run was counted");
+    assert_eq!(spent.total_cost_usd, 0.0, "the loopback rule's 0");
+    assert_eq!(budgeted_window(&mut events), Some(DEFAULT_WINDOW));
+    assert_eq!(router.noted_substitutions(), Vec::<(String, String)>::new());
+    assert_eq!(
+        router.noted_alias_collapses(),
+        Vec::<(String, String)>::new()
+    );
+
+    let menu = format!(
+        "Run this subagent on another model than its template's. Here fast, balanced and \
+         strong are all {SERVED}; or one of: {SERVED}. Omit it to use the template's model \
+         — most templates inherit yours, {SERVED}. The template's cost cap still applies."
+    );
+    let tools = models.lead_request(0).tools;
+    let single = tools.iter().find(|t| t.name == "spawn_subagent").unwrap();
+    assert_eq!(
+        single.parameters["properties"]["model"]["description"],
+        serde_json::json!(menu)
+    );
+}
+
+/// A `[models."qwen3-32b"]` row with `context` sizes the lead on a
+/// compatible server: the row the person wrote gives the window that the
+/// server's list does not.
+#[tokio::test]
+async fn a_models_row_s_context_sizes_the_lead_on_a_compatible_server() {
+    let models = Models::new(batch_lead(every_worker()));
+    let router = openai_install_at(&models, COMPAT_BASE, false, "");
+    let sized: HashMap<String, openalpaca_llm::ModelConfigEntry> = toml::from_str(&format!(
+        "[\"{SERVED}\"]\nprovider = \"openai\"\ncontext = 32768\n"
+    ))
+    .expect("a [models] row parses");
+    router
+        .model_registry()
+        .reload_from_config(&sized, &HashSet::new());
+    listed(&router, SERVED);
+    let shared = shipped();
+    let lead = instance(&shared, "lead_agent");
+    let bus = EventBus::default();
+    let mut events = bus.subscribe();
+    run(&lead, router, shared, bus).await;
+    assert_eq!(models.lead_model(), SERVED);
+    assert_eq!(budgeted_window(&mut events), Some(32_768));
+}
+
+/// The same install on OpenAI's own API (its default `base_url`) keeps the
+/// compiled rows: the lead and its six on `strong`'s, the two `fast`
+/// profiles on `fast`'s, though the provider's discovery listed another
+/// model too. A guard: green on the parent as well.
+#[tokio::test]
+async fn on_openai_s_own_api_the_shipped_templates_keep_openai_s_rows() {
+    let models = Models::new(batch_lead(every_worker()));
+    let router = openai_install_at(&models, "https://api.openai.com/v1", true, "");
+    every_template_on(&models, router).await;
+
+    let strong = row(ProviderType::OpenAI, ModelAlias::Strong);
+    let fast = row(ProviderType::OpenAI, ModelAlias::Fast);
+    assert_eq!(models.lead_model(), strong);
+    for id in WORKERS {
+        let expected = if ["explore_agent", "system_agent"].contains(&id) {
+            &fast
+        } else {
+            &strong
+        };
+        assert_eq!(&models.child_model(id), expected, "{id}");
+    }
+}
+
+/// A pin under `[providers.openai.model_aliases]` still wins on a
+/// compatible server (M-4 step 1): the lead and the six that follow it run
+/// on the pinned model, and `explore_agent`'s `fast`, unpinned, collapses
+/// to its parent's, the same model. The pin is a guard, green on the
+/// parent as well; the `fast` line is red there (`gpt-6-luna`).
+#[tokio::test]
+async fn a_strong_pin_still_wins_on_a_compatible_openai_server() {
+    let models = Models::new(batch_lead(serde_json::json!([
+        { "agent_id": "explore_agent", "objective": "work for explore_agent" },
+        { "agent_id": "general_agent", "objective": "work for general_agent" }
+    ])));
+    let router = openai_install_at(
+        &models,
+        COMPAT_BASE,
+        false,
+        "[providers.openai.model_aliases]\nstrong = \"qwen3-coder-30b\"\n",
+    );
+    listed(&router, "qwen3-coder-30b");
+    let shared = shipped();
+    let lead = instance(&shared, "lead_agent");
+    run(&lead, router, shared, EventBus::default()).await;
+    assert_eq!(models.lead_model(), "qwen3-coder-30b");
+    assert_eq!(models.child_model("general_agent"), "qwen3-coder-30b");
+    assert_eq!(models.child_model("explore_agent"), "qwen3-coder-30b");
+}
+
+/// M-7 on a compatible server: a per-call OpenAI id the server did not
+/// list is refused before anything starts, and the refusal lists what the
+/// server serves. On the parent `gpt-6.1-sol` was routable there, and the
+/// subagent asked the server for it.
+#[tokio::test]
+async fn a_per_call_openai_id_is_refused_on_a_compatible_server() {
+    let models = Models::new(single_lead(serde_json::json!({
+        "agent_id": "general_agent",
+        "objective": "work for general_agent",
+        "model": "gpt-6.1-sol"
+    })));
+    let router = openai_install_at(&models, COMPAT_BASE, false, "");
+    let shared = shipped();
+    let lead = instance(&shared, "lead_agent");
+    run(&lead, router, shared, EventBus::default()).await;
+    assert!(models.seen().iter().all(|s| s.lead), "no subagent ran");
+    let refusal = &models.tool_results()[0];
+    assert!(
+        refusal.contains(&format!(
+            "model 'gpt-6.1-sol' is not routable on this install. Routable now: {SERVED}. \
+             Aliases now: fast → {SERVED}, balanced → {SERVED}, strong → {SERVED}. \
+             Leave model out to use the template's."
+        )),
+        "{refusal}"
     );
 }
