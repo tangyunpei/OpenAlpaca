@@ -267,6 +267,37 @@ fn the_openai_rows_report_reasoning_tokens() {
     assert!(!claude.supports_reasoning);
 }
 
+/// `remove` forgets that a `[models]` row of the person's wrote the id: a
+/// compiled row put back after it is the compiled row only again, which a
+/// provider built to call another server does not route (COMPAT-SERVER).
+/// Red with `remove`'s person-row cleanup taken out.
+#[test]
+fn a_removed_persons_row_leaves_the_restored_compiled_row_compiled_only() {
+    let config = HashMap::from([(
+        "gpt-6-luna".to_string(),
+        crate::config::ModelConfigEntry {
+            provider: "openai".to_string(),
+            input_price: None,
+            output_price: None,
+            context: Some(32_768),
+            supports_image: None,
+            supports_audio: None,
+            supports_document: None,
+            supports_reasoning: None,
+            supports_tools: None,
+        },
+    )]);
+    let registry = ModelRegistry::with_defaults_and_config(&config, &HashSet::new());
+    assert!(!registry.is_compiled_only("gpt-6-luna"), "the person's row");
+
+    assert!(registry.remove("gpt-6-luna"));
+    assert_eq!(
+        registry.restore_defaults_for_provider(&ProviderType::OpenAI),
+        1
+    );
+    assert!(registry.is_compiled_only("gpt-6-luna"));
+}
+
 #[test]
 fn restoring_a_providers_defaults_puts_back_only_what_is_missing() {
     let registry = ModelRegistry::with_defaults();

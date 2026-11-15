@@ -607,3 +607,62 @@ async fn a_persons_row_naming_a_compiled_id_is_routable_on_a_compatible_server()
         .collect();
     assert_eq!(offered, vec!["gpt-6.1-sol".to_string()]);
 }
+
+/// A `[models]` row of the person's naming `gpt-6-luna` on a compatible
+/// server, then the provider switched off (`deregister_provider`, the
+/// toggle), the row deleted while it is off, and the provider switched on
+/// again as the settings service does it (the compiled rows put back,
+/// `[models]` read again, the provider registered, a discovery):
+/// `gpt-6-luna` is only the compiled row again, so the server, which lists
+/// only its own model, is not asked for it. Red with
+/// `remove_by_provider`'s person-row cleanup taken out: the id stayed a
+/// person's row, routable and the main model.
+#[tokio::test]
+async fn a_persons_row_deleted_while_the_provider_is_off_is_forgotten() {
+    let server = compatible_server(&[SERVED]).await;
+    let base = format!("{}/v1", server.base_url);
+    let config = HashMap::from([(
+        "gpt-6-luna".to_string(),
+        ModelConfigEntry {
+            provider: "openai".to_string(),
+            input_price: None,
+            output_price: None,
+            context: Some(32_768),
+            supports_image: None,
+            supports_audio: None,
+            supports_document: None,
+            supports_reasoning: None,
+            supports_tools: None,
+        },
+    )]);
+    let router = router_over(
+        vec![(ProviderType::OpenAI, openai_at(&base))],
+        &config,
+        "gpt-6-luna",
+        &base,
+        &[],
+    );
+    assert!(router.is_routable("gpt-6-luna"), "the person's row");
+
+    router.deregister_provider(&ProviderType::OpenAI);
+    let registry = router.model_registry();
+    registry.restore_defaults_for_provider(&ProviderType::OpenAI);
+    registry.reload_from_config(&HashMap::new(), &HashSet::new());
+    router.register_provider(
+        ProviderType::OpenAI,
+        openai_at(&base),
+        KeyPool::new(
+            vec![ApiKey::new(
+                "test".to_string(),
+                ProviderType::OpenAI,
+                "sk-test-not-a-key".to_string(),
+            )],
+            SelectionStrategy::RoundRobin,
+        ),
+    );
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+
+    assert!(!router.is_routable("gpt-6-luna"));
+    assert_eq!(router.effective_default_model().as_deref(), Some(SERVED));
+    assert_eq!(router.routable_models(), vec![SERVED.to_string()]);
+}
