@@ -22,7 +22,7 @@
 ## Re-exports
 
 - `pub use cli_backend::{ ClaudeCodeCliProvider, CliBackendConfig, CliBackendStatus, CliBackendsConfig, CodexCliProvider, detect_cli_backends, };`
-- `pub use config::llm_config::{ EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig, ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig, TimeoutsConfig, WebSearchConfig, build_router, build_router_with_secret_store, collect_secret_refs, is_loopback_url, migrate_llm_secrets, read_config, resolve_key_from_config, reverse_migrate_llm_secrets, write_config, };`
+- `pub use config::llm_config::{ EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig, ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig, TimeoutsConfig, WebSearchConfig, build_router, build_router_with_secret_store, collect_secret_refs, is_local_url, migrate_llm_secrets, read_config, resolve_key_from_config, reverse_migrate_llm_secrets, write_config, };`
 - `pub use config::settings_service::{ ConfigWriter, LlmSettingsService, OrchestratorConfigResponse, ProviderEnabledOutcome, SetProviderEnabledError, UpdateOrchestratorRequest, };`
 - `pub use error::LlmError;`
 - `pub use keys::credential_discovery::{ CredentialDiscoveryConfig, CredentialSource, DiscoveredCredential, DiscoveredCredentialInfo, OAuthToken, TokenManager, };`

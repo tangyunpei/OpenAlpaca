@@ -156,7 +156,7 @@ impl LlmRouter {
             alias_collapses_logged: DashSet::new(),
             forced_choices_logged: DashSet::new(),
         };
-        router.note_loopback_providers();
+        router.note_local_server_providers();
         router
     }
 
@@ -191,7 +191,7 @@ impl LlmRouter {
             alias_collapses_logged: DashSet::new(),
             forced_choices_logged: DashSet::new(),
         };
-        router.note_loopback_providers();
+        router.note_local_server_providers();
         router
     }
 
@@ -239,7 +239,7 @@ impl LlmRouter {
             alias_collapses_logged: DashSet::new(),
             forced_choices_logged: DashSet::new(),
         };
-        router.note_loopback_providers();
+        router.note_local_server_providers();
         router
     }
 
@@ -260,37 +260,38 @@ impl LlmRouter {
 
     /// Hot-reload the runtime config (timeouts, endpoints, env vars, provider defaults).
     ///
-    /// The registry learns which providers' `base_url` is loopback from it, so
-    /// what their discovery listed is priced as this machine's (item 17).
+    /// The registry learns which providers' `base_url` is local from it, so
+    /// what their discovery listed is priced as a local server's (item 17).
     pub fn reload_runtime_config(&self, config: LlmRuntimeConfig) {
         self.runtime_config.store(Arc::new(config));
-        self.note_loopback_providers();
+        self.note_local_server_providers();
     }
 
-    /// Tell the registry which providers run on this machine though keyed
-    /// (item 17): the runtime config's `base_url` is loopback
-    /// ([`LlmRuntimeConfig::is_on_loopback`], learning's LR7 test) and so is
-    /// the address the provider was built to call
+    /// Tell the registry which providers run on a machine of the person's
+    /// own though keyed (item 17): the runtime config's `base_url` is local,
+    /// on loopback or the home network
+    /// ([`LlmRuntimeConfig::is_on_local_server`], learning's LR7 test), and
+    /// so is the address the provider was built to call
     /// ([`LlmProvider::base_url`]). Both, because a hot reload rebuilds no
     /// provider and the Anthropic arm reads no `base_url`: either alone
     /// could exempt calls that reach a paid API. Run at construction, on
     /// every reload, and whenever a provider is registered or removed.
-    fn note_loopback_providers(&self) {
+    fn note_local_server_providers(&self) {
         let runtime = self.runtime_config();
-        let loopback = self
+        let local = self
             .providers
             .iter()
             .filter(|entry| {
-                runtime.is_on_loopback(entry.key())
+                runtime.is_on_local_server(entry.key())
                     && entry
                         .value()
                         .provider
                         .base_url()
-                        .is_some_and(crate::is_loopback_url)
+                        .is_some_and(crate::is_local_url)
             })
             .map(|entry| entry.key().to_string())
             .collect();
-        self.model_registry.set_loopback_providers(loopback);
+        self.model_registry.set_local_server_providers(local);
     }
 
     /// Batch-reload model registry entries from config.
@@ -783,7 +784,7 @@ impl LlmRouter {
                 key_pool: Arc::new(ArcSwap::from_pointee(pool)),
             },
         );
-        self.note_loopback_providers();
+        self.note_local_server_providers();
         true
     }
 
@@ -791,7 +792,7 @@ impl LlmRouter {
     /// Returns the list of model IDs that were removed.
     pub fn deregister_provider(&self, provider_type: &ProviderType) -> Vec<String> {
         self.providers.remove(provider_type);
-        self.note_loopback_providers();
+        self.note_local_server_providers();
         self.model_registry.remove_by_provider(provider_type)
     }
 

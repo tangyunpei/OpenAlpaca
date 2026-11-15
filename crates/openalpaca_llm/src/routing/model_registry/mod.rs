@@ -215,20 +215,22 @@ pub struct ModelInfo {
 /// Thread-safe via internal RwLock for dynamic model discovery.
 pub struct ModelRegistry {
     models: RwLock<HashMap<String, ModelInfo>>,
-    /// The providers, by name, the router judges to run on loopback: the
-    /// runtime config's `base_url` and the address the provider was built to
-    /// call (`LlmProvider::base_url`) both loopback. Kept in step by the
-    /// router (`LlmRouter::note_loopback_providers`) at construction, on
-    /// every runtime-config reload and whenever a provider is registered or
-    /// removed: what their discovery lists runs on this machine (item 17).
-    loopback_providers: RwLock<HashSet<String>>,
+    /// The providers, by name, the router judges to run on a local server:
+    /// the runtime config's `base_url` and the address the provider was
+    /// built to call (`LlmProvider::base_url`) both local (`is_local_url`:
+    /// loopback or the home network). Kept in step by the router
+    /// (`LlmRouter::note_local_server_providers`) at construction, on every
+    /// runtime-config reload and whenever a provider is registered or
+    /// removed: what their discovery lists runs on a machine of the
+    /// person's own (item 17).
+    local_server_providers: RwLock<HashSet<String>>,
 }
 
 impl ModelRegistry {
     pub fn new(models: HashMap<String, ModelInfo>) -> Self {
         Self {
             models: RwLock::new(models),
-            loopback_providers: RwLock::new(HashSet::new()),
+            local_server_providers: RwLock::new(HashSet::new()),
         }
     }
 
@@ -237,13 +239,13 @@ impl ModelRegistry {
         Self::new(Self::default_models())
     }
 
-    /// The providers that run on loopback from now on: both the runtime
-    /// config's `base_url` and the provider's own address loopback, as
-    /// `LlmRouter::note_loopback_providers` judges them at construction, on
-    /// each reload and on each provider registration or removal.
-    pub(crate) fn set_loopback_providers(&self, providers: HashSet<String>) {
+    /// The providers that run on a local server from now on: both the
+    /// runtime config's `base_url` and the provider's own address local, as
+    /// `LlmRouter::note_local_server_providers` judges them at construction,
+    /// on each reload and on each provider registration or removal.
+    pub(crate) fn set_local_server_providers(&self, providers: HashSet<String>) {
         *self
-            .loopback_providers
+            .local_server_providers
             .write()
             .unwrap_or_else(|p| p.into_inner()) = providers;
     }
@@ -676,12 +678,12 @@ impl ModelRegistry {
     /// discovery registered ([`Self::is_unpriced`]): that row's 0 / 0 is the
     /// absence of a price, not a price (O-18).
     pub fn get_pricing(&self, model_id: &str) -> Option<PricingInfo> {
-        let loopback = self.loopback_providers();
+        let local = self.local_server_providers();
         self.models
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .filter(|info| !Self::unpriced(info, &loopback))
+            .filter(|info| !Self::unpriced(info, &local))
             .map(|info| PricingInfo {
                 input_price_per_million: info.input_price_per_million,
                 output_price_per_million: info.output_price_per_million,
@@ -698,28 +700,28 @@ impl ModelRegistry {
     /// for an unknown id (O-18 (b)). A discovered row is priced at its 0
     /// instead where it runs on this machine: a local provider's (L8; "local"
     /// is the set whose provider needs no key, only Ollama), and a keyed
-    /// provider's the router found on loopback (item 17): its runtime-config
-    /// `base_url` (learning's LR7 test) and the address it was built to call
-    /// both loopback.
+    /// provider's the router found on a local server (item 17): its
+    /// runtime-config `base_url` (learning's LR7 test) and the address it
+    /// was built to call both on loopback or the home network.
     pub fn is_unpriced(&self, model_id: &str) -> bool {
-        let loopback = self.loopback_providers();
+        let local = self.local_server_providers();
         self.models
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .is_some_and(|info| Self::unpriced(info, &loopback))
+            .is_some_and(|info| Self::unpriced(info, &local))
     }
 
-    fn unpriced(info: &ModelInfo, loopback: &HashSet<String>) -> bool {
+    fn unpriced(info: &ModelInfo, local_servers: &HashSet<String>) -> bool {
         !info.declared
             && !info.provider.is_local()
-            && !loopback.contains(&info.provider.to_string())
+            && !local_servers.contains(&info.provider.to_string())
     }
 
     /// Taken before `models`, never while holding it (nothing takes the two
     /// the other way round).
-    fn loopback_providers(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
-        self.loopback_providers
+    fn local_server_providers(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
+        self.local_server_providers
             .read()
             .unwrap_or_else(|p| p.into_inner())
     }

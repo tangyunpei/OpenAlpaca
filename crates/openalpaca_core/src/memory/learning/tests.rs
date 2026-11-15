@@ -3127,6 +3127,40 @@ async fn an_openai_provider_on_localhost_yields() {
     assert_yielded(&scene, &s, &report);
 }
 
+/// The same for a keyed `openai` provider on the person's home network —
+/// a llama.cpp or LM Studio server on another computer of theirs, at a
+/// private address or an mDNS name — which counts as local too (item 17,
+/// widened by the owner's second answers of 2026-11-14): its flush yields.
+#[tokio::test]
+async fn an_openai_provider_on_the_home_network_yields() {
+    for base in [
+        "http://192.168.1.20:8080/v1",
+        "http://gpu-box.local:8080/v1",
+    ] {
+        let model = Scripted::new(vec![Say::Hang]);
+        let router = router_for(model.clone(), ProviderType::OpenAI, "lan-openai");
+        let mut runtime = openalpaca_llm::LlmRuntimeConfig::default();
+        runtime
+            .provider_defaults
+            .get_mut("openai")
+            .expect("openai has defaults")
+            .base_url = Some(base.to_string());
+        router.reload_runtime_config(runtime);
+        let scene = Scene::with_router(model, router, DaemonConfig::default());
+        scene.no_quiet_period();
+        let s = scene.session();
+        scene.turn(&s, PREF, "Noted.");
+
+        let flush = flush_until_the_call(&scene, &s).await;
+        let _chat = scene.queue.turn_started(uuid::Uuid::new_v4(), LANE, true);
+        let report = tokio::time::timeout(std::time::Duration::from_secs(10), flush)
+            .await
+            .unwrap_or_else(|_| panic!("the flush did not yield on {base}"))
+            .unwrap();
+        assert_yielded(&scene, &s, &report);
+    }
+}
+
 /// The quiet check and the call are one decision: a chat turn that starts
 /// while the flush is between them — here, waiting on its window read —
 /// makes a local model's flush yield **before** the call goes out. The call

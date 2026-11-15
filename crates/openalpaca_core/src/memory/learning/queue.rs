@@ -1264,10 +1264,11 @@ impl LearningQueue {
         report
     }
 
-    /// Whether the model a flush calls runs on this machine (ruling LR7): a
-    /// provider that needs no key, or one whose base URL is loopback — a
-    /// llama.cpp or LM Studio server behind the `openai` provider. The
-    /// loopback test is `openalpaca_llm::is_loopback_url`, the one the cost
+    /// Whether the model a flush calls runs on a machine of the person's
+    /// own (ruling LR7): a provider that needs no key, or one whose base URL
+    /// is local — a llama.cpp or LM Studio server behind the `openai`
+    /// provider, on loopback or, since item 17's widening, the home network.
+    /// The test is `openalpaca_llm::is_local_url`, the one the cost
     /// tracker's exemption reads too.
     fn is_local_model(&self, model: &str) -> bool {
         let router = &self.deps.router;
@@ -1277,7 +1278,7 @@ impl LearningQueue {
         if router.provider_requires_key(&provider) == Some(false) {
             return true;
         }
-        router.runtime_config().is_on_loopback(&provider)
+        router.runtime_config().is_on_local_server(&provider)
     }
 
     async fn flush_chunks(&self, session_id: &str, policy: FlushPolicy) -> FlushReport {

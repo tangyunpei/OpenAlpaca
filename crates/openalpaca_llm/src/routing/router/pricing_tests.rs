@@ -1,5 +1,5 @@
 //! What a model that discovery registered is counted at (O-18, taken as (b)
-//! with (c); on a loopback `base_url`, item 17), and how much of Anthropic's
+//! with (c); on a local `base_url`, item 17), and how much of Anthropic's
 //! model list discovery reads.
 //!
 //! Before the fix, keyed discovery registered every id Anthropic or OpenAI
@@ -308,7 +308,7 @@ async fn a_discovered_ollama_model_still_costs_nothing() {
     assert!(!logs_contain("no price"));
 }
 
-// ── LOOPBACK-FREE: a keyed server on this machine (item 17) ─────────────────
+// ── LOOPBACK-FREE and LOCAL-LAN: a keyed server of the person's (item 17) ───
 
 /// The runtime config as `llm.toml` would load it with `[providers.openai]
 /// base_url = base`: the address the locality rule (LR7) reads.
@@ -382,21 +382,57 @@ async fn a_model_discovered_on_a_loopback_keyed_server_costs_nothing() {
     assert!(!logs_contain("no price"));
 }
 
-/// Only loopback is exempt: a keyed server at a LAN address, like any other
-/// host, still counts an unpriced model at the fallback (LAN hosts are an
-/// open sub-question, not built).
+/// A keyed server on the person's home network runs on a machine of
+/// theirs, as one on loopback does (item 17, widened by the owner's second
+/// answers of 2026-11-14): what its discovery lists costs nothing and is
+/// not announced — at a private IPv4 address, an IPv6 unique-local one and
+/// an mDNS name alike. The provider is built at that address and the
+/// runtime config says the same; neither is ever called here.
 #[tokio::test]
 #[tracing_test::traced_test]
-async fn a_keyed_server_off_loopback_still_counts_at_the_fallback() {
-    let server = local_openai_server("lan-gguf-test").await;
-    let router = openai_router(&server.base_url, &HashMap::new());
-    openai_base_url(&router, "http://192.168.1.20:8080/v1");
-    router.refresh_models_for(&ProviderType::OpenAI).await;
+async fn a_model_discovered_on_a_home_network_server_costs_nothing() {
+    for base in [
+        "http://192.168.1.20:8080",
+        "http://[fd12:3456:789a::5]:8080",
+        "http://gpu-box.local:8080",
+    ] {
+        let router = openai_router(base, &HashMap::new());
+        router.model_registry().register_discovered(
+            "lan-gguf-test".to_string(),
+            discovered_row(ProviderType::OpenAI),
+        );
+        openai_base_url(&router, &format!("{base}/v1"));
 
-    let cost = router
-        .cost_tracker
-        .calculate_cost("lan-gguf-test", MILLION, MILLION);
-    assert!(close(cost, FALLBACK), "counted at $3 / $15, not {cost}");
+        let cost = router
+            .cost_tracker
+            .calculate_cost("lan-gguf-test", MILLION, MILLION);
+        assert_eq!(cost, 0.0, "{base}");
+    }
+    assert!(!logs_contain("no price"));
+}
+
+/// A keyed server anywhere else — a public address, or a host name that is
+/// not `.local`, which is never looked up — still counts an unpriced model
+/// at the fallback, announced.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_keyed_server_off_the_home_network_still_counts_at_the_fallback() {
+    for base in ["http://203.0.113.5:8080", "http://gpu-box:8080"] {
+        let router = openai_router(base, &HashMap::new());
+        router.model_registry().register_discovered(
+            "remote-gguf-test".to_string(),
+            discovered_row(ProviderType::OpenAI),
+        );
+        openai_base_url(&router, &format!("{base}/v1"));
+
+        let cost = router
+            .cost_tracker
+            .calculate_cost("remote-gguf-test", MILLION, MILLION);
+        assert!(
+            close(cost, FALLBACK),
+            "{base}: counted at $3 / $15, not {cost}"
+        );
+    }
     assert!(logs_contain("no price"));
 }
 
@@ -528,7 +564,7 @@ async fn a_router_built_on_a_loopback_base_url_is_exempt_at_boot() {
 /// until the provider itself is built at the loopback address.
 #[tokio::test]
 async fn a_provider_still_built_off_loopback_is_not_exempt_by_a_reload() {
-    let router = openai_router("http://10.0.0.5:9", &HashMap::new());
+    let router = openai_router("http://203.0.113.5:9", &HashMap::new());
     router.model_registry().register_discovered(
         "cloud-listed-test".to_string(),
         discovered_row(ProviderType::OpenAI),
@@ -604,7 +640,7 @@ async fn re_registering_a_provider_off_loopback_ends_the_exemption() {
         loopback_client(TIMEOUT),
         "sk-test-not-a-key".to_string(),
         None,
-        Some("http://10.0.0.5:9/v1".to_string()),
+        Some("http://203.0.113.5:9/v1".to_string()),
         None,
     ));
     router.register_provider(

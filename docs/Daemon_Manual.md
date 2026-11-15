@@ -509,18 +509,26 @@ id asked for (such as `gpt-4o-mini-2024-07-18`, or `gpt-5.2-2025-12-11`,
 `gpt-5.2`'s default snapshot): a snapshot the catalogue lacks meets the
 same fallback. `gpt-6.1-sol`'s page lists no snapshot but the id itself. A
 streamed round is counted by the id it was routed to. An OpenAI-compatible
-server on this machine (a loopback `base_url`: `localhost`, `127.0.0.0/8` or
-`::1`, such as llama.cpp or LM Studio set up as the `openai` provider with a
-key) runs here though it is keyed: the models its discovery lists are
-counted at `0`, as Ollama's are, and are not announced. A `[models."<id>"]`
-row's price still wins, and a built-in row keeps its own price wherever it
-is served from. The provider must be built at that address: a `base_url`
-changed on a running daemon counts once the provider is rebuilt (a restart,
-or switching it off and on), and the Anthropic provider, which always calls
-Anthropic's API, never counts as local. An OpenAI-compatible server at any
-other address, a machine on your network included, is counted like a cloud
-one; a `[models."<id>"]` row with `input_price = 0` and `output_price = 0`
-keeps such a model at `0`.
+server of your own, such as llama.cpp or LM Studio set up as the `openai`
+provider with a key, is local though it is keyed when its `base_url` names
+this machine — `localhost`, `127.0.0.0/8` or `::1` — or another computer
+on your home network: an IPv4 private address (`10.0.0.0/8`,
+`172.16.0.0/12`, `192.168.0.0/16`) or link-local one (`169.254.0.0/16`), an
+IPv6 unique-local (`fc00::/7`) or link-local (`fe80::/10`) one, or a name
+ending in `.local`. The models its discovery lists are counted at `0`, as
+Ollama's are, and are not announced. A `[models."<id>"]` row's price still
+wins, and a built-in row keeps its own price wherever it is served from.
+The provider must be built at that address: a `base_url` changed on a
+running daemon counts once the provider is rebuilt (a restart, or switching
+it off and on), and the Anthropic provider, which always calls Anthropic's
+API, never counts as local. Any other host name — `gpu-box`, `gpu-box.lan`,
+a name with a trailing dot — is not looked up and is not local, whatever it
+resolves to, and neither is any other address: such a server is counted
+like a cloud one, and a `[models."<id>"]` row with `input_price = 0` and
+`output_price = 0` keeps such a model at `0`. A local `base_url` that
+forwards to a paid service (a gateway, a tunnel) has the models its
+discovery lists that nothing prices counted at `0` too; a built-in row it
+serves keeps its price.
 
 A model whose provider prices a long prompt higher carries that second rate
 in its built-in row: `gpt-6.1-sol` costs $2 / $10 per million tokens, and a

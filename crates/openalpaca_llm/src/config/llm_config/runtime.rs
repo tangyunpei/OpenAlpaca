@@ -5,25 +5,51 @@ use super::router_config::LlmRouterConfig;
 use crate::keys::key_pool::ProviderType;
 use crate::routing::model_alias::ModelAlias;
 
-/// Whether a base URL names this machine: `localhost`, `127.0.0.0/8` or
-/// `::1` — loopback only (ruling LR7's second clause), read with the URL
-/// parser `reqwest` connects by, so the host judged is the host reached.
+/// Whether a base URL names a machine of the person's own: this one first
+/// — `localhost`, `127.0.0.0/8` or `::1` (ruling LR7's second clause) — or
+/// another on the home network (item 17, widened by the owner's second
+/// answers of 2026-11-14: "local can include other computers on the home
+/// network, but mainly localhost"): an IPv4 private address (`10/8`,
+/// `172.16/12`, `192.168/16`) or link-local one (`169.254/16`), an IPv6
+/// unique-local (`fc00::/7`) or link-local (`fe80::/10`) one, or an mDNS
+/// name ending in `.local`. The host is read with the URL parser `reqwest`
+/// connects by, so the host judged is the host reached.
+///
+/// No name is looked up: any other name (`gpu-box`, `gpu-box.lan`,
+/// `localhost.` or `gpu-box.local.`, a trailing dot being another
+/// spelling) is not local whatever it resolves to, and neither is an
+/// IPv4-mapped IPv6 address. A false yes would price a paid host at 0, so
+/// every doubtful spelling fails closed.
 ///
 /// The one locality test: learning's yield rule
-/// ([`LlmRuntimeConfig::is_on_loopback`]) and the cost tracker's exemption
-/// for what a keyed provider's discovery lists (item 17 of the owner's
-/// answer of 2026-11-14) both read it. A LAN address (`10/8`, `192.168/16`,
-/// `*.local`) is not loopback here.
-pub fn is_loopback_url(base_url: &str) -> bool {
+/// ([`LlmRuntimeConfig::is_on_local_server`]) and the cost tracker's
+/// exemption for what a keyed provider's discovery lists (item 17 of the
+/// owner's answer of 2026-11-14) both read it.
+pub fn is_local_url(base_url: &str) -> bool {
     let Ok(url) = url::Url::parse(base_url) else {
         return false;
     };
     match url.host() {
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(name)) => {
+            name.eq_ignore_ascii_case("localhost") || is_mdns_name(name)
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
         None => false,
     }
+}
+
+/// A name of one or more labels under `.local`, mDNS's domain, no label
+/// empty: `.local` and `gpu-box..local` are not, nor is `gpu-box.local.`,
+/// whose last label is the empty one after the dot. The URL parser has
+/// already lowercased an `http` or `https` name; the comparison ignores case
+/// all the same, so the rule does not lean on the scheme.
+fn is_mdns_name(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(head, last)| {
+        last.eq_ignore_ascii_case("local") && head.split('.').all(|label| !label.is_empty())
+    })
 }
 
 fn default_usage_cache_ttl() -> u64 {
@@ -221,14 +247,14 @@ impl LlmRuntimeConfig {
         std::time::Duration::from_secs(clamped)
     }
 
-    /// Whether `provider`'s `base_url` is loopback ([`is_loopback_url`]): a
+    /// Whether `provider`'s `base_url` is local ([`is_local_url`]): a
     /// llama.cpp or LM Studio server behind the `openai` provider runs on
-    /// this machine though it is keyed.
-    pub fn is_on_loopback(&self, provider: &ProviderType) -> bool {
+    /// this machine, or another on the home network, though it is keyed.
+    pub fn is_on_local_server(&self, provider: &ProviderType) -> bool {
         self.provider_defaults
             .get(&provider.to_string())
             .and_then(|d| d.base_url.as_deref())
-            .is_some_and(is_loopback_url)
+            .is_some_and(is_local_url)
     }
 }
 

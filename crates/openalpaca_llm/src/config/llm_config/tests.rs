@@ -471,48 +471,140 @@ strong = "  "
     assert!(written.contains("fastest"), "{written}");
 }
 
-/// LR7's loopback test, moved from core's learning queue with its cases
-/// unchanged (item 17), and the spellings that must not read as loopback:
-/// a false yes would price a paid host at 0, so each fails closed.
+/// The one locality rule (LR7, item 17 widened by the owner's second
+/// answers of 2026-11-14): loopback first, then the home network — IPv4's
+/// private ranges and link-local, IPv6's unique-local and link-local, and
+/// an mDNS `.local` name — each range's edges in and the address just
+/// outside each edge out. Every other spelling fails closed: a false yes
+/// would price a paid host at 0, and no name is looked up.
 #[test]
-fn loopback_urls_are_local() {
+fn local_urls_are_loopback_or_the_home_network() {
     for url in [
+        // Loopback, LR7's cases as moved from core.
         "http://localhost:1234/v1",
         "http://LOCALHOST/v1",
         "http://127.0.0.1:8080/v1",
         "http://127.1.2.3/v1",
         "http://[::1]:11434/v1",
         "http://user:pw@localhost:1/v1",
+        // 10.0.0.0/8
+        "http://10.0.0.0/v1",
+        "http://10.0.0.5/v1",
+        "http://10.255.255.255:8080/v1",
+        // 172.16.0.0/12
+        "http://172.16.0.0/v1",
+        "http://172.31.255.255/v1",
+        // 192.168.0.0/16
+        "http://192.168.0.0/v1",
+        "http://192.168.1.20:8080/v1",
+        "http://192.168.255.255/v1",
+        // 169.254.0.0/16, IPv4 link-local
+        "http://169.254.0.0/v1",
+        "http://169.254.255.255/v1",
+        // fc00::/7, IPv6 unique-local
+        "http://[fc00::]/v1",
+        "http://[fd12:3456:789a::1]:8080/v1",
+        "http://[fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/v1",
+        // fe80::/10, IPv6 link-local
+        "http://[fe80::1]/v1",
+        "http://[febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/v1",
+        // An mDNS name.
+        "http://gpu-box.local:8080/v1",
+        // The parser lowercases an http name, so this pins the parse, not
+        // the rule's own case-blind comparison.
+        "http://Studio.LOCAL/v1",
+        "https://a.b.local/v1",
+        "http://user:pw@gpu-box.local/v1",
     ] {
-        assert!(is_loopback_url(url), "{url}");
+        assert!(is_local_url(url), "{url}");
     }
     for url in [
+        // A public host, by name and by address.
         "https://api.openai.com/v1",
-        "http://10.0.0.5/v1",
-        "http://192.168.1.20:8080/v1",
+        "http://8.8.8.8/v1",
+        "http://[2001:4860:4860::8888]/v1",
+        // Just outside each range.
+        "http://9.255.255.255/v1",
+        "http://11.0.0.0/v1",
+        "http://172.15.255.255/v1",
+        "http://172.32.0.0/v1",
+        "http://192.167.255.255/v1",
+        "http://192.169.0.0/v1",
+        "http://169.253.255.255/v1",
+        "http://169.255.0.0/v1",
+        "http://[fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/v1",
+        "http://[fe00::]/v1",
+        "http://[fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff]/v1",
+        "http://[fec0::]/v1",
+        // A host name that is neither localhost nor `.local`: never
+        // looked up, so never local, whatever it resolves to.
+        "http://gpu-box/v1",
+        "http://gpu-box.lan:8080/v1",
+        "http://local/v1",
+        "http://xlocal/v1",
+        "http://gpu-box.local.example.com/v1",
+        // `.local` with no label before it, or with an empty one.
+        "http://.local/v1",
+        "http://..local/v1",
+        "http://gpu-box..local/v1",
+        "http://192.168.1.20.example.com/v1",
+        "http://localhost.example.com/v1",
+        // A trailing dot is another spelling, refused like the rest.
+        "http://gpu-box.local./v1",
+        "http://localhost./v1",
+        // Not a URL, or no host.
         "not a url",
         "localhost:1234/v1",
-        "http://localhost.example.com/v1",
+        "192.168.1.20:8080/v1",
+        // The host is what follows the user info, and a backslash ends
+        // the authority in an http URL.
         "http://127.0.0.1@api.openai.com/v1",
+        "http://192.168.1.20@api.openai.com/v1",
+        "http://gpu-box.local@api.openai.com/v1",
         "http://api.openai.com\\@127.0.0.1/v1",
+        "http://api.openai.com\\@192.168.1.20/v1",
+        // IPv4-mapped IPv6 is not read through to its IPv4 address.
         "http://[::ffff:127.0.0.1]/v1",
+        "http://[::ffff:192.168.1.20]/v1",
+        // A zone index does not parse.
+        "http://[fe80::1%25en0]/v1",
     ] {
-        assert!(!is_loopback_url(url), "{url}");
+        assert!(!is_local_url(url), "{url}");
     }
 }
 
-/// A provider is on loopback by its own `base_url` in the runtime config;
-/// one with none, or an unknown one, is not.
+/// A provider is on a local server by its own `base_url` in the runtime
+/// config — loopback, or the home network since item 17's widening; one
+/// with none, an unknown one, or one at a public host or a bare name, is
+/// not.
 #[test]
-fn a_provider_is_on_loopback_by_its_base_url() {
+fn a_provider_is_on_a_local_server_by_its_base_url() {
     let mut runtime = LlmRuntimeConfig::default();
-    assert!(!runtime.is_on_loopback(&ProviderType::OpenAI));
-    assert!(!runtime.is_on_loopback(&ProviderType::Anthropic));
+    assert!(!runtime.is_on_local_server(&ProviderType::OpenAI));
+    assert!(!runtime.is_on_local_server(&ProviderType::Anthropic));
     runtime
         .provider_defaults
         .get_mut("openai")
         .unwrap()
         .base_url = Some("http://127.0.0.1:8080/v1".to_string());
-    assert!(runtime.is_on_loopback(&ProviderType::OpenAI));
-    assert!(!runtime.is_on_loopback(&ProviderType::Plugin("x".to_string())));
+    assert!(runtime.is_on_local_server(&ProviderType::OpenAI));
+    assert!(!runtime.is_on_local_server(&ProviderType::Plugin("x".to_string())));
+    for (base, local) in [
+        ("http://192.168.1.20:8080/v1", true),
+        ("http://gpu-box.local:8080/v1", true),
+        ("http://[fd12::5]:8080/v1", true),
+        ("https://api.openai.com/v1", false),
+        ("http://gpu-box:8080/v1", false),
+    ] {
+        runtime
+            .provider_defaults
+            .get_mut("openai")
+            .unwrap()
+            .base_url = Some(base.to_string());
+        assert_eq!(
+            runtime.is_on_local_server(&ProviderType::OpenAI),
+            local,
+            "{base}"
+        );
+    }
 }

@@ -22,7 +22,7 @@ pub use config::llm_config::{
     EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig, ModelConfigEntry,
     OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig, TimeoutsConfig,
     WebSearchConfig, build_router, build_router_with_secret_store, collect_secret_refs,
-    is_loopback_url, migrate_llm_secrets, read_config, resolve_key_from_config,
+    is_local_url, migrate_llm_secrets, read_config, resolve_key_from_config,
     reverse_migrate_llm_secrets, write_config,
 };
 pub use config::settings_service::{
@@ -96,8 +96,9 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// The router exempts a keyed provider's discovered models from the
     /// unpriced fallback only when both this address and the runtime
-    /// config's `base_url` are loopback (item 17): a hot reload rebuilds no
-    /// provider, and an arm that ignores `base_url` keeps calling its own.
+    /// config's `base_url` are local (`is_local_url`: loopback or the home
+    /// network, item 17): a hot reload rebuilds no provider, and an arm that
+    /// ignores `base_url` keeps calling its own.
     fn base_url(&self) -> Option<&str> {
         None
     }
