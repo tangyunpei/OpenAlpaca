@@ -42,6 +42,10 @@ struct Models {
     lead: Mutex<VecDeque<ChatResponse>>,
     children: Mutex<Vec<(String, VecDeque<ChatResponse>)>>,
     seen: Mutex<Vec<Seen>>,
+    /// A model whose every request is refused for its credentials, as a
+    /// provider answers a key it will not take: the router then walks the
+    /// ladder from it (`LlmRouterError::AllKeysRefused`).
+    refused: Mutex<Option<String>>,
 }
 
 impl Models {
@@ -50,7 +54,23 @@ impl Models {
             lead: Mutex::new(lead.into()),
             children: Mutex::new(Vec::new()),
             seen: Mutex::new(Vec::new()),
+            refused: Mutex::new(None),
         })
+    }
+
+    /// Every request naming `model` is refused for its credentials.
+    fn refusing(self: &Arc<Self>, model: &str) -> Arc<Self> {
+        *self.refused.lock().unwrap() = Some(model.to_string());
+        self.clone()
+    }
+
+    /// Every model a request of the lead (`lead`) or of a subagent named.
+    fn models_asked(&self, lead: bool) -> Vec<String> {
+        self.seen()
+            .into_iter()
+            .filter(|s| s.lead == lead)
+            .filter_map(|s| s.model)
+            .collect()
     }
 
     /// The subagent whose objective contains `key` answers with `script`.
@@ -167,6 +187,11 @@ impl LlmProvider for Models {
             tools: request.tools.as_ref().clone(),
             messages: request.messages.as_ref().clone(),
         });
+        if request.model.is_some() && *self.refused.lock().unwrap() == request.model {
+            return Err(LlmError::AuthenticationFailed(
+                "the key was refused".to_string(),
+            ));
+        }
         let next = if lead {
             self.lead.lock().unwrap().pop_front()
         } else {
@@ -683,6 +708,125 @@ async fn the_leads_alias_is_resolved_before_its_loop_config() {
     assert_eq!(
         budgeted.as_deref(),
         Some(row(ProviderType::Anthropic, ModelAlias::Strong).as_str())
+    );
+}
+
+// ── A word or a per-call model drops the template's chain (M-6b) ────────────
+//
+// Added after C8 (`5e3b5078`), in the review of the commits after
+// `02da85b9`: each of the three is red with its `fallback_models.clear()`
+// taken out (`run_lead_agent`'s for the lead, `SpawnSubagentTool::execute`'s
+// for a child, and that one's `chosen_per_call` for the per-call case). The
+// shipped templates carry no chain, so each test's template is a person's
+// own, or the shipped lead with one written in: a model the provider
+// refuses walks the ladder, and with the chain dropped it reaches the main
+// model, never the chain's `claude-sonnet-5-5`.
+
+/// The main model of these three runs, and the rung a dropped chain leaves.
+const MAIN: &str = "claude-haiku-5-5";
+/// The chain each template carries: routable, neither the main model nor
+/// the alias's row, so a run that walks it is told apart.
+const CHAIN: &str = "claude-sonnet-5-5";
+
+/// A lead naming `strong` that carries a chain: its model refused, it
+/// answers on the main model and never asks the chain's.
+#[tokio::test]
+async fn a_lead_on_an_alias_does_not_walk_its_templates_chain() {
+    let strong = row(ProviderType::Anthropic, ModelAlias::Strong);
+    let models = Models::new(vec![answer("all done", vec![])]).refusing(&strong);
+    let router = install(&models, &[ProviderType::Anthropic], MAIN);
+    let shared = shipped();
+    let mut lead = instance(&shared, "lead_agent");
+    assert_eq!(lead.llm_config.model.as_deref(), Some("strong"));
+    lead.llm_config.fallback_models = vec![CHAIN.to_string()];
+    let result = run(&lead, router, shared, EventBus::default()).await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+    let asked = models.models_asked(true);
+    assert_eq!(asked.first(), Some(&strong), "the lead asked strong first");
+    assert!(
+        asked.iter().any(|m| m == MAIN),
+        "the ladder's rung: {asked:?}"
+    );
+    assert!(
+        !asked.iter().any(|m| m == CHAIN),
+        "the template's chain is dropped: {asked:?}"
+    );
+}
+
+/// A child whose template names `strong` and carries a chain: its model
+/// refused, it answers on the main model and never asks the chain's.
+#[tokio::test]
+async fn a_child_on_an_alias_does_not_walk_its_templates_chain() {
+    let strong = row(ProviderType::Anthropic, ModelAlias::Strong);
+    let models = Models::new(single_lead(serde_json::json!({
+        "agent_id": "my_agent",
+        "objective": "work for my_agent"
+    })))
+    .refusing(&strong);
+    let router = install(&models, &[ProviderType::Anthropic], MAIN);
+    let shared = shipped();
+    let mut mine = crate::test_util::make_agent("my_agent", vec!["memory_read"]);
+    mine.llm_config.model = Some("strong".to_string());
+    mine.llm_config.fallback_models = vec![CHAIN.to_string()];
+    assert!(
+        shared
+            .agent_registry
+            .register_template(crate::test_util::template_from_agent(&mine))
+    );
+    let mut lead = instance(&shared, "lead_agent");
+    lead.llm_config.model = Some(MAIN.to_string());
+    run(&lead, router, shared, EventBus::default()).await;
+    let asked = models.models_asked(false);
+    assert_eq!(asked.first(), Some(&strong), "the child asked strong first");
+    assert!(
+        asked.iter().any(|m| m == MAIN),
+        "the ladder's rung: {asked:?}"
+    );
+    assert!(
+        !asked.iter().any(|m| m == CHAIN),
+        "the template's chain is dropped: {asked:?}"
+    );
+}
+
+/// A per-call id on a template naming an id and carrying a chain: the
+/// per-call model refused, the child answers on the main model and never
+/// asks the chain's — the choice is not a word, so only the per-call rule
+/// drops it.
+#[tokio::test]
+async fn a_child_on_a_per_call_id_does_not_walk_its_templates_chain() {
+    let strong = row(ProviderType::Anthropic, ModelAlias::Strong);
+    let models = Models::new(single_lead(serde_json::json!({
+        "agent_id": "my_agent",
+        "objective": "work for my_agent",
+        "model": strong
+    })))
+    .refusing(&strong);
+    let router = install(&models, &[ProviderType::Anthropic], MAIN);
+    let shared = shipped();
+    let mut mine = crate::test_util::make_agent("my_agent", vec!["memory_read"]);
+    mine.llm_config.model = Some(MAIN.to_string());
+    mine.llm_config.fallback_models = vec![CHAIN.to_string()];
+    assert!(
+        shared
+            .agent_registry
+            .register_template(crate::test_util::template_from_agent(&mine))
+    );
+    let mut lead = instance(&shared, "lead_agent");
+    lead.llm_config.model = Some(MAIN.to_string());
+    run(&lead, router, shared, EventBus::default()).await;
+    let asked = models.models_asked(false);
+    assert_eq!(
+        asked.first(),
+        Some(&strong),
+        "the child asked its per-call id"
+    );
+    assert!(
+        asked.iter().any(|m| m == MAIN),
+        "the ladder's rung: {asked:?}"
+    );
+    assert!(
+        !asked.iter().any(|m| m == CHAIN),
+        "the template's chain is dropped: {asked:?}"
     );
 }
 

@@ -8287,8 +8287,11 @@ async fn an_omitted_agent_id_spawns_general_agent() {
     assert_eq!(opens[0].data["agent_id_defaulted"], true);
     assert_eq!(opens[1].data["template"], "code_agent");
     assert_eq!(opens[1].data["agent_id_defaulted"], false);
-    // C8 (M-10): `subagent_open_records_the_model_choice` — what chose the
-    // child's model and the id it resolved to before the call.
+    // C8 (M-10): what chose the child's model and the id it resolved to
+    // before the call — the assertions the design's §9 lists as
+    // `subagent_open_records_the_model_choice`, folded into this test (no
+    // test bears that name; the per-call case is
+    // `subagent_open_records_a_per_call_model_choice`).
     assert_eq!(
         opens[0].data["model_choice"],
         serde_json::json!({"choice": "inherit", "per_call": false})

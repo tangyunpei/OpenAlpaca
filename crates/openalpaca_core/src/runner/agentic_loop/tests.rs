@@ -4160,6 +4160,109 @@ async fn a_substituted_model_is_reported_on_the_streaming_path() {
     );
 }
 
+/// A provider whose every answer is thinking alone: `end_turn`, no text, no
+/// call, not cut. Streamed, it sends the thinking and ends.
+struct ThinkingOnlyProvider {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LlmProvider for ThinkingOnlyProvider {
+    fn name(&self) -> &str {
+        "thinking-only"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ChatResponse {
+            content: String::new(),
+            tool_calls: vec![],
+            model: request.model.clone().unwrap_or_default(),
+            usage: Usage {
+                input_tokens: 4,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: Some("Nothing left to say.".to_string()),
+            echo: None,
+            parts: None,
+        })
+    }
+}
+
+/// OUTPUT-BUDGET (`e00ee04a`) made a streamed round with nothing to forward
+/// to an `EmptyCompletion` when it ends on thinking alone; a chat turn
+/// streamed to its chat keeps what it did before: the round is collected as
+/// it came, the loop completes with no answer text (the main loop then
+/// answers `LoopResult::no_answer_line()`), and nothing is asked again.
+/// Added after C8 (`5e3b5078`), in the review of the commits after
+/// `02da85b9`: red with the backend's `stream_callback.is_none()` guard
+/// taken out (the loop then ends in `Error`).
+#[tokio::test]
+async fn a_chat_turn_streamed_to_its_chat_ending_on_thinking_alone_completes() {
+    let provider = Arc::new(ThinkingOnlyProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        EFFECTIVE_MODEL.to_string(),
+    );
+    let forwarded: Arc<std::sync::Mutex<usize>> = Arc::new(std::sync::Mutex::new(0));
+    let counter = Arc::clone(&forwarded);
+    let config = LoopConfig {
+        stream_callback: Some(Arc::new(move |_event: &openalpaca_llm::StreamEvent| {
+            *counter.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        })),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("hello")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        *forwarded.lock().unwrap_or_else(|p| p.into_inner()) > 0,
+        "the turn really took the streaming rail"
+    );
+    assert_eq!(
+        result.finish_reason,
+        LoopFinishReason::Complete,
+        "not an EmptyCompletion"
+    );
+    assert_eq!(result.final_content, "");
+    assert_eq!(
+        result.no_answer_line().as_deref(),
+        Some("I finished this turn without writing an answer.")
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "asked once, not again whole"
+    );
+}
+
 // ── LOCAL-CALL-HOUR: a streamed round to a local model may run an hour ──
 
 /// A model that keeps generating: its stream sends one `TextDelta` a second
