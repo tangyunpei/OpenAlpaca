@@ -518,7 +518,6 @@ async fn watch() -> Result<()> {
         urlencoding::encode(&info.token)
     );
 
-    let client = DaemonClient::connect()?;
     let (ws_stream, _) = connect_async(&ws_url).await?;
     println!(
         "{}",
@@ -539,13 +538,7 @@ async fn watch() -> Result<()> {
                     let Some(frame) = confirmation_frame(&text) else { continue };
                     print!("{}", watch_prompt_text(&frame, tty));
                     let (approved, entire_tool) = ask(frame.per_call);
-                    match client
-                        .post_raw(
-                            &answer_path(&frame.request_id),
-                            &answer_body(approved, entire_tool),
-                        )
-                        .await
-                    {
+                    match send_watch_answer(&frame.request_id, approved, entire_tool).await {
                         Ok(_) => println!(
                             "{}",
                             answered_line(approved, entire_tool, Some(&frame.tool_name))
@@ -574,6 +567,22 @@ async fn watch() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Sends one answer of `watch`'s. It reads `discovery.json` again for each:
+/// the daemon rotates its token while it runs (T21 (2)) and honours the one
+/// it replaced only until that one's expiry, and a watch can wait for days.
+async fn send_watch_answer(
+    request_id: &str,
+    approved: bool,
+    entire_tool: bool,
+) -> Result<reqwest::Response> {
+    DaemonClient::connect()?
+        .post_raw(
+            &answer_path(request_id),
+            &answer_body(approved, entire_tool),
+        )
+        .await
 }
 
 /// The answers, read from the terminal. Anything else is a denial —
@@ -611,6 +620,40 @@ fn read_answer(input: &str, per_call: bool) -> (bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T21: `confirmations watch` waits for days; each answer reads
+    /// `discovery.json` again, so it carries the token the daemon names now,
+    /// not the one the watch started with.
+    #[tokio::test]
+    async fn each_answer_carries_the_token_discovery_names_now() {
+        use crate::test_util::{
+            EnvSandbox, bearer_of, discovery_of_a_daemon_up_for, ok_json, serve,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
+        let (addr, server) = serve(vec![ok_json("{}"), ok_json("{}")]);
+        let first = discovery_of_a_daemon_up_for(addr.port(), 13);
+
+        send_watch_answer("req-1", true, false)
+            .await
+            .expect("the first answer");
+        let later = first.with_rotated_auth(chrono::Utc::now());
+        discovery::write_discovery_atomic(&later).unwrap();
+        send_watch_answer("req-2", false, false)
+            .await
+            .expect("the second answer");
+
+        let requests = server.join().expect("the server finishes");
+        assert!(requests[0].starts_with("POST /v1/chat/confirmations/req-1 "));
+        assert_eq!(
+            bearer_of(&requests[0]).as_deref(),
+            Some(first.auth.token.as_str())
+        );
+        assert_eq!(
+            bearer_of(&requests[1]).as_deref(),
+            Some(later.auth.token.as_str())
+        );
+    }
 
     fn page(confirmations: serde_json::Value) -> PendingPrompts {
         serde_json::from_value(serde_json::json!({ "confirmations": confirmations }))

@@ -378,7 +378,7 @@ pub(crate) fn get_artifact(db: &Database, owner_id: &str, id: &str) -> Response 
 pub(crate) async fn artifact_content(
     db: &Database,
     owner_id: &str,
-    expected_token: &str,
+    expected_token: &(impl crate::discovery_rotation::AcceptsToken + ?Sized),
     headers: &HeaderMap,
     query_token: Option<&str>,
     id: &str,
@@ -564,7 +564,7 @@ pub async fn get_artifact_content_handler(
     artifact_content(
         &state.db,
         &state.local_user_id,
-        &state.token,
+        &*state.tokens,
         &headers,
         params.token.as_deref(),
         &id,
@@ -583,7 +583,7 @@ pub async fn get_artifact_version_content_handler(
     artifact_content(
         &state.db,
         &state.local_user_id,
-        &state.token,
+        &*state.tokens,
         &headers,
         params.token.as_deref(),
         &id,

@@ -177,6 +177,19 @@ spawns would get. Nothing else is set or removed: an app started from a
 terminal still hands its daemon its own environment (`tasks/pending-decisions.md` §1
 _Rev 92_).
 
+The token is rotated while the daemon runs (T21,
+`apps/openalpacad/src/discovery_rotation/`): 12 hours after its issue the
+daemon rewrites `discovery.json` with a new `auth` (`expires_at` 24 hours
+after the new issue; nothing else in the file changes, `instance_id`
+included), looking at the wall clock every minute. Every route below accepts
+the token the file names now and the one it replaced until that one's own
+`expires_at`. `apiRequest` (`lib/http.ts`) answers a `401` by reading the
+connection again through `refreshConnection` — one `get_connection_info` for
+every request refused together — and sends the request once more when the
+same `instanceId` names another token; a URL already built with a token
+(`wsUrl`, `sseUrl`, a content URL) carries what the cache held when it was
+built (`tasks/pending-decisions.md` §1 _Rev 93_).
+
 Auth on the wire:
 
 - **HTTP** — every `/v1/*` route except `/` and `/v1/health` sits behind
@@ -205,7 +218,9 @@ Liveness / identity guards the React client must reproduce:
 1. A `connection` module wrapping `invoke("ensure_daemon_running")` on boot and
    `invoke("get_connection_info")` on reconnect. Keep `{baseUrl, token, instanceId}`
    in a store/context; **all** fetches read from it.
-2. An `apiFetch(path, init)` helper that injects `Authorization: Bearer`.
+2. An `apiFetch(path, init)` helper that injects `Authorization: Bearer` and
+   answers a `401` by reading the connection again and sending the request
+   once more when the token changed (T21; §1.1).
 3. A `wsUrl(path)` helper: `baseUrl.replace(/^http/, "ws") + path + "?token=" + encodeURIComponent(token)`.
 4. An `sseUrl(streamId)` helper (token in query string).
 5. The instance-id guard above, driving the Settings → **Connection** panel's

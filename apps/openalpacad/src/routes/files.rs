@@ -279,7 +279,7 @@ pub async fn get_file_metadata_handler(
 pub(crate) async fn file_content(
     db: &openalpaca_storage::Database,
     owner_id: &str,
-    expected_token: &str,
+    expected_token: &(impl crate::discovery_rotation::AcceptsToken + ?Sized),
     headers: &HeaderMap,
     query_token: Option<&str>,
     id: &str,
@@ -360,7 +360,7 @@ pub async fn get_file_content_handler(
     file_content(
         &state.db,
         &state.local_user_id,
-        &state.token,
+        &*state.tokens,
         &headers,
         params.token.as_deref(),
         &id,

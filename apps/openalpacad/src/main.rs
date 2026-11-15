@@ -11,6 +11,7 @@ mod args;
 mod background;
 mod bootstrap;
 mod connector_bridge;
+mod discovery_rotation;
 mod event_bridge;
 mod events;
 mod extraction;
@@ -235,7 +236,11 @@ async fn async_main(
         discovery::make_discovery(host, port, instance_id.clone(), env!("CARGO_PKG_VERSION"));
     let discovery_path = discovery::write_discovery_atomic(&disc)?;
     info!("Discovery written to: {}", discovery_path.display());
-    let token = disc.auth.token.clone();
+    // T21 (2): the tokens a request may carry, the boot's alone until the
+    // rotation (Step 13) replaces it.
+    let tokens = Arc::new(discovery_rotation::DaemonTokens::new(
+        disc.auth.token.clone(),
+    ));
 
     // Step 3: Initialize database
     let db_path = store::database_path()?;
@@ -755,6 +760,9 @@ async fn async_main(
         background::spawn_learning_sweeper(queue.clone(), cancel_token.clone());
         background::spawn_learning_catch_up(queue.clone(), cancel_token.clone());
     }
+    // T21 (2): discovery.json's token and expires_at rotated on a schedule
+    // while the daemon runs; awaited at shutdown before the file is removed.
+    let rotation_task = discovery_rotation::spawn(disc, tokens.clone(), cancel_token.clone());
 
     // Step 14: Build AppState and HTTP router
     let db_for_shutdown = db.clone();
@@ -764,7 +772,7 @@ async fn async_main(
         instance_id: instance_id.clone(),
         started_at,
         managed_log,
-        token,
+        tokens,
         event_broadcaster: event_broadcaster.clone(),
         db,
         shutdown_tx,
@@ -929,8 +937,19 @@ async fn async_main(
         warn!("Failed to shut down WakeManager: {e}");
     }
 
-    // Cleanup: remove discovery file
+    // Cleanup: remove discovery file — after the rotation has stopped (it
+    // stops on the cancel, at most a write in flight later), so it cannot
+    // write the file again once it is gone.
     info!("Cleaning up...");
+    if let Some(Err(e)) = shutdown::within(
+        "The discovery token's rotation",
+        shutdown::stage_deadline(&force_exit_at),
+        rotation_task,
+    )
+    .await
+    {
+        warn!("The discovery token's rotation ended abnormally: {e}");
+    }
     if let Err(e) = discovery::remove_discovery() {
         warn!("Failed to remove discovery file: {e}");
     }

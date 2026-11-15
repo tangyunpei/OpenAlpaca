@@ -444,7 +444,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // names absolute paths; `/v1/health` stays the public liveness probe.
         .route("/v1/status", get(crate::routes::status_handler))
         .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            state.tokens.clone(),
             crate::middleware::auth_middleware,
         ));
 

@@ -7,6 +7,8 @@ use axum::{
 };
 use openalpaca_core::memory::scope_context::MemoryScopeContext;
 use openalpaca_storage::store::projects::ProjectError;
+
+use crate::discovery_rotation::AcceptsToken;
 use serde::Serialize;
 
 pub mod agents;
@@ -176,19 +178,22 @@ pub struct TokenParams {
 /// Whether a content request carries the daemon token, as `?token=<t>` (the way
 /// `/v1/chat/stream` does) or as `Authorization: Bearer <t>` (the way every
 /// other route does, so the GUI's existing `apiFetchBlob` keeps working).
+///
+/// `expected` is the daemon's token set (T21 (2)), or one fixed token in a
+/// test.
 pub(crate) fn content_token_ok(
     headers: &HeaderMap,
     query_token: Option<&str>,
-    expected: &str,
+    expected: &(impl AcceptsToken + ?Sized),
 ) -> bool {
-    if query_token == Some(expected) {
+    if query_token.is_some_and(|token| expected.accepts_token(token)) {
         return true;
     }
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected)
+        .is_some_and(|token| expected.accepts_token(token))
 }
 
 /// The plain-text `401` the other inline-auth route answers with

@@ -53,7 +53,9 @@ pub struct Auth {
     pub token: String,
     /// When the token was issued
     pub issued_at: DateTime<Utc>,
-    /// When the token expires (daemon will regenerate)
+    /// When the token expires: [`TOKEN_LIFETIME`] after its issue. The daemon
+    /// replaces the token [`ROTATE_AFTER`] after its issue, so a running
+    /// daemon's file is never read expired (T21 (2)).
     pub expires_at: DateTime<Utc>,
 }
 
@@ -66,8 +68,46 @@ pub struct Build {
 }
 
 // ============================================================================
-// Token Generation
+// Token Generation and Rotation (T21 (2))
 // ============================================================================
+
+/// How long a token lives from its issue — what `auth.expires_at` says.
+pub const TOKEN_LIFETIME: Duration = Duration::hours(24);
+
+/// How long after its issue the running daemon replaces a token with a new
+/// one (T21 (2)): half its lifetime, so a token read from the file has at
+/// least twelve hours left, and the daemon, which honours the token it
+/// replaced until that one's own `expires_at`, holds at most two.
+pub const ROTATE_AFTER: Duration = Duration::hours(12);
+
+/// A new token issued at `now`, expiring [`TOKEN_LIFETIME`] later.
+pub fn issue_auth(now: DateTime<Utc>) -> Auth {
+    Auth {
+        token: generate_token(),
+        issued_at: now,
+        expires_at: now + TOKEN_LIFETIME,
+    }
+}
+
+impl Discovery {
+    /// Whether the daemon should replace this file's token at `now`:
+    /// [`ROTATE_AFTER`] after its issue, or at once when the wall clock is
+    /// before the issue (it was set back). Past the expiry — a Mac that slept
+    /// through the schedule — it is due at the first look after the wake.
+    pub fn rotation_due(&self, now: DateTime<Utc>) -> bool {
+        now >= self.auth.issued_at + ROTATE_AFTER || now < self.auth.issued_at
+    }
+
+    /// This file with a new token issued at `now` and everything else as it
+    /// is: the instance, pid, start, address and build describe the run, and
+    /// a changed `instance_id` would tell a client the daemon restarted.
+    pub fn with_rotated_auth(&self, now: DateTime<Utc>) -> Discovery {
+        Discovery {
+            auth: issue_auth(now),
+            ..self.clone()
+        }
+    }
+}
 
 /// Generates a cryptographically secure token using OS-level CSPRNG.
 /// Returns 32 bytes encoded as base64url (no padding) = 43 characters.
@@ -151,7 +191,9 @@ pub fn remove_discovery() -> anyhow::Result<()> {
 // Validation
 // ============================================================================
 
-/// Checks if the discovery token has expired.
+/// Checks if the discovery token has expired — the clients' check, kept by
+/// T21 (2): a running daemon replaces its token before this fires, so it
+/// refuses the file of a daemon that is gone, hung or from before T21.
 pub fn ensure_not_expired(d: &Discovery) -> anyhow::Result<()> {
     if Utc::now() >= d.auth.expires_at {
         bail!("Discovery token has expired");
@@ -231,11 +273,7 @@ pub fn make_discovery(host: &str, port: u16, instance_id: String, version: &str)
             host: host.to_string(),
             port,
         },
-        auth: Auth {
-            token: generate_token(),
-            issued_at: now,
-            expires_at: now + Duration::hours(24),
-        },
+        auth: issue_auth(now),
         build: Build {
             version: version.to_string(),
             protocol: 1,

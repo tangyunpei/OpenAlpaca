@@ -29,7 +29,10 @@ pub struct AppState {
     /// ownership, not which launcher — widened from "the CLI marked this run"
     /// when the sidecar started writing the file too (T30).
     pub managed_log: bool,
-    pub token: String,
+    /// The tokens a request may carry: the one `discovery.json` names now and
+    /// the one it replaced, until that one's own expiry (T21 (2); rotated by
+    /// `discovery_rotation`).
+    pub tokens: Arc<crate::discovery_rotation::DaemonTokens>,
     pub event_broadcaster: EventBroadcaster,
     pub db: Database,
     pub shutdown_tx: mpsc::Sender<()>,

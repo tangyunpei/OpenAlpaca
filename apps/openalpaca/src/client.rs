@@ -297,6 +297,27 @@ mod tests {
     use super::render_error;
     use serde_json::json;
 
+    /// T21: a command run against a daemon up for more than a day reads the
+    /// rotated `discovery.json` and sends the token it names now.
+    #[tokio::test]
+    async fn a_client_sends_the_token_the_rotated_file_names() {
+        use crate::test_util::{
+            EnvSandbox, bearer_of, discovery_of_a_daemon_up_for, ok_json, serve,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
+        let (addr, server) = serve(vec![ok_json("{}")]);
+        let d = discovery_of_a_daemon_up_for(addr.port(), 30);
+
+        let client = super::DaemonClient::connect().expect("the rotated file is not expired");
+        let _: serde_json::Value = client.get("/v1/status").await.expect("answered");
+        let requests = server.join().expect("the server finishes");
+        assert_eq!(
+            bearer_of(&requests[0]).as_deref(),
+            Some(d.auth.token.as_str())
+        );
+    }
+
     /// The canonical envelope every new route answers with. The code is what
     /// `docs/CLI_Manual.md` and the route comments call the refusal by, so it
     /// is printed, not dropped.

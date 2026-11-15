@@ -238,7 +238,9 @@ async fn ensure_daemon_running() -> Result<ShellConnection, ShellError> {
     // discovery.json (left by a crashed/killed daemon or a reboot) would
     // otherwise be trusted forever, so the GUI would never respawn. Liveness is
     // the authoritative signal — a live daemon is used even if the file's own
-    // 24h expiry has lapsed (long uptime).
+    // expiry has lapsed. A running daemon rotates its token before that
+    // (T21 (2)), so a lapsed file over a live address is a daemon that is hung
+    // or from before T21 (Q04's table decides that case).
     if let Some(info) = live_daemon().await {
         return Ok(info);
     }

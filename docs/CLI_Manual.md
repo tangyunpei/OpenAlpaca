@@ -58,7 +58,7 @@ Linux and Windows packaging/install scripts also exist under `scripts/release/` 
 - CLI reads base URL and token from discovery.
 - Protected endpoints use `Authorization: Bearer <token>`.
 - Streaming endpoints may use query-token auth (handled by CLI internals).
-- The token is valid for 24 hours from daemon start. After that the CLI refuses it with `Discovery token has expired`; `openalpaca daemon restart` writes a fresh one.
+- The token is valid for 24 hours from its issue, and a running daemon writes a new one into `discovery.json` every 12 hours, accepting the one it replaced until that one expires, so a daemon up for days stays reachable. The CLI still refuses a file whose token has expired, with `Discovery token has expired`: a daemon that is hung, one built before the rotation, or a Mac woken from a sleep past the expiry, for up to a minute until the daemon writes a new token; `openalpaca daemon restart` writes a fresh one. `openalpaca tasks confirmations watch` reads the file again for each answer it sends, and the chat REPL reconnects when a request is refused.
 
 If discovery is missing or expired, daemon-backed commands fail until daemon is started/restarted. `config` is the exception — it works on local files and needs no daemon.
 
@@ -1178,7 +1178,7 @@ Alpaca: Forgot “I review diffs in a split view” (3f9a1c2d). The note files, 
 
 ## Troubleshooting
 
-- Discovery missing/expired: start or restart daemon. `Discovery token has expired` means the daemon has been up for more than 24 hours — `openalpaca daemon restart`.
+- Discovery missing/expired: start or restart daemon. A running daemon renews its token every 12 hours, so `Discovery token has expired` means the daemon is not renewing it: it is hung, or it was built before the renewal, or the Mac has just woken from a sleep past the expiry (wait a minute and try again) — otherwise `openalpaca daemon restart`.
 - Auth errors: ensure CLI and daemon use the same current discovery file (the same `OPENALPACA_HOME_STORE`, if you set one).
 - `daemon status` unhealthy: inspect the daemon log (`~/.openalpaca/state/logs/daemon.log` for a daemon started with `openalpaca daemon start` or by the GUI app) and `RUST_LOG` settings.
 - `daemon stop` or `restart` exits with status 2: the old daemon was not gone 15 s after it was asked to stop. The message says whether the process is still running (it prints the `kill -9 <pid>` that finishes the job) or something still holds the single-instance lock (check `openalpaca daemon status`). `restart` starts nothing in either case.

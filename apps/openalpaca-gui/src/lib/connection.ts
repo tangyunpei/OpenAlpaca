@@ -9,7 +9,9 @@
  *                             does not come up, the rejection carries the end
  *                             of what it wrote to `daemon.log` — its own
  *                             reason, verbatim.
- *   `get_connection_info`   — reads discovery + expiry check. Use on reconnect.
+ *   `get_connection_info`   — reads discovery + expiry check. Use on reconnect,
+ *                             and when a request is refused `401`: the daemon
+ *                             rotates its token while it runs (T21).
  *   `read_daemon_log_tail`  — the end of `daemon.log`, read straight from the
  *                             file, so it answers with no daemon serving.
  *   `await_daemon_stopped`  — after `POST /v1/command {"command":"shutdown"}`,
@@ -128,6 +130,7 @@ export type InstanceChangeListener = (
 
 let current: ConnectionInfo | null = null;
 let bootstrapInFlight: Promise<ConnectionInfo> | null = null;
+let refreshInFlight: Promise<ConnectionInfo> | null = null;
 
 const connectionListeners = new Set<ConnectionListener>();
 const instanceListeners = new Set<InstanceChangeListener>();
@@ -383,8 +386,19 @@ export function bootstrapConnection(): Promise<ConnectionInfo> {
  * Reconnect path: re-read discovery. On an `instanceId` mismatch this performs
  * a **full re-bootstrap** rather than handing back a connection to a daemon the
  * caller's state no longer matches.
+ *
+ * Also the path a request refused `401` takes (`lib/http.ts`): the daemon
+ * rotates the token while it runs (T21). Concurrent callers share one read.
  */
-export async function refreshConnection(): Promise<ConnectionInfo> {
+export function refreshConnection(): Promise<ConnectionInfo> {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = rereadConnection().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+async function rereadConnection(): Promise<ConnectionInfo> {
   const previous = current;
   const info = await invokeConnection("get_connection_info");
 

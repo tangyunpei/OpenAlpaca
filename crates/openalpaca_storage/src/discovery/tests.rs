@@ -111,3 +111,73 @@ fn connection_info_serde_names_are_the_guis() {
         )
     );
 }
+
+// ============================================================================
+// T21 (2): the token and its expiry rotated while the daemon runs
+// ============================================================================
+
+/// A rotation gives the file a new `auth` and leaves every other byte: the
+/// GUI drops all its state on an `instance_id` change, and `started_at`,
+/// `pid`, `listen` and `build` describe the run, not the token.
+#[test]
+fn a_rotation_replaces_the_auth_and_nothing_else() {
+    let d = pinned_discovery();
+    let at = d.auth.issued_at + ROTATE_AFTER;
+    let rotated = d.with_rotated_auth(at);
+
+    assert_ne!(rotated.auth.token, d.auth.token);
+    assert_eq!(rotated.auth.token.len(), 43);
+    assert_eq!(rotated.auth.issued_at, at);
+    assert_eq!(rotated.auth.expires_at, at + TOKEN_LIFETIME);
+    assert!(rotated.auth.expires_at > d.auth.expires_at);
+
+    let mut without_auth = serde_json::to_value(&rotated).unwrap();
+    without_auth["auth"] = serde_json::to_value(&d.auth).unwrap();
+    assert_eq!(without_auth, serde_json::to_value(&d).unwrap());
+}
+
+/// The schedule: twelve hours after a token's issue, half its lifetime, so a
+/// token read from the file always has at least twelve hours left; and at
+/// once when the wall clock has gone back past the issue.
+#[test]
+fn rotation_is_due_twelve_hours_after_issue_or_when_the_clock_went_back() {
+    assert_eq!(TOKEN_LIFETIME, Duration::hours(24));
+    assert_eq!(ROTATE_AFTER, Duration::hours(12));
+    let d = pinned_discovery();
+    let issued = d.auth.issued_at;
+
+    assert!(!d.rotation_due(issued));
+    assert!(!d.rotation_due(issued + ROTATE_AFTER - Duration::seconds(1)));
+    assert!(d.rotation_due(issued + ROTATE_AFTER));
+    // A Mac asleep past the expiry: due at the first look after the wake.
+    assert!(d.rotation_due(issued + Duration::days(3)));
+    assert!(d.rotation_due(issued - Duration::seconds(1)));
+}
+
+/// What a client reads from a daemon that has kept its schedule is never
+/// expired, however long the daemon has run; the file as the start wrote it,
+/// which is all a daemon wrote before T21, is refused after a day.
+#[test]
+fn a_file_rotated_on_schedule_is_never_expired() {
+    let now = Utc::now();
+    let started = now - Duration::hours(25);
+    let first =
+        make_discovery("127.0.0.1", 51823, "i".to_string(), "0.1.0").with_rotated_auth(started);
+    assert!(
+        ensure_not_expired(&first).is_err(),
+        "the start's token lasts a day"
+    );
+
+    let mut d = first.clone();
+
+    let mut at = started;
+    while at <= now {
+        if d.rotation_due(at) {
+            d = d.with_rotated_auth(at);
+        }
+        at += Duration::minutes(1);
+    }
+    assert_eq!(d.auth.issued_at, started + ROTATE_AFTER * 2);
+    assert_eq!(d.started_at, first.started_at);
+    ensure_not_expired(&d).expect("a rotated file is not expired");
+}

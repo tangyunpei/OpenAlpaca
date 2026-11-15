@@ -788,9 +788,23 @@ Daemon writes discovery object including:
 - build metadata
 
 The token is generated at every start and its `expires_at` is 24 hours later.
-The expiry is checked by the clients that read `discovery.json` (the CLI and
-the GUI refuse an expired file); the daemon's own middleware compares the token
-and nothing else. The file is removed on a clean shutdown.
+While the daemon runs it rewrites `discovery.json` with a new token and a new
+`expires_at` 12 hours after the token's issue (T21): it reads the wall clock
+every minute, so after a sleep past the expiry the file is renewed within a
+minute of the wake, and a wall clock set back before the issue renews it at
+once. Only `auth` changes; the instance id, pid, start time, address and build
+stay. The daemon accepts the token the file names now, and the one it replaced
+until that one's own `expires_at` (or until the next rotation, which comes
+before then only after the wall clock is set back; a client refused then
+reads the file again); the new token is accepted before the file
+names it, and a write that fails leaves the old token in the file and in force
+and is tried again a minute later (`daemon.log` says so, never the token). The
+expiry is still checked by the clients that read `discovery.json` (the CLI and
+the GUI refuse an expired file), which a running daemon's file no longer meets;
+a client holding a token past its life reads the file again when refused (the
+GUI on a `401`, `confirmations watch` for each answer, the chat REPL). The
+rotation stops when shutdown begins, and the file is removed on a clean
+shutdown after it has stopped.
 
 Auth behavior:
 
@@ -2190,7 +2204,7 @@ the app strips them for display and changes nothing else.
 - Daemon already running: check lock/discovery and stop existing instance cleanly.
 - The GUI app says the daemon did not start within 5 seconds: the rest of that message is the daemon's own reason, quoted from the end of `state/logs/daemon.log` — the same text the CLI launcher would have written there. Settings → Connection → `Show daemon log` reads more of it. "…and wrote nothing to its log" means the daemon binary never ran: check it is installed beside the app.
 - `openalpaca daemon restart` stops the daemon but starts nothing, and exits with status 2: the old daemon was not completely gone 15 s after it was asked to stop, so starting a new one would have lost the single-instance lock. The message says which of two things happened. "`The daemon (PID …) is still running 15s after it was asked to stop, so nothing was restarted.`" — read the daemon log it names (`state/logs/daemon.log` under the store root) to see what it is doing, stop it with the `kill -9 <pid>` it prints, then `openalpaca daemon start`. "`The daemon (PID …) exited, but something still holds the single-instance lock 15s after it was asked to stop, so nothing was restarted.`" — another daemon is probably already running on this store; check `openalpaca daemon status` before starting one. `openalpaca daemon stop` reports the same two cases and exits 2 as well.
-- Discovery expired: restart daemon to rotate token and rewrite discovery.
+- Discovery expired: a running daemon renews its token every 12 hours, so an expired file means it is hung, was built before the renewal, or the Mac has just woken from a sleep past the expiry (renewed within a minute). Otherwise restart the daemon, which writes a fresh token.
 - DB lock/contention: ensure single daemon instance and avoid conflicting external writers.
 - Config not loading: verify resolved config directory and presence of expected files.
 - GUI/CLI auth failures: ensure they read the current discovery token and instance.

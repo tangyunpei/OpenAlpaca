@@ -247,3 +247,47 @@ fn singleton_lock_holder_process() {
 fn the_storage_test_home_guard_is_armed_in_this_test_build() {
     assert!(openalpaca_storage::store::projects::test_home_guard_armed());
 }
+
+/// The `discovery.json` a daemon listening on `port`, started `hours_up`
+/// hours ago, has written by now on T21's schedule — the start's token, then
+/// a new one each time `rotation_due` said so, looked at every minute as the
+/// daemon looks — written where the sandboxed CLI reads it.
+pub(crate) fn discovery_of_a_daemon_up_for(
+    port: u16,
+    hours_up: i64,
+) -> openalpaca_storage::discovery::Discovery {
+    use openalpaca_storage::discovery;
+    let now = chrono::Utc::now();
+    let started = now - chrono::TimeDelta::hours(hours_up);
+    let mut d = discovery::make_discovery("127.0.0.1", port, "instance-t21".into(), "0.1.0");
+    d.started_at = started;
+    d = d.with_rotated_auth(started);
+    let mut at = started;
+    while at <= now {
+        if d.rotation_due(at) {
+            d = d.with_rotated_auth(at);
+        }
+        at += chrono::TimeDelta::minutes(1);
+    }
+    discovery::write_discovery_atomic(&d).expect("write discovery.json");
+    d
+}
+
+/// A `200` JSON answer for [`serve`].
+pub(crate) fn ok_json(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// The bearer token a raw request from [`serve`] carried, if any.
+pub(crate) fn bearer_of(request: &str) -> Option<String> {
+    request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("authorization") {
+            return None;
+        }
+        value.trim().strip_prefix("Bearer ").map(str::to_string)
+    })
+}

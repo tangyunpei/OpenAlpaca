@@ -265,6 +265,37 @@ fn get_connection_info_refuses_an_expired_discovery_file() {
     );
 }
 
+/// T21: the shell reads the file a daemon up for more than a day has
+/// rotated — the token it names now, not the start's, and no refusal of an
+/// expiry, where the file as the start wrote it is refused after a day.
+#[test]
+fn get_connection_info_reads_the_rotated_file() {
+    let _guard = HomeStoreGuard::set("info-rotated");
+    let made = discovery::make_discovery("127.0.0.1", 1, "instance-q11".into(), "0.0.0");
+    // Twenty-five hours ago (the shell has no chrono of its own).
+    let started = made.started_at - discovery::TOKEN_LIFETIME - discovery::ROTATE_AFTER / 12;
+    let first = made.with_rotated_auth(started);
+    discovery::write_discovery_atomic(&first).expect("the start's discovery.json");
+    assert_eq!(
+        refusal(invoke("get_connection_info", json!({}))),
+        shell_refusal("expired", "Discovery token has expired")
+    );
+
+    let mut d = first.clone();
+    for at in [
+        started + discovery::ROTATE_AFTER,
+        started + discovery::ROTATE_AFTER * 2,
+    ] {
+        assert!(d.rotation_due(at));
+        d = d.with_rotated_auth(at);
+    }
+    discovery::write_discovery_atomic(&d).expect("the rotated discovery.json");
+
+    let answer = invoke("get_connection_info", json!({})).expect("connection info");
+    assert_connection_info(&answer, &d);
+    assert_ne!(answer["token"], first.auth.token.as_str());
+}
+
 #[test]
 fn get_connection_info_refuses_a_discovery_file_it_cannot_parse() {
     let _guard = HomeStoreGuard::set("info-unparsable");

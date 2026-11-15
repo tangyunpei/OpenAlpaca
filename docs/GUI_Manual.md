@@ -132,7 +132,9 @@ whole bridge (`src-tauri/src/lib.rs`):
 - `ensure_daemon_running` — the boot path. It reads `state/discovery.json` and
   probes liveness by opening a TCP connection to the advertised address
   (300 ms). A live daemon is used even if the file's 24 h expiry has lapsed,
-  because liveness is the authoritative signal. If nothing answers, the daemon
+  because liveness is the authoritative signal (a running daemon renews its
+  token every 12 hours, so a lapsed file means a daemon that is hung or built
+  before the renewal). If nothing answers, the daemon
   is spawned detached (`setsid` on Unix), its output appended to
   `state/logs/daemon.log`, and the command polls for up to about five seconds
   (25 × 200 ms) for a daemon that both advertises itself and accepts
@@ -143,7 +145,12 @@ whole bridge (`src-tauri/src/lib.rs`):
   never an earlier run's. The daemon it spawns runs on your login shell's
   `PATH` (below).
 - `get_connection_info` — the reconnect path. It re-reads discovery and checks
-  the expiry without spawning anything.
+  the expiry without spawning anything. A request the daemon refuses with a
+  `401` takes it too: a running daemon renews its token every 12 hours and
+  accepts the one it replaced only until that one expires, so a window left
+  open longer reads the file again, once for every request refused together,
+  and sends the request again with the new token (never to a daemon that has
+  restarted).
 - `await_daemon_stopped` — waits until a daemon asked to stop is really gone:
   its process first, then the single-instance lock, for up to 15 s. It signals
   nothing.
