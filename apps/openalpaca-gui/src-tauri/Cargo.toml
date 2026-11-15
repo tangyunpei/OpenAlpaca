@@ -14,7 +14,10 @@ tauri-build.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+# Q12: `net` for the liveness probe (tokio::net::TcpStream, lookup_host). It
+# turns on tokio's `socket2` too, so the macOS build links socket2 0.6.5,
+# already in Cargo.lock and THIRD-PARTY-NOTICES: no lock or notices change.
+tokio = { workspace = true, features = ["net"] }
 anyhow.workspace = true
 tracing.workspace = true
 directories.workspace = true

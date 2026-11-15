@@ -7,11 +7,20 @@
 //! - Reading the end of the daemon log, so a daemon that would not start can
 //!   say why
 //! - Showing an artifact in its folder (Finder, Explorer, the file manager)
+//!
+//! Every command is `async`, so none runs on the main thread, which draws the
+//! window (Tauri runs a command without `async` there); every file read, the
+//! spawn and every other blocking call runs on the blocking pool
+//! (`tauri::async_runtime::spawn_blocking`), so it never holds a thread of
+//! the async runtime either; and the liveness probe is tokio's connect under
+//! tokio's timeout (Q12).
 
 use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
 use openalpaca_storage::store;
 use serde::Serialize;
+use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
 use std::time::Duration;
@@ -22,8 +31,17 @@ use std::time::Duration;
 
 /// Get connection info from discovery.json.
 /// Returns error if daemon is not running or discovery is invalid.
+///
+/// The file is read on the blocking pool.
 #[tauri::command]
-fn get_connection_info() -> Result<ConnectionInfo, String> {
+async fn get_connection_info() -> Result<ConnectionInfo, String> {
+    tauri::async_runtime::spawn_blocking(read_connection_info)
+        .await
+        .map_err(|e| format!("Could not read the daemon's discovery file: {e}"))?
+}
+
+/// [`get_connection_info`]'s work: read discovery.json and check its token.
+fn read_connection_info() -> Result<ConnectionInfo, String> {
     let Some(d) = discovery::read_discovery().map_err(|e| e.to_string())? else {
         return Err("Discovery not found: daemon may not be running".into());
     };
@@ -35,6 +53,10 @@ fn get_connection_info() -> Result<ConnectionInfo, String> {
 
 /// Ensure the daemon is running, spawning it if necessary.
 /// Returns connection info once daemon is ready.
+///
+/// Every read of discovery.json, the spawn and the read of the log run on
+/// the blocking pool, and the probe is tokio's, so the command holds no
+/// runtime thread while it waits on a disk, a connect or the new process.
 #[tauri::command]
 async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
     // Step 1: Check if a daemon is already running AND actually alive. A stale
@@ -42,23 +64,22 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
     // otherwise be trusted forever, so the GUI would never respawn. Liveness is
     // the authoritative signal — a live daemon is used even if the file's own
     // 24h expiry has lapsed (long uptime).
-    if let Ok(Some(d)) = discovery::read_discovery()
-        && daemon_is_alive(&d)
-    {
-        return Ok(ConnectionInfo::from(&d));
+    if let Some(info) = live_daemon().await {
+        return Ok(info);
     }
 
     // Step 2: Spawn the daemon process
-    let log_start = spawn_daemon().map_err(|e| format!("Failed to spawn daemon: {e:#}"))?;
+    let log_start = tauri::async_runtime::spawn_blocking(spawn_daemon)
+        .await
+        .map_err(|e| format!("Failed to spawn daemon: {e}"))?
+        .map_err(|e| format!("Failed to spawn daemon: {e:#}"))?;
 
     // Step 3: Wait for the new daemon to appear AND accept connections.
     for _ in 0..25 {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        if let Ok(Some(d)) = discovery::read_discovery()
-            && daemon_is_alive(&d)
-        {
-            return Ok(ConnectionInfo::from(&d));
+        if let Some(info) = live_daemon().await {
+            return Ok(info);
         }
     }
 
@@ -68,8 +89,14 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
     // say it: with no daemon serving `GET /v1/status` there is nobody to ask
     // where the log is. Only what *this* spawn wrote is read, so an earlier
     // run's last words are never presented as this one's.
-    let log_path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
-    let tail = store::read_log_tail(&log_path, log_start, TIMEOUT_TAIL_LINES).unwrap_or_default();
+    let (log_path, tail) = tauri::async_runtime::spawn_blocking(move || {
+        let log_path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
+        let tail =
+            store::read_log_tail(&log_path, log_start, TIMEOUT_TAIL_LINES).unwrap_or_default();
+        Ok::<_, String>((log_path, tail))
+    })
+    .await
+    .map_err(|e| format!("Could not read the daemon log: {e}"))??;
     if tail.is_empty() {
         Err(format!(
             "The daemon did not start within 5 seconds, and wrote nothing to its log \
@@ -99,11 +126,17 @@ const TIMEOUT_TAIL_LINES: usize = 40;
 /// line handling is `store::read_log_tail`'s, which is where it is tested —
 /// the workspace's gate set (`default-members`) leaves this crate out, and
 /// it is checked and tested only by hand (`-p openalpaca_gui`).
+///
+/// The read runs on the blocking pool.
 #[tauri::command]
-fn read_daemon_log_tail(lines: usize) -> Result<String, String> {
-    let path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
-    store::read_log_tail(&path, 0, lines)
-        .map_err(|e| format!("Could not read {}: {e}", path.display()))
+async fn read_daemon_log_tail(lines: usize) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
+        store::read_log_tail(&path, 0, lines)
+            .map_err(|e| format!("Could not read {}: {e}", path.display()))
+    })
+    .await
+    .map_err(|e| format!("Could not read the daemon log: {e}"))?
 }
 
 /// What [`await_daemon_stopped`] concluded, serialized to the webview in
@@ -252,16 +285,46 @@ fn without_verbatim_prefix(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// The daemon discovery.json names, if there is one and it answers the
+/// probe. The file is read on the blocking pool; a missing, unreadable or
+/// unparsable file is no daemon, as is a read that could not be run.
+async fn live_daemon() -> Option<ConnectionInfo> {
+    let d = tauri::async_runtime::spawn_blocking(discovery::read_discovery)
+        .await
+        .ok()?
+        .ok()??;
+    daemon_is_alive(&d).await.then(|| ConnectionInfo::from(&d))
+}
+
+/// How long the probe waits for one address's connect.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+
 /// Liveness probe: can we open a TCP connection to the daemon's listen address?
 /// A stale discovery.json (dead daemon) fails this, so callers respawn instead
 /// of returning a dead endpoint.
-fn daemon_is_alive(d: &discovery::Discovery) -> bool {
-    use std::net::ToSocketAddrs;
-    let Ok(addrs) = (d.listen.host.as_str(), d.listen.port).to_socket_addrs() else {
+///
+/// tokio's resolver and connect, each address under tokio's timeout: the
+/// waits are the runtime's timers, so a slow or silent address holds no
+/// thread.
+async fn daemon_is_alive(d: &discovery::Discovery) -> bool {
+    let Ok(addrs) = tokio::net::lookup_host((d.listen.host.as_str(), d.listen.port)).await else {
         return false;
     };
+    any_address_answers(addrs, tokio::net::TcpStream::connect).await
+}
+
+/// Whether `connect` completes for any of `addrs`, tried in order, each
+/// given [`LIVENESS_PROBE_TIMEOUT`] and no more. The connect is a parameter
+/// so a test can give the probe an address that never answers.
+async fn any_address_answers<S, F>(
+    addrs: impl IntoIterator<Item = SocketAddr>,
+    connect: impl Fn(SocketAddr) -> F,
+) -> bool
+where
+    F: Future<Output = std::io::Result<S>>,
+{
     for addr in addrs {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+        if let Ok(Ok(_)) = tokio::time::timeout(LIVENESS_PROBE_TIMEOUT, connect(addr)).await {
             return true;
         }
     }

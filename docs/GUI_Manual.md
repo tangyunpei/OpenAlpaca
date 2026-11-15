@@ -159,6 +159,12 @@ guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
 `request_id` the client holds is dead and the app re-bootstraps rather than
 merely reopening its socket (`src/lib/connection.ts`).
 
+None of the five runs on the window's own thread, so none can freeze the
+window: each answers on the shell's background runtime, every file read, the
+spawn and the wait for a stop run on a pool of threads of their own, and the
+liveness probe waits on the runtime's timers, not on a thread. A slow disk, a
+daemon slow to answer or a long log read leaves the window responsive.
+
 **Three ways to have no daemon, told apart.** A window that stopped the daemon
 itself (Settings → Connection → `Stop daemon…`) says `stopped`; one whose daemon
 announced it was going away — the CLI or another window stopped it, and the

@@ -123,28 +123,40 @@ fn the_storage_test_home_guard_is_armed_in_this_test_build() {
 // The IPC round trip
 // ============================================================================
 
-/// One `invoke(cmd, args)` from a webview of a mock app built from
-/// [`with_commands`]: the command's answer as JSON, or its refusal.
-fn invoke(cmd: &str, args: Value) -> Result<Value, Value> {
+/// A mock app built from [`with_commands`] and its one webview. The app is
+/// returned beside the webview so that it lives as long as the test needs it.
+fn mock_webview() -> (
+    tauri::App<tauri::test::MockRuntime>,
+    tauri::WebviewWindow<tauri::test::MockRuntime>,
+) {
     let app = with_commands(mock_builder())
         .build(mock_context(noop_assets()))
         .expect("mock app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
         .expect("mock webview");
-    get_ipc_response(
-        &webview,
-        InvokeRequest {
-            cmd: cmd.into(),
-            callback: CallbackFn(0),
-            error: CallbackFn(1),
-            url: "tauri://localhost".parse().expect("url"),
-            body: InvokeBody::Json(args),
-            headers: Default::default(),
-            invoke_key: INVOKE_KEY.to_string(),
-        },
-    )
-    .map(|body| body.deserialize::<Value>().expect("a JSON answer"))
+    (app, webview)
+}
+
+/// The webview's `invoke(cmd, args)` as the IPC layer receives it.
+fn invoke_request(cmd: &str, args: Value) -> InvokeRequest {
+    InvokeRequest {
+        cmd: cmd.into(),
+        callback: CallbackFn(0),
+        error: CallbackFn(1),
+        url: "tauri://localhost".parse().expect("url"),
+        body: InvokeBody::Json(args),
+        headers: Default::default(),
+        invoke_key: INVOKE_KEY.to_string(),
+    }
+}
+
+/// One `invoke(cmd, args)` from a webview of a mock app built from
+/// [`with_commands`]: the command's answer as JSON, or its refusal.
+fn invoke(cmd: &str, args: Value) -> Result<Value, Value> {
+    let (_app, webview) = mock_webview();
+    get_ipc_response(&webview, invoke_request(cmd, args))
+        .map(|body| body.deserialize::<Value>().expect("a JSON answer"))
 }
 
 /// A refusal's text: the shell's own are one string each.
@@ -387,5 +399,297 @@ fn reveal_path_refuses_a_call_without_path() {
     assert!(
         text.contains("command reveal_path missing required key path"),
         "{text}"
+    );
+}
+
+// ============================================================================
+// Off the window's thread and off the runtime's (Q12)
+// ============================================================================
+
+/// One `invoke(cmd, args)` dispatched from this thread with a responder of
+/// the test's own: the thread the answer was produced on, and the answer.
+fn invoke_answered_on(cmd: &str, args: Value) -> (std::thread::ThreadId, Result<Value, Value>) {
+    let (_app, webview) = mock_webview();
+    let (tx, rx) = std::sync::mpsc::channel();
+    webview.on_message(
+        invoke_request(cmd, args),
+        Box::new(move |_webview, _cmd, response, _callback, _error| {
+            let _ = tx.send((std::thread::current().id(), response));
+        }),
+    );
+    let (thread, response) = rx
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap_or_else(|_| panic!("{cmd} gave no answer within 30 s"));
+    let answer = match response {
+        tauri::ipc::InvokeResponse::Ok(body) => {
+            Ok(body.deserialize::<Value>().expect("a JSON answer"))
+        }
+        tauri::ipc::InvokeResponse::Err(tauri::ipc::InvokeError(value)) => Err(value),
+    };
+    (thread, answer)
+}
+
+/// Every command answers on a thread of the async runtime, never on the
+/// thread that dispatched the `invoke`. In the app that thread is the main
+/// one, which draws the window, and a command without `async` runs on it
+/// (Tauri's *Calling Rust from the Frontend*: "Commands without the async
+/// keyword are executed on the main thread"): a slow disk under
+/// `get_connection_info`, or `read_daemon_log_tail`'s 64 KiB read, froze the
+/// window while it ran. The mock app dispatches from the test's own thread,
+/// so an answer produced on it is a command that ran inline.
+#[test]
+fn every_command_answers_off_the_thread_that_invoked_it() {
+    let guard = HomeStoreGuard::set("off-the-invoking-thread");
+    assert_no_daemon_beside_the_test_binary();
+    let here = std::thread::current().id();
+    let gone = guard.store().join("artifacts").join("gone.md");
+    let mut inline = Vec::new();
+    // Before discovery.json exists: `await_daemon_stopped` then answers
+    // `not_running` at once.
+    for (cmd, args) in [
+        ("await_daemon_stopped", json!({})),
+        ("read_daemon_log_tail", json!({ "lines": 5 })),
+        ("reveal_path", json!({ "path": gone })),
+        ("get_connection_info", json!({})),
+    ] {
+        let (thread, _answer) = invoke_answered_on(cmd, args);
+        if thread == here {
+            inline.push(cmd);
+        }
+    }
+    // `ensure_daemon_running`'s reuse arm only (C-12): an address that answers.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    write_discovery(listener.local_addr().expect("port").port(), false);
+    let (thread, answer) = invoke_answered_on("ensure_daemon_running", json!({}));
+    answer.expect("reused");
+    if thread == here {
+        inline.push("ensure_daemon_running");
+    }
+    drop(listener);
+    assert!(
+        inline.is_empty(),
+        "answered on the thread that invoked them (the window's, in the app): {inline:?}"
+    );
+}
+
+/// A named pipe standing in for a slow file: opening it to read blocks until
+/// something opens it to write, so a read of it holds its thread for exactly
+/// as long as the test keeps it shut — a network volume, or a disk waking.
+#[cfg(unix)]
+struct BlockedFile {
+    path: PathBuf,
+    released: bool,
+}
+
+#[cfg(unix)]
+impl BlockedFile {
+    fn at(path: PathBuf) -> Self {
+        use std::os::unix::ffi::OsStrExt;
+
+        std::fs::create_dir_all(path.parent().expect("its folder")).expect("its folder");
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a C path");
+        // SAFETY: a NUL-terminated path that outlives the call.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(
+            rc,
+            0,
+            "mkfifo {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+        Self {
+            path,
+            released: false,
+        }
+    }
+
+    /// Lets the reader through with `bytes`: opens the pipe to write once a
+    /// reader holds it open (until then the open is refused, `ENXIO`), writes
+    /// and closes. Gives up after ten seconds, when nothing is reading.
+    fn release(&mut self, bytes: &[u8]) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        if std::mem::replace(&mut self.released, true) {
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&self.path)
+            {
+                Ok(mut pipe) => {
+                    let _ = pipe.write_all(bytes);
+                    return;
+                }
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for BlockedFile {
+    /// A test that failed before letting the reader through still does, so
+    /// no thread is left waiting on the pipe.
+    fn drop(&mut self) {
+        self.release(b"");
+    }
+}
+
+/// Runs `command()` on a runtime of one thread while `file` is held shut,
+/// and reports whether that thread stayed free to run another task — what a
+/// command must keep so that one slow read never holds a runtime thread
+/// every other `invoke` may be waiting for — with the command's answer once
+/// `file` is let through with `bytes`. The ten seconds are a backstop for a
+/// command that holds the thread, never a measurement.
+#[cfg(unix)]
+fn runtime_free_while_blocked<T, F>(
+    mut file: BlockedFile,
+    bytes: &[u8],
+    command: impl FnOnce() -> F + Send + 'static,
+) -> (bool, T)
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + 'static,
+{
+    let (beat, heard) = std::sync::mpsc::channel();
+    let runner = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a one-thread runtime")
+            .block_on(async move {
+                tokio::spawn(async move {
+                    let _ = beat.send(());
+                });
+                command().await
+            })
+    });
+    let free = heard.recv_timeout(Duration::from_secs(10)).is_ok();
+    file.release(bytes);
+    let answer = runner.join().expect("the command's thread");
+    (free, answer)
+}
+
+#[cfg(unix)]
+#[test]
+fn get_connection_info_reads_discovery_off_the_runtime() {
+    let _guard = HomeStoreGuard::set("info-blocked");
+    let file = BlockedFile::at(store::discovery_path().expect("discovery path"));
+    let d = discovery::make_discovery("127.0.0.1", 1, "instance-q11".into(), "0.0.0");
+    let bytes = serde_json::to_vec(&d).expect("discovery as JSON");
+    let (free, answer) = runtime_free_while_blocked(file, &bytes, get_connection_info);
+    assert!(
+        free,
+        "get_connection_info held the runtime's thread while discovery.json would not open"
+    );
+    let info = answer.expect("connection info");
+    assert_connection_info(&serde_json::to_value(info).expect("as JSON"), &d);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_daemon_log_tail_reads_the_log_off_the_runtime() {
+    let _guard = HomeStoreGuard::set("log-blocked");
+    let file = BlockedFile::at(store::daemon_log_path().expect("log path"));
+    // Whatever a pipe gives a seek, the command answers once let through.
+    let (free, _answer) =
+        runtime_free_while_blocked(file, b"one\ntwo\n", || read_daemon_log_tail(5));
+    assert!(
+        free,
+        "read_daemon_log_tail held the runtime's thread while daemon.log would not open"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_daemon_running_reads_discovery_off_the_runtime() {
+    let guard = HomeStoreGuard::set("ensure-blocked");
+    assert_no_daemon_beside_the_test_binary();
+    // The reuse arm only (C-12): the address the file names answers.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    let port = listener.local_addr().expect("port").port();
+    let file = BlockedFile::at(store::discovery_path().expect("discovery path"));
+    let d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), "0.0.0");
+    let bytes = serde_json::to_vec(&d).expect("discovery as JSON");
+    let (free, answer) = runtime_free_while_blocked(file, &bytes, ensure_daemon_running);
+    drop(listener);
+    assert!(
+        free,
+        "ensure_daemon_running held the runtime's thread while discovery.json would not open"
+    );
+    let info = answer.expect("reused");
+    assert_connection_info(&serde_json::to_value(info).expect("as JSON"), &d);
+    let log = store::daemon_log_path().expect("log path");
+    assert!(log.starts_with(guard.store()));
+    assert!(!log.exists(), "the spawn arm ran: {}", log.display());
+}
+
+// ============================================================================
+// The liveness probe (Q12: tokio's connect under tokio's timeout)
+// ============================================================================
+
+/// `future` run to its end on a runtime of one thread.
+fn on_one_thread<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a one-thread runtime")
+        .block_on(future)
+}
+
+#[test]
+fn the_liveness_probe_finds_an_address_that_answers() {
+    let _guard = HomeStoreGuard::set("probe-live");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    let port = listener.local_addr().expect("port").port();
+    let d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), "0.0.0");
+    assert!(on_one_thread(daemon_is_alive(&d)));
+}
+
+#[test]
+fn the_liveness_probe_finds_nothing_at_a_closed_port() {
+    let _guard = HomeStoreGuard::set("probe-closed");
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        listener.local_addr().expect("port").port()
+    };
+    let d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), "0.0.0");
+    assert!(!on_one_thread(daemon_is_alive(&d)));
+}
+
+/// An address whose connect never completes costs the probe its timeout per
+/// address and no more, and the probe says no.
+#[test]
+fn the_liveness_probe_gives_each_silent_address_its_timeout_and_no_more() {
+    let _guard = HomeStoreGuard::set("probe-silent");
+    assert_eq!(
+        LIVENESS_PROBE_TIMEOUT,
+        Duration::from_millis(300),
+        "the probe's wait per address"
+    );
+    let addrs: [std::net::SocketAddr; 2] = [
+        "127.0.0.1:1".parse().expect("an address"),
+        "[::1]:1".parse().expect("an address"),
+    ];
+    let started = std::time::Instant::now();
+    let answered = on_one_thread(any_address_answers(addrs, |_| {
+        std::future::pending::<std::io::Result<()>>()
+    }));
+    let waited = started.elapsed();
+    assert!(!answered);
+    assert!(
+        waited >= LIVENESS_PROBE_TIMEOUT * 2,
+        "gave up after {waited:?}, before two timeouts"
+    );
+    assert!(
+        waited < Duration::from_secs(5),
+        "still waiting after {waited:?}"
     );
 }
