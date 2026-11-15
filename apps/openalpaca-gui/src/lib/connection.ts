@@ -19,7 +19,9 @@
  * camelCase, with `daemonPath` (Q21): where the `PATH` of a daemon this run
  * of the app spawned came from — the login shell's, captured at the app's
  * start, or the fallback list — and how long the capture took, never the
- * `PATH` itself; `null` for a daemon the app did not spawn this run. A
+ * `PATH` itself, with the names of the variables passed beside it because
+ * `daemon.toml`'s `[daemon.env] passthrough_keys` lists them (N-DAEMON-2),
+ * never their values; `null` for a daemon the app did not spawn this run. A
  * refusal of the shell's is typed, `{ kind, message }`
  * (`lib/shell-error.ts`, Q13): it becomes a `ConnectionError` carrying that
  * `kind` and the shell's sentence as it is.
@@ -56,6 +58,11 @@ export interface DaemonPath {
   captureMs: number;
   /** Why the capture failed, the shell's sentence; `null` for `login-shell`. */
   reason: string | null;
+  /**
+   * The variables passed beside `PATH` from the login shell, by name, as
+   * `[daemon.env] passthrough_keys` lists them (N-DAEMON-2); empty for none.
+   */
+  passedKeys: string[];
 }
 
 /** `value` as a `DaemonPath`, or `null` when it is not one. */
@@ -67,7 +74,18 @@ export function daemonPathOf(value: unknown): DaemonPath | null {
     return null;
   }
   if (v.reason !== null && typeof v.reason !== "string") return null;
-  return { source: v.source, captureMs: v.captureMs, reason: v.reason };
+  if (
+    !Array.isArray(v.passedKeys) ||
+    !v.passedKeys.every((key) => typeof key === "string")
+  ) {
+    return null;
+  }
+  return {
+    source: v.source,
+    captureMs: v.captureMs,
+    reason: v.reason,
+    passedKeys: [...(v.passedKeys as string[])],
+  };
 }
 
 /** Thrown when discovery is missing/expired or the Tauri bridge is absent. */

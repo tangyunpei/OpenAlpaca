@@ -25,7 +25,10 @@
 //! The daemon it spawns runs on the `PATH` of the account's login shell,
 //! captured once at the app's start, or on a fixed list when that capture
 //! fails (Q21, [`login_path`]); `ensure_daemon_running` and
-//! `get_connection_info` answer which, for a daemon this app spawned.
+//! `get_connection_info` answer which, for a daemon this app spawned. Beside
+//! `PATH` it gets only the variables the owner lists in `daemon.toml`'s
+//! `[daemon.env] passthrough_keys` that the login shell exports, named in the
+//! same announcement, never by value (N-DAEMON-2).
 
 mod login_path;
 
@@ -658,22 +661,28 @@ fn spawn_daemon() -> anyhow::Result<Spawned> {
     })
 }
 
-/// The spawn's line in `gui.log`: the daemon's `PATH` source and the
-/// capture's duration, never the `PATH`.
+/// The spawn's line in `gui.log`: the daemon's `PATH` source, the
+/// capture's duration and the keys passed beside it by name (N-DAEMON-2),
+/// never the `PATH` or a value.
 fn announce_daemon_path(path: &DaemonPath) {
     tracing::info!(
         source = path.source.as_str(),
         capture_ms = path.capture_ms(),
+        passed_keys = path.passed_keys().join(",").as_str(),
         "Daemon PATH source"
     );
 }
 
 /// The daemon's command but its stdio: its working directory the store's
 /// root, `OPENALPACA_CONFIG_DIR`, [`store::MANAGED_LOG_ENV`], and — with a
-/// [`DaemonPath`] — `PATH` set to it and [`store::PATH_SOURCE_ENV`] to its
-/// source and capture time (`login-shell 212`), never the `PATH` itself.
-/// Nothing else is set or removed: every other variable is the app's own,
-/// inherited as before.
+/// [`DaemonPath`] — `PATH` set to it, each listed key the login shell
+/// exported set to its value (N-DAEMON-2), and [`store::PATH_SOURCE_ENV`] to
+/// the source, the capture time and the keys' names (`login-shell 212
+/// AWS_PROFILE`), never the `PATH` or a value. The listed keys are set
+/// first, so a variable the app sets itself always keeps the app's value
+/// (the list never holds one: `login_path::SET_BY_THE_APP`). Nothing else is
+/// set or removed: every other variable is the app's own, inherited as
+/// before.
 ///
 /// On Unix a `PATH` set on the command is also the one a bare program name
 /// is looked up on, so a debug build's `openalpacad` fallback (no daemon
@@ -685,6 +694,9 @@ fn daemon_command(
     path: Option<&DaemonPath>,
 ) -> Command {
     let mut cmd = Command::new(program);
+    if let Some(path) = path {
+        cmd.envs(path.passed().iter().map(|(key, value)| (key, value)));
+    }
     cmd.current_dir(app_dir)
         .env("OPENALPACA_CONFIG_DIR", config_dir)
         .env(store::MANAGED_LOG_ENV, "1");

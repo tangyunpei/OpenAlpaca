@@ -173,9 +173,29 @@ shell still running then is stopped, with everything it started. If the
 capture fails — the login shell exits with an error (a csh or tcsh login
 shell always does), takes too long, or prints no `PATH` — the daemon gets
 a fixed list instead: `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
-`/bin`, `/usr/sbin`, `/sbin` and `~/.cargo/bin`. Only `PATH` is taken: an API
-key or any other variable your profile exports does not reach the daemon this
-way. A non-interactive login shell reads your login files (`~/.zprofile`,
+`/bin`, `/usr/sbin`, `/sbin` and `~/.cargo/bin`. Only `PATH` is taken, unless
+you name more: a credential pointer (`AWS_PROFILE`,
+`GOOGLE_APPLICATION_CREDENTIALS`, `KUBECONFIG`) your profile exports reaches
+the app's daemon — and every command and MCP server it starts — only when
+`[daemon.env] passthrough_keys` in
+`~/.openalpaca/config/daemon.toml` lists its name
+(`passthrough_keys = ["AWS_PROFILE"]`; names only, never values; empty by
+default). The list takes any variable's name, so an API key named there
+reaches the daemon too; keep API keys in `llm.toml`. The app reads
+that list when it opens, with the login shell's `PATH`, and hands it only to a
+daemon it spawns: the daemon outlives the window, a reopened app uses a daemon
+still running as it is, and that daemon keeps the environment it started with.
+So an edit reaches the daemon once you stop it (Settings → Connection →
+`Stop daemon…`, or `openalpaca daemon stop`) and open the app again, or open
+the app again and then choose `Stop daemon…` and `Start daemon` there; until
+then `gui.log`'s capture line names the
+keys a daemon this launch spawns would get, not the running one's. A listed
+variable your login shell does not export, and every listed one when the
+capture fails, is not passed. `PATH`
+and the three `OPENALPACA_` variables the app sets itself are never taken
+from the list. An app started from a terminal (`bun run tauri dev`) still
+hands its daemon that terminal's own environment, whatever the list says. A
+non-interactive login shell reads your login files (`~/.zprofile`,
 `~/.zshenv`, `/etc/zprofile` for zsh; `~/.bash_profile` or `~/.profile` for
 bash), not `~/.zshrc` or `~/.bashrc`: a folder added to `PATH` only there is
 not in the daemon's `PATH`. Where the `PATH` came from, and how long the capture
@@ -183,7 +203,8 @@ took, is written to `state/logs/gui.log`, to the daemon's boot line in
 `daemon.log` (`PATH source: login-shell`, `fallback-list`, or `inherited` for a
 daemon started from a terminal), and to Settings → Connection for a daemon this
 run of the app started — not for one an earlier launch started and this one
-found running — never the `PATH` itself.
+found running — never the `PATH` itself. The listed variables passed beside it
+are named in the same three places, never their values.
 
 The first two return `{ baseUrl, token, instanceId, daemonPath }`;
 `daemonPath` is where the `PATH` of a daemon this run of the app spawned came
@@ -1151,7 +1172,10 @@ For a daemon this run of the app started, a line under the buttons says where
 its `PATH` came from and how long reading it took — `This daemon's PATH is your
 login shell's, read when the app started (212 ms).`, or `This daemon's PATH is
 the app's fallback list:` and why — never the `PATH` itself ([Connection
-lifecycle](#connection-lifecycle)). There is no line for a daemon started from a
+lifecycle](#connection-lifecycle)). When `daemon.toml`'s
+`[daemon.env] passthrough_keys` named variables your login shell exports, the
+line goes on: `Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: AWS_PROFILE.`
+— their names, never their values. There is no line for a daemon started from a
 terminal, or for one an earlier launch of the app started and this one found
 running, or while the daemon is stopped.
 

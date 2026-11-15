@@ -136,6 +136,7 @@ const link = vi.hoisted(() => ({
     source: "login-shell" | "fallback-list";
     captureMs: number;
     reason: string | null;
+    passedKeys: string[];
   } | null,
   connected: true,
   lastError: null as string | null,
@@ -423,7 +424,12 @@ describe("where a project-less run's files go (G7)", () => {
  */
 describe("the daemon's PATH (Q21)", () => {
   it("says the login shell's, with the capture's duration", () => {
-    link.daemonPath = { source: "login-shell", captureMs: 212, reason: null };
+    link.daemonPath = {
+      source: "login-shell",
+      captureMs: 212,
+      reason: null,
+      passedKeys: [],
+    };
     render(<ConnectionSection />);
 
     expect(
@@ -438,6 +444,7 @@ describe("the daemon's PATH (Q21)", () => {
       source: "fallback-list",
       captureMs: 3001,
       reason: "the login shell did not finish within 3000 ms",
+      passedKeys: [],
     };
     render(<ConnectionSection />);
 
@@ -448,11 +455,32 @@ describe("the daemon's PATH (Q21)", () => {
     ).toBeTruthy();
   });
 
+  it("names the keys passed beside it, never their values (N-DAEMON-2)", () => {
+    link.daemonPath = {
+      source: "login-shell",
+      captureMs: 212,
+      reason: null,
+      passedKeys: ["AWS_PROFILE"],
+    };
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        "This daemon's PATH is your login shell's, read when the app started (212 ms). Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: AWS_PROFILE.",
+      ),
+    ).toBeTruthy();
+  });
+
   it("says nothing for a daemon this app did not spawn, or while stopped", () => {
     render(<ConnectionSection />);
     expect(screen.queryByText(/This daemon's PATH/)).toBeNull();
 
-    link.daemonPath = { source: "login-shell", captureMs: 212, reason: null };
+    link.daemonPath = {
+      source: "login-shell",
+      captureMs: 212,
+      reason: null,
+      passedKeys: [],
+    };
     link.stopIntent = "stopped_here";
     link.stopPhase = "stopped";
     render(<ConnectionSection />);
@@ -462,6 +490,9 @@ describe("the daemon's PATH (Q21)", () => {
   it("words each row of the shell's table", () => {
     expect(daemonPathNote(daemonPaths.login_shell as never)).toBe(
       "This daemon's PATH is your login shell's, read when the app started (212 ms).",
+    );
+    expect(daemonPathNote(daemonPaths.login_shell_with_keys as never)).toBe(
+      "This daemon's PATH is your login shell's, read when the app started (212 ms). Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: AWS_PROFILE, KUBECONFIG.",
     );
     expect(daemonPathNote(daemonPaths.fallback_list as never)).toBe(
       "This daemon's PATH is the app's fallback list: the login shell did not finish within 3000 ms (3000 ms).",

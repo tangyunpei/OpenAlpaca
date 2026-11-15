@@ -41,9 +41,10 @@
  * **Where a daemon this app spawned got its `PATH`** (Q21): the shell's
  * `daemonPath` on the connection — the login shell's, read once when the app
  * started, or the app's fallback list and why — with the capture's
- * duration, never the `PATH` itself; nothing for a daemon this run of the
- * app did not spawn (one started from a terminal logs `inherited` in its own
- * `daemon.log`).
+ * duration, never the `PATH` itself, and the variables passed beside it by
+ * name (`[daemon.env] passthrough_keys`, N-DAEMON-2); nothing for a daemon
+ * this run of the app did not spawn (one started from a terminal logs
+ * `inherited` in its own `daemon.log`).
  *
  * **Why the daemon would not start** is shown here too, verbatim: the shell's
  * `ensure_daemon_running` rejection ends with what the daemon wrote to its
@@ -291,11 +292,14 @@ export function statusTitle(
 
 /**
  * Where the `PATH` of the daemon this app spawned came from, and how long
- * the capture took — never the `PATH` (Q21).
+ * the capture took — never the `PATH` (Q21) — and the variables passed
+ * beside it, by name, never their values (N-DAEMON-2).
  */
 export function daemonPathNote(path: DaemonPath): string {
   if (path.source === "login-shell") {
-    return `This daemon's PATH is your login shell's, read when the app started (${path.captureMs} ms).`;
+    const note = `This daemon's PATH is your login shell's, read when the app started (${path.captureMs} ms).`;
+    if (path.passedKeys.length === 0) return note;
+    return `${note} Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: ${path.passedKeys.join(", ")}.`;
   }
   const why = path.reason ?? "the login shell's could not be read";
   return `This daemon's PATH is the app's fallback list: ${why} (${path.captureMs} ms).`;

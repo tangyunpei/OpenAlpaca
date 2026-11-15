@@ -82,6 +82,10 @@ interface ConnectionInfo {
     source: "login-shell" | "fallback-list";
     captureMs: number; // the capture's duration, from the app's start
     reason: string | null; // why the capture failed; null for login-shell
+    // N-DAEMON-2: the variables passed beside PATH from the login shell
+    // because daemon.toml's [daemon.env] passthrough_keys lists them, by
+    // name; empty for none (always empty for fallback-list). Never a value.
+    passedKeys: string[];
   } | null;
 }
 // baseUrl = `http://{listen.host}:{listen.port}`
@@ -151,6 +155,27 @@ on existing answers: no command is added (still five), and nothing is added
 to the daemon's API. `src/lib/daemon-path.json` holds `daemonPath`'s wire
 forms, which the shell's test serializes against and `lib/connection.test.ts`
 and `ConnectionSection.test.tsx` read.
+
+Beside `PATH` the daemon gets only the variables the owner lists in the
+store's `config/daemon.toml` (the file the daemon reads through
+`OPENALPACA_CONFIG_DIR`), `[daemon.env] passthrough_keys = []` — names only,
+empty by default (N-DAEMON-2): the shell reads the list on the capture's
+thread as the capture starts (the `toml` crate), keeps each listed variable
+the login shell exports from between the markers, and sets it on the
+daemon's command before its own variables. An entry that is not a variable
+name, and `PATH` and the three variables the shell sets itself, are dropped
+with a `gui.log` warning that never quotes a dropped entry. The keys passed
+are named, never valued, in `gui.log` (`passed_keys`, and `absent_keys` for
+a listed one the login shell does not export), after the capture time in
+`OPENALPACA_PATH_SOURCE` (`login-shell 212 AWS_PROFILE,KUBECONFIG`, which
+the daemon's boot line names) and in `daemonPath.passedKeys`. A failed
+capture passes none. The list reaches only a daemon the shell spawns: an edit
+reaches the daemon once it is stopped and the app opened again (a daemon still
+running is reused by `ensure_daemon_running` as it is, its environment
+unchanged), and the capture's `passed_keys` name what a daemon this launch
+spawns would get. Nothing else is set or removed: an app started from a
+terminal still hands its daemon its own environment (`tasks/pending-decisions.md` §1
+_Rev 92_).
 
 Auth on the wire:
 

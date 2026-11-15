@@ -24,6 +24,25 @@
 //! `store::PATH_SOURCE_ENV`, to one boot line in `daemon.log`; and on the
 //! connection the webview reads (Settings → Connection).
 //!
+//! **The keys listed beside `PATH` (N-DAEMON-2).** A credential pointer the
+//! login shell exports — `AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`,
+//! `KUBECONFIG`, or any other variable — reaches the daemon only when the
+//! owner names it in `daemon.toml`, `[daemon.env] passthrough_keys = [...]`:
+//! variable names only, never values, empty by default. The shell reads that
+//! list from the store's `config/daemon.toml` — the file the daemon it spawns
+//! reads, through `OPENALPACA_CONFIG_DIR` — on the capture's thread, as the
+//! capture starts ([`configured_passthrough_keys`]), so the allowlist taken
+//! from between the markers is `PATH` and the listed names. The list reaches
+//! only a daemon this launch spawns: a daemon still running is reused as it
+//! is (`ensure_daemon_running`), so an edit reaches the daemon once it is
+//! stopped and the app opened again, and the capture line's `passed_keys`
+//! name what a spawned daemon would get, not the running one's. A
+//! listed key the login shell exports is set on the daemon's command beside
+//! `PATH`; the announcement names the keys passed, by name, never their
+//! values. Claude Code's design (`settings.json`'s `env`, a map the user
+//! sets), not ZCode's, which passes the three by name
+//! (ZCode:packages/services/src/runtime-tools/runtimeCommandEnv.ts:48-106).
+//!
 //! The design is ZCode's capture read as a design and written fresh
 //! (ZCode:packages/services/src/runtime-tools/runtimeLoginShellEnvCapture.ts:6-11,
 //! :54-101, :173-216), with the entry's differences: a non-interactive login
@@ -58,6 +77,16 @@ const END_MARKER: &str = "__OPENALPACA_LOGIN_ENV_END__";
 /// `echo` is a builtin of every shell `-l -c` reaches.
 pub(crate) const CAPTURE_COMMAND: &str =
     "echo __OPENALPACA_LOGIN_ENV_START__; /usr/bin/env -0; echo; echo __OPENALPACA_LOGIN_ENV_END__";
+
+/// The variables the shell sets on the daemon's command itself
+/// ([`crate::daemon_command`]): a listed one is not passed from the login
+/// shell — the app's own value stands — and `gui.log` says so.
+pub(crate) const SET_BY_THE_APP: [&str; 4] = [
+    "PATH",
+    "OPENALPACA_CONFIG_DIR",
+    openalpaca_storage::store::MANAGED_LOG_ENV,
+    openalpaca_storage::store::PATH_SOURCE_ENV,
+];
 
 /// The fixed list the daemon gets when the capture fails, `~/.cargo/bin`
 /// after it.
@@ -133,15 +162,40 @@ impl std::fmt::Display for CaptureFailure {
     }
 }
 
+/// What a capture that answered took from between the markers: `PATH`,
+/// and each listed key the login shell exported, in the list's order. Its
+/// `Debug` leaves every value out.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Captured {
+    pub(crate) path: OsString,
+    pub(crate) passed: Vec<(String, OsString)>,
+}
+
+impl std::fmt::Debug for Captured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.passed.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("Captured")
+            .field("passed_keys", &names)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The `PATH` the daemon is given, where it came from and how long the
-/// capture took. Its `Debug` leaves the value out: the value is set on the
-/// daemon's command and written nowhere else.
+/// capture took, with the listed keys passed beside it (N-DAEMON-2). Its
+/// `Debug` leaves every value out: the values are set on the daemon's
+/// command and written nowhere else.
 #[derive(Clone)]
 pub(crate) struct DaemonPath {
     pub(crate) source: PathSource,
     value: OsString,
     pub(crate) capture: Duration,
     pub(crate) failure: Option<CaptureFailure>,
+    /// The keys `[daemon.env] passthrough_keys` listed, as the capture read
+    /// them (empty when the capture's thread had not read them by the wait's
+    /// deadline).
+    listed: Vec<String>,
+    /// Those of them the login shell exported, with its values.
+    passed: Vec<(String, OsString)>,
 }
 
 impl std::fmt::Debug for DaemonPath {
@@ -150,6 +204,7 @@ impl std::fmt::Debug for DaemonPath {
             .field("source", &self.source)
             .field("capture", &self.capture)
             .field("failure", &self.failure)
+            .field("passed_keys", &self.passed_keys())
             .finish_non_exhaustive()
     }
 }
@@ -160,15 +215,43 @@ impl DaemonPath {
         &self.value
     }
 
+    /// The listed keys passed beside `PATH`, with their values, for the
+    /// daemon's command alone.
+    pub(crate) fn passed(&self) -> &[(String, OsString)] {
+        &self.passed
+    }
+
+    /// The names of the keys passed, in the list's order.
+    pub(crate) fn passed_keys(&self) -> Vec<&str> {
+        self.passed.iter().map(|(key, _)| key.as_str()).collect()
+    }
+
+    /// The listed keys not passed: the login shell did not export them, or
+    /// the capture failed.
+    fn absent_keys(&self) -> Vec<&str> {
+        self.listed
+            .iter()
+            .map(String::as_str)
+            .filter(|key| !self.passed.iter().any(|(passed, _)| passed == key))
+            .collect()
+    }
+
     /// The capture's duration in whole milliseconds.
     pub(crate) fn capture_ms(&self) -> u64 {
         u64::try_from(self.capture.as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Storage's `store::PATH_SOURCE_ENV` value: the source and the
-    /// capture's milliseconds, `login-shell 212` — never the `PATH` itself.
+    /// capture's milliseconds, `login-shell 212`, then the names of the keys
+    /// passed, comma-separated, when there are any —
+    /// `login-shell 212 AWS_PROFILE,KUBECONFIG` — never a value.
     pub(crate) fn announcement(&self) -> String {
-        format!("{} {}", self.source.as_str(), self.capture_ms())
+        let mut text = format!("{} {}", self.source.as_str(), self.capture_ms());
+        if !self.passed.is_empty() {
+            text.push(' ');
+            text.push_str(&self.passed_keys().join(","));
+        }
+        text
     }
 
     /// What the webview reads (Settings → Connection).
@@ -177,19 +260,23 @@ impl DaemonPath {
             source: self.source,
             capture_ms: self.capture_ms(),
             reason: self.failure.as_ref().map(ToString::to_string),
+            passed_keys: self.passed_keys().into_iter().map(str::to_owned).collect(),
         }
     }
 }
 
 /// The daemon's `PATH` as the webview reads it, on the connection of a
-/// daemon this app spawned: `{ source, captureMs, reason }`, `reason` the
-/// capture's failure as a sentence, `null` for the login shell's.
+/// daemon this app spawned: `{ source, captureMs, reason, passedKeys }`,
+/// `reason` the capture's failure as a sentence, `null` for the login
+/// shell's; `passedKeys` the names of the listed keys passed beside it
+/// (N-DAEMON-2), never their values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DaemonPathReport {
     pub(crate) source: PathSource,
     pub(crate) capture_ms: u64,
     pub(crate) reason: Option<String>,
+    pub(crate) passed_keys: Vec<String>,
 }
 
 /// [`FALLBACK_DIRS`] joined, then `<home>/.cargo/bin` when the home is known.
@@ -202,11 +289,117 @@ pub(crate) fn fallback_path(home: Option<&Path>) -> OsString {
     path
 }
 
-/// The account the capture runs for: its login shell, and the home whose
-/// `~/.cargo/bin` the fallback list ends with.
+/// The account the capture runs for: its login shell, the home whose
+/// `~/.cargo/bin` the fallback list ends with, and the keys
+/// `[daemon.env] passthrough_keys` lists (N-DAEMON-2).
 pub(crate) struct Account {
     pub(crate) shell: Option<PathBuf>,
     pub(crate) home: Option<PathBuf>,
+    pub(crate) keys: Vec<String>,
+}
+
+/// Whether `name` is a variable name: a letter or `_`, then letters, digits
+/// and `_` — so never `KEY=value`.
+fn is_variable_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b) if b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// The keys `<config_dir>/daemon.toml` lists under `[daemon.env]
+/// passthrough_keys`, in its order, each once. No file, no `[daemon.env]`
+/// table or no list is an empty list. A file that cannot be read or is not
+/// TOML, a value that is not a list, an entry that is not a string or not a
+/// variable name, and a variable the app sets itself ([`SET_BY_THE_APP`]) are
+/// each a `gui.log` warning and pass nothing; a warning names a dropped entry
+/// by its place in the list, never by what it holds (`KEY=value` would be a
+/// value), but for the app's own, named by name.
+pub(crate) fn passthrough_keys(config_dir: &Path) -> Vec<String> {
+    let file = config_dir.join("daemon.toml");
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                file = %file.display(),
+                "Could not read [daemon.env] passthrough_keys ({}); no key is passed beside PATH.",
+                e.kind()
+            );
+            return Vec::new();
+        }
+    };
+    // Parsed as a bare table and walked by hand, so no parser message — which
+    // may quote the file — reaches the log.
+    let Ok(table) = text.parse::<toml::Table>() else {
+        tracing::warn!(
+            file = %file.display(),
+            "daemon.toml is not valid TOML; no key is passed beside PATH."
+        );
+        return Vec::new();
+    };
+    let Some(daemon) = table.get("daemon") else {
+        return Vec::new();
+    };
+    let Some(env) = daemon.as_table().map(|daemon| daemon.get("env")) else {
+        tracing::warn!("daemon.toml's [daemon] is not a table; no key is passed beside PATH.");
+        return Vec::new();
+    };
+    let Some(env) = env else {
+        return Vec::new();
+    };
+    let Some(list) = env.as_table().map(|env| env.get("passthrough_keys")) else {
+        tracing::warn!("daemon.toml's [daemon.env] is not a table; no key is passed beside PATH.");
+        return Vec::new();
+    };
+    let Some(list) = list else {
+        return Vec::new();
+    };
+    let Some(entries) = list.as_array() else {
+        tracing::warn!(
+            "[daemon.env] passthrough_keys is not a list of variable names; no key is passed \
+             beside PATH."
+        );
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let place = index + 1;
+        match entry.as_str() {
+            Some(name) if SET_BY_THE_APP.contains(&name) => tracing::warn!(
+                key = name,
+                "[daemon.env] passthrough_keys lists a variable the app sets on the daemon \
+                 itself; the app's value stands, and it is not passed from the login shell."
+            ),
+            Some(name) if is_variable_name(name) => {
+                if !keys.iter().any(|key| key == name) {
+                    keys.push(name.to_owned());
+                }
+            }
+            _ => tracing::warn!(
+                entry = place,
+                "[daemon.env] passthrough_keys: entry {place} is not a variable name; it is not \
+                 passed."
+            ),
+        }
+    }
+    keys
+}
+
+/// [`passthrough_keys`] of the store's `config/daemon.toml` — the file the
+/// daemon the app spawns reads, its `OPENALPACA_CONFIG_DIR` being the
+/// store's `config/` (`store::ensure_runtime_config_dir`). Empty when the
+/// store cannot be resolved.
+pub(crate) fn configured_passthrough_keys() -> Vec<String> {
+    match openalpaca_storage::store::runtime_config_dir() {
+        Ok(config_dir) => passthrough_keys(&config_dir),
+        Err(e) => {
+            tracing::warn!(
+                "Could not find daemon.toml for [daemon.env] passthrough_keys ({e:#}); no key is \
+                 passed beside PATH."
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// The capture: started once, on a thread of its own; [`Capture::wait`]
@@ -216,6 +409,9 @@ pub(crate) struct Capture {
     deadline: Duration,
     /// The account's home, once the capture's thread has resolved it.
     home: OnceLock<Option<PathBuf>>,
+    /// The keys listed beside `PATH`, once the capture's thread has read
+    /// them.
+    keys: OnceLock<Vec<String>>,
     result: Mutex<Option<DaemonPath>>,
     settled: Condvar,
 }
@@ -235,6 +431,7 @@ impl Capture {
             started: Instant::now(),
             deadline,
             home: OnceLock::new(),
+            keys: OnceLock::new(),
             result: Mutex::new(None),
             settled: Condvar::new(),
         });
@@ -246,8 +443,11 @@ impl Capture {
                 tracing::dispatcher::with_default(&dispatch, || {
                     let account = resolve();
                     let _ = runner.home.set(account.home);
+                    let keys = runner.keys.get_or_init(|| account.keys);
                     let outcome = match account.shell {
-                        Some(shell) => capture_login_path(&shell, runner.started, runner.deadline),
+                        Some(shell) => {
+                            capture_login_path(&shell, runner.started, runner.deadline, keys)
+                        }
                         None => Err(CaptureFailure::NoShell),
                     };
                     runner.settle(outcome);
@@ -262,8 +462,8 @@ impl Capture {
     }
 
     /// Record what the capture concluded, once, and log it: its source and
-    /// duration, a failure's reason, never the value.
-    fn settle(&self, outcome: Result<OsString, CaptureFailure>) {
+    /// duration, a failure's reason, the keys passed by name, never a value.
+    fn settle(&self, outcome: Result<Captured, CaptureFailure>) {
         let mut result = self.result.lock().unwrap_or_else(|p| p.into_inner());
         if result.is_some() {
             return;
@@ -274,20 +474,25 @@ impl Capture {
         self.settled.notify_all();
     }
 
-    fn daemon_path(&self, outcome: Result<OsString, CaptureFailure>) -> DaemonPath {
+    fn daemon_path(&self, outcome: Result<Captured, CaptureFailure>) -> DaemonPath {
         let capture = self.started.elapsed();
+        let listed = self.keys.get().cloned().unwrap_or_default();
         match outcome {
-            Ok(value) => DaemonPath {
+            Ok(captured) => DaemonPath {
                 source: PathSource::LoginShell,
-                value,
+                value: captured.path,
                 capture,
                 failure: None,
+                listed,
+                passed: captured.passed,
             },
             Err(failure) => DaemonPath {
                 source: PathSource::FallbackList,
                 value: fallback_path(self.home.get().and_then(Option::as_deref)),
                 capture,
                 failure: Some(failure),
+                listed,
+                passed: Vec::new(),
             },
         }
     }
@@ -321,17 +526,24 @@ impl Capture {
     }
 }
 
-/// The capture's line in `gui.log`.
+/// The capture's line in `gui.log`, with the keys passed beside `PATH` and
+/// the listed ones not passed, by name.
 fn log_capture(path: &DaemonPath) {
+    let passed = path.passed_keys().join(",");
+    let absent = path.absent_keys().join(",");
     match &path.failure {
         None => tracing::info!(
             source = path.source.as_str(),
             capture_ms = path.capture_ms(),
+            passed_keys = passed.as_str(),
+            absent_keys = absent.as_str(),
             "The daemon's PATH is the login shell's."
         ),
         Some(failure) => tracing::warn!(
             source = path.source.as_str(),
             capture_ms = path.capture_ms(),
+            passed_keys = passed.as_str(),
+            absent_keys = absent.as_str(),
             reason = %failure,
             "The daemon's PATH is the fallback list."
         ),
@@ -342,21 +554,26 @@ fn log_capture(path: &DaemonPath) {
 static CAPTURE: OnceLock<Arc<Capture>> = OnceLock::new();
 
 /// Begin the app's one capture (`run`): the account's login shell, the home
-/// `directories` resolves, both looked up on the capture's thread,
-/// [`CAPTURE_DEADLINE`]. Unix only; elsewhere the daemon inherits the app's
-/// `PATH`, as it did.
+/// `directories` resolves and the keys `daemon.toml` lists beside `PATH`, all
+/// looked up on the capture's thread, [`CAPTURE_DEADLINE`]. Unix only;
+/// elsewhere the daemon inherits the app's `PATH` and environment, as it
+/// did.
 pub(crate) fn start() {
     #[cfg(unix)]
     {
-        let _ = CAPTURE.get_or_init(|| {
-            Capture::start(
-                || Account {
-                    shell: account_login_shell(),
-                    home: directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()),
-                },
-                CAPTURE_DEADLINE,
-            )
-        });
+        let _ = CAPTURE.get_or_init(|| Capture::start(this_account, CAPTURE_DEADLINE));
+    }
+}
+
+/// The account the app's capture runs for, resolved on the capture's
+/// thread: the login shell the user database names, the home `directories`
+/// resolves, and the keys the store's `daemon.toml` lists beside `PATH`.
+#[cfg(unix)]
+pub(crate) fn this_account() -> Account {
+    Account {
+        shell: account_login_shell(),
+        home: directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()),
+        keys: configured_passthrough_keys(),
     }
 }
 
@@ -406,7 +623,8 @@ fn account_login_shell() -> Option<PathBuf> {
 }
 
 /// Run `shell -l -c` [`CAPTURE_COMMAND`] in a process group of its own and
-/// take `PATH` from what it prints between the markers. Settled on the
+/// take `PATH`, and each of `keys` it exports, from what it prints between
+/// the markers. Settled on the
 /// shell's exit, not on the end of its output (a profile's background child
 /// may hold the pipe open); at `started + deadline` the group is killed and
 /// the shell reaped. After a successful exit the group is left alone: a
@@ -418,7 +636,8 @@ pub(crate) fn capture_login_path(
     shell: &Path,
     started: Instant,
     deadline: Duration,
-) -> Result<OsString, CaptureFailure> {
+    keys: &[String],
+) -> Result<Captured, CaptureFailure> {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -504,7 +723,7 @@ pub(crate) fn capture_login_path(
                 return Err(CaptureFailure::TooMuchOutput);
             }
             if *ended || Instant::now() >= deadline || contains(bytes, END_MARKER.as_bytes()) {
-                return path_between_markers(bytes);
+                return environment_between_markers(bytes, keys);
             }
         }
         std::thread::sleep(poll);
@@ -516,7 +735,8 @@ pub(crate) fn capture_login_path(
     _shell: &Path,
     _started: Instant,
     _deadline: Duration,
-) -> Result<OsString, CaptureFailure> {
+    _keys: &[String],
+) -> Result<Captured, CaptureFailure> {
     Err(CaptureFailure::NoShell)
 }
 
@@ -524,23 +744,45 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// `PATH` from the environment printed between the last end marker and the
-/// last start marker before it: NUL-terminated `KEY=value` entries. Every
-/// other key is dropped (the allowlist is `PATH` alone).
-pub(crate) fn path_between_markers(output: &[u8]) -> Result<OsString, CaptureFailure> {
+/// `PATH`, and each of `keys` present, from the environment printed between
+/// the last end marker and the last start marker before it: NUL-terminated
+/// `KEY=value` entries. Every other key is dropped (the allowlist is `PATH`
+/// and the keys `[daemon.env] passthrough_keys` lists). A listed key is
+/// passed with whatever value it holds, an empty one included.
+pub(crate) fn environment_between_markers(
+    output: &[u8],
+    keys: &[String],
+) -> Result<Captured, CaptureFailure> {
     let start = format!("{START_MARKER}\n");
     let end = format!("\n{END_MARKER}");
     let end_at = rfind(output, end.as_bytes()).ok_or(CaptureFailure::NoMarkers)?;
     let start_at = rfind(&output[..end_at], start.as_bytes()).ok_or(CaptureFailure::NoMarkers)?;
     let environment = &output[start_at + start.len()..end_at];
     let mut path = None;
+    let mut found: Vec<Option<&[u8]>> = vec![None; keys.len()];
     for entry in environment.split(|&b| b == 0) {
         if let Some(value) = entry.strip_prefix(b"PATH=") {
             path = Some(value);
+            continue;
+        }
+        for (key, slot) in keys.iter().zip(found.iter_mut()) {
+            if let Some(value) = entry
+                .strip_prefix(key.as_bytes())
+                .and_then(|rest| rest.strip_prefix(b"="))
+            {
+                *slot = Some(value);
+            }
         }
     }
     match path {
-        Some(value) if !value.is_empty() => Ok(os_string(value)),
+        Some(value) if !value.is_empty() => Ok(Captured {
+            path: os_string(value),
+            passed: keys
+                .iter()
+                .zip(found)
+                .filter_map(|(key, value)| value.map(|value| (key.clone(), os_string(value))))
+                .collect(),
+        }),
         _ => Err(CaptureFailure::NoPath),
     }
 }

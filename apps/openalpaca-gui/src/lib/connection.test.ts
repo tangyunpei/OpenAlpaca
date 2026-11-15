@@ -174,15 +174,30 @@ describe("the daemon's PATH on the connection", () => {
     for (const value of [
       undefined,
       "login-shell",
-      { source: "inherited", captureMs: 1, reason: null },
-      { source: "login-shell", captureMs: "1", reason: null },
-      { source: "login-shell", captureMs: 1, reason: 7 },
-      { source: "fallback-list", captureMs: Number.NaN, reason: "x" },
+      { source: "inherited", captureMs: 1, reason: null, passedKeys: [] },
+      { source: "login-shell", captureMs: "1", reason: null, passedKeys: [] },
+      { source: "login-shell", captureMs: 1, reason: 7, passedKeys: [] },
+      {
+        source: "fallback-list",
+        captureMs: Number.NaN,
+        reason: "x",
+        passedKeys: [],
+      },
+      // N-DAEMON-2: the keys passed beside PATH, by name.
+      { source: "login-shell", captureMs: 1, reason: null },
+      { source: "login-shell", captureMs: 1, reason: null, passedKeys: "A" },
+      { source: "login-shell", captureMs: 1, reason: null, passedKeys: [7] },
     ]) {
       expect(daemonPathOf(value)).toBeNull();
     }
     expect(daemonPathOf(daemonPaths.fallback_list)).toEqual(
       daemonPaths.fallback_list,
     );
+    expect(daemonPathOf(daemonPaths.login_shell_with_keys)).toEqual({
+      source: "login-shell",
+      captureMs: 212,
+      reason: null,
+      passedKeys: ["AWS_PROFILE", "KUBECONFIG"],
+    });
   });
 });

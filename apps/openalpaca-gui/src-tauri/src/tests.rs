@@ -1196,13 +1196,24 @@ use login_path::{
 };
 
 /// A capture of `shell`'s `PATH`, the fallback list's home `home`: the
-/// account as the capture's thread would resolve it, given.
+/// account as the capture's thread would resolve it, given, with no key
+/// listed beside `PATH`.
 fn capture_of(
     shell: Option<PathBuf>,
     home: Option<PathBuf>,
     deadline: Duration,
 ) -> std::sync::Arc<Capture> {
-    Capture::start(move || Account { shell, home }, deadline)
+    capture_listing(shell, home, Vec::new(), deadline)
+}
+
+/// [`capture_of`] with `keys` listed beside `PATH` (N-DAEMON-2).
+fn capture_listing(
+    shell: Option<PathBuf>,
+    home: Option<PathBuf>,
+    keys: Vec<String>,
+    deadline: Duration,
+) -> std::sync::Arc<Capture> {
+    Capture::start(move || Account { shell, home, keys }, deadline)
 }
 
 /// The `PATH` the noisy login shell exports, and the two values it exports
@@ -1210,6 +1221,9 @@ fn capture_of(
 const CAPTURED_PATH: &str = "/q21/captured/bin:/usr/bin:/bin";
 const CAPTURED_API_KEY: &str = "sk-q21-captured-not-passed";
 const CAPTURED_PROFILE: &str = "q21-profile-captured-not-passed";
+const CAPTURED_KUBECONFIG: &str = "/q21/kube/config-captured-not-passed";
+const CAPTURED_GOOGLE: &str = "/q21/google/credentials-captured-not-passed.json";
+const CAPTURED_PROFILE_BACKUP: &str = "q21-backup-captured-not-passed";
 
 /// A stand-in login shell: a `/bin/sh` script at `<root>/<name>` running
 /// `body`, which reaches the command it is given as `"$3"` (`-l -c <cmd>`).
@@ -1226,8 +1240,9 @@ fn fake_login_shell(root: &Path, name: &str, body: &str) -> PathBuf {
 
 /// A login shell that prints noise around the markers — `PATH=` lines
 /// before and after them, one NUL-terminated as `env -0` writes — and
-/// exports an API key and a credential pointer beside its `PATH`; it records
-/// each run's arguments.
+/// exports an API key, the three credential pointers and
+/// `AWS_PROFILE_BACKUP` (a name extending a listed one) beside its `PATH`;
+/// it records each run's arguments.
 #[cfg(unix)]
 fn noisy_login_shell(root: &Path) -> PathBuf {
     let runs = root.join("runs");
@@ -1240,6 +1255,10 @@ fn noisy_login_shell(root: &Path) -> PathBuf {
              PATH='{CAPTURED_PATH}'; export PATH\n\
              OPENAI_API_KEY='{CAPTURED_API_KEY}'; export OPENAI_API_KEY\n\
              AWS_PROFILE='{CAPTURED_PROFILE}'; export AWS_PROFILE\n\
+             KUBECONFIG='{CAPTURED_KUBECONFIG}'; export KUBECONFIG\n\
+             GOOGLE_APPLICATION_CREDENTIALS='{CAPTURED_GOOGLE}'; \
+             export GOOGLE_APPLICATION_CREDENTIALS\n\
+             AWS_PROFILE_BACKUP='{CAPTURED_PROFILE_BACKUP}'; export AWS_PROFILE_BACKUP\n\
              eval \"$3\"\n\
              echo 'PATH=/noise/after/bin'\n\
              printf 'PATH=/noise/after/nul/bin\\0'",
@@ -1354,13 +1373,29 @@ fn the_login_shells_path_and_nothing_else_reaches_the_daemons_command() {
         Some(OsString::from(format!("login-shell {}", path.capture_ms())))
     );
     assert_eq!(cmd.get_current_dir(), Some(app_dir.as_path()));
-    let env = effective_env(&cmd);
-    for value in env.values() {
+    assert_no_captured_value_but(&cmd, &[]);
+}
+
+/// The values the noisy login shell exports beside its `PATH`.
+const CAPTURED_VALUES: [&str; 5] = [
+    CAPTURED_API_KEY,
+    CAPTURED_PROFILE,
+    CAPTURED_KUBECONFIG,
+    CAPTURED_GOOGLE,
+    CAPTURED_PROFILE_BACKUP,
+];
+
+/// No value the noisy login shell exports beside its `PATH` is in the
+/// daemon's effective environment, but those in `passed`.
+fn assert_no_captured_value_but(cmd: &Command, passed: &[&str]) {
+    for value in effective_env(cmd).values() {
         let value = value.to_string_lossy();
-        assert!(
-            !value.contains(CAPTURED_API_KEY) && !value.contains(CAPTURED_PROFILE),
-            "a captured value besides PATH reached the daemon"
-        );
+        for captured in CAPTURED_VALUES {
+            assert!(
+                passed.contains(&captured) || !value.contains(captured),
+                "a captured value the list does not name reached the daemon ({captured})"
+            );
+        }
     }
 }
 
@@ -1379,7 +1414,7 @@ fn a_shell_past_the_deadline_is_killed_with_its_group() {
     );
     let deadline = Duration::from_millis(1500);
     let started = Instant::now();
-    let outcome = capture_login_path(&shell, started, deadline);
+    let outcome = capture_login_path(&shell, started, deadline, &[]);
     let took = started.elapsed();
     let child: i32 = std::fs::read_to_string(&pid_file)
         .expect("the shell started its child")
@@ -1490,6 +1525,7 @@ fn the_capture_holds_no_caller_and_the_wait_ends_at_its_deadline() {
             Account {
                 shell: Some(shell),
                 home: None,
+                keys: Vec::new(),
             }
         },
         deadline,
@@ -1532,6 +1568,7 @@ fn the_wait_takes_the_fallback_list_itself_at_the_deadline() {
             Account {
                 shell: None,
                 home: Some(home),
+                keys: Vec::new(),
             }
         },
         deadline,
@@ -1578,7 +1615,7 @@ fn the_capture_settles_on_the_shells_exit_not_the_end_of_its_output() {
     let (sent, received) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let started = Instant::now();
-        let outcome = capture_login_path(&shell, started, deadline);
+        let outcome = capture_login_path(&shell, started, deadline, &[]);
         let _ = sent.send((outcome, started.elapsed()));
     });
     let answer = received.recv_timeout(Duration::from_secs(5));
@@ -1590,7 +1627,10 @@ fn the_capture_settles_on_the_shells_exit_not_the_end_of_its_output() {
     let _stray = KillOnDrop(background);
 
     let (outcome, took) = answer.expect("the capture settled while the child held the pipe");
-    assert_eq!(outcome, Ok(OsString::from(CAPTURED_PATH)));
+    assert_eq!(
+        outcome.map(|captured| captured.path),
+        Ok(OsString::from(CAPTURED_PATH))
+    );
     assert!(
         took < Duration::from_secs(2),
         "settled on the exit: {took:?}"
@@ -1665,6 +1705,7 @@ fn the_connection_names_the_path_of_the_daemon_this_app_spawned() {
         source: PathSource::LoginShell,
         capture_ms: 212,
         reason: None,
+        passed_keys: Vec::new(),
     };
 
     record_spawned(d.pid, Some(report));
@@ -1672,7 +1713,12 @@ fn the_connection_names_the_path_of_the_daemon_this_app_spawned() {
         let answer = invoke(cmd, json!({})).expect("connection info");
         assert_eq!(
             answer["daemonPath"],
-            json!({ "source": "login-shell", "captureMs": 212, "reason": null }),
+            json!({
+                "source": "login-shell",
+                "captureMs": 212,
+                "reason": null,
+                "passedKeys": []
+            }),
             "{cmd}"
         );
         assert_eq!(answer["instanceId"], "instance-q11");
@@ -1685,6 +1731,7 @@ fn the_connection_names_the_path_of_the_daemon_this_app_spawned() {
             source: PathSource::LoginShell,
             capture_ms: 212,
             reason: None,
+            passed_keys: Vec::new(),
         }),
     );
     for cmd in ["ensure_daemon_running", "get_connection_info"] {
@@ -1706,6 +1753,7 @@ fn a_daemon_this_run_spawned_keeps_its_path_after_a_later_spawn() {
         source: PathSource::FallbackList,
         capture_ms: 3000,
         reason: Some(CaptureFailure::TimedOut(Duration::from_secs(3)).to_string()),
+        passed_keys: Vec::new(),
     };
 
     record_spawned(d.pid, Some(report.clone()));
@@ -1735,6 +1783,16 @@ fn every_daemon_path_is_its_row_in_the_table_the_webview_reads() {
                 source: PathSource::LoginShell,
                 capture_ms: 212,
                 reason: None,
+                passed_keys: Vec::new(),
+            },
+        ),
+        (
+            "login_shell_with_keys",
+            DaemonPathReport {
+                source: PathSource::LoginShell,
+                capture_ms: 212,
+                reason: None,
+                passed_keys: vec!["AWS_PROFILE".into(), "KUBECONFIG".into()],
             },
         ),
         (
@@ -1743,6 +1801,7 @@ fn every_daemon_path_is_its_row_in_the_table_the_webview_reads() {
                 source: PathSource::FallbackList,
                 capture_ms: 3000,
                 reason: Some(CaptureFailure::TimedOut(Duration::from_secs(3)).to_string()),
+                passed_keys: Vec::new(),
             },
         ),
     ];
@@ -1758,4 +1817,286 @@ fn every_daemon_path_is_its_row_in_the_table_the_webview_reads() {
             "{name}"
         );
     }
+}
+
+// ============================================================================
+// The credential-pointer keys (N-DAEMON-2)
+// ============================================================================
+
+use login_path::{configured_passthrough_keys, passthrough_keys};
+
+/// Write `body` as the scratch store's `config/daemon.toml`, the file the
+/// daemon the app spawns reads (`OPENALPACA_CONFIG_DIR`), and return its
+/// folder.
+fn write_daemon_toml(guard: &HomeStoreGuard, body: &str) -> PathBuf {
+    let config_dir = guard.store().join("config");
+    std::fs::write(config_dir.join("daemon.toml"), body).expect("daemon.toml");
+    config_dir
+}
+
+/// The variables the daemon's command sets, by name, with their values.
+fn set_on(cmd: &Command) -> std::collections::BTreeMap<OsString, Option<OsString>> {
+    cmd.get_envs()
+        .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
+        .collect()
+}
+
+/// The command for the daemon given `path`, under the guard's store.
+fn command_for(guard: &HomeStoreGuard, path: &login_path::DaemonPath) -> Command {
+    daemon_command(
+        Path::new("/nonexistent/openalpacad"),
+        &guard.store(),
+        &guard.store().join("config"),
+        Some(path),
+    )
+}
+
+/// The entry's first case: a login shell exporting `AWS_PROFILE`,
+/// `KUBECONFIG` and `GOOGLE_APPLICATION_CREDENTIALS`, with
+/// `[daemon.env] passthrough_keys = []`, passes none of them — the command
+/// sets the four variables Q21 sets and nothing else.
+#[cfg(unix)]
+#[test]
+fn with_the_list_empty_no_credential_pointer_reaches_the_daemon() {
+    let guard = HomeStoreGuard::set("keys-empty");
+    write_daemon_toml(&guard, "[daemon.env]\npassthrough_keys = []\n");
+    let keys = configured_passthrough_keys();
+    assert!(keys.is_empty(), "{keys:?}");
+    let shell = noisy_login_shell(guard.root());
+    let path = capture_listing(Some(shell), None, keys, Duration::from_secs(10)).wait();
+
+    assert_eq!(path.source, PathSource::LoginShell);
+    assert!(path.passed_keys().is_empty());
+    let cmd = command_for(&guard, &path);
+    assert_eq!(
+        set_on(&cmd).keys().cloned().collect::<Vec<_>>(),
+        [
+            OsString::from("OPENALPACA_CONFIG_DIR"),
+            OsString::from(store::MANAGED_LOG_ENV),
+            OsString::from(store::PATH_SOURCE_ENV),
+            OsString::from("PATH"),
+        ]
+    );
+    assert_eq!(
+        path.announcement(),
+        format!("login-shell {}", path.capture_ms())
+    );
+    assert_no_captured_value_but(&cmd, &[]);
+}
+
+/// The entry's second case: with `passthrough_keys = ["AWS_PROFILE"]` the
+/// daemon's command sets `AWS_PROFILE` to the login shell's value beside
+/// `PATH`, and `KUBECONFIG` and `GOOGLE_APPLICATION_CREDENTIALS`, which the
+/// shell exports too, are not passed. A listed key is matched by its whole
+/// name: `AWS`, listed and not exported, is not taken from `AWS_PROFILE`
+/// (whatever order `env` prints them in), and `AWS_PROFILE_BACKUP`, which
+/// the shell exports, neither reaches the daemon nor stands in for
+/// `AWS_PROFILE`'s value.
+#[cfg(unix)]
+#[test]
+fn a_listed_key_reaches_the_daemon_and_an_unlisted_one_does_not() {
+    let guard = HomeStoreGuard::set("keys-listed");
+    write_daemon_toml(
+        &guard,
+        "[execution.artifacts]\n\n[daemon.env]\npassthrough_keys = [\"AWS_PROFILE\", \"AWS\"]\n",
+    );
+    let keys = configured_passthrough_keys();
+    assert_eq!(keys, ["AWS_PROFILE", "AWS"]);
+    let shell = noisy_login_shell(guard.root());
+    let path = capture_listing(Some(shell), None, keys, Duration::from_secs(10)).wait();
+
+    assert_eq!(path.source, PathSource::LoginShell);
+    assert_eq!(path.value(), &OsString::from(CAPTURED_PATH));
+    assert_eq!(path.passed_keys(), ["AWS_PROFILE"]);
+    let cmd = command_for(&guard, &path);
+    let set = set_on(&cmd);
+    assert_eq!(
+        set.keys().cloned().collect::<Vec<_>>(),
+        [
+            OsString::from("AWS_PROFILE"),
+            OsString::from("OPENALPACA_CONFIG_DIR"),
+            OsString::from(store::MANAGED_LOG_ENV),
+            OsString::from(store::PATH_SOURCE_ENV),
+            OsString::from("PATH"),
+        ],
+        "the listed key beside Q21's four, and nothing removed"
+    );
+    assert_eq!(
+        set[&OsString::from("AWS_PROFILE")],
+        Some(OsString::from(CAPTURED_PROFILE))
+    );
+    assert_no_captured_value_but(&cmd, &[CAPTURED_PROFILE]);
+    assert_eq!(
+        path.report().passed_keys,
+        ["AWS_PROFILE"],
+        "Settings → Connection is told the key by name"
+    );
+}
+
+/// The entry's third case: the announcement names the keys passed and never
+/// their values — `gui.log`'s capture and spawn lines, the variable the
+/// daemon's boot line reads, the connection's `passedKeys` — and a listed
+/// key the login shell does not export is named as absent. A capture that
+/// failed passes no key.
+#[cfg(unix)]
+#[test]
+fn the_announcement_names_the_keys_passed_never_their_values() {
+    let guard = HomeStoreGuard::set("keys-announced");
+    let noisy = noisy_login_shell(guard.root());
+    let failing = failing_login_shell(guard.root());
+    let keys = vec!["AWS_PROFILE".to_owned(), "Q21_NOT_EXPORTED".to_owned()];
+    let deadline = Duration::from_secs(10);
+    let (passed, fallback) = with_the_shell_log(|| {
+        let passed = capture_listing(Some(noisy), None, keys.clone(), deadline).wait();
+        announce_daemon_path(&passed);
+        let fallback = capture_listing(Some(failing), None, keys.clone(), deadline).wait();
+        announce_daemon_path(&fallback);
+        (passed, fallback)
+    });
+
+    assert_eq!(
+        passed.announcement(),
+        format!("login-shell {} AWS_PROFILE", passed.capture_ms())
+    );
+    assert_eq!(fallback.source, PathSource::FallbackList);
+    assert!(fallback.passed_keys().is_empty());
+    assert_eq!(
+        fallback.announcement(),
+        format!("fallback-list {}", fallback.capture_ms())
+    );
+    let text = gui_log_text();
+    let captured = format!(
+        "source=\"login-shell\" capture_ms={} passed_keys=\"AWS_PROFILE\" \
+         absent_keys=\"Q21_NOT_EXPORTED\"",
+        passed.capture_ms()
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.contains("The daemon's PATH is the login shell's.") && l.contains(&captured)),
+        "the capture's line, {captured}: {text:?}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.contains("Daemon PATH source") && l.contains("passed_keys=\"AWS_PROFILE\"")),
+        "the spawn's line names the key: {text:?}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.contains("The daemon's PATH is the fallback list.")
+                && l.contains("passed_keys=\"\"")),
+        "a failed capture passes no key: {text:?}"
+    );
+    for value in CAPTURED_VALUES {
+        assert!(
+            !text.contains(value),
+            "gui.log names a captured value ({value}): {text:?}"
+        );
+    }
+    let report = serde_json::to_value(passed.report()).expect("serializes");
+    assert_eq!(report["passedKeys"], json!(["AWS_PROFILE"]));
+    assert!(!report.to_string().contains(CAPTURED_PROFILE));
+}
+
+/// The list takes variable names and nothing else: an entry that is not a
+/// string or not a name — `KEY=value` among them, whose value is never
+/// written to `gui.log` — is dropped, as is a variable the app sets on the
+/// daemon itself (`PATH` and its three own); a name listed twice is passed
+/// once; no file, no table, or a file that is not TOML is an empty list.
+#[test]
+fn the_list_takes_variable_names_only() {
+    let guard = HomeStoreGuard::set("keys-list");
+    let config_dir = guard.store().join("config");
+    let read = |body: Option<&str>| {
+        let file = config_dir.join("daemon.toml");
+        match body {
+            Some(body) => std::fs::write(&file, body).expect("daemon.toml"),
+            None => {
+                let _ = std::fs::remove_file(&file);
+            }
+        }
+        passthrough_keys(&config_dir)
+    };
+    let lists = with_the_shell_log(|| {
+        [
+            read(None),
+            read(Some("")),
+            read(Some("[daemon]\nlog = 1\n")),
+            read(Some(
+                "[daemon.env]\npassthrough_keys = [\"KUBECONFIG\", \"AWS_PROFILE\", \"KUBECONFIG\"]\n",
+            )),
+            read(Some(
+                "[daemon.env]\npassthrough_keys = [\"AWS_PROFILE=q21-value-in-the-list\", 7, \
+                 \"\", \"1BAD\", \"BAD-NAME\", \"PATH\", \"OPENALPACA_CONFIG_DIR\", \
+                 \"OPENALPACA_MANAGED_LOG\", \"OPENALPACA_PATH_SOURCE\", \
+                 \"GOOGLE_APPLICATION_CREDENTIALS\"]\n",
+            )),
+            read(Some("[daemon.env]\npassthrough_keys = \"AWS_PROFILE\"\n")),
+            read(Some("daemon = 3\n")),
+            read(Some("[daemon.env\npassthrough_keys = [\"AWS_PROFILE\"]\n")),
+        ]
+    });
+    let empty: Vec<String> = Vec::new();
+    assert_eq!(
+        lists,
+        [
+            empty.clone(),
+            empty.clone(),
+            empty.clone(),
+            vec!["KUBECONFIG".to_owned(), "AWS_PROFILE".to_owned()],
+            vec!["GOOGLE_APPLICATION_CREDENTIALS".to_owned()],
+            empty.clone(),
+            empty.clone(),
+            empty,
+        ]
+    );
+    let text = gui_log_text();
+    assert!(!text.contains("q21-value-in-the-list"), "{text:?}");
+    for name in [
+        "PATH",
+        "OPENALPACA_CONFIG_DIR",
+        "OPENALPACA_MANAGED_LOG",
+        "OPENALPACA_PATH_SOURCE",
+    ] {
+        assert!(
+            text.lines()
+                .any(|l| l.contains(" WARN ") && l.contains(&format!("key=\"{name}\""))),
+            "the app's own {name} is named as not passed: {text:?}"
+        );
+    }
+    assert!(
+        text.lines()
+            .any(|l| l.contains(" WARN ") && l.contains("not a variable name")),
+        "{text:?}"
+    );
+}
+
+/// The `daemon.toml` the daemon seeds into a new store names the list, and
+/// names no key: by default nothing but `PATH` is passed.
+#[test]
+fn the_seeded_daemon_toml_lists_no_key() {
+    let guard = HomeStoreGuard::set("keys-seeded");
+    let seeded = include_str!("../../../../scripts/release/templates/config/daemon.toml");
+    let table: toml::Table = seeded.parse().expect("the template is TOML");
+    assert_eq!(
+        table["daemon"]["env"]["passthrough_keys"],
+        toml::Value::Array(Vec::new())
+    );
+    let config_dir = write_daemon_toml(&guard, seeded);
+    assert!(passthrough_keys(&config_dir).is_empty());
+}
+
+/// The account the app's own capture starts with carries the list the
+/// store's `daemon.toml` names: the one place `start()` reads it.
+#[cfg(unix)]
+#[test]
+fn the_apps_capture_reads_the_list_from_the_stores_daemon_toml() {
+    let guard = HomeStoreGuard::set("keys-account");
+    write_daemon_toml(
+        &guard,
+        "[daemon.env]\npassthrough_keys = [\"KUBECONFIG\", \"AWS_PROFILE\"]\n",
+    );
+    assert_eq!(
+        login_path::this_account().keys,
+        ["KUBECONFIG", "AWS_PROFILE"]
+    );
 }

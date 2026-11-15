@@ -2,11 +2,19 @@
   "login_shell": {
     "source": "login-shell",
     "captureMs": 212,
-    "reason": null
+    "reason": null,
+    "passedKeys": []
+  },
+  "login_shell_with_keys": {
+    "source": "login-shell",
+    "captureMs": 212,
+    "reason": null,
+    "passedKeys": ["AWS_PROFILE", "KUBECONFIG"]
   },
   "fallback_list": {
     "source": "fallback-list",
     "captureMs": 3000,
-    "reason": "the login shell did not finish within 3000 ms"
+    "reason": "the login shell did not finish within 3000 ms",
+    "passedKeys": []
   }
 }

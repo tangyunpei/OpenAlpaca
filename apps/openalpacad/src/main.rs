@@ -214,10 +214,11 @@ async fn async_main(
 
     // Step 0c (Q21): where this daemon's PATH came from — the app's capture
     // of the login shell's, its fallback list, or, with no word from the
-    // app, whatever started it. The source and the capture's time, never
-    // the PATH.
+    // app, whatever started it. The source and the capture's time, and the
+    // variables the app passed beside it by name (N-DAEMON-2), never the
+    // PATH or a value.
     let path_source = bootstrap::read_path_source();
-    info!("{}", bootstrap::path_source_line(path_source));
+    info!("{}", bootstrap::path_source_line(&path_source));
 
     // Step 1: Bind to dynamic port (127.0.0.1:0 -> OS assigns port)
     let listener = TcpListener::bind(("127.0.0.1", 0))
