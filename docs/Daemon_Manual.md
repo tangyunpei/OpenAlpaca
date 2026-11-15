@@ -290,7 +290,9 @@ routable, with tool support assumed and **no price** — the daemon's
 ### The effective model
 
 A requested model that is not routable (unknown id, provider not loaded,
-provider disabled) walks a ladder instead of failing: the request's
+provider disabled, a built-in OpenAI row on an OpenAI-compatible server that
+neither lists it nor has a `[models]` row of yours naming it) walks a ladder
+instead of failing: the request's
 `fallback_models` → the model's own chain → `[orchestrator] fallback_models` →
 the **effective default** — the configured default when it is routable,
 otherwise the default model of the first loaded provider that has a routable
@@ -302,10 +304,15 @@ provider's own list confirmed when there is one, and among those (or among
 the built-in rows, when nothing was listed) the provider's `fast` model when
 the router has it (`claude-haiku-5-5` on Anthropic, `gpt-6-luna` on OpenAI,
 not a flagship that sorts first by name), then one that can use tools and
-then the lowest id, so the answer does not move between runs. A server of
-your own behind `[providers.openai]` whose list lacks `gpt-6-luna` therefore
-gets one of its own models, not a built-in row it does not serve. Every
-substitution is announced — one `WARN`
+then the lowest id, so the answer does not move between runs. The
+exception is an `openai` provider whose `base_url` is not OpenAI's own
+(llama.cpp, LM Studio, vLLM, a gateway): the built-in rows are not
+candidates there unless the server lists them or a `[models]` row names
+them, so its default is one the server listed or one of your `[models]`
+rows, and while the server has listed nothing (its list could not be
+read, or was empty) only your `[models]` rows stand — with none, the
+provider offers no default, and on an install with nothing else loaded
+nothing is routable. Every substitution is announced — one `WARN`
 per distinct (requested → effective) pair, and the call log carries the model
 actually used. `GET /v1/status` serves the pair:
 
@@ -577,8 +584,9 @@ fallback counts a model Anthropic's or OpenAI's discovery registered with no
 price: it still runs, its spend counts against the caps below, and
 `daemon.log` says once per id that it is counted at the fallback. A
 `[models."<id>"]` row with its `input_price` and `output_price` counts it at
-its own rate. A non-streaming OpenAI answer, on either of its APIs, is
-counted by the model its body names, which may be a dated snapshot of the
+its own rate, and a price the row leaves out is `0`. A non-streaming OpenAI
+answer, on either of its APIs, is counted by the model its body names,
+which may be a dated snapshot of the
 id asked for (such as `gpt-4o-mini-2024-07-18`): a snapshot the catalogue
 lacks meets the same fallback. The four built-in OpenAI rows' pages list no
 snapshot but the id itself. A

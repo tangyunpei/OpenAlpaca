@@ -613,15 +613,19 @@ cannot answer until you enable one:
   is the model the asking agent runs on, so a workflow's lead and every
   agent it starts run on the server's model, counted at 0 on a server on
   this machine or your home network (elsewhere, at $3 / $15 per million
-  tokens unless a `[models]` row prices it). The server's list gives no
-  context window, so a run is budgeted at 200,000 tokens unless a
-  `[models."<id>"]` row with `provider = "openai"` gives the model's
-  `context`; give one for a small local model, or its runs overrun its
-  window. A pin naming another model the server lists moves an alias
-  there: `fast`, `balanced` or `strong` under
-  `[providers.openai.model_aliases]`. A server whose model list cannot be
-  read is run only on models you name for it: add each as a
-  `[models."<id>"]` row with `provider = "openai"` in `llm.toml`.
+  tokens unless a `[models]` row names the model: such a row counts it at
+  the `input_price` and `output_price` it gives, and at 0 for each it
+  leaves out). The server's list gives no context window, so a run is
+  budgeted at 200,000 tokens unless a `[models."<id>"]` row with
+  `provider = "openai"` gives the model's `context`; give one for a small
+  local model, or its runs overrun its window. A pin naming another model
+  the server lists moves an alias there: `fast`, `balanced` or `strong`
+  under `[providers.openai.model_aliases]`. A server whose model list
+  cannot be read is run only on models you name for it: add each as a
+  `[models."<id>"]` row with `provider = "openai"` in `llm.toml`. On a
+  paid gateway, or any server elsewhere, give both `input_price` and
+  `output_price` in every such row: a price left out is counted at 0, so
+  that spend does not count against the cost caps.
   See [Daemon Manual → Model aliases](Daemon_Manual.md#model-aliases) and
   [OpenAI's Responses API](Daemon_Manual.md#openais-responses-api).
 
