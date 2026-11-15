@@ -161,11 +161,13 @@ describe("the written-artifact card", () => {
 
   it("asks the shell to reveal the path the frame carried, and shows its refusal", async () => {
     vi.stubGlobal("isTauri", true);
-    // Tauri rejects a command's `Err(String)` with the bare string.
+    // The shell refuses with its typed refusal, `{ kind, message }` (Q13).
     revealAnswer = () =>
-      Promise.reject(
-        "/home/.openalpaca/artifacts/2026-09-05-run/01-connector-audit-findings.md is not there any more, so it cannot be shown in its folder.",
-      );
+      Promise.reject({
+        kind: "reveal_refused",
+        message:
+          "/home/.openalpaca/artifacts/2026-09-05-run/01-connector-audit-findings.md is not there any more, so it cannot be shown in its folder.",
+      });
     const user = userEvent.setup();
     renderTranscript(written);
 

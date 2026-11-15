@@ -14,6 +14,9 @@
 //! (`tauri::async_runtime::spawn_blocking`), so it never holds a thread of
 //! the async runtime either; and the liveness probe is tokio's connect under
 //! tokio's timeout (Q12).
+//!
+//! A command refuses with a [`ShellError`] (Q13): `{ kind, message }` to the
+//! webview, `kind` what refused and `message` the sentence it shows.
 
 use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
@@ -26,6 +29,91 @@ use std::process::Command;
 use std::time::Duration;
 
 // ============================================================================
+// The refusals
+// ============================================================================
+
+/// Why a command refused, as the webview receives it (Q13): an object whose
+/// `kind` is the variant in snake_case and whose `message` is the sentence
+/// the webview shows as it is — the sentence each command answered with
+/// before the refusals were typed, byte for byte. `SpawnFailed` carries the
+/// daemon log's tail beside it. The webview branches on `kind`, never on the
+/// sentence's words.
+///
+/// The TypeScript side mirrors it by hand (`src/lib/shell-error.ts`), and
+/// `src/lib/shell-errors.json` holds every variant's wire form, which a test
+/// on each side reads (tauri-specta, the typed-IPC form, is not yet at a
+/// stable 2.0). Tauri's own refusals — an argument missing, a command not
+/// admitted — stay bare strings, and are not this.
+#[derive(Debug, Serialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ShellError {
+    /// `get_connection_info`: there is no `discovery.json`, so no daemon is
+    /// serving (or it removed the file on its way out).
+    #[error("{message}")]
+    NotRunning { message: String },
+    /// `get_connection_info`: the discovery file's token has expired.
+    #[error("{message}")]
+    Expired { message: String },
+    /// `get_connection_info`: `discovery.json` could not be found, read or
+    /// parsed, or its read could not be run.
+    #[error("{message}")]
+    DiscoveryUnreadable { message: String },
+    /// `ensure_daemon_running`: no daemon came up — it could not be spawned,
+    /// or the one spawned did not answer within 5 seconds. `log_tail` is what
+    /// this run wrote to `daemon.log` (also quoted in `message`), `None` when
+    /// it wrote nothing or the log could not be read.
+    #[error("{message}")]
+    SpawnFailed {
+        message: String,
+        log_tail: Option<String>,
+    },
+    /// `read_daemon_log_tail`: the log could not be found or read, or its
+    /// read could not be run.
+    #[error("{message}")]
+    LogUnreadable { message: String },
+    /// `await_daemon_stopped`: the wait could not be run, so whether the
+    /// daemon is gone is not known.
+    #[error("{message}")]
+    StopUnconfirmed { message: String },
+    /// `reveal_path`: the path is not one the shell shows
+    /// (`store::RevealRefusal`).
+    #[error("{message}")]
+    RevealRefused { message: String },
+    /// `reveal_path`: the platform's program could not show an admitted
+    /// path, or could not be run.
+    #[error("{message}")]
+    RevealFailed { message: String },
+}
+
+/// [`ShellError::SpawnFailed`] with no log tail.
+fn spawn_failed(message: String) -> ShellError {
+    ShellError::SpawnFailed {
+        message,
+        log_tail: None,
+    }
+}
+
+/// [`ShellError::SpawnFailed`] for a daemon that did not answer within the
+/// wait: `tail` is what this run wrote to `log_path`, empty when nothing.
+fn did_not_start(log_path: &Path, tail: String) -> ShellError {
+    if tail.is_empty() {
+        spawn_failed(format!(
+            "The daemon did not start within 5 seconds, and wrote nothing to its log \
+             ({}). Check that the daemon binary is installed beside the app.",
+            log_path.display()
+        ))
+    } else {
+        ShellError::SpawnFailed {
+            message: format!(
+                "The daemon did not start within 5 seconds. Its log ({}) ends with:\n\n{tail}",
+                log_path.display()
+            ),
+            log_tail: Some(tail),
+        }
+    }
+}
+
+// ============================================================================
 // Tauri Commands
 // ============================================================================
 
@@ -34,19 +122,28 @@ use std::time::Duration;
 ///
 /// The file is read on the blocking pool.
 #[tauri::command]
-async fn get_connection_info() -> Result<ConnectionInfo, String> {
+async fn get_connection_info() -> Result<ConnectionInfo, ShellError> {
     tauri::async_runtime::spawn_blocking(read_connection_info)
         .await
-        .map_err(|e| format!("Could not read the daemon's discovery file: {e}"))?
+        .map_err(|e| ShellError::DiscoveryUnreadable {
+            message: format!("Could not read the daemon's discovery file: {e}"),
+        })?
 }
 
 /// [`get_connection_info`]'s work: read discovery.json and check its token.
-fn read_connection_info() -> Result<ConnectionInfo, String> {
-    let Some(d) = discovery::read_discovery().map_err(|e| e.to_string())? else {
-        return Err("Discovery not found: daemon may not be running".into());
+fn read_connection_info() -> Result<ConnectionInfo, ShellError> {
+    let Some(d) = discovery::read_discovery().map_err(|e| ShellError::DiscoveryUnreadable {
+        message: e.to_string(),
+    })?
+    else {
+        return Err(ShellError::NotRunning {
+            message: "Discovery not found: daemon may not be running".into(),
+        });
     };
 
-    discovery::ensure_not_expired(&d).map_err(|e| e.to_string())?;
+    discovery::ensure_not_expired(&d).map_err(|e| ShellError::Expired {
+        message: e.to_string(),
+    })?;
 
     Ok(ConnectionInfo::from(&d))
 }
@@ -58,7 +155,7 @@ fn read_connection_info() -> Result<ConnectionInfo, String> {
 /// the blocking pool, and the probe is tokio's, so the command holds no
 /// runtime thread while it waits on a disk, a connect or the new process.
 #[tauri::command]
-async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
+async fn ensure_daemon_running() -> Result<ConnectionInfo, ShellError> {
     // Step 1: Check if a daemon is already running AND actually alive. A stale
     // discovery.json (left by a crashed/killed daemon or a reboot) would
     // otherwise be trusted forever, so the GUI would never respawn. Liveness is
@@ -71,8 +168,8 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
     // Step 2: Spawn the daemon process
     let log_start = tauri::async_runtime::spawn_blocking(spawn_daemon)
         .await
-        .map_err(|e| format!("Failed to spawn daemon: {e}"))?
-        .map_err(|e| format!("Failed to spawn daemon: {e:#}"))?;
+        .map_err(|e| spawn_failed(format!("Failed to spawn daemon: {e}")))?
+        .map_err(|e| spawn_failed(format!("Failed to spawn daemon: {e:#}")))?;
 
     // Step 3: Wait for the new daemon to appear AND accept connections.
     for _ in 0..25 {
@@ -96,19 +193,10 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
         Ok::<_, String>((log_path, tail))
     })
     .await
-    .map_err(|e| format!("Could not read the daemon log: {e}"))??;
-    if tail.is_empty() {
-        Err(format!(
-            "The daemon did not start within 5 seconds, and wrote nothing to its log \
-             ({}). Check that the daemon binary is installed beside the app.",
-            log_path.display()
-        ))
-    } else {
-        Err(format!(
-            "The daemon did not start within 5 seconds. Its log ({}) ends with:\n\n{tail}",
-            log_path.display()
-        ))
-    }
+    .map_err(|e| format!("Could not read the daemon log: {e}"))
+    .and_then(|read| read)
+    .map_err(spawn_failed)?;
+    Err(did_not_start(&log_path, tail))
 }
 
 /// How many log lines a failed start quotes. Enough for the longest refusal
@@ -129,30 +217,43 @@ const TIMEOUT_TAIL_LINES: usize = 40;
 ///
 /// The read runs on the blocking pool.
 #[tauri::command]
-async fn read_daemon_log_tail(lines: usize) -> Result<String, String> {
+async fn read_daemon_log_tail(lines: usize) -> Result<String, ShellError> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
         store::read_log_tail(&path, 0, lines)
             .map_err(|e| format!("Could not read {}: {e}", path.display()))
     })
     .await
-    .map_err(|e| format!("Could not read the daemon log: {e}"))?
+    .map_err(|e| format!("Could not read the daemon log: {e}"))
+    .and_then(|read| read)
+    .map_err(|message| ShellError::LogUnreadable { message })
 }
 
 /// What [`await_daemon_stopped`] concluded, serialized to the webview in
 /// camelCase: `{ outcome, pid, waitedMs }`.
 ///
 /// `outcome` is one of `not_running`, `stopped`, `lock_still_held` or
-/// `still_alive` — [`StopOutcome`]'s four answers, spelled as data. Only
-/// `not_running` and `stopped` mean a daemon can be started now; `pid` is set
-/// only for `still_alive`, so the webview can name the process it could not
-/// wait out.
+/// `still_alive` — [`StopOutcome`]'s four answers, a [`StopReportOutcome`]
+/// serialized in snake_case. Only `not_running` and `stopped` mean a daemon
+/// can be started now; `pid` is set only for `still_alive`, so the webview
+/// can name the process it could not wait out.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DaemonStopReport {
-    outcome: &'static str,
+    outcome: StopReportOutcome,
     pid: Option<u32>,
     waited_ms: u64,
+}
+
+/// [`StopOutcome`]'s four answers without their data, as the webview reads
+/// [`DaemonStopReport`]'s `outcome` (Q13: an enum, where it was a string).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StopReportOutcome {
+    NotRunning,
+    Stopped,
+    LockStillHeld,
+    StillAlive,
 }
 
 impl From<StopOutcome> for DaemonStopReport {
@@ -160,22 +261,22 @@ impl From<StopOutcome> for DaemonStopReport {
         let millis = |waited: Duration| u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
         match outcome {
             StopOutcome::NotRunning => DaemonStopReport {
-                outcome: "not_running",
+                outcome: StopReportOutcome::NotRunning,
                 pid: None,
                 waited_ms: 0,
             },
             StopOutcome::Stopped { waited } => DaemonStopReport {
-                outcome: "stopped",
+                outcome: StopReportOutcome::Stopped,
                 pid: None,
                 waited_ms: millis(waited),
             },
             StopOutcome::LockStillHeld { waited } => DaemonStopReport {
-                outcome: "lock_still_held",
+                outcome: StopReportOutcome::LockStillHeld,
                 pid: None,
                 waited_ms: millis(waited),
             },
             StopOutcome::StillAlive { pid, waited } => DaemonStopReport {
-                outcome: "still_alive",
+                outcome: StopReportOutcome::StillAlive,
                 pid: Some(pid),
                 waited_ms: millis(waited),
             },
@@ -199,13 +300,15 @@ impl From<StopOutcome> for DaemonStopReport {
 /// on the async runtime's own threads it would stall every other `invoke`
 /// for up to 15 s.
 #[tauri::command]
-async fn await_daemon_stopped() -> Result<DaemonStopReport, String> {
+async fn await_daemon_stopped() -> Result<DaemonStopReport, ShellError> {
     tauri::async_runtime::spawn_blocking(|| {
         daemon_lifecycle::wait_for_daemon_exit(daemon_lifecycle::STOP_TIMEOUT)
     })
     .await
     .map(DaemonStopReport::from)
-    .map_err(|e| format!("Could not wait for the daemon to stop: {e}"))
+    .map_err(|e| ShellError::StopUnconfirmed {
+        message: format!("Could not wait for the daemon to stop: {e}"),
+    })
 }
 
 /// Show a file in its folder: Finder with the file selected on macOS
@@ -220,20 +323,27 @@ async fn await_daemon_stopped() -> Result<DaemonStopReport, String> {
 /// Reveal answers for such a file whatever its kind). The platform program
 /// gets that resolved path as an argument of its own, never through a shell.
 /// This shows the file; opening it stays the daemon's route
-/// (`POST /v1/files/{id}/open`). An error is one sentence, which the webview
-/// shows as it is.
+/// (`POST /v1/files/{id}/open`). A refusal's sentence is one the webview
+/// shows as it is: [`ShellError::RevealRefused`] for a path the check does
+/// not admit, [`ShellError::RevealFailed`] for one the platform could not
+/// show.
 ///
 /// The check (it reads `projects/`) and the program both run on the blocking
 /// pool, so a slow disk or file manager never stalls another `invoke`.
 #[tauri::command]
-async fn reveal_path(path: String) -> Result<(), String> {
+async fn reveal_path(path: String) -> Result<(), ShellError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let path =
-            store::revealable_path(Path::new(&path)).map_err(|refusal| refusal.to_string())?;
-        reveal_in_folder(&path)
+        let path = store::revealable_path(Path::new(&path)).map_err(|refusal| {
+            ShellError::RevealRefused {
+                message: refusal.to_string(),
+            }
+        })?;
+        reveal_in_folder(&path).map_err(|message| ShellError::RevealFailed { message })
     })
     .await
-    .map_err(|e| format!("Could not show the file in its folder: {e}."))?
+    .map_err(|e| ShellError::RevealFailed {
+        message: format!("Could not show the file in its folder: {e}."),
+    })?
 }
 
 /// Run the platform's reveal for an already admitted path and wait for it.

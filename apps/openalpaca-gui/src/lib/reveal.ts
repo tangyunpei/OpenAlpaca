@@ -12,6 +12,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+import { shellErrorOf } from "./shell-error";
+
 /**
  * Whether this window can reveal a file: only inside the Tauri shell. In the
  * Vite preview (or jsdom) there is no shell to ask, so nothing draws the
@@ -36,16 +38,22 @@ export function revealLabel(
 
 /**
  * Ask the shell to show `path` in its folder. Rejects with the shell's own
- * sentence — it is written to be shown as it is.
+ * sentence — it is written to be shown as it is — read from its typed
+ * refusal (`reveal_refused` for a path it does not show, `reveal_failed` for
+ * one the platform could not; `lib/shell-error.ts`, Q13). Tauri's own
+ * refusal is a bare string, shown as it is too.
  */
 export async function revealInFolder(path: string): Promise<void> {
   try {
     await invoke("reveal_path", { path });
   } catch (cause) {
+    const shell = shellErrorOf(cause);
     throw new Error(
-      typeof cause === "string"
-        ? cause
-        : "The file could not be shown in its folder.",
+      shell?.message ??
+        (typeof cause === "string"
+          ? cause
+          : "The file could not be shown in its folder."),
+      { cause },
     );
   }
 }

@@ -16,7 +16,9 @@
  *                             waits until the process and its lock are gone.
  *
  * The first two return `ConnectionInfo`, serialized to the webview in
- * camelCase.
+ * camelCase. A refusal of the shell's is typed, `{ kind, message }`
+ * (`lib/shell-error.ts`, Q13): it becomes a `ConnectionError` carrying that
+ * `kind` and the shell's sentence as it is.
  *
  * `instanceId` is the identity guard: a change means the daemon restarted, so
  * every `task_id`, `stream_id` and `request_id` the client holds is dead and
@@ -24,6 +26,8 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+
+import { shellErrorOf, type ShellErrorKind } from "./shell-error";
 
 export interface ConnectionInfo {
   baseUrl: string;
@@ -39,9 +43,28 @@ export class ConnectionError extends Error {
     message: string,
     /** The underlying Tauri rejection or malformed payload. */
     readonly detail: unknown = null,
+    /**
+     * What refused, when the shell did (its typed refusal's `kind`); `null`
+     * for Tauri's own refusal, an absent bridge or a malformed payload.
+     */
+    readonly kind: ShellErrorKind | null = null,
   ) {
     super(message);
   }
+}
+
+/**
+ * A command's rejection as a `ConnectionError`: the shell's typed refusal
+ * keeps its `kind` and its sentence; Tauri's own refusal is a bare string,
+ * kept as it is with no `kind`; anything else is named by the command.
+ */
+function refusalOf(command: string, cause: unknown): ConnectionError {
+  const shell = shellErrorOf(cause);
+  if (shell) return new ConnectionError(shell.message, cause, shell.kind);
+  return new ConnectionError(
+    typeof cause === "string" ? cause : `Tauri command \`${command}\` failed`,
+    cause,
+  );
 }
 
 export type ConnectionListener = (info: ConnectionInfo | null) => void;
@@ -78,10 +101,7 @@ async function invokeConnection(
   try {
     raw = await invoke(command);
   } catch (cause) {
-    throw new ConnectionError(
-      typeof cause === "string" ? cause : `Tauri command \`${command}\` failed`,
-      cause,
-    );
+    throw refusalOf(command, cause);
   }
   if (!isConnectionInfo(raw)) {
     throw new ConnectionError(
@@ -105,12 +125,7 @@ export async function readDaemonLogTail(lines: number): Promise<string> {
   try {
     raw = await invoke("read_daemon_log_tail", { lines });
   } catch (cause) {
-    throw new ConnectionError(
-      typeof cause === "string"
-        ? cause
-        : "Tauri command `read_daemon_log_tail` failed",
-      cause,
-    );
+    throw refusalOf("read_daemon_log_tail", cause);
   }
   if (typeof raw !== "string") {
     throw new ConnectionError(
@@ -240,12 +255,7 @@ export async function awaitDaemonStopped(): Promise<DaemonStopReport> {
   try {
     raw = await invoke("await_daemon_stopped");
   } catch (cause) {
-    throw new ConnectionError(
-      typeof cause === "string"
-        ? cause
-        : "Tauri command `await_daemon_stopped` failed",
-      cause,
-    );
+    throw refusalOf("await_daemon_stopped", cause);
   }
   const report = raw as Partial<DaemonStopReport> | null;
   if (

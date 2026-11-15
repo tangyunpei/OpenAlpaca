@@ -1,0 +1,43 @@
+{
+  "about": "Every refusal the Tauri shell's commands answer with (Q13), as the webview receives it: one row per variant of src-tauri/src/lib.rs's ShellError, two for spawn_failed (with and without a log tail). The shell's test serializes each variant and must equal its row; lib/shell-error.test.ts parses each row and must read its kind, message and log_tail. Add a row with a new variant, on both sides.",
+  "refusals": [
+    {
+      "kind": "not_running",
+      "message": "Discovery not found: daemon may not be running"
+    },
+    {
+      "kind": "expired",
+      "message": "Discovery token has expired"
+    },
+    {
+      "kind": "discovery_unreadable",
+      "message": "Failed to parse discovery.json"
+    },
+    {
+      "kind": "spawn_failed",
+      "message": "The daemon did not start within 5 seconds. Its log (/s/state/logs/daemon.log) ends with:\n\nError: this database is newer than this build",
+      "log_tail": "Error: this database is newer than this build"
+    },
+    {
+      "kind": "spawn_failed",
+      "message": "Failed to spawn daemon: No such file or directory (os error 2)",
+      "log_tail": null
+    },
+    {
+      "kind": "log_unreadable",
+      "message": "Could not read /s/state/logs/daemon.log: Is a directory (os error 21)"
+    },
+    {
+      "kind": "stop_unconfirmed",
+      "message": "Could not wait for the daemon to stop: task 7 panicked"
+    },
+    {
+      "kind": "reveal_refused",
+      "message": "/s/artifacts/gone.md is not there any more, so it cannot be shown in its folder."
+    },
+    {
+      "kind": "reveal_failed",
+      "message": "open could not show /s/artifacts/notes.md in its folder (exit status: 1)."
+    }
+  ]
+}

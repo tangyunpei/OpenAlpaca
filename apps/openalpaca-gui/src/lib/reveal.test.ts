@@ -63,13 +63,47 @@ describe("revealInFolder", () => {
     });
   });
 
-  it("rejects with the shell's own sentence", async () => {
-    vi.mocked(invoke).mockRejectedValue(
-      "/tmp/notes.md is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder.",
-    );
+  it("rejects with the shell's own sentence, read from its typed refusal", async () => {
+    vi.mocked(invoke).mockRejectedValue({
+      kind: "reveal_refused",
+      message:
+        "/tmp/notes.md is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder.",
+    });
 
     await expect(revealInFolder("/tmp/notes.md")).rejects.toThrow(
       "/tmp/notes.md is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder.",
+    );
+  });
+
+  it("rejects with the sentence of a reveal the platform could not do", async () => {
+    vi.mocked(invoke).mockRejectedValue({
+      kind: "reveal_failed",
+      message:
+        "open could not show /Users/me/.openalpaca/artifacts/01-notes.md in its folder (exit status: 1).",
+    });
+
+    await expect(
+      revealInFolder("/Users/me/.openalpaca/artifacts/01-notes.md"),
+    ).rejects.toThrow(
+      "open could not show /Users/me/.openalpaca/artifacts/01-notes.md in its folder (exit status: 1).",
+    );
+  });
+
+  it("rejects with Tauri's own refusal, a bare string, as it is", async () => {
+    vi.mocked(invoke).mockRejectedValue(
+      "command reveal_path missing required key path",
+    );
+
+    await expect(revealInFolder("/tmp/notes.md")).rejects.toThrow(
+      "command reveal_path missing required key path",
+    );
+  });
+
+  it("rejects with a sentence of its own for an answer it does not know", async () => {
+    vi.mocked(invoke).mockRejectedValue({ kind: "unheard_of", message: "x" });
+
+    await expect(revealInFolder("/tmp/notes.md")).rejects.toThrow(
+      "The file could not be shown in its folder.",
     );
   });
 });

@@ -28,6 +28,7 @@
 use super::*;
 use openalpaca_storage::discovery::Discovery;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::sync::MutexGuard;
 use tauri::ipc::{CallbackFn, InvokeBody};
@@ -159,11 +160,23 @@ fn invoke(cmd: &str, args: Value) -> Result<Value, Value> {
         .map(|body| body.deserialize::<Value>().expect("a JSON answer"))
 }
 
-/// A refusal's text: the shell's own are one string each.
-fn refusal(answer: Result<Value, Value>) -> String {
+/// The shell's own refusal, as the webview receives it (Q13): an object
+/// whose `kind` names what refused and whose `message` is the sentence.
+fn refusal(answer: Result<Value, Value>) -> Value {
+    answer.expect_err("a refusal")
+}
+
+/// `{ kind, message }`: a refusal of the shell's own, as the webview reads it.
+fn shell_refusal(kind: &str, message: impl Into<String>) -> Value {
+    json!({ "kind": kind, "message": message.into() })
+}
+
+/// Tauri's own refusal (an argument missing, a command not admitted): a bare
+/// string, never the shell's typed refusal.
+fn tauri_refusal(answer: Result<Value, Value>) -> String {
     match answer.expect_err("a refusal") {
         Value::String(text) => text,
-        other => panic!("a refusal that is not a string: {other}"),
+        other => panic!("Tauri's own refusal that is not a string: {other}"),
     }
 }
 
@@ -218,7 +231,10 @@ fn get_connection_info_refuses_without_a_discovery_file() {
     let _guard = HomeStoreGuard::set("info-none");
     assert_eq!(
         refusal(invoke("get_connection_info", json!({}))),
-        "Discovery not found: daemon may not be running"
+        shell_refusal(
+            "not_running",
+            "Discovery not found: daemon may not be running"
+        )
     );
 }
 
@@ -236,7 +252,32 @@ fn get_connection_info_refuses_an_expired_discovery_file() {
     write_discovery(1, true);
     assert_eq!(
         refusal(invoke("get_connection_info", json!({}))),
-        "Discovery token has expired"
+        shell_refusal("expired", "Discovery token has expired")
+    );
+}
+
+#[test]
+fn get_connection_info_refuses_a_discovery_file_it_cannot_parse() {
+    let _guard = HomeStoreGuard::set("info-unparsable");
+    let path = store::discovery_path().expect("discovery path");
+    std::fs::create_dir_all(path.parent().expect("its folder")).expect("its folder");
+    std::fs::write(&path, "not discovery").expect("write discovery.json");
+    assert_eq!(
+        refusal(invoke("get_connection_info", json!({}))),
+        shell_refusal("discovery_unreadable", "Failed to parse discovery.json")
+    );
+}
+
+/// A discovery file it cannot read (a folder where `discovery.json` should
+/// be): the read's own sentence, not the parse's.
+#[test]
+fn get_connection_info_refuses_a_discovery_file_it_cannot_read() {
+    let _guard = HomeStoreGuard::set("info-unreadable");
+    let path = store::discovery_path().expect("discovery path");
+    std::fs::create_dir_all(&path).expect("a folder at discovery.json's path");
+    assert_eq!(
+        refusal(invoke("get_connection_info", json!({}))),
+        shell_refusal("discovery_unreadable", "Failed to read discovery.json")
     );
 }
 
@@ -298,10 +339,32 @@ fn read_daemon_log_tail_returns_the_last_lines_newest_last() {
     );
 }
 
+/// A log it cannot read (a folder where `daemon.log` should be) is refused
+/// with the path and the system's reason.
+#[cfg(unix)]
+#[test]
+fn read_daemon_log_tail_refuses_a_log_it_cannot_read() {
+    let _guard = HomeStoreGuard::set("log-unreadable");
+    let log = store::daemon_log_path().expect("log path");
+    std::fs::create_dir_all(&log).expect("a folder at the log's path");
+    assert_eq!(
+        refusal(invoke("read_daemon_log_tail", json!({ "lines": 5 }))),
+        shell_refusal(
+            "log_unreadable",
+            format!(
+                "Could not read {}: Is a directory (os error 21)",
+                log.display()
+            )
+        )
+    );
+}
+
+/// Tauri's own refusal of a call missing an argument stays its bare string:
+/// the webview shows it as it is.
 #[test]
 fn read_daemon_log_tail_refuses_a_call_without_lines() {
     let _guard = HomeStoreGuard::set("log-no-arg");
-    let text = refusal(invoke("read_daemon_log_tail", json!({ "count": 2 })));
+    let text = tauri_refusal(invoke("read_daemon_log_tail", json!({ "count": 2 })));
     assert!(
         text.contains("command read_daemon_log_tail missing required key lines"),
         "{text}"
@@ -356,9 +419,12 @@ fn reveal_path_refuses_a_path_that_is_not_there() {
     let gone = guard.store().join("artifacts").join("gone.md");
     assert_eq!(
         refusal(invoke("reveal_path", json!({ "path": gone }))),
-        format!(
-            "{} is not there any more, so it cannot be shown in its folder.",
-            gone.display()
+        shell_refusal(
+            "reveal_refused",
+            format!(
+                "{} is not there any more, so it cannot be shown in its folder.",
+                gone.display()
+            )
         )
     );
 }
@@ -370,9 +436,12 @@ fn reveal_path_refuses_a_folder() {
     std::fs::create_dir_all(&folder).expect("folder");
     assert_eq!(
         refusal(invoke("reveal_path", json!({ "path": folder }))),
-        format!(
-            "{} is not a file, so it cannot be shown in its folder.",
-            folder.display()
+        shell_refusal(
+            "reveal_refused",
+            format!(
+                "{} is not a file, so it cannot be shown in its folder.",
+                folder.display()
+            )
         )
     );
 }
@@ -384,10 +453,13 @@ fn reveal_path_refuses_a_file_outside_every_store() {
     std::fs::write(&outside, "not the store's").expect("file");
     assert_eq!(
         refusal(invoke("reveal_path", json!({ "path": outside }))),
-        format!(
-            "{} is not in an OpenAlpaca store or one of your projects, so it is not shown in \
-             its folder.",
-            outside.display()
+        shell_refusal(
+            "reveal_refused",
+            format!(
+                "{} is not in an OpenAlpaca store or one of your projects, so it is not \
+                 shown in its folder.",
+                outside.display()
+            )
         )
     );
 }
@@ -395,7 +467,7 @@ fn reveal_path_refuses_a_file_outside_every_store() {
 #[test]
 fn reveal_path_refuses_a_call_without_path() {
     let _guard = HomeStoreGuard::set("reveal-no-arg");
-    let text = refusal(invoke("reveal_path", json!({ "file": "/x" })));
+    let text = tauri_refusal(invoke("reveal_path", json!({ "file": "/x" })));
     assert!(
         text.contains("command reveal_path missing required key path"),
         "{text}"
@@ -691,5 +763,172 @@ fn the_liveness_probe_gives_each_silent_address_its_timeout_and_no_more() {
     assert!(
         waited < Duration::from_secs(5),
         "still waiting after {waited:?}"
+    );
+}
+
+// ============================================================================
+// The typed refusals (Q13)
+// ============================================================================
+
+/// One of each refusal, with the values `src/lib/shell-errors.json`'s rows
+/// carry, in its order. The exhaustive match below only points the compiler
+/// here when a variant is added; what forces its value (and so its row) is
+/// `every_variant_in_the_source_has_a_refusal`, which reads the variants
+/// from `lib.rs` itself.
+fn every_refusal() -> Vec<ShellError> {
+    let all = vec![
+        ShellError::NotRunning {
+            message: "Discovery not found: daemon may not be running".into(),
+        },
+        ShellError::Expired {
+            message: "Discovery token has expired".into(),
+        },
+        ShellError::DiscoveryUnreadable {
+            message: "Failed to parse discovery.json".into(),
+        },
+        did_not_start(
+            Path::new("/s/state/logs/daemon.log"),
+            "Error: this database is newer than this build".into(),
+        ),
+        ShellError::SpawnFailed {
+            message: "Failed to spawn daemon: No such file or directory (os error 2)".into(),
+            log_tail: None,
+        },
+        ShellError::LogUnreadable {
+            message: "Could not read /s/state/logs/daemon.log: Is a directory (os error 21)".into(),
+        },
+        ShellError::StopUnconfirmed {
+            message: "Could not wait for the daemon to stop: task 7 panicked".into(),
+        },
+        ShellError::RevealRefused {
+            message: "/s/artifacts/gone.md is not there any more, so it cannot be shown in its \
+                      folder."
+                .into(),
+        },
+        ShellError::RevealFailed {
+            message: "open could not show /s/artifacts/notes.md in its folder (exit status: 1)."
+                .into(),
+        },
+    ];
+    for error in &all {
+        match error {
+            ShellError::NotRunning { .. }
+            | ShellError::Expired { .. }
+            | ShellError::DiscoveryUnreadable { .. }
+            | ShellError::SpawnFailed { .. }
+            | ShellError::LogUnreadable { .. }
+            | ShellError::StopUnconfirmed { .. }
+            | ShellError::RevealRefused { .. }
+            | ShellError::RevealFailed { .. } => {}
+        }
+    }
+    all
+}
+
+/// Each refusal's wire form is its row in `src/lib/shell-errors.json`, the
+/// table the webview's test reads too: the TypeScript mirror is held to the
+/// same rows (`lib/shell-error.test.ts`).
+#[test]
+fn every_refusal_is_its_row_in_the_table_the_webview_reads() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/shell-errors.json");
+    let table: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("shell-errors.json")).expect("JSON");
+    let rows = table["refusals"].as_array().expect("its refusals");
+    let wire: Vec<Value> = every_refusal()
+        .iter()
+        .map(|e| serde_json::to_value(e).expect("as JSON"))
+        .collect();
+    assert_eq!(&wire, rows);
+}
+
+/// `ShellError`'s variants, read from `lib.rs`'s source, in snake_case: a
+/// line indented four spaces inside `enum ShellError { … }` that starts with
+/// a capital (doc comments, attributes and fields do not).
+fn shell_error_kinds_in_the_source() -> BTreeSet<String> {
+    let source = include_str!("lib.rs");
+    let anchor = "\nenum ShellError {\n";
+    assert_eq!(
+        source.matches(anchor).count(),
+        1,
+        "lib.rs declares `enum ShellError {{` once"
+    );
+    let start = source.find(anchor).expect("the enum") + anchor.len();
+    let end = source[start..].find("\n}\n").expect("the enum's end");
+    let kinds: BTreeSet<String> = source[start..start + end]
+        .lines()
+        .filter_map(|line| line.strip_prefix("    "))
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+        .map(|rest| {
+            let name: String = rest
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            let mut kind = String::new();
+            for (i, c) in name.chars().enumerate() {
+                if c.is_ascii_uppercase() && i > 0 {
+                    kind.push('_');
+                }
+                kind.push(c.to_ascii_lowercase());
+            }
+            kind
+        })
+        .collect();
+    assert!(!kinds.is_empty(), "no variant read from lib.rs");
+    kinds
+}
+
+/// Every variant `lib.rs` declares has a value in `every_refusal`, and so,
+/// by the table test, a row in `shell-errors.json`, which the TypeScript
+/// side's `SHELL_ERROR_KINDS` is held to: a new variant fails here until it
+/// has both.
+#[test]
+fn every_variant_in_the_source_has_a_refusal() {
+    let built: BTreeSet<String> = every_refusal()
+        .iter()
+        .map(|e| {
+            serde_json::to_value(e).expect("as JSON")["kind"]
+                .as_str()
+                .expect("its kind")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(built, shell_error_kinds_in_the_source());
+}
+
+/// `message` is the sentence, and it is also the error's `Display`.
+#[test]
+fn a_refusal_displays_its_sentence() {
+    for error in every_refusal() {
+        let wire = serde_json::to_value(&error).expect("as JSON");
+        assert_eq!(
+            error.to_string(),
+            wire["message"].as_str().expect("message")
+        );
+    }
+}
+
+/// A start that timed out: the two sentences, byte for byte, and the tail
+/// beside the sentence only when the run wrote one.
+#[test]
+fn a_start_that_timed_out_quotes_what_this_run_wrote() {
+    let log = Path::new("/s/state/logs/daemon.log");
+    assert_eq!(
+        serde_json::to_value(did_not_start(log, String::new())).expect("as JSON"),
+        json!({
+            "kind": "spawn_failed",
+            "message": "The daemon did not start within 5 seconds, and wrote nothing to its log \
+                        (/s/state/logs/daemon.log). Check that the daemon binary is installed \
+                        beside the app.",
+            "log_tail": null,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(did_not_start(log, "one\ntwo".into())).expect("as JSON"),
+        json!({
+            "kind": "spawn_failed",
+            "message": "The daemon did not start within 5 seconds. Its log \
+                        (/s/state/logs/daemon.log) ends with:\n\none\ntwo",
+            "log_tail": "one\ntwo",
+        })
     );
 }

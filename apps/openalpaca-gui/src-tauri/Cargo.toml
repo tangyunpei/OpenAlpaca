@@ -19,6 +19,9 @@ serde_json.workspace = true
 # already in Cargo.lock and THIRD-PARTY-NOTICES: no lock or notices change.
 tokio = { workspace = true, features = ["net"] }
 anyhow.workspace = true
+# Q13: the commands' typed refusals (`ShellError`). thiserror 2.0.21 is
+# already in Cargo.lock (tauri's); the lock gains only this crate's edge.
+thiserror.workspace = true
 tracing.workspace = true
 directories.workspace = true
 tauri-plugin-dialog.workspace = true

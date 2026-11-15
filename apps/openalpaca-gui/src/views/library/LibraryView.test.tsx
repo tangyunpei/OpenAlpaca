@@ -662,7 +662,9 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
       ),
     );
     vi.mocked(invoke).mockImplementation(async (command: string) =>
-      command === "reveal_path" ? Promise.reject(sentence) : connection,
+      command === "reveal_path"
+        ? Promise.reject({ kind: "reveal_refused", message: sentence })
+        : connection,
     );
     const user = userEvent.setup();
     renderView();
@@ -752,7 +754,9 @@ describe("LibraryDetail — Open and Reveal", () => {
     vi.stubGlobal("isTauri", true);
     const refusal = `${findings.path} is not there any more, so it cannot be shown in its folder.`;
     vi.mocked(invoke).mockImplementation(async (command: string) =>
-      command === "reveal_path" ? Promise.reject(refusal) : connection,
+      command === "reveal_path"
+        ? Promise.reject({ kind: "reveal_refused", message: refusal })
+        : connection,
     );
     const user = userEvent.setup();
     renderView();
@@ -841,9 +845,11 @@ describe("LibraryDetail — toasts name an agent's file escaped (d7-app-3, S6a M
     vi.stubGlobal("isTauri", true);
     vi.mocked(invoke).mockImplementation(async (command: string) =>
       command === "reveal_path"
-        ? Promise.reject(
-            "/w/docs/\u{202E}notes\u{200B}.md is not there any more, so it cannot be shown in its folder.",
-          )
+        ? Promise.reject({
+            kind: "reveal_refused",
+            message:
+              "/w/docs/\u{202E}notes\u{200B}.md is not there any more, so it cannot be shown in its folder.",
+          })
         : connection,
     );
     const user = userEvent.setup();
