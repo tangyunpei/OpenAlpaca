@@ -76,8 +76,13 @@ impl AgentConfigService {
         &self.config_dir
     }
 
-    /// Get agent config and its version from the in-memory registry.
+    /// Get agent config and its version from the in-memory registry. For a
+    /// template's id it is the template with the set stored for it over it —
+    /// what its next run gets, while one runs too (AGENT-SETS).
     pub fn get_agent_config(&self, id: &str) -> Result<(AgentConfigFile, u64), String> {
+        if let Some(found) = self.registry.template_config(id) {
+            return Ok(found);
+        }
         let (agent, version) = self
             .registry
             .get_with_version(id)
@@ -87,13 +92,47 @@ impl AgentConfigService {
     }
 
     /// Update an agent config with optimistic locking.
-    /// Write-Ahead: disk first, then memory, then DB.
+    ///
+    /// On a template's id this is a set (AGENT-SETS, item 22 of the owner's
+    /// second answers of 2026-11-14): it never changes a running agent; it
+    /// is kept as the fields it changes over the template, in the store's
+    /// `agent` row (its `config` column, which the template's rewrite of
+    /// the row leaves alone), and loaded for every new run of the template,
+    /// singleton or not, and at the next start. A set the store cannot keep
+    /// is refused, and the registry is put back as it was.
+    ///
+    /// On any other id (a legacy `.toml` agent): disk first, then memory,
+    /// then DB, as before; a run's own instance is refused while it runs
+    /// (`AGENT_RUNNING: …`, naming its template), since no later run loads
+    /// it.
     pub fn update_agent_config(
         &self,
         id: &str,
         config: AgentConfigFile,
         expected_version: u64,
     ) -> Result<u64, String> {
+        {
+            // One set or rescan at a time: the rescan reads the store's set
+            // and writes the row, so neither lands between the other's
+            // store and row.
+            let _one_at_a_time = self.registry.lock_rescan();
+            if let Some(stored) = self
+                .registry
+                .store_set(id, config.clone(), expected_version)?
+            {
+                if let Err(e) = self.save_set(id, &stored) {
+                    self.registry.restore_set(id, stored.previous);
+                    return Err(format!("the set could not be saved: {e:#}"));
+                }
+                return Ok(stored.version);
+            }
+        }
+        if let Some(agent) = self.registry.get(id)
+            && matches!(agent.status, super::AgentStatus::Busy { .. })
+        {
+            return Err(running_refusal(id, &agent.template_id));
+        }
+
         // 1. Write TOML to disk (Write-Ahead) — only when the id is no
         // template of any layer and no .md file holds it: a template's file
         // (or, for a bundled one, the binary) is its source of truth, and a
@@ -113,7 +152,14 @@ impl AgentConfigService {
         let subagent = config.clone().into_subagent();
         let new_version = self
             .registry
-            .update_config(id, subagent, expected_version)?;
+            .update_config(id, subagent, expected_version)
+            .map_err(|e| match e.as_str() {
+                "AGENT_RUNNING" => {
+                    let template = self.registry.get(id).map(|a| a.template_id);
+                    running_refusal(id, template.as_deref().unwrap_or(id))
+                }
+                _ => e,
+            })?;
 
         // 3. Persist to DB
         let storage_config = config.into_storage_config();
@@ -123,12 +169,44 @@ impl AgentConfigService {
         Ok(new_version)
     }
 
+    /// Store a set `AgentRegistry::store_set` took: the set in the row's
+    /// `config` column, and the row's definition with it.
+    fn save_set(&self, id: &str, stored: &super::registry::StoredSet) -> anyhow::Result<()> {
+        let repo = SubAgentRepository::new(&self.db);
+        // The row first: the set is stored on it.
+        super::file_layer::write_template_row(&self.db, &stored.template, id, stored.set.as_ref())?;
+        let set = stored.set.as_ref().map(|set| set.to_string());
+        if !repo.store_set(id, set.as_deref())? {
+            anyhow::bail!("the agent {id} has no row in the store");
+        }
+        Ok(())
+    }
+
     /// Create a new agent. Returns the agent_id.
     pub fn create_agent(&self, config: AgentConfigFile) -> Result<String, String> {
         let agent_id = config.agent.id.clone();
 
-        // Check not already registered
+        // Check not already registered. An id a template's instance holds
+        // is refused naming the template (item 22 of 2026-11-14): its
+        // settings are changed by a set, its definition by its file.
         if self.registry.get(&agent_id).is_some() {
+            if let Some(template) = self.registry.get_template(&agent_id) {
+                let from = match self.registry.provenance(&agent_id) {
+                    Some(p) if p.layer == TemplateLayer::File => match p.path {
+                        Some(path) => format!("the file {}", path.display()),
+                        None => "a file".to_string(),
+                    },
+                    Some(p) if p.layer == TemplateLayer::Plugin => "a plugin".to_string(),
+                    _ => "the built-in templates".to_string(),
+                };
+                return Err(format!(
+                    "'{agent_id}' is the agent template {} ({from}); no agent is created \
+                     over it — change its settings with `openalpaca agents set {agent_id} \
+                     <key> <value>` (PUT /v1/agents/{agent_id}/config), or its template \
+                     with PUT /v1/agent-templates/{agent_id}",
+                    template.frontmatter.name
+                ));
+            }
             return Err(format!("Agent '{}' already exists", agent_id));
         }
 
@@ -388,3 +466,14 @@ impl AgentConfigService {
         Ok(())
     }
 }
+
+/// The refusal of a set on a run's own instance: no later run loads it.
+fn running_refusal(id: &str, template_id: &str) -> String {
+    format!(
+        "AGENT_RUNNING: the agent '{id}' is running, and a set never changes a running \
+         agent; set its template '{template_id}' instead, which its next runs load"
+    )
+}
+
+#[cfg(test)]
+mod set_tests;

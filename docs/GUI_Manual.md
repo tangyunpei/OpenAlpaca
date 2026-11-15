@@ -1410,8 +1410,9 @@ exist.
 The template list (`GET /v1/agent-templates`) with each template's
 **completed**-run count and the window it was counted over
 (`?window=7d|30d|all`, default `7d`, grouped out of `subagent_span`), plus,
-separately, which instances are running right now (`GET /v1/agent-instances`).
-A template with no completed run in the window says so in words, because
+separately, how many of its instances are running right now
+(`GET /v1/agent-instances`; the idle instance each template keeps between
+runs is not counted, so `1 running` means a run). A template with no completed run in the window says so in words, because
 `0 runs` reads like a metric that failed to load.
 
 Each row's chip says where the template comes from: **Built in** (shipped

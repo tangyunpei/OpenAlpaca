@@ -238,7 +238,15 @@ pub fn rescan_file_layer(
         if !changed {
             continue;
         }
-        persist_template_to_db(db, template, id);
+        // AGENT-SETS: the set the store keeps for the id is put over the
+        // template — loaded at the start, and read again for an id the
+        // rescan changed, the store being the set's one record — and the
+        // row is written with it, so `GET /v1/agents/{id}` and `GET
+        // …/config` agree.
+        if let Some(stored) = read_stored_set(db, id) {
+            registry.restore_set(id, stored);
+        }
+        let _ = write_template_row(db, template, id, registry.stored_set(id).as_ref());
         if mode == LoadMode::Reload {
             match (layer, registry.provenance(id).and_then(|p| p.path)) {
                 (TemplateLayer::File, Some(path)) => {
@@ -585,62 +593,57 @@ fn note_duplicate(layer: &mut FileLayer, id: &str, path: &Path) {
     layer.note_not_used(id, path.to_path_buf(), NotUsedReason::Duplicate);
 }
 
+/// The set the store keeps for an id (AGENT-SETS): `Some(None)` for none,
+/// or for one that does not parse, which is logged and not applied. `None`
+/// when the store cannot be read: logged, and the set held in memory, if
+/// any, is left as it is.
+fn read_stored_set(db: &Database, id: &str) -> Option<Option<serde_json::Value>> {
+    let repo = openalpaca_storage::SubAgentRepository::new(db);
+    let stored = match repo.stored_set(id) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => return Some(None),
+        Err(e) => {
+            warn!("Agent {id}: cannot read its stored set: {e:#}");
+            return None;
+        }
+    };
+    match serde_json::from_str(&stored) {
+        Ok(set) => Some(Some(set)),
+        Err(e) => {
+            warn!("Agent {id}: its stored set does not parse ({e}); its runs use the template");
+            Some(None)
+        }
+    }
+}
+
 /// Write a template's `agent` row — the row `GET /v1/agents` lists and the
 /// run history references (design §2.11) — and its metrics row if missing.
-fn persist_template_to_db(db: &Database, template: &AgentTemplate, template_id: &str) {
+/// It holds the template with the set stored for the id over it, if any
+/// (AGENT-SETS): the config `GET /v1/agents/{id}/config` reads.
+pub(crate) fn write_template_row(
+    db: &Database,
+    template: &AgentTemplate,
+    template_id: &str,
+    set: Option<&serde_json::Value>,
+) -> anyhow::Result<()> {
     let repo = openalpaca_storage::SubAgentRepository::new(db);
-    let persona = super::template::extract_persona(template);
-    let fm = &template.frontmatter;
-    let skills: Vec<super::Capability> = fm
-        .capabilities
-        .iter()
-        .map(|s| super::Capability {
-            name: s.clone(),
-            category: "assigned".to_string(),
-            proficiency: 1.0,
-        })
-        .collect();
-    let preset = super::AgentPreset {
-        persona: persona.clone(),
-        temperature: fm.temperature,
-        verbosity: fm.verbosity.clone(),
-    };
-    let constraints = super::AgentConstraints {
-        max_tool_calls: fm.max_tool_calls,
-        timeout_seconds: fm.timeout_seconds,
-        max_cost_per_task: fm.max_cost_per_task,
-        require_confirmation_for: fm.require_confirmation_for.clone(),
-        allowed_capabilities: fm.capabilities.clone(),
-        denied_capabilities: fm.denied_capabilities.clone(),
-        ..Default::default()
-    };
-    let llm_config = super::AgentLlmConfig {
-        model: fm.model.clone(),
-        fallback_models: fm.fallback_models.clone(),
-        ..Default::default()
-    };
-    let now = chrono::Utc::now();
-    let storage_config = openalpaca_storage::SubAgentConfig {
-        id: template_id.to_string(),
-        template_id: template_id.to_string(),
-        name: fm.name.clone(),
-        description: Some(fm.description.clone()),
-        icon: fm.icon.clone(),
-        status: "idle".to_string(),
-        current_task_id: None,
-        skills_json: serde_json::to_string(&skills).unwrap_or_else(|_| "[]".to_string()),
-        preset_json: serde_json::to_string(&preset).unwrap_or_else(|_| "{}".to_string()),
-        constraints_json: Some(
-            serde_json::to_string(&constraints).unwrap_or_else(|_| "{}".to_string()),
-        ),
-        llm_config_json: Some(
-            serde_json::to_string(&llm_config).unwrap_or_else(|_| "{}".to_string()),
-        ),
-        persona: Some(persona),
-        created_at: now,
-        updated_at: Some(now),
-    };
-    let _ = repo.upsert(&storage_config);
+    // The one builder `GET …/config` reads too, with or without a set, so
+    // the two GETs show one definition; a stored set that no longer
+    // applies is left out, as its runs leave it out.
+    let mut config = super::registry::effective_config(template, set)
+        .or_else(|_| super::registry::effective_config(template, None))
+        .map_err(anyhow::Error::msg)?;
+    config.agent.id = template_id.to_string();
+    repo.upsert(&config.into_storage_config())?;
+    finish_template_row(&repo, template_id)
+}
+
+/// A template row's tail: its status set back to `idle`, and its metrics
+/// row written if missing.
+fn finish_template_row(
+    repo: &openalpaca_storage::SubAgentRepository<'_>,
+    template_id: &str,
+) -> anyhow::Result<()> {
     // The upsert never moves an existing row's status, so a row a DELETE
     // archived — an earlier build's, before the bundled template of its id
     // ran again, or this build's, before a file of its id came back — or one
@@ -656,6 +659,7 @@ fn persist_template_to_db(db: &Database, template: &AgentTemplate, template_id: 
     if let Ok(None) = repo.get_metrics(template_id) {
         let _ = repo.upsert_metrics(&openalpaca_storage::AgentMetrics::new_empty(template_id));
     }
+    Ok(())
 }
 
 #[cfg(test)]

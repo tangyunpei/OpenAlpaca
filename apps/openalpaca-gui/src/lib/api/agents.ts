@@ -116,7 +116,10 @@ export async function getAgentConfig(
   );
 }
 
-/** `PUT /v1/agents/{id}/config` — 409 when `config_version` is stale. */
+/**
+ * `PUT /v1/agents/{id}/config` — 409 `CONFIG_CONFLICT` when `config_version`
+ * is stale, 409 `AGENT_RUNNING` on a run's own instance while it runs.
+ */
 export async function updateAgentConfig(
   id: string,
   config: AgentConfigFile,

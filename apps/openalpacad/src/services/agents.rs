@@ -384,6 +384,55 @@ mod tests {
         assert_eq!(std::fs::read_dir(&agents).unwrap().count(), 0);
     }
 
+    /// AGENT-SETS (item 22 of 2026-11-14): a set made through the service
+    /// the route calls is loaded by the next start — a fresh registry over
+    /// the same store, through this function — for every run of its
+    /// template, and `GET /v1/agents/{id}` (the row) and `GET …/config`
+    /// agree on it after the start, as they did before.
+    #[test]
+    fn a_set_is_loaded_by_the_next_start() {
+        let start = Start::with(&[("reader.md", READER)]);
+        start.load().unwrap();
+        let service = |registry| {
+            openalpaca_core::agent::AgentConfigService::new(
+                registry,
+                start.dir.path().join("agents"),
+                start.db.clone(),
+            )
+        };
+        let before = service(start.shared_context.agent_registry.clone());
+        for id in ["reader", "lead_agent"] {
+            let (mut config, version) = before.get_agent_config(id).unwrap();
+            config.preset.persona = format!("{id}, as set.");
+            before.update_agent_config(id, config, version).unwrap();
+        }
+
+        let restarted = Start {
+            shared_context: Arc::new(SharedContext::new()),
+            ..start
+        };
+        restarted.load().unwrap();
+
+        let registry = &restarted.shared_context.agent_registry;
+        let after = openalpaca_core::agent::AgentConfigService::new(
+            registry.clone(),
+            restarted.dir.path().join("agents"),
+            restarted.db.clone(),
+        );
+        for id in ["reader", "lead_agent"] {
+            let run = registry.spawn_instance(id, "t1".to_string()).unwrap();
+            assert_eq!(run.preset.persona, format!("{id}, as set."), "{id}");
+            registry.destroy_instance(&run.id);
+            let (config, _) = after.get_agent_config(id).unwrap();
+            assert_eq!(config.preset.persona, format!("{id}, as set."), "{id}");
+            let row = openalpaca_storage::SubAgentRepository::new(&restarted.db)
+                .get(id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.persona.as_deref(), Some(config.preset.persona.as_str()));
+        }
+    }
+
     struct IdleExecutor;
 
     #[async_trait::async_trait]

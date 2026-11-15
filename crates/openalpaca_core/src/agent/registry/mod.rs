@@ -8,9 +8,15 @@
 //! reader sees one resolved view of them (subagent design §2.4 L-1,
 //! `tasks/subagent-brief-design.md`).
 
+mod stored_set;
+
+pub(crate) use stored_set::effective_config;
+
+use super::config::AgentConfigFile;
 use super::subagent::{AgentStatus, SubAgent};
 use super::template::{AgentSource, AgentTemplate};
 use crate::bundled::ShippedCopy;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
@@ -297,6 +303,11 @@ struct TemplateLayers {
     /// What every reader sees: recomputed by `resolve` after each change
     /// to a layer, never written by itself.
     resolved: HashMap<String, AgentTemplate>,
+    /// The sets stored for an id (AGENT-SETS): the fields each changes over
+    /// its template, put over it for every new run and the idle instance.
+    /// Kept by id, whatever layer the template comes from, and not cleared
+    /// when the template leaves: the store's `agent` row keeps it too.
+    sets: HashMap<String, Value>,
 }
 
 impl TemplateLayers {
@@ -380,13 +391,45 @@ pub(crate) fn same_definition(a: &AgentTemplate, b: &AgentTemplate) -> bool {
     a.frontmatter == b.frontmatter && a.body == b.body && a.sections == b.sections
 }
 
-/// The idle instance a template's id answers to between runs (L-1a).
-fn idle_instance(template: &AgentTemplate) -> SubAgent {
-    let id = &template.frontmatter.id;
-    let mut agent = template.to_subagent(id, "");
-    agent.status = AgentStatus::Idle;
-    agent.current_task = None;
-    agent
+/// The idle instance a template's id answers to between runs (L-1a), with
+/// the set stored for the id over it (AGENT-SETS).
+fn idle_instance(template: &AgentTemplate, set: Option<&Value>) -> SubAgent {
+    stored_set::build_instance(template, &template.frontmatter.id, None, set)
+}
+
+/// What a synced idle instance was last built from: its template and the
+/// set over it.
+struct Built {
+    template: AgentTemplate,
+    set: Option<Value>,
+}
+
+impl Built {
+    fn of(template: &AgentTemplate, set: Option<&Value>) -> Self {
+        Self {
+            template: template.clone(),
+            set: set.cloned(),
+        }
+    }
+
+    fn is(&self, template: &AgentTemplate, set: Option<&Value>) -> bool {
+        same_definition(&self.template, template) && self.set.as_ref() == set
+    }
+}
+
+/// A set `AgentRegistry::store_set` stored.
+pub struct StoredSet {
+    /// The id's config version after it.
+    pub version: u64,
+    /// The fields the set changes over the template; `None` when it changes
+    /// none (every field as the template has it).
+    pub set: Option<Value>,
+    /// The set it replaced, for `AgentRegistry::restore_set` to put back.
+    pub previous: Option<Value>,
+    /// The template it is over.
+    pub template: AgentTemplate,
+    /// The template's config with the set over it: what the next run gets.
+    pub config: AgentConfigFile,
 }
 
 /// Internal wrapper that pairs a SubAgent instance with its config version
@@ -413,9 +456,10 @@ pub struct AgentRegistry {
     /// bare "template not found". The live map stays scrubbed exactly as today.
     template_tombstones: Mutex<HashMap<String, String>>,
     /// The idle instances `sync_template_instances` materialised, by
-    /// instance id, each with the template it was last built from (L-1a).
-    /// An instance not in it — a legacy `.toml` agent's — is never removed.
-    synced: Mutex<HashMap<String, AgentTemplate>>,
+    /// instance id, each with the template and set it was last built from
+    /// (L-1a). An instance not in it — a legacy `.toml` agent's — is never
+    /// removed.
+    synced: Mutex<HashMap<String, Built>>,
     /// Held by `agent::file_layer::rescan_file_layer` from its read of the
     /// directory to its instance sync, so one rescan runs at a time (L-3).
     rescan: Mutex<()>,
@@ -820,7 +864,7 @@ impl AgentRegistry {
     pub fn spawn_instance(&self, template_id: &str, task_id: String) -> Result<SubAgent, String> {
         // Extract what we need from the template, then drop the templates lock
         // before acquiring instances, to avoid holding both locks simultaneously.
-        let (is_singleton, template_clone) = {
+        let (is_singleton, template_clone, set) = {
             let templates = self.lock_templates();
             let Some(template) = templates.resolved.get(template_id) else {
                 return Err(match templates.file.templates.get(template_id) {
@@ -851,7 +895,11 @@ impl AgentRegistry {
                     _ => format!("template '{}' not found", template_id),
                 });
             };
-            (template.frontmatter.singleton, template.clone())
+            (
+                template.frontmatter.singleton,
+                template.clone(),
+                templates.sets.get(template_id).cloned(),
+            )
         }; // templates lock dropped here
 
         let mut instances = self.lock_instances();
@@ -876,7 +924,12 @@ impl AgentRegistry {
                 return Ok(entry.agent.clone());
             }
             // No instance yet — create with stable ID = template_id
-            let agent = template_clone.to_subagent(template_id, &task_id);
+            let agent = stored_set::build_instance(
+                &template_clone,
+                template_id,
+                Some(&task_id),
+                set.as_ref(),
+            );
             instances.insert(
                 template_id.to_string(),
                 RegisteredAgent {
@@ -895,7 +948,12 @@ impl AgentRegistry {
                     break candidate;
                 }
             };
-            let agent = template_clone.to_subagent(&instance_id, &task_id);
+            let agent = stored_set::build_instance(
+                &template_clone,
+                &instance_id,
+                Some(&task_id),
+                set.as_ref(),
+            );
             instances.insert(
                 instance_id,
                 RegisteredAgent {
@@ -936,17 +994,18 @@ impl AgentRegistry {
             entry.agent.current_task = None;
             let mut synced = self.lock_synced();
             if let Some(built) = synced.get(instance_id) {
+                let set = templates.sets.get(instance_id);
                 match templates.instance_template(instance_id) {
                     None => {
                         instances.remove(instance_id);
                         synced.remove(instance_id);
                         return DestroyOutcome::Removed;
                     }
-                    Some(template) if !same_definition(built, template) => {
-                        entry.agent = idle_instance(template);
+                    Some(template) if !built.is(template, set) => {
+                        entry.agent = idle_instance(template, set);
                         entry.config_version += 1;
                         entry.is_singleton = template.frontmatter.singleton;
-                        synced.insert(instance_id.to_string(), template.clone());
+                        synced.insert(instance_id.to_string(), Built::of(template, set));
                     }
                     Some(_) => {}
                 }
@@ -1000,40 +1059,42 @@ impl AgentRegistry {
     /// method materialised are ever removed, so a legacy `.toml` agent
     /// stays; a plugin's template gets none, as before.
     pub fn sync_template_instances(&self) {
-        let wanted: HashMap<String, AgentTemplate> = {
+        let wanted: HashMap<String, (AgentTemplate, Option<Value>)> = {
             let templates = self.lock_templates();
             templates
                 .resolved
                 .iter()
                 .filter(|(id, _)| templates.layer_of(id) != Some(TemplateLayer::Plugin))
-                .map(|(id, template)| (id.clone(), template.clone()))
+                .map(|(id, template)| {
+                    let set = templates.sets.get(id).cloned();
+                    (id.clone(), (template.clone(), set))
+                })
                 .collect()
         };
         let mut instances = self.lock_instances();
         let mut synced = self.lock_synced();
 
-        for (id, template) in &wanted {
+        for (id, (template, set)) in &wanted {
+            let set = set.as_ref();
             match instances.get_mut(id) {
                 None => {
                     instances.insert(
                         id.clone(),
                         RegisteredAgent {
-                            agent: idle_instance(template),
+                            agent: idle_instance(template, set),
                             config_version: 0,
                             is_singleton: template.frontmatter.singleton,
                         },
                     );
-                    synced.insert(id.clone(), template.clone());
+                    synced.insert(id.clone(), Built::of(template, set));
                 }
                 Some(entry) if entry.agent.status.is_available() => {
-                    let current = synced
-                        .get(id)
-                        .is_some_and(|built| same_definition(built, template));
+                    let current = synced.get(id).is_some_and(|built| built.is(template, set));
                     if !current {
-                        entry.agent = idle_instance(template);
+                        entry.agent = idle_instance(template, set);
                         entry.config_version += 1;
                         entry.is_singleton = template.frontmatter.singleton;
-                        synced.insert(id.clone(), template.clone());
+                        synced.insert(id.clone(), Built::of(template, set));
                     }
                 }
                 Some(_) => {} // busy: the next change rebuilds it
@@ -1066,7 +1127,7 @@ impl AgentRegistry {
         }
     }
 
-    fn lock_synced(&self) -> std::sync::MutexGuard<'_, HashMap<String, AgentTemplate>> {
+    fn lock_synced(&self) -> std::sync::MutexGuard<'_, HashMap<String, Built>> {
         match self.synced.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -1114,7 +1175,11 @@ impl AgentRegistry {
             .map(|r| (r.agent.clone(), r.config_version))
     }
 
-    /// Update the config of a registered agent with optimistic locking.
+    /// Update the config of a registered agent with optimistic locking: an
+    /// instance no template's set reaches (a legacy `.toml` agent's, or a
+    /// run's own `<template>::<id>`; a template's id takes `store_set`).
+    /// A running one is refused, `AGENT_RUNNING`, and left as it is: a set
+    /// never changes a running agent (AGENT-SETS).
     pub fn update_config(
         &self,
         agent_id: &str,
@@ -1126,6 +1191,9 @@ impl AgentRegistry {
             .get_mut(agent_id)
             .ok_or_else(|| "AGENT_NOT_FOUND".to_string())?;
 
+        if matches!(entry.agent.status, AgentStatus::Busy { .. }) {
+            return Err("AGENT_RUNNING".to_string());
+        }
         if entry.config_version != expected_version {
             return Err("CONFIG_CONFLICT".to_string());
         }
@@ -1133,6 +1201,129 @@ impl AgentRegistry {
         entry.agent = new_agent;
         entry.config_version += 1;
         Ok(entry.config_version)
+    }
+
+    // ── Sets over a template (AGENT-SETS) ────────────────────────────
+
+    /// The config of a template's id — its template with the set stored for
+    /// it over it, what its next run gets, whether or not it runs now — and
+    /// its config version. `None` for an id with no idle instance of a
+    /// template's: a plugin's template, a legacy agent, a run's instance.
+    pub fn template_config(&self, template_id: &str) -> Option<(AgentConfigFile, u64)> {
+        let templates = self.lock_templates();
+        let template = templates.instance_template(template_id)?;
+        let instances = self.lock_instances();
+        let synced = self.lock_synced();
+        if !synced.contains_key(template_id) {
+            return None;
+        }
+        let entry = instances.get(template_id)?;
+        let set = templates.sets.get(template_id);
+        let config = stored_set::effective_config(template, set)
+            .or_else(|_| stored_set::effective_config(template, None))
+            .ok()?;
+        Some((config, entry.config_version))
+    }
+
+    /// Store a set on a template's id: `config` is the whole config the
+    /// person put (`PUT /v1/agents/{id}/config`), and what is kept is the
+    /// fields it changes over the template. The idle instance is rebuilt
+    /// with it; a running one is left as it runs, and catches up when its
+    /// run ends (`destroy_instance`); every later spawn has it.
+    ///
+    /// `Ok(None)` when the id has no idle instance of a template's (see
+    /// `template_config`), for the caller's other path; `CONFIG_CONFLICT`
+    /// when `expected_version` is not the id's. The caller stores the set
+    /// in the database, and puts the previous one back with `restore_set`
+    /// if it cannot.
+    pub fn store_set(
+        &self,
+        template_id: &str,
+        config: AgentConfigFile,
+        expected_version: u64,
+    ) -> Result<Option<StoredSet>, String> {
+        let mut templates = self.lock_templates();
+        let Some(template) = templates.instance_template(template_id).cloned() else {
+            return Ok(None);
+        };
+        let mut instances = self.lock_instances();
+        let mut synced = self.lock_synced();
+        if !synced.contains_key(template_id) {
+            return Ok(None);
+        }
+        let Some(entry) = instances.get_mut(template_id) else {
+            return Ok(None);
+        };
+        if entry.config_version != expected_version {
+            return Err("CONFIG_CONFLICT".to_string());
+        }
+        let set = stored_set::set_over(&template, config)?;
+        let config = stored_set::effective_config(&template, set.as_ref())?;
+        let previous = match &set {
+            Some(set) => templates.sets.insert(template_id.to_string(), set.clone()),
+            None => templates.sets.remove(template_id),
+        };
+        entry.config_version += 1;
+        Self::rebuild_unless_running(entry, &mut synced, &template, set.as_ref());
+        Ok(Some(StoredSet {
+            version: entry.config_version,
+            set,
+            previous,
+            template,
+            config,
+        }))
+    }
+
+    /// Put `set` back as the id's stored set — the start's load of the
+    /// store's, or a set the store could not keep — rebuilding its idle
+    /// instance if it changes it. A running instance is left as it runs.
+    pub fn restore_set(&self, template_id: &str, set: Option<Value>) {
+        let mut templates = self.lock_templates();
+        if templates.sets.get(template_id) == set.as_ref() {
+            return;
+        }
+        match set {
+            Some(set) => templates.sets.insert(template_id.to_string(), set),
+            None => templates.sets.remove(template_id),
+        };
+        let Some(template) = templates.instance_template(template_id).cloned() else {
+            return;
+        };
+        let set = templates.sets.get(template_id).cloned();
+        let mut instances = self.lock_instances();
+        let mut synced = self.lock_synced();
+        if !synced.contains_key(template_id) {
+            return;
+        }
+        if let Some(entry) = instances.get_mut(template_id) {
+            entry.config_version += 1;
+            Self::rebuild_unless_running(entry, &mut synced, &template, set.as_ref());
+        }
+    }
+
+    /// The set stored for an id, if any.
+    pub fn stored_set(&self, template_id: &str) -> Option<Value> {
+        self.lock_templates().sets.get(template_id).cloned()
+    }
+
+    /// A synced instance rebuilt from `template` and `set`, unless it runs:
+    /// it keeps its status and task (an idle one, or one paused).
+    fn rebuild_unless_running(
+        entry: &mut RegisteredAgent,
+        synced: &mut HashMap<String, Built>,
+        template: &AgentTemplate,
+        set: Option<&Value>,
+    ) {
+        if matches!(entry.agent.status, AgentStatus::Busy { .. }) {
+            return;
+        }
+        let id = &template.frontmatter.id;
+        let mut agent = idle_instance(template, set);
+        agent.status = entry.agent.status.clone();
+        agent.current_task = entry.agent.current_task.clone();
+        entry.agent = agent;
+        entry.is_singleton = template.frontmatter.singleton;
+        synced.insert(id.clone(), Built::of(template, set));
     }
 
     /// Update the status of an agent instance. Returns false if not found.

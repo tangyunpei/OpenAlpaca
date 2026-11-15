@@ -609,3 +609,74 @@ async fn agents_tidy_apply_in_an_agents_folder_holding_its_own_git_entry_moves_a
     );
     assert!(!store.agents.join("system_agent.md").exists());
 }
+
+/// AGENT-SETS: `agents set` on a run's own instance while it runs is
+/// refused by the daemon, `409 AGENT_RUNNING`, its sentence naming the
+/// template to set. The CLI prints that sentence and exits non-zero — it
+/// is no version conflict, and "please retry" would never succeed.
+#[tokio::test]
+async fn agents_set_on_a_running_instance_fails_with_the_daemons_sentence() {
+    plain();
+    let dir = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(dir.path());
+    let config = serde_json::json!({
+        "config": {"agent": {"id": "reader::1a2b3c4d"}, "llm": {"model": "model-r"}},
+        "config_version": 0
+    })
+    .to_string();
+    let refusal = serde_json::json!({"error": {
+        "code": "AGENT_RUNNING",
+        "message": "the agent 'reader::1a2b3c4d' is running, and a set never changes a \
+                    running agent; set its template 'reader' instead, which its next runs load"
+    }})
+    .to_string();
+    let (addr, server) = serve(vec![
+        json_answer("200 OK", "config", &config),
+        json_answer("409 Conflict", "refused", &refusal),
+    ]);
+    let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+
+    let err = agent_set_with(&client, "reader::1a2b3c4d", "llm.model", "model-set")
+        .await
+        .unwrap_err()
+        .to_string();
+
+    let requests = server.join().expect("the server finishes");
+    assert!(
+        requests[1].starts_with("PUT /v1/agents/reader::1a2b3c4d/config HTTP/1.1"),
+        "{}",
+        requests[1]
+    );
+    assert!(err.starts_with("AGENT_RUNNING: "), "{err}");
+    assert!(err.contains("set its template 'reader'"), "{err}");
+}
+
+/// A stale version is still the retry case: the CLI says so and the run
+/// ends as before.
+#[tokio::test]
+async fn agents_set_on_a_stale_version_says_to_retry() {
+    plain();
+    let dir = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(dir.path());
+    let config = serde_json::json!({
+        "config": {"agent": {"id": "reader"}, "llm": {"model": "model-r"}},
+        "config_version": 3
+    })
+    .to_string();
+    let refusal = serde_json::json!({"error": {
+        "code": "CONFIG_CONFLICT",
+        "message": "Config version mismatch — reload and retry"
+    }})
+    .to_string();
+    let (addr, server) = serve(vec![
+        json_answer("200 OK", "config", &config),
+        json_answer("409 Conflict", "stale", &refusal),
+    ]);
+    let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+
+    agent_set_with(&client, "reader", "llm.model", "model-set")
+        .await
+        .unwrap();
+
+    server.join().expect("the server finishes");
+}

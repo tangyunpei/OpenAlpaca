@@ -328,7 +328,15 @@ async fn agent_action(agent_id: &str, action: &str) -> Result<()> {
 
 async fn agent_set(agent_id: &str, key_path: &str, value: &str) -> Result<()> {
     let client = DaemonClient::connect()?;
+    agent_set_with(&client, agent_id, key_path, value).await
+}
 
+async fn agent_set_with(
+    client: &DaemonClient,
+    agent_id: &str,
+    key_path: &str,
+    value: &str,
+) -> Result<()> {
     // 1. Get current config
     let config_resp: AgentConfigResponse = client
         .get(&format!("/v1/agents/{}/config", agent_id))
@@ -396,17 +404,17 @@ async fn agent_set(agent_id: &str, key_path: &str, value: &str) -> Result<()> {
                 new_version
             );
         }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("409") || msg.contains("CONFLICT") || msg.contains("conflict") {
-                println!(
-                    "{} Config modified by another client, please retry",
-                    "✗".red()
-                );
-            } else {
-                return Err(e);
-            }
+        // Only a stale version is the retry case. Any other refusal — a
+        // run's own instance while it runs, `409 AGENT_RUNNING`, among them
+        // — is the daemon's sentence, returned so it is printed and the
+        // exit is non-zero.
+        Err(e) if e.to_string().starts_with("CONFIG_CONFLICT: ") => {
+            println!(
+                "{} Config modified by another client, please retry",
+                "✗".red()
+            );
         }
+        Err(e) => return Err(e),
     }
     Ok(())
 }

@@ -858,6 +858,8 @@ export interface AgentConfigFile {
     max_tool_calls?: number;
     timeout_seconds?: number;
     max_cost_per_task?: number;
+    /** The template's `max_rounds`, kept through a set (AGENT-SETS). */
+    max_rounds?: number;
     require_confirmation_for?: string[];
     allowed_capabilities?: string[];
     denied_capabilities?: string[];

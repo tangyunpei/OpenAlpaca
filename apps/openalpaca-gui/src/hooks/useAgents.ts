@@ -73,7 +73,7 @@ export function useAgentConfig(
 export interface UpdateAgentConfigInput {
   id: string;
   config: AgentConfigFile;
-  /** Optimistic lock — a stale version 409s. */
+  /** Optimistic lock — a stale version 409s (`CONFIG_CONFLICT`). */
   configVersion: number;
 }
 

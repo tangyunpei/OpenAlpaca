@@ -47,6 +47,10 @@ pub struct AgentConstraintsConfig {
     pub max_tool_calls: Option<u32>,
     pub timeout_seconds: Option<u64>,
     pub max_cost_per_task: Option<f64>,
+    /// The template's `max_rounds`, carried through a set's round trip
+    /// (`from_subagent`, then `into_subagent`) so a set keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<usize>,
     pub require_confirmation_for: Option<Vec<String>>,
     pub allowed_capabilities: Option<Vec<String>>,
     pub denied_capabilities: Option<Vec<String>>,
@@ -107,6 +111,7 @@ impl AgentConfigFile {
             let has_values = c.max_tool_calls.is_some()
                 || c.timeout_seconds.is_some()
                 || c.max_cost_per_task.is_some()
+                || c.max_rounds.is_some()
                 || !c.require_confirmation_for.is_empty()
                 || !c.allowed_capabilities.is_empty()
                 || !c.denied_capabilities.is_empty()
@@ -119,6 +124,7 @@ impl AgentConfigFile {
                     max_tool_calls: c.max_tool_calls,
                     timeout_seconds: c.timeout_seconds,
                     max_cost_per_task: c.max_cost_per_task,
+                    max_rounds: c.max_rounds,
                     require_confirmation_for: if c.require_confirmation_for.is_empty() {
                         None
                     } else {
@@ -225,7 +231,7 @@ impl AgentConfigFile {
                     max_tool_calls: c.max_tool_calls,
                     timeout_seconds: c.timeout_seconds,
                     max_cost_per_task: c.max_cost_per_task,
-                    max_rounds: None,
+                    max_rounds: c.max_rounds,
                     require_confirmation_for: c
                         .require_confirmation_for
                         .clone()
@@ -310,6 +316,7 @@ impl AgentConfigFile {
             let has_values = fm.max_tool_calls.is_some()
                 || fm.timeout_seconds.is_some()
                 || fm.max_cost_per_task.is_some()
+                || fm.max_rounds.is_some()
                 || !fm.require_confirmation_for.is_empty()
                 || !fm.capabilities.is_empty()
                 || !fm.denied_capabilities.is_empty();
@@ -319,6 +326,7 @@ impl AgentConfigFile {
                     max_tool_calls: fm.max_tool_calls,
                     timeout_seconds: fm.timeout_seconds,
                     max_cost_per_task: fm.max_cost_per_task,
+                    max_rounds: fm.max_rounds,
                     require_confirmation_for: if fm.require_confirmation_for.is_empty() {
                         None
                     } else {
@@ -402,7 +410,7 @@ impl AgentConfigFile {
             max_tool_calls: self.constraints.as_ref().and_then(|c| c.max_tool_calls),
             timeout_seconds: self.constraints.as_ref().and_then(|c| c.timeout_seconds),
             max_cost_per_task: self.constraints.as_ref().and_then(|c| c.max_cost_per_task),
-            max_rounds: None,
+            max_rounds: self.constraints.as_ref().and_then(|c| c.max_rounds),
             require_confirmation_for: self
                 .constraints
                 .as_ref()
@@ -459,7 +467,7 @@ impl AgentConfigFile {
                 max_tool_calls: c.max_tool_calls,
                 timeout_seconds: c.timeout_seconds,
                 max_cost_per_task: c.max_cost_per_task,
-                max_rounds: None,
+                max_rounds: c.max_rounds,
                 require_confirmation_for: c.require_confirmation_for.clone().unwrap_or_default(),
                 allowed_capabilities: c.allowed_capabilities.clone().unwrap_or_default(),
                 denied_capabilities: denied,

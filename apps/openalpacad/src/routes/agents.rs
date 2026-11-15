@@ -371,7 +371,14 @@ pub async fn update_agent_config_handler(
             )
                 .into_response()
         }
-        Err(e) if e == "CONFIG_CONFLICT" => (
+        Err(e) => config_update_refusal(&e),
+    }
+}
+
+/// The answer to a `PUT /v1/agents/{id}/config` the service refused.
+fn config_update_refusal(e: &str) -> axum::response::Response {
+    match e {
+        "CONFIG_CONFLICT" => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
                 "error": {
@@ -381,7 +388,19 @@ pub async fn update_agent_config_handler(
             })),
         )
             .into_response(),
-        Err(e) => (
+        // A run's own instance (AGENT-SETS): a set never changes a running
+        // agent, and no later run loads that instance.
+        e if e.starts_with("AGENT_RUNNING: ") => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "AGENT_RUNNING",
+                    "message": e.trim_start_matches("AGENT_RUNNING: ")
+                }
+            })),
+        )
+            .into_response(),
+        e => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
         )
@@ -913,11 +932,13 @@ mod tests {
         }
     }
 
-    /// LEAD-SINGLETON: a `PUT /v1/agents/lead_agent/config` (`agents set`)
-    /// holds for the lead's later runs, not only its next one, until its
-    /// template changes — the rescan of a changed definition rebuilds it.
+    /// LEAD-SINGLETON, then AGENT-SETS (item 22 of 2026-11-14): a `PUT
+    /// /v1/agents/lead_agent/config` (`agents set`) holds for the lead's
+    /// later runs, not only its next one, and outlasts an edit of its
+    /// template through `PUT /v1/agent-templates/lead_agent` for the field
+    /// it set — where the rescan of a changed definition used to drop it.
     #[test]
-    fn a_config_set_on_the_lead_holds_for_its_runs_until_its_template_changes() {
+    fn a_config_set_on_the_lead_holds_for_its_runs_and_outlasts_a_template_edit() {
         let t = Templates::new(&[("lead_agent.md", lead("model-a"))]);
         let (mut config, version) = t.service.get_agent_config("lead_agent").unwrap();
         config.llm.as_mut().expect("the lead names a model").model = Some("model-set".into());
@@ -934,13 +955,15 @@ mod tests {
             t.registry.destroy_instance(&run.id);
         }
 
-        let edited = parse_agent_markdown(&lead("model-b")).unwrap();
+        let edited =
+            parse_agent_markdown(&lead("model-b").replace("leads", "leads, edited")).unwrap();
         t.route().update("lead_agent", edited).unwrap();
         let next = t
             .registry
             .spawn_instance("lead_agent", "t3".to_string())
             .unwrap();
-        assert_eq!(next.llm_config.model.as_deref(), Some("model-b"));
+        assert_eq!(next.llm_config.model.as_deref(), Some("model-set"));
+        assert_eq!(next.description.as_deref(), Some("leads, edited"));
     }
 
     /// T-2's present form: `DELETE /v1/agent-templates/{id}` archives the
@@ -1455,5 +1478,42 @@ mod tests {
         let message = DeleteTemplateError::Bundled.to_string();
         assert!(message.contains("override it"), "{message}");
         assert!(message.contains("disabled: true"), "{message}");
+    }
+
+    /// AGENT-SETS, beyond the item's words: `PUT /v1/agents/{id}/config` on
+    /// a run's own instance while it runs is `409 {"error":{"code":
+    /// "AGENT_RUNNING","message":…}}`, the message naming the template to
+    /// set, and the instance is left as it runs.
+    #[tokio::test]
+    async fn a_set_on_a_runs_own_instance_is_409_agent_running_naming_the_template() {
+        let t = Templates::new(&[]);
+        let run = t
+            .registry
+            .spawn_instance("general_agent", "t1".to_string())
+            .unwrap();
+        let (config, version) = t.service.get_agent_config(&run.id).unwrap();
+
+        let err = t
+            .service
+            .update_agent_config(&run.id, config, version)
+            .unwrap_err();
+        let response = config_update_refusal(&err);
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "AGENT_RUNNING", "{body}");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("'general_agent'"), "{message}");
+        assert!(!message.starts_with("AGENT_RUNNING"), "{message}");
+        assert!(
+            !t.registry
+                .get_instance(&run.id)
+                .unwrap()
+                .status
+                .is_available()
+        );
     }
 }

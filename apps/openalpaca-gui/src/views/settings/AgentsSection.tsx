@@ -5,8 +5,9 @@
  * *completed*-run count and the window it was counted over (GAP-20's counts
  * half, closed by T48: `?window=7d|30d|all` against `subagent_span`), and,
  * separately, which instances are running right now
- * (`GET /v1/agent-instances`) — the design's rows are templates, so the
- * running count is shown as meta rather than conflated with them.
+ * (`GET /v1/agent-instances`, an idle instance not counted) — the design's
+ * rows are templates, so the running count is shown as meta rather than
+ * conflated with them.
  *
  * A template a file in `config/agents` switches off (`disabled: true`,
  * subagent design §2.4 L-4a) is listed with its file and a "Switched off"
@@ -125,8 +126,13 @@ export function AgentsSection() {
   const instances = useAgentInstances();
   const rows = templates.data ?? [];
 
+  // Every template's idle instance is listed between runs (the lead's
+  // included), so only an instance whose status is not `idle` is running
+  // (AGENT-SETS, item 22 of 2026-11-14). A daemon that sends no status is
+  // counted as before.
   const runningByTemplate = new Map<string, number>();
   for (const instance of instances.data ?? []) {
+    if (instance.status === "idle") continue;
     runningByTemplate.set(
       instance.template_id,
       (runningByTemplate.get(instance.template_id) ?? 0) + 1,

@@ -155,6 +155,40 @@ describe("AgentsSection run counts (GAP-20, counts half — T48)", () => {
   });
 
   /**
+   * AGENT-SETS (item 22 of 2026-11-14): every template's idle instance is
+   * listed between runs, the lead's included, so "running" counts only an
+   * instance whose status is not `idle`.
+   */
+  it("counts an idle instance as not running", () => {
+    state.templates = [
+      template({ run_count: 3 }),
+      template({ id: "lead_agent", name: "Lead", run_count: 2 }),
+    ];
+    state.instances = [
+      {
+        id: "review_agent",
+        template_id: "review_agent",
+        name: "Review",
+        status: "idle",
+        current_task: null,
+      },
+      {
+        id: "lead_agent",
+        template_id: "lead_agent",
+        name: "Lead",
+        status: "busy",
+        current_task: "t1",
+      },
+    ];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText("3 runs · 7d")).toBeInTheDocument();
+    expect(screen.getByText("1 running · 2 runs · 7d")).toBeInTheDocument();
+    expect(screen.getAllByText(/running/)).toHaveLength(1);
+  });
+
+  /**
    * The other half of GAP-20 narrowed with C3a: a file saying `disabled:
    * true` switches a template off and the spawn path refuses it, but no
    * route writes that file, so the switch stays disabled and names the file
