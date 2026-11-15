@@ -900,3 +900,6 @@ mod pricing_tests;
 
 #[cfg(all(test, feature = "anthropic"))]
 mod contract_tests;
+
+#[cfg(all(test, feature = "anthropic", feature = "ollama", feature = "openai"))]
+mod latest_models_tests;

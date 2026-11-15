@@ -168,6 +168,16 @@ pub struct ProviderDefaults {
     pub model_aliases: BTreeMap<ModelAlias, String>,
 }
 
+/// The orchestrator model a config that names none starts with, wherever
+/// one is filled in: the router's default when `llm.toml` has no
+/// `[orchestrator]` and no Anthropic default, the row
+/// `update_orchestrator_config` inserts, and the CLI's own default and
+/// `config reset ai.default_model` (the storage schema's `ai.default_model`
+/// default spells the same id; a CLI test pins the two). Claude Sonnet 5.5,
+/// the tier these sites held as `claude-sonnet-4-5-20250929` (the subagent
+/// design's §4.9.9 ML-8; MODELS-LATEST).
+pub const DEFAULT_ORCHESTRATOR_MODEL: &str = "claude-sonnet-5-5";
+
 /// Runtime representation of all externalized LLM configuration.
 /// Wrapped in ArcSwap for lock-free hot-reload.
 #[derive(Debug, Clone)]
@@ -184,7 +194,11 @@ impl Default for LlmRuntimeConfig {
         provider_defaults.insert(
             "anthropic".to_string(),
             ProviderDefaults {
-                default_model: "claude-sonnet-4-5-20250929".to_string(),
+                // MODELS-LATEST (§4.9.5): Sonnet 4.5 is "Deprecated",
+                // retiring November 30, 2026, its replacement
+                // `claude-sonnet-5-5` (platform.claude.com/docs/en/
+                // about-claude/model-deprecations, read 2026-11-14).
+                default_model: "claude-sonnet-5-5".to_string(),
                 default_max_tokens: 4096,
                 base_url: None,
                 request_timeout_secs: None,
@@ -194,7 +208,10 @@ impl Default for LlmRuntimeConfig {
         provider_defaults.insert(
             "openai".to_string(),
             ProviderDefaults {
-                default_model: "gpt-4o".to_string(),
+                // MODELS-LATEST (§4.9.5): GPT-4o's replacement is
+                // `gpt-6-luna` (developers.openai.com/api/docs/deprecations,
+                // read 2026-11-14).
+                default_model: "gpt-6-luna".to_string(),
                 default_max_tokens: 4096,
                 base_url: Some("https://api.openai.com/v1".to_string()),
                 request_timeout_secs: None,

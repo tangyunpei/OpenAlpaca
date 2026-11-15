@@ -104,7 +104,7 @@ fn anthropic_router(
         ModelRegistry::with_defaults_and_config(config, &disabled),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     )
 }
 
@@ -162,6 +162,34 @@ async fn bodies(server: &MockHttpServer) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Two Claude ids only a `[models]` row prices: no compiled row names them,
+/// so they carry no contract (C7a: "a discovered id that no compiled row
+/// names has none"). Since MODELS-LATEST every compiled Anthropic row
+/// carries one, so these stand for "a model without a contract".
+const PLAIN: [&str; 2] = ["claude-plain-test-a", "claude-plain-test-b"];
+
+fn plain_rows() -> HashMap<String, ModelConfigEntry> {
+    PLAIN
+        .iter()
+        .map(|id| {
+            (
+                id.to_string(),
+                ModelConfigEntry {
+                    provider: "anthropic".to_string(),
+                    input_price: Some(3.0),
+                    output_price: Some(15.0),
+                    context: Some(200_000),
+                    supports_image: None,
+                    supports_audio: None,
+                    supports_document: None,
+                    supports_reasoning: None,
+                    supports_tools: Some(true),
+                },
+            )
+        })
+        .collect()
+}
+
 /// A utility call to `claude-opus-5-5` (temperature 0, thinking disabled)
 /// goes with no sampling parameter, and its thinking, always on, asked for
 /// summarized (ANTHROPIC-THINKING).
@@ -192,9 +220,9 @@ async fn a_utility_request_to_opus_5_5_goes_without_sampling_parameters_and_summ
 /// for (characterization: the parent's request, unchanged).
 #[tokio::test]
 async fn a_utility_request_to_a_model_without_a_contract_is_sent_as_asked() {
-    for model in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+    for model in PLAIN {
         let server = MockHttpServer::start(move |_| MockResponse::json(answer(model))).await;
-        let router = anthropic_router(&server, &HashMap::new());
+        let router = anthropic_router(&server, &plain_rows());
 
         router
             .complete(utility_request(model))
@@ -272,9 +300,9 @@ async fn a_forced_send_to_opus_5_5_goes_as_auto_and_is_said_once() {
 /// A model without the contract is still forced (characterization).
 #[tokio::test]
 async fn a_forced_send_to_a_model_without_a_contract_stays_forced() {
-    for model in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+    for model in PLAIN {
         let server = MockHttpServer::start(move |_| MockResponse::json(answer(model))).await;
-        let router = anthropic_router(&server, &HashMap::new());
+        let router = anthropic_router(&server, &plain_rows());
 
         router
             .complete(forced_send_request(model))
@@ -401,18 +429,13 @@ async fn a_chat_request_to_opus_5_5_asks_for_its_thinking_summarized() {
 
 /// A row without the fact is sent what its caller asked, byte for byte
 /// (characterization): no `thinking` for a chat round, `disabled` for a
-/// utility call, never `display` — on the two rows that reject `adaptive`
-/// and the two whose summary is already the default.
+/// utility call, never `display` — on an id only a `[models]` row prices,
+/// since MODELS-LATEST retired the compiled rows that had no contract.
 #[tokio::test]
 async fn a_model_without_the_fact_is_asked_as_before() {
-    for model in [
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-5-20250929",
-        "claude-haiku-4-5-20251001",
-    ] {
+    for model in PLAIN {
         let server = MockHttpServer::start(move |_| MockResponse::json(answer(model))).await;
-        let router = anthropic_router(&server, &HashMap::new());
+        let router = anthropic_router(&server, &plain_rows());
 
         router
             .complete(RouterRequest {
@@ -459,14 +482,14 @@ async fn a_fallback_rung_after_opus_5_5_is_not_asked_for_a_summary() {
         let model = if req.body.contains("claude-opus-5-5") {
             "claude-opus-5-5"
         } else {
-            "claude-haiku-4-5-20251001"
+            PLAIN[0]
         };
         MockResponse::json(answer(model))
     })
     .await;
-    let router = anthropic_router(&server, &HashMap::new());
+    let router = anthropic_router(&server, &plain_rows());
     let request = || RouterRequest {
-        fallback_models: vec!["claude-haiku-4-5-20251001".to_string()],
+        fallback_models: vec![PLAIN[0].to_string()],
         ..utility_request("claude-opus-5-5")
     };
 
@@ -480,7 +503,7 @@ async fn a_fallback_rung_after_opus_5_5_is_not_asked_for_a_summary() {
     assert_eq!(sent.len(), 2);
     assert_eq!(sent[0]["model"], "claude-opus-5-5");
     assert_eq!(sent[0]["thinking"], summarized());
-    assert_eq!(sent[1]["model"], "claude-haiku-4-5-20251001");
+    assert_eq!(sent[1]["model"], PLAIN[0]);
     assert_eq!(
         sent[1]["thinking"],
         serde_json::json!({"type": "disabled"}),

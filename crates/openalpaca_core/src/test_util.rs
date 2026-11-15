@@ -298,7 +298,23 @@ pub(crate) fn router_recording(
 
 /// The model the recording router defaults to: a compiled-in Anthropic id, so
 /// `ModelRegistry::with_defaults()` resolves it to the registered provider.
-pub(crate) const RECORDED_MODEL: &str = "claude-sonnet-4-6";
+/// Claude Haiku 5.5 since MODELS-LATEST: of the compiled rows, the one whose
+/// request contract keeps a utility call's `Disabled` thinking and a forced
+/// tool choice as the caller built them (it drops `temperature`).
+pub(crate) const RECORDED_MODEL: &str = "claude-haiku-5-5";
+
+/// Re-register `id`'s compiled row on `router` with no request contract, so
+/// what a recording provider sees is the request its caller built — as on
+/// the contract-free rows the parent of MODELS-LATEST recorded on (every
+/// compiled Anthropic row now carries one: Haiku 5.5's drops `temperature`).
+pub(crate) fn without_request_contract(router: &openalpaca_llm::LlmRouter, id: &str) {
+    let registry = router.model_registry();
+    let mut info = registry
+        .get_model_info(id)
+        .unwrap_or_else(|| panic!("{id} is a compiled row"));
+    info.request_contract = openalpaca_llm::RequestContract::NONE;
+    registry.register(id.to_string(), info);
+}
 
 /// Storage's `store::projects::register` refuses an unguarded home store only
 /// in a build that carries its `test-home-guard` feature, which this crate

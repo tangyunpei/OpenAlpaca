@@ -91,7 +91,7 @@ fn make_orchestrator_with_fixed_llm_response(response: &str) -> Orchestrator {
             response: response.to_string(),
         }),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
@@ -140,7 +140,7 @@ fn make_orchestrator_with_capturing_llm(
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(CapturingMockLlm { captured_requests }),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
 }
@@ -311,7 +311,7 @@ async fn test_simple_query_with_mock_llm() {
     let router = LlmRouter::single_provider(
         Arc::new(MockLlm),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = Orchestrator::new(
         ctx,
@@ -448,7 +448,7 @@ fn make_planning_mock_llm(response: &str) -> Arc<LlmRouter> {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(mock),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     Arc::new(router)
 }
@@ -506,7 +506,7 @@ async fn test_slash_commands_bypass_llm() {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(PanickingLlm),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_and_agents(Arc::new(router), vec![]);
 
@@ -703,7 +703,7 @@ mod request_workspace_threading {
                 calls: AtomicUsize::new(0),
             }),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-5-20250929".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
         let bus = EventBus::default();
         let gate = make_security_gate_with_registry(&bus, registry.clone());
@@ -914,7 +914,7 @@ mod a_list_change_mid_turn {
                 offered: offered.clone(),
             }),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-5-20250929".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
         let gate = make_security_gate_with_registry(&bus, registry.clone());
         let orch = Orchestrator::new(
@@ -1028,7 +1028,7 @@ mod project_turn_offers {
         let router = openalpaca_llm::LlmRouter::single_provider(
             Arc::new(Capturing(captured.clone())),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-5-20250929".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
         let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), tools);
         orch.handle_message(HandleRequest {
@@ -1195,7 +1195,7 @@ async fn test_tool_intent_detected_and_executes() {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(mock),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), &["web_fetch"]);
 
@@ -1284,7 +1284,7 @@ async fn test_tool_max_rounds_enforcement() {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(mock),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), &["web_fetch"]);
 
@@ -1430,7 +1430,7 @@ async fn test_empty_content_with_attachments_forces_simple_query() {
 // The round-7 acceptance run attached an image and a text file to an
 // Ollama-only install and got `[image attached — …]` and
 // `[document attached — …]` back: the adaptation asked the registry about
-// `claude-haiku-4-5-20251001`, the *configured* default, which a local-only
+// `claude-haiku-5-5`, the *configured* default, which a local-only
 // install has pruned from the catalogue entirely. These build the same shape.
 
 /// A router shaped like a local-only install: Anthropic and OpenAI are
@@ -1463,7 +1463,7 @@ fn local_only_router(
         Arc::new(CostTracker::new(cost_registry)),
         // Exactly what a shipped `llm.toml` names, and exactly what the
         // acceptance run's install could not route.
-        "claude-haiku-4-5-20251001".to_string(),
+        "claude-haiku-5-5".to_string(),
     );
     router.model_registry().register(
         model_id.to_string(),
@@ -1733,7 +1733,7 @@ fn a_native_document_model_still_gets_the_native_part() {
     let router = make_planning_mock_llm(r#"{"classification":"simple_query","assignments":[]}"#);
     let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
     let model = orch
-        .answering_model(Some("claude-sonnet-4-5-20250929"))
+        .answering_model(Some("claude-sonnet-5-5"))
         .expect("the configured default is routable here");
 
     let adapted = orch.adapt_parts_for_model(
@@ -2026,7 +2026,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
             captured_requests: captured_requests.clone(),
         }),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_tools_and_llm(Arc::new(router), &["file_write"]);
 
@@ -2566,7 +2566,7 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
             call_count: call_count.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let (_tmp, catalog) = make_review_skill_catalog();
     let orch = make_orchestrator_with_llm_and_skills(Arc::new(router), catalog);
@@ -3203,7 +3203,7 @@ fn make_tool_mode_orchestrator_with_db(
             requests: requests.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_agents_and_config(Arc::new(router), agents, config, db);
     (orch, requests)
@@ -4021,7 +4021,7 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
         Arc::new(SilentMockLlm),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     ));
     let nested = crate::orchestrator::skill::invoke_executor::SkillInvocationToolExecutor::new(
         catalog,
@@ -4275,7 +4275,7 @@ fn nested_executor(
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
         Arc::new(SilentMockLlm),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     ));
     crate::orchestrator::skill::invoke_executor::SkillInvocationToolExecutor::new(
         catalog,
@@ -4424,7 +4424,7 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
                 } else {
                     vec![]
                 },
-                model: "claude-sonnet-4-5-20250929".to_string(),
+                model: "claude-sonnet-5-5".to_string(),
                 usage: Usage::default(),
                 finish_reason: if first {
                     FinishReason::ToolUse
@@ -4492,7 +4492,7 @@ Dump.
             seen: seen.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let mut config = DaemonConfig::default();
@@ -5068,7 +5068,7 @@ async fn a_named_model_reaches_the_loop_config_for_that_turn() {
     let orch = make_orchestrator_with_capturing_llm(captured.clone());
 
     orch.handle_message(HandleRequest {
-        model_override: Some("claude-opus-4-6".to_string()),
+        model_override: Some("claude-opus-5-5".to_string()),
         unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
@@ -5089,7 +5089,7 @@ async fn a_named_model_reaches_the_loop_config_for_that_turn() {
     );
     assert_eq!(
         requests[0].model.as_deref(),
-        Some("claude-opus-4-6"),
+        Some("claude-opus-5-5"),
         "the override should be the model this request runs on"
     );
 }
@@ -5119,7 +5119,7 @@ async fn the_override_dies_with_its_request() {
         )
     };
 
-    orch.handle_message(turn(Some("claude-opus-4-6")))
+    orch.handle_message(turn(Some("claude-opus-5-5")))
         .await
         .expect("first turn");
     let first = captured.lock().unwrap().len();
@@ -5131,7 +5131,7 @@ async fn the_override_dies_with_its_request() {
     let requests = captured.lock().unwrap();
     assert_eq!(
         requests[first].model.as_deref(),
-        Some("claude-sonnet-4-5-20250929"),
+        Some("claude-sonnet-5-5"),
         "the next turn runs on the daemon default, not the previous override"
     );
     assert_eq!(
@@ -5160,7 +5160,7 @@ async fn a_bootstrap_turn_still_gets_the_named_model() {
     }));
 
     orch.handle_message(HandleRequest {
-        model_override: Some("claude-opus-4-6".to_string()),
+        model_override: Some("claude-opus-5-5".to_string()),
         unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
@@ -5181,7 +5181,7 @@ async fn a_bootstrap_turn_still_gets_the_named_model() {
     );
     assert_eq!(
         requests[0].model.as_deref(),
-        Some("claude-opus-4-6"),
+        Some("claude-opus-5-5"),
         "the override must reach the bootstrap branch's LoopConfig.model"
     );
 }
@@ -5196,7 +5196,7 @@ async fn an_attachment_only_turn_still_gets_the_named_model() {
 
     orch.handle_message_with_attachments(
         HandleRequest {
-            model_override: Some("claude-opus-4-6".to_string()),
+            model_override: Some("claude-opus-5-5".to_string()),
             unattended: false,
             ..HandleRequest::new(
                 Uuid::new_v4(),
@@ -5219,7 +5219,7 @@ async fn an_attachment_only_turn_still_gets_the_named_model() {
     );
     assert_eq!(
         requests[0].model.as_deref(),
-        Some("claude-opus-4-6"),
+        Some("claude-opus-5-5"),
         "the override must reach the attachment-only branch's LoopConfig.model"
     );
 }
@@ -5232,7 +5232,7 @@ async fn the_social_fast_path_still_gets_the_named_model() {
     let orch = make_orchestrator_with_capturing_llm(captured.clone());
 
     orch.handle_message(HandleRequest {
-        model_override: Some("claude-opus-4-6".to_string()),
+        model_override: Some("claude-opus-5-5".to_string()),
         unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
@@ -5253,7 +5253,7 @@ async fn the_social_fast_path_still_gets_the_named_model() {
     );
     assert_eq!(
         requests[0].model.as_deref(),
-        Some("claude-opus-4-6"),
+        Some("claude-opus-5-5"),
         "the override must reach the social fast path's LoopConfig.model"
     );
 }
@@ -5334,7 +5334,7 @@ fn make_orchestrator_with_streaming_llm() -> Orchestrator {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(StreamingMockLlm),
         ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
 }
@@ -5528,7 +5528,9 @@ fn orchestrator_with_skill_and_config(
     let router = openalpaca_llm::LlmRouter::single_provider(
         provider,
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        // A model that takes a forced tool choice (Haiku 5.5's request
+        // contract), so the skill's forced first round reaches the wire.
+        "claude-haiku-5-5".to_string(),
     );
     let bus = EventBus::default();
     let gate = make_security_gate_with_registry(&bus, registry.clone());
@@ -6105,7 +6107,7 @@ async fn a_streamed_tool_call_runs_with_its_arguments() {
             call_count: std::sync::atomic::AtomicUsize::new(0),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_agents_and_config(
         Arc::new(router),
@@ -6208,7 +6210,7 @@ async fn a_turn_that_reaches_no_answer_says_why() {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(AlwaysToolCallingMock),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_agents_and_config(
         Arc::new(router),
@@ -6339,7 +6341,7 @@ fn ollama_only_router(
     let router = openalpaca_llm::LlmRouter::single_provider(
         provider,
         openalpaca_llm::ProviderType::Ollama,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     router.model_registry().register(
         "qwen3:8b".to_string(),
@@ -6572,7 +6574,7 @@ fn scripted_turn_orchestrator_with_builtins(
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(ScriptedTurnLlm::new(steps, requests.clone())),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     (
         orchestrator_with_builtins(Arc::new(router), Some(db)),
@@ -7861,7 +7863,7 @@ fn scripted_turn_orchestrator(
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(ScriptedTurnLlm::new(steps, requests.clone())),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let orch = make_orchestrator_with_llm_agents_and_config(
         Arc::new(router),
@@ -8880,7 +8882,7 @@ fn filer_skill_orchestrator(
             requests: requests.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let bus = EventBus::default();
     let gate = make_security_gate(&bus);
@@ -9201,7 +9203,7 @@ impl LearningStack {
                 requests: requests.clone(),
             }),
             openalpaca_llm::ProviderType::Anthropic,
-            "claude-sonnet-4-5-20250929".to_string(),
+            "claude-sonnet-5-5".to_string(),
         ));
         let config = DaemonConfig::default();
         let orch = make_orchestrator_with_llm_agents_and_config(
@@ -9787,7 +9789,7 @@ async fn a_main_loop_turn_carries_the_working_state_ahead_of_its_rows() {
 /// model's window 4 096 tokens and the compaction buffer forced high: a turn
 /// over ten 800-character rows compacts at `LlmSummary` without the assembly
 /// trimming a row, and a turn over four does not compact. The summariser's
-/// model is `claude-haiku-4-5-20251001`; the recent window holds `recent`
+/// model is `claude-haiku-5-5`; the recent window holds `recent`
 /// rows.
 fn a_4k_orchestrator(
     reply: &str,
@@ -9797,15 +9799,15 @@ fn a_4k_orchestrator(
     let mut config = DaemonConfig::default();
     config.orchestrator.memory.prompt_recent_messages = recent;
     config.execution.context.autocompact_buffer_ratio = 0.3;
-    config.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".to_string());
+    config.orchestrator.costs.summary_model = Some("claude-haiku-5-5".to_string());
     let (orch, requests) =
         make_tool_mode_orchestrator_with_db(None, reply, config, Vec::new(), Some(db.clone()));
     let registry = orch.llm_router.as_ref().unwrap().model_registry();
     let mut info = registry
-        .get_model_info("claude-sonnet-4-5-20250929")
+        .get_model_info("claude-sonnet-5-5")
         .expect("the tool-mode model is in the catalogue");
     info.context_window = 4096;
-    registry.register("claude-sonnet-4-5-20250929".to_string(), info);
+    registry.register("claude-sonnet-5-5".to_string(), info);
     (orch, requests)
 }
 
@@ -9879,7 +9881,7 @@ async fn a_compacting_turn_writes_its_state_and_the_next_request_carries_it() {
             .unwrap()
             .model
             .as_deref(),
-        Some("claude-haiku-4-5-20251001"),
+        Some("claude-haiku-5-5"),
         "on `summary_model` (CQ-3)"
     );
     let row = openalpaca_storage::ConversationRepository::new(&db)
@@ -10801,7 +10803,7 @@ async fn a_skill_turn_says_what_it_continued_from() {
             requests: requests.clone(),
         }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let (_tmp, catalog) = make_review_skill_catalog();
     let bus = EventBus::default();
@@ -11050,7 +11052,7 @@ Build it.
     let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
         provider.clone(),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     ));
     let bus = EventBus::default();
     let gate = make_security_gate_with_registry(&bus, registry.clone());

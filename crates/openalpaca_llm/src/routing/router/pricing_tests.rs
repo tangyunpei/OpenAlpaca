@@ -23,8 +23,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const MILLION: u32 = 1_000_000;
 /// `CostTracker::pricing_for`'s fallback for an id it holds no price for.
 const FALLBACK: f64 = 3.0 + 15.0;
-/// `gpt-4o-mini` at the rate its own page prints: $0.15 in, $0.60 out.
-const GPT_4O_MINI: f64 = 0.15 + 0.60;
+/// `gpt-6-luna`, the seeded OpenAI default since MODELS-LATEST, at the rate
+/// its own page prints (developers.openai.com/api/docs/models/gpt-6-luna,
+/// read 2026-11-14): $0.10 in, $0.50 out.
+const GPT_6_LUNA: f64 = 0.10 + 0.50;
 
 fn close(actual: f64, expected: f64) -> bool {
     (actual - expected).abs() < 1e-9
@@ -68,12 +70,12 @@ fn registry_for(
 }
 
 /// A keyed OpenAI install, the provider at `base` (`…/v1`), as the seeded
-/// `llm.toml` sets it up: `gpt-4o-mini` the default.
+/// `llm.toml` sets it up: `gpt-6-luna` the default.
 fn openai_router(base: &str, config: &HashMap<String, ModelConfigEntry>) -> LlmRouter {
     let provider = Arc::new(OpenAiProvider::with_client(
         loopback_client(TIMEOUT),
         "sk-test-not-a-key".to_string(),
-        Some("gpt-4o-mini".to_string()),
+        Some("gpt-6-luna".to_string()),
         Some(format!("{base}/v1")),
         None,
     ));
@@ -90,7 +92,7 @@ fn openai_router(base: &str, config: &HashMap<String, ModelConfigEntry>) -> LlmR
         registry_for(ProviderType::OpenAI, config),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-4o-mini".to_string(),
+        "gpt-6-luna".to_string(),
     )
 }
 
@@ -125,7 +127,7 @@ fn unpriced_announcements(lines: &[&str], id: &str) -> usize {
 #[tokio::test]
 async fn the_seeded_openai_default_is_counted_at_its_own_rate() {
     let server = MockHttpServer::start(|req| match req.path.as_str() {
-        "/v1/models" => MockResponse::json(models_body(&["gpt-4o-mini", "gpt-5-mini"])),
+        "/v1/models" => MockResponse::json(models_body(&["gpt-6-luna", "gpt-6.1-terra"])),
         _ => MockResponse::not_found(),
     })
     .await;
@@ -133,20 +135,22 @@ async fn the_seeded_openai_default_is_counted_at_its_own_rate() {
 
     let status = router.refresh_models_for(&ProviderType::OpenAI).await;
     assert_eq!(status.error, None);
-    assert!(router.is_routable("gpt-4o-mini"));
+    assert!(router.is_routable("gpt-6-luna"));
 
+    // 100,000 tokens each way, below the 272,000 past which the whole
+    // request pays the long-prompt rate: a tenth of the two prices.
     let cost = router
         .cost_tracker
-        .calculate_cost("gpt-4o-mini", MILLION, MILLION);
+        .calculate_cost("gpt-6-luna", MILLION / 10, MILLION / 10);
     assert!(
-        close(cost, GPT_4O_MINI),
-        "gpt-4o-mini is counted at $0.15 / $0.60, not {cost}"
+        close(cost, GPT_6_LUNA / 10.0),
+        "gpt-6-luna is counted at $0.10 / $0.50, not {cost}"
     );
     let info = router
         .model_registry()
-        .get_model_info("gpt-4o-mini")
+        .get_model_info("gpt-6-luna")
         .expect("a catalogue row");
-    assert_eq!(info.context_window, 128_000);
+    assert_eq!(info.context_window, 1_050_000);
     assert!(info.supports_tools && info.supports_image && !info.supports_audio);
 }
 
@@ -520,7 +524,7 @@ async fn a_router_built_on_a_loopback_base_url_is_exempt_at_boot() {
     let provider = Arc::new(OpenAiProvider::with_client(
         loopback_client(TIMEOUT),
         "sk-test-not-a-key".to_string(),
-        Some("gpt-4o-mini".to_string()),
+        Some("gpt-6-luna".to_string()),
         Some(format!("{}/v1", server.base_url)),
         None,
     ));
@@ -543,7 +547,7 @@ async fn a_router_built_on_a_loopback_base_url_is_exempt_at_boot() {
         registry_for(ProviderType::OpenAI, &HashMap::new()),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-4o-mini".to_string(),
+        "gpt-6-luna".to_string(),
         runtime,
         RateLimitConfig::default(),
     );
@@ -601,7 +605,7 @@ async fn a_loopback_base_url_the_anthropic_arm_does_not_call_is_not_exempt() {
         registry_for(ProviderType::Anthropic, &HashMap::new()),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-haiku-4-5-20251001".to_string(),
+        "claude-haiku-5-5".to_string(),
     );
     router.model_registry().register_discovered(
         "claude-listed-test".to_string(),
@@ -711,7 +715,7 @@ async fn anthropic_discovery_reads_every_page_of_the_model_list() {
         registry_for(ProviderType::Anthropic, &HashMap::new()),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let status = router.refresh_models_for(&ProviderType::Anthropic).await;
@@ -777,7 +781,7 @@ async fn a_later_page_that_does_not_decode_keeps_the_ids_already_read() {
         registry_for(ProviderType::Anthropic, &HashMap::new()),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let status = router.refresh_models_for(&ProviderType::Anthropic).await;
@@ -824,7 +828,7 @@ fn anthropic_router(server: &MockHttpServer) -> LlmRouter {
         registry_for(ProviderType::Anthropic, &HashMap::new()),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     )
 }
 
@@ -1001,7 +1005,7 @@ fn responses_router(base: &str) -> LlmRouter {
         OpenAiProvider::with_client(
             loopback_client(TIMEOUT),
             "sk-test-not-a-key".to_string(),
-            Some("gpt-4o-mini".to_string()),
+            Some("gpt-6-luna".to_string()),
             Some(format!("{base}/v1")),
             None,
         )
@@ -1020,7 +1024,7 @@ fn responses_router(base: &str) -> LlmRouter {
         registry_for(ProviderType::OpenAI, &HashMap::new()),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-4o-mini".to_string(),
+        "gpt-6-luna".to_string(),
     )
 }
 
@@ -1059,9 +1063,10 @@ fn responses_answer(model: &str, input: u32, output: u32) -> String {
 /// C7b's pin, no change made: a non-streaming Responses answer is counted by
 /// the model its body names, as a Chat Completions one is (design item (4)).
 /// `gpt-6.1-sol`'s page (read 2026-11-12) lists one snapshot, the id
-/// itself, so its answer is counted at its row; `gpt-5.2`'s names the
-/// default snapshot `gpt-5.2-2025-12-11`, which no row prices, so an answer
-/// naming it is counted at $3 / $15 (pending-decisions §1.14, *Rev 42*).
+/// itself, so its answer is counted at its row; an answer naming a dated
+/// snapshot no row prices — made up here, since MODELS-LATEST retired
+/// `gpt-5.2`, whose page named `gpt-5.2-2025-12-11` — is counted at $3 /
+/// $15 (pending-decisions §1.14, *Rev 42*).
 #[tokio::test]
 async fn a_responses_answer_is_counted_by_the_model_its_body_names() {
     let server = MockHttpServer::start(|req| {
@@ -1070,9 +1075,11 @@ async fn a_responses_answer_is_counted_by_the_model_its_body_names() {
             ("/v1/responses", Some("gpt-6.1-sol")) => {
                 MockResponse::json(responses_answer("gpt-6.1-sol", 100_000, 100_000))
             }
-            ("/v1/responses", Some("gpt-5.2")) => {
-                MockResponse::json(responses_answer("gpt-5.2-2025-12-11", MILLION, MILLION))
-            }
+            ("/v1/responses", Some("gpt-6-luna")) => MockResponse::json(responses_answer(
+                "gpt-6-luna-snapshot-test",
+                MILLION,
+                MILLION,
+            )),
             _ => MockResponse::not_found(),
         }
     })
@@ -1095,10 +1102,10 @@ async fn a_responses_answer_is_counted_by_the_model_its_body_names() {
         usage.total_cost_usd
     );
 
-    let mut previous = tool_request("gpt-5.2");
+    let mut previous = tool_request("gpt-6-luna");
     previous.context.agent_id = Some("snapshot".to_string());
     let answered = router.complete(previous).await.expect("the mock answers");
-    assert_eq!(answered.model, "gpt-5.2-2025-12-11");
+    assert_eq!(answered.model, "gpt-6-luna-snapshot-test");
     let usage = router
         .cost_tracker
         .get_agent_usage("snapshot")
@@ -1123,7 +1130,7 @@ async fn a_streamed_responses_round_is_routed_under_the_asked_id() {
     let completed = serde_json::json!({
         "type": "response.completed",
         "response": serde_json::from_str::<serde_json::Value>(
-            &responses_answer("gpt-5.2-2025-12-11", 1_000, 1_000)
+            &responses_answer("gpt-6-luna-snapshot-test", 1_000, 1_000)
         ).unwrap()
     });
     let frame = format!("event: response.completed\ndata: {completed}\n\n");
@@ -1135,10 +1142,10 @@ async fn a_streamed_responses_round_is_routed_under_the_asked_id() {
     let router = responses_router(&server.base_url);
 
     let routed = router
-        .complete_streaming(tool_request("gpt-5.2"))
+        .complete_streaming(tool_request("gpt-6-luna"))
         .await
         .expect("streams");
-    assert_eq!(routed.model, "gpt-5.2");
+    assert_eq!(routed.model, "gpt-6-luna");
     let response = crate::collect_stream(routed.stream, routed.model.clone())
         .await
         .expect("collects");

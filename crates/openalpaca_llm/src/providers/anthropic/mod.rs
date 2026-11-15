@@ -8,7 +8,11 @@ use crate::types::*;
 use async_trait::async_trait;
 use reqwest::header::HeaderMap;
 
-const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// The model for a request that names none: Claude Sonnet 5.5, a compiled
+/// row (MODELS-LATEST, the subagent design's §4.9.5; the models overview,
+/// platform.claude.com/docs/en/about-claude/models/overview, read
+/// 2026-11-14).
+const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Where the Messages and Models APIs live; [`AnthropicProvider::with_api_base`]
 /// points a test at a loopback server instead.

@@ -883,17 +883,19 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   chat); a lead's or subagent's round ends its run on an empty-completion
   error that nothing retries. So does a lead's or subagent's round that
   ends its turn on thinking alone, no text and no call, on a model whose
-  thinking has text: `claude-opus-5-5` too since it is asked for the
-  summary (M2's rule, `empty_completion_error`; while its thinking was
+  thinking has text: the built-in Claude rows too, since they are asked
+  for the summary (M2's rule, `empty_completion_error`; while its thinking was
   omitted, that round came back an empty answer).
   The loop's `context_management` asks the server to keep every turn's
   thinking (`clear_thinking_20251015` with `keep` `"all"`; without the
   `keep` the strategy keeps one turn on every model), under the
   context-editing page's beta header, `context-management-2025-06-27`
   (read 2026-11-14), so the model reads every block the loop sends back.
-  On `claude-opus-5-5`, whose thinking `display` defaults to `"omitted"`,
-  the request asks for `"summarized"`, so the streamed thinking has text
-  (a per-row fact of its request contract; ANTHROPIC-THINKING).
+  On the built-in Claude rows (`claude-fable-5-2`, `claude-opus-5-5`,
+  `claude-sonnet-5-5`, `claude-haiku-5-5`), whose thinking `display`
+  defaults to `"omitted"`, a request that thinks asks for `"summarized"`,
+  so the streamed thinking has text (a per-row fact of the request
+  contract; ANTHROPIC-THINKING, MODELS-LATEST).
   OpenAI's Responses API (C7b, a request with tools to OpenAI's own API)
   keeps a turn's output items the same way when the turn carried a
   reasoning item, and sends them back before the turn's tool results, its

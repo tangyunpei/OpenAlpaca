@@ -73,7 +73,7 @@ pub(super) fn load_or_default(path: &Path) -> Result<LlmRouterConfig> {
 pub(super) fn default_config() -> LlmRouterConfig {
     LlmRouterConfig {
         orchestrator: Some(OrchestratorLlmConfig {
-            model: "claude-sonnet-4-5-20250929".to_string(),
+            model: openalpaca_llm::config::DEFAULT_ORCHESTRATOR_MODEL.to_string(),
             fallback_models: None,
         }),
         providers: Some(HashMap::new()),
@@ -125,7 +125,7 @@ pub(super) fn apply_to_config(
             config
                 .orchestrator
                 .get_or_insert_with(|| OrchestratorLlmConfig {
-                    model: "claude-sonnet-4-5-20250929".to_string(),
+                    model: openalpaca_llm::config::DEFAULT_ORCHESTRATOR_MODEL.to_string(),
                     fallback_models: None,
                 })
                 .fallback_models = Some(models);

@@ -211,6 +211,8 @@ impl Scene {
             ProviderType::Anthropic,
             RECORDED_MODEL.to_string(),
         ));
+        // The extractor's and the summariser's own request, as they build it.
+        crate::test_util::without_request_contract(&router, RECORDED_MODEL);
         Self::with_router(model, router, config)
     }
 

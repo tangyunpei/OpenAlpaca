@@ -487,7 +487,7 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         key: "daemon.orchestrator.summary_model",
         kind: ConfigKind::String,
         default: None,
-        description: "Model ID for background summary generation (e.g. claude-haiku-4-5-20251001). Uses router default if empty.",
+        description: "Model ID for background summary generation (e.g. claude-haiku-5-5). Uses router default if empty.",
         category: "Daemon",
         subcategory: Some("Orchestrator"),
         sensitive: false,
@@ -497,7 +497,7 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         key: "daemon.orchestrator.extraction_model",
         kind: ConfigKind::String,
         default: None,
-        description: "Model ID for background user trait extraction (e.g. claude-haiku-4-5-20251001). Uses router default if empty.",
+        description: "Model ID for background user trait extraction (e.g. claude-haiku-5-5). Uses router default if empty.",
         category: "Daemon",
         subcategory: Some("Orchestrator"),
         sensitive: false,
@@ -823,7 +823,9 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
     ConfigKeyDef {
         key: "ai.default_model",
         kind: ConfigKind::String,
-        default: Some("claude-sonnet-4-5-20250929"),
+        // `openalpaca_llm::config::DEFAULT_ORCHESTRATOR_MODEL` (storage is a
+        // leaf; the CLI's tests pin the two the same).
+        default: Some("claude-sonnet-5-5"),
         description: "Default LLM model for orchestration",
         category: "Agents",
         subcategory: Some("Orchestrator"),

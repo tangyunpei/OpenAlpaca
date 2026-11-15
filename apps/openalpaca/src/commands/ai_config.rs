@@ -82,7 +82,7 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
     match key {
         "ai.default_model" => {
             if let Some(ref mut orch) = config.orchestrator {
-                orch.model = "claude-sonnet-4-5-20250929".to_string();
+                orch.model = openalpaca_llm::config::DEFAULT_ORCHESTRATOR_MODEL.to_string();
             }
         }
         "ai.fallback_models" => {

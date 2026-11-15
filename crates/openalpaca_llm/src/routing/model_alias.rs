@@ -113,33 +113,37 @@ impl AliasRow {
 pub static ALIAS_TABLE: [AliasRow; 2] = [
     AliasRow {
         provider: ProviderType::Anthropic,
-        // Claude Haiku 4.5: "Active" (the model-deprecations page,
-        // platform.claude.com/docs/en/about-claude/model-deprecations, read
-        // 2026-11-12). O-16 (a) moves it to claude-haiku-5-5 after C7a.
-        fast: "claude-haiku-4-5-20251001",
-        // Claude Sonnet 4.6: "Active" (the same page, read 2026-11-12).
-        // O-16 (a) moves it to claude-sonnet-5-5 after C7a.
-        balanced: "claude-sonnet-4-6",
+        // Claude Haiku 5.5 (MODELS-LATEST; the owner agreed 2026-11-14): "For
+        // high-volume, latency-sensitive tasks such as classification,
+        // extraction, and routing" (platform.claude.com/docs/en/models/
+        // haiku-5-5/overview, read 2026-11-14).
+        fast: "claude-haiku-5-5",
+        // Claude Sonnet 5.5 (MODELS-LATEST): "The best combination of speed
+        // and intelligence" (.../models/sonnet-5-5/overview, read
+        // 2026-11-14).
+        balanced: "claude-sonnet-5-5",
         // The latest Opus (O-13 (a)): Claude Opus 5.5, `claude-opus-5-5`
         // (the models overview, platform.claude.com/docs/en/models/overview,
-        // read 2026-11-12).
+        // read 2026-11-12, and again 2026-11-14). Claude Fable 5.2, the
+        // flagship, is catalogued and no alias's.
         strong: "claude-opus-5-5",
     },
     AliasRow {
         provider: ProviderType::OpenAI,
-        // GPT-5 nano: "Deprecated", shut down on Dec 11, 2026
-        // (developers.openai.com/api/docs/models/gpt-5-nano and
-        // .../deprecations, read 2026-11-12) — a holding row (M-3a) until
-        // O-16 (a) moves it after C7b.
-        fast: "gpt-5-nano",
-        // GPT-5 Mini: "Deprecated", shut down on Dec 11, 2026 (its page and
-        // the deprecations page, read 2026-11-12) — a holding row until
-        // O-16 (a).
-        balanced: "gpt-5-mini",
+        // GPT-6 Luna (MODELS-LATEST): "Our most efficient model for focused,
+        // high-volume tasks" (developers.openai.com/api/docs/models/
+        // gpt-6-luna), named `gpt-5-nano`'s replacement by .../deprecations
+        // (both read 2026-11-14).
+        fast: "gpt-6-luna",
+        // GPT-6.1 Terra (MODELS-LATEST): "A fast, efficient model" (its
+        // page), named `gpt-5-mini`'s replacement by the deprecations page
+        // (both read 2026-11-14).
+        balanced: "gpt-6.1-terra",
         // The latest GPT Sol (O-13 (a), O-15 (a)): GPT-6.1 Sol, `gpt-6.1-sol`
         // (developers.openai.com/api/docs/models/gpt-6.1-sol, read
         // 2026-11-12: "Tool calling requires the Responses API", which the
-        // OpenAI arm speaks for a request with tools since C7b).
+        // OpenAI arm speaks for a request with tools since C7b). GPT-6 Astra,
+        // the flagship, is catalogued and no alias's.
         strong: "gpt-6.1-sol",
     },
 ];

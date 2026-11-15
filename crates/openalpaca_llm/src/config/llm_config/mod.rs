@@ -15,8 +15,8 @@ pub use router_config::{
     SecurityConfig, WebSearchConfig,
 };
 pub use runtime::{
-    EndpointsConfig, EnvVarsConfig, LlmRuntimeConfig, ProviderDefaults, TimeoutsConfig,
-    is_local_url,
+    DEFAULT_ORCHESTRATOR_MODEL, EndpointsConfig, EnvVarsConfig, LlmRuntimeConfig, ProviderDefaults,
+    TimeoutsConfig, is_local_url,
 };
 
 use crate::error::LlmError;

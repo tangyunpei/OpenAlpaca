@@ -87,7 +87,7 @@ fn a_disabled_provider_contributes_no_models_at_boot() {
     std::fs::write(
         &path,
         r#"[orchestrator]
-model = "claude-haiku-4-5-20251001"
+model = "claude-haiku-5-5"
 
 [providers.openai]
 enabled = false
@@ -108,12 +108,12 @@ context = 128000
         "the disabled provider's own [models] row must stay out"
     );
     assert_eq!(
-        registry.resolve_provider("gpt-5.2"),
+        registry.resolve_provider("gpt-6.1-sol"),
         None,
         "and so must its compiled defaults"
     );
     assert!(
-        registry.resolve_provider("claude-haiku-4-5-20251001").is_some(),
+        registry.resolve_provider("claude-haiku-5-5").is_some(),
         "the enabled providers are untouched"
     );
 }

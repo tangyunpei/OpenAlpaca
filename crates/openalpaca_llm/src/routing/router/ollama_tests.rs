@@ -179,11 +179,11 @@ async fn a_keyless_provider_completes_through_the_streaming_path() {
 /// The slot is for providers that need no key — not a way around a missing one.
 #[tokio::test]
 async fn an_empty_pool_still_refuses_a_provider_that_needs_a_key() {
-    let server = MockHttpServer::start(|_| MockResponse::json(completion_body("gpt-5.2", "hi"))).await;
+    let server = MockHttpServer::start(|_| MockResponse::json(completion_body("gpt-6.1-sol", "hi"))).await;
 
     let provider = Arc::new(crate::providers::openai::OpenAiProvider::new(
         "sk-test".to_string(),
-        Some("gpt-5.2".to_string()),
+        Some("gpt-6.1-sol".to_string()),
         Some(format!("{}/v1", server.base_url)),
         None,
     ));
@@ -204,11 +204,11 @@ async fn an_empty_pool_still_refuses_a_provider_that_needs_a_key() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-5.2".to_string(),
+        "gpt-6.1-sol".to_string(),
     );
 
     let err = router
-        .complete(request("gpt-5.2"))
+        .complete(request("gpt-6.1-sol"))
         .await
         .expect_err("a provider that needs a key and has none cannot be served");
     assert!(
@@ -617,7 +617,7 @@ async fn a_claude_pin_falls_through_to_an_installed_ollama_model() {
     let router = empty_catalogue_router(&server.base_url);
     // The configured default is the seeded template's Claude id, and
     // `[providers.ollama] default_model` names a tag nobody pulled.
-    router.set_default_model("claude-sonnet-4-6".to_string());
+    router.set_default_model("claude-sonnet-5-5".to_string());
     router.refresh_models_for(&ProviderType::Ollama).await;
 
     assert_eq!(
@@ -627,7 +627,7 @@ async fn a_claude_pin_falls_through_to_an_installed_ollama_model() {
     );
 
     let response = router
-        .complete(request("claude-sonnet-4-6"))
+        .complete(request("claude-sonnet-5-5"))
         .await
         .expect("a Claude pin still runs when only Ollama is enabled");
     assert_eq!(response.content, "local pong");
@@ -647,7 +647,7 @@ async fn an_ollama_with_no_models_installed_says_what_to_do() {
 
     assert_eq!(router.effective_default_model(), None);
     let err = router
-        .complete(request("claude-sonnet-4-6"))
+        .complete(request("claude-sonnet-5-5"))
         .await
         .expect_err("nothing is installed");
     assert!(matches!(err, LlmRouterError::NoRoutableModel), "{err:?}");
@@ -729,7 +729,7 @@ async fn a_routed_stream_says_whether_its_provider_needs_a_key() {
 
     let provider = Arc::new(crate::providers::openai::OpenAiProvider::new(
         "sk-test".to_string(),
-        Some("gpt-5.2".to_string()),
+        Some("gpt-6.1-sol".to_string()),
         Some(format!("{}/v1", server.base_url)),
         None,
     ));
@@ -753,10 +753,10 @@ async fn a_routed_stream_says_whether_its_provider_needs_a_key() {
         ModelRegistry::with_defaults(),
         HashMap::new(),
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-        "gpt-5.2".to_string(),
+        "gpt-6.1-sol".to_string(),
     );
     let routed = keyed
-        .complete_streaming(request("gpt-5.2"))
+        .complete_streaming(request("gpt-6.1-sol"))
         .await
         .expect("a keyed provider streams");
     assert!(

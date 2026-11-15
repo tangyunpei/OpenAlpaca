@@ -360,7 +360,7 @@ mod tests {
             router: &router,
             context: RequestContext::default(),
             writer: WriterConfig {
-                model: Some("claude-haiku-4-5-20251001".into()),
+                model: Some("claude-haiku-5-5".into()),
                 ..WriterConfig::default()
             },
             fallback_models: Vec::new(),
@@ -383,7 +383,7 @@ mod tests {
             request.thinking
         );
         assert_eq!(request.max_tokens, Some(working_state::MAX_TOKENS));
-        assert_eq!(request.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(request.model.as_deref(), Some("claude-haiku-5-5"));
         let user = &request.messages[1].content;
         assert!(
             user.contains(&serde_json::to_string(&previous).unwrap()),

@@ -1316,7 +1316,7 @@ async fn run_compacting_turn(
         enable_caching: false,
         session_log: Some(handle.clone()),
         writer: WriterConfig {
-            model: Some("claude-haiku-4-5-20251001".to_string()),
+            model: Some("claude-haiku-5-5".to_string()),
             ..WriterConfig::default()
         },
         working_state: Some(std::sync::Arc::new(lisbon("Lisbon trip"))),
@@ -1379,7 +1379,7 @@ async fn an_llm_summary_compaction_makes_one_call_and_leaves_one_state_block() {
     assert_eq!(writer_calls.len(), 1, "one call for the compaction");
     assert_eq!(requests.len(), 2, "and one for the answer");
     let call = writer_calls[0];
-    assert_eq!(call.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    assert_eq!(call.model.as_deref(), Some("claude-haiku-5-5"));
     let user = &call.messages[1].content;
     assert!(
         user.contains(&serde_json::to_string(&lisbon("Lisbon trip")).unwrap()),
@@ -1779,7 +1779,7 @@ async fn test_agentic_loop_routed_completes() {
     let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
         content: "Router response".to_string(),
         tool_calls: vec![],
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         usage: Usage {
             input_tokens: 10,
             output_tokens: 5,
@@ -1794,12 +1794,12 @@ async fn test_agentic_loop_routed_completes() {
     let router = LlmRouter::single_provider(
         provider,
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let messages = vec![ChatMessage::user("hello via router")];
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         thinking: None,
         ..Default::default()
@@ -1826,7 +1826,7 @@ async fn test_agentic_loop_routed_completes() {
     assert_eq!(result.rounds_used, 1);
     assert_eq!(result.total_input_tokens, 10);
     assert_eq!(result.total_output_tokens, 5);
-    assert_eq!(result.model_used, Some("claude-sonnet-4-6".to_string()));
+    assert_eq!(result.model_used, Some("claude-sonnet-5-5".to_string()));
 }
 
 /// The agentic loop's column of M57's retry table: it retries what
@@ -1851,7 +1851,7 @@ async fn the_loop_retries_a_transient_transport_failure_and_not_a_refused_port()
     let answer = Ok(ChatResponse {
         content: "answered".to_string(),
         tool_calls: vec![],
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         usage: Usage::default(),
         finish_reason: FinishReason::Stop,
         thinking: None,
@@ -1882,10 +1882,10 @@ async fn the_loop_retries_a_transient_transport_failure_and_not_a_refused_port()
         let router = LlmRouter::single_provider(
             Arc::clone(&provider) as Arc<dyn LlmProvider>,
             ProviderType::Anthropic,
-            "claude-sonnet-4-6".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
         let config = LoopConfig {
-            model: Some("claude-sonnet-4-6".to_string()),
+            model: Some("claude-sonnet-5-5".to_string()),
             enable_caching: false,
             thinking: None,
             ..Default::default()
@@ -1935,7 +1935,7 @@ async fn test_agentic_loop_routed_publishes_model_access_denied_event() {
     let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
         content: "Should be rejected".to_string(),
         tool_calls: vec![],
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         usage: Usage {
             input_tokens: 10,
             output_tokens: 5,
@@ -1950,11 +1950,11 @@ async fn test_agentic_loop_routed_publishes_model_access_denied_event() {
     let router = LlmRouter::single_provider(
         provider,
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let mut constraints = AgentConstraints {
-        denied_models: vec!["claude-sonnet-4-6".to_string()],
+        denied_models: vec!["claude-sonnet-5-5".to_string()],
         ..Default::default()
     };
     constraints.normalize();
@@ -1963,7 +1963,7 @@ async fn test_agentic_loop_routed_publishes_model_access_denied_event() {
     let mut event_rx = bus.subscribe();
 
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         thinking: None,
         agent_constraints: Some(constraints),
@@ -2011,7 +2011,7 @@ async fn test_agentic_loop_routed_publishes_model_access_denied_event() {
             ..
         } => {
             assert_eq!(agent_id, "denied-agent");
-            assert_eq!(model_id, "claude-sonnet-4-6");
+            assert_eq!(model_id, "claude-sonnet-5-5");
             assert!(!reason.is_empty());
         }
         other => panic!("expected ModelAccessDenied, got {other:?}"),
@@ -2030,7 +2030,7 @@ async fn test_agentic_loop_routed_with_tool_calls() {
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
             }],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage {
                 input_tokens: 20,
                 output_tokens: 15,
@@ -2044,7 +2044,7 @@ async fn test_agentic_loop_routed_with_tool_calls() {
         Ok(ChatResponse {
             content: "Router done.".to_string(),
             tool_calls: vec![],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage {
                 input_tokens: 30,
                 output_tokens: 10,
@@ -2060,12 +2060,12 @@ async fn test_agentic_loop_routed_with_tool_calls() {
     let router = LlmRouter::single_provider(
         provider,
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let messages = vec![ChatMessage::user("search via router")];
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         thinking: None,
         ..Default::default()
@@ -2106,7 +2106,7 @@ async fn test_agentic_loop_routed_respects_max_rounds() {
             name: "search".to_string(),
             arguments: serde_json::json!({}),
         }],
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         usage: Usage {
             input_tokens: 10,
             output_tokens: 5,
@@ -2121,13 +2121,13 @@ async fn test_agentic_loop_routed_respects_max_rounds() {
     let router = LlmRouter::single_provider(
         provider,
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let messages = vec![ChatMessage::user("loop forever")];
     let config = LoopConfig {
         max_rounds: 3,
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         thinking: None,
         ..Default::default()
@@ -2177,7 +2177,7 @@ async fn main_loop_turn_with_prior_agent_spend_does_not_exit_cost_exceeded() {
     let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
         content: "Hello there.".to_string(),
         tool_calls: vec![],
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         usage: Usage {
             input_tokens: 10,
             output_tokens: 5,
@@ -2192,7 +2192,7 @@ async fn main_loop_turn_with_prior_agent_spend_does_not_exit_cost_exceeded() {
     let router = LlmRouter::single_provider(
         Arc::clone(&provider) as Arc<dyn LlmProvider>,
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     // Prior cumulative spend under the shared "orchestrator" bucket — well
@@ -2202,7 +2202,7 @@ async fn main_loop_turn_with_prior_agent_spend_does_not_exit_cost_exceeded() {
         .record(&CallRecord {
             agent_id: "orchestrator".to_string(),
             task_id: None,
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: 5.00,
@@ -2213,7 +2213,7 @@ async fn main_loop_turn_with_prior_agent_spend_does_not_exit_cost_exceeded() {
 
     let messages = vec![ChatMessage::user("hello")];
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         thinking: None,
         ..Default::default() // max_cost defaults to $1.00
@@ -2261,7 +2261,7 @@ async fn per_turn_cap_still_trips_within_one_turn() {
             name: "search".to_string(),
             arguments: serde_json::json!({}),
         }],
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         usage: Usage {
             input_tokens: 500_000,
             output_tokens: 200_000,
@@ -2277,14 +2277,14 @@ async fn per_turn_cap_still_trips_within_one_turn() {
     let router = LlmRouter::single_provider(
         Arc::clone(&provider) as Arc<dyn LlmProvider>,
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let messages = vec![ChatMessage::user("expensive query")];
     let config = LoopConfig {
         max_cost: 1.00,
         max_rounds: 5,
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         thinking: None,
         ..Default::default()
@@ -2421,7 +2421,7 @@ async fn run_minimal_loop_for_span_test() -> LoopResult {
     let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
         content: "Done.".to_string(),
         tool_calls: vec![],
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         usage: Usage {
             input_tokens: 10,
             output_tokens: 5,
@@ -2436,12 +2436,12 @@ async fn run_minimal_loop_for_span_test() -> LoopResult {
     let router = LlmRouter::single_provider(
         provider,
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let messages = vec![ChatMessage::user("span test")];
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         // enable_caching = true so the Anthropic cache_markers span fires.
         enable_caching: true,
         thinking: None,
@@ -2526,7 +2526,7 @@ async fn run_loop_with_seeded_cost(
     let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
         content: "Done.".to_string(),
         tool_calls: vec![],
-        model: "claude-sonnet-4-6".to_string(),
+        model: "claude-sonnet-5-5".to_string(),
         usage: Usage {
             input_tokens: 10,
             output_tokens: 5,
@@ -2541,7 +2541,7 @@ async fn run_loop_with_seeded_cost(
     let router = LlmRouter::single_provider(
         Arc::clone(&provider) as Arc<dyn LlmProvider>,
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     // Pre-seed the accumulator so iteration 1 sees the simulated cost at
@@ -2557,7 +2557,7 @@ async fn run_loop_with_seeded_cost(
     let config = LoopConfig {
         max_rounds: 5,
         max_cost,
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         thinking: None,
         experimental_ephemeral_pressure,
@@ -3192,7 +3192,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "kettle"}),
             }],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage {
                 input_tokens: 20,
                 output_tokens: 15,
@@ -3206,7 +3206,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
         Ok(ChatResponse {
             content: "All done.".to_string(),
             tool_calls: vec![],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage {
                 input_tokens: 30,
                 output_tokens: 10,
@@ -3221,7 +3221,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
     let router = LlmRouter::single_provider(
         provider,
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -3236,7 +3236,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
     let handle = service.handle_for("sess-loop");
 
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         session_log: Some(handle.clone()),
         span_id: Some("lead::task-9".to_string()),
@@ -3279,7 +3279,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
     // which is what makes replay-resume reconstructible (§5.4).
     let round = &records[0];
     assert_eq!(round.data["round"], 1);
-    assert_eq!(round.data["model"], "claude-sonnet-4-6");
+    assert_eq!(round.data["model"], "claude-sonnet-5-5");
     assert_eq!(round.data["input_tokens"], 20);
     assert_eq!(round.data["text"], "Searching.");
     assert_eq!(round.data["tool_use"][0]["id"], "tc_1");
@@ -3383,7 +3383,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
                 name: "dump".to_string(),
                 arguments: serde_json::json!({}),
             }],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage::default(),
             finish_reason: FinishReason::ToolUse,
             thinking: None,
@@ -3393,7 +3393,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
         Ok(ChatResponse {
             content: "Done.".to_string(),
             tool_calls: vec![],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
@@ -3404,7 +3404,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
     let router = LlmRouter::single_provider(
         provider.clone(),
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -3419,7 +3419,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
     let handle = service.handle_for("sess-big-result");
 
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         session_log: Some(handle.clone()),
         ..Default::default()
@@ -3573,7 +3573,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
                 name: "build".to_string(),
                 arguments: serde_json::json!({}),
             }],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage::default(),
             finish_reason: FinishReason::ToolUse,
             thinking: None,
@@ -3583,7 +3583,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
         Ok(ChatResponse {
             content: "It failed.".to_string(),
             tool_calls: vec![],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
@@ -3594,7 +3594,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
     let router = LlmRouter::single_provider(
         provider.clone(),
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -3609,7 +3609,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
     let handle = service.handle_for("sess-big-err");
 
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         session_log: Some(handle.clone()),
         ..Default::default()
@@ -3826,7 +3826,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
                 name: "dump".to_string(),
                 arguments: serde_json::json!({}),
             }],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage::default(),
             finish_reason: FinishReason::ToolUse,
             thinking: None,
@@ -3836,7 +3836,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
         Ok(ChatResponse {
             content: "Done.".to_string(),
             tool_calls: vec![],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
@@ -3847,7 +3847,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
     let router = LlmRouter::single_provider(
         provider.clone(),
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -3873,7 +3873,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
     assert!(handle.is_closed(), "the writer gave up and its channel closed");
 
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         session_log: Some(handle.clone()),
         ..Default::default()
@@ -4070,7 +4070,7 @@ impl LlmProvider for ModelEchoProvider {
 
 /// The model the ladder settles on when the loop asks for one nothing serves:
 /// the only loaded provider's default.
-const EFFECTIVE_MODEL: &str = "claude-sonnet-4-6";
+const EFFECTIVE_MODEL: &str = "claude-sonnet-5-5";
 const UNROUTABLE_MODEL: &str = "no-such-model-anywhere";
 
 fn echo_router() -> LlmRouter {
@@ -5538,7 +5538,7 @@ mod no_output {
                     name: "quiet".to_string(),
                     arguments: serde_json::json!({}),
                 }],
-                model: "claude-sonnet-4-6".to_string(),
+                model: "claude-sonnet-5-5".to_string(),
                 usage: Usage::default(),
                 finish_reason: FinishReason::ToolUse,
                 thinking: None,
@@ -5548,7 +5548,7 @@ mod no_output {
             Ok(ChatResponse {
                 content: "Done.".to_string(),
                 tool_calls: vec![],
-                model: "claude-sonnet-4-6".to_string(),
+                model: "claude-sonnet-5-5".to_string(),
                 usage: Usage::default(),
                 finish_reason: FinishReason::Stop,
                 thinking: None,
@@ -5559,7 +5559,7 @@ mod no_output {
         let router = LlmRouter::single_provider(
             provider.clone(),
             ProviderType::Anthropic,
-            "claude-sonnet-4-6".to_string(),
+            "claude-sonnet-5-5".to_string(),
         );
         let dir = tempfile::tempdir().unwrap();
         let service = SessionLogService::new(
@@ -5575,7 +5575,7 @@ mod no_output {
         }
         let handle = service.handle_for("sess-quiet");
         let config = LoopConfig {
-            model: Some("claude-sonnet-4-6".to_string()),
+            model: Some("claude-sonnet-5-5".to_string()),
             enable_caching: false,
             session_log: Some(handle.clone()),
             tool_result_inline_bytes: inline_bytes,
@@ -5760,7 +5760,7 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
                 name: "shell_execute".to_string(),
                 arguments: serde_json::json!({"command": "cargo build --release"}),
             }],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage::default(),
             finish_reason: FinishReason::ToolUse,
             thinking: None,
@@ -5770,7 +5770,7 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
         Ok(ChatResponse {
             content: "Built.".to_string(),
             tool_calls: vec![],
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             usage: Usage::default(),
             finish_reason: FinishReason::Stop,
             thinking: None,
@@ -5781,7 +5781,7 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
     let router = LlmRouter::single_provider(
         provider.clone(),
         ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let dir = tempfile::tempdir().unwrap();
     let service = SessionLogService::new(
@@ -5792,7 +5792,7 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
     );
     let handle = service.handle_for("sess-long-build");
     let config = LoopConfig {
-        model: Some("claude-sonnet-4-6".to_string()),
+        model: Some("claude-sonnet-5-5".to_string()),
         enable_caching: false,
         session_log: Some(handle.clone()),
         ..Default::default()

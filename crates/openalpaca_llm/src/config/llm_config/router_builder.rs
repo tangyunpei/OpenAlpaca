@@ -293,7 +293,7 @@ fn build_router_from_hierarchical(
                 .provider_defaults
                 .get("anthropic")
                 .map(|d| d.default_model.clone())
-                .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string())
+                .unwrap_or_else(|| super::runtime::DEFAULT_ORCHESTRATOR_MODEL.to_string())
         });
 
     // Fallback chains

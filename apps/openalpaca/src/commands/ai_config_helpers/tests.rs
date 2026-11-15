@@ -76,3 +76,49 @@ fn the_daemons_master_key_decrypts_what_the_cli_wrote() {
     assert!(KeyEncryptor::is_encrypted(&encrypted));
     assert_eq!(daemon.decrypt(&encrypted).unwrap(), "sk-secret-value");
 }
+
+/// MODELS-LATEST (the design's §4.9.5, ML-8): the CLI's own default — the
+/// orchestrator model a config without one starts with, the one a
+/// `fallback_models` set inserts beside it — and the `ai.default_model`
+/// schema default all name `claude-sonnet-5-5`, a compiled row, so no site
+/// names a retired id. Red on the parent's `claude-sonnet-4-5-20250929`.
+#[test]
+fn the_cli_and_schema_defaults_name_the_latest_sonnet() {
+    use super::{apply_to_config, default_config};
+    use openalpaca_llm::ModelRegistry;
+    use openalpaca_llm::config::LlmRouterConfig;
+    use openalpaca_llm::keys::secret_store::MemorySecretStore;
+
+    let registry = ModelRegistry::with_defaults();
+    let compiled = |id: &str| {
+        assert!(
+            registry.get_model_info(id).is_some(),
+            "{id} is a compiled row"
+        );
+        id.to_string()
+    };
+
+    let config = default_config();
+    let model = config.orchestrator.expect("an orchestrator").model;
+    assert_eq!(compiled(&model), "claude-sonnet-5-5");
+
+    let mut config = LlmRouterConfig::default();
+    apply_to_config(
+        "ai.fallback_models",
+        "gpt-6-luna",
+        &mut config,
+        &MemorySecretStore::new(),
+        None,
+    )
+    .expect("applied");
+    let model = config.orchestrator.expect("inserted").model;
+    assert_eq!(compiled(&model), "claude-sonnet-5-5");
+
+    let schema = openalpaca_storage::config_schema::lookup("ai.default_model")
+        .expect("the key is in the schema")
+        .default
+        .expect("with a default");
+    assert_eq!(compiled(schema), "claude-sonnet-5-5");
+    // One value: the schema's default is the router's.
+    assert_eq!(schema, openalpaca_llm::config::DEFAULT_ORCHESTRATOR_MODEL);
+}

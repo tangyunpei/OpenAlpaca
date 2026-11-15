@@ -81,11 +81,11 @@ fn priced_router(usages: Vec<Usage>) -> Arc<openalpaca_llm::LlmRouter> {
     let router = openalpaca_llm::LlmRouter::single_provider(
         Arc::new(PricedRounds { usages }),
         openalpaca_llm::ProviderType::Anthropic,
-        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-5-5".to_string(),
     );
     let registry = router.model_registry();
     let mut info = registry
-        .get_model_info("claude-sonnet-4-6")
+        .get_model_info("claude-sonnet-5-5")
         .expect("the default model has a row");
     info.input_price_per_million = 1.0;
     info.output_price_per_million = 5.0;

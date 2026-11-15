@@ -66,8 +66,8 @@ task_extract_max_daily_cost_usd = 0.5
 task_extract_min_content_len = 100
 # Memory candidates one task run's extraction may write at most.
 task_extract_max_items_per_run = 10
-# summary_model = "claude-haiku-4-5-20251001"
-# extraction_model = "claude-haiku-4-5-20251001"
+# summary_model = "claude-haiku-5-5"
+# extraction_model = "claude-haiku-5-5"
 
 [orchestrator.memory]
 msg_trunc_chars = 1500

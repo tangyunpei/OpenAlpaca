@@ -1122,3 +1122,16 @@ async fn a_streamed_answers_cache_reads_and_writes_are_priced_by_the_row() {
     let cost = priced("claude-opus-5-5", &response.usage);
     assert!((cost - OPUS_5_5_COST).abs() < 1e-12, "cost={cost}");
 }
+
+/// MODELS-LATEST (the design's §4.9.5): the arm's model for a request that
+/// names none is a compiled row, `claude-sonnet-5-5`. Red on the parent's
+/// `claude-sonnet-4-6`, a retired row.
+#[test]
+fn the_arms_default_model_is_the_latest_sonnet() {
+    assert_eq!(DEFAULT_MODEL, "claude-sonnet-5-5");
+    assert!(
+        crate::routing::model_registry::ModelRegistry::with_defaults()
+            .get_model_info(DEFAULT_MODEL)
+            .is_some()
+    );
+}

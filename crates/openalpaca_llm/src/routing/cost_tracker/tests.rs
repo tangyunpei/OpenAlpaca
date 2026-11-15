@@ -7,9 +7,9 @@ fn make_tracker() -> CostTracker {
 #[test]
 fn test_calculate_cost_known_model() {
     let tracker = make_tracker();
-    // claude-sonnet: $3/1M input, $15/1M output
-    let cost = tracker.calculate_cost("claude-sonnet-4-5-20250929", 1_000_000, 100_000);
-    let expected = 3.0 + 1.5; // 1M * $3/1M + 100K * $15/1M
+    // claude-sonnet-5-5: $2/1M input, $10/1M output (MODELS-LATEST)
+    let cost = tracker.calculate_cost("claude-sonnet-5-5", 1_000_000, 100_000);
+    let expected = 2.0 + 1.0; // 1M * $2/1M + 100K * $10/1M
     assert!(
         (cost - expected).abs() < 0.01,
         "cost={}, expected={}",

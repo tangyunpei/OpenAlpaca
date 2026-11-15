@@ -72,8 +72,10 @@ pub struct LongPromptRate {
 /// refuses, sends `auto` for a forced tool choice and says so once a model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RequestContract {
-    /// `temperature`, `top_p` and `top_k` are refused (a 400 at a non-default
-    /// value under the API version the Anthropic arm sends).
+    /// `temperature`, `top_p` and `top_k` are refused: on Anthropic a 400 at
+    /// a non-default value under the API version the arm sends; on OpenAI's
+    /// GPT-6 rows, removed "when reasoning effort is not `none`", which it
+    /// never is on a request the arm builds (it sends no effort).
     pub no_sampling_parameters: bool,
     /// Thinking is always on: `thinking: {"type": "disabled"}` is refused.
     pub thinking_always_on: bool,
@@ -253,339 +255,239 @@ impl ModelRegistry {
     /// The compiled default catalogue — every model this build knows how to
     /// price and route without asking a provider's API.
     fn default_models() -> HashMap<String, ModelInfo> {
+        // MODELS-LATEST (the subagent design's §4.9; the owner's models
+        // directive of 2026-11-14, "retire all the old models ... and
+        // replace them with the latest", and his agreement the same day, "I
+        // agree on the new models"): the eight latest models, undated, and
+        // no other row. An undated id is a pinned snapshot, never a moving
+        // pointer ("Every Claude model ID is a pinned snapshot, including the
+        // dateless IDs", platform.claude.com/docs/en/about-claude/models/
+        // overview; each OpenAI row's page gives the undated id as its
+        // "Default snapshot"), so "latest" moves only with a build. Every
+        // page below was read on 2026-11-14.
         let mut models = HashMap::new();
 
-        // Anthropic models (discovered: false — only for internal routing/pricing).
-        // Prices from platform.claude.com/docs/en/about-claude/pricing, read
-        // 2026-11-12. The windows of the rows before Opus 5.5 stay as listed
-        // until step 19's live check (O-17 (a)); the pricing page's "Long
-        // context pricing" gives Claude 4.6 and later (but Haiku 5.5) their
-        // whole window at the standard rate, so none has a long-prompt rate.
-        // `claude-opus-4-20250514` and `claude-sonnet-4-20250514` are gone:
-        // "Retired" on June 15, 2026 (the model-deprecations page, read
-        // 2026-11-12), O-17 (a).
+        // Anthropic (discovered: false — only for internal routing/pricing).
+        // The models overview's "Latest models" table and each model's own
+        // overview (platform.claude.com/docs/en/models/<model>/overview):
+        // "Context window: 1M tokens · Max output: 128K tokens"; text and
+        // image in and tool use ("All current models support text and image
+        // input, ... vision, and tool use", the overview); PDFs ("All active
+        // models support PDF processing", .../build-with-claude/pdf-support).
         //
-        // Cache rates (CACHE-MULT, CACHE-WRITE; the pricing page's "Model
-        // pricing" and .../build-with-claude/prompt-caching, read
-        // 2026-11-14): a read ("Cache hits and refreshes") costs 0.05x the
-        // input price on Opus 5.5 ("Cache hits and refreshes on Claude Opus
-        // 5.5 and Claude Sonnet 5.5 are priced at 0.05x the base input
-        // price") and "the standard 0.1x multiplier" on the other rows
-        // ($0.20, $0.50, $0.30, $0.30 and $0.10 a million); a write costs
-        // 1.25x, the "5m cache writes" column ($5, $6.25, $3.75, $3.75 and
-        // $1.25), the lifetime the arm's `cache_control: {"type":
-        // "ephemeral"}` gets ("By default, the cache has a 5-minute
-        // lifetime"). The arm never asks for the 1-hour write (2x).
+        // Prices, the pricing page (.../about-claude/pricing, "Model
+        // pricing"): a read ("Cache hits and refreshes") at 0.025x the input
+        // price on Fable 5.2 (footnote 1), 0.05x on Opus 5.5 and Sonnet 5.5
+        // (footnote 2) and "the standard 0.1x multiplier" on Haiku 5.5; a
+        // write at 1.25x, the "5m cache writes" column, the lifetime the
+        // arm's `cache_control: {"type": "ephemeral"}` gets ("By default,
+        // the cache has a 5-minute lifetime", .../build-with-claude/
+        // prompt-caching); the arm never asks for the 1-hour write (2x).
+        // "Long context pricing": "Claude 4.6 and later models (except
+        // Claude Haiku 5.5) ... include the full 1M token context window at
+        // standard pricing"; Haiku 5.5's "prompt is over 100,000 tokens pays
+        // higher prices", counting "all of its input tokens, including cache
+        // reads and cache writes" — the folded `Usage.input_tokens` the
+        // cost tracker compares.
         //
+        // Request contracts (C7a, ANTHROPIC-THINKING; the design's §4.9.3):
+        // .../build-with-claude/thinking, "Sampling parameters": on all four
+        // "non-default `temperature`, `top_p`, or `top_k` values return a 400
+        // error on every request, regardless of whether thinking is used";
+        // "Response prefill and forced tool use": Opus 5.5, Sonnet 5.5 and
+        // Fable 5.2 "reject forced tool use on every request with a 400
+        // error"; *Controlling thinking display*: `"omitted"` "is the
+        // default" on all four. The thinking-troubleshooting table
+        // (.../build-with-claude/thinking-troubleshooting): Fable 5.2 and
+        // Opus 5.5 "Adaptive only", "Always on", rejecting `"enabled"` and
+        // `"disabled"`; Sonnet 5.5 "Adaptive, `between_tools`", rejecting
+        // both — `between_tools` "in place of `"disabled"`", not sent
+        // (ML-5), so a `Disabled` request is dropped and the model thinks;
+        // Haiku 5.5 "Adaptive only", rejecting `"enabled"` and accepting
+        // `"disabled"` "at effort `high` or below" (the arm sends no effort,
+        // so its default `medium` holds). The model-deprecations page: the
+        // sampling parameters "Removed in API version `2026-10-21`"; the
+        // arm sends `2023-06-01`, one of the "Earlier API versions" that
+        // "return it [a 400] when set to a non-default value on Claude 4.7
+        // and later models".
+        let anthropic = |input: f64,
+                         output: f64,
+                         cache_read: f64,
+                         long_prompt: Option<LongPromptRate>,
+                         request_contract: RequestContract| ModelInfo {
+            provider: ProviderType::Anthropic,
+            input_price_per_million: input,
+            output_price_per_million: output,
+            context_window: 1_000_000,
+            discovered: false,
+            supports_image: true,
+            supports_audio: false,
+            supports_document: true,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
+            long_prompt,
+            cache_rates: Some(CacheRates {
+                read: cache_read,
+                write: 1.25,
+            }),
+            request_contract,
+        };
+        let refuses_all = RequestContract {
+            no_sampling_parameters: true,
+            thinking_always_on: true,
+            adaptive_thinking_only: true,
+            no_forced_tool_choice: true,
+            summarized_thinking: true,
+        };
+        // Claude Fable 5.2, the flagship ("For demanding reasoning and
+        // long-horizon agentic work"; released November 9, 2026): $8 / $40,
+        // reads $0.20, writes $10. Catalogued, no alias's (O-13 kept); its
+        // migration guide's 30-day retention rule and prefix check reach only
+        // a person who names it.
+        models.insert(
+            "claude-fable-5-2".to_string(),
+            anthropic(8.0, 40.0, 0.025, None, refuses_all),
+        );
         // Claude Opus 5.5, the latest Opus and `strong`'s row (O-13 (a)):
-        // $4 / $20, a 1M-token window (the pricing page and the models
-        // overview, platform.claude.com/docs/en/models/overview, read
-        // 2026-11-12); text and image in and tool use ("All current models
-        // support text and image input, ... vision, and tool use", the
-        // overview); PDFs ("All active models support PDF processing",
-        // .../build-with-claude/pdf-support, read 2026-11-12).
+        // $4 / $20, reads $0.20, writes $5. Its migration guide, "What every
+        // request to Claude Opus 5.5 must satisfy", as C7a read it.
         models.insert(
             "claude-opus-5-5".to_string(),
-            ModelInfo {
-                provider: ProviderType::Anthropic,
-                input_price_per_million: 4.0,
-                output_price_per_million: 20.0,
-                context_window: 1_000_000,
-                discovered: false,
-                supports_image: true,
-                supports_audio: false,
-                supports_document: true,
-                supports_reasoning: false,
-                supports_tools: true,
-                declared: true,
-                long_prompt: None,
-                cache_rates: Some(CacheRates {
-                    read: 0.05,
-                    write: 1.25,
-                }),
-                // C7a: its request contract, from the pages read 2026-11-12.
-                // The Opus 5.5 migration guide (platform.claude.com/docs/en/
-                // models/opus-5-5/migration-guide), "What every request to
-                // Claude Opus 5.5 must satisfy": "Omit `temperature`, `top_p`,
-                // and `top_k`"; `thinking: {"type": "disabled"}` and manual
-                // budgets (`"enabled"`) "are rejected" — "adaptive thinking is
-                // always on"; forcing a tool call with `any` or a named tool
-                // "is rejected". The thinking troubleshooting page's table
-                // (.../build-with-claude/thinking-troubleshooting): Opus 5.5
-                // "Adaptive only", "Always on", rejecting `"enabled"` and
-                // `"disabled"`. Model deprecations (.../about-claude/
-                // model-deprecations): sampling parameters "Removed in API
-                // version `2026-10-21`"; "Earlier API versions return it [a
-                // 400] when set to a non-default value on Claude 4.7 and
-                // later models" — the arm sends `2023-06-01`.
-                // ANTHROPIC-THINKING, the thinking page read 2026-11-14
-                // (.../build-with-claude/thinking, *Controlling thinking
-                // display*): `"omitted"` "is the default on ... Claude Opus
-                // 5.5"; "Opt in with `thinking: {"type": "adaptive",
-                // "display": "summarized"}`".
-                request_contract: RequestContract {
-                    no_sampling_parameters: true,
-                    thinking_always_on: true,
-                    adaptive_thinking_only: true,
-                    no_forced_tool_choice: true,
-                    summarized_thinking: true,
-                },
-            },
+            anthropic(4.0, 20.0, 0.05, None, refuses_all),
         );
-        // Claude Opus 4.6: $5 / $25 (the pricing page, read 2026-11-12; the
-        // catalogue had $15 / $75, Opus 4's and 4.1's rate).
+        // Claude Sonnet 5.5, `balanced`'s row ("The best combination of
+        // speed and intelligence"): $2 / $10, reads $0.10, writes $2.50.
         models.insert(
-            "claude-opus-4-6".to_string(),
-            ModelInfo {
-                provider: ProviderType::Anthropic,
-                input_price_per_million: 5.0,
-                output_price_per_million: 25.0,
-                context_window: 200_000,
-                discovered: false,
-                supports_image: true,
-                supports_audio: false,
-                supports_document: true,
-                supports_reasoning: false,
-                supports_tools: true,
-                declared: true,
-                long_prompt: None,
-                cache_rates: Some(CacheRates {
-                    read: 0.10,
-                    write: 1.25,
-                }),
-                request_contract: RequestContract::NONE,
-            },
+            "claude-sonnet-5-5".to_string(),
+            anthropic(2.0, 10.0, 0.05, None, refuses_all),
         );
-        // Claude Sonnet 4.6 and 4.5: $3 / $15 (the pricing page, read
-        // 2026-11-12). Sonnet 4.5 is "Deprecated", retiring November 30,
-        // 2026 (the model-deprecations page): kept until then.
-        for id in &["claude-sonnet-4-6", "claude-sonnet-4-5-20250929"] {
-            models.insert(
-                id.to_string(),
+        // Claude Haiku 5.5, `fast`'s row ("For high-volume,
+        // latency-sensitive tasks"): $0.10 / $0.50, reads $0.01, writes
+        // $0.125 "for prompts up to 100,000 tokens"; over it $0.50 / $2.50,
+        // reads $0.05, writes $0.625 — the same multiples of the upper input
+        // rate. Its migration guide: it "accepts a forced `tool_choice` (`any`
+        // or a named tool), but the response starts with the tool call and
+        // has no `thinking` block", so a forced choice is sent as asked.
+        models.insert(
+            "claude-haiku-5-5".to_string(),
+            anthropic(
+                0.10,
+                0.50,
+                0.10,
+                Some(LongPromptRate {
+                    above_input_tokens: 100_000,
+                    input_price_per_million: 0.50,
+                    output_price_per_million: 2.50,
+                }),
+                RequestContract {
+                    thinking_always_on: false,
+                    no_forced_tool_choice: false,
+                    ..refuses_all
+                },
+            ),
+        );
+
+        // OpenAI: the "Flagship models" of developers.openai.com/api/docs/
+        // models/all and each model's page (.../models/<id>): "1,050,000
+        // context window" (the window O-17 (a) keeps until step 19's live
+        // check; "Maximum input tokens: 922,000" is the owner's option,
+        // ML-3), "128,000 max output tokens", "Input modalities: text,
+        // image", "Reasoning token support", function calling; no audio.
+        // PDFs: the arm sends none as a file part (a PDF reaches the model as
+        // extracted text), so no row says it takes one.
+        //
+        // Prices, each model's page and the pricing page (.../pricing,
+        // "Standard pricing data"): input, "Cached input" (0.1x on Astra and
+        // Luna, "5% of the uncached input token rate" on Sol and Terra) and
+        // "Cache writes are billed at 1.25x the uncached input token rate",
+        // the default `"30m"` lifetime: the arm sends no
+        // `prompt_cache_options`, and "Omitting both settings preserves the
+        // default `"30m"` behavior" (.../guides/prompt-caching); it never
+        // asks for the 12-hour write. "Prompts with more than 272K input
+        // tokens are priced at 2x input and cache rates and 1.5x output for
+        // the full request" on all four.
+        //
+        // Request contract (item 4 of the owner's answers of 2026-11-14,
+        // taken: `no_sampling_parameters` on `gpt-6.1-sol` "and on the other
+        // OpenAI rows whose pages say so"): the GPT-6 guide (.../guides/
+        // latest-model) — "When reasoning effort is not `none`, remove
+        // `temperature`, `top_p`, and `top_logprobs`"; the arm sends no
+        // effort for a request that carries `Disabled` or no thinking, so
+        // each model reasons at its default (`medium` on Sol, Terra and
+        // Luna), and none of the four may be sent a sampling parameter. The
+        // other four flags describe Anthropic's `thinking` wire. Tool calls:
+        // "tool calling requires Responses" (the same guide), which the arm
+        // speaks for a request with tools to OpenAI's own API (C7b).
+        let openai =
+            |input: f64, output: f64, cache_read: f64, long_input: f64, long_output: f64| {
                 ModelInfo {
-                    provider: ProviderType::Anthropic,
-                    input_price_per_million: 3.0,
-                    output_price_per_million: 15.0,
-                    context_window: 200_000,
+                    provider: ProviderType::OpenAI,
+                    input_price_per_million: input,
+                    output_price_per_million: output,
+                    context_window: 1_050_000,
                     discovered: false,
                     supports_image: true,
                     supports_audio: false,
-                    supports_document: true,
-                    supports_reasoning: false,
+                    supports_document: false,
+                    supports_reasoning: true,
                     supports_tools: true,
                     declared: true,
-                    long_prompt: None,
+                    long_prompt: Some(LongPromptRate {
+                        above_input_tokens: 272_000,
+                        input_price_per_million: long_input,
+                        output_price_per_million: long_output,
+                    }),
                     cache_rates: Some(CacheRates {
-                        read: 0.10,
+                        read: cache_read,
                         write: 1.25,
                     }),
-                    request_contract: RequestContract::NONE,
-                },
-            );
-        }
-        // Claude Haiku 4.5: $1 / $5 (the pricing page, read 2026-11-12).
+                    request_contract: RequestContract {
+                        no_sampling_parameters: true,
+                        ..RequestContract::NONE
+                    },
+                }
+            };
+        // GPT-6 Astra, the flagship ("Our most capable model for the most
+        // demanding work"): $10 / $50, cached $1, writes $12.50; above 272K
+        // $20 / $75. Its `reasoning.effort` has no `none`. Catalogued, no
+        // alias's (O-13 kept: "Choose GPT-6.1 Sol to balance intelligence
+        // and cost", .../models).
         models.insert(
-            "claude-haiku-4-5-20251001".to_string(),
-            ModelInfo {
-                provider: ProviderType::Anthropic,
-                input_price_per_million: 1.0,
-                output_price_per_million: 5.0,
-                context_window: 200_000,
-                discovered: false,
-                supports_image: true,
-                supports_audio: false,
-                supports_document: true,
-                supports_reasoning: false,
-                supports_tools: true,
-                declared: true,
-                long_prompt: None,
-                cache_rates: Some(CacheRates {
-                    read: 0.10,
-                    write: 1.25,
-                }),
-                request_contract: RequestContract::NONE,
-            },
+            "gpt-6-astra".to_string(),
+            openai(10.0, 50.0, 0.10, 20.0, 75.0),
         );
-
-        // OpenAI models. `gpt-5.2` $1.75 / $14, `gpt-5-mini` $0.25 / $2 and
-        // `gpt-5-nano` $0.05 / $0.40, as the catalogue had them
-        // (developers.openai.com/api/docs/pricing and each model's page, read
-        // 2026-11-12); the last two "Deprecated", shut down on Dec 11, 2026
-        // (the deprecations page): kept until O-16 (a) moves the aliases off
-        // them. The windows stay as listed until step 19's live check.
-        //
-        // Cache rates (CACHE-MULT, CACHE-WRITE; the pricing page, each
-        // model's page and .../guides/prompt-caching, read 2026-11-14): the
-        // earlier models — these three, `gpt-4o-mini` and `o3` — read at
-        // their page's "Cached input" price ($0.175, $0.025, $0.005, $0.075
-        // and $0.50 a million: 0.1x, 0.1x, 0.1x, 0.5x and 0.25x) and write at
-        // their input rate, the guide's "Summary of model differences"
-        // giving "Other earlier models" "No additional cache-write charge".
-        models.insert(
-            "gpt-5.2".to_string(),
-            ModelInfo {
-                provider: ProviderType::OpenAI,
-                input_price_per_million: 1.75,
-                output_price_per_million: 14.0,
-                context_window: 128_000,
-                discovered: false,
-                supports_image: true,
-                supports_audio: true,
-                supports_document: false,
-                supports_reasoning: false,
-                supports_tools: true,
-                declared: true,
-                long_prompt: None,
-                cache_rates: Some(CacheRates {
-                    read: 0.10,
-                    write: 1.0,
-                }),
-                request_contract: RequestContract::NONE,
-            },
-        );
-        models.insert(
-            "gpt-5-mini".to_string(),
-            ModelInfo {
-                provider: ProviderType::OpenAI,
-                input_price_per_million: 0.25,
-                output_price_per_million: 2.0,
-                context_window: 128_000,
-                discovered: false,
-                supports_image: true,
-                supports_audio: true,
-                supports_document: false,
-                supports_reasoning: false,
-                supports_tools: true,
-                declared: true,
-                long_prompt: None,
-                cache_rates: Some(CacheRates {
-                    read: 0.10,
-                    write: 1.0,
-                }),
-                request_contract: RequestContract::NONE,
-            },
-        );
-        models.insert(
-            "gpt-5-nano".to_string(),
-            ModelInfo {
-                provider: ProviderType::OpenAI,
-                input_price_per_million: 0.05,
-                output_price_per_million: 0.40,
-                context_window: 128_000,
-                discovered: false,
-                supports_image: true,
-                supports_audio: true,
-                supports_document: false,
-                supports_reasoning: false,
-                supports_tools: true,
-                declared: true,
-                long_prompt: None,
-                cache_rates: Some(CacheRates {
-                    read: 0.10,
-                    write: 1.0,
-                }),
-                request_contract: RequestContract::NONE,
-            },
-        );
-
-        // The seeded `llm.toml`'s OpenAI default (O-18 (c)), at the rates and
-        // window of OpenAI's own model page (developers.openai.com, "GPT-4o
-        // mini", read 2026-11-12): text and image in, no audio, function
-        // calling; the page marks it deprecated.
-        models.insert(
-            "gpt-4o-mini".to_string(),
-            ModelInfo {
-                provider: ProviderType::OpenAI,
-                input_price_per_million: 0.15,
-                output_price_per_million: 0.60,
-                context_window: 128_000,
-                discovered: false,
-                supports_image: true,
-                supports_audio: false,
-                supports_document: false,
-                supports_reasoning: false,
-                supports_tools: true,
-                declared: true,
-                long_prompt: None,
-                cache_rates: Some(CacheRates {
-                    read: 0.50,
-                    write: 1.0,
-                }),
-                request_contract: RequestContract::NONE,
-            },
-        );
-
-        // GPT-6.1 Sol, the latest Sol (O-13 (a); `strong`'s OpenAI row once
-        // C7b lands, O-15 (a)): $2 / $10, and "API prompts with more than
-        // 272K input tokens are priced at 2x input and cache rates and 1.5x
-        // output for the full request" — $4 / $15; a 1,050,000-token window;
-        // text and image in, audio unsupported; reasoning tokens; function
-        // calling, though "Tool calling requires the Responses API", which
-        // the arm reaches only with C7b (developers.openai.com/api/docs/
-        // models/gpt-6.1-sol and .../pricing, read 2026-11-12). Its cache
-        // (the same pages and .../guides/prompt-caching, read 2026-11-14):
-        // "Cached input tokens are priced at 5% of the uncached input token
-        // rate" ($0.10) and "Cache writes are billed at 1.25x the uncached
-        // input token rate" ($2.50), the default `"30m"` lifetime: the arm
-        // sends no `prompt_cache_options`, and "Omitting both settings
-        // preserves the default `"30m"` behavior". It never asks for the
-        // 12-hour write (2.5x, the Responses API only).
+        // GPT-6.1 Sol, the latest Sol and `strong`'s row (O-13 (a), O-15
+        // (a)): $2 / $10, cached $0.10, writes $2.50; above 272K $4 / $15.
         models.insert(
             "gpt-6.1-sol".to_string(),
-            ModelInfo {
-                provider: ProviderType::OpenAI,
-                input_price_per_million: 2.0,
-                output_price_per_million: 10.0,
-                context_window: 1_050_000,
-                discovered: false,
-                supports_image: true,
-                supports_audio: false,
-                supports_document: false,
-                supports_reasoning: true,
-                supports_tools: true,
-                declared: true,
-                long_prompt: Some(LongPromptRate {
-                    above_input_tokens: 272_000,
-                    input_price_per_million: 4.0,
-                    output_price_per_million: 15.0,
-                }),
-                cache_rates: Some(CacheRates {
-                    read: 0.05,
-                    write: 1.25,
-                }),
-                request_contract: RequestContract::NONE,
-            },
+            openai(2.0, 10.0, 0.05, 4.0, 15.0),
         );
-
-        // o3: $2 / $8 (its page, developers.openai.com/api/docs/models/o3,
-        // and the pricing page, read 2026-11-12; the catalogue had $10 /
-        // $40), a 200,000-token window. "Deprecated", shut down on Dec 11,
-        // 2026 (the deprecations page): kept until then. `o3-mini`, `o1` and
-        // `o1-mini` are gone: "Shut down" (.../models/all and the
-        // deprecations page, read 2026-11-12), O-17 (a).
+        // GPT-6.1 Terra, `balanced`'s row (`gpt-5-mini`'s replacement on the
+        // deprecations page): $1 / $5, cached $0.05, writes $1.25; above
+        // 272K $2 / $7.50.
         models.insert(
-            "o3".to_string(),
-            ModelInfo {
-                provider: ProviderType::OpenAI,
-                input_price_per_million: 2.0,
-                output_price_per_million: 8.0,
-                context_window: 200_000,
-                discovered: false,
-                supports_image: true,
-                supports_audio: false,
-                supports_document: false,
-                supports_reasoning: true,
-                supports_tools: true,
-                declared: true,
-                long_prompt: None,
-                cache_rates: Some(CacheRates {
-                    read: 0.25,
-                    write: 1.0,
-                }),
-                request_contract: RequestContract::NONE,
-            },
+            "gpt-6.1-terra".to_string(),
+            openai(1.0, 5.0, 0.05, 2.0, 7.50),
+        );
+        // GPT-6 Luna, `fast`'s row and the seeded OpenAI default (the
+        // deprecations page names it the replacement of `gpt-5-nano`, GPT-4o
+        // and GPT-4o mini; "Our most efficient model for focused,
+        // high-volume tasks"): $0.10 / $0.50, cached $0.01, writes $0.125;
+        // above 272K $0.20 / $0.75. "Chat Completions supports function
+        // calling only with `reasoning_effort` set to `none`": a request
+        // with tools to OpenAI's own API goes to Responses (C7b).
+        models.insert(
+            "gpt-6-luna".to_string(),
+            openai(0.10, 0.50, 0.10, 0.20, 0.75),
         );
 
+        // Retired by the directive, with every site that named them: Claude
+        // Opus 4.6, Sonnet 4.6, Sonnet 4.5 (`claude-sonnet-4-5-20250929`)
+        // and Haiku 4.5 (`claude-haiku-4-5-20251001`); `gpt-5.2`,
+        // `gpt-5-mini`, `gpt-5-nano`, `gpt-4o-mini` and `o3`. Several still
+        // answer until their shutdown dates; a discovered listing of one is
+        // a bare row priced at the fallback (§4.9.8, the owner's open item).
         models
     }
 
@@ -803,15 +705,34 @@ impl ModelRegistry {
     /// has. A model the provider's API confirmed wins over one only declared,
     /// then a tool-capable one over one that is not, then the id — so the
     /// answer does not move between runs.
+    ///
+    /// Second only to that confirmation, the provider's `fast` alias row,
+    /// when it is registered for this provider (the subagent design's §4.9.9
+    /// ML-7, MODELS-LATEST): with the flagships catalogued the id order would
+    /// put `claude-fable-5-2` before `claude-haiku-5-5` and `gpt-6-astra`
+    /// before `gpt-6-luna`, running work nobody chose a model for on the
+    /// dearest one. With no discovery every row is declared and the `fast`
+    /// row leads; a discovery that lists it marks it discovered, so it leads
+    /// again. A discovery that does not list it — a person's own
+    /// OpenAI-compatible server behind `[providers.openai]`, say — keeps a
+    /// model the server serves ahead of a compiled row it does not. A
+    /// provider with no alias row (Ollama), or whose `fast` row is not
+    /// registered, keeps the order above.
     pub fn first_model_for_provider(&self, provider: &ProviderType) -> Option<String> {
         let models = self.models.read().unwrap_or_else(|p| p.into_inner());
+        let fast = crate::routing::model_alias::compiled_alias(
+            provider,
+            crate::routing::model_alias::ModelAlias::Fast,
+        );
         let mut candidates: Vec<(&String, &ModelInfo)> = models
             .iter()
             .filter(|(_, info)| &info.provider == provider)
             .collect();
         candidates.sort_by(|(a_id, a), (b_id, b)| {
+            let is_fast = |id: &String| fast.is_some_and(|f| f == id.as_str());
             b.discovered
                 .cmp(&a.discovered)
+                .then(is_fast(b_id).cmp(&is_fast(a_id)))
                 .then(b.supports_tools.cmp(&a.supports_tools))
                 .then(a_id.cmp(b_id))
         });

@@ -9,7 +9,10 @@ use crate::types::*;
 use async_trait::async_trait;
 use reqwest::header::HeaderMap;
 
-const DEFAULT_MODEL: &str = "gpt-4o";
+/// The model for a request that names none: GPT-6 Luna, a compiled row,
+/// named GPT-4o's replacement (MODELS-LATEST, the subagent design's §4.9.5;
+/// developers.openai.com/api/docs/deprecations, read 2026-11-14).
+const DEFAULT_MODEL: &str = "gpt-6-luna";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
@@ -60,8 +63,9 @@ pub struct OpenAiProvider {
 
 /// The hosts of OpenAI's own API: `api.openai.com` and the regional hosts
 /// of its data-residency table, each of which serves `/v1/responses`
-/// (developers.openai.com/api/docs/guides/your-data, "Support by region",
-/// read 2026-11-12).
+/// (developers.openai.com/api/docs/guides/data-residency, "Support by
+/// region", read 2026-11-14: the same ten regional hosts the your-data
+/// guide listed on 2026-11-12, which now points there).
 const OPENAI_API_HOSTS: &[&str] = &[
     "api.openai.com",
     "us.api.openai.com",

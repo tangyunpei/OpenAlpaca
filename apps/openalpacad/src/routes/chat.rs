@@ -1630,7 +1630,7 @@ mod tests {
             Arc::new(openalpaca_llm::CostTracker::new(
                 openalpaca_llm::ModelRegistry::with_defaults(),
             )),
-            "claude-sonnet-4-6".to_string(),
+            "claude-sonnet-5-5".to_string(),
         )
     }
 
@@ -1668,10 +1668,10 @@ mod tests {
     /// and the response says which that is.
     #[tokio::test]
     async fn a_turn_that_names_no_model_reports_the_daemon_default() {
-        let router = router_serving("claude-sonnet-4-6");
+        let router = router_serving("claude-sonnet-5-5");
         assert_eq!(
             resolve_turn_model(Some(&router), None).expect("accepted"),
-            Some("claude-sonnet-4-6".to_string())
+            Some("claude-sonnet-5-5".to_string())
         );
     }
 
@@ -1684,11 +1684,11 @@ mod tests {
     async fn a_turn_reports_the_model_it_will_actually_reach() {
         // Anthropic is the loaded provider; the configured default belongs to
         // OpenAI, which is not loaded.
-        let router = router_serving("gpt-5.2");
+        let router = router_serving("gpt-6.1-sol");
         let reported = resolve_turn_model(Some(&router), None).expect("accepted");
         assert_ne!(
             reported.as_deref(),
-            Some("gpt-5.2"),
+            Some("gpt-6.1-sol"),
             "an unroutable configured default must not be echoed as the turn's model"
         );
         assert_eq!(
@@ -1715,8 +1715,8 @@ mod tests {
     async fn a_registered_model_is_accepted_and_echoed() {
         let router = router_with(&[]);
         assert_eq!(
-            resolve_turn_model(Some(&router), Some("claude-opus-4-6")).expect("accepted"),
-            Some("claude-opus-4-6".to_string())
+            resolve_turn_model(Some(&router), Some("claude-opus-5-5")).expect("accepted"),
+            Some("claude-opus-5-5".to_string())
         );
     }
 
@@ -1747,9 +1747,9 @@ mod tests {
     async fn a_disabled_providers_model_is_refused_too() {
         let router = router_with(&[openalpaca_llm::ProviderType::OpenAI]);
         // Sanity: the same id is fine while its provider is on.
-        assert!(resolve_turn_model(Some(&router_with(&[])), Some("gpt-5.2")).is_ok());
+        assert!(resolve_turn_model(Some(&router_with(&[])), Some("gpt-6.1-sol")).is_ok());
 
-        let err = resolve_turn_model(Some(&router), Some("gpt-5.2")).expect_err("refused");
+        let err = resolve_turn_model(Some(&router), Some("gpt-6.1-sol")).expect_err("refused");
         let (status, body) = refusal(err).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "UNKNOWN_MODEL");
@@ -1761,7 +1761,7 @@ mod tests {
             "the refusal must say why an id that used to work no longer does"
         );
         // The provider that is still on keeps its models.
-        assert!(resolve_turn_model(Some(&router), Some("claude-opus-4-6")).is_ok());
+        assert!(resolve_turn_model(Some(&router), Some("claude-opus-5-5")).is_ok());
     }
 
     /// No router at all: naming a model is refused rather than accepted and
@@ -1770,7 +1770,7 @@ mod tests {
     async fn naming_a_model_without_an_llm_router_is_503() {
         assert_eq!(resolve_turn_model(None, None).expect("accepted"), None);
 
-        let err = resolve_turn_model(None, Some("claude-opus-4-6")).expect_err("refused");
+        let err = resolve_turn_model(None, Some("claude-opus-5-5")).expect_err("refused");
         let (status, body) = refusal(err).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "LLM_NOT_CONFIGURED");

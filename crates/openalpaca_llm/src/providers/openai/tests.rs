@@ -1517,3 +1517,16 @@ async fn a_streamed_call_whose_arguments_arrive_as_an_object_keeps_them() {
         serde_json::json!({"path": "a"})
     );
 }
+
+/// MODELS-LATEST (the design's §4.9.5): the arm's model for a request that
+/// names none is a compiled row, `gpt-6-luna` (the deprecations page names
+/// it GPT-4o's replacement). Red on the parent's `gpt-4o`, which has none.
+#[test]
+fn the_arms_default_model_is_luna() {
+    assert_eq!(DEFAULT_MODEL, "gpt-6-luna");
+    assert!(
+        crate::routing::model_registry::ModelRegistry::with_defaults()
+            .get_model_info(DEFAULT_MODEL)
+            .is_some()
+    );
+}

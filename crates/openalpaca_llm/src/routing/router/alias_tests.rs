@@ -183,21 +183,46 @@ fn every_alias_table_id_is_in_the_catalogue_and_supports_tools() {
     );
 }
 
+/// MODELS-LATEST (the design's §4.9.4; the owner, 2026-11-14: "I agree on
+/// the new models"): `fast` Haiku 5.5 / Luna, `balanced` Sonnet 5.5 /
+/// Terra, `strong` Opus 5.5 / Sol (O-13 kept). Red on the parent's Haiku
+/// 4.5, Sonnet 4.6, GPT-5 nano and GPT-5 mini.
+#[test]
+fn the_alias_table_names_the_agreed_latest_models() {
+    let table: Vec<(ProviderType, [&str; 3])> = ALIAS_TABLE
+        .iter()
+        .map(|row| (row.provider.clone(), [row.fast, row.balanced, row.strong]))
+        .collect();
+    assert_eq!(
+        table,
+        vec![
+            (
+                ProviderType::Anthropic,
+                ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]
+            ),
+            (
+                ProviderType::OpenAI,
+                ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"]
+            ),
+        ]
+    );
+}
+
 // ── M-4: resolution ─────────────────────────────────────────────────────────
 
-/// Step 2: the parent's provider's compiled id — on Anthropic, Haiku 4.5,
-/// Sonnet 4.6 and the latest Opus (O-13 (a)).
+/// Step 2: the parent's provider's compiled id — on Anthropic, Haiku 5.5,
+/// Sonnet 5.5 and the latest Opus (O-13 (a); MODELS-LATEST).
 #[test]
 fn an_alias_resolves_to_the_parent_providers_model() {
-    let router = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
-    let parent = Some("claude-haiku-4-5-20251001");
+    let router = router(&[ProviderType::Anthropic], "claude-haiku-5-5");
+    let parent = Some("claude-haiku-5-5");
     assert_eq!(
         resolved(&router, ModelAlias::Fast, parent),
-        "claude-haiku-4-5-20251001"
+        "claude-haiku-5-5"
     );
     assert_eq!(
         resolved(&router, ModelAlias::Balanced, parent),
-        "claude-sonnet-4-6"
+        "claude-sonnet-5-5"
     );
     let strong = router
         .resolve_alias(ModelAlias::Strong, parent)
@@ -211,9 +236,12 @@ fn an_alias_resolves_to_the_parent_providers_model() {
 /// (M-3a).
 #[test]
 fn an_alias_on_an_openai_only_router_resolves_to_openais() {
-    let router = router(&[ProviderType::OpenAI], "gpt-4o-mini");
-    assert_eq!(resolved(&router, ModelAlias::Fast, None), "gpt-5-nano");
-    assert_eq!(resolved(&router, ModelAlias::Balanced, None), "gpt-5-mini");
+    let router = router(&[ProviderType::OpenAI], "gpt-6-astra");
+    assert_eq!(resolved(&router, ModelAlias::Fast, None), "gpt-6-luna");
+    assert_eq!(
+        resolved(&router, ModelAlias::Balanced, None),
+        "gpt-6.1-terra"
+    );
     assert_eq!(resolved(&router, ModelAlias::Strong, None), "gpt-6.1-sol");
 }
 
@@ -223,14 +251,14 @@ fn an_alias_on_an_openai_only_router_resolves_to_openais() {
 fn an_alias_prefers_the_parent_providers_row() {
     let router = router(
         &[ProviderType::Anthropic, ProviderType::OpenAI],
-        "claude-haiku-4-5-20251001",
+        "claude-haiku-5-5",
     );
     assert_eq!(
-        resolved(&router, ModelAlias::Fast, Some("gpt-5-mini")),
-        "gpt-5-nano"
+        resolved(&router, ModelAlias::Fast, Some("gpt-6.1-terra")),
+        "gpt-6-luna"
     );
     assert_eq!(
-        resolved(&router, ModelAlias::Strong, Some("claude-sonnet-4-6")),
+        resolved(&router, ModelAlias::Strong, Some("claude-sonnet-5-5")),
         "claude-opus-5-5"
     );
 }
@@ -297,22 +325,22 @@ async fn an_alias_no_provider_maps_collapses_to_the_parent_model() {
 fn an_alias_on_a_parent_that_is_not_routable_answers_the_effective_default() {
     let ollama_only = router(&[ProviderType::Ollama], "qwen3:8b");
     pulled(&ollama_only, "qwen3:8b");
-    assert!(!ollama_only.is_routable("claude-sonnet-4-6"));
+    assert!(!ollama_only.is_routable("claude-sonnet-5-5"));
     for alias in ModelAlias::ALL {
         let resolution = ollama_only
-            .resolve_alias(alias, Some("claude-sonnet-4-6"))
+            .resolve_alias(alias, Some("claude-sonnet-5-5"))
             .unwrap_or_else(|| panic!("{alias} resolves"));
         assert_eq!(resolution.model, "qwen3:8b");
         assert!(resolution.passed_over.is_empty());
     }
 
-    let anthropic_only = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    let anthropic_only = router(&[ProviderType::Anthropic], "claude-haiku-5-5");
     pulled(&anthropic_only, "qwen3:8b");
     assert!(!anthropic_only.is_routable("qwen3:8b"));
     for alias in ModelAlias::ALL {
         assert_eq!(
             resolved(&anthropic_only, alias, Some("qwen3:8b")),
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-5-5",
             "{alias} on a parent whose provider is off"
         );
     }
@@ -327,7 +355,7 @@ fn an_alias_on_a_parent_that_is_not_routable_answers_the_effective_default() {
 async fn a_collapse_line_calls_the_default_the_default_not_the_parents_model() {
     let mixed = router(
         &[ProviderType::Ollama, ProviderType::Anthropic],
-        "claude-haiku-4-5-20251001",
+        "claude-haiku-5-5",
     );
     pulled(&mixed, "qwen3:8b");
     assert_eq!(
@@ -335,12 +363,12 @@ async fn a_collapse_line_calls_the_default_the_default_not_the_parents_model() {
         "qwen3:8b"
     );
 
-    let ollama_off = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    let ollama_off = router(&[ProviderType::Anthropic], "claude-haiku-5-5");
     pulled(&ollama_off, "qwen3:8b");
     for _ in 0..3 {
         assert_eq!(
             resolved(&ollama_off, ModelAlias::Balanced, Some("qwen3:8b")),
-            "claude-haiku-4-5-20251001"
+            "claude-haiku-5-5"
         );
     }
 
@@ -371,7 +399,7 @@ async fn a_collapse_line_calls_the_default_the_default_not_the_parents_model() {
                 l.contains("INFO")
                     && l.contains(
                         "Model alias 'balanced' has no model on ollama: its parent's model \
-                         qwen3:8b is not available, so it runs on claude-haiku-4-5-20251001, \
+                         qwen3:8b is not available, so it runs on claude-haiku-5-5, \
                          the default model",
                     )
                     && l.contains("[providers.ollama.model_aliases]")
@@ -387,7 +415,7 @@ async fn a_collapse_line_calls_the_default_the_default_not_the_parents_model() {
 /// Step 4: nothing routable resolves nothing, with or without a parent.
 #[test]
 fn nothing_routable_resolves_no_alias() {
-    let router = router(&[], "claude-haiku-4-5-20251001");
+    let router = router(&[], "claude-haiku-5-5");
     for alias in ModelAlias::ALL {
         assert_eq!(router.resolve_alias(alias, None), None);
         assert_eq!(router.resolve_alias(alias, Some("claude-opus-5-5")), None);
@@ -400,21 +428,21 @@ fn nothing_routable_resolves_no_alias() {
 /// row.
 #[test]
 fn a_providers_pin_wins_when_routable() {
-    let router = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    let router = router(&[ProviderType::Anthropic], "claude-haiku-5-5");
     load(
         &router,
         r#"
 [providers.anthropic.model_aliases]
-fast = "claude-sonnet-4-6"
+fast = "claude-sonnet-5-5"
 "#,
     );
     assert_eq!(
         resolved(&router, ModelAlias::Fast, None),
-        "claude-sonnet-4-6"
+        "claude-sonnet-5-5"
     );
     assert_eq!(
         resolved(&router, ModelAlias::Balanced, None),
-        "claude-sonnet-4-6",
+        "claude-sonnet-5-5",
         "an alias with no pin keeps the compiled row"
     );
 }
@@ -422,18 +450,18 @@ fast = "claude-sonnet-4-6"
 /// "or the user decides": a pin of `strong` replaces the latest Opus.
 #[test]
 fn a_strong_pin_overrides_the_compiled_row() {
-    let router = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    let router = router(&[ProviderType::Anthropic], "claude-haiku-5-5");
     load(
         &router,
         r#"
 [providers.anthropic.model_aliases]
-strong = "claude-sonnet-4-6"
+strong = "claude-sonnet-5-5"
 "#,
     );
     let strong = router
         .resolve_alias(ModelAlias::Strong, None)
         .expect("strong resolves");
-    assert_eq!(strong.model, "claude-sonnet-4-6");
+    assert_eq!(strong.model, "claude-sonnet-5-5");
     assert!(strong.passed_over.is_empty());
 }
 
@@ -447,12 +475,12 @@ fn a_pin_naming_another_providers_model_is_used() {
         &router,
         r#"
 [providers.ollama.model_aliases]
-balanced = "claude-sonnet-4-6"
+balanced = "claude-sonnet-5-5"
 "#,
     );
     assert_eq!(
         resolved(&router, ModelAlias::Balanced, Some("qwen3:8b")),
-        "claude-sonnet-4-6"
+        "claude-sonnet-5-5"
     );
     assert_eq!(
         resolved(&router, ModelAlias::Fast, Some("qwen3:8b")),
@@ -465,7 +493,7 @@ balanced = "claude-sonnet-4-6"
 /// parent on OpenAI.
 #[test]
 fn another_providers_pin_does_not_move_the_parents_resolution() {
-    let router = router(&[ProviderType::Ollama, ProviderType::OpenAI], "gpt-5.2");
+    let router = router(&[ProviderType::Ollama, ProviderType::OpenAI], "gpt-6-astra");
     pulled(&router, "qwen3:4b");
     load(
         &router,
@@ -475,8 +503,8 @@ fast = "qwen3:4b"
 "#,
     );
     assert_eq!(
-        resolved(&router, ModelAlias::Fast, Some("gpt-5.2")),
-        "gpt-5-nano"
+        resolved(&router, ModelAlias::Fast, Some("gpt-6-astra")),
+        "gpt-6-luna"
     );
     assert_eq!(
         resolved(&router, ModelAlias::Fast, Some("qwen3:4b")),
@@ -489,7 +517,7 @@ fast = "qwen3:4b"
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn a_pin_that_is_not_routable_is_passed_over_and_announced_once() {
-    let router = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    let router = router(&[ProviderType::Anthropic], "claude-haiku-5-5");
     load(
         &router,
         r#"
@@ -501,7 +529,7 @@ fast = "claude-not-installed"
         let fast = router
             .resolve_alias(ModelAlias::Fast, None)
             .expect("fast resolves");
-        assert_eq!(fast.model, "claude-haiku-4-5-20251001");
+        assert_eq!(fast.model, "claude-haiku-5-5");
         assert_eq!(fast.passed_over, vec!["claude-not-installed".to_string()]);
     }
     logs_assert(|lines: &[&str]| {
@@ -511,7 +539,7 @@ fast = "claude-not-installed"
                 l.contains("WARN")
                     && l.contains(
                         "Model alias 'fast' would use claude-not-installed, which is not \
-                         available — answering with claude-haiku-4-5-20251001",
+                         available — answering with claude-haiku-5-5",
                     )
                     && l.contains("[providers.anthropic.model_aliases]")
             })
@@ -528,13 +556,13 @@ fast = "claude-not-installed"
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn a_compiled_id_that_is_not_routable_is_passed_over_and_announced_once() {
-    let router = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    let router = router(&[ProviderType::Anthropic], "claude-haiku-5-5");
     assert!(router.model_registry().remove("claude-opus-5-5"));
     for _ in 0..2 {
         let strong = router
-            .resolve_alias(ModelAlias::Strong, Some("claude-sonnet-4-6"))
+            .resolve_alias(ModelAlias::Strong, Some("claude-sonnet-5-5"))
             .expect("strong resolves");
-        assert_eq!(strong.model, "claude-sonnet-4-6");
+        assert_eq!(strong.model, "claude-sonnet-5-5");
         assert_eq!(strong.passed_over, vec!["claude-opus-5-5".to_string()]);
     }
     logs_assert(|lines: &[&str]| {
@@ -551,16 +579,16 @@ async fn a_compiled_id_that_is_not_routable_is_passed_over_and_announced_once() 
 /// No `[providers.<name>.model_aliases]` table: the compiled table answers.
 #[test]
 fn an_llm_toml_without_model_aliases_reads_the_compiled_table() {
-    let router = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    let router = router(&[ProviderType::Anthropic], "claude-haiku-5-5");
     load(
         &router,
         r#"
 [orchestrator]
-model = "claude-haiku-4-5-20251001"
+model = "claude-haiku-5-5"
 
 [providers.anthropic]
 enabled = true
-default_model = "claude-sonnet-4-6"
+default_model = "claude-sonnet-5-5"
 "#,
     );
     assert!(
@@ -578,7 +606,7 @@ default_model = "claude-sonnet-4-6"
 /// compiled row back: the pins live in the runtime config the watcher swaps.
 #[test]
 fn a_hot_reload_takes_a_pin() {
-    let router = router(&[ProviderType::Anthropic], "claude-haiku-4-5-20251001");
+    let router = router(&[ProviderType::Anthropic], "claude-haiku-5-5");
     assert_eq!(
         resolved(&router, ModelAlias::Strong, None),
         "claude-opus-5-5"
@@ -587,12 +615,12 @@ fn a_hot_reload_takes_a_pin() {
         &router,
         r#"
 [providers.anthropic.model_aliases]
-strong = "claude-opus-4-6"
+strong = "claude-fable-5-2"
 "#,
     );
     assert_eq!(
         resolved(&router, ModelAlias::Strong, None),
-        "claude-opus-4-6"
+        "claude-fable-5-2"
     );
     load(&router, "[providers.anthropic]\nenabled = true\n");
     assert_eq!(
@@ -607,13 +635,13 @@ strong = "claude-opus-4-6"
 /// nothing else.
 #[test]
 fn routable_models_are_sorted_and_only_routable() {
-    let router = router(&[ProviderType::OpenAI], "gpt-4o-mini");
+    let router = router(&[ProviderType::OpenAI], "gpt-6-astra");
     pulled(&router, "qwen3:8b"); // Ollama is not loaded
     let routable = router.routable_models();
     let mut sorted = routable.clone();
     sorted.sort();
     assert_eq!(routable, sorted);
-    assert!(routable.contains(&"gpt-5.2".to_string()));
+    assert!(routable.contains(&"gpt-6-astra".to_string()));
     assert!(routable.contains(&"gpt-6.1-sol".to_string()));
     assert!(!routable.contains(&"qwen3:8b".to_string()));
     assert!(!routable.iter().any(|id| id.starts_with("claude-")));

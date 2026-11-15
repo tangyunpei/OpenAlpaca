@@ -681,7 +681,7 @@ impl LlmSettingsService {
                 config
                     .orchestrator
                     .get_or_insert_with(|| crate::config::OrchestratorLlmConfig {
-                        model: "claude-sonnet-4-5-20250929".to_string(),
+                        model: crate::config::DEFAULT_ORCHESTRATOR_MODEL.to_string(),
                         fallback_models: None,
                     });
             orch.model = req.model;

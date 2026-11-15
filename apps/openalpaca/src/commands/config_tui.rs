@@ -1527,7 +1527,7 @@ fn interactive_create_agent() -> Result<()> {
             }
         }
         _ => Input::<String>::with_theme(&theme)
-            .with_prompt("Model (e.g., claude-sonnet-4-5-20250929)")
+            .with_prompt("Model (e.g., claude-sonnet-5-5)")
             .interact_text()?,
     };
 

@@ -341,11 +341,11 @@ pub struct CostsConfig {
     /// local model, where the cost cap never binds. `0` = no cap. Range
     /// 0..=10000.
     pub extract_max_calls_per_day: u32,
-    /// Model ID for background summary generation (e.g. claude-haiku-4-5-20251001).
+    /// Model ID for background summary generation (e.g. claude-haiku-5-5).
     /// If None, falls back to the router's default model.
     #[serde(default)]
     pub summary_model: Option<String>,
-    /// Model ID for background user trait extraction (e.g. claude-haiku-4-5-20251001).
+    /// Model ID for background user trait extraction (e.g. claude-haiku-5-5).
     /// If None, falls back to the router's default model.
     #[serde(default)]
     pub extraction_model: Option<String>,

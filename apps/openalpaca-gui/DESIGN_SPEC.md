@@ -1399,7 +1399,7 @@ Transcribed from the `class Component extends DCLogic` block. This is the comple
 | `panelArt`        | `null \| artifactId`                          | `null`                | aside shows the file panel for this artifact              |
 | `panelTab`        | `"preview" \| "diff" \| "history"`            | `"preview"`           | file-panel tab                                            |
 | `pickerOpen`      | boolean                                       | `false`               | file-panel artifact dropdown                              |
-| `model`           | string                                        | `"claude-sonnet-4-6"` | chat model                                                |
+| `model`           | string                                        | `"claude-sonnet-5-5"` | chat model                                                |
 | `modelPickerOpen` | boolean                                       | `false`               | composer model popover                                    |
 | `sel`             | runId                                         | `"b41c8e02"`          | selected run in Work                                      |
 | `openArt`         | artifactId                                    | `"findings"`          | selected artifact in Library                              |

@@ -343,7 +343,7 @@ async fn no_episode_before_four_user_turns() {
 #[tokio::test]
 async fn a_close_makes_two_calls_with_two_labels_when_both_are_due() {
     let mut config = DaemonConfig::default();
-    config.orchestrator.costs.summary_model = Some("claude-haiku-4-5-20251001".into());
+    config.orchestrator.costs.summary_model = Some("claude-haiku-5-5".into());
     let scene = Scene::with(
         Scripted::new(vec![trip_state(), trip_state(), trip_summary()]),
         config,
@@ -377,7 +377,7 @@ async fn a_close_makes_two_calls_with_two_labels_when_both_are_due() {
     }
     assert!(episode.contains("<today>2026-"), "{episode}");
     let request = scene.model.seen.lock().unwrap()[2].clone();
-    assert_eq!(request.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    assert_eq!(request.model.as_deref(), Some("claude-haiku-5-5"));
     assert!(
         matches!(
             request.thinking,

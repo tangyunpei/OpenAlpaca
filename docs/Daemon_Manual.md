@@ -293,15 +293,21 @@ otherwise the default model of the first loaded provider that has a routable
 one. Providers are walked in the built-in order (anthropic, openai, ollama,
 then anything else by name); `llm.toml` is parsed into a map, so its own
 declaration order is not recoverable. For a provider whose `default_model` is
-empty or names a tag that is not installed, "its default" is the first
-discovered model, preferring one that can use tools and then the lowest id, so
-the answer does not move between runs. Every substitution is announced — one `WARN`
+empty or names a model that is not there, "its default" is a model the
+provider's own list confirmed when there is one, and among those (or among
+the built-in rows, when nothing was listed) the provider's `fast` model when
+the router has it (`claude-haiku-5-5` on Anthropic, `gpt-6-luna` on OpenAI,
+not a flagship that sorts first by name), then one that can use tools and
+then the lowest id, so the answer does not move between runs. A server of
+your own behind `[providers.openai]` whose list lacks `gpt-6-luna` therefore
+gets one of its own models, not a built-in row it does not serve. Every
+substitution is announced — one `WARN`
 per distinct (requested → effective) pair, and the call log carries the model
 actually used. `GET /v1/status` serves the pair:
 
 ```jsonc
 "llm": {
-  "default_model": "claude-haiku-4-5-20251001",
+  "default_model": "claude-haiku-5-5",
   "default_model_routable": false,
   "effective_default_model": "qwen3:8b"   // null = nothing is routable
 }
@@ -328,12 +334,16 @@ routable.
 provider. The router resolves one against the model of the agent that asks
 (its parent) before any call, so the call itself names a routable model. In
 this build no template or tool names an alias yet; the shipped agent
-templates still name model ids.
+templates still name model ids, and ids this build no longer lists (Claude
+Sonnet 4.6, Opus 4.6 and Haiku 4.5): with a key whose provider's model list
+still names one, it is sent to that model as asked, counted at the $3 / $15
+fallback, with none of a built-in row's rules; otherwise each call walks the
+substitution ladder, announced. A later release moves them to the aliases.
 
 | Alias | Anthropic | OpenAI | Ollama, or any provider with no row |
 |---|---|---|---|
-| `fast` | `claude-haiku-4-5-20251001` | `gpt-5-nano` | the parent's model |
-| `balanced` | `claude-sonnet-4-6` | `gpt-5-mini` | the parent's model |
+| `fast` | `claude-haiku-5-5` | `gpt-6-luna` | the parent's model |
+| `balanced` | `claude-sonnet-5-5` | `gpt-6.1-terra` | the parent's model |
 | `strong` | `claude-opus-5-5` | `gpt-6.1-sol` | the parent's model |
 
 Resolution, in order: the parent's provider's pin; that provider's built-in
@@ -349,7 +359,7 @@ A pin is yours, per provider, under `[providers.<name>.model_aliases]` in
 
 ```toml
 [providers.anthropic.model_aliases]
-strong = "claude-sonnet-4-6"
+strong = "claude-sonnet-5-5"
 
 [providers.ollama.model_aliases]
 fast = "qwen3:4b"
@@ -372,35 +382,58 @@ reach it with the release.
 ### What a model's API refuses
 
 Some models refuse parts of a request that others take. The router holds
-each request to the model it is sent to, after the ladder has picked it. In
-this build one row says so: `claude-opus-5-5`. Its API refuses
-`temperature`, `top_p` and `top_k`, refuses turning thinking off (thinking
-is always on), refuses a thinking budget, and refuses a forced tool choice.
-So a request to it goes without `temperature` and without a `thinking`
-field that turns thinking off; a thinking budget would go as adaptive
-thinking, though no request this build makes sends one. That covers the
-conversation summary, the episode summary and the memory and task-output
-extraction when their model is Opus 5.5. A round that forces the `send`
-tool (the main loop's send hint, or a skill with `send`) goes with
-`tool_choice` `auto`, and `daemon.log` says so once per model at `INFO`:
-`claude-opus-5-5 refuses a forced tool choice: a call that asks for the
-tool 'send' is sent with tool_choice auto, here and on every later call to
-claude-opus-5-5`. A `[models."claude-opus-5-5"]` row of yours keeps these
-rules. A model that only discovery lists carries none. On Opus 5.5 those
-utility calls now think inside their `max_tokens`. Thinking text comes back
-as a summary, since every request to it asks for one (below).
+each request to the model it is sent to, after the ladder has picked it,
+by the rules of that model's built-in row (as the providers' pages gave
+them on 2026-11-14):
 
-A round on Opus 5.5 can spend its whole `max_tokens` (4096 unless set)
-thinking, before any text or tool call. A main-loop or skill turn streamed
-to its chat continues such a turn as it continues any truncated answer, at
-most twice at the same cap, its thinking sent back. A round asked without
-streaming (every lead and subagent round, and a main-loop or skill turn
-with no chat stream) ends it as an empty completion, an error that is not
-retried: the run stops there. So does such a round that ends its turn on
-thinking alone, with no text and no tool call: its thinking now has text,
-and a round that reasoned instead of answering is an empty completion, as
-on every model that shows its thinking by default. While Opus 5.5's
-thinking came back empty, that round ended with an empty answer instead.
+- Every built-in row refuses the sampling parameters — `temperature`,
+  `top_p` and `top_k` on Anthropic's four, `temperature`, `top_p` and
+  `top_logprobs` on OpenAI's — so no request to one carries them (of
+  these the daemon only ever sends `temperature`). On OpenAI's four that
+  is because each reasons on every request the daemon sends (it sends no
+  reasoning effort, so each runs at its default) and OpenAI's GPT-6 guide
+  says to remove them while a model reasons.
+- `claude-fable-5-2`, `claude-opus-5-5` and `claude-sonnet-5-5` refuse
+  turning thinking off and a forced tool choice. A request that turns
+  thinking off goes without that field, and the model thinks; a round that
+  forces the `send` tool (the main loop's send hint, or a skill with `send`)
+  goes with `tool_choice` `auto`, and `daemon.log` says so once per model
+  at `INFO`: `claude-opus-5-5 refuses a forced tool choice: a call that asks
+  for the tool 'send' is sent with tool_choice auto, here and on every later
+  call to claude-opus-5-5`. Sonnet 5.5 offers its own way to think less
+  (`between_tools`), which the daemon does not send.
+- `claude-haiku-5-5` takes both: a request that turns thinking off goes as
+  asked, and a forced `send` reaches it (its answer then starts with the
+  tool call and carries no thinking).
+- The four Claude rows refuse a thinking budget, which would go as adaptive
+  thinking, though no request this build makes sends one.
+
+That covers the conversation summary, the episode summary and the memory
+and task-output extraction, which ask for temperature 0 with thinking off:
+on Haiku 5.5, the seeded main model, they run without `temperature` and
+with thinking off; on Fable 5.2, Opus 5.5 or Sonnet 5.5, set as their
+model, they also think, inside their `max_tokens`; on an OpenAI row they
+reason at the model's default effort, also inside their `max_tokens`. A
+`[models."<id>"]` row of yours for a built-in id keeps these rules. A model
+that only discovery lists carries none. Thinking text comes back as a
+summary, since every request to a Claude row asks for one (below).
+
+`claude-fable-5-2`, catalogued but named by no default and no alias,
+reaches you only if you name it; Anthropic's migration guide says it needs
+30-day data retention (not available under zero data retention unless
+Anthropic allows it) and returns a 400 when its prefix check fails.
+
+A round on a model that thinks — every built-in Claude row (Haiku 5.5 unless
+the request turns thinking off) — can spend its whole `max_tokens` (4096
+unless set) thinking, before any text or tool call. A main-loop or skill
+turn streamed to its chat continues such a turn as it continues any
+truncated answer, at most twice at the same cap, its thinking sent back. A
+round asked without streaming (every lead and subagent round, and a
+main-loop or skill turn with no chat stream) ends it as an empty completion,
+an error that is not retried: the run stops there. So does such a round that
+ends its turn on thinking alone, with no text and no tool call: its thinking
+now has text, and a round that reasoned instead of answering is an empty
+completion, as on every model that shows its thinking by default.
 
 Within one run, a model's thinking goes back to it unchanged in the next
 request of a tool loop: every thinking block, its signature and its order,
@@ -419,13 +452,12 @@ The loop's `context_management` asks the API to keep the thinking of
 every turn (`clear_thinking_20251015` with `keep` `"all"`), so the model
 reads every block that is sent; the request carries the beta header
 Anthropic's context-editing page names, `context-management-2025-06-27`
-(read 2026-11-14). Opus 5.5 hides its thinking text unless asked (its
-`display` defaults to `"omitted"`, Anthropic's thinking page, read
-2026-11-14), so every request to `claude-opus-5-5` asks for
-`"summarized"`: the reasoning stream shows a readable summary of the
-model's thinking, billed the same. No other catalogued model is asked:
-Opus 4.6 and Sonnet 4.6 summarize by default, and Haiku 4.5 and Sonnet 4.5
-refuse adaptive thinking.
+(read 2026-11-14). The four built-in Claude rows hide their thinking text
+unless asked (their `display` defaults to `"omitted"`, Anthropic's
+thinking page, read 2026-11-14), so every request to one that thinks asks
+for `"summarized"`: the reasoning stream shows a readable summary of the
+model's thinking, billed the same. A request to Haiku 5.5 that turns
+thinking off is not asked.
 
 ### OpenAI's Responses API
 
@@ -485,11 +517,9 @@ On the Responses API each request:
 The usage is read as on Chat Completions: input tokens, output tokens
 (reasoning included, which OpenAI bills as output), cached input and the
 input written to the cache. A
-`temperature` a request names is sent. `gpt-6.1-sol` always reasons, and
-OpenAI's GPT-6 guide says to remove `temperature` while a model reasons,
-on either API. So a summary or extraction call whose model is set to
-`gpt-6.1-sol` sends temperature 0 and may be refused; no catalogue rule
-leaves it out for that model yet.
+`temperature` a request names is sent, but never to a built-in row (above):
+OpenAI's GPT-6 guide says to remove it while a model reasons, on either
+API, and each of the four always reasons here.
 
 ### Cost
 
@@ -505,9 +535,9 @@ price: it still runs, its spend counts against the caps below, and
 `[models."<id>"]` row with its `input_price` and `output_price` counts it at
 its own rate. A non-streaming OpenAI answer, on either of its APIs, is
 counted by the model its body names, which may be a dated snapshot of the
-id asked for (such as `gpt-4o-mini-2024-07-18`, or `gpt-5.2-2025-12-11`,
-`gpt-5.2`'s default snapshot): a snapshot the catalogue lacks meets the
-same fallback. `gpt-6.1-sol`'s page lists no snapshot but the id itself. A
+id asked for (such as `gpt-4o-mini-2024-07-18`): a snapshot the catalogue
+lacks meets the same fallback. The four built-in OpenAI rows' pages list no
+snapshot but the id itself. A
 streamed round is counted by the id it was routed to. An OpenAI-compatible
 server of your own, such as llama.cpp or LM Studio set up as the `openai`
 provider with a key, is local though it is keyed when its `base_url` names
@@ -533,31 +563,45 @@ serves keeps its price.
 A model whose provider prices a long prompt higher carries that second rate
 in its built-in row: `gpt-6.1-sol` costs $2 / $10 per million tokens, and a
 request whose prompt is longer than 272,000 input tokens (cached ones
-included) is counted whole at $4 / $15. Each request is priced on its own,
+included) is counted whole at $4 / $15; the other three OpenAI rows double
+their input rate and take 1.5x their output rate past the same line, and
+`claude-haiku-5-5`, $0.10 / $0.50, is counted at $0.50 / $2.50 once a
+request's prompt passes 100,000 tokens, cache reads and writes included. Each request is priced on its own,
 and a chat turn's or a chat skill's spend in the usage figures
 (`GET /v1/usage/summary`) is the sum of its requests' costs as the caps
 counted them, cache rates included: a turn of several requests is counted
 at the long rate only for a request that passed the threshold itself.
-The built-in rows follow the providers' pages as read on 2026-11-12:
-`claude-opus-5-5` ($4 / $20) and `gpt-6.1-sol` are listed, `claude-opus-4-6`
-is counted at $5 / $25 and `o3` at $2 / $8, and the rows of models the
-providers have shut down or retired (`o1`, `o1-mini`, `o3-mini`,
-`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) are gone, so a
-template or a setting that names one walks the substitution ladder before
-the call, announced, instead of failing at the provider, unless your own
-`[models."<id>"]` row or the provider's model list still names it: then it
-stays routable and the call goes to the provider, priced by your row, or
-at the $3 / $15 fallback when only the list names it. A `[models."<id>"]`
+The built-in rows are the providers' latest models, as their pages gave
+them on 2026-11-14, each undated (an undated id is one fixed snapshot,
+not a pointer that moves): `claude-fable-5-2` ($8 / $40),
+`claude-opus-5-5` ($4 / $20), `claude-sonnet-5-5` ($2 / $10) and
+`claude-haiku-5-5`, each with a 1,000,000-token window; `gpt-6-astra`
+($10 / $50), `gpt-6.1-sol` ($2 / $10), `gpt-6.1-terra` ($1 / $5) and
+`gpt-6-luna` ($0.10 / $0.50), each with a 1,050,000-token window. The
+rows of older models are gone: those the providers have shut down or
+retired (`o1`, `o1-mini`, `o3-mini`, `claude-opus-4-20250514`,
+`claude-sonnet-4-20250514`), and the nine this build retires though some
+still answer until their providers' dates (`claude-opus-4-6`,
+`claude-sonnet-4-6`, `claude-sonnet-4-5-20250929`,
+`claude-haiku-4-5-20251001`, `gpt-5.2`, `gpt-5-mini`, `gpt-5-nano`,
+`gpt-4o-mini`, `o3`). A template or a setting that names one walks the
+substitution ladder before the call, announced, instead of failing at the
+provider, unless your own `[models."<id>"]` row or the provider's model
+list still names it: then it stays routable and the call goes to the
+provider, priced by your row, or at the $3 / $15 fallback when only the
+list names it, with none of a built-in row's rules. An `llm.toml` seeded
+before this build keeps naming the ids it was seeded with; nothing
+rewrites it and nothing warns at start. A `[models."<id>"]`
 row replaces a built-in row whole, its long-prompt rate and cache rates
 included.
 
 Cached input is counted at each built-in row's own rates, as the
-providers' pages gave them on 2026-11-14. A cache read costs 0.05x the
-input rate on `claude-opus-5-5` and `gpt-6.1-sol`, 0.25x on `o3`, 0.5x on
-`gpt-4o-mini` and 0.1x on the other rows. A cache write costs 1.25x on the
-Anthropic rows (the 5-minute cache, the one the daemon asks for) and on
-`gpt-6.1-sol` (OpenAI's default 30-minute cache), and the plain input rate
-on OpenAI's earlier models, which charge nothing more for a write. The
+providers' pages gave them on 2026-11-14. A cache read costs 0.025x the
+input rate on `claude-fable-5-2`, 0.05x on `claude-opus-5-5`,
+`claude-sonnet-5-5`, `gpt-6.1-sol` and `gpt-6.1-terra`, and 0.1x on
+`claude-haiku-5-5`, `gpt-6-astra` and `gpt-6-luna`. A cache write costs
+1.25x on every built-in row: the 5-minute cache on Anthropic's, the one the
+daemon asks for, and OpenAI's default 30-minute cache. The
 OpenAI provider reads the written count from the usage on both of its
 APIs. A model with no built-in row — a discovered one, an unknown id, or
 one a `[models]` row describes — is counted at 0.1x for a read and 1.25x

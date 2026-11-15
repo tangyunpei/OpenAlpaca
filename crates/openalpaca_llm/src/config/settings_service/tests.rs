@@ -27,7 +27,7 @@ fn hand_authored() -> String {
 
 /// The default model the fixture names. Anthropic's, and one the compiled
 /// registry knows — so the 409 guard resolves it on the first rung.
-const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
+const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 
 fn hand_authored_with(model: &str) -> String {
     format!(
@@ -270,7 +270,7 @@ async fn a_failed_write_leaves_the_router_untouched() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_some(),
         "and its models are still registered"
     );
@@ -310,7 +310,7 @@ async fn the_default_models_provider_cannot_be_disabled() {
     match &err {
         SetProviderEnabledError::IsDefaultProvider { provider, model } => {
             assert_eq!(provider, "anthropic");
-            assert_eq!(model, "claude-haiku-4-5-20251001");
+            assert_eq!(model, "claude-haiku-5-5");
         }
         other => panic!("{other:?}"),
     }
@@ -334,7 +334,7 @@ async fn a_disable_unloads_the_provider_and_strips_its_models() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_some()
     );
 
@@ -343,7 +343,7 @@ async fn a_disable_unloads_the_provider_and_strips_its_models() {
     assert_eq!(outcome.id, "openai");
     assert!(!outcome.enabled);
     assert!(
-        outcome.removed_models.iter().any(|m| m == "gpt-5.2"),
+        outcome.removed_models.iter().any(|m| m == "gpt-6.1-sol"),
         "the stripped models are reported: {:?}",
         outcome.removed_models
     );
@@ -354,14 +354,14 @@ async fn a_disable_unloads_the_provider_and_strips_its_models() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_none()
     );
     // Anthropic is untouched.
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("claude-sonnet-4-6")
+            .resolve_provider("claude-sonnet-5-5")
             .is_some()
     );
 }
@@ -374,7 +374,7 @@ async fn an_enable_restores_the_catalogue_the_disable_stripped() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_none()
     );
 
@@ -388,7 +388,7 @@ async fn an_enable_restores_the_catalogue_the_disable_stripped() {
     assert!(
         h.router
             .model_registry()
-            .resolve_provider("gpt-5.2")
+            .resolve_provider("gpt-6.1-sol")
             .is_some(),
         "otherwise the model picker stays empty until the daemon restarts"
     );
@@ -415,7 +415,7 @@ async fn an_orchestrator_write_goes_through_the_same_locked_writer_as_a_toggle()
 
     h.service
         .update_orchestrator_config(UpdateOrchestratorRequest {
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             fallback_models: vec![],
         })
         .unwrap();
@@ -430,7 +430,7 @@ async fn an_orchestrator_write_goes_through_the_same_locked_writer_as_a_toggle()
         text.contains("enabled = false"),
         "the toggle's bit survived the orchestrator write:\n{text}"
     );
-    assert!(text.contains(r#"model = "claude-sonnet-4-6""#), "{text}");
+    assert!(text.contains(r#"model = "claude-sonnet-5-5""#), "{text}");
     assert!(text.contains(SECRET), "and the encrypted key is still verbatim");
 }
 
@@ -451,14 +451,14 @@ async fn an_orchestrator_write_moves_the_routers_default_model_at_once() {
 
     h.service
         .update_orchestrator_config(UpdateOrchestratorRequest {
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             fallback_models: vec![],
         })
         .unwrap();
 
     assert_eq!(
         h.router.default_model(),
-        "claude-sonnet-4-6",
+        "claude-sonnet-5-5",
         "the write is the hot path's trigger, not the watcher"
     );
 }
@@ -474,7 +474,7 @@ async fn a_failed_orchestrator_write_leaves_the_default_model_alone() {
     let err = h
         .service
         .update_orchestrator_config(UpdateOrchestratorRequest {
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5-5".to_string(),
             fallback_models: vec![],
         })
         .expect_err("the writer was told to fail");
@@ -667,7 +667,7 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // The other writer points the default model at openai, then lets go.
-    std::fs::write(&h.path, hand_authored_with("gpt-5.2")).unwrap();
+    std::fs::write(&h.path, hand_authored_with("gpt-6.1-sol")).unwrap();
     helper.stdin.take().unwrap().write_all(b"\n").unwrap();
     helper.wait().unwrap();
 
@@ -676,7 +676,7 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
         .unwrap()
         .expect_err("the provider now serving the default model was disabled");
     assert!(
-        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "gpt-5.2"),
+        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "gpt-6.1-sol"),
         "{err:?}"
     );
     assert!(

@@ -2,20 +2,20 @@
 # This file is installed only when no user config exists.
 
 [orchestrator]
-model = "claude-haiku-4-5-20251001"
-fallback_models = ["claude-sonnet-4-6"]
+model = "claude-haiku-5-5"
+fallback_models = ["claude-sonnet-5-5"]
 
 [providers.anthropic]
 enabled = false
 strategy = "round_robin"
-default_model = "claude-sonnet-4-6"
+default_model = "claude-sonnet-5-5"
 default_max_tokens = 4096
 
 [providers.openai]
 enabled = false
 base_url = "https://api.openai.com/v1"
 strategy = "round_robin"
-default_model = "gpt-4o-mini"
+default_model = "gpt-6-luna"
 default_max_tokens = 4096
 
 # Local models, served by the Ollama you run yourself.
