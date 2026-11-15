@@ -99,7 +99,7 @@ impl AgentConfigService {
     /// `agent` row (its `config` column, which the template's rewrite of
     /// the row leaves alone), and loaded for every new run of the template,
     /// singleton or not, and at the next start. A set the store cannot keep
-    /// is refused, and the registry is put back as it was.
+    /// is refused, and the registry and the row are put back as they were.
     ///
     /// On any other id (a legacy `.toml` agent): disk first, then memory,
     /// then DB, as before; a run's own instance is refused while it runs
@@ -121,7 +121,20 @@ impl AgentConfigService {
                 .store_set(id, config.clone(), expected_version)?
             {
                 if let Err(e) = self.save_set(id, &stored) {
-                    self.registry.restore_set(id, stored.previous);
+                    // The row was written with the refused set before the
+                    // store refused it: write it back with the set put back,
+                    // so `GET /v1/agents/{id}` agrees with `GET …/config`.
+                    // Should that fail too, the next start writes the row
+                    // from the store's set, which the refusal left as it was.
+                    self.registry.restore_set(id, stored.previous.clone());
+                    if let Err(row) = super::file_layer::write_template_row(
+                        &self.db,
+                        &stored.template,
+                        id,
+                        stored.previous.as_ref(),
+                    ) {
+                        tracing::warn!("Agent {id}: its row could not be put back: {row:#}");
+                    }
                     return Err(format!("the set could not be saved: {e:#}"));
                 }
                 return Ok(stored.version);

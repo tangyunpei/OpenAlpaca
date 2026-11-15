@@ -421,3 +421,96 @@ fn the_row_and_the_config_agree_with_no_set_and_with_one() {
         .unwrap();
     assert_eq!(row_definition(&row)["constraints"]["max_rounds"], 4);
 }
+
+/// Run SQL on the store's own connection: the faults below are planted
+/// there, since a set's store write and read are the store's.
+fn plant(store: &Store, sql: &str) {
+    store
+        .db
+        .with_connection(|conn| Ok(conn.execute_batch(sql)?))
+        .unwrap();
+}
+
+/// AGENT-SETS' refusal (`update_agent_config`): a set the store cannot
+/// keep is refused and the registry put back as it was — the config read,
+/// the next run and the row show the set it replaced, and a set after the
+/// fault is gone is taken with the version read again.
+#[test]
+fn a_set_the_store_cannot_keep_is_refused_and_put_back() {
+    let store = Store::new(&[("reader.md", reader("model-r"))]);
+    let daemon = store.start();
+    daemon.set_model("reader", "model-a").unwrap();
+    plant(
+        &store,
+        "CREATE TRIGGER no_set BEFORE UPDATE OF config ON agent \
+         BEGIN SELECT RAISE(ABORT, 'the store refuses the set'); END;",
+    );
+
+    let err = daemon.set_model("reader", "model-b").unwrap_err();
+
+    assert!(err.contains("could not be saved"), "{err}");
+    assert_eq!(daemon.config_model("reader").as_deref(), Some("model-a"));
+    assert_eq!(
+        daemon.run("reader", "t1").llm_config.model.as_deref(),
+        Some("model-a")
+    );
+    assert_eq!(store.row_model("reader").as_deref(), Some("model-a"));
+    assert_eq!(
+        SubAgentRepository::new(&store.db)
+            .stored_set("reader")
+            .unwrap()
+            .map(|set| set.contains("model-a")),
+        Some(true)
+    );
+
+    plant(&store, "DROP TRIGGER no_set;");
+    daemon.set_model("reader", "model-c").unwrap();
+    assert_eq!(
+        daemon.run("reader", "t2").llm_config.model.as_deref(),
+        Some("model-c")
+    );
+}
+
+/// The rescan (`file_layer::read_stored_set`): a store whose set cannot
+/// be read leaves the set held in memory as it is, so the next run of a
+/// template edited meanwhile still carries it.
+#[test]
+fn a_set_the_rescan_cannot_read_stays_held() {
+    let store = Store::new(&[("reader.md", reader("model-r"))]);
+    let daemon = store.start();
+    daemon.set_model("reader", "model-set").unwrap();
+    plant(&store, "ALTER TABLE agent RENAME COLUMN config TO unread;");
+    assert!(
+        SubAgentRepository::new(&store.db)
+            .stored_set("reader")
+            .is_err()
+    );
+
+    store.rewrite(&daemon, "reader.md", &reader("model-r2"));
+
+    assert_eq!(
+        daemon.run("reader", "t1").llm_config.model.as_deref(),
+        Some("model-set")
+    );
+    assert_eq!(daemon.config_model("reader").as_deref(), Some("model-set"));
+}
+
+/// The rescan's other branch: a stored set that does not parse is logged
+/// and the template runs as it is.
+#[test]
+fn a_stored_set_that_does_not_parse_leaves_the_template() {
+    let store = Store::new(&[("reader.md", reader("model-r"))]);
+    let daemon = store.start();
+    daemon.set_model("reader", "model-set").unwrap();
+    plant(
+        &store,
+        "UPDATE agent SET config = '{not json' WHERE id = 'reader';",
+    );
+
+    store.rewrite(&daemon, "reader.md", &reader("model-r2"));
+
+    assert_eq!(
+        daemon.run("reader", "t1").llm_config.model.as_deref(),
+        Some("model-r2")
+    );
+}
