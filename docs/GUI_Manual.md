@@ -100,7 +100,15 @@ When the GUI spawns the daemon it sets the child's working directory to that
 root and `OPENALPACA_CONFIG_DIR` to `<root>/config`, and appends the daemon's
 output to `<root>/state/logs/daemon.log` — the same file, under the same
 rotation (16 MB, three older generations kept), that `openalpaca daemon start`
-writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you choose keeps its
+writes (`src-tauri/src/lib.rs`, `spawn_daemon`). The app keeps its own log
+beside it, `<root>/state/logs/gui.log`, appended across launches under the
+same rotation: the shell's lines (the daemon it spawned, and that daemon's
+exit), Tauri's own, a start-up mark for the shell's start and for each page
+load with the milliseconds since it, a panic of the shell, and a line when the
+window's web content process ends — after which the app reloads the window,
+whose page then connects as it does at launch. A source checkout's
+`openalpaca gui start` appends the dev build's output to `gui-dev.log` instead,
+and never truncates `gui.log`. A project you choose keeps its
 data in the home store, in its folder under `projects/` — its artifacts, uploads
 and memory notes beside a `project.json` with its id and path; nothing of
 OpenAlpaca's is written inside the project's own folder — an agent writes

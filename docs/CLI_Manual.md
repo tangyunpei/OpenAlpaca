@@ -193,7 +193,7 @@ openalpaca gui start
 openalpaca gui stop
 ```
 
-`start` looks for the app bundle in this order: `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`, `~/Applications/openalpaca-gui.app`, `/Applications/openalpaca-gui.app`. From a repository checkout it falls back to the Tauri dev build. `stop` sends SIGTERM to the app's process — on macOS the bundle's `openalpaca_gui` — and leaves the daemon running; an unsent draft in the app is lost.
+`start` looks for the app bundle in this order: `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`, `~/Applications/openalpaca-gui.app`, `/Applications/openalpaca-gui.app`. From a repository checkout it falls back to the Tauri dev build, whose output (`bun run tauri dev`'s) is appended to `~/.openalpaca/state/logs/gui-dev.log`, rotated past 16 MB like `daemon.log`; the app itself logs to `gui.log` beside it, which a dev launch never truncates. `stop` sends SIGTERM to the app's process — on macOS the bundle's `openalpaca_gui` — and leaves the daemon running; an unsent draft in the app is lost.
 
 ### `connector`
 

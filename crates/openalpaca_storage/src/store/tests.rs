@@ -170,6 +170,23 @@ fn the_daemon_log_is_named_once_and_creating_nothing() {
     assert_eq!(log, logs_dir().unwrap().join("daemon.log"));
 }
 
+/// Q14: the app's own log and a dev launch's are two names beside
+/// `daemon.log`, never `~/Library/Logs` (D1), and naming them creates
+/// nothing.
+#[test]
+fn the_gui_logs_are_named_beside_the_daemon_log_and_creating_nothing() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(tmp.path());
+
+    let logs = tmp.path().join("state").join("logs");
+    assert_eq!(gui_log_path().unwrap(), logs.join("gui.log"));
+    assert_eq!(gui_dev_log_path().unwrap(), logs.join("gui-dev.log"));
+    assert!(
+        !logs.exists(),
+        "naming the GUI logs must not create the logs directory"
+    );
+}
+
 /// The former `paths.rs::test_paths_are_consistent`, re-targeted at `state_dir()`.
 #[test]
 fn test_paths_are_consistent() {
@@ -805,6 +822,49 @@ fn rotate_daemon_log_rotates_the_store_log_and_creates_nothing_on_a_fresh_root()
     rotate_daemon_log().expect("rotation should succeed");
     assert!(!log.exists());
     assert!(logs_dir().unwrap().join("daemon.log.1").exists());
+}
+
+/// Q14: `gui.log` and `gui-dev.log` rotate under the daemon log's caps, each
+/// on its own — rotating one leaves the others where they are — and a fresh
+/// root rotates nothing and creates nothing.
+#[test]
+fn the_gui_logs_rotate_under_the_daemon_logs_caps_each_on_its_own() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(tmp.path());
+
+    rotate_gui_log().expect("a fresh root rotates nothing");
+    rotate_gui_dev_log().expect("a fresh root rotates nothing");
+    assert!(
+        !tmp.path().join("state").exists(),
+        "rotating a log that is not there must not create the store"
+    );
+
+    let logs = logs_dir().unwrap();
+    for name in ["daemon.log", "gui.log", "gui-dev.log"] {
+        fs::File::create(logs.join(name))
+            .unwrap()
+            .set_len(DAEMON_LOG_MAX_BYTES + 1)
+            .unwrap();
+    }
+
+    rotate_gui_log().expect("rotation should succeed");
+    assert!(!logs.join("gui.log").exists());
+    assert!(logs.join("gui.log.1").exists());
+    assert!(logs.join("gui-dev.log").exists(), "only gui.log moved");
+    assert!(logs.join("daemon.log").exists(), "only gui.log moved");
+
+    rotate_gui_dev_log().expect("rotation should succeed");
+    assert!(!logs.join("gui-dev.log").exists());
+    assert!(logs.join("gui-dev.log.1").exists());
+    assert!(logs.join("daemon.log").exists(), "only gui-dev.log moved");
+
+    // Under the cap, either is left as it is.
+    fs::write(logs.join("gui.log"), "a short run\n").unwrap();
+    rotate_gui_log().expect("rotation should succeed");
+    assert_eq!(
+        fs::read_to_string(logs.join("gui.log")).unwrap(),
+        "a short run\n"
+    );
 }
 
 #[test]

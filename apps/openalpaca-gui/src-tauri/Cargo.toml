@@ -23,6 +23,11 @@ anyhow.workspace = true
 # already in Cargo.lock (tauri's); the lock gains only this crate's edge.
 thiserror.workspace = true
 tracing.workspace = true
+# Q14: the shell's log, `state/logs/gui.log` — `fmt` with `env-filter` (the
+# workspace's), and through its default `tracing-log` feature the bridge for
+# Tauri's `log` records. tracing-subscriber 0.3.23 is already in Cargo.lock
+# (the daemon's); the lock gains only this crate's edge.
+tracing-subscriber.workspace = true
 directories.workspace = true
 tauri-plugin-dialog.workspace = true
 

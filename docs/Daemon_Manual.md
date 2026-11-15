@@ -107,9 +107,13 @@ root is the human's:
   reports the path for a daemon either of them launched; a daemon started by
   hand (a bare `cargo run`, or `openalpacad` in a terminal) writes to its
   terminal instead and reports `null`, even when an older `daemon.log` is still
-  there. When `openalpaca gui start`
-  launches the GUI from a source checkout (`bun run tauri dev`), its output
-  goes beside it as `gui.log`.
+  there.
+- GUI logs: beside it, `~/.openalpaca/state/logs/gui.log` is the GUI app's
+  own log — its shell's lines, its start-up marks, a panic, and the window's
+  web content process ending — written by the app alone and appended across
+  launches; `gui-dev.log` is the output of `bun run tauri dev` when
+  `openalpaca gui start` launches the GUI from a source checkout, appended.
+  Each is rotated at launch under `daemon.log`'s caps.
 
 ## Startup and Lifecycle
 

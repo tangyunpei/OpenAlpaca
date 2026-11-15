@@ -17,16 +17,26 @@
 //!
 //! A command refuses with a [`ShellError`] (Q13): `{ kind, message }` to the
 //! webview, `kind` what refused and `message` the sentence it shows.
+//!
+//! The shell logs to `state/logs/gui.log` (Q14): its `tracing` lines and
+//! Tauri's `log` records, its startup marks, a panic, and a web content
+//! process that ended — after which the window is reloaded.
 
 use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
 use openalpaca_storage::store;
 use serde::Serialize;
 use std::future::Future;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tauri::webview::PageLoadEvent;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
+use tracing_subscriber::util::SubscriberInitExt;
 
 // ============================================================================
 // The refusals
@@ -584,13 +594,223 @@ fn reap_when_it_exits(mut child: std::process::Child) {
 }
 
 // ============================================================================
+// The shell's log (Q14)
+// ============================================================================
+
+/// The target every startup mark is logged under, so a reader of `gui.log`
+/// (plan-rev3 §7.5's scenario (1)) finds them with one match: `startup mark
+/// mark=<name> elapsed_ms=<ms since T0>`, the page-load marks with the
+/// webview's label and the page's origin.
+const STARTUP_TARGET: &str = "openalpaca_gui::startup";
+
+/// The target of the line [`install_panic_hook`]'s hook writes.
+const PANIC_TARGET: &str = "openalpaca_gui::panic";
+
+/// Open `state/logs/gui.log` to append, after rotating it under the store's
+/// caps (16 MB, three older generations, as `daemon.log`). A rotation that
+/// failed comes back beside the file, for the caller to log once the log is
+/// up: it is never a reason not to open it.
+fn open_gui_log() -> anyhow::Result<(PathBuf, std::fs::File, Option<anyhow::Error>)> {
+    store::logs_dir()?;
+    let path = store::gui_log_path()?;
+    let rotation = store::rotate_gui_log().err();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to open {}: {e}", path.display()))?;
+    Ok((path, file, rotation))
+}
+
+/// The subscriber that writes the shell's log: `tracing`'s plain format,
+/// without colour escapes, appended to `file`, under `filter`.
+fn gui_log_subscriber(
+    file: std::fs::File,
+    filter: EnvFilter,
+) -> impl tracing::Subscriber + Send + Sync + 'static {
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(file))
+        .finish()
+}
+
+/// `RUST_LOG` when it is set and valid, `info` otherwise — the daemon's rule.
+fn gui_log_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+}
+
+/// Start the shell's log: [`open_gui_log`], then [`gui_log_subscriber`] as
+/// the process's default, which (tracing-subscriber's `tracing-log`
+/// feature) also takes Tauri's `log` records. Returns the log's path, for
+/// the panic hook; `None` when it could not be opened. Never fatal: an app
+/// that will not open because its log could not be is the worse bug, so a
+/// failure goes to stderr and the app runs without a log.
+fn init_gui_log() -> Option<PathBuf> {
+    let (path, file, rotation) = match open_gui_log() {
+        Ok(opened) => opened,
+        Err(e) => {
+            eprintln!("openalpaca_gui: the shell runs without its log: {e:#}");
+            return None;
+        }
+    };
+    if let Err(e) = gui_log_subscriber(file, gui_log_filter()).try_init() {
+        eprintln!("openalpaca_gui: the shell log was not installed: {e}");
+    }
+    if let Some(e) = rotation {
+        tracing::warn!("Could not rotate the shell log ({e:#}); appending to it as it is.");
+    }
+    Some(path)
+}
+
+/// Write each panic of the shell to `log_path` as one line, then run the
+/// hook that was there before (Rust's own prints it to stderr).
+///
+/// The line is written straight to the file, not through `tracing`, so a
+/// panic raised inside a log call cannot re-enter the subscriber that was
+/// writing, and a panic is kept even when the subscriber is not installed.
+fn install_panic_hook(log_path: PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // One append of the whole line, so it lands whole beside the
+        // subscriber's lines. Nothing to do if the file will not open.
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = file.write_all(panic_line(info).as_bytes());
+        }
+        previous(info);
+    }));
+}
+
+/// A panic as one line of `gui.log`, in the subscriber's form: the time, the
+/// level, the target, then where and what. A line break in the message (an
+/// `assert_eq!`'s always has two), the thread's name or the place is written
+/// `\n` or `\r`, so the whole panic stays on the one line a reader matching
+/// [`PANIC_TARGET`] finds.
+fn panic_line(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let mut time = String::new();
+    let _ = SystemTime.format_time(&mut Writer::new(&mut time));
+    let thread = std::thread::current();
+    let thread = one_line(thread.name().unwrap_or("<unnamed>"));
+    let location = info
+        .location()
+        .map_or_else(|| "an unknown place".to_owned(), ToString::to_string);
+    let location = one_line(&location);
+    let payload = one_line(info.payload_as_str().unwrap_or("Box<dyn Any>"));
+    format!(
+        "{time} ERROR {PANIC_TARGET}: the shell panicked on thread '{thread}' at {location}: \
+         {payload}\n"
+    )
+}
+
+/// `text` with each line feed written `\n` and each carriage return `\r`,
+/// and nothing else changed.
+fn one_line(text: &str) -> String {
+    text.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+/// Milliseconds since `t0`, as a mark logs them.
+fn millis_since(t0: Instant) -> u64 {
+    u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// T0, the shell's own start, as a startup mark: the first line `run` logs.
+fn t0_mark(t0: Instant) {
+    tracing::info!(
+        target: STARTUP_TARGET,
+        mark = "t0",
+        elapsed_ms = millis_since(t0),
+        version = env!("CARGO_PKG_VERSION"),
+        pid = std::process::id(),
+        "startup mark"
+    );
+}
+
+/// A page load of `label`'s webview as a startup mark (`Builder::on_page_load`):
+/// its start and its end, each with the milliseconds since T0. A reload logs
+/// them again, so the marks also show a window reloaded after its web
+/// content process ended. The page's origin is logged, never its path or
+/// query.
+fn page_load_mark(t0: Instant, label: &str, event: PageLoadEvent, url: &tauri::Url) {
+    let mark = match event {
+        PageLoadEvent::Started => "page_load_started",
+        PageLoadEvent::Finished => "page_load_finished",
+    };
+    tracing::info!(
+        target: STARTUP_TARGET,
+        mark,
+        elapsed_ms = millis_since(t0),
+        webview = label,
+        origin = %page_origin(url),
+        "startup mark"
+    );
+}
+
+/// `scheme://host[:port]` of a page — `tauri://localhost` packaged, the dev
+/// server's in a dev launch. Built by hand, since `Url::origin` is opaque
+/// (`null`) for a custom scheme such as `tauri:`.
+fn page_origin(url: &tauri::Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
+/// The window's web content process ended (WebKit's `WebContent` crashed or
+/// was killed), which leaves a blank window: log it and reload the webview.
+/// Safe, because the state lives in the daemon: the reloaded page bootstraps
+/// against the same daemon and `instance_id`. macOS and iOS only, where
+/// Tauri reports it (`Builder::on_web_content_process_terminate`).
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+fn reload_after_web_content_ended<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
+    log_and_reload(webview.label(), || webview.reload());
+}
+
+/// The line for `label`'s webview whose web content process ended, then
+/// `reload`, once; a reload that failed is a line too. The reload is a
+/// parameter so a test sees it called, which the mock runtime cannot show.
+fn log_and_reload(label: &str, reload: impl FnOnce() -> tauri::Result<()>) {
+    tracing::warn!(
+        webview = label,
+        "The window's web content process ended; reloading the window."
+    );
+    if let Err(e) = reload() {
+        tracing::error!(
+            webview = label,
+            "Could not reload the window after its web content process ended: {e}"
+        );
+    }
+}
+
+// ============================================================================
 // Tauri App Entry Point
 // ============================================================================
 
 pub fn run() {
-    with_commands(tauri::Builder::default())
+    // T0: the shell's own start, before anything else it does.
+    let t0 = Instant::now();
+    if let Some(log_path) = init_gui_log() {
+        install_panic_hook(log_path);
+    }
+    t0_mark(t0);
+    with_app_hooks(with_commands(tauri::Builder::default()), t0)
         .run(tauri::generate_context!())
         .expect("Error while running Tauri application");
+}
+
+/// The window's hooks (Q14): the page-load marks, and on macOS the reload
+/// after the web content process ended.
+fn with_app_hooks<R: tauri::Runtime>(builder: tauri::Builder<R>, t0: Instant) -> tauri::Builder<R> {
+    let builder = builder.on_page_load(move |webview, payload| {
+        page_load_mark(t0, webview.label(), payload.event(), payload.url());
+    });
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(reload_after_web_content_ended);
+    builder
 }
 
 /// The dialog plugin and the five commands the webview invokes: the one list,

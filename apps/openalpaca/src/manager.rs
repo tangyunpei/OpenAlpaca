@@ -136,10 +136,7 @@ pub fn start_gui() -> Result<()> {
         }
         GuiLaunch::DevTauri { workspace_root } => {
             ensure_runtime_dirs()?;
-            let log_path = store::logs_dir()?.join("gui.log");
-            let log_file = fs::File::create(&log_path).with_context(|| {
-                format!("Failed to create GUI log file: {}", log_path.display())
-            })?;
+            let (log_path, log_file) = open_gui_dev_log()?;
             let gui_path = workspace_root.join("apps/openalpaca-gui");
 
             Command::new("bun")
@@ -157,10 +154,30 @@ pub fn start_gui() -> Result<()> {
                 })?;
 
             println!("✅ GUI started via development fallback.");
-            println!("📝 GUI log: {}", log_path.display());
+            println!("📝 GUI dev log: {}", log_path.display());
         }
     }
     Ok(())
+}
+
+/// Open `state/logs/gui-dev.log` to append the output of `bun run tauri dev`
+/// (Q14). `gui.log` is the app shell's own log, which the shell this launch
+/// starts writes itself, so a dev launch never truncates or writes it; its
+/// own file is appended across launches and bounded by the store's rotation
+/// (16 MB, three older generations), like `daemon.log`. A rotation that fails
+/// is reported and not fatal.
+fn open_gui_dev_log() -> Result<(PathBuf, fs::File)> {
+    store::logs_dir().context("Failed to create the GUI log directory")?;
+    let log_path = store::gui_dev_log_path()?;
+    if let Err(e) = store::rotate_gui_dev_log() {
+        println!("⚠️  Could not rotate the GUI dev log ({e:#}); appending to it as it is.");
+    }
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("Failed to open GUI dev log file: {}", log_path.display()))?;
+    Ok((log_path, log_file))
 }
 
 /// Stop GUI (Naive approach: lookup by name or port?)
@@ -436,6 +453,52 @@ mod tests {
 
     use super::*;
     use std::fs;
+
+    /// Q14: a dev launch writes its own `gui-dev.log`, appended and rotated
+    /// past the store's cap, and leaves `gui.log` — the shell's own log —
+    /// exactly as it was.
+    #[test]
+    fn a_dev_launch_appends_to_gui_dev_log_and_truncates_nothing() {
+        let tmp = tempfile::tempdir().expect("a scratch root");
+        let _env = crate::test_util::EnvSandbox::enter(tmp.path());
+        let logs = store::logs_dir().expect("the scratch logs dir");
+        fs::write(logs.join("gui.log"), "the shell's own line\n").unwrap();
+        fs::write(logs.join("gui-dev.log"), "an earlier dev launch\n").unwrap();
+
+        let (path, mut file) = open_gui_dev_log().expect("the dev log opens");
+        assert_eq!(path, logs.join("gui-dev.log"));
+        std::io::Write::write_all(&mut file, b"this dev launch\n").unwrap();
+        drop(file);
+
+        assert_eq!(
+            fs::read_to_string(logs.join("gui-dev.log")).unwrap(),
+            "an earlier dev launch\nthis dev launch\n",
+            "the dev log is appended, never truncated"
+        );
+        assert_eq!(
+            fs::read_to_string(logs.join("gui.log")).unwrap(),
+            "the shell's own line\n",
+            "a dev launch leaves the shell's gui.log alone"
+        );
+
+        // A gui-dev.log past the store's cap is rotated before it is opened,
+        // like daemon.log; gui.log is still left alone.
+        fs::File::create(logs.join("gui-dev.log"))
+            .unwrap()
+            .set_len(store::DAEMON_LOG_MAX_BYTES + 1)
+            .unwrap();
+        let (_, file) = open_gui_dev_log().expect("the dev log opens again");
+        assert_eq!(file.metadata().unwrap().len(), 0, "a fresh gui-dev.log");
+        assert_eq!(
+            fs::metadata(logs.join("gui-dev.log.1")).unwrap().len(),
+            store::DAEMON_LOG_MAX_BYTES + 1,
+            "the full one rotated to gui-dev.log.1"
+        );
+        assert_eq!(
+            fs::read_to_string(logs.join("gui.log")).unwrap(),
+            "the shell's own line\n"
+        );
+    }
 
     fn touch_executable(path: &Path) {
         if let Some(parent) = path.parent() {

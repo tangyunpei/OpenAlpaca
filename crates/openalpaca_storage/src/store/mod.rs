@@ -18,7 +18,7 @@
 //!     openalpaca.db (+ -wal, -shm), discovery.json, openalpacad.lock, .master_key,
 //!     repl_history     the CLI chat's line history
 //!     backups/         rotated copies of hand-edited config files
-//!     logs/            daemon.log, gui.log
+//!     logs/            daemon.log, gui.log (the app's), gui-dev.log (a dev launch's)
 //!     cache/           derived data: the memory search index; open/<file id>/, Open's copies
 //!     editor/          the CLI's editor buffers (`memory add|edit`, `persona edit user`)
 //!   config/            USER-EDITED runtime config (GUI/CLI-managed daemons)
@@ -170,8 +170,26 @@ pub fn daemon_log_path() -> Result<PathBuf> {
     Ok(state_dir_path()?.join(LOGS_DIR).join(DAEMON_LOG_FILE))
 }
 
+/// `state/logs/gui.log` — the app shell's own log (Q14): its `tracing`
+/// output, Tauri's `log` records, its startup marks, a panic and a web
+/// content process that ended. Only the app writes it, appending, after
+/// [`rotate_gui_log`]. Non-creating, like [`daemon_log_path`].
+pub fn gui_log_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join(LOGS_DIR).join(GUI_LOG_FILE))
+}
+
+/// `state/logs/gui-dev.log` — the output of `bun run tauri dev` when
+/// `openalpaca gui start` launches the app from a source checkout (Q14):
+/// appended after [`rotate_gui_dev_log`], so a dev launch never truncates
+/// [`gui_log_path`], which the shell it starts writes itself. Non-creating.
+pub fn gui_dev_log_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join(LOGS_DIR).join(GUI_DEV_LOG_FILE))
+}
+
 const LOGS_DIR: &str = "logs";
 const DAEMON_LOG_FILE: &str = "daemon.log";
+const GUI_LOG_FILE: &str = "gui.log";
+const GUI_DEV_LOG_FILE: &str = "gui-dev.log";
 
 /// Set on the environment of a daemon whose launcher pointed its stdout and
 /// stderr at `daemon_log_path()` and rotated the file first — marks *this*
@@ -210,8 +228,25 @@ pub const LOG_TAIL_READ_BYTES: u64 = 64 * 1024;
 /// daemon that will not start because its log could not be renamed is the
 /// worse bug.
 pub fn rotate_daemon_log() -> Result<()> {
-    let path = daemon_log_path()?;
-    rotate_log(&path, DAEMON_LOG_MAX_BYTES, DAEMON_LOG_KEEP)
+    rotate_store_log(&daemon_log_path()?)
+}
+
+/// Rotate `gui.log` under the daemon log's caps ([`DAEMON_LOG_MAX_BYTES`],
+/// [`DAEMON_LOG_KEEP`]) — the app, once at each start, before it opens the
+/// file to append (Q14). A failure is a warning, never a reason not to start.
+pub fn rotate_gui_log() -> Result<()> {
+    rotate_store_log(&gui_log_path()?)
+}
+
+/// Rotate `gui-dev.log` under the same caps — `openalpaca gui start`'s dev
+/// launch, before it opens the file to append (Q14).
+pub fn rotate_gui_dev_log() -> Result<()> {
+    rotate_store_log(&gui_dev_log_path()?)
+}
+
+/// One of the store's logs, rotated under the shared caps.
+fn rotate_store_log(path: &Path) -> Result<()> {
+    rotate_log(path, DAEMON_LOG_MAX_BYTES, DAEMON_LOG_KEEP)
         .with_context(|| format!("Failed to rotate {}", path.display()))
 }
 
@@ -805,7 +840,7 @@ directory loses those files only.
 | `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key`, `repl_history` (the line history of `openalpaca chat`) | never swept — a factory reset deletes the database here and leaves the rest |
 | `state/memory-control/` | one control snapshot per memory partition: the revision the service last wrote, each note's origin, the tombstones of forgotten notes | never swept — the notes' authority and forget history; a backup of `memory/` includes it |
 | `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
-| `state/logs/` | `daemon.log`, `gui.log` | regenerable — swept freely |
+| `state/logs/` | `daemon.log`, `gui.log` (the app's own), `gui-dev.log` (`openalpaca gui start` from a source checkout), each rotated past 16 MB | regenerable — swept freely |
 | `state/cache/` | derived data the machine can rebuild — `memory-index-v1.sqlite`, the memory search index; `open/<file id>/`, the copy of an upload made each time you open it, under the name you uploaded it with; and `bundled-skills/`, the built-in skills' files, written at each start | regenerable — deleting it costs one rebuild from the notes on the next start; the copies under `open/` go at each daemon start, and with their project's data; `bundled-skills/` is written again at each start, or when a built-in skill next runs |
 | `state/editor/` | the files `openalpaca memory add`, `memory edit` and `persona edit user` open in your editor; a refused or conflicting edit keeps your text here and says where | yours to delete — never swept; remove a kept file once you have merged it |
 | `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `orchestrator/`, `tools/`, and `agents/` and `skills/`, your own agent templates and skills and those that override the built-in ones (an unedited copy of a built-in one is not read) | yours — never swept |

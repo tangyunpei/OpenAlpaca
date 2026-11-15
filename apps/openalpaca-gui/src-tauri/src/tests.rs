@@ -932,3 +932,247 @@ fn a_start_that_timed_out_quotes_what_this_run_wrote() {
         })
     );
 }
+
+// ============================================================================
+// The shell's log (Q14)
+// ============================================================================
+
+/// What `gui.log` holds now under the guard's scratch store.
+fn gui_log_text() -> String {
+    std::fs::read_to_string(store::gui_log_path().expect("the gui.log path")).unwrap_or_default()
+}
+
+/// `body` run with the shell's log subscriber as this thread's default,
+/// over the file [`open_gui_log`] opened, at `info` whatever `RUST_LOG` the
+/// test runs under. A thread's default, never the process's: a global one
+/// would outlive this test's scratch root.
+fn with_the_shell_log<T>(body: impl FnOnce() -> T) -> T {
+    let (_, file, rotation) = open_gui_log().expect("gui.log opens");
+    assert!(rotation.is_none(), "a fresh log rotates without failing");
+    let subscriber = gui_log_subscriber(file, EnvFilter::new("info"));
+    tracing::subscriber::with_default(subscriber, body)
+}
+
+/// `gui.log` is the store's `state/logs/gui.log`, under the scratch store
+/// `OPENALPACA_HOME_STORE` names — never `~/Library/Logs` (D1) — and is
+/// appended to, never truncated: the previous launch's lines stay.
+#[test]
+fn the_shell_log_is_the_stores_gui_log_and_appended_to() {
+    let guard = HomeStoreGuard::set("gui-log-append");
+    let path = store::gui_log_path().expect("the gui.log path");
+    assert_eq!(path, guard.store().join("state/logs/gui.log"));
+    std::fs::create_dir_all(path.parent().expect("logs dir")).expect("logs dir");
+    std::fs::write(&path, "an earlier launch's line\n").expect("an earlier log");
+
+    let (opened, _, _) = open_gui_log().expect("gui.log opens");
+    assert_eq!(opened, path);
+    with_the_shell_log(|| tracing::info!("this launch's line"));
+
+    let text = gui_log_text();
+    assert!(
+        text.starts_with("an earlier launch's line\n"),
+        "the earlier launch's line was kept: {text:?}"
+    );
+    assert!(text.contains("this launch's line"), "{text:?}");
+    assert!(
+        !text.contains('\u{1b}'),
+        "no colour escapes in a file: {text:?}"
+    );
+}
+
+/// A `gui.log` past the store's 16 MB cap is rotated to `gui.log.1` before
+/// the launch opens a fresh one.
+#[test]
+fn the_shell_log_is_rotated_past_the_stores_cap_before_it_is_opened() {
+    let _guard = HomeStoreGuard::set("gui-log-rotate");
+    let path = store::gui_log_path().expect("the gui.log path");
+    std::fs::create_dir_all(path.parent().expect("logs dir")).expect("logs dir");
+    std::fs::File::create(&path)
+        .expect("a full log")
+        .set_len(store::DAEMON_LOG_MAX_BYTES + 1)
+        .expect("a sparse 16 MB");
+
+    let (_, file, rotation) = open_gui_log().expect("gui.log opens");
+    assert!(rotation.is_none());
+    assert_eq!(
+        file.metadata().expect("metadata").len(),
+        0,
+        "a fresh gui.log"
+    );
+    let rotated = path.with_file_name("gui.log.1");
+    assert_eq!(
+        std::fs::metadata(&rotated).expect("gui.log.1").len(),
+        store::DAEMON_LOG_MAX_BYTES + 1
+    );
+}
+
+/// The startup marks in the one form a reader parses (plan-rev3 §7.5's
+/// scenario (1), Q10): T0 first, then each page load's start and end, each
+/// with the milliseconds since T0; a page's origin, never its path or query.
+#[test]
+fn the_startup_marks_are_logged_in_one_form() {
+    let _guard = HomeStoreGuard::set("gui-log-marks");
+    let t0 = Instant::now();
+    let url: tauri::Url = "tauri://localhost/index.html?secret=1#chat"
+        .parse()
+        .expect("a page URL");
+    with_the_shell_log(|| {
+        t0_mark(t0);
+        page_load_mark(t0, "main", PageLoadEvent::Started, &url);
+        page_load_mark(t0, "main", PageLoadEvent::Finished, &url);
+    });
+
+    let text = gui_log_text();
+    let marks: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains(" INFO openalpaca_gui::startup: startup mark "))
+        .collect();
+    assert_eq!(marks.len(), 3, "three marks: {text:?}");
+    let (t0_line, started, finished) = (marks[0], marks[1], marks[2]);
+    assert!(t0_line.contains(" mark=\"t0\" elapsed_ms="), "{t0_line}");
+    assert!(
+        t0_line.contains(&format!(" pid={}", std::process::id())),
+        "{t0_line}"
+    );
+    for (line, mark) in [
+        (started, "page_load_started"),
+        (finished, "page_load_finished"),
+    ] {
+        assert!(
+            line.contains(&format!(" mark=\"{mark}\" elapsed_ms=")),
+            "{line}"
+        );
+        assert!(line.contains(" webview=\"main\""), "{line}");
+        assert!(line.ends_with(" origin=tauri://localhost"), "{line}");
+    }
+    assert!(!text.contains("secret"), "no query in the log: {text:?}");
+    assert!(!text.contains("index.html"), "no path in the log: {text:?}");
+
+    // A dev launch's page keeps its port.
+    let dev: tauri::Url = "http://localhost:1420/#/chat".parse().expect("a dev URL");
+    assert_eq!(page_origin(&dev), "http://localhost:1420");
+}
+
+/// A web content process that ended is a line in `gui.log`, and the window
+/// is reloaded, once; a reload that failed is a line too. The reload is
+/// counted through [`log_and_reload`]'s parameter; the hook's own
+/// `Webview::reload` over the mock runtime answers `Ok`; the real reload,
+/// and the reconnect to the same `instance_id`, are G-bundle leg A's.
+#[test]
+fn a_web_content_process_that_ended_is_logged_and_the_window_reloaded() {
+    const ENDED: &str = "The window's web content process ended; reloading the window.";
+    let _guard = HomeStoreGuard::set("gui-log-webcontent");
+    let (_app, webview) = mock_webview();
+    let reloads = std::cell::Cell::new(0);
+    with_the_shell_log(|| {
+        reload_after_web_content_ended(webview.as_ref());
+        log_and_reload("main", || {
+            reloads.set(reloads.get() + 1);
+            Ok(())
+        });
+    });
+    assert_eq!(reloads.get(), 1, "the window is reloaded, once");
+
+    let text = gui_log_text();
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains(ENDED)).collect();
+    assert_eq!(lines.len(), 2, "a line for each ended process: {text:?}");
+    for line in lines {
+        assert!(line.contains(" WARN openalpaca_gui: "), "{line}");
+        assert!(line.contains(" webview=\"main\""), "{line}");
+    }
+    assert!(
+        !text.contains("Could not reload"),
+        "the reload answered: {text:?}"
+    );
+
+    // A reload that fails is said, after the line for the ended process.
+    with_the_shell_log(|| log_and_reload("main", || Err(tauri::Error::WebviewNotFound)));
+    let text = gui_log_text();
+    let failed = text
+        .lines()
+        .find(|line| {
+            line.contains("Could not reload the window after its web content process ended")
+        })
+        .unwrap_or_else(|| panic!("no line for the failed reload: {text:?}"));
+    assert!(failed.contains(" ERROR openalpaca_gui: "), "{failed}");
+    assert!(failed.contains(" webview=\"main\""), "{failed}");
+}
+
+/// The panic hook writes a panic to `gui.log` under the scratch store
+/// `OPENALPACA_HOME_STORE` names, as one line naming where and what — an
+/// `assert_eq!`'s message of three lines too, its line breaks written `\n` —
+/// and hands the panic on to the hook that was there before.
+#[test]
+fn the_panic_hook_writes_a_panic_to_gui_log() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _guard = HomeStoreGuard::set("gui-log-panic");
+    let (path, _, _) = open_gui_log().expect("gui.log opens");
+
+    // The stand-in for the hook before the shell's counts this test's
+    // panics only; another test's, on another thread, goes on to the
+    // original hook, so its failure is still printed.
+    let original: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync> =
+        Arc::from(std::panic::take_hook());
+    let this_thread = std::thread::current().id();
+    let handed_on = Arc::new(AtomicUsize::new(0));
+    let (seen, others) = (handed_on.clone(), original.clone());
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == this_thread {
+            seen.fetch_add(1, Ordering::SeqCst);
+        } else {
+            others(info);
+        }
+    }));
+    install_panic_hook(path);
+    let line = line!() + 1;
+    let caught = std::panic::catch_unwind(|| panic!("the shell's test panic {}", 14));
+    let line_of_assert = line!() + 1;
+    let caught_assert = std::panic::catch_unwind(|| assert_eq!(1 + 1, 3, "two lines"));
+    // This test's hook and the one before it go; the original comes back.
+    drop(std::panic::take_hook());
+    std::panic::set_hook(Box::new(move |info| original(info)));
+
+    assert!(caught.is_err() && caught_assert.is_err());
+    assert_eq!(
+        handed_on.load(Ordering::SeqCst),
+        2,
+        "the hook that was there before ran too, for each panic"
+    );
+    let text = gui_log_text();
+    let thread = format!(
+        " on thread '{}' ",
+        std::thread::current().name().unwrap_or("<unnamed>")
+    );
+    let panics: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains(" ERROR openalpaca_gui::panic: the shell panicked "))
+        .filter(|l| l.contains(&thread))
+        .collect();
+    assert_eq!(panics.len(), 2, "a line for each panic: {text:?}");
+    let (panic_line, assert_line) = (panics[0], panics[1]);
+    assert!(
+        panic_line.contains(&format!("src/tests.rs:{line}:")),
+        "where: {panic_line}"
+    );
+    assert!(
+        panic_line.ends_with(": the shell's test panic 14"),
+        "what: {panic_line}"
+    );
+    assert!(
+        assert_line.contains(&format!("src/tests.rs:{line_of_assert}:")),
+        "where: {assert_line}"
+    );
+    assert!(
+        assert_line
+            .ends_with(": assertion `left == right` failed: two lines\\n  left: 2\\n right: 3"),
+        "the whole message, on its one line: {assert_line}"
+    );
+    // Every line of the log is one the subscriber's form begins: a time.
+    for l in text.lines() {
+        assert!(
+            l.starts_with("20") && l.as_bytes().get(4) == Some(&b'-'),
+            "a line without its time: {l:?} in {text:?}"
+        );
+    }
+}

@@ -119,6 +119,14 @@ crates.io, read 2026-11-15, lists `2.0.0-rc.29` and stable `1.0.2`). Tauri's
 own refusals — an argument missing, a command not admitted — stay bare strings,
 shown as they are, with no `kind`.
 
+The shell logs to `state/logs/gui.log` (Q14), rotated under `daemon.log`'s
+caps: its `tracing` lines and Tauri's `log` records, a start-up mark for T0
+and each page load (`openalpaca_gui::startup`, `elapsed_ms` since T0), a
+panic, and the window's web content process ending, after which it reloads the
+window. That adds no command — still the five above — and nothing to the
+daemon's API; the webview's own marks reach a log through an instrumented
+build or the console, never through a command.
+
 Auth on the wire:
 
 - **HTTP** — every `/v1/*` route except `/` and `/v1/health` sits behind
