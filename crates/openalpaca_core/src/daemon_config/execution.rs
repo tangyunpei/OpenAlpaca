@@ -27,9 +27,13 @@ pub struct AgentDefaults {
     /// The per-tool bound every loop reads (N-TOOL-1b, B-11) — the main
     /// loop, the lead, every subagent and both skill tiers: a tool call still
     /// running after this many seconds is cut (and a command killed with
-    /// what it started, R45). A `Command`-backend tool whose own
-    /// `timeout_secs` is above it runs to that figure, up to the ceiling
-    /// (CMD-TIMEOUT-2). A template's `timeout_seconds` does not move it.
+    /// what it started, R45). The sandbox is the one clock for a command
+    /// and a `Command`, `Http`, MCP or plugin tool (TIMEOUT-ONE-CLOCK; a
+    /// builtin's own deadline, `web_fetch`'s among them, still comes first): a `Command`-backend tool runs to its own
+    /// `timeout_secs`, below or above this, up to the ceiling; an
+    /// `Http`-backend tool's own figure or an MCP server's
+    /// `request_timeout_secs` cuts its calls sooner where lower. A
+    /// template's `timeout_seconds` does not move it.
     pub max_tool_runtime_secs: u64,
     /// The most a call's own `timeout_secs` may ask for, on `shell_execute`,
     /// a `Command`-backend tool or a plugin's tool: a larger figure is

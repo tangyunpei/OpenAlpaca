@@ -17,6 +17,7 @@ use crate::tools::extensions::is_withheld_refusal;
 use crate::tools::registry::{HumanApproval, HumanDenial, ToolContext};
 use crate::tools::ToolRegistry;
 use chrono::Utc;
+use openalpaca_api::events::ToolFailureReason;
 use openalpaca_llm::ToolCall;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +29,21 @@ use std::time::Duration;
 /// by this type. Written only by the [`SandboxPolicy::unattended`] arm —
 /// nothing else in the system can produce a refusal with no approver.
 pub const UNAPPROVABLE_EVENT_TYPE: &str = "tool_approval_unavailable";
+
+/// A tool's own figure for how long one of its calls runs, which the
+/// sandbox cuts a call that asked for nothing at (TIMEOUT-ONE-CLOCK,
+/// [`SandboxPolicy::default_runtime_secs`]; `ToolRegistry::own_figure`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnFigure {
+    /// A `Command`-backend tool's `timeout_secs` (its TOML's): its calls'
+    /// default, up to the ceiling, below or above the per-tool bound
+    /// (CMD-TIMEOUT, CMD-TIMEOUT-2).
+    Default(u64),
+    /// An `Http`-backend tool's `timeout_secs` or an MCP server's
+    /// `request_timeout_secs`: a limit of the tool's own, which cuts its
+    /// calls where it is below the bound and never lifts them past it.
+    Limit(u64),
+}
 
 /// Policy governing what a sandboxed agent can do.
 #[derive(Debug, Clone)]
@@ -101,31 +117,33 @@ impl SandboxPolicy {
 
     /// The seconds the sandbox lets one call run (N-TOOL-1b, B-11): what the
     /// call asked for ([`Self::asked_runtime_secs`]), else its default
-    /// ([`Self::default_runtime_secs`]) — `own_secs` is a `Command`-backend
-    /// tool's own `timeout_secs` (`ToolRegistry::command_default_secs`),
-    /// `None` for every other tool. ZCode's `min(asked || default, max)`.
+    /// ([`Self::default_runtime_secs`]) — `own` is the tool's own figure
+    /// (`ToolRegistry::own_figure`), `None` for a tool with none. ZCode's
+    /// `min(asked || default, max)`.
     pub fn runtime_secs_for(
         &self,
         arguments: &serde_json::Value,
         may_ask: bool,
-        own_secs: Option<u64>,
+        own: Option<OwnFigure>,
     ) -> u64 {
         self.asked_runtime_secs(arguments, may_ask)
-            .unwrap_or_else(|| self.default_runtime_secs(own_secs))
+            .unwrap_or_else(|| self.default_runtime_secs(own))
     }
 
-    /// What a call that asked for nothing runs under: the per-tool bound,
-    /// or — for a `Command`-backend tool whose author's `timeout_secs`
-    /// (`own_secs`) is above it — that figure clamped to the ceiling
-    /// (CMD-TIMEOUT-2), never below the bound. An author's figure below the
-    /// bound leaves the bound: that tool's own clock stops it first. One at
-    /// the bound is cut here, the sandbox's the one clock (the backend
-    /// stands back where this cut is at or below its figure).
-    pub fn default_runtime_secs(&self, own_secs: Option<u64>) -> u64 {
+    /// What a call that asked for nothing runs under — the sandbox the one
+    /// clock for every call (TIMEOUT-ONE-CLOCK): a `Command`-backend tool's
+    /// own figure clamped to the ceiling, below the per-tool bound as above
+    /// it; an `Http`-backend tool's or an MCP server's own figure where it is
+    /// below the bound, else the bound, so each such call ends when it ended
+    /// before, now by this clock; the bound for every other tool. The
+    /// backend's own clock stands back past this cut.
+    pub fn default_runtime_secs(&self, own: Option<OwnFigure>) -> u64 {
         let bound = self.max_tool_runtime_secs;
-        own_secs.map_or(bound, |own| {
-            own.min(self.max_tool_runtime_ceiling_secs).max(bound)
-        })
+        match own {
+            None => bound,
+            Some(OwnFigure::Default(own)) => own.min(self.max_tool_runtime_ceiling_secs),
+            Some(OwnFigure::Limit(own)) => own.min(bound),
+        }
     }
 
     /// What a call that may ask for its own figure (`may_ask`: one that runs
@@ -138,10 +156,8 @@ impl SandboxPolicy {
     /// its own argument. A plugin's tool is handed the argument as it was
     /// sent. A `Command`-backend tool's call that asked runs under
     /// this figure alone; one that asked nothing, under its author's own
-    /// `timeout_secs` (its TOML's), its default (CMD-TIMEOUT,
-    /// `ToolContext::asked_runtime_secs`) — the sandbox's cut where that
-    /// figure is at or above the bound, its own clock's below
-    /// ([`Self::default_runtime_secs`], CMD-TIMEOUT-2).
+    /// `timeout_secs` (its TOML's), its default (CMD-TIMEOUT), cut by the
+    /// sandbox at it ([`Self::default_runtime_secs`], TIMEOUT-ONE-CLOCK).
     pub fn asked_runtime_secs(&self, arguments: &serde_json::Value, may_ask: bool) -> Option<u64> {
         if !may_ask {
             return None;
@@ -296,7 +312,8 @@ impl SandboxManager {
     /// 4. Circuit breaker check (block if tool has too many recent failures)
     /// 5. Timeout-wrapped execution
     /// 6. Record outcome for circuit breaker
-    /// 7. Event emission (ToolExecuted or SecurityViolation)
+    /// 7. Event emission (ToolExecuted or SecurityViolation; a cut by step
+    ///    5's clock is a failed ToolExecuted with the reason `timeout`)
     pub async fn execute_tool(
         &self,
         tool_call: &ToolCall,
@@ -379,7 +396,7 @@ impl SandboxManager {
                     tool = %tool_call.name,
                     "Tool refused before its confirmation card: {reason}"
                 );
-                self.emit_tool_executed(agent_id, tool_call, false, 0, task_id, session_id);
+                self.emit_tool_executed(agent_id, tool_call, false, 0, task_id, session_id, None);
                 return Err(reason);
             }
             // Check the approval cache first — a prior user approval (this session)
@@ -602,7 +619,7 @@ impl SandboxManager {
 
         // 4. Circuit breaker check
         if let Err(reason) = self.circuit_breaker.check(agent_id, &tool_call.name) {
-            self.emit_tool_executed(agent_id, tool_call, false, 0, task_id, session_id);
+            self.emit_tool_executed(agent_id, tool_call, false, 0, task_id, session_id, None);
             return Err(reason);
         }
 
@@ -613,16 +630,18 @@ impl SandboxManager {
         // to the per-tool sandbox timeout.
         let is_exempt = self.registry.is_exempt_from_timeout(&tool_call.name);
 
-        // N-TOOL-1b: the sandbox's cut for this call — the policy's bound, or
-        // a command's own `timeout_secs` clamped to the ceiling, and since
-        // PLUGIN-WAIT a plugin tool's as a command's; since CMD-TIMEOUT-2 a
-        // `Command`-backend tool's author's figure above the bound, clamped
-        // to the ceiling, where the call asked nothing.
+        // N-TOOL-1b: the sandbox's cut for this call — a command's own
+        // `timeout_secs` clamped to the ceiling, and since PLUGIN-WAIT a
+        // plugin tool's as a command's; else the tool's own figure
+        // (TIMEOUT-ONE-CLOCK: a `Command`-backend tool's author's, clamped to
+        // the ceiling; an `Http`-backend tool's or an MCP server's, where
+        // below the bound) or the policy's bound. The sandbox is the one
+        // clock for every call it cuts.
         let may_ask = self.registry.is_command_tool(&tool_call.name)
             || self.registry.is_plugin_tool(&tool_call.name);
         let asked_secs = policy.asked_runtime_secs(&tool_call.arguments, may_ask);
-        let own_secs = self.registry.command_default_secs(&tool_call.name);
-        let runtime_secs = policy.runtime_secs_for(&tool_call.arguments, may_ask, own_secs);
+        let own = self.registry.own_figure(&tool_call.name);
+        let runtime_secs = policy.runtime_secs_for(&tool_call.arguments, may_ask, own);
 
         let registry = self.registry.clone();
         let tool_name = tool_call.name.clone();
@@ -639,23 +658,17 @@ impl SandboxManager {
         // 09 §4.2 rule 1): the sandbox's own answer from step 3 or nothing, so
         // a context a caller built with the field set arrives with `None`.
         //
-        // So is the figure a call asked for (CMD-TIMEOUT), under the same
-        // discipline: set here, where this sandbox cuts the call at it, and
-        // `None` on every other path, so a `Command`-backend tool stands its
-        // own clock back only for a cut that is really there — and so is the
-        // figure it cuts at (PLUGIN-WAIT), which a plugin tool waits past, and
-        // the ceiling such a call may ask up to (CMD-TIMEOUT-2), which a
-        // `Command`-backend tool's own kill names in its hint.
+        // So is the figure this sandbox cuts the call at (PLUGIN-WAIT,
+        // TIMEOUT-ONE-CLOCK), under the same discipline: set here, where the
+        // cut is, and `None` on every other path, so a backend stands its own
+        // clock back only for a cut that is really there.
         let ctx_owned = {
             let mut owned = disciplined(ctx);
             if owned.event_bus.is_none() {
                 owned.event_bus = Some(self.bus.clone());
             }
             owned.human_approval = human_approval;
-            owned.asked_runtime_secs = asked_secs.filter(|_| !is_exempt);
             owned.sandbox_cut_secs = (!is_exempt).then_some(runtime_secs);
-            owned.runtime_ceiling_secs =
-                (may_ask && !is_exempt).then_some(policy.max_tool_runtime_ceiling_secs);
             owned
         };
 
@@ -676,13 +689,29 @@ impl SandboxManager {
 
         match result {
             Ok(Ok(output)) => {
-                self.emit_tool_executed(agent_id, tool_call, true, duration_ms, task_id, session_id);
+                self.emit_tool_executed(
+                    agent_id,
+                    tool_call,
+                    true,
+                    duration_ms,
+                    task_id,
+                    session_id,
+                    None,
+                );
                 self.circuit_breaker
                     .record_success(agent_id, &tool_call.name);
                 Ok(output)
             }
             Ok(Err(err)) => {
-                self.emit_tool_executed(agent_id, tool_call, false, duration_ms, task_id, session_id);
+                self.emit_tool_executed(
+                    agent_id,
+                    tool_call,
+                    false,
+                    duration_ms,
+                    task_id,
+                    session_id,
+                    None,
+                );
                 // A withheld capability is a governance decision, not a failure
                 // of the tool (ADR-030's S4). The refusal quotes the
                 // extension's own error detail, which routinely contains
@@ -698,24 +727,41 @@ impl SandboxManager {
             }
             Err(_timeout) => {
                 let reason = format!("Tool '{}' timed out after {runtime_secs}s", tool_call.name);
-                self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
+                // TIMEOUT-ONE-CLOCK: a call this clock cut is a failed tool
+                // run with the reason `timeout` — never a security violation —
+                // so a confirmed call's approval row settles as any failed
+                // run's does.
+                tracing::warn!(agent_id, tool = %tool_call.name, "{reason}");
+                self.emit_tool_executed(
+                    agent_id,
+                    tool_call,
+                    false,
+                    duration_ms,
+                    task_id,
+                    session_id,
+                    Some(ToolFailureReason::Timeout),
+                );
                 // Timeouts are transient — record for circuit breaker
                 self.circuit_breaker
                     .record_failure_for_task(agent_id, &tool_call.name, task_id);
                 // N-TOOL-4 (Z1-13): the limit is enforced here, so a call
                 // cut at it is told what to do here — the hint is this
                 // message's own, not a guess the loop makes from its words.
-                // Below the most it may run it names `timeout_secs`
-                // (N-TOOL-1b): the ceiling, for every call that may ask —
-                // `shell_execute`, a `Command`-backend tool (a call's figure
-                // lifts the tool's own, CMD-TIMEOUT) and, since
-                // PLUGIN-WAIT-2, a plugin's tool — in one text.
+                // Every call that may ask — `shell_execute`, a
+                // `Command`-backend tool (a call's figure lifts the tool's
+                // own, CMD-TIMEOUT) and a plugin's tool (PLUGIN-WAIT-2) — is
+                // told the ceiling in one text; to ask for it with a
+                // `timeout_secs` only where its parameters take one (item
+                // 19): its schema names it, or this call sent one.
                 if may_ask {
+                    let takes_timeout_secs = asked_secs.is_some()
+                        || self.registry.declares_timeout_secs(&tool_call.name);
                     return Err(format!(
                         "{reason}\n{}",
                         crate::tools::platform::timed_out_hint(
                             runtime_secs,
                             policy.max_tool_runtime_ceiling_secs,
+                            takes_timeout_secs,
                         )
                     ));
                 }
@@ -792,6 +838,10 @@ impl SandboxManager {
     /// and previews onto it (R51) — the daemon's insert itself is
     /// unconditional, because the writer's copy is best-effort and an audit
     /// row is not.
+    ///
+    /// `reason` says why a failed run failed, where the sandbox knows:
+    /// `Timeout` for a call its clock cut (TIMEOUT-ONE-CLOCK).
+    #[allow(clippy::too_many_arguments)]
     fn emit_tool_executed(
         &self,
         agent_id: &str,
@@ -800,6 +850,7 @@ impl SandboxManager {
         duration_ms: u64,
         task_id: Option<&str>,
         session_id: Option<&str>,
+        reason: Option<ToolFailureReason>,
     ) {
         self.bus.publish(SystemEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
@@ -809,6 +860,7 @@ impl SandboxManager {
             task_id: task_id.map(|t| t.to_string()),
             session_id: session_id.map(|s| s.to_string()),
             tool_use_id: Some(tool_call.id.clone()).filter(|id| !id.is_empty()),
+            reason,
             timestamp: Utc::now(),
         });
     }
@@ -915,9 +967,7 @@ fn decoded_json_string_call(tool_call: &ToolCall, source: &str) -> Option<ToolCa
 }
 
 /// A copy of `ctx` with neither person-fact set (design 09 §4.2 rule 1),
-/// nor the figure a call asked for (CMD-TIMEOUT), nor the one the sandbox
-/// cuts it at (PLUGIN-WAIT), nor the ceiling it may ask up to
-/// (CMD-TIMEOUT-2).
+/// nor the figure the sandbox cuts it at (PLUGIN-WAIT, TIMEOUT-ONE-CLOCK).
 ///
 /// Every context the sandbox hands onward — to a preview hook, to a denial
 /// hook, to the tool itself — starts from this, and only the sandbox then
@@ -926,9 +976,7 @@ fn disciplined(ctx: &ToolContext) -> ToolContext {
     let mut out = ctx.clone();
     out.human_approval = None;
     out.human_denial = None;
-    out.asked_runtime_secs = None;
     out.sandbox_cut_secs = None;
-    out.runtime_ceiling_secs = None;
     out
 }
 
@@ -977,3 +1025,6 @@ mod precheck_tests;
 
 #[cfg(test)]
 mod json_string_tests;
+
+#[cfg(test)]
+mod one_clock_tests;

@@ -1934,33 +1934,54 @@ fn a_commands_timeout_secs_is_its_bound_up_to_the_ceiling() {
     assert_eq!(asked(serde_json::json!({"timeout_secs": 300}), false), None);
 }
 
-/// CMD-TIMEOUT-2: a call that asks for nothing runs under the bound, or
-/// under a `Command`-backend tool's own figure above it clamped to the
-/// ceiling — never below the bound; what a call asks for still comes first.
+/// TIMEOUT-ONE-CLOCK: a call that asks for nothing runs under the bound,
+/// under a `Command`-backend tool's own figure clamped to the ceiling — below
+/// the bound as above it (CMD-TIMEOUT-2 floored it at the bound) — or under
+/// an `Http`-backend tool's or an MCP server's own figure where it is below
+/// the bound, never past it; what a call asks for still comes first. Was
+/// `a_command_tools_own_figure_above_the_bound_is_its_unasked_cut`.
 #[test]
-fn a_command_tools_own_figure_above_the_bound_is_its_unasked_cut() {
+fn every_tools_own_figure_is_the_sandboxs_unasked_cut() {
     let policy = bounded(120, 600);
     let unasked = serde_json::json!({});
-    let cut = |own: Option<u64>| policy.runtime_secs_for(&unasked, true, own);
+    let cut = |own: Option<OwnFigure>| policy.runtime_secs_for(&unasked, true, own);
     assert_eq!(cut(None), 120);
-    assert_eq!(cut(Some(30)), 120, "below the bound: its own clock first");
-    assert_eq!(cut(Some(120)), 120);
-    assert_eq!(cut(Some(300)), 300);
-    assert_eq!(cut(Some(900)), 600, "clamped to the ceiling");
     assert_eq!(
-        policy.runtime_secs_for(&serde_json::json!({"timeout_secs": 5}), true, Some(300)),
+        cut(Some(OwnFigure::Default(30))),
+        30,
+        "below the bound: the sandbox's cut"
+    );
+    assert_eq!(cut(Some(OwnFigure::Default(120))), 120);
+    assert_eq!(cut(Some(OwnFigure::Default(300))), 300);
+    assert_eq!(
+        cut(Some(OwnFigure::Default(900))),
+        600,
+        "clamped to the ceiling"
+    );
+    assert_eq!(
+        cut(Some(OwnFigure::Limit(30))),
+        30,
+        "a limit below the bound cuts there"
+    );
+    assert_eq!(cut(Some(OwnFigure::Limit(120))), 120);
+    assert_eq!(
+        cut(Some(OwnFigure::Limit(300))),
+        120,
+        "a limit never lifts the bound"
+    );
+    assert_eq!(
+        policy.runtime_secs_for(
+            &serde_json::json!({"timeout_secs": 5}),
+            true,
+            Some(OwnFigure::Default(300))
+        ),
         5,
         "what a call asks for comes first"
     );
     assert_eq!(
-        bounded(120, 200).default_runtime_secs(Some(300)),
+        bounded(120, 200).default_runtime_secs(Some(OwnFigure::Default(300))),
         200,
         "a ceiling below the author's figure clamps it"
-    );
-    assert_eq!(
-        bounded(5, 2).default_runtime_secs(Some(300)),
-        5,
-        "never below the bound, even under a ceiling below it"
     );
 }
 
@@ -2050,9 +2071,10 @@ async fn an_unasked_command_tool_above_the_bound_runs_to_its_own_figure() {
 }
 
 /// CMD-TIMEOUT-2: such a call is cut by the sandbox at its author's figure
-/// — one clock, never its backend's at the same instant — and the hint
-/// names the ceiling, as `shell_execute`'s does, not that figure (a call
-/// may lift it up to the ceiling, CMD-TIMEOUT). Was
+/// — one clock, never its backend's at the same instant. The hint named
+/// the ceiling, as `shell_execute`'s does, not that figure; since
+/// TIMEOUT-ONE-CLOCK (item 19) it names that figure as its limit beside the
+/// ceiling and advises no `timeout_secs`, which its schema does not take. Was
 /// `a_command_tool_cut_below_the_ceiling_is_told_the_ceiling_not_its_own_figure`,
 /// cut at the 1 s bound.
 #[tokio::test]
@@ -2071,9 +2093,10 @@ async fn an_unasked_command_tool_above_the_bound_is_cut_at_its_own_figure() {
         .unwrap_err();
     assert_eq!(
         err,
-        "Tool 'slow_cmd' timed out after 3s\nHint: this tool may run up to 10 seconds here — \
-         call it again with a larger timeout_secs, or split the work into smaller calls that \
-         each finish sooner."
+        format!(
+            "Tool 'slow_cmd' timed out after 3s\n{}",
+            crate::tools::platform::timed_out_hint(3, 10, false)
+        )
     );
 }
 
@@ -2122,9 +2145,10 @@ async fn an_unasked_command_tool_at_the_bound_is_cut_by_the_sandbox() {
         .unwrap_err();
     assert_eq!(
         err,
-        "Tool 'slow_cmd' timed out after 2s\nHint: this tool may run up to 10 seconds here — \
-         call it again with a larger timeout_secs, or split the work into smaller calls that \
-         each finish sooner."
+        format!(
+            "Tool 'slow_cmd' timed out after 2s\n{}",
+            crate::tools::platform::timed_out_hint(2, 10, false)
+        )
     );
 }
 
@@ -2150,9 +2174,10 @@ async fn a_calls_timeout_secs_lifts_a_command_tools_own_figure() {
 }
 
 /// The default half: a call that asks for nothing runs under its author's
-/// figure, killed by its backend at 1 s though the sandbox would allow 5 —
-/// and since CMD-TIMEOUT-2 told, as the sandbox's cut is, that it may ask
-/// for up to the 10 s ceiling.
+/// figure, 1 s though the bound is 5 — since TIMEOUT-ONE-CLOCK cut there by
+/// the sandbox, not killed by its backend (CMD-TIMEOUT-2's "Command timed
+/// out after 1s"), and told its 1 s limit and the 10 s ceiling, with no
+/// `timeout_secs` advised, since its schema takes none.
 #[tokio::test]
 async fn a_command_tool_asked_for_nothing_stops_at_its_own_figure() {
     let gp = crate::test_util::GuardedProject::new();
@@ -2169,9 +2194,10 @@ async fn a_command_tool_asked_for_nothing_stops_at_its_own_figure() {
         .unwrap_err();
     assert_eq!(
         err,
-        "Command timed out after 1s\nHint: this tool may run up to 10 seconds here — \
-         call it again with a larger timeout_secs, or split the work into smaller calls that \
-         each finish sooner."
+        format!(
+            "Tool 'slow_cmd' timed out after 1s\n{}",
+            crate::tools::platform::timed_out_hint(1, 10, false)
+        )
     );
 }
 
@@ -2203,7 +2229,8 @@ async fn a_command_tool_asking_above_the_ceiling_is_cut_at_the_ceiling() {
 
 /// One clock: a call that asked for 2 s, below the 10 s ceiling, is cut by
 /// the sandbox at its figure — never by its backend at the same instant,
-/// with the backend's words — and is told it may ask for up to the ceiling.
+/// with the backend's words — and is told it may ask for up to the ceiling:
+/// it sent a `timeout_secs`, so its parameters take one (item 19).
 #[tokio::test]
 async fn a_command_tool_cut_at_its_asked_figure_is_cut_by_the_sandbox() {
     let gp = crate::test_util::GuardedProject::new();
@@ -2227,11 +2254,12 @@ async fn a_command_tool_cut_at_its_asked_figure_is_cut_by_the_sandbox() {
 }
 
 /// The figure is the sandbox's to set: a context a caller built with one is
-/// handed on without it, so a call that asked for nothing is still killed at
-/// its author's 1 s, with the backend's words — and so is a ceiling
-/// (CMD-TIMEOUT-2): the hint names the policy's 10 s, not the caller's 99.
+/// handed on without it, so a call that asked for nothing is still cut at
+/// its author's 1 s, not the caller's 10 — by the sandbox since
+/// TIMEOUT-ONE-CLOCK — and the hint names the policy's 10 s ceiling. Was a
+/// forged asked figure and ceiling, fields TIMEOUT-ONE-CLOCK removed.
 #[tokio::test]
-async fn a_caller_supplied_asked_figure_is_discarded() {
+async fn a_caller_supplied_cut_is_discarded() {
     let gp = crate::test_util::GuardedProject::new();
     let sandbox =
         SandboxManager::with_defaults(Arc::new(sleeping_command_tool("3", 1)), EventBus::default());
@@ -2241,8 +2269,7 @@ async fn a_caller_supplied_asked_figure_is_discarded() {
         arguments: serde_json::json!({}),
     };
     let ctx = ToolContext {
-        asked_runtime_secs: Some(10),
-        runtime_ceiling_secs: Some(99),
+        sandbox_cut_secs: Some(10),
         ..gp.ctx()
     };
     let err = sandbox
@@ -2251,9 +2278,10 @@ async fn a_caller_supplied_asked_figure_is_discarded() {
         .unwrap_err();
     assert_eq!(
         err,
-        "Command timed out after 1s\nHint: this tool may run up to 10 seconds here — \
-         call it again with a larger timeout_secs, or split the work into smaller calls that \
-         each finish sooner."
+        format!(
+            "Tool 'slow_cmd' timed out after 1s\n{}",
+            crate::tools::platform::timed_out_hint(1, 10, false)
+        )
     );
 }
 
@@ -2300,8 +2328,10 @@ fn slow_plugin_tool() -> ToolRegistry {
 
 /// A plugin tool's call may ask for its own figure, as a command's may: its
 /// `timeout_secs` lifts the bound for that call, clamped to the ceiling; one
-/// that asks nothing is cut at the bound, and — below the ceiling — told it
-/// may ask for more, in the words a command's cut gets (PLUGIN-WAIT-2).
+/// that asks nothing is cut at the bound, and — below the ceiling — told the
+/// ceiling in the words a command's cut gets (PLUGIN-WAIT-2); since
+/// TIMEOUT-ONE-CLOCK (item 19) its limit and the ceiling, with no
+/// `timeout_secs` advised, since its schema takes none.
 #[tokio::test]
 async fn a_plugin_tools_call_may_ask_for_its_own_figure() {
     let sandbox = SandboxManager::with_defaults(Arc::new(slow_plugin_tool()), EventBus::default());
@@ -2336,9 +2366,10 @@ async fn a_plugin_tools_call_may_ask_for_its_own_figure() {
         .unwrap_err();
     assert_eq!(
         cut,
-        "Tool 'slow-plugin::slow' timed out after 1s\nHint: this tool may run up to 600 seconds \
-         here — call it again with a larger timeout_secs, or split the work into smaller calls \
-         that each finish sooner."
+        format!(
+            "Tool 'slow-plugin::slow' timed out after 1s\n{}",
+            crate::tools::platform::timed_out_hint(1, 600, false)
+        )
     );
 }
 

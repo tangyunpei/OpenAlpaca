@@ -802,8 +802,11 @@ mcp_compatible = true
     /// **Past the sandbox's figure a plugin tool is cut with the sandbox's
     /// message**, "Tool '<name>' timed out after <n>s", not the plugin
     /// channel's: the sandbox's clock is the one that ends it. Cut below the
-    /// ceiling, it is told it may ask for more, as a command is
-    /// (PLUGIN-WAIT-2). The row stays `Enabled` — a cut is no crash.
+    /// ceiling, it is told its limit and the ceiling and, since its schema
+    /// takes no `timeout_secs`, advised none (TIMEOUT-ONE-CLOCK, item 19;
+    /// PLUGIN-WAIT-2 told it to ask). The cut is a failed tool run with
+    /// the reason `timeout`, never a security violation. The row stays
+    /// `Enabled` — a cut is no crash.
     #[tokio::test]
     async fn past_the_sandboxs_figure_a_plugin_tool_is_cut_with_its_message() {
         let tmp = tempfile::tempdir().unwrap();
@@ -811,6 +814,7 @@ mcp_compatible = true
         let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
         let (pid, _group) = load_named_stub(&h).await;
 
+        let mut events = h.bus.subscribe();
         let error = call_through_sandbox(
             &h,
             2,
@@ -820,11 +824,38 @@ mcp_compatible = true
         .expect_err("the stub answers after the sandbox's bound");
         assert_eq!(
             error,
-            "Tool 'named-test::echo' timed out after 2s\nHint: this tool may run up to 600 \
-             seconds here — call it again with a larger timeout_secs, or split the work into \
-             smaller calls that each finish sooner.",
-            "the call was not cut by the sandbox's clock, or not told it may ask for more"
+            "Tool 'named-test::echo' timed out after 2s\nHint: this tool's limit here is 2 \
+             seconds (the most any call may run is 600 seconds). Split the work into smaller \
+             calls that each finish sooner.",
+            "the call was not cut by the sandbox's clock, or was sent after a timeout_secs its \
+             schema does not take"
         );
+        let (mut executed, mut violations) = (Vec::new(), 0);
+        while let Ok(event) = events.try_recv() {
+            match event {
+                openalpaca_core::events::SystemEvent::ToolExecuted {
+                    tool_name,
+                    success,
+                    reason,
+                    ..
+                } if tool_name == "named-test::echo" => executed.push((success, reason)),
+                openalpaca_core::events::SystemEvent::SecurityViolation { tool_name, .. }
+                    if tool_name == "named-test::echo" =>
+                {
+                    violations += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            executed,
+            vec![(
+                false,
+                Some(openalpaca_api::events::ToolFailureReason::Timeout)
+            )],
+            "a cut call is a failed tool run with the reason timeout"
+        );
+        assert_eq!(violations, 0, "a timeout is no security violation");
         assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
 
         tear_down_named_stub(&h, pid).await;

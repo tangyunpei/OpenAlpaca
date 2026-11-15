@@ -125,6 +125,9 @@ pub enum SystemEvent {
         /// the audit row with the session log's `tool_call`/`tool_result`
         /// records. Also not carried on the wire.
         tool_use_id: Option<String>,
+        /// Why a failed run failed, where the sandbox names it: a call its
+        /// clock cut is `Timeout` (TIMEOUT-ONE-CLOCK). `None` otherwise.
+        reason: Option<openalpaca_api::events::ToolFailureReason>,
         timestamp: DateTime<Utc>,
     },
     /// An LLM call completed

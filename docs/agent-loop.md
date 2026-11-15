@@ -936,29 +936,37 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   tool or a plugin's tool may send `timeout_secs` (a plugin's tool is
   handed it as sent, PLUGIN-WAIT): the sandbox cuts it at that figure, a
   larger one at `max_tool_runtime_ceiling_secs` (600 s) — clamped, never
-  refused. The sandbox's figure is an outer bound: a tool with a clock of
-  its own stops at whichever comes first, with its own error, not the
-  sandbox's. A `Command`-backend tool's author's own `timeout_secs` (its
-  TOML's, 30 s by default) is its calls' default: a call that sends none
-  is killed there by the tool's own clock where that figure is below
-  `max_tool_runtime_secs` (120 s), else cut there by the sandbox, clamped
-  to the ceiling (CMD-TIMEOUT-2), and one that sends `timeout_secs` lifts
-  it, running under the sandbox's figure alone (CMD-TIMEOUT); an
-  `Http`-backend tool's
-  request stops at its TOML's `timeout_secs` (30 s by default); an MCP
-  tool at its server's `request_timeout_secs` (`config/mcp.toml`, 30 s by
-  default); a builtin at a deadline of its own, `web_fetch`'s among them.
-  A plugin tool has none beside the sandbox's: it waits for its plugin's
-  answer past the sandbox's figure, so the sandbox's cut, with its own
-  message, ends a slow one (PLUGIN-WAIT); only a call made outside the
-  sandbox still waits 60 s, which no key sets ("timeout waiting for
-  plugin response"). A cut plugin call leaves no request waiting in its
-  plugin's channel, and its late answer is discarded; the plugin itself
-  is not told — no cancel is sent — and runs the call on (PLUGIN-WAIT-2).
-  A call the sandbox cuts below the most it may run — the ceiling — is
-  told it may ask for more, naming it, whether a command or a plugin's
-  tool, in one text (PLUGIN-WAIT-2), and so is a `Command`-backend tool
-  its own clock stopped (CMD-TIMEOUT-2). The loop
+  refused. The sandbox is the one clock for a `Command`-backend, an
+  `Http`-backend, a plugin's and an MCP tool (TIMEOUT-ONE-CLOCK): each
+  backend's own clock stands back past the sandbox's cut. A
+  `Command`-backend tool's author's own `timeout_secs` (its TOML's, 30 s
+  by default) is its calls' default: a call that sends none is cut there
+  by the sandbox, clamped to the ceiling, below `max_tool_runtime_secs`
+  (120 s) as above it, and one that sends `timeout_secs` lifts it
+  (CMD-TIMEOUT); an `Http`-backend tool's TOML `timeout_secs` (30 s by
+  default) and an MCP tool's server's `request_timeout_secs`
+  (`config/mcp.toml`, 30 s by default) are cut there by the sandbox where
+  below the bound, else at the bound, so each such call ends when it did
+  before (an MCP reconnect before the call keeps the server's figure). A
+  builtin stops at a deadline of its own where it has one, `web_fetch`'s
+  among them, with its own error. A plugin tool waits for its plugin's
+  answer past the sandbox's figure (PLUGIN-WAIT); only a call made
+  outside the sandbox still waits 60 s, which no key sets ("timeout
+  waiting for plugin response"), as an `Http` or MCP call outside it
+  keeps its own figure. A cut plugin call leaves no request waiting in
+  its plugin's channel, and its late answer is discarded; the plugin
+  itself is not told — no cancel is sent — and runs the call on
+  (PLUGIN-WAIT-2). **A call the sandbox cuts is a failed tool run:**
+  `tool_executed` with `success: false` and `reason: "timeout"`, counted
+  by the circuit breaker as before, never a `security_violation`, so a
+  confirmed call's approval row settles ("timed out after …"). A call the
+  sandbox cuts below the most it may run — the ceiling — is told the
+  ceiling, whether a command or a plugin's tool, in one text, and to ask
+  for it with a larger `timeout_secs` only where its parameters take one
+  (its schema names it, or the call sent one); otherwise its own limit
+  beside the ceiling, with no `timeout_secs` advised, and to split the
+  work (item 19). At the ceiling it is told that is
+  the most this tool may run here (item 21, kept). The loop
   writes both figures into `shell_execute`'s definition before the first
   request, so the model is told the limits it really runs under; the
   registered definition names none, and the shell's own bound (3600 s,

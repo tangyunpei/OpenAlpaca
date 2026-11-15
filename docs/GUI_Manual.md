@@ -618,7 +618,7 @@ on how it ended:
 
 | How the prompt ended | What the transcript shows |
 |---|---|
-| You approved it here | `Approved · <tool> approved · waiting for the tool to run…`, upgraded to `returned in 1.4s` or `failed after …` when the tool reports back |
+| You approved it here | `Approved · <tool> approved · waiting for the tool to run…`, upgraded to `returned in 1.4s`, `failed after …` or, for a call the sandbox's time limit cut, `timed out after …` when the tool reports back |
 | You denied it here | `Denied · <tool> denied · the agent was told to skip it.` |
 | Nobody answered in time | `Timed out · <tool> timed out — not run. Nobody answered in time, so the agent continued without it.` |
 | It was answered somewhere else (another window, `openalpaca tasks confirmations approve`), or the run went away | the card clears, with no row — the window does not claim an answer you did not give |
@@ -743,7 +743,9 @@ action group or, for a finished run, a terminal banner, then three cards:
   could never attribute to a run. Each row wears one of five tags (`tool`,
   `steer`, `artifact`, `spawn`, `run`) and a sentence built from the stored
   row. A file the run wrote reads `<name> · v<n>`, or `<name> · in the project`
-  for one it wrote into its project. A tool prompt reads
+  for one it wrote into its project. A tool call that failed reads
+  `<tool> · failed`, or `<tool> · timed out` where the sandbox's time limit
+  cut it. A tool prompt reads
   `<tool> · awaiting approval`, and how it ended is its own row:
   `<tool> · approved`, `denied`, `timed out`, or `withdrawn` (the run went away
   before anyone answered). A row the window cannot fill a sentence for shows

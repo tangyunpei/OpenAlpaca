@@ -1213,6 +1213,157 @@ command = "{}"
 }
 
 // ============================================================================
+// TIMEOUT-ONE-CLOCK — the sandbox is the one clock for an MCP call too
+// ============================================================================
+
+/// One call to `srv__echo` through a sandbox whose per-tool bound is
+/// `bound_secs`, on the harness's bus; what the bus carried for it after:
+/// each `ToolExecuted`'s success and reason, and the `SecurityViolation`s.
+async fn call_through_the_sandbox(
+    h: &Harness,
+    bound_secs: u64,
+) -> (
+    Result<String, String>,
+    Vec<(bool, Option<openalpaca_api::events::ToolFailureReason>)>,
+    usize,
+) {
+    use openalpaca_core::events::SystemEvent;
+    use openalpaca_core::security::capabilities::Allowlist;
+    use openalpaca_core::security::sandbox::{SandboxManager, SandboxPolicy};
+
+    let mut events = h.bus.subscribe();
+    let sandbox = SandboxManager::with_defaults(Arc::clone(&h.registry), h.bus.clone());
+    let policy = SandboxPolicy {
+        agent_id: "one-clock".to_string(),
+        allowed_capabilities: Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: bound_secs,
+        max_tool_runtime_ceiling_secs: 600,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+        unattended: false,
+    };
+    let call = openalpaca_llm::ToolCall {
+        id: "tc_clock".to_string(),
+        name: "srv__echo".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let ctx = openalpaca_core::tools::registry::ToolContext {
+        agent_id: Some("one-clock".to_string()),
+        ..Default::default()
+    };
+    let answer = sandbox.execute_tool(&call, &policy, &ctx).await;
+    let (mut executed, mut violations) = (Vec::new(), 0);
+    while let Ok(event) = events.try_recv() {
+        match event {
+            SystemEvent::ToolExecuted {
+                tool_name,
+                success,
+                reason,
+                ..
+            } if tool_name == "srv__echo" => executed.push((success, reason)),
+            SystemEvent::SecurityViolation { tool_name, .. } if tool_name == "srv__echo" => {
+                violations += 1;
+            }
+            _ => {}
+        }
+    }
+    (answer, executed, violations)
+}
+
+/// A stub that hangs every call, declared with `request_timeout_secs`, up
+/// and `Enabled`.
+async fn hanging_server(h: &Harness, request_timeout_secs: u64) -> Stub {
+    let stub = stub_server(
+        h.path(),
+        "clock",
+        StubOpts {
+            hang_call: true,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&format!(
+        r#"[defaults]
+connect_timeout_secs = 10
+request_timeout_secs = {request_timeout_secs}
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.srv]
+transport = "stdio"
+command = "{}"
+"#,
+        stub.script.display()
+    ));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    stub
+}
+
+/// TIMEOUT-ONE-CLOCK: an MCP call whose server's `request_timeout_secs`
+/// (1 s) is below the bound (3 s) is cut by the sandbox at that figure — the
+/// client's own deadline no longer ends it first with "MCP server ...
+/// failed" — and is a failed tool run with the reason `timeout`, never a
+/// security violation. A cut is no crash: the row stays `Enabled`.
+#[tokio::test]
+async fn an_mcp_call_is_cut_by_the_sandbox_at_its_servers_figure() {
+    let h = Harness::new(1);
+    let stub = hanging_server(&h, 1).await;
+
+    let (answer, executed, violations) = call_through_the_sandbox(&h, 3).await;
+    let _hang = stub
+        .sleeps()
+        .into_iter()
+        .map(KillOnFail)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answer.as_ref().map_err(String::as_str),
+        Err("Tool 'srv__echo' timed out after 1s"),
+        "the sandbox cut the call at the server's figure"
+    );
+    assert_eq!(
+        executed,
+        vec![(
+            false,
+            Some(openalpaca_api::events::ToolFailureReason::Timeout)
+        )]
+    );
+    assert_eq!(violations, 0, "a timeout is no security violation");
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+}
+
+/// One whose server's figure (10 s) is above the bound (1 s) is cut at the
+/// bound, as before — and is now a failed tool run, not a violation.
+#[tokio::test]
+async fn an_mcp_call_past_the_bound_is_cut_at_the_bound_as_a_failed_run() {
+    let h = Harness::new(1);
+    let stub = hanging_server(&h, 10).await;
+
+    let (answer, executed, violations) = call_through_the_sandbox(&h, 1).await;
+    let _hang = stub
+        .sleeps()
+        .into_iter()
+        .map(KillOnFail)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answer.as_ref().map_err(String::as_str),
+        Err("Tool 'srv__echo' timed out after 1s")
+    );
+    assert_eq!(
+        executed,
+        vec![(
+            false,
+            Some(openalpaca_api::events::ToolFailureReason::Timeout)
+        )]
+    );
+    assert_eq!(violations, 0, "a timeout is no security violation");
+}
+
+// ============================================================================
 // N-MCP-4 — remote tool names in the providers' alphabet
 // ============================================================================
 

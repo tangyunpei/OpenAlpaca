@@ -660,7 +660,7 @@ A stdio server's `command` is looked up on the daemon's `PATH`, which comes from
 
 There is **no per-tool switch**: a whole server (or plugin) is turned off with `openalpaca ext disable mcp <server>` — see Extensions below. A disabled server's tools leave every surface and the gate refuses them.
 
-A streamable-HTTP server (`transport = "http"`) is bounded by idleness, never by a total deadline: a streamed answer is no longer cut at 30 s by the connection — it runs until the call's own deadline, the server's `request_timeout_secs` (default 30), so raise that for a long-running tool — up to `[execution.agent_defaults] max_tool_runtime_secs` in `config/daemon.toml` (120 by default): the sandbox ends every MCP call there, whatever the server's figure, with `Tool '<server>__<tool>' timed out after 120s`, and an MCP call may not ask for more. The connection itself is given up only when nothing at all arrives for five minutes, or for `request_timeout_secs` when that is longer, so a stream the server holds open between events is not cut either. A redirect is followed only on the server's own origin (scheme, host and port), for up to ten hops, and only for a server given no credentials: a server with `auth` or `extra_headers` (`extra_headers_from` included) follows no redirect at all, since the credential and every extra header would travel with the request. So a server whose `url` relies on a redirect — `http://` to `https://` included, or any redirect when credentials are configured — stops connecting: its row reads `Failed` with reason `config_invalid`, its detail saying ``server redirected to <origin>; set `url` to the canonical endpoint``, and it connects again once `url` is the endpoint the server redirected to. A call that meets such a redirect mid-session returns the same message and is never retried.
+A streamable-HTTP server (`transport = "http"`) is bounded by idleness, never by a total deadline: a streamed answer is no longer cut at 30 s by the connection — it runs until the call's own limit, the server's `request_timeout_secs` (default 30), so raise that for a long-running tool — up to `[execution.agent_defaults] max_tool_runtime_secs` in `config/daemon.toml` (120 by default), and an MCP call may not ask for more. The sandbox is the one clock for an MCP call (TIMEOUT-ONE-CLOCK): it cuts the call at the lower of the two figures, with `Tool '<server>__<tool>' timed out after <n>s`, and the call is a failed tool run (`tool_executed`, `success: false`, `reason: "timeout"`), never a `security_violation`; the client's own deadline waits past that cut, and a reconnect before the call keeps `request_timeout_secs`. The connection itself is given up only when nothing at all arrives for five minutes, or for `request_timeout_secs` when that is longer, so a stream the server holds open between events is not cut either. A redirect is followed only on the server's own origin (scheme, host and port), for up to ten hops, and only for a server given no credentials: a server with `auth` or `extra_headers` (`extra_headers_from` included) follows no redirect at all, since the credential and every extra header would travel with the request. So a server whose `url` relies on a redirect — `http://` to `https://` included, or any redirect when credentials are configured — stops connecting: its row reads `Failed` with reason `config_invalid`, its detail saying ``server redirected to <origin>; set `url` to the canonical endpoint``, and it connects again once `url` is the endpoint the server redirected to. A call that meets such a redirect mid-session returns the same message and is never retried.
 
 ## Extensions (MCP servers + plugins)
 
@@ -1612,7 +1612,15 @@ only for the rest of the turn or run that gave it, as
 [Tool confirmations](#tool-confirmations) says — its card names the folder the
 command runs in, and the card is the one place to stop it: read the command
 before you approve it. Only an operating-system sandbox would change this, and
-none is used in this version. A command, a command tool or a skill script that
+none is used in this version. A command, command tool, HTTP tool, MCP tool or
+plugin tool call has one clock, the sandbox's (TIMEOUT-ONE-CLOCK): a command
+tool's own `timeout_secs` and an HTTP tool's under `config/tools` are where the
+sandbox cuts it (an HTTP tool's, or an MCP server's `request_timeout_secs`,
+only below `[execution.agent_defaults] max_tool_runtime_secs`), and a cut call
+is a failed tool run with the reason `timeout`, never a `security_violation`.
+A builtin with a deadline of its own — `web_fetch`'s, `web_search`'s
+`timeout_secs`, a skill script's `timeout_secs` — still stops at it first, with
+its own error and no reason. A command, a command tool or a skill script that
 runs past its time limit, or whose run is cancelled, is killed at once, with
 the processes it started (on Windows, the command alone; a process that leaves
 its process group, as `setsid` or a program that turns itself into a
@@ -1987,7 +1995,10 @@ list is the whole union. Every frame also carries `ts` and `instance_id`.
 - `connector_status`, `key_status_changed`
 - `chat_stream_started`, `chat_stream_ended`
 - `orchestrator_config_changed`, `daemon_config_changed`
-- `security_violation`, `circuit_breaker_tripped`, `tool_executed`
+- `security_violation`, `circuit_breaker_tripped`, `tool_executed` — a
+  failed run the sandbox's clock cut also carries `reason: "timeout"`
+  (TIMEOUT-ONE-CLOCK; a timeout is never a `security_violation`), as does its
+  persisted row's `detail`; every other frame carries no `reason`
 - `tool_confirmation_requested` and its twin `tool_confirmation_resolved`
   (`request_id`, `agent_id`, `tool_name`, `outcome`, `stream_id`, `lane_key`,
   `task_id`) — sent for every way a prompt stops being pending, with `outcome`

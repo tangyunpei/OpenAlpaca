@@ -124,6 +124,7 @@ pub fn spawn_event_bridge(
                     task_id,
                     session_id,
                     tool_use_id,
+                    reason,
                     ..
                 } => {
                     tracing::debug!(
@@ -137,6 +138,7 @@ pub fn spawn_event_bridge(
                         task_id.as_deref(),
                         session_id.as_deref(),
                         tool_use_id.as_deref(),
+                        reason,
                     );
                 }
                 openalpaca_core::events::SystemEvent::LlmCallCompleted {
@@ -1090,6 +1092,7 @@ mod tests {
             task_id: Some("t-1".into()),
             session_id: None,
             tool_use_id: None,
+            reason: None,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {
@@ -1222,6 +1225,37 @@ mod tests {
         cancel.cancel();
     }
 
+    /// TIMEOUT-ONE-CLOCK: a run the sandbox cut crosses the bridge with its
+    /// reason, so a client reads it as a failed run that timed out.
+    #[tokio::test]
+    async fn test_a_timed_out_run_bridges_its_reason() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::ToolExecuted {
+            agent_id: "orchestrator".into(),
+            tool_name: "slow_cmd".into(),
+            success: false,
+            duration_ms: 1000,
+            task_id: None,
+            session_id: None,
+            tool_use_id: None,
+            reason: Some(openalpaca_api::events::ToolFailureReason::Timeout),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ToolExecuted {
+                success, reason, ..
+            } => {
+                assert!(!success);
+                assert_eq!(
+                    reason,
+                    Some(openalpaca_api::events::ToolFailureReason::Timeout)
+                );
+            }
+            other => panic!("Expected ToolExecuted, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
     /// A frame from outside any run bridges with `task_id: None` — the bridge
     /// never invents attribution.
     #[tokio::test]
@@ -1235,6 +1269,7 @@ mod tests {
             task_id: None,
             session_id: None,
             tool_use_id: None,
+            reason: None,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {

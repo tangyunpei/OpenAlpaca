@@ -927,9 +927,10 @@ description = "Search query"
 type = "http"                    # or "command"
 url = "https://api.example.com/search?q={query}"
 method = "GET"                   # default: GET
-timeout_secs = 30                # default: 30, range: 1-300; a command
-                                 # tool's is its calls' default (above
-                                 # max_tool_runtime_secs too), which a
+timeout_secs = 30                # default: 30, range: 1-300; the sandbox
+                                 # cuts a call here (an http tool's only
+                                 # below max_tool_runtime_secs); a command
+                                 # tool's is its calls' default, which a
                                  # call's own timeout_secs may lift up to
                                  # max_tool_runtime_ceiling_secs (600)
 
@@ -1022,7 +1023,9 @@ examples.
 ```toml
 [defaults]
 connect_timeout_secs = 30       # default 30
-request_timeout_secs = 30       # default 30
+request_timeout_secs = 30       # default 30; a tool call is cut here by
+                                # the sandbox where below the per-tool
+                                # bound (TIMEOUT-ONE-CLOCK)
 max_reconnect_attempts = 3      # default 3
 reconnect_backoff_ms = 100      # default 100
 
@@ -1162,8 +1165,10 @@ tools into the shared registry when the plugin loads:
   `tools/list` and every other request without a figure of its own do
   (`initialize` waits 10 s, `shutdown` 3 s) (PLUGIN-WAIT); a call may send
   `timeout_secs`, as a command's may, and the plugin is handed it as sent,
-  and a call cut below the ceiling is told it may ask for more, in the
-  words a command's cut gets (PLUGIN-WAIT-2; *Recovery hints*, below);
+  and a call cut below the ceiling is told the ceiling in the words a
+  command's cut gets (PLUGIN-WAIT-2; *Recovery hints*, below), and to ask
+  for it only where its schema names `timeout_secs` or the call sent one
+  (TIMEOUT-ONE-CLOCK, item 19);
 - a wait that ends without its answer — cut, dropped by its caller or timed
   out — takes its request's entry out of the channel's pending map
   (`StdioChannel::call_with_timeout`'s `PendingEntry`, PLUGIN-WAIT-2), so a
@@ -1274,7 +1279,10 @@ The agent identity comes from `ctx.agent_id` (falls back to `"unknown"`).
    are only recorded when `is_transient_tool_error()` classifies them as
    transient **and** the error is not an extension-withheld refusal
 7. Emit `SystemEvent::ToolExecuted` or `SystemEvent::SecurityViolation`
-   (violations are also persisted to `event_log` when a DB is attached)
+   (violations are also persisted to `event_log` when a DB is attached);
+   a call step 5's clock cut is a `ToolExecuted` with `success: false` and
+   `reason: Some(ToolFailureReason::Timeout)`, never a violation
+   (TIMEOUT-ONE-CLOCK)
 
 ### 11.2 SandboxPolicy
 
@@ -1304,20 +1312,25 @@ is set by the caller that knows where the work came from.
 `shell_execute`, `Command`-backend or plugin tool call's `timeout_secs` (a
 whole number above 0) clamped to the ceiling
 (`SandboxPolicy::asked_runtime_secs`), else the call's default
-(`SandboxPolicy::default_runtime_secs`): `max_tool_runtime_secs`, or a
-`Command`-backend tool's own `timeout_secs` above it, clamped to the
-ceiling (`ToolRegistry::command_default_secs`, CMD-TIMEOUT-2); the
-figure reaches every tool as `ToolContext::sandbox_cut_secs`, and a plugin
-tool waits past it (PLUGIN-WAIT). A `Command`-backend tool's own
-`timeout_secs` (its TOML's) is its calls' default: it still kills a call
-that asked for nothing where it is below the sandbox's cut, and stands back
-for one that asked and for one the sandbox cuts at or below its figure,
-which the sandbox alone cuts (CMD-TIMEOUT, CMD-TIMEOUT-2; the asked figure
-reaches the backend as `ToolContext::asked_runtime_secs`). Its own kill,
-"Command timed out after Ns", carries the hint the sandbox's cut gives,
-naming the ceiling the sandbox put on the context
-(`ToolContext::runtime_ceiling_secs`); outside the sandbox it carries
-none.  The daemon's
+(`SandboxPolicy::default_runtime_secs`) from the tool's own figure
+(`ToolRegistry::own_figure`, `OwnFigure`): a `Command`-backend tool's own
+`timeout_secs` (`Default`), clamped to the ceiling, below the bound as
+above it; an `Http`-backend tool's `timeout_secs` or an MCP server's
+`request_timeout_secs` (`Limit`), where below `max_tool_runtime_secs`;
+else that bound. The sandbox is the one clock for every call it cuts
+(TIMEOUT-ONE-CLOCK): the figure reaches the backend as
+`ToolContext::sandbox_cut_secs`, and each of these backends with a clock
+of its own stands back (a builtin's own deadline, `web_fetch`'s among them,
+still ends its call first) — a `Command`-backend tool's to 3600 s, the ceiling's highest
+setting, as `shell_execute`'s does; a plugin's wait (PLUGIN-WAIT), an
+`Http`-backend tool's request and an MCP call
+(`McpClient::call_tool_within`, its reconnect keeping
+`request_timeout_secs`) to 5 s past the cut (`PAST_THE_SANDBOX`). Only a
+call no sandbox cuts keeps the backend's own figure ("Command timed out
+after Ns", "HTTP request failed: …", the MCP client's timeout). A cut call
+is a failed run: `SystemEvent::ToolExecuted` with `success: false` and
+`reason: Some(ToolFailureReason::Timeout)`, counted by the breaker, never a
+`SecurityViolation`.  The daemon's
 `security.auto_approve_confirmations` config flag forces
 `auto_approve = true` globally.  `auto_approve` is read before
 `unattended`.
@@ -1726,7 +1739,8 @@ the failure is known — the loop adds none:
 | `file_write` | the system refuses the write (`PermissionDenied`), on the file or on a folder it makes above it | check the file's permissions, or write it under another path |
 | `web_fetch` | HTTP 404 | use web_search to find the correct URL first |
 | `web_fetch` | the request or the body read ran out of time | the URL may be unreachable; try a different source |
-| `shell_execute`, `Command` tools, plugin tools | cut by the sandbox below the most it may run — the ceiling — or, a `Command` tool, stopped below it by its own `timeout_secs` | this tool may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller calls that each finish sooner (`tools::platform::timed_out_hint`; one text for every tool that may ask, PLUGIN-WAIT-2) |
+| `shell_execute`, `Command` tools, plugin tools | cut by the sandbox below the most it may run — the ceiling — where the tool's schema names `timeout_secs` or the call sent one | this tool may run up to that most here — call it again with a larger timeout_secs, or split the work into smaller calls that each finish sooner (`tools::platform::timed_out_hint`; one text for every tool that may ask, PLUGIN-WAIT-2) |
+| `Command` tools, plugin tools | cut by the sandbox below the ceiling where the schema names no `timeout_secs` and the call sent none (TIMEOUT-ONE-CLOCK, item 19) | this tool's limit here is N seconds (the most any call may run is that most). Split the work into smaller calls that each finish sooner (`tools::platform::timed_out_hint`; no `timeout_secs` advised or denied) |
 | `shell_execute`, `Command` tools, plugin tools | cut by the sandbox at that most, or (`shell_execute`) by the shell's own 3600 s | that is the most this tool may run here; split the work into smaller calls that each finish sooner (`tools::platform::TIMED_OUT_HINT`) |
 | `shell_execute` | exit 127 | check that the command is installed, or give its full path |
 
@@ -1798,7 +1812,7 @@ authoritative.
 SandboxManager.execute_tool()
          │ emit
 SystemEvent::ToolExecuted { agent_id, tool_name, success, duration_ms,
-                            task_id, session_id, tool_use_id }
+                            task_id, session_id, tool_use_id, reason }
          │ EventBus broadcast
 Daemon event bridge (apps/openalpacad/src/event_bridge.rs → events/)
          ├──► ServerEvent::ToolExecuted (WebSocket broadcast)

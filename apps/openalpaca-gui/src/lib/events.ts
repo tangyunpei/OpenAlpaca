@@ -59,7 +59,7 @@ export type ServerEvent =
   | { type: "orchestrator_config_changed"; model: string; ts: string; instance_id: string; _id: number }
   | { type: "security_violation"; agent_id: string; tool_name: string; reason: string; task_id: string | null; ts: string; instance_id: string; _id: number }
   | { type: "circuit_breaker_tripped"; agent_id: string; tool_name: string; consecutive_failures: number; reset_after_secs: number; task_id: string | null; ts: string; instance_id: string; _id: number }
-  | { type: "tool_executed"; agent_id: string; tool_name: string; success: boolean; duration_ms: number; task_id: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "tool_executed"; agent_id: string; tool_name: string; success: boolean; duration_ms: number; task_id: string | null; reason?: "timeout"; ts: string; instance_id: string; _id: number }
   | { type: "llm_call_completed"; agent_id: string; model: string; input_tokens: number; output_tokens: number; cost_usd: number; task_id: string | null; ts: string; instance_id: string; _id: number }
   | { type: "skill_catalog_updated"; skill_name: string; action: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_invocation_started"; request_id: string; skill_id: string; query_preview: string; ts: string; instance_id: string; _id: number }

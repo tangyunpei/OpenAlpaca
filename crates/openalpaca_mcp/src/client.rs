@@ -515,6 +515,13 @@ impl McpClient {
         self.inner.protocol_version.get()
     }
 
+    /// The server's `request_timeout_secs`: the deadline [`Self::call_tool`]
+    /// puts on a call, and the one a caller that cuts the call itself reads
+    /// as the server's figure ([`Self::call_tool_within`]).
+    pub fn request_timeout(&self) -> Duration {
+        self.inner.config.request_timeout
+    }
+
     /// Health check — sends an MCP `ping`.
     pub async fn ping(&self) -> Result<(), McpError> {
         let peer = self.current_peer().await?;
@@ -671,12 +678,43 @@ impl McpClient {
         }
     }
 
-    /// Invoke a tool.
+    /// Invoke a tool, under the server's `request_timeout`.
     pub async fn call_tool(
         &self,
         name: &str,
         arguments: serde_json::Value,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<rmcp::model::CallToolResult, McpError> {
+        self.call_tool_under(name, arguments, cancel_token, None)
+            .await
+    }
+
+    /// Invoke a tool whose caller cuts the call itself (TIMEOUT-ONE-CLOCK:
+    /// the daemon's sandbox, the one clock for every tool call). The
+    /// pre-send reconnect keeps the server's `request_timeout`, a connect
+    /// bound; the call itself runs under `deadline`, which the caller sets
+    /// past its own cut, so the caller's clock is the one that ends the call
+    /// once sent (a reconnect hung to its own bound can tie with a cut at the
+    /// same figure).
+    pub async fn call_tool_within(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+        deadline: Duration,
+    ) -> Result<rmcp::model::CallToolResult, McpError> {
+        self.call_tool_under(name, arguments, cancel_token, Some(deadline))
+            .await
+    }
+
+    /// [`Self::call_tool`] (`deadline` `None`) and
+    /// [`Self::call_tool_within`].
+    async fn call_tool_under(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+        deadline: Option<Duration>,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
         use std::sync::atomic::Ordering;
         let params = rmcp::model::CallToolRequestParams::new(name.to_string());
@@ -690,24 +728,51 @@ impl McpClient {
             }
         };
 
-        // One deadline spans the pre-send reconnect and the call. Once the
-        // request may have left, it is never sent again: a timeout, a server
+        // Without a caller's `deadline`, one deadline, the server's
+        // `request_timeout`, spans the pre-send reconnect and the call; with
+        // one, the reconnect keeps the server's own (a connect bound) and the
+        // call runs under the caller's. Once the request may have left, it is never sent again: a timeout, a server
         // error, a transport error or a transport that closes mid-call goes
         // back to the caller, and the next call's pre-send check respawns a
         // dead child (N-MCP-1; extension design §3.6 item 1).
         // The request runs on a cloned peer, never under the service lock
         // (N-MCP-3), and the lock is taken only inside this deadline for the
-        // instant the clone takes.
-        let op = async {
-            self.ensure_connected().await?;
-            let peer = self.current_peer().await?;
-            let result = peer
-                .call_tool(params)
-                .await
-                .map_err(|e| self.call_error(e))?;
-            Ok::<_, McpError>(result)
+        // instant the clone takes. Under the daemon's sandbox the cut is at
+        // most `request_timeout`, so a reconnect that hangs to its own bound
+        // when the cut equals it may end in the same timer tick as the cut
+        // and be reported as this client's timeout, not the sandbox's (kept:
+        // the connect bound stays, as before; an owner item,
+        // TIMEOUT-ONE-CLOCK).
+        let request_timeout = self.inner.config.request_timeout;
+        let outcome = match deadline {
+            None => {
+                let op = async {
+                    self.ensure_connected().await?;
+                    let peer = self.current_peer().await?;
+                    let result = peer
+                        .call_tool(params)
+                        .await
+                        .map_err(|e| self.call_error(e))?;
+                    Ok::<_, McpError>(result)
+                };
+                with_cancel_and_timeout(op, cancel_token, request_timeout).await
+            }
+            Some(deadline) => {
+                let connect = async {
+                    self.ensure_connected().await?;
+                    self.current_peer().await
+                };
+                match with_cancel_and_timeout(connect, cancel_token, request_timeout).await {
+                    Ok(peer) => {
+                        let op =
+                            async { peer.call_tool(params).await.map_err(|e| self.call_error(e)) };
+                        with_cancel_and_timeout(op, cancel_token, deadline).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
         };
-        match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
+        match outcome {
             Ok(result) => {
                 self.inner.attempt_counter.store(0, Ordering::Relaxed);
                 Ok(result)

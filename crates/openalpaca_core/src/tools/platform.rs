@@ -56,18 +56,25 @@ pub const TIMED_OUT_HINT: &str = "Hint: that is the most this tool may run here;
 /// What a call the sandbox cut after `secs` is told, where it may run up to
 /// `most_secs` (N-TOOL-1b, B-11) — the ceiling a call's `timeout_secs` is
 /// clamped to, for `shell_execute`, a `Command`-backend tool (CMD-TIMEOUT)
-/// and, since PLUGIN-WAIT-2, a plugin's tool alike; since CMD-TIMEOUT-2
-/// what a `Command`-backend tool its own clock stopped is told too: below
-/// that most, that its `timeout_secs` can give it longer; at it,
-/// [`TIMED_OUT_HINT`]. One text for every tool that may ask.
-pub fn timed_out_hint(secs: u64, most_secs: u64) -> String {
-    if secs < most_secs {
+/// and a plugin's tool (PLUGIN-WAIT-2) alike. Below that most it advises a
+/// larger `timeout_secs` only where the tool's parameters take one
+/// (`takes_timeout_secs`, TIMEOUT-ONE-CLOCK item 19): never advice its
+/// schema may refuse. Otherwise it names the tool's limit and the ceiling as
+/// facts and says to split the work, neither advising nor denying a
+/// `timeout_secs`. At it, [`TIMED_OUT_HINT`] (item 21, kept).
+pub fn timed_out_hint(secs: u64, most_secs: u64, takes_timeout_secs: bool) -> String {
+    if secs >= most_secs {
+        TIMED_OUT_HINT.to_string()
+    } else if takes_timeout_secs {
         format!(
             "Hint: this tool may run up to {most_secs} seconds here — call it again with a \
              larger timeout_secs, or split the work into smaller calls that each finish sooner."
         )
     } else {
-        TIMED_OUT_HINT.to_string()
+        format!(
+            "Hint: this tool's limit here is {secs} seconds (the most any call may run is \
+             {most_secs} seconds). Split the work into smaller calls that each finish sooner."
+        )
     }
 }
 
