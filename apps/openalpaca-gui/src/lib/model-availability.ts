@@ -30,8 +30,8 @@ function turnOnSentence(where: NoteAudience): string {
  * (L3) — `null` when there is nothing to say.
  *
  * `[orchestrator] model` is allowed to name a model this install cannot serve:
- * every shipped agent template pins a Claude id, and on a machine with only a
- * local provider the ladder answers with something else. A picker that shows
+ * a Claude id seeded before the provider had a key, say, and on a machine with
+ * only a local provider the ladder answers with something else. A picker that shows
  * the configured id alone is then a picker that disagrees with every reply.
  *
  * It is also allowed to name **nothing**: an install that has never set one

@@ -3992,7 +3992,7 @@ async fn the_resume_record_names_the_trim_and_the_rounds_it_dropped() {
 // ── M5: the run is budgeted against the model that answers ──────────────
 
 /// A router shaped like an Ollama-only install: the configured default is the
-/// Claude id every shipped template pins, Anthropic is **not** loaded, and the
+/// Claude id every shipped template pinned before C8, Anthropic is **not** loaded, and the
 /// one loaded provider holds a local 8 192-token model.
 fn ollama_only_router(provider: Arc<ScriptedProvider>) -> Arc<LlmRouter> {
     let router = LlmRouter::single_provider(
@@ -8253,9 +8253,13 @@ async fn an_omitted_agent_id_spawns_general_agent() {
     let ids = run_ids_in(&reply);
     assert_eq!(ids.len(), 1, "{reply}");
     assert!(ids[0].starts_with("general_agent::"), "{reply}");
+    // C8 (M-10): the reply names the model the child runs on — a worker
+    // with no `model:` is `inherit`, here the router default, as no lead
+    // slot or lead model is handed to this tool.
     assert!(
         reply.starts_with(&format!(
-            "Subagent 'general_agent' (the default: no agent_id given) spawned (run_id: '{}'), ",
+            "Subagent 'general_agent' (the default: no agent_id given) spawned (run_id: '{}') \
+             on claude-sonnet-5-5 (your model), ",
             ids[0]
         )),
         "{reply}"
@@ -8283,6 +8287,57 @@ async fn an_omitted_agent_id_spawns_general_agent() {
     assert_eq!(opens[0].data["agent_id_defaulted"], true);
     assert_eq!(opens[1].data["template"], "code_agent");
     assert_eq!(opens[1].data["agent_id_defaulted"], false);
+    // C8 (M-10): `subagent_open_records_the_model_choice` — what chose the
+    // child's model and the id it resolved to before the call.
+    assert_eq!(
+        opens[0].data["model_choice"],
+        serde_json::json!({"choice": "inherit", "per_call": false})
+    );
+    assert_eq!(opens[0].data["model"], "claude-sonnet-5-5");
+}
+
+/// C8 (M-10): a per-call model is recorded on the lane's `subagent_open` as
+/// the call's choice, with the id it resolved to.
+#[tokio::test(start_paused = true)]
+async fn subagent_open_records_a_per_call_model_choice() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let shared = sa1_shared(&["code_agent"]);
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-lead");
+    shared.register_task_session_log("task-1", handle.clone());
+    let spawn = sa1_spawn_tool(shared, Arc::new(SubagentTracker::new()), "lead_agent");
+
+    let reply = spawn
+        .execute(&serde_json::json!({
+            "agent_id": "code_agent",
+            "objective": "Fix it.",
+            "model": "claude-opus-5-5"
+        }))
+        .await
+        .unwrap();
+    assert!(
+        reply.contains(") on claude-opus-5-5 (as you asked: claude-opus-5-5), "),
+        "{reply}"
+    );
+
+    assert!(handle.flush().await);
+    let records = read_records(&dir.path().join("sess-lead")).unwrap();
+    let open = records
+        .iter()
+        .find(|r| r.kind == "subagent_open")
+        .expect("a lane opened");
+    assert_eq!(
+        open.data["model_choice"],
+        serde_json::json!({"choice": "claude-opus-5-5", "per_call": true})
+    );
+    assert_eq!(open.data["model"], "claude-opus-5-5");
 }
 
 /// **A-1.** `null` and an empty string read as an omitted `agent_id`.

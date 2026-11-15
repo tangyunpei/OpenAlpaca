@@ -406,3 +406,54 @@ describe("AgentsSection sources and copies not used (§2.7 R-4, C5)", () => {
     expect(screen.queryByText(/not used/)).toBeNull();
   });
 });
+
+describe("AgentsSection model chip (C8, M-10)", () => {
+  /**
+   * The chip shows the template's `model:` as written — `inherit`, an alias
+   * or an id — and a template with no `model:` line reads `inherit`, which
+   * is what it means since C8 (M-1b): never a blank where a model runs.
+   */
+  it("shows the word a template names, and inherit when it names none", () => {
+    state.templates = [
+      template({ id: "lead_agent", name: "Lead", model: "strong" }),
+      template({ id: "explore_agent", name: "Explore", model: "fast" }),
+      template({ id: "mine", name: "Mine" }),
+    ];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByRole("button", { name: "strong" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "fast" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "inherit" })).toBeInTheDocument();
+  });
+
+  /**
+   * A plugin's template runs out of process on its plugin's own model
+   * (M-7d), so it shows no model chip — neither `inherit` nor the line its
+   * file writes, which no run of it reads. Added in C8's review.
+   */
+  it("shows no model chip for a plugin's template", () => {
+    state.templates = [
+      template({
+        id: "notion_writer",
+        name: "Notion writer",
+        source: "plugin",
+        plugin: "notion",
+        path: null,
+      }),
+      template({
+        id: "notion_reader",
+        name: "Notion reader",
+        source: "plugin",
+        plugin: "notion",
+        path: null,
+        model: "strong",
+      }),
+    ];
+
+    render(<AgentsSection />);
+
+    expect(screen.queryByRole("button", { name: "inherit" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "strong" })).toBeNull();
+  });
+});

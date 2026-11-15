@@ -14,8 +14,7 @@ denied_capabilities:
   - "shell_execute"
   - "web_access"
 verbosity: "detailed"
-model: "claude-sonnet-4-6"
-fallback_models: []
+model: "inherit"
 max_tool_calls: 10
 ---
 

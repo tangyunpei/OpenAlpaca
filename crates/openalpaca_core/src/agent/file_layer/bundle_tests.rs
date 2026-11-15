@@ -8,8 +8,9 @@
 use super::*;
 use crate::agent::registry::{NotUsed, NotUsedReason, TemplateLayer, TemplateState};
 use crate::bundled::test_support::{
-    LEAD_AGENT_9B1EA1D3, LEAD_AGENT_E9F15916, SYSTEM_AGENT_2BC29A80, SYSTEM_AGENT_9ED847FE,
-    SYSTEM_AGENT_EB98B820, WRITING_AGENT_2BC29A80, WRITING_AGENT_EB98B820, step_7, step_8,
+    EXPLORE_AGENT_E00EE04A, LEAD_AGENT_9B1EA1D3, LEAD_AGENT_E9F15916, SYSTEM_AGENT_2BC29A80,
+    SYSTEM_AGENT_9ED847FE, SYSTEM_AGENT_EB98B820, WRITING_AGENT_2BC29A80, WRITING_AGENT_EB98B820,
+    step_7, step_8,
 };
 use crate::bundled::{BUNDLED_AGENTS, ManualEdit, ShippedCopy, ShippedVersion, bundled_templates};
 use crate::test_util::HomeStoreGuard;
@@ -89,6 +90,41 @@ fn set_aside(path: &Path, version: ShippedVersion, edit: Option<ManualEdit>) -> 
         reason: NotUsedReason::UneditedCopy(ShippedCopy { version, edit }),
         plugin: None,
     }
+}
+
+/// C8 (V-1, V-3): `explore_agent.md` as this branch shipped it before C8
+/// (`e00ee04a`, naming `claude-haiku-4-5-20251001`) is set aside — the
+/// bundled template runs and its model is `fast` — while the same file with
+/// its `model:` line edited by the person is theirs: it overrides the
+/// bundled template and keeps the id it names. On the parent the unedited
+/// copy was the current version, set aside as current.
+#[test]
+fn before_c8_an_unedited_explore_agent_is_set_aside_and_an_edited_one_kept() {
+    let store = Store::new();
+    let path = store.write("explore_agent.md", EXPLORE_AGENT_E00EE04A);
+    store.rescan(LoadMode::Start);
+    assert_eq!(store.layer("explore_agent"), TemplateLayer::Bundled);
+    assert_eq!(
+        store.not_used("explore_agent"),
+        [set_aside(&path, ShippedVersion::Earlier, None)]
+    );
+    let template = store.registry.get_template("explore_agent").unwrap();
+    assert_eq!(template.frontmatter.model.as_deref(), Some("fast"));
+
+    let edited = EXPLORE_AGENT_E00EE04A.replace(
+        "model: \"claude-haiku-4-5-20251001\"",
+        "model: \"claude-sonnet-5-5\"",
+    );
+    assert_ne!(edited, EXPLORE_AGENT_E00EE04A, "the line is edited");
+    store.write("explore_agent.md", &edited);
+    store.rescan(LoadMode::Reload);
+    assert_eq!(store.layer("explore_agent"), TemplateLayer::File);
+    let template = store.registry.get_template("explore_agent").unwrap();
+    assert_eq!(
+        template.frontmatter.model.as_deref(),
+        Some("claude-sonnet-5-5"),
+        "the person's id is kept"
+    );
 }
 
 /// §1.2, V-1: `system_agent.md` as an earlier build seeded it — with the

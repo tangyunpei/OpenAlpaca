@@ -167,6 +167,40 @@ entry goes to `spawn_subagent` whole, and one that cannot spawn (no
 objective, an unknown or withheld agent) is its own `[n] FAILED (…)` line
 while the entries around it are spawned and their run ids returned.
 
+**Which model each runs on** (SA-3, C8; `runner/model_choice.rs`). A
+template's `model:` and a spawn's optional `model` are `inherit` (also no
+value), an alias (`fast`, `balanced`, `strong`) or a model id, resolved
+**before** the loop config is built from the agent, so the window, the
+context budget's telemetry, the cost check and the usage row read the id
+that answers; the router never sees a word. The lead's choice resolves at
+the top of `run_lead_agent`, on a copy of its `SubAgent` (the template and
+the registry's instance keep the word): `inherit` is
+`LlmRouter::effective_default_model()`, an alias `resolve_alias` against
+it, an id itself; a template without `orchestration` borrowed as a lead
+follows `lead_agent`'s choice when its own is `inherit` — the choice a run of
+`lead_agent` gets, a set stored over it included (`AgentRegistry::run_model`).
+`LeadAgentResult.lead_model` carries the resolved id, which the dispatcher's
+usage row and completion report name when no round answered. The lead's
+loop writes the model that answered each round into
+`LoopConfig::answering_model`, a slot `SpawnSubagentTool` reads: a
+subagent's `inherit` is that model (or the lead's resolved one while the
+slot is empty or names a model the router cannot route), and its alias
+resolves against it. A per-call `model` outranks the template's, is checked
+before the spawn reserves anything, and is refused — listing the first 30
+routable ids, how many more, and what each alias names — when nothing
+routable answers it; never substituted. A plugin-backed template refuses one.
+An alias or `inherit` empties the agent's `fallback_models` (its model is
+routable); an id keeps them as its request chain and walks the ladder at the
+call when it is not routable. The template's `max_cost_per_task` caps the
+child whatever model it runs on. Both spawn definitions carry the `model`
+parameter, whose description, built per lead run (`ModelMenu`), names each
+alias's model here, the routable ids and the model the lead's id reaches
+(`LlmRouter::would_answer`), reading the aliases without announcing them
+(`LlmRouter::peek_alias`); both stay
+non-strict (M-9). The reply names the child's model, what chose it and that
+the lead stays on its own; `subagent_open` records `model_choice` (`choice`,
+`per_call`) and `model`.
+
 Subagents can be plugin-backed: when the spawned template's source is
 `AgentSource::Plugin` (contributed by a plugin manifest), the spawn path
 skips the internal loop entirely and `runner/plugin_agent.rs` drives the

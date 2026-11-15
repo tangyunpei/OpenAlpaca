@@ -12,9 +12,7 @@ capabilities:
   - "artifact_write"
   - "read_result"
 verbosity: "detailed"
-model: "claude-sonnet-4-6"
-fallback_models:
-  - "claude-opus-4-6"
+model: "strong"
 max_tool_calls: 50
 max_cost_per_task: 3.0
 ---

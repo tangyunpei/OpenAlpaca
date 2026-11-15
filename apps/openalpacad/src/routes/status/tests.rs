@@ -423,7 +423,7 @@ async fn no_router_means_no_llm_block() {
 }
 
 /// **L3.** `[orchestrator] model` names a Claude id — right when Anthropic is
-/// configured, and exactly what every shipped agent template pins — while the
+/// configured, and what every shipped agent template pinned before C8 — while the
 /// only enabled provider is a local Ollama. The ladder substitutes, and the
 /// substitution is reported rather than left in the log: a client can say
 /// "configured: X — not available, using Y".

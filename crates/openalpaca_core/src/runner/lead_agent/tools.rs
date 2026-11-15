@@ -26,7 +26,7 @@ use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
-use openalpaca_llm::{ChatMessage, LlmRouter, ToolDefinition};
+use openalpaca_llm::{ChatMessage, LlmRouter, ModelChoice, ToolDefinition};
 use openalpaca_storage::Database;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -292,6 +292,13 @@ pub struct SpawnSubagentTool {
     /// subagent's tool context — it names the scratch folder a run with no
     /// project works in. `None` for a run with no conversation.
     conversation_id: Option<String>,
+    /// C8, M-1: the model that answered the lead's last round, which a
+    /// subagent on `inherit` runs on. `None` outside a lead's run.
+    answering_model: Option<crate::runner::model_choice::AnsweringModel>,
+    /// C8, M-6e: the model the lead's own choice resolved to — a child's
+    /// parent while the slot is empty, and the model the spawn's reply says
+    /// the lead stays on.
+    lead_model: Option<String>,
 }
 
 impl SpawnSubagentTool {
@@ -363,7 +370,31 @@ impl SpawnSubagentTool {
             compose_engine,
             unattended,
             conversation_id,
+            answering_model: None,
+            lead_model: None,
         }
+    }
+
+    /// C8: the lead's answering-model slot and its own resolved model, which
+    /// a subagent's `inherit`, an alias and a per-call model resolve against
+    /// (M-1, M-4, M-7).
+    pub fn with_lead_models(
+        mut self,
+        answering_model: crate::runner::model_choice::AnsweringModel,
+        lead_model: Option<String>,
+    ) -> Self {
+        self.answering_model = Some(answering_model);
+        self.lead_model = lead_model;
+        self
+    }
+
+    /// The model a child's `inherit` and aliases resolve against now.
+    fn parent_model(&self) -> Option<String> {
+        crate::runner::model_choice::parent_of_child(
+            &self.router,
+            self.answering_model.as_ref(),
+            self.lead_model.as_deref(),
+        )
     }
 
     pub fn spawn_count(&self) -> usize {
@@ -524,6 +555,20 @@ impl BuiltInTool for SpawnSubagentTool {
             .get("objective")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: objective".to_string())?;
+        // C8, M-7: a per-call model — `inherit`, an alias or a model id — or
+        // none (absent, `null`, empty), the template's.
+        let per_call_model = match arguments.get("model") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(model)) if model.trim().is_empty() => None,
+            Some(serde_json::Value::String(model)) => Some(model.clone()),
+            Some(_) => {
+                return Err(
+                    "model must be a string — inherit, fast, balanced, strong or a model id — \
+                     or left out for the template's model"
+                        .to_string(),
+                );
+            }
+        };
 
         tracing::info!(
             target_agent = agent_id,
@@ -560,13 +605,38 @@ impl BuiltInTool for SpawnSubagentTool {
             ));
         }
 
+        // C8: a per-call model is checked before anything is reserved or
+        // registered — refused, with what can be chosen, when it names
+        // nothing routable (M-7), and refused for a plugin-backed template,
+        // which runs out of process on its plugin's own model (M-7d).
+        let plugin_backed = matches!(
+            self.shared_context
+                .agent_registry
+                .get_template(agent_id)
+                .map(|t| t.source),
+            Some(AgentSource::Plugin { .. })
+        );
+        let per_call = match per_call_model {
+            None => None,
+            Some(_) if plugin_backed => {
+                return Err(format!(
+                    "'{agent_id}' runs out of process on its plugin's own model; leave model out."
+                ));
+            }
+            Some(value) => Some(crate::runner::model_choice::per_call(
+                &self.router,
+                &value,
+                self.parent_model().as_deref(),
+            )?),
+        };
+
         // N-LEAD-6: the run's lifetime bound, before anything is registered —
         // a refused spawn leaves no instance, lane or task behind.
         self.reserve_spawn()?;
 
         // 3. Spawn a new instance from the agent template
         //    (agent_id is really a template_id — the LLM picks from the template catalog)
-        let agent = self
+        let mut agent = self
             .shared_context
             .agent_registry
             .spawn_instance(agent_id, self.task_id.clone())
@@ -589,6 +659,35 @@ impl BuiltInTool for SpawnSubagentTool {
                     None => format!("Cannot spawn agent '{}': {}", agent_id, e),
                 }
             })?;
+        // C8 (M-6e): the child's model resolves here, before its loop config,
+        // its window and its records read it — the call's choice first, else
+        // its template's word (`inherit` for none, M-1b) against the model
+        // that answered the lead (M-1). An alias or `inherit` names a
+        // routable model, so the template's `fallback_models` are no chain
+        // for it; an explicit id keeps them, and walks the ladder at the call
+        // if it is not routable, as it always has (M-6d). Never written back:
+        // the template and the registry's instance keep the word (M-7b).
+        let (choice, chosen_per_call) = match &per_call {
+            Some((choice, _)) => (choice.clone(), true),
+            None => (
+                crate::runner::model_choice::template_choice(agent.llm_config.model.as_deref()),
+                false,
+            ),
+        };
+        let child_model = match &per_call {
+            Some((_, model)) => Some(model.clone()),
+            None => crate::runner::model_choice::resolve(
+                &self.router,
+                &choice,
+                self.parent_model().as_deref(),
+            ),
+        };
+        if !plugin_backed {
+            agent.llm_config.model = child_model.clone();
+            if chosen_per_call || crate::runner::model_choice::is_word(&choice) {
+                agent.llm_config.fallback_models.clear();
+            }
+        }
         let instance_id = agent.id.clone();
         // The id the lead knows this subagent by — returned below, and named
         // on the lane's open and close records so a resumed run can rebuild
@@ -655,6 +754,15 @@ impl BuiltInTool for SpawnSubagentTool {
                         "role": "subagent",
                         "run_id": run_id,
                         "objective": objective.chars().take(500).collect::<String>(),
+                        // C8 (M-10): what chose the child's model — its
+                        // template's word or the lead's call — and the id it
+                        // resolved to before the call; the model that
+                        // answered is the lane's rounds'.
+                        "model_choice": {
+                            "choice": crate::runner::model_choice::choice_word(&choice),
+                            "per_call": chosen_per_call,
+                        },
+                        "model": if plugin_backed { None } else { child_model.clone() },
                         // P-17: a plugin-backed template says so, so a reader
                         // never has to guess which extension ran the lane.
                         "plugin_id": self
@@ -1324,10 +1432,37 @@ impl BuiltInTool for SpawnSubagentTool {
         } else {
             ""
         };
+        // M-10: the model the child runs on, what chose it, and that the
+        // lead's own stays — without it a lead reads a child's model as its
+        // own switch.
+        let model_note = match (&child_model, plugin_backed) {
+            (Some(model), false) => {
+                let stay = self
+                    .answering_model
+                    .as_ref()
+                    .and_then(crate::runner::model_choice::read_answering)
+                    .or_else(|| self.lead_model.clone())
+                    .map(|lead| format!("; you stay on {lead}"))
+                    .unwrap_or_default();
+                let word = crate::runner::model_choice::choice_word(&choice);
+                let why = if chosen_per_call {
+                    format!("as you asked: {word}{stay}")
+                } else {
+                    match &choice {
+                        ModelChoice::Inherit => "your model".to_string(),
+                        ModelChoice::Alias(_) => format!("its template's {word}{stay}"),
+                        ModelChoice::Id(_) => format!("its template's model{stay}"),
+                    }
+                };
+                format!(" on {model} ({why})")
+            }
+            _ => String::new(),
+        };
         Ok(format!(
-            "Subagent '{agent_id}'{default_note} spawned (run_id: '{run_id}'), {start}. Spawn \
-             more subagents if needed, then call `wait_for_subagents` to collect all results, \
-             or `check_subagent_status` with this run_id to check individually."
+            "Subagent '{agent_id}'{default_note} spawned (run_id: '{run_id}'){model_note}, \
+             {start}. Spawn more subagents if needed, then call `wait_for_subagents` to \
+             collect all results, or `check_subagent_status` with this run_id to check \
+             individually."
         ))
     }
 }
@@ -1417,8 +1552,25 @@ const OBJECTIVE_DESCRIPTION: &str = "A self-contained brief for the subagent: th
      (what its answer must hold, and any file or workspace key it is to write). The subagent \
      is given neither the user's request nor this conversation, only this brief.";
 
-/// Tool definition for `spawn_subagents_batch`.
+/// Tool definition for `spawn_subagents_batch`, with the `model`
+/// parameter's description of no install ([`ModelMenu::default`]); a lead's
+/// run builds it with its own menu
+/// ([`spawn_subagents_batch_tool_definition_with_models`]).
+///
+/// [`ModelMenu::default`]: crate::runner::model_choice::ModelMenu
 pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> ToolDefinition {
+    spawn_subagents_batch_tool_definition_with_models(
+        templates,
+        &crate::runner::model_choice::ModelMenu::default(),
+    )
+}
+
+/// Tool definition for `spawn_subagents_batch`, its items' `model`
+/// parameter describing `menu` (M-8).
+pub fn spawn_subagents_batch_tool_definition_with_models(
+    templates: &[AgentTemplate],
+    menu: &crate::runner::model_choice::ModelMenu,
+) -> ToolDefinition {
     let agent_descriptions: Vec<String> = templates
         .iter()
         .map(|t| {
@@ -1465,6 +1617,10 @@ pub fn spawn_subagents_batch_tool_definition(templates: &[AgentTemplate]) -> Too
                             "objective": {
                                 "type": "string",
                                 "description": OBJECTIVE_DESCRIPTION
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": menu.description()
                             }
                         },
                         "required": ["objective"]
@@ -2018,6 +2174,20 @@ pub fn register_workflow_tools(
 pub fn spawn_subagent_tool_definition_from_templates(
     templates: &[AgentTemplate],
 ) -> ToolDefinition {
+    spawn_subagent_tool_definition_with_models(
+        templates,
+        &crate::runner::model_choice::ModelMenu::default(),
+    )
+}
+
+/// [`spawn_subagent_tool_definition_from_templates`] with the `model`
+/// parameter describing `menu` (M-8): what each alias is here, the routable
+/// ids and the lead's own model, read when the lead's run starts. The
+/// choices are in the parameter and nowhere else (§7 O-8 (a)).
+pub fn spawn_subagent_tool_definition_with_models(
+    templates: &[AgentTemplate],
+    menu: &crate::runner::model_choice::ModelMenu,
+) -> ToolDefinition {
     let agent_descriptions: Vec<String> = templates
         .iter()
         .map(|t| {
@@ -2059,6 +2229,10 @@ pub fn spawn_subagent_tool_definition_from_templates(
                 "objective": {
                     "type": "string",
                     "description": OBJECTIVE_DESCRIPTION
+                },
+                "model": {
+                    "type": "string",
+                    "description": menu.description()
                 }
             },
             "required": ["objective"]

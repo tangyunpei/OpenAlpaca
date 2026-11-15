@@ -93,7 +93,13 @@ impl Default for AgentPreset {
 /// Per-agent LLM configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentLlmConfig {
-    /// Override model for this agent (None = inherit from orchestrator).
+    /// The agent's model as its template writes it: `inherit` (also `None`),
+    /// an alias (`fast`, `balanced`, `strong`) or a model id (C8, M-1, M-2).
+    /// `inherit` is, for a subagent, the model that answered its lead; for
+    /// the lead, the model a request naming none reaches (a borrowed lead's
+    /// follows the shipped lead's choice, M-1a). The word is resolved to an
+    /// id before a loop is built from the agent
+    /// (`runner::model_choice`), never sent as one.
     #[serde(default)]
     pub model: Option<String>,
     /// Fallback models if the primary is unavailable.

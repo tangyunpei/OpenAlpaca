@@ -272,6 +272,21 @@ pub async fn initialize_services(
     // in agent frontmatter can be validated against the known set.)
     agents::load_agent_templates(config_base_dir, db, &shared_context, &tool_registry)?;
 
+    // C8 (M-6f): a `[fallback_chains]` key of the parsed `llm.toml` that one
+    // of the earlier bundle's Claude pins names was written to steer the
+    // shipped templates; since they name `inherit` or an alias it reaches
+    // nothing, so the start names it, once each — unless a template's run
+    // (its stored set over it) still names the key.
+    let template_models =
+        openalpaca_core::runner::model_choice::template_models(&shared_context.agent_registry);
+    for line in openalpaca_core::runner::model_choice::stale_fallback_chain_lines(
+        llm_config.as_ref().and_then(|c| c.fallback_chains.as_ref()),
+        llm_router.as_deref(),
+        &template_models,
+    ) {
+        info!("{line}");
+    }
+
     // The MCP crash reaper starts **after** the templates are loaded: its T1
     // step 3 intersects the withdrawn capabilities with the agent registry, and
     // a crash inside the boot window would otherwise report a dependent scan

@@ -650,7 +650,7 @@ fn all_nine_templates_name_memory_read() {
 /// and the icon (`temperature`, sent nowhere, is out of all nine since
 /// TEMPLATE-TEMPERATURE: `no_shipped_template_sets_temperature`). A table of
 /// the values before SA-1, checked against the bundled bytes. The `model:`
-/// lines are pinned too: SA-3's commit (C8), not SA-1's, moves them.
+/// lines are pinned too: SA-3's commit (C8), not SA-1's, moved them.
 #[test]
 fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
     struct Kept {
@@ -667,9 +667,14 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
         model: &'static str,
         fallback_models: &'static [&'static str],
     }
-    const SONNET: &str = "claude-sonnet-4-6";
-    const HAIKU: &str = "claude-haiku-4-5-20251001";
-    const OPUS: &[&str] = &["claude-opus-4-6"];
+    // C8 (SA-3, M-6, M-6a, M-6b): the lead names `strong`, the two
+    // read-only profiles `fast`, the six others `inherit`, and none keeps a
+    // `fallback_models` list (the parent's named `claude-sonnet-4-6`,
+    // `claude-haiku-4-5-20251001` and the `claude-opus-4-6` retry).
+    const INHERIT: &str = "inherit";
+    const FAST: &str = "fast";
+    const STRONG: &str = "strong";
+    const NONE: &[&str] = &[];
     let table = [
         Kept {
             id: "code_agent",
@@ -691,8 +696,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(50),
             max_cost_per_task: Some(3.0),
             max_rounds: None,
-            model: SONNET,
-            fallback_models: OPUS,
+            model: INHERIT,
+            fallback_models: NONE,
         },
         Kept {
             id: "explore_agent",
@@ -705,8 +710,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(40),
             max_cost_per_task: Some(0.25),
             max_rounds: None,
-            model: HAIKU,
-            fallback_models: &[SONNET],
+            model: FAST,
+            fallback_models: NONE,
         },
         Kept {
             id: "general_agent",
@@ -730,8 +735,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(50),
             max_cost_per_task: Some(5.0),
             max_rounds: None,
-            model: SONNET,
-            fallback_models: OPUS,
+            model: INHERIT,
+            fallback_models: NONE,
         },
         Kept {
             id: "lead_agent",
@@ -751,8 +756,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(50),
             max_cost_per_task: Some(3.0),
             max_rounds: None,
-            model: SONNET,
-            fallback_models: OPUS,
+            model: STRONG,
+            fallback_models: NONE,
         },
         Kept {
             id: "planning_agent",
@@ -772,8 +777,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(30),
             max_cost_per_task: Some(1.5),
             max_rounds: None,
-            model: SONNET,
-            fallback_models: OPUS,
+            model: INHERIT,
+            fallback_models: NONE,
         },
         Kept {
             id: "research_agent",
@@ -792,8 +797,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(12),
             max_cost_per_task: Some(0.35),
             max_rounds: Some(8),
-            model: SONNET,
-            fallback_models: OPUS,
+            model: INHERIT,
+            fallback_models: NONE,
         },
         Kept {
             id: "review_agent",
@@ -813,8 +818,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(40),
             max_cost_per_task: Some(1.0),
             max_rounds: None,
-            model: SONNET,
-            fallback_models: OPUS,
+            model: INHERIT,
+            fallback_models: NONE,
         },
         Kept {
             id: "system_agent",
@@ -836,8 +841,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(30),
             max_cost_per_task: None,
             max_rounds: None,
-            model: HAIKU,
-            fallback_models: &[],
+            model: FAST,
+            fallback_models: NONE,
         },
         Kept {
             id: "writing_agent",
@@ -858,8 +863,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(10),
             max_cost_per_task: None,
             max_rounds: None,
-            model: SONNET,
-            fallback_models: &[],
+            model: INHERIT,
+            fallback_models: NONE,
         },
     ];
     let mut shipped: Vec<AgentTemplate> = crate::bundled::BUNDLED_AGENTS

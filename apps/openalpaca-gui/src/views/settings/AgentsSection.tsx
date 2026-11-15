@@ -198,9 +198,12 @@ export function AgentsSection() {
                   )
                 }
                 chips={
-                  template.model === undefined ? undefined : (
+                  // C8 (M-10): the template's `model:` as written — `inherit`,
+                  // an alias or an id; no line is `inherit` (M-1b). A plugin's
+                  // template runs on its plugin's own model (M-7d): no chip.
+                  template.source === "plugin" ? undefined : (
                     <Button variant={chipVariant(false)} disabled>
-                      {template.model}
+                      {template.model ?? "inherit"}
                     </Button>
                   )
                 }

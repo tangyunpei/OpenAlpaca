@@ -332,13 +332,29 @@ routable.
 
 `fast`, `balanced` and `strong` are model aliases: each names one model per
 provider. The router resolves one against the model of the agent that asks
-(its parent) before any call, so the call itself names a routable model. In
-this build no template or tool names an alias yet; the shipped agent
-templates still name model ids, and ids this build no longer lists (Claude
-Sonnet 4.6, Opus 4.6 and Haiku 4.5): with a key whose provider's model list
-still names one, it is sent to that model as asked, counted at the $3 / $15
-fallback, with none of a built-in row's rules; otherwise each call walks the
-substitution ladder, announced. A later release moves them to the aliases.
+(its parent) before any call, so the call itself names a routable model.
+
+**What the shipped agent templates name.** `lead_agent` names `strong`;
+`explore_agent` and `system_agent` name `fast`; the other six (`general_agent`,
+`code_agent`, `planning_agent`, `research_agent`, `review_agent`,
+`writing_agent`) name `inherit`, and none keeps a `fallback_models` list.
+`inherit` — also a template with no `model:` line, your own included — means,
+for a subagent, the model that answered its lead (after any substitution),
+read when it is spawned; for the lead, the model a request naming none
+reaches (the main loop's). A template that is not an orchestrator, borrowed
+as a lead (a second workflow while `lead_agent` is busy), follows
+`lead_agent`'s choice instead, a set stored for it (`openalpaca agents set
+lead_agent llm.model …`) included. A model id in a template is kept as written and,
+when it is not routable, walks the substitution ladder at the call,
+announced, as it always has. The lead can also name a model for one spawn:
+`spawn_subagent` and each `spawn_subagents_batch` entry take an optional
+`model` — `inherit`, an alias or a routable id — which outranks the
+template's; one that is not routable is refused, listing what can be
+chosen, and never substituted, and the template's `max_cost_per_task` still
+caps the subagent. A plugin's template refuses a `model`: it runs on its
+plugin's own model. The spawn's reply names the model the subagent runs on,
+what chose it, and that the lead stays on its own; the lane's
+`subagent_open` record carries `model_choice` and `model`.
 
 | Alias | Anthropic | OpenAI | Ollama, or any provider with no row |
 |---|---|---|---|
@@ -375,9 +391,14 @@ parent's provider has no model for an alias and another loaded provider has
 one, the alias still runs on the parent's model, and that is said once per
 alias and provider at `INFO`; if the parent's model is not available either
 (its provider is off), the line says so and names the default model the
-alias runs on instead. The seeded `llm.toml` carries a commented-out
+alias runs on instead. Both lines come from a run that used the alias, never
+from the list of aliases a workflow's lead is shown. The seeded `llm.toml` carries a commented-out
 example; an existing `llm.toml` is never rewritten, so the built-in rows
-reach it with the release.
+reach it with the release. At start, a key of your own `[fallback_chains]`
+table that names `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` or
+`claude-opus-4-6` — written once to steer the shipped templates, which named
+those ids — is named at `INFO` when it is not routable and no template names
+it: it no longer steers them.
 
 ### What a model's API refuses
 

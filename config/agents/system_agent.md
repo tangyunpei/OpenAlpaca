@@ -14,8 +14,7 @@ capabilities:
 denied_capabilities:
   - "web_access"
 verbosity: "concise"
-model: "claude-haiku-4-5-20251001"
-fallback_models: []
+model: "fast"
 max_tool_calls: 30
 ---
 

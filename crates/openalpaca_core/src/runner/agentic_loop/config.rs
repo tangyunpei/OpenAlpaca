@@ -38,6 +38,10 @@ pub struct LoopConfig {
     pub max_cost: f64,
     /// Override model for this loop (used by LlmRouter).
     pub model: Option<String>,
+    /// The slot this loop writes the model that answered each round into
+    /// (C8, M-1): a lead's, which its spawn tool reads when a subagent on
+    /// `inherit` starts. `None` on every other loop.
+    pub answering_model: Option<crate::runner::model_choice::AnsweringModel>,
     /// Fallback models (informational — fallback is handled by router's fallback chain).
     pub fallback_models: Vec<String>,
     /// Agent model constraints for access control enforcement.
@@ -155,6 +159,7 @@ impl Clone for LoopConfig {
             max_tools_per_round: self.max_tools_per_round,
             max_cost: self.max_cost,
             model: self.model.clone(),
+            answering_model: self.answering_model.clone(),
             fallback_models: self.fallback_models.clone(),
             agent_constraints: self.agent_constraints.clone(),
             max_context_tokens: self.max_context_tokens,
@@ -189,6 +194,7 @@ impl std::fmt::Debug for LoopConfig {
             .field("max_tools_per_round", &self.max_tools_per_round)
             .field("max_cost", &self.max_cost)
             .field("model", &self.model)
+            .field("answering_model", &self.answering_model.is_some())
             .field("max_context_tokens", &self.max_context_tokens)
             .field("context_threshold", &self.context_threshold)
             .field("context_tail_keep", &self.context_tail_keep)
@@ -226,6 +232,7 @@ impl Default for LoopConfig {
             max_tools_per_round: 5,
             max_cost: 1.00,
             model: None,
+            answering_model: None,
             fallback_models: Vec::new(),
             agent_constraints: None,
             max_context_tokens: 0,
@@ -297,6 +304,7 @@ impl LoopConfig {
             max_tools_per_round,
             max_cost: agent.constraints.max_cost_per_task.unwrap_or(max_cost),
             model,
+            answering_model: None,
             fallback_models: agent.llm_config.fallback_models.clone(),
             agent_constraints: Some(agent.constraints.clone()),
             max_context_tokens: 0,

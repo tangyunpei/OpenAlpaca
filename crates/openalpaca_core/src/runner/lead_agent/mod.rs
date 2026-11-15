@@ -14,12 +14,12 @@ mod tracker;
 // External API (unchanged)
 pub use prompt::build_lead_agent_prompt_from_templates;
 pub use tools::{
-    check_subagent_status_tool_definition, post_update_tool_definition,
-    queue_followup_tool_definition, register_coordination_tools, register_workflow_tools,
-    spawn_subagent_tool_definition_from_templates,
-    spawn_subagents_batch_tool_definition, wait_for_subagents_tool_definition,
     CheckSubagentStatusTool, PostUpdateTool, QueueFollowupTool, SpawnSubagentTool,
-    SpawnSubagentsBatchTool, WaitForSubagentsTool,
+    SpawnSubagentsBatchTool, WaitForSubagentsTool, check_subagent_status_tool_definition,
+    post_update_tool_definition, queue_followup_tool_definition, register_coordination_tools,
+    register_workflow_tools, spawn_subagent_tool_definition_from_templates,
+    spawn_subagent_tool_definition_with_models, spawn_subagents_batch_tool_definition,
+    spawn_subagents_batch_tool_definition_with_models, wait_for_subagents_tool_definition,
 };
 pub use tools::{
     DEFAULT_SUBAGENT_TEMPLATE, SUBAGENT_DAEMON_STOP_DETAIL, SUBAGENT_RUN_ENDED_DETAIL,
@@ -72,6 +72,11 @@ pub struct LeadAgentResult {
     pub final_content: String,
     pub loop_result: LoopResult,
     pub subagents_spawned: usize,
+    /// The model the lead's own choice resolved to before its loop (C8,
+    /// M-6e): an id, never the template's word — what its usage row and its
+    /// completion report name when no round answered. `None` only when
+    /// nothing was routable.
+    pub lead_model: Option<String>,
 }
 
 // ── run_lead_agent ───────────────────────────────────────────────────
@@ -135,6 +140,32 @@ pub async fn run_lead_agent(
         "Lead agent starting execution"
     );
 
+    // C8 (M-6e): the lead's own choice resolves first, on a copy — the
+    // registry's instance and the template keep their word — so its window,
+    // its loop config, its telemetry and the spawn tools' `model` parameter
+    // all read the id that will answer. `inherit` is the model a request
+    // naming none reaches (its parent, the main loop, requests none); a
+    // borrowed lead's `inherit` follows the shipped lead's choice (M-1a).
+    let lead_choice =
+        crate::runner::model_choice::lead_choice(&shared_context.agent_registry, lead_agent);
+    let lead_model = crate::runner::model_choice::resolve(router.as_ref(), &lead_choice, None);
+    let mut resolved_lead = lead_agent.clone();
+    resolved_lead.llm_config.model = lead_model.clone();
+    if crate::runner::model_choice::is_word(&lead_choice) {
+        resolved_lead.llm_config.fallback_models.clear();
+    }
+    let lead_agent = &resolved_lead;
+    // M-1: the model that answered the lead's last round, which a subagent
+    // on `inherit` runs on; and M-8's menu, against the model the lead's id
+    // will reach — itself when routable, else the ladder's (an edited lead
+    // naming an unroutable id), the model its children inherit.
+    let answering_model = crate::runner::model_choice::answering_model();
+    let menu_model = lead_model
+        .as_deref()
+        .and_then(|model| router.would_answer(model, &lead_agent.llm_config.fallback_models));
+    let model_menu =
+        crate::runner::model_choice::ModelMenu::for_lead(router.as_ref(), menu_model.as_deref());
+
     // 1. List worker agent templates (all templates except the lead itself),
     // sorted by id (G-2): the `<agents>` block and both spawn descriptions
     // read the same from run to run.
@@ -152,7 +183,7 @@ pub async fn run_lead_agent(
     );
 
     // 2. Build spawn_subagent tool definition from templates
-    let spawn_tool_def = spawn_subagent_tool_definition_from_templates(&worker_templates);
+    let spawn_tool_def = spawn_subagent_tool_definition_with_models(&worker_templates, &model_menu);
 
     // 3. Build tools: spawn_subagent + check/wait + workspace + memory reads
     let batch_spawn_enabled = daemon_config
@@ -162,7 +193,10 @@ pub async fn run_lead_agent(
         .batch_spawn_enabled;
     let mut tools = vec![spawn_tool_def];
     if batch_spawn_enabled {
-        tools.push(spawn_subagents_batch_tool_definition(&worker_templates));
+        tools.push(spawn_subagents_batch_tool_definition_with_models(
+            &worker_templates,
+            &model_menu,
+        ));
     }
     tools.push(check_subagent_status_tool_definition());
     tools.push(wait_for_subagents_tool_definition());
@@ -298,34 +332,37 @@ pub async fn run_lead_agent(
     // TODO: In future, resolve via context_manager.resolve() with LeadAgent path
     let parent_bundle = Arc::new(ContextBundle::empty());
 
-    let spawn_tool = Arc::new(SpawnSubagentTool::new(
-        router.clone(),
-        tool_registry.clone(),
-        shared_context.clone(),
-        bus.clone(),
-        db.clone(),
-        task_id.to_string(),
-        created_by.to_string(),
-        lead_agent.template_id.clone(),
-        daemon_config.clone(),
-        cancel_token.clone(),
-        tracker.clone(),
-        0, // depth: top-level lead agent
-        daemon_config
-            .load()
-            .execution
-            .lead_agent_defaults
-            .max_concurrent_subagents,
-        workspace.clone(),
-        confirmation_broker.clone(),
-        context_manager,
-        parent_bundle,
-        compose_engine.clone(),
-        // M6: every subagent of this run inherits the run's answer.
-        unattended,
-        // R44: and the run's conversation.
-        session_id.map(str::to_string),
-    ));
+    let spawn_tool = Arc::new(
+        SpawnSubagentTool::new(
+            router.clone(),
+            tool_registry.clone(),
+            shared_context.clone(),
+            bus.clone(),
+            db.clone(),
+            task_id.to_string(),
+            created_by.to_string(),
+            lead_agent.template_id.clone(),
+            daemon_config.clone(),
+            cancel_token.clone(),
+            tracker.clone(),
+            0, // depth: top-level lead agent
+            daemon_config
+                .load()
+                .execution
+                .lead_agent_defaults
+                .max_concurrent_subagents,
+            workspace.clone(),
+            confirmation_broker.clone(),
+            context_manager,
+            parent_bundle,
+            compose_engine.clone(),
+            // M6: every subagent of this run inherits the run's answer.
+            unattended,
+            // R44: and the run's conversation.
+            session_id.map(str::to_string),
+        )
+        .with_lead_models(answering_model.clone(), lead_model.clone()),
+    );
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -364,7 +401,10 @@ pub async fn run_lead_agent(
         None
     };
     let batch_def = if batch_spawn_enabled {
-        Some(spawn_subagents_batch_tool_definition(&worker_templates))
+        Some(spawn_subagents_batch_tool_definition_with_models(
+            &worker_templates,
+            &model_menu,
+        ))
     } else {
         None
     };
@@ -374,7 +414,7 @@ pub async fn run_lead_agent(
         batch_tool,
         check_status_tool,
         wait_tool,
-        spawn_subagent_tool_definition_from_templates(&worker_templates),
+        spawn_subagent_tool_definition_with_models(&worker_templates, &model_menu),
         batch_def,
         check_subagent_status_tool_definition(),
         wait_for_subagents_tool_definition(),
@@ -665,6 +705,7 @@ pub async fn run_lead_agent(
     // message). The chat's working state, the working-folder line and a
     // replayed history stay behind it, for the loop to fold.
     loop_config.kept_head = objective_head;
+    loop_config.answering_model = Some(answering_model);
     loop_config.event_bus = Some(bus.clone());
     loop_config.experimental_ephemeral_pressure =
         daemon_config.load().experimental.ephemeral_pressure_layer;
@@ -822,6 +863,7 @@ pub async fn run_lead_agent(
         final_content: result.final_content.clone(),
         loop_result: result,
         subagents_spawned,
+        lead_model,
     }
 }
 
@@ -901,3 +943,6 @@ fn lead_memory_delivery(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod model_tests;

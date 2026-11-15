@@ -725,6 +725,11 @@ export interface AgentTemplate {
   /** Absent when the template sets none; accepted and not sent to a model. */
   temperature?: number;
   verbosity: string;
+  /**
+   * The template's `model:` as written: `inherit`, an alias (`fast`,
+   * `balanced`, `strong`) or a model id; absent means `inherit` (C8). A
+   * plugin's template runs on its plugin's own model whatever it says (M-7d).
+   */
   model?: string;
   fallback_models: string[];
   max_tool_calls?: number;

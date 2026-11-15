@@ -14,9 +14,7 @@ denied_capabilities:
   - "file_write"
   - "web_access"
 verbosity: "detailed"
-model: "claude-sonnet-4-6"
-fallback_models:
-  - "claude-opus-4-6"
+model: "inherit"
 max_tool_calls: 40
 max_cost_per_task: 1.0
 ---

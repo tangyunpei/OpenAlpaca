@@ -393,7 +393,7 @@ impl TableRow for ProviderUsageEntry {
 /// What the `Model:` line says, given the daemon's own verdict on it (L3).
 ///
 /// `[orchestrator] model` is allowed to name a model this install cannot serve
-/// — every shipped agent template pins a Claude id, and on an Ollama-only
+/// — a seeded Claude id with no Anthropic key, say, and on an Ollama-only
 /// machine the fallback ladder answers with something else. Printing only the
 /// configured id there is a lie by omission: the owner reads a Claude name and
 /// gets a local reply.
@@ -788,7 +788,7 @@ mod tests {
     }
 
     /// L3: `[orchestrator] model` may name a model this install cannot serve —
-    /// every shipped template pins a Claude id. Printing it alone tells the
+    /// a seeded Claude id, say. Printing it alone tells the
     /// owner a Claude answered.
     #[test]
     fn the_model_line_names_what_would_really_answer() {

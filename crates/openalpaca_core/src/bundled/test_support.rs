@@ -25,6 +25,13 @@ pub(crate) const LEAD_AGENT_E9F15916: &str = include_str!("fixtures/e9f15916/age
 /// `4038c409`'s `lead_agent.md`: the side before TEMPLATE-TEMPERATURE, its
 /// `temperature: 0.3` line still in it.
 pub(crate) const LEAD_AGENT_4038C409: &str = include_str!("fixtures/4038c409/agents/lead_agent.md");
+/// `e00ee04a`'s `lead_agent.md`: the side before C8, naming
+/// `claude-sonnet-4-6` with its `claude-opus-4-6` fallback.
+pub(crate) const LEAD_AGENT_E00EE04A: &str = include_str!("fixtures/e00ee04a/agents/lead_agent.md");
+/// `e00ee04a`'s `explore_agent.md`: the side before C8, naming
+/// `claude-haiku-4-5-20251001` with its `claude-sonnet-4-6` fallback.
+pub(crate) const EXPLORE_AGENT_E00EE04A: &str =
+    include_str!("fixtures/e00ee04a/agents/explore_agent.md");
 
 /// The Installation Manual's step 7, as written: delete exactly the two
 /// lines `require_confirmation_for:` and `  - "file_delete"`.

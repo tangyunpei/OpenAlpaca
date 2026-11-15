@@ -695,6 +695,25 @@ impl AgentRegistry {
         self.lock_templates().resolved.get(template_id).cloned()
     }
 
+    /// The `model:` a run of `template_id` gets: its template's, with the set
+    /// stored for it over it, as `spawn_instance` builds the run (C8: a
+    /// borrowed lead's `inherit` follows `lead_agent`'s, M-1a; M-6f's start
+    /// line reads every template's). `None` when no template has the id;
+    /// `Some(None)` when the run names none (`inherit`).
+    pub fn run_model(&self, template_id: &str) -> Option<Option<String>> {
+        let templates = self.lock_templates();
+        let template = templates.resolved.get(template_id)?;
+        let set = templates.sets.get(template_id);
+        if set.is_none() {
+            return Some(template.frontmatter.model.clone());
+        }
+        Some(
+            stored_set::build_instance(template, template_id, None, set)
+                .llm_config
+                .model,
+        )
+    }
+
     /// List all resolved templates, sorted by id (L-1): the lead's
     /// `<agents>` block and both spawn descriptions read the same from start
     /// to start.

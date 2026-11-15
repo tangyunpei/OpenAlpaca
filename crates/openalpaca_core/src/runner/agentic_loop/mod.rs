@@ -1026,6 +1026,11 @@ async fn run_agentic_loop_core(
                     state.requests_cost += backend.request_cost(&response);
                     state.rounds += 1;
                     state.last_model = Some(response.model.clone());
+                    // C8, M-1: a lead's subagents on `inherit` follow the
+                    // model that answered it, not the one it asked for.
+                    if let Some(slot) = &config.answering_model {
+                        crate::runner::model_choice::write_answering(slot, &response.model);
+                    }
 
                     // Model access check (Router only): the router may fallback to a
                     // different model than requested. Verify the agent is allowed to

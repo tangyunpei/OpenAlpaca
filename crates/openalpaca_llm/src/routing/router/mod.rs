@@ -471,24 +471,35 @@ impl LlmRouter {
     /// Otherwise the first rung of the ladder that is, announced once. `None`
     /// when nothing is routable.
     ///
-    /// This is what keeps the shipped agent templates working: their Claude
-    /// pins are right when Anthropic is configured, and fall through here when
-    /// it is not, instead of dying on `UnknownModel` before the fallback chain
-    /// was ever consulted.
+    /// This is what keeps a template that names a model id working (the
+    /// shipped ones did until C8; they name `inherit` or an alias since, which
+    /// resolve to a routable model before the call): a Claude pin is right
+    /// when Anthropic is configured, and falls through here when it is not,
+    /// instead of dying on `UnknownModel` before the fallback chain was ever
+    /// consulted.
     pub(super) fn resolve_routable(
         &self,
         requested: &str,
         request_chain: &[String],
     ) -> Option<String> {
+        let effective = self.would_answer(requested, request_chain)?;
+        self.note_substitution(requested, &effective);
+        Some(effective)
+    }
+
+    /// The model a request naming `requested`, with `request_chain` as its
+    /// own fallbacks, would be sent as — [`Self::resolve_routable`]'s answer,
+    /// announcing nothing: what a caller that describes a run before it
+    /// starts reads (C8: the spawn tools' `model` parameter names the model
+    /// an edited lead's unroutable id reaches, M-8; built beyond the rows'
+    /// words). `None` when nothing is routable.
+    pub fn would_answer(&self, requested: &str, request_chain: &[String]) -> Option<String> {
         if self.is_routable(requested) {
             return Some(requested.to_string());
         }
-        let effective = self
-            .substitution_ladder(requested, request_chain)
+        self.substitution_ladder(requested, request_chain)
             .into_iter()
-            .find(|m| self.is_routable(m))?;
-        self.note_substitution(requested, &effective);
-        Some(effective)
+            .find(|m| self.is_routable(m))
     }
 
     /// Say, once per distinct pair, that an answer came from another model.
@@ -538,6 +549,25 @@ impl LlmRouter {
         alias: ModelAlias,
         parent: Option<&str>,
     ) -> Option<AliasResolution> {
+        self.alias_resolution(alias, parent, true)
+    }
+
+    /// [`Self::resolve_alias`]'s answer, announcing nothing: what a listing
+    /// of the aliases reads (C8: the spawn tools' `model` parameter, M-8,
+    /// and a per-call refusal, M-7), since M-5's lines say a step a run's
+    /// resolution took, not one a listing looked at (built beyond the rows'
+    /// words).
+    pub fn peek_alias(&self, alias: ModelAlias, parent: Option<&str>) -> Option<AliasResolution> {
+        self.alias_resolution(alias, parent, false)
+    }
+
+    /// M-4's resolution; `announce` says M-5's lines when a step is taken.
+    fn alias_resolution(
+        &self,
+        alias: ModelAlias,
+        parent: Option<&str>,
+        announce: bool,
+    ) -> Option<AliasResolution> {
         let parent = parent
             .map(str::trim)
             .filter(|p| !p.is_empty())
@@ -555,7 +585,9 @@ impl LlmRouter {
             ];
             for candidate in candidates.into_iter().flatten() {
                 if self.is_routable(&candidate) {
-                    self.announce_passed_over(alias, provider, &passed_over, &candidate);
+                    if announce {
+                        self.announce_passed_over(alias, provider, &passed_over, &candidate);
+                    }
                     return Some(AliasResolution {
                         model: candidate,
                         passed_over,
@@ -571,7 +603,7 @@ impl LlmRouter {
             .clone()
             .filter(|p| self.is_routable(p))
             .or_else(|| self.effective_default_model())?;
-        if let Some(provider) = &provider {
+        if announce && let Some(provider) = &provider {
             if passed_over.is_empty() {
                 self.announce_collapse(alias, provider, parent.as_deref(), &model);
             } else {
@@ -740,6 +772,35 @@ impl LlmRouter {
             .collect();
         ids.sort();
         ids
+    }
+
+    /// The (requested, answering) pairs the ladder has announced since the
+    /// router was built ([`Self::note_substitution`]'s once-per-pair set),
+    /// sorted — what a caller outside the router reads to tell that a request
+    /// it built was not sent as asked (C8: a shipped template that names an
+    /// alias or `inherit` never walks the ladder).
+    pub fn noted_substitutions(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = self
+            .substitutions_logged
+            .iter()
+            .map(|p| p.clone())
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    /// The (alias, provider) collapses M-5's `INFO` has said since the router
+    /// was built ([`Self::announce_collapse`]'s once-per-pair set), as
+    /// (`fast`/`balanced`/`strong`, provider name), sorted — a reader beside
+    /// [`Self::noted_substitutions`] (C8; built beyond the rows' words).
+    pub fn noted_alias_collapses(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = self
+            .alias_collapses_logged
+            .iter()
+            .map(|p| (p.0.as_str().to_string(), p.1.clone()))
+            .collect();
+        pairs.sort();
+        pairs
     }
 
     /// Does this provider need an API key? `None` when it is not loaded.

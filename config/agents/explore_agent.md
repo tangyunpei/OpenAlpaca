@@ -13,9 +13,7 @@ denied_capabilities:
   - "shell_execute"
   - "web_access"
 verbosity: "concise"
-model: "claude-haiku-4-5-20251001"
-fallback_models:
-  - "claude-sonnet-4-6"
+model: "fast"
 max_tool_calls: 40
 max_cost_per_task: 0.25
 ---

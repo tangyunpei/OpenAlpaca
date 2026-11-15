@@ -923,11 +923,14 @@ impl TaskDispatcher {
                 )
             };
 
-            // Persist LLM usage for the lead agent's own loop
+            // Persist LLM usage for the lead agent's own loop. Where no round
+            // answered, the row names the id the lead's choice resolved to
+            // (C8, M-6e), never its template's word: this `lead_agent` is the
+            // unresolved instance `spawn_instance` gave.
             usage::record_llm_usage(
                 &router,
                 &result.loop_result,
-                lead_agent.llm_config.model.as_deref(),
+                result.lead_model.as_deref(),
                 &lead_agent.id,
                 &task_id,
                 start_time.elapsed().as_millis() as i64,
@@ -996,7 +999,7 @@ impl TaskDispatcher {
                     .loop_result
                     .model_used
                     .as_deref()
-                    .or(lead_agent.llm_config.model.as_deref())
+                    .or(result.lead_model.as_deref())
                     .unwrap_or(&default_model);
                 // GAP-23: the report carries the run it closed *and* a
                 // `role='artifact'` link per file the run produced — the two

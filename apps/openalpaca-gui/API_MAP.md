@@ -1047,7 +1047,7 @@ Plan reference: `tasks/api-fix-plan.md` §Phase 8 item 8.
 > `log_retention_days`, which is served but inert (R85).
 >
 > `llm` arrived with L3: the fallback ladder may answer on a model other than
-> `[orchestrator] model` — every shipped agent template pins a Claude id — and
+> `[orchestrator] model` — a seeded Claude id with no Anthropic key, say — and
 > Settings → Models reads this pair to name the substitution rather than show a
 > picker that disagrees with every reply. `null` means this daemon has no
 > router at all.

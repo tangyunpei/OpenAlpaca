@@ -512,7 +512,7 @@ describe("refreshing the catalogue", () => {
 });
 
 /**
- * L3: the shipped templates pin Claude ids, so on a local-only install the
+ * L3: a configured Claude id is not served on a local-only install, so the
  * ladder answers with something else. Showing only the configured id is a
  * silent substitution.
  */

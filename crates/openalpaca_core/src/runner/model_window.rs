@@ -2,7 +2,8 @@
 //!
 //! Every prompt budget in the lead-agent path used to read the window of the
 //! model the agent *template pins*, or a hard-coded 200 000 — and a shipped
-//! template pins a Claude id (`config/agents/lead_agent.md`). On an
+//! template then pinned a Claude id (`config/agents/lead_agent.md`; since C8
+//! the shipped ones name `inherit` or an alias). On an
 //! Ollama-only install that pin is not routable: L3 substitutes, the call is
 //! answered by an 8 192-token local model, and the budget said 200 000. The
 //! loop then never compacted, and the provider refused the overflowing
@@ -117,7 +118,7 @@ mod tests {
         router
     }
 
-    /// **M5.** The lead's template pins Claude (a compiled row, 1 000 000)
+    /// **M5.** A lead's template pins Claude (a compiled row, 1 000 000)
     /// and the only loaded provider is a local Ollama: the budget is the
     /// local model's 8 192, not the pin's, or the loop never compacts and the
     /// provider refuses the request.

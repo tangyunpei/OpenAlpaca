@@ -1,5 +1,6 @@
 mod agentic_loop;
 pub mod lead_agent;
+pub mod model_choice;
 pub mod model_window;
 pub mod plugin_agent;
 pub mod span;

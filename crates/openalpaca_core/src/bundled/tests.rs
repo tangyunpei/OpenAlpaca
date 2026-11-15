@@ -216,7 +216,7 @@ fn fixtures() -> Vec<(PathBuf, String)> {
 #[test]
 fn every_fixture_is_a_shipped_version() {
     let files = fixtures();
-    assert_eq!(files.len(), 13, "{files:?}");
+    assert_eq!(files.len(), 15, "{files:?}");
     for (file, path) in &files {
         let bytes = std::fs::read(file).unwrap();
         assert!(
@@ -304,6 +304,59 @@ fn the_side_before_template_temperature_classifies_as_an_earlier_shipped_version
             edit: None
         })
     );
+}
+
+/// C8 (§2.2 V-3, ML-9): the nine templates moved from vendor ids to
+/// `inherit` and the aliases, so an unedited copy of the version before C8
+/// — what an earlier build of this branch seeded, or a copy of the
+/// repository's `config/` — is an earlier shipped version, set aside like
+/// any other, while the bundled template it differs from is the current one
+/// and names a word, not an id. On the parent the fixture was the current
+/// version.
+#[test]
+fn the_side_before_c8_classifies_as_an_earlier_shipped_version() {
+    for (before, path, old_id, word) in [
+        (
+            test_support::LEAD_AGENT_E00EE04A,
+            "agents/lead_agent.md",
+            "claude-sonnet-4-6",
+            "strong",
+        ),
+        (
+            test_support::EXPLORE_AGENT_E00EE04A,
+            "agents/explore_agent.md",
+            "claude-haiku-4-5-20251001",
+            "fast",
+        ),
+    ] {
+        assert!(
+            before.contains(&format!("\nmodel: \"{old_id}\"\n")),
+            "the fixture is the side that named {old_id}"
+        );
+        assert_eq!(
+            classify_agent_file(before.as_bytes()),
+            Some(ShippedCopy {
+                version: ShippedVersion::Earlier,
+                edit: None
+            }),
+            "{path}"
+        );
+        let bundled = BUNDLED_AGENTS
+            .iter()
+            .find(|file| file.path == path)
+            .expect("bundled");
+        assert_eq!(
+            classify_agent_file(bundled.contents.as_bytes()),
+            Some(ShippedCopy {
+                version: ShippedVersion::Current,
+                edit: None
+            })
+        );
+        assert!(
+            bundled.contents.contains(&format!("\nmodel: \"{word}\"\n")),
+            "{path} names {word}"
+        );
+    }
 }
 
 /// **T4.** The main loop's tool calls are attributed to `orchestrator`, so

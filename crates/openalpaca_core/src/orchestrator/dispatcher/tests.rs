@@ -1958,6 +1958,85 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
     assert_eq!(exists, 1, "task_id should name a real run");
 }
 
+/// A provider that answers nothing: every call fails.
+struct RefusesEveryCall;
+
+#[async_trait::async_trait]
+impl openalpaca_llm::LlmProvider for RefusesEveryCall {
+    fn name(&self) -> &str {
+        "refuses"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    fn requires_key(&self) -> bool {
+        false
+    }
+
+    async fn chat(
+        &self,
+        _request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        Err(openalpaca_llm::LlmError::NotConfigured)
+    }
+}
+
+/// C8 (M-6e): a lead whose template names an alias and whose run ends
+/// before any round answered (`model_used: None`) — the usage row and the
+/// completion report name the id the alias resolved to, never the word.
+/// Added in C8's review; red with the dispatcher reading the instance's
+/// unresolved `llm_config.model`.
+#[tokio::test]
+async fn a_lead_on_an_alias_with_no_answer_records_the_resolved_id() {
+    let home = tempfile::tempdir().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(RefusesEveryCall),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-haiku-5-5".to_string(),
+    ));
+    let strong = openalpaca_llm::compiled_alias(
+        &openalpaca_llm::ProviderType::Anthropic,
+        openalpaca_llm::ModelAlias::Strong,
+    )
+    .expect("Anthropic has a strong row")
+    .to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let mut lead = make_agent("lead-01", vec!["orchestration"]);
+    lead.llm_config.model = Some("strong".to_string());
+    let dispatcher =
+        setup_with_specific_router_and_db(vec![lead], DaemonConfig::default(), db.clone(), router);
+    dispatcher
+        .dispatch_lead_agent(
+            "Weigh the herd",
+            "Herd".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let msg = wait_for_conversation_message(&db, "user1:cli").await;
+    assert_eq!(msg.model.as_deref(), Some(strong.as_str()), "the report");
+    let task_id = msg.task_id.expect("the completion report carries its run");
+    let models: Vec<String> = db
+        .with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT model FROM llm_call_log WHERE task_id = ?1")?;
+            let rows = stmt
+                .query_map([&task_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    assert_eq!(models, vec![strong], "the usage row");
+}
+
 /// GAP-23's second link: the completion report carries `task_id` *and* one
 /// `role='artifact'` row per file the run produced — the message
 /// `RunReportCard` renders after a reload.
