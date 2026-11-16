@@ -1,0 +1,20 @@
+[
+  {
+    "author": "",
+    "description": "",
+    "invocations_today": 0,
+    "name": "",
+    "origin": {
+      "enabled": false,
+      "id": "",
+      "kind": "",
+      "state": ""
+    },
+    "provides_capabilities": [
+      ""
+    ],
+    "requires_confirmation": false,
+    "source": "",
+    "version": ""
+  }
+]

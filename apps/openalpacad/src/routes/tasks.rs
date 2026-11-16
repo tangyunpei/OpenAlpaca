@@ -185,7 +185,23 @@ pub async fn list_tasks_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
-    let repo = TaskRepository::new(&state.db);
+    list_tasks(
+        &state.db,
+        &state.gateway.shared_context,
+        &state.local_user_id,
+        query,
+    )
+}
+
+/// `GET /v1/tasks`'s answer (split out for the API contract's sample,
+/// API-CONTRACT).
+fn list_tasks(
+    db: &Database,
+    shared_context: &SharedContext,
+    owner_id: &str,
+    query: ListTasksQuery,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = TaskRepository::new(db);
     // Clamped (D13): an oversized page is not just a big response — the grouped
     // cost query below binds one SQLite parameter per row, so a page of 1 000
     // asked for more than the 999-variable limit and every `cost_usd` came back
@@ -226,7 +242,7 @@ pub async fn list_tasks_handler(
             // of one per row. A read failure yields an empty map, so the page
             // renders with zeroes rather than 500-ing.
             let task_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
-            let costs = LlmUsageRepository::new(&state.db)
+            let costs = LlmUsageRepository::new(db)
                 .cost_for_tasks(&task_ids)
                 .unwrap_or_else(|e| {
                     // The same stance as the subagent counts below: a read
@@ -235,7 +251,7 @@ pub async fn list_tasks_handler(
                     tracing::warn!("Failed to read costs for task list: {e}");
                     Default::default()
                 });
-            let subagent_counts = SubagentSpanRepository::new(&state.db)
+            let subagent_counts = SubagentSpanRepository::new(db)
                 .counts_for_tasks(&task_ids)
                 .unwrap_or_else(|e| {
                     tracing::warn!("Failed to read subagent counts for task list: {e}");
@@ -243,7 +259,7 @@ pub async fn list_tasks_handler(
                 });
             // M4, the same shape again: one grouped query for the page, so a
             // row's artifact count is what the store holds for that run.
-            let produced_counts = FileAssetRepository::new(&state.db)
+            let produced_counts = FileAssetRepository::new(db)
                 .produced_counts_for_tasks(&task_ids)
                 .unwrap_or_else(|e| {
                     tracing::warn!("Failed to read produced artifact counts for task list: {e}");
@@ -259,8 +275,7 @@ pub async fn list_tasks_handler(
                     let subagent_count = subagent_counts.get(&t.id).copied().unwrap_or(0);
                     // R40 — an in-memory lookup per row (the registered inbox),
                     // no query: the list stays one page, three queries.
-                    let steerable =
-                        is_steerable(&t, &state.gateway.shared_context, &state.local_user_id);
+                    let steerable = is_steerable(&t, shared_context, owner_id);
                     TaskSummaryResponse {
                         task: t,
                         outcome,
@@ -287,24 +302,39 @@ pub async fn get_task_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let repo = TaskRepository::new(&state.db);
+    get_task(
+        &state.db,
+        &state.gateway.shared_context,
+        &state.local_user_id,
+        &id,
+    )
+}
 
-    match repo.get(&id) {
+/// `GET /v1/tasks/{id}`'s answer (split out for the API contract's sample,
+/// API-CONTRACT).
+fn get_task(
+    db: &Database,
+    shared_context: &SharedContext,
+    owner_id: &str,
+    id: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = TaskRepository::new(db);
+
+    match repo.get(id) {
         Ok(Some(mut task)) => {
             let mut outcome = parse_outcome(&task);
             // M4: what the run produced is what `file_assets` holds for it,
             // whoever wrote it — the lead or a subagent — and whether or not
             // the row's stored count was ever right.
-            let produced = FileAssetRepository::new(&state.db)
-                .produced_for_task(&id)
+            let produced = FileAssetRepository::new(db)
+                .produced_for_task(id)
                 .map(|p| p.len() as i64)
                 .unwrap_or_else(|e| {
                     tracing::warn!(task_id = %id, "Failed to count produced artifacts: {e}");
                     0
                 });
             reconcile_artifact_count(&mut task, outcome.as_mut(), produced);
-            let steerable =
-                is_steerable(&task, &state.gateway.shared_context, &state.local_user_id);
+            let steerable = is_steerable(&task, shared_context, owner_id);
             (
                 StatusCode::OK,
                 Json(
@@ -1135,7 +1165,7 @@ pub async fn steer_task_handler(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::body::to_bytes;
     use openalpaca_core::bus::EventBus;
@@ -3049,5 +3079,131 @@ mod tests {
             serde_json::from_str(r#"{"unattended":true}"#).expect("parse");
         assert_eq!(rerun.unattended, Some(true));
         assert_eq!(RerunTaskRequest::default().unattended, None);
+    }
+
+    // ── The API contract's samples (API-CONTRACT) ─────────────────────
+
+    /// `/v1/tasks*`'s JSON bodies for the API contract's folder: a finished
+    /// run with a mixed outcome and a lane, a live run steered, one
+    /// created, re-run, started, cancelled and replay-resumed.
+    pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+        use crate::contract::ok_body;
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+        let mut finished = make_test_task();
+        finished.id = "task-2".to_string();
+        finished.description = Some("write the changelog".to_string());
+        finished.workspace_id = Some("project-1".to_string());
+        finished.source_task_id = Some("task-1".to_string());
+        finished.session_id = Some("s1".to_string());
+        finished.progress_current = Some(1);
+        finished.progress_total = Some(2);
+        finished.outcome_kind = Some(OutcomeKind::Mixed);
+        finished.artifact_count = 1;
+        finished.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Report with a chart",
+                "outcome_kind": "mixed",
+                "artifacts": [
+                    {"key": "chart.png", "label": "Chart", "agent_id": "researcher", "step_order": 0},
+                ],
+                "no_artifact_reason": "none"
+            })
+            .to_string(),
+        );
+        TaskRepository::new(&db)
+            .create(&finished)
+            .expect("create task");
+        let (shared, bus, _inbox) = steerable(16);
+        let query = ListTasksQuery {
+            status: None,
+            created_by: None,
+            limit: None,
+        };
+        let (_, Json(body)) = list_tasks(&db, &shared, STEER_OWNER, query);
+        out.response("get-tasks", body);
+        let (_, Json(body)) = get_task(&db, &shared, STEER_OWNER, "task-2");
+        out.response("get-tasks-id", body);
+        let (_, Json(body)) = task_timeline(&db, None, "task-1");
+        out.response("get-tasks-id-timeline", body);
+        let body = ok_body(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("focus on the tests"),
+            None,
+        ))
+        .await;
+        out.response("post-tasks-id-steer", body);
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let body = ok_body(
+            transition_task(&shared, &lanes, &bus, &db, "task-1", "cancel")
+                .expect("a cancel answers"),
+        )
+        .await;
+        out.response("post-tasks-id-action-cancel", body);
+
+        let created = ok_body(create_task(
+            &db,
+            &SharedContext::new(),
+            &lanes,
+            &bus,
+            LAUNCH_OWNER,
+            CreateTaskRequest {
+                title: "Ship it".to_string(),
+                description: None,
+                priority: None,
+                created_by: "someone-else".to_string(),
+                source_lane: "user-1:gui".to_string(),
+                unattended: false,
+            },
+        ))
+        .await;
+        out.response("post-tasks", created);
+
+        for (name, body) in launched().await {
+            out.response(name, body);
+        }
+    }
+
+    /// The three launch verbs' answers. Each dispatches a lead agent, which
+    /// outlives the verb; so they run on a runtime of their own, on a thread
+    /// holding a temporary home store, and the runtime is dropped — what it
+    /// started with it — before the guard is, as a `#[tokio::test]` of
+    /// their own would end.
+    async fn launched() -> Vec<(&'static str, serde_json::Value)> {
+        use crate::contract::ok_body;
+        tokio::task::spawn_blocking(|| {
+            let home = tempfile::tempdir().expect("home store");
+            let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let bodies = runtime.block_on(async {
+                let mut bodies = Vec::new();
+                let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+                let orchestrator = launch_orchestrator(&db, true);
+                let response = rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None);
+                bodies.push(("post-tasks-id-rerun", ok_body(response).await));
+                let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
+                let orchestrator = launch_orchestrator(&db, true);
+                let response = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None);
+                bodies.push(("post-tasks-id-action-start", ok_body(response).await));
+                let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+                let orchestrator = launch_orchestrator(&db, true);
+                with_session_logs(&orchestrator, logs.path(), true);
+                let response = resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None).await;
+                bodies.push(("post-tasks-id-action-resume", ok_body(response).await));
+                bodies
+            });
+            drop(runtime);
+            bodies
+        })
+        .await
+        .expect("the launch samples")
     }
 }

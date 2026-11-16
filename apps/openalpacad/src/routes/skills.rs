@@ -228,7 +228,13 @@ pub(crate) fn diagnostics_json(catalog: &SkillCatalog) -> Vec<serde_json::Value>
 
 /// `GET /v1/skills/health` — per-skill lifetime metrics keyed by `skill_id`.
 pub async fn skill_health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let repo = SkillExecutionRepository::new(&state.db);
+    skill_health(&state.db)
+}
+
+/// `GET /v1/skills/health`'s answer (split out for the API contract's
+/// sample, API-CONTRACT).
+pub(crate) fn skill_health(db: &openalpaca_storage::Database) -> Response {
+    let repo = SkillExecutionRepository::new(db);
     match repo.all_skill_health() {
         Ok(metrics) => Json(metrics).into_response(),
         Err(e) => {
@@ -243,4 +249,4 @@ pub async fn skill_health_handler(State(state): State<Arc<AppState>>) -> impl In
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

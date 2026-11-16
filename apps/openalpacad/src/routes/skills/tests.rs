@@ -490,3 +490,67 @@ fn the_catalog_stays_a_bare_array_of_the_loaded_skills() {
         assert!(row.get("diagnostics").is_none(), "{row}");
     }
 }
+
+/// `/v1/skills*`'s JSON bodies for the API contract's folder (API-CONTRACT):
+/// the bundled layer under a config folder (an override and a set-aside
+/// copy), a plugin's skill, the troubled scan's diagnostics, and one run's
+/// health.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home"));
+    let pack = root.join("state/cache/bundled-skills");
+    let skills = root.join("config/skills");
+    let mine = skills.join("code-review");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("SKILL.md"), REVIEW_SKILL).unwrap();
+    let copy = skills.join("explain-code");
+    std::fs::create_dir_all(&copy).unwrap();
+    let explain = openalpaca_core::bundled::BUNDLED_SKILLS
+        .iter()
+        .find(|f| f.path == "skills/explain-code/SKILL.md")
+        .unwrap();
+    std::fs::write(copy.join("SKILL.md"), explain.contents).unwrap();
+    let catalog = SkillCatalog::new();
+    catalog.load_bundled_layer(&pack);
+    catalog.scan_config_layer(&skills);
+    register_plugin_skill(&catalog, "notion", "daily-digest");
+    let rows = skills_json(&catalog, &ExtensionLedger::new(), &HashMap::new());
+    out.response("get-skills", serde_json::Value::Array(rows));
+
+    let troubled = tempfile::tempdir().expect("tempdir");
+    let rows = diagnostics_json(&troubled_catalog(troubled.path()));
+    out.response("get-skills-diagnostics", serde_json::Value::Array(rows));
+
+    let db = openalpaca_storage::Database::open(&root.join("test.db")).expect("open db");
+    openalpaca_storage::SkillExecutionRepository::new(&db)
+        .record(
+            &openalpaca_storage::models::skill_execution::SkillExecutionEntry {
+                id: None,
+                request_id: "req-1".to_string(),
+                skill_id: "code-review".to_string(),
+                agent_id: "orchestrator".to_string(),
+                status: "completed".to_string(),
+                finish_reason: Some("stop".to_string()),
+                error_message: None,
+                validation_failures: None,
+                duration_ms: 5,
+                rounds_used: Some(1),
+                tool_calls_made: Some(0),
+                input_tokens: 10,
+                output_tokens: 5,
+                cost_usd: 0.01,
+                model_used: Some("qwen3:8b".to_string()),
+                query_preview: Some("review".to_string()),
+                route_score: Some(1.0),
+                was_auto_selected: true,
+                repair_attempted: false,
+                repair_succeeded: false,
+                timestamp: None,
+            },
+        )
+        .expect("record a run");
+    let body = ok_body(skill_health(&db)).await;
+    out.response("get-skills-health", body);
+}

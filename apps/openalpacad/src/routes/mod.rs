@@ -475,6 +475,33 @@ pub(crate) fn page_offset(requested: Option<i64>) -> i64 {
     requested.unwrap_or(0).max(0)
 }
 
+/// Every route module's samples for the API contract's folder
+/// (API-CONTRACT), in one place: `crate::contract` checks the set against the
+/// folder, so a producer dropped here is a removal.
+#[cfg(test)]
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    artifacts::tests::contract_samples(out).await;
+    command::contract_samples(out);
+    status::tests::contract_samples(out).await;
+    sessions::tests::contract_samples(out).await;
+    memories::tests::contract_samples(out).await;
+    workspaces::life_tests::contract_samples(out).await;
+    extensions::tests::contract_samples(out).await;
+    skills::tests::contract_samples(out).await;
+    tools::tests::contract_samples(out);
+    persona::tests::contract_samples(out).await;
+    settings::contract_tests::contract_samples(out).await;
+    tasks::tests::contract_samples(out).await;
+    agents::tests::contract_samples(out).await;
+    chat::tests::contract_samples(out).await;
+    connectors::tests::contract_samples(out);
+    files::tests::contract_samples(out).await;
+    followups::tests::contract_samples(out).await;
+    orchestrator_latency::contract_samples(out).await;
+    dispatch_decisions::contract_samples(out).await;
+    events_history::tests::contract_samples(out);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

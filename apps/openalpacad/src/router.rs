@@ -514,6 +514,15 @@ fn health_json(instance_id: &str) -> serde_json::Value {
     })
 }
 
+/// `GET /v1/health`'s sample for the API contract's folder (API-CONTRACT).
+#[cfg(test)]
+pub(crate) fn contract_samples(out: &mut crate::contract::Samples) {
+    out.response(
+        "get-health",
+        health_json("0f1e2d3c-4b5a-4968-8776-655443322110"),
+    );
+}
+
 /// Root endpoint (basic info)
 async fn root_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({

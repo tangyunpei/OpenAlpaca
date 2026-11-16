@@ -11,6 +11,8 @@ mod args;
 mod background;
 mod bootstrap;
 mod connector_bridge;
+#[cfg(test)]
+mod contract;
 mod discovery_rotation;
 mod event_bridge;
 mod events;

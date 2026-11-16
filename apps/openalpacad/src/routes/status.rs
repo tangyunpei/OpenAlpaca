@@ -438,4 +438,4 @@ fn display(path: std::path::PathBuf) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -1,0 +1,18 @@
+{
+  "events": [
+    {
+      "agent_id": "",
+      "detail": {
+        "tool_name": ""
+      },
+      "event_type": "",
+      "id": 0,
+      "result": {
+        "ok": false
+      },
+      "task_id": "",
+      "timestamp": ""
+    }
+  ],
+  "next_before": null
+}

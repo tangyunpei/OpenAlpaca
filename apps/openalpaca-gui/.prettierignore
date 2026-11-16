@@ -3,3 +3,5 @@ node_modules
 src-tauri/target
 src-tauri/gen
 static
+# The API contract's samples are written by the daemon's tests (serde_json's layout).
+src/lib/api/contract

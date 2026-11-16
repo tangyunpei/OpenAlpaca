@@ -122,7 +122,7 @@ pub async fn events_history_handler(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use openalpaca_storage::repository::EventLogRepository;
 
@@ -328,5 +328,22 @@ mod tests {
         let next = history_page(&db, &params(Some("t-1"), page.next_before, Some(2))).unwrap();
         assert!(next.events.is_empty());
         assert_eq!(next.next_before, None);
+    }
+
+    /// `GET /v1/events/history`'s sample for the API contract's folder
+    /// (API-CONTRACT): one run's event with its detail.
+    pub(crate) fn contract_samples(out: &mut crate::contract::Samples) {
+        let (_dir, db) = test_db();
+        EventLogRepository::new(&db)
+            .log_for_task(
+                "tool_executed",
+                Some("orchestrator"),
+                Some("t-1"),
+                Some(&serde_json::json!({ "tool_name": "file_read" })),
+                Some(&serde_json::json!({ "ok": true })),
+            )
+            .unwrap();
+        let page = history_page(&db, &params(None, None, None)).unwrap();
+        out.response("get-events-history", serde_json::to_value(page).unwrap());
     }
 }

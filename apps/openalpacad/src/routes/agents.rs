@@ -189,11 +189,17 @@ pub async fn get_agent_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let repo = SubAgentRepository::new(&state.db);
+    agent_detail(&state.db, &id)
+}
 
-    match repo.get(&id) {
+/// `GET /v1/agents/{id}`'s answer (split out for the API contract's sample,
+/// API-CONTRACT).
+fn agent_detail(db: &Database, id: &str) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = SubAgentRepository::new(db);
+
+    match repo.get(id) {
         Ok(Some(agent)) => {
-            let metrics = repo.get_metrics(&id).unwrap_or(None);
+            let metrics = repo.get_metrics(id).unwrap_or(None);
             (
                 StatusCode::OK,
                 Json(serde_json::to_value(AgentResponse { agent, metrics }).unwrap()),
@@ -309,13 +315,16 @@ pub async fn agent_action_handler(
         timestamp: Utc::now(),
     });
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "agent_id": id,
-            "status": new_status
-        })),
-    )
+    (StatusCode::OK, Json(agent_acted(&id, new_status)))
+}
+
+/// `POST /v1/agents/{id}/action`'s answer (split out for the API contract's
+/// sample, API-CONTRACT).
+fn agent_acted(id: &str, status: &str) -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": id,
+        "status": status
+    })
 }
 
 /// GET /v1/agents/{id}/config
@@ -323,9 +332,13 @@ pub async fn get_agent_config_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let service = &state.agent_config_service;
+    agent_config(&state.agent_config_service, &id)
+}
 
-    match service.get_agent_config(&id) {
+/// `GET /v1/agents/{id}/config`'s answer (split out for the API contract's
+/// sample, API-CONTRACT).
+fn agent_config(service: &AgentConfigService, id: &str) -> Response {
+    match service.get_agent_config(id) {
         Ok((config, version)) => (
             StatusCode::OK,
             Json(
@@ -639,11 +652,11 @@ pub async fn create_template_handler(
             });
             (
                 StatusCode::CREATED,
-                Json(serde_json::json!({
-                    "template_id": template_id,
-                    "status": "created",
-                    "overrides_bundled": route.overrides_bundled(&template_id)
-                })),
+                Json(template_written(
+                    &template_id,
+                    "created",
+                    route.overrides_bundled(&template_id),
+                )),
             )
                 .into_response()
         }
@@ -674,11 +687,11 @@ pub async fn update_template_handler(
             });
             (
                 StatusCode::OK,
-                Json(serde_json::json!({
-                    "template_id": id,
-                    "status": "updated",
-                    "overrides_bundled": route.overrides_bundled(&id)
-                })),
+                Json(template_written(
+                    &id,
+                    "updated",
+                    route.overrides_bundled(&id),
+                )),
             )
                 .into_response()
         }
@@ -703,17 +716,29 @@ pub async fn delete_template_handler(
                 config_version: 0,
                 timestamp: Utc::now(),
             });
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "template_id": id,
-                    "status": "archived"
-                })),
-            )
-                .into_response()
+            (StatusCode::OK, Json(template_archived(&id))).into_response()
         }
         Err(e) => delete_refusal(&e),
     }
+}
+
+/// `POST` and `PUT /v1/agent-templates*`'s answer after the write (split out
+/// for the API contract's sample, API-CONTRACT).
+fn template_written(template_id: &str, status: &str, overrides_bundled: bool) -> serde_json::Value {
+    serde_json::json!({
+        "template_id": template_id,
+        "status": status,
+        "overrides_bundled": overrides_bundled
+    })
+}
+
+/// `DELETE /v1/agent-templates/{id}`'s answer (split out for the API
+/// contract's sample, API-CONTRACT).
+fn template_archived(template_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "template_id": template_id,
+        "status": "archived"
+    })
 }
 
 /// A refused `DELETE /v1/agent-templates/{id}`: a bundled template no file
@@ -749,9 +774,18 @@ fn delete_refusal(e: &DeleteTemplateError) -> Response {
 
 /// GET /v1/agent-instances
 pub async fn list_instances_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let instances = state.gateway.shared_context.agent_registry.list_instances();
+    let response = instance_rows(&state.gateway.shared_context.agent_registry);
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap()),
+    )
+}
 
-    let response: Vec<InstanceResponse> = instances
+/// `GET /v1/agent-instances`' rows (split out for the API contract's
+/// sample, API-CONTRACT).
+fn instance_rows(registry: &AgentRegistry) -> Vec<InstanceResponse> {
+    registry
+        .list_instances()
         .iter()
         .map(|a| InstanceResponse {
             id: a.id.clone(),
@@ -760,18 +794,13 @@ pub async fn list_instances_handler(State(state): State<Arc<AppState>>) -> impl 
             status: a.status.as_str().to_string(),
             current_task: a.current_task.clone(),
         })
-        .collect();
-
-    (
-        StatusCode::OK,
-        Json(serde_json::to_value(response).unwrap()),
-    )
+        .collect()
 }
 
 // ── `?window=` parsing (GAP-20, T48) ────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use chrono::TimeZone;
 
@@ -1515,5 +1544,86 @@ mod tests {
                 .status
                 .is_available()
         );
+    }
+
+    // ── The API contract's samples (API-CONTRACT) ─────────────────────
+
+    /// `/v1/agents*`, `/v1/agent-templates*` and `/v1/agent-instances`'
+    /// JSON bodies for the API contract's folder: the bundled layer under a
+    /// lead file, one running instance, one stored agent with its metrics.
+    pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+        use crate::contract::ok_body;
+        use openalpaca_storage::{AgentMetrics, SubAgentConfig};
+        let t = Templates::new(&[("lead_agent.md", lead("model-a"))]);
+        let mut instance = t
+            .registry
+            .spawn_instance("lead_agent", "task-1".to_string())
+            .unwrap();
+        instance.current_task = Some("task-1".to_string());
+        t.registry.register(instance);
+        let (window, since) = resolve_window(None, Utc::now()).unwrap();
+        let runs = SubagentSpanRepository::new(&t.db)
+            .run_counts_by_template(since)
+            .unwrap();
+        let rows = template_rows(&t.registry, &runs, window);
+        out.response("get-agent-templates", serde_json::to_value(rows).unwrap());
+        let template = t.registry.get_template("lead_agent").unwrap();
+        let provenance = t.registry.provenance("lead_agent");
+        let row = TemplateResponse::from_template(
+            &template,
+            provenance.as_ref(),
+            runs.get("lead_agent"),
+            window,
+        );
+        out.response("get-agent-templates-id", serde_json::to_value(row).unwrap());
+        let overrides = t.route().overrides_bundled("lead_agent");
+        out.response(
+            "post-agent-templates",
+            template_written("lead_agent", "created", overrides),
+        );
+        out.response(
+            "put-agent-templates-id",
+            template_written("lead_agent", "updated", overrides),
+        );
+        out.response("delete-agent-templates-id", template_archived("lead_agent"));
+        let instances = instance_rows(&t.registry);
+        out.response(
+            "get-agent-instances",
+            serde_json::to_value(instances).unwrap(),
+        );
+
+        let repo = SubAgentRepository::new(&t.db);
+        repo.upsert(&SubAgentConfig {
+            id: "agent-1".to_string(),
+            template_id: "lead_agent".to_string(),
+            name: "Lead".to_string(),
+            description: Some("leads".to_string()),
+            icon: Some("icon".to_string()),
+            status: "idle".to_string(),
+            current_task_id: Some("task-1".to_string()),
+            skills_json: "[]".to_string(),
+            preset_json: "{}".to_string(),
+            constraints_json: Some("{}".to_string()),
+            llm_config_json: Some("{}".to_string()),
+            persona: Some("Leads.".to_string()),
+            created_at: Utc::now(),
+            updated_at: Some(Utc::now()),
+        })
+        .unwrap();
+        repo.upsert_metrics(&AgentMetrics {
+            agent_id: "agent-1".to_string(),
+            tasks_completed: 1,
+            tasks_failed: 0,
+            total_runtime_seconds: 5,
+            average_runtime_seconds: 5.0,
+            success_rate: 1.0,
+            updated_at: Utc::now(),
+        })
+        .unwrap();
+        let (_, Json(body)) = agent_detail(&t.db, "agent-1");
+        out.response("get-agents-id", body);
+        let body = ok_body(agent_config(&t.service, "lead_agent")).await;
+        out.response("get-agents-id-config", body);
+        out.response("post-agents-id-action", agent_acted("agent-1", "waiting"));
     }
 }

@@ -6,8 +6,14 @@
 //! is from [`OLDEST_SUPPORTED`] to [`PROTOCOL`], reuses one it speaks
 //! exactly, reuses an older one it still supports with a note, and refuses
 //! any other with a mismatch it names — never killing, never spawning beside
-//! it. When the two numbers move is API-CONTRACT's written rule, not this
-//! module's.
+//! it. When the two numbers move is the PROTOCOL rule (CLAUDE.md,
+//! *Storage*; API-CONTRACT): a removed or renamed route, field or event
+//! variant bumps [`PROTOCOL`] in the same commit, and
+//! [`OLDEST_SUPPORTED`] with it where the older protocol can no longer be
+//! served; an addition bumps neither. The daemon's contract test
+//! (`apps/openalpacad/src/contract/`) refuses a response or event sample
+//! that lost a field unless [`PROTOCOL`] moved; it does not see a request's
+//! fields or a route's path, which the rule binds all the same.
 
 /// The protocol this build speaks.
 pub const PROTOCOL: u32 = 1;

@@ -233,14 +233,19 @@ pub async fn upload_file_handler(
         }
     };
 
-    Json(FileUploadResponse {
-        id: stored.asset.id,
-        filename: stored.asset.filename,
-        mime_type: stored.asset.mime_type,
-        size_bytes: stored.asset.size_bytes,
-        status: stored.asset.status.as_str().to_string(),
-    })
-    .into_response()
+    Json(upload_answer(stored.asset)).into_response()
+}
+
+/// `POST /v1/files/upload`'s answer for the stored row (split out for the
+/// API contract's sample, API-CONTRACT).
+fn upload_answer(asset: openalpaca_storage::FileAsset) -> FileUploadResponse {
+    FileUploadResponse {
+        id: asset.id,
+        filename: asset.filename,
+        mime_type: asset.mime_type,
+        size_bytes: asset.size_bytes,
+        status: asset.status.as_str().to_string(),
+    }
 }
 
 /// GET /v1/files/{id} — Get file metadata
@@ -406,7 +411,7 @@ pub(crate) fn sweep_open_copies() -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use openalpaca_storage::{Database, FileAsset, FileAssetStatus};
     use tempfile::TempDir;
@@ -1419,5 +1424,32 @@ mod tests {
             },
             "the opener was never called"
         );
+    }
+
+    /// `/v1/files*`'s JSON bodies for the API contract's folder
+    /// (API-CONTRACT): one stored row, its metadata, its upload answer and
+    /// an Open that opens nothing.
+    pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+        let (_dir, db) = test_db();
+        let mut asset = sample_asset("f1", "user1");
+        asset.extracted_text = Some("text".to_string());
+        asset.extract_error = Some("none".to_string());
+        asset.metadata_json = Some("{}".to_string());
+        FileAssetRepository::new(&db)
+            .insert(&asset)
+            .expect("insert asset");
+        let stored = FileAssetRepository::new(&db)
+            .get_by_id("f1")
+            .expect("read")
+            .expect("a row");
+        out.response("get-files-id", serde_json::to_value(&stored).unwrap());
+        out.response(
+            "post-files-upload",
+            serde_json::to_value(upload_answer(stored)).unwrap(),
+        );
+        let opened = open_asset_for_user(&db, "f1", "user1", open_ok)
+            .await
+            .expect("opened");
+        out.response("post-files-id-open", serde_json::to_value(opened).unwrap());
     }
 }

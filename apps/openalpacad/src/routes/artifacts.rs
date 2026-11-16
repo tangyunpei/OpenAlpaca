@@ -624,4 +624,4 @@ pub async fn pin_artifact_handler(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

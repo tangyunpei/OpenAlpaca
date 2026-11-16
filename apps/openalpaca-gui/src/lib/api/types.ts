@@ -857,7 +857,12 @@ export interface AgentActionResponse {
 
 export interface AgentConfigFile {
   agent: { id: string; name: string; description: string; icon?: string };
-  skills: { assigned: string[]; denied?: string[] };
+  /**
+   * The template's capability grant, as `AgentConfigFile` serializes it
+   * (`capabilities`, renamed from `skills` in the daemon long ago; the
+   * API contract's sample found the old name here, API-CONTRACT).
+   */
+  capabilities: { assigned: string[]; denied?: string[] | null };
   preset: { persona: string; temperature?: number; verbosity?: string };
   constraints?: {
     max_tool_calls?: number;

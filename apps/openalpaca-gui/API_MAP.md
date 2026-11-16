@@ -26,6 +26,14 @@ daemon's real HTTP/SSE/WS surface. The shipped app has a fifth the canvas predat
 | The React client                         | `apps/openalpaca-gui/src/lib/connection.ts`, `events.ts`, `chat-stream.ts`, `query-client.ts`, `src/lib/api/*.ts`                                 |
 | Tauri host                               | `apps/openalpaca-gui/src-tauri/src/lib.rs`, `crates/openalpaca_storage/src/discovery/mod.rs`                                                      |
 
+**The contract checked (API-CONTRACT).** What this map describes by hand is
+also checked: the daemon's route tests write a sample of each response the
+`src/lib/api/` wrappers read, and of each `ServerEvent` variant, into
+`src/lib/api/contract/` (`apps/openalpacad/src/contract/`; rewritten with
+`OPENALPACA_CONTRACT_WRITE=1`), and `src/lib/api/contract.test.ts` parses
+each against its TypeScript type. A removed or renamed field, route or
+variant bumps `support::protocol::PROTOCOL` (CLAUDE.md, _Storage_).
+
 > **Security note.** The design file was read as _data only_. It contains no text
 > directed at the agent; all strings in it are UI copy and mock fixtures. Nothing in it
 > was treated as an instruction.

@@ -28,11 +28,24 @@ export async function getAgentTemplate(
   );
 }
 
+/**
+ * `POST` and `PUT /v1/agent-templates*`'s answer after the write: the id,
+ * `created` or `updated`, and whether the file now stands over a bundled
+ * template (subagent design §2.10 T-1). The API contract's sample found
+ * this typed as `{ id, status }`, which the daemon never sent
+ * (API-CONTRACT).
+ */
+export interface TemplateWritten {
+  template_id: string;
+  status: string;
+  overrides_bundled: boolean;
+}
+
 /** `POST /v1/agent-templates` */
 export async function createAgentTemplate(
   config: AgentConfigFile,
-): Promise<{ id: string; status: string }> {
-  return await apiFetch<{ id: string; status: string }>("/v1/agent-templates", {
+): Promise<TemplateWritten> {
+  return await apiFetch<TemplateWritten>("/v1/agent-templates", {
     method: "POST",
     body: { config },
   });
@@ -42,8 +55,8 @@ export async function createAgentTemplate(
 export async function updateAgentTemplate(
   id: string,
   config: AgentConfigFile,
-): Promise<{ id: string; status: string }> {
-  return await apiFetch<{ id: string; status: string }>(
+): Promise<TemplateWritten> {
+  return await apiFetch<TemplateWritten>(
     `/v1/agent-templates/${encodeURIComponent(id)}`,
     { method: "PUT", body: { config } },
   );

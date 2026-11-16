@@ -1,0 +1,43 @@
+{
+  "busy": {
+    "connected_clients": 0,
+    "pending_confirmations": 0,
+    "running_tasks": 0
+  },
+  "db_path": "",
+  "home_root": "",
+  "llm": {
+    "default_model": "",
+    "default_model_routable": false,
+    "effective_default_model": ""
+  },
+  "log_path": null,
+  "produced_bytes": 0,
+  "project_root": "",
+  "retention": {
+    "log_max_session_bytes": 0,
+    "log_max_total_bytes": 0,
+    "log_retention_days": 0
+  },
+  "routing": {
+    "resume_enabled": false
+  },
+  "schema_version": 0,
+  "sessions": {
+    "dropped_records": 0,
+    "last_sweep": {
+      "bytes_after": 0,
+      "bytes_before": 0,
+      "bytes_freed": 0,
+      "files_removed": 0,
+      "index_rows_cleared": 0,
+      "over_cap_after": false,
+      "sessions_evicted": 0,
+      "sessions_visited": 0
+    }
+  },
+  "started_at": "",
+  "state_dir": "",
+  "upload_bytes": 0,
+  "uptime_secs": 0
+}

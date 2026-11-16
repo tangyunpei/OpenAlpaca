@@ -1,0 +1,27 @@
+{
+  "agent": {
+    "constraints_json": "",
+    "created_at": "",
+    "current_task_id": "",
+    "description": "",
+    "icon": "",
+    "id": "",
+    "llm_config_json": "",
+    "name": "",
+    "persona": "",
+    "preset_json": "",
+    "skills_json": "",
+    "status": "",
+    "template_id": "",
+    "updated_at": ""
+  },
+  "metrics": {
+    "agent_id": "",
+    "average_runtime_seconds": 0,
+    "success_rate": 0,
+    "tasks_completed": 0,
+    "tasks_failed": 0,
+    "total_runtime_seconds": 0,
+    "updated_at": ""
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "applied": false,
+  "counts": {
+    "artifacts": 0,
+    "followups": 0,
+    "memory_notes": 0,
+    "messages": 0,
+    "run_events": 0,
+    "sessions": 0,
+    "spans": 0,
+    "tasks": 0,
+    "tool_calls": 0,
+    "uploads": 0
+  },
+  "dry_run": false,
+  "entries": [
+    {
+      "action": "",
+      "entry": "",
+      "holds": "",
+      "retention": ""
+    }
+  ],
+  "kept": {
+    "artifacts": 0,
+    "uploads": 0
+  },
+  "project": {
+    "id": "",
+    "missing": false,
+    "name": "",
+    "root": ""
+  },
+  "removed": {
+    "memory_partitions": 0,
+    "project_folder": false,
+    "session_dirs": 0
+  }
+}

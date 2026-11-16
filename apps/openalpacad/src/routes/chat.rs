@@ -959,7 +959,7 @@ pub async fn confirm_tool(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// **M6.** The declaration is opt-in and absent by default: an existing
@@ -2191,5 +2191,106 @@ mod tests {
     #[test]
     fn no_broker_means_nothing_is_pending() {
         assert!(pending_confirmations(None).confirmations.is_empty());
+    }
+
+    // ── The API contract's samples (API-CONTRACT) ─────────────────────
+
+    /// `/v1/chat/history`, `/v1/chat/confirmations` and the feedback
+    /// routes' JSON bodies for the API contract's folder: one message with
+    /// a linked artifact and its feedback, one pending prompt. The history,
+    /// clear and feedback answers are their handlers' own response types,
+    /// built here over the rows the handlers read: the handlers read them
+    /// through the `ChatService` and `AppState` a unit test cannot build.
+    pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+        use openalpaca_core::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
+        use openalpaca_storage::store::StoreScope;
+        use openalpaca_storage::{
+            ArtifactKind, ArtifactStore, ConversationMessage, ConversationRepository, Database,
+            FileAssetRepository, MessageFeedbackRepository, NewArtifact,
+        };
+        let home = tempfile::tempdir().expect("home store");
+        let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let lane = "owner-1:gui";
+        let repo = ConversationRepository::new(&db);
+        let session = repo
+            .get_or_create_active_session(lane, "gui", None)
+            .expect("session");
+        let message = repo
+            .insert(&ConversationMessage {
+                lane_key: lane.to_string(),
+                role: "assistant".to_string(),
+                content: "Here it is.".to_string(),
+                ..Default::default()
+            })
+            .expect("insert");
+        let artifact = ArtifactStore::new(&db)
+            .put(NewArtifact::new(
+                "owner-1",
+                &StoreScope::Home,
+                ArtifactKind::Markdown,
+                "report",
+                b"body\n",
+            ))
+            .expect("put")
+            .0;
+        FileAssetRepository::new(&db)
+            .link_to_message_with_role(
+                message,
+                &artifact.id,
+                0,
+                None,
+                openalpaca_storage::repository::file_asset::ARTIFACT_ROLE,
+            )
+            .expect("link");
+        let messages = repo.list_by_session(&session.id, 50, 0).expect("messages");
+        let history = ChatHistoryResponse {
+            messages: with_artifacts(&db, messages),
+            total: 1,
+            lane_key: lane.to_string(),
+            session_id: Some(session.id.clone()),
+        };
+        out.response("get-chat-history", serde_json::to_value(history).unwrap());
+        out.response(
+            "delete-chat-history",
+            serde_json::to_value(ChatDeleteResponse { deleted: 1 }).unwrap(),
+        );
+        let feedback = MessageFeedbackRepository::new(&db);
+        feedback
+            .upsert(message, "positive", Some("good"))
+            .expect("feedback");
+        let row = feedback
+            .get_by_message(message)
+            .expect("read")
+            .expect("a row");
+        let answer = FeedbackResponse {
+            message_id: row.message_id,
+            feedback: row.feedback,
+            comment: row.comment,
+        };
+        let answer = serde_json::to_value(answer).unwrap();
+        out.response("put-chat-messages-id-feedback", answer.clone());
+        out.response("get-chat-messages-id-feedback", answer);
+
+        let broker = ConfirmationBroker::new();
+        let _pending = broker.request(&ConfirmationRequest {
+            request_id: "req-1".to_string(),
+            agent_id: "orchestrator".to_string(),
+            tool_name: "file_write".to_string(),
+            tool_arguments: serde_json::json!({ "path": "notes.md" }),
+            stream_id: Some("stream-1".to_string()),
+            lane_key: Some(lane.to_string()),
+            task_id: Some("task-1".to_string()),
+            agent_instance_id: None,
+            preview: Some("+ a line".to_string()),
+            per_call: true,
+            timestamp: Utc::now(),
+        });
+        let pending = pending_confirmations(Some(&broker));
+        out.response(
+            "get-chat-confirmations",
+            serde_json::to_value(pending).unwrap(),
+        );
     }
 }

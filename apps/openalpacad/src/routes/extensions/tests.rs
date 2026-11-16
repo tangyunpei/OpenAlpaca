@@ -1777,3 +1777,59 @@ fn the_new_paths_do_not_collide_with_the_verb_paths() {
     // Building it is the assertion: `Router::route` panics on a conflict.
     drop(router);
 }
+
+/// `/v1/extensions*`'s JSON bodies for the API contract's folder
+/// (API-CONTRACT): a plugin validated, installed, denied, updated and
+/// uninstalled, and a switched-off MCP server added — nothing spawned.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let h = Harness::new();
+    let manifest = "[types]\ntools = true\n[capabilities]\nprovides = [\"notes_write\"]\n";
+    let source = h.source("notion", "1.4.0", manifest);
+    let request = serde_json::json!({ "source": "path", "path": source.display().to_string() });
+    let body = ok_body(super::validate_plugin(h.extensions.clone(), request.clone()).await).await;
+    out.response("post-extensions-plugin-validate", body);
+    let body =
+        ok_body(super::install_extension(h.extensions.clone(), "plugin", request).await).await;
+    out.response("post-extensions-plugin", body);
+    let body = ok_body(
+        super::install_extension(
+            h.extensions.clone(),
+            "mcp",
+            serde_json::json!({
+                "name": "remote",
+                "transport": "http",
+                "url": "https://example.com/mcp",
+                "connect_timeout_secs": 1,
+                "enabled": false,
+            }),
+        )
+        .await,
+    )
+    .await;
+    out.response("post-extensions-mcp", body);
+    let body = ok_body(run_verb(h.extensions.clone(), "plugin", "notion", Verb::Deny).await).await;
+    out.response("post-extensions-kind-id-verb", body);
+    let body = ok_body(super::list_extensions(&h.extensions, true).await).await;
+    out.response("get-extensions", body);
+    let newer = h.source("notion", "1.5.0", manifest);
+    let body = ok_body(
+        super::update_extension(
+            h.extensions.clone(),
+            "plugin",
+            "notion",
+            serde_json::json!({ "source": "path", "path": newer.display().to_string() }),
+        )
+        .await,
+    )
+    .await;
+    out.response("put-extensions-plugin-id", body);
+    let query = DeleteQuery {
+        uninstall: true,
+        keep_data: false,
+    };
+    let body =
+        ok_body(super::delete_extension(h.extensions.clone(), "plugin", "notion", query).await)
+            .await;
+    out.response("delete-extensions-kind-id", body);
+}

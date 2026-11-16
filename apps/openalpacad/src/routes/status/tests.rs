@@ -636,3 +636,56 @@ async fn busy_counts_live_runs_pending_prompts_and_connected_clients() {
         "a count must not carry the prompt's arguments: {body}"
     );
 }
+
+/// `GET /v1/status`'s sample for the API contract's folder (API-CONTRACT):
+/// every optional block present — a router, a broker, a swept session log
+/// and a project named by the request.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let _guard = HomeStoreGuard::set(&root.join("home").join(".openalpaca"));
+    let db = test_db(&tmp);
+    let project = root.join("checkout");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let config_path = tmp.path().join("llm.toml");
+    std::fs::write(
+        &config_path,
+        r#"[orchestrator]
+model = "qwen3:8b"
+
+[providers.ollama]
+enabled = true
+base_url = "http://127.0.0.1:1/v1"
+
+[models."qwen3:8b"]
+provider = "ollama"
+context = 32768
+"#,
+    )
+    .unwrap();
+    let router = openalpaca_llm::build_router(&config_path).expect("router");
+    let broker = ConfirmationBroker::new();
+    let service = SessionLogService::new(
+        tmp.path().join("sessions"),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    )
+    .with_last_sweep(SweepReport {
+        sessions_visited: 1,
+        sessions_evicted: 0,
+        files_removed: 0,
+        bytes_freed: 0,
+        bytes_before: 0,
+        bytes_after: 0,
+        over_cap_after: false,
+        index_rows_cleared: 0,
+    });
+    let mut ins = inputs(&db, Utc::now());
+    ins.llm_router = Some(&router);
+    ins.confirmation_broker = Some(&broker);
+    ins.session_log = Some(&service);
+    let body =
+        crate::contract::ok_body(status_response(&ins, &headers_with(project.to_str()))).await;
+    out.response("get-status", body);
+}

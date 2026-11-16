@@ -1,0 +1,41 @@
+[
+  {
+    "body": "",
+    "capabilities": [
+      ""
+    ],
+    "denied_capabilities": [
+      ""
+    ],
+    "description": "",
+    "fallback_models": [],
+    "icon": "",
+    "id": "",
+    "max_cost_per_task": 0,
+    "max_tool_calls": 0,
+    "model": "",
+    "name": "",
+    "not_used": [
+      {
+        "edit": null,
+        "path": null,
+        "plugin": null,
+        "reason": "",
+        "source": "",
+        "version": null
+      }
+    ],
+    "overrides_bundled": false,
+    "path": "",
+    "persona": "",
+    "plugin": null,
+    "require_confirmation_for": [],
+    "run_count": 0,
+    "singleton": false,
+    "source": "",
+    "state": "",
+    "verbosity": "",
+    "warnings": [],
+    "window": ""
+  }
+]

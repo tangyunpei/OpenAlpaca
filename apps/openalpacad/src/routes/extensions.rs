@@ -333,7 +333,13 @@ pub async fn list_extensions_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListQuery>,
 ) -> Response {
-    let rows = state.extensions.list(query.include_orphaned).await;
+    list_extensions(&state.extensions, query.include_orphaned).await
+}
+
+/// `GET /v1/extensions`'s answer: a bare array of rows (split out for the
+/// API contract's sample, API-CONTRACT).
+pub(crate) async fn list_extensions(extensions: &Extensions, include_orphaned: bool) -> Response {
+    let rows = extensions.list(include_orphaned).await;
     let body: Vec<serde_json::Value> = rows.iter().map(row_json).collect();
     (StatusCode::OK, Json(body)).into_response()
 }
@@ -841,4 +847,4 @@ pub(crate) fn json_to_toml(v: &serde_json::Value) -> toml::Value {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

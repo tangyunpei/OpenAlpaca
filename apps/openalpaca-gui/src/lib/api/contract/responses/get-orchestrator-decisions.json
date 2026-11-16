@@ -1,0 +1,16 @@
+{
+  "records": [
+    {
+      "agent_count": 0,
+      "dag_node_count": 0,
+      "error_message": "",
+      "id": 0,
+      "mode": "",
+      "predictability_score": 0,
+      "reason": "",
+      "request_id": "",
+      "task_id": "",
+      "timestamp": ""
+    }
+  ]
+}

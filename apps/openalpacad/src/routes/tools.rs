@@ -127,4 +127,4 @@ pub(crate) fn tools_json(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

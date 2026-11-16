@@ -1,0 +1,17 @@
+{
+  "active_task_count": 0,
+  "created_at": "",
+  "ended_at": null,
+  "id": "",
+  "interrupted_task_count": 0,
+  "lane_key": "",
+  "last_message_at": null,
+  "message_count": 0,
+  "source": "",
+  "status": "",
+  "title": "",
+  "updated_at": "",
+  "working_state": null,
+  "working_state_updated_at": null,
+  "workspace_id": null
+}

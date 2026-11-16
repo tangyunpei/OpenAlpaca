@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "artifacts": [],
+      "content": "",
+      "content_json": null,
+      "created_at": "",
+      "display_text": null,
+      "duration_ms": null,
+      "id": 0,
+      "lane_key": "",
+      "model": null,
+      "role": "",
+      "session_id": "",
+      "source": null,
+      "task_id": null,
+      "tokens_in": null,
+      "tokens_out": null
+    }
+  ],
+  "total": 0
+}

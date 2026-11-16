@@ -1312,3 +1312,60 @@ async fn writes_on_another_owners_session_answer_404() {
     assert_eq!(after.status, SESSION_ACTIVE);
     assert_eq!(after.title, "");
 }
+
+/// `/v1/sessions*`'s JSON bodies for the API contract's folder
+/// (API-CONTRACT): two conversations on the lane, one bound to a project,
+/// with a message each.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let home = tempfile::tempdir().expect("home store");
+    let _env = crate::test_util::HomeStoreGuard::set(&home.path().join(".openalpaca"));
+    let project = tempfile::tempdir().expect("project");
+    let project_root = project.path().canonicalize().expect("canonical project");
+    std::fs::create_dir_all(project_root.join(".git")).expect("a git checkout");
+    let h = Harness::new();
+    let created = ok_body(create_session(
+        &h.deps(),
+        CreateSessionRequest {
+            title: Some("A chat".to_string()),
+            workspace_path: Some(project_root.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    ))
+    .await;
+    out.response("post-sessions", created.clone());
+    let id = created["id"].as_str().expect("an id").to_string();
+    h.repo()
+        .insert(&ConversationMessage {
+            lane_key: LANE.to_string(),
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            ..Default::default()
+        })
+        .expect("insert");
+    let other = ok_body(create_session(&h.deps(), CreateSessionRequest::default())).await;
+    let other_id = other["id"].as_str().expect("an id").to_string();
+    let body = ok_body(list_sessions(&h.deps(), ListSessionsQuery::default())).await;
+    out.response("get-sessions", body);
+    let body = ok_body(get_session_messages(
+        &h.deps(),
+        &id,
+        SessionMessagesQuery::default(),
+    ))
+    .await;
+    out.response("get-sessions-id-messages", body);
+    let body = ok_body(patch_session(
+        &h.deps(),
+        &other_id,
+        PatchSessionRequest {
+            title: Some("Renamed".to_string()),
+            ..Default::default()
+        },
+    ))
+    .await;
+    out.response("patch-sessions-id", body);
+    let body = ok_body(activate_session(&h.deps(), &id)).await;
+    out.response("post-sessions-id-activate", body);
+    let body = ok_body(archive_session(&h.deps(), &other_id)).await;
+    out.response("post-sessions-id-archive", body);
+}

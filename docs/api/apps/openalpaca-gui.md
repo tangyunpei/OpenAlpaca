@@ -191,6 +191,18 @@
 - Exported functions: `configureConnector`, `getConnectorSettings`, `listConnectors`, `performConnectorAction`, `updateConnectorSettings`
 - Endpoints: `GET /v1/connectors`, `POST /v1/connectors/{id}/action`, `POST /v1/connectors/{id}/config`, `GET /v1/connectors/{id}/settings`, `PUT /v1/connectors/{id}/settings`
 
+### `contract-shape.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/contract-shape.ts`
+- Exported functions: none
+- Endpoints: none
+
+### `contract.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/contract.test.ts`
+- Exported functions: none
+- Endpoints: none
+
 ### `extensions.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/extensions.ts`

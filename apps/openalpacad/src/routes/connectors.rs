@@ -65,19 +65,28 @@ fn connector_row(
 /// List all connectors and their status
 pub async fn list_connectors_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let details = state.connector_manager.list_detail().await;
-    let config_repo = openalpaca_storage::ConfigRepository::new(&state.db);
+    Json(connector_rows(&state.db, &details))
+}
+
+/// `GET /v1/connectors`' rows over the manager's details (split out for the
+/// API contract's sample, API-CONTRACT).
+fn connector_rows(
+    db: &openalpaca_storage::Database,
+    details: &[ConnectorDetail],
+) -> Vec<ConnectorStatus> {
+    let config_repo = openalpaca_storage::ConfigRepository::new(db);
 
     // GAP-17/T49: one grouped count for the whole list, never one per row. A
     // read failure costs the counts, not the list — every row then reports the
     // `0` an empty message table would, so nothing renders as a made-up number.
-    let messages = openalpaca_storage::repository::ConversationRepository::new(&state.db)
+    let messages = openalpaca_storage::repository::ConversationRepository::new(db)
         .message_counts_by_source_since(&seven_day_cutoff(Utc::now()))
         .unwrap_or_else(|e| {
             tracing::warn!("Failed to read connector message counts: {e}");
             HashMap::new()
         });
 
-    let response: Vec<ConnectorStatus> = details
+    details
         .iter()
         .map(|detail| {
             // Token-optional connectors (iMessage) are always "configured" on their platform.
@@ -93,9 +102,7 @@ pub async fn list_connectors_handler(State(state): State<Arc<AppState>>) -> impl
             };
             connector_row(detail, configured, &messages)
         })
-        .collect();
-
-    Json(response)
+        .collect()
 }
 
 /// POST /v1/connectors/:id/action
@@ -176,7 +183,16 @@ pub async fn connector_settings_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let config_repo = openalpaca_storage::ConfigRepository::new(&state.db);
+    Json(connector_settings(&state.db, &id))
+}
+
+/// `GET /v1/connectors/{id}/settings`' map (split out for the API
+/// contract's sample, API-CONTRACT).
+fn connector_settings(
+    db: &openalpaca_storage::Database,
+    id: &str,
+) -> HashMap<String, serde_json::Value> {
+    let config_repo = openalpaca_storage::ConfigRepository::new(db);
 
     // Collect all config keys matching this connector's prefix
     let prefix = format!("{}.", id);
@@ -201,7 +217,7 @@ pub async fn connector_settings_handler(
         );
     }
 
-    Json(settings)
+    settings
 }
 
 #[derive(Deserialize)]
@@ -254,7 +270,7 @@ pub async fn update_connector_settings_handler(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::managers::connector::ConnectorDetail;
     use chrono::TimeZone;
@@ -317,5 +333,17 @@ mod tests {
     fn cutoff_is_seven_utc_days_back_in_the_tables_own_format() {
         let now = Utc.with_ymd_and_hms(2026, 9, 8, 4, 30, 0).unwrap();
         assert_eq!(seven_day_cutoff(now), "2026-09-01 04:30:00");
+    }
+
+    /// `GET /v1/connectors` and its settings read for the API contract's
+    /// folder (API-CONTRACT): one connector the manager reports, and
+    /// Telegram's schema keys.
+    pub(crate) fn contract_samples(out: &mut crate::contract::Samples) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).expect("db");
+        let rows = connector_rows(&db, &[detail("telegram", "Telegram", true)]);
+        out.response("get-connectors", serde_json::to_value(rows).unwrap());
+        let settings = serde_json::to_value(connector_settings(&db, "telegram")).unwrap();
+        out.response_with_maps("get-connectors-id-settings", settings, &[""]);
     }
 }

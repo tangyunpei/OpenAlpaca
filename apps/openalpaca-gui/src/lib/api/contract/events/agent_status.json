@@ -1,0 +1,11 @@
+{
+  "agent_id": "",
+  "agent_instance_id": "",
+  "current_task_id": "",
+  "instance_id": "",
+  "name": "",
+  "status": "",
+  "template_id": "",
+  "ts": "",
+  "type": "agent_status"
+}

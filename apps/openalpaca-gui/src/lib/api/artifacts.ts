@@ -70,7 +70,7 @@ export interface ArtifactListPage {
 }
 
 /** A row as the wire may carry it: a daemon older than result files (S4a) sends neither field. */
-type WireArtifact = Omit<Artifact, "in_project" | "openable"> &
+export type WireArtifact = Omit<Artifact, "in_project" | "openable"> &
   Partial<Pick<Artifact, "in_project" | "openable">>;
 
 /**

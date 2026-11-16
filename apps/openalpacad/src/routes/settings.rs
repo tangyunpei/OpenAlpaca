@@ -406,7 +406,13 @@ pub async fn get_llm_usage(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LlmUsageQuery>,
 ) -> impl IntoResponse {
-    let repo = openalpaca_storage::repository::LlmUsageRepository::new(&state.db);
+    llm_usage(&state.db, query)
+}
+
+/// `GET /v1/llm/usage`'s answer (split out for the API contract's sample,
+/// API-CONTRACT).
+fn llm_usage(db: &openalpaca_storage::Database, query: LlmUsageQuery) -> Response {
+    let repo = openalpaca_storage::repository::LlmUsageRepository::new(db);
     let limit = query.limit.unwrap_or(50).min(1000);
 
     let result = if let Some(ref task_id) = query.task_id {
@@ -435,7 +441,13 @@ pub async fn get_llm_usage_daily(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LlmUsageDailyQuery>,
 ) -> impl IntoResponse {
-    let repo = openalpaca_storage::repository::LlmUsageRepository::new(&state.db);
+    llm_usage_daily(&state.db, query)
+}
+
+/// `GET /v1/llm/usage/daily`'s answer (split out for the API contract's
+/// sample, API-CONTRACT).
+fn llm_usage_daily(db: &openalpaca_storage::Database, query: LlmUsageDailyQuery) -> Response {
+    let repo = openalpaca_storage::repository::LlmUsageRepository::new(db);
     let limit = query.limit.unwrap_or(30).min(365);
 
     let result =
@@ -529,27 +541,37 @@ pub async fn get_usage_summary(
         );
     }
 
-    let now = Utc::now();
-    let date = now.format("%Y-%m-%d").to_string();
-
-    // A read failure costs the breakdown, not the summary: the panel then
-    // shows the total with no per-provider rows, which is what a day with no
-    // calls looks like too — never an invented figure.
-    let providers = openalpaca_storage::repository::LlmUsageRepository::new(&state.db)
-        .provider_usage_since(&utc_day_start(now))
-        .unwrap_or_else(|e| {
-            tracing::warn!("Failed to read today's per-provider usage: {e}");
-            Vec::new()
-        });
-
     let execution = &state.daemon_config.load().execution;
     let caps = UsageCaps {
         workflow_max_cost_usd: execution.lead_agent_defaults.max_cost,
         agent_max_cost_usd: execution.agent_defaults.max_cost,
     };
+    (
+        StatusCode::OK,
+        Json(today_usage(&state.db, Utc::now(), caps)),
+    )
+        .into_response()
+}
 
-    let summary = usage_summary(date, providers, caps);
-    (StatusCode::OK, Json(summary)).into_response()
+/// `GET /v1/usage/summary`'s body for the UTC day of `now` (split out for
+/// the API contract's sample, API-CONTRACT).
+fn today_usage(
+    db: &openalpaca_storage::Database,
+    now: DateTime<Utc>,
+    caps: UsageCaps,
+) -> UsageSummaryResponse {
+    let date = now.format("%Y-%m-%d").to_string();
+
+    // A read failure costs the breakdown, not the summary: the panel then
+    // shows the total with no per-provider rows, which is what a day with no
+    // calls looks like too — never an invented figure.
+    let providers = openalpaca_storage::repository::LlmUsageRepository::new(db)
+        .provider_usage_since(&utc_day_start(now))
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to read today's per-provider usage: {e}");
+            Vec::new()
+        });
+    usage_summary(date, providers, caps)
 }
 
 // ── Credential Discovery endpoints ──────────────────────────────────
@@ -849,6 +871,9 @@ pub async fn update_web_search_config(
 
 #[cfg(test)]
 mod provider_enabled_tests;
+
+#[cfg(test)]
+pub(crate) mod contract_tests;
 
 #[cfg(test)]
 mod tests {

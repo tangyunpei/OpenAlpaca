@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "changes": [],
+      "created_at": "",
+      "id": "",
+      "knowledge": "",
+      "knowledge_left_out": 0,
+      "observed_at": "",
+      "older_count": 0,
+      "origin": "",
+      "reason": "",
+      "revision": "",
+      "scope": "",
+      "sources": [],
+      "target": {
+        "excerpt": "",
+        "excerpt_left_out": 0,
+        "id": "",
+        "origin": "",
+        "revision": "",
+        "scope": "",
+        "title": ""
+      },
+      "title": ""
+    }
+  ]
+}

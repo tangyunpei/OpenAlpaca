@@ -1647,3 +1647,107 @@ async fn a_write_whose_project_cannot_be_recorded_is_refused_and_writes_nothing(
     );
     assert!(!repo.join(".openalpaca").exists(), "nothing was written");
 }
+
+/// `/v1/memories*`'s JSON bodies for the API contract's folder
+/// (API-CONTRACT): a saved note with a pending suggestion and two revisions,
+/// a learned note, a candidate, and each write's answer.
+pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
+    use crate::contract::ok_body;
+    let f = Fixture::new();
+    let created = ok_body(
+        f.api
+            .create(
+                &Fixture::headers(),
+                create_body("Commute", "# Commute\n\n## Knowledge\nBus.\n", "fact"),
+            )
+            .await,
+    )
+    .await;
+    out.response("post-memories", created.clone());
+    let note = NoteId::parse(created["id"].as_str().unwrap()).unwrap();
+    let revision = created["revision"].as_str().unwrap().to_string();
+    f.suggestion(note, &revision, "Bike.");
+    f.extracted("Learned", "# Learned\n\nFrom what you said.\n");
+    let (candidate, candidate_revision) = f.candidate("Candidate", "# Candidate\n\nMaybe.\n");
+
+    let body = ok_body(
+        f.api
+            .list(&Fixture::headers(), ListMemoriesQuery::default())
+            .await,
+    )
+    .await;
+    out.response("get-memories", body);
+    let query = SearchMemoriesQuery {
+        q: "commute".to_string(),
+        ..Default::default()
+    };
+    let body = ok_body(f.api.search(&Fixture::headers(), query).await).await;
+    out.response("get-memories-search", body);
+    let body = ok_body(
+        f.api
+            .recently_learned(&Fixture::headers(), RecentlyLearnedQuery::default())
+            .await,
+    )
+    .await;
+    out.response("get-memories-recently-learned", body);
+    let body = ok_body(
+        f.api
+            .suggestions(&Fixture::headers(), SuggestionsQuery::default())
+            .await,
+    )
+    .await;
+    out.response("get-memories-suggestions", body);
+
+    let edited = ok_body(
+        f.api
+            .update(
+                &Fixture::with_if_match(&revision),
+                &note.to_string(),
+                update_body("edit", Some("# Commute\n\n## Knowledge\nTrain.\n")),
+            )
+            .await,
+    )
+    .await;
+    out.response("post-memories-id-edit", edited);
+    let body = ok_body(
+        f.api
+            .update(
+                &Fixture::with_if_match(&candidate_revision),
+                &candidate.to_string(),
+                update_body("confirm", None),
+            )
+            .await,
+    )
+    .await;
+    out.response("post-memories-id-confirm", body);
+    let body = ok_body(
+        f.api
+            .read(
+                &Fixture::headers(),
+                &note.to_string(),
+                ReadMemoryQuery::default(),
+            )
+            .await,
+    )
+    .await;
+    let current = body["revision"].as_str().unwrap().to_string();
+    out.response("get-memories-id", body);
+    let body = ok_body(f.api.history(&Fixture::headers(), &note.to_string()).await).await;
+    out.response("get-memories-id-history", body);
+
+    let (fresh, fresh_revision) = f.extracted("Fresh", "# Fresh\n\nUndo me.\n");
+    let body = ok_body(
+        f.api
+            .undo(&Fixture::with_if_match(&fresh_revision), &fresh.to_string())
+            .await,
+    )
+    .await;
+    out.response("post-memories-id-undo", body);
+    let body = ok_body(
+        f.api
+            .delete(&Fixture::with_if_match(&current), &note.to_string())
+            .await,
+    )
+    .await;
+    out.response("delete-memories-id", body);
+}

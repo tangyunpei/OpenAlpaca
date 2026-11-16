@@ -343,3 +343,22 @@ fn every_row_carries_the_nine_section_8_keys_and_no_others() {
         );
     }
 }
+
+/// `GET /v1/tools`'s sample for the API contract's folder (API-CONTRACT): a
+/// builtin, a config tool and an MCP server's tool.
+pub(crate) fn contract_samples(out: &mut crate::contract::Samples) {
+    let registry = ToolRegistry::new().expect("registry");
+    let ext = ExtensionId::mcp("github");
+    registry
+        .extensions()
+        .upsert(&ext, true, ExtensionState::Enabled);
+    for tool in [
+        builtin_tool("remember"),
+        config_tool("weather"),
+        mcp_tool("github", "github__create_issue"),
+    ] {
+        registry.register(tool).expect("register");
+    }
+    let rows = tools_json(&registry, registry.extensions(), &HashMap::new());
+    out.response("get-tools", serde_json::Value::Array(rows));
+}

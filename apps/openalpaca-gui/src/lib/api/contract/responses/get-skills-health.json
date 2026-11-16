@@ -1,0 +1,18 @@
+[
+  {
+    "avg_cost_usd": 0,
+    "avg_duration_ms": 0,
+    "avg_rounds": 0,
+    "clean_success_rate": 0,
+    "clean_success_rate_7d": 0,
+    "degraded_rate": 0,
+    "feedback_count": 0,
+    "feedback_coverage": 0,
+    "last_invoked_at": "",
+    "repair_effectiveness": 0,
+    "repair_rate": 0,
+    "skill_id": "",
+    "total_invocations": 0,
+    "user_satisfaction_rate": null
+  }
+]

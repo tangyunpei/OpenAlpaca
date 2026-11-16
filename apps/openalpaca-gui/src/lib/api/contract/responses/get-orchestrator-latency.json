@@ -1,0 +1,13 @@
+{
+  "records": [
+    {
+      "ack_ms": 0,
+      "auto_promotion_reason": "",
+      "fallback_reason": "",
+      "id": 0,
+      "mode": "",
+      "request_id": "",
+      "timestamp": ""
+    }
+  ]
+}
