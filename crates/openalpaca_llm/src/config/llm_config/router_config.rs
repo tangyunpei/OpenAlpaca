@@ -108,8 +108,13 @@ pub struct ModelConfigEntry {
     pub supports_document: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_reasoning: Option<bool>,
-    /// Whether the model can be given tools. Omitted means yes — see
-    /// [`crate::routing::model_registry::ModelInfo::supports_tools`].
+    /// Whether the model can be given tools. Omitted keeps the compiled
+    /// row's flag, else what discovery read, else yes (CAP-FLAGS;
+    /// `supports_image` likewise, else no; `supports_audio`,
+    /// `supports_document` and `supports_reasoning`, which no discovery
+    /// reads, the compiled row's, else no) — see
+    /// [`crate::routing::model_registry::ModelRegistry::reload_from_config`]
+    /// and [`crate::routing::model_registry::ModelInfo::supports_tools`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_tools: Option<bool>,
 }

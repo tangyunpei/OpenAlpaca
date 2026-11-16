@@ -809,3 +809,358 @@ async fn a_compiled_id_a_local_server_lists_with_no_row_costs_the_compiled_price
     assert_eq!(cost, 0.0, "an uncatalogued id there is 0");
     assert!(!logs_contain("no price"));
 }
+
+// ── CAP-FLAGS, Rev 110 (3) (b): a row that leaves out a capability flag ──
+
+/// An Ollama with `tag` installed, `/api/show` giving a 32,768 window and
+/// `capabilities`.
+async fn ollama_capable(
+    tag: &'static str,
+    capabilities: &'static [&'static str],
+) -> MockHttpServer {
+    MockHttpServer::start(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/api/tags") => {
+            MockResponse::json(serde_json::json!({"models": [{"name": tag}]}).to_string())
+        }
+        ("POST", "/api/show") => MockResponse::json(
+            serde_json::json!({
+                "capabilities": capabilities,
+                "model_info": {"llama.context_length": 32_768},
+            })
+            .to_string(),
+        ),
+        _ => MockResponse::not_found(),
+    })
+    .await
+}
+
+/// `id`'s registered row.
+fn info_of(registry: &ModelRegistry, id: &str) -> crate::routing::model_registry::ModelInfo {
+    registry
+        .get_model_info(id)
+        .unwrap_or_else(|| panic!("{id} is registered"))
+}
+
+/// [`unsized_row`] for Ollama, a price and nothing else.
+fn priced_only() -> ModelConfigEntry {
+    unsized_row("ollama", Some(0.5), Some(1.0))
+}
+
+/// A row written only to price a vision Ollama tag keeps the image
+/// support `/api/show` reported, whether the row was read before
+/// discovery (a boot) or after it (a hand edit's reload), and a
+/// `supports_image` line taken out again gives the discovered value back.
+/// On the parent the row's left-out flag said `false` over it in both
+/// orders (the review's probe).
+#[tokio::test]
+async fn a_row_that_leaves_out_a_flag_keeps_what_discovery_read() {
+    let server = ollama_capable("vision-tag", &["completion", "tools", "vision"]).await;
+    let priced = || [("vision-tag", priced_only())];
+
+    // The boot's order: the row first, then discovery.
+    let router = ollama_router(&server.base_url, &priced());
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    let info = info_of(router.model_registry(), "vision-tag");
+    assert!(info.supports_image, "row, then discovery");
+    assert!(info.supports_tools, "row, then discovery");
+
+    // A reload's order: discovery first, then the row.
+    let router = ollama_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    let registry = router.model_registry();
+    assert!(info_of(registry, "vision-tag").supports_image, "discovered");
+    registry.reload_from_config(&config_of(&priced()), &HashSet::new());
+    assert!(
+        info_of(registry, "vision-tag").supports_image,
+        "discovery, then row"
+    );
+
+    // A stated `false` wins, and the line taken out again gives back what
+    // discovery read.
+    let stated = [(
+        "vision-tag",
+        ModelConfigEntry {
+            supports_image: Some(false),
+            ..priced_only()
+        },
+    )];
+    registry.reload_from_config(&config_of(&stated), &HashSet::new());
+    assert!(
+        !info_of(registry, "vision-tag").supports_image,
+        "the row's own"
+    );
+    registry.reload_from_config(&config_of(&priced()), &HashSet::new());
+    assert!(
+        info_of(registry, "vision-tag").supports_image,
+        "the line taken out"
+    );
+}
+
+/// A flag the row states wins over what discovery read, in both orders:
+/// `false` on a vision tag, `true` on a tag that reports no vision. Green
+/// on the parent: a guard against a fix that lets discovery overwrite a
+/// stated flag.
+#[tokio::test]
+async fn a_flag_the_row_states_wins_over_discovery() {
+    let vision = ollama_capable("vision-tag", &["completion", "tools", "vision"]).await;
+    let plain = ollama_capable("plain-tag", &["completion", "tools"]).await;
+    let stating = |value| ModelConfigEntry {
+        supports_image: Some(value),
+        ..priced_only()
+    };
+    for (server, tag, value) in [(&vision, "vision-tag", false), (&plain, "plain-tag", true)] {
+        let rows = [(tag, stating(value))];
+        // The row first, then discovery.
+        let router = ollama_router(&server.base_url, &rows);
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        assert_eq!(
+            info_of(router.model_registry(), tag).supports_image,
+            value,
+            "{tag}: row, then discovery"
+        );
+        // Discovery first, then the row.
+        let router = ollama_router(&server.base_url, &[]);
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        let registry = router.model_registry();
+        registry.reload_from_config(&config_of(&rows), &HashSet::new());
+        assert_eq!(
+            info_of(registry, tag).supports_image,
+            value,
+            "{tag}: discovery, then row"
+        );
+        // A later discovery leaves the stated flag alone.
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        assert_eq!(
+            info_of(registry, tag).supports_image,
+            value,
+            "{tag}: discovery again"
+        );
+    }
+
+    // `supports_tools` stated `false` on a tag `/api/show` says takes
+    // tools: the row's own, in both orders.
+    let rows = [(
+        "plain-tag",
+        ModelConfigEntry {
+            supports_tools: Some(false),
+            ..priced_only()
+        },
+    )];
+    let router = ollama_router(&plain.base_url, &rows);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert!(
+        !info_of(router.model_registry(), "plain-tag").supports_tools,
+        "tools: row, then discovery"
+    );
+    let router = ollama_router(&plain.base_url, &[]);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    let registry = router.model_registry();
+    registry.reload_from_config(&config_of(&rows), &HashSet::new());
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert!(
+        !info_of(registry, "plain-tag").supports_tools,
+        "tools: discovery, then row, then discovery again"
+    );
+}
+
+/// `supports_tools` follows the same rule: a row that leaves it out on a
+/// tag whose `/api/show` names no `tools` capability keeps discovery's
+/// `false`, so the ladder stops preferring it as it does with no row. On
+/// the parent the row's left-out flag said `true` over it.
+#[tokio::test]
+async fn a_row_that_leaves_out_supports_tools_keeps_discovery_s_no() {
+    let server = ollama_capable("chat-only", &["completion"]).await;
+    let priced = [("chat-only", priced_only())];
+    let router = ollama_router(&server.base_url, &priced);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert!(
+        !info_of(router.model_registry(), "chat-only").supports_tools,
+        "row, then discovery"
+    );
+    let router = ollama_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    let registry = router.model_registry();
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    assert!(
+        !info_of(registry, "chat-only").supports_tools,
+        "discovery, then row"
+    );
+}
+
+/// A provider turned off and on again forgets the flags its discovery
+/// read: the row read back on the enable, before the new discovery, holds
+/// the defaults, not the turned-off provider's reading
+/// (`remove_by_provider`'s clearing), and then takes what the provider
+/// reports now.
+#[tokio::test]
+async fn a_provider_turned_off_and_on_forgets_the_flags_it_read() {
+    let before = ollama_capable("priced-tag", &["completion", "tools", "vision"]).await;
+    let after = ollama_capable("priced-tag", &["completion"]).await;
+    let priced = [("priced-tag", priced_only())];
+    let router = ollama_router(&before.base_url, &priced);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert!(
+        info_of(router.model_registry(), "priced-tag").supports_image,
+        "before"
+    );
+
+    router.deregister_provider(&ProviderType::Ollama);
+    let registry = router.model_registry();
+    registry.restore_defaults_for_provider(&ProviderType::Ollama);
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    let info = info_of(registry, "priced-tag");
+    assert!(!info.supports_image, "nothing read since the enable");
+    assert!(info.supports_tools, "the row's default");
+    router.register_provider(
+        ProviderType::Ollama,
+        ollama_at(&after.base_url),
+        KeyPool::new(vec![], SelectionStrategy::RoundRobin),
+    );
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    let info = info_of(registry, "priced-tag");
+    assert!(!info.supports_image, "what the provider reports now");
+    assert!(!info.supports_tools, "what the provider reports now");
+}
+
+/// An id taken out of the registry takes the flags its discovery read
+/// with it: a row for it read later that leaves them out holds the
+/// defaults (`remove`'s clearing).
+#[test]
+fn a_removed_id_forgets_the_flags_discovery_read() {
+    let registry = ModelRegistry::new(HashMap::new());
+    let discovered = || crate::routing::model_registry::ModelInfo {
+        provider: ProviderType::Ollama,
+        input_price_per_million: 0.0,
+        output_price_per_million: 0.0,
+        context_window: 32_768,
+        discovered: true,
+        supports_image: true,
+        supports_audio: false,
+        supports_document: false,
+        supports_reasoning: false,
+        supports_tools: false,
+        declared: false,
+        long_prompt: None,
+        cache_rates: None,
+        request_contract: crate::routing::model_registry::RequestContract::NONE,
+    };
+    let priced = [("priced-tag", priced_only())];
+    registry.register_discovered("priced-tag".to_string(), discovered());
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    let info = info_of(&registry, "priced-tag");
+    assert!(info.supports_image && !info.supports_tools, "what was read");
+
+    assert!(registry.remove("priced-tag"));
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    let info = info_of(&registry, "priced-tag");
+    assert!(!info.supports_image, "nothing remembered: the default");
+    assert!(info.supports_tools, "nothing remembered: the default");
+}
+
+/// A row naming a compiled id that leaves out its flags keeps the
+/// compiled row's, even when a discovery read the id otherwise (a bare
+/// listing reports no image support for every id), in both orders: the
+/// compiled row comes before the discovered reading, as it does for the
+/// window. On the parent the row's left-out flags said `false`.
+#[test]
+fn a_compiled_flag_comes_before_a_discovered_one() {
+    let sol = compiled("gpt-6.1-sol");
+    assert!(
+        sol.supports_image && sol.supports_reasoning,
+        "flags the rule can be seen keeping"
+    );
+    let bare = || crate::routing::model_registry::ModelInfo {
+        supports_image: false,
+        supports_reasoning: false,
+        ..sol.clone()
+    };
+    let priced = [("gpt-6.1-sol", unsized_row("openai", Some(1.0), Some(5.0)))];
+
+    // Discovery first, then the row.
+    let registry = ModelRegistry::new(HashMap::new());
+    registry.register_discovered("gpt-6.1-sol".to_string(), bare());
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    let info = info_of(&registry, "gpt-6.1-sol");
+    assert!(info.supports_image, "discovery, then row");
+    assert!(info.supports_reasoning, "discovery, then row");
+
+    // The row first, then discovery.
+    let registry = ModelRegistry::new(HashMap::new());
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    registry.register_discovered("gpt-6.1-sol".to_string(), bare());
+    let info = info_of(&registry, "gpt-6.1-sol");
+    assert!(info.supports_image, "row, then discovery");
+    assert!(info.supports_reasoning, "row, then discovery");
+}
+
+/// A later discovery's reading replaces a flag the row left out (the
+/// latest wins, *Rev 115*'s second item, (a)): a tag `/api/show` first
+/// describes with vision and tools, then, with no provider turned off in
+/// between, with neither (pulled again), is read the second way both on
+/// the live row and on a reload after it, in both orders.
+#[tokio::test]
+async fn a_later_discovery_s_reading_replaces_a_left_out_flag() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let pulled_again = Arc::new(AtomicBool::new(false));
+    let switch = Arc::clone(&pulled_again);
+    let server = MockHttpServer::start(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/api/tags") => {
+            MockResponse::json(serde_json::json!({"models": [{"name": "pulled-tag"}]}).to_string())
+        }
+        ("POST", "/api/show") => {
+            let capabilities: &[&str] = if switch.load(Ordering::SeqCst) {
+                &["completion"]
+            } else {
+                &["completion", "tools", "vision"]
+            };
+            MockResponse::json(
+                serde_json::json!({
+                    "capabilities": capabilities,
+                    "model_info": {"llama.context_length": 32_768},
+                })
+                .to_string(),
+            )
+        }
+        _ => MockResponse::not_found(),
+    })
+    .await;
+    let priced = [("pulled-tag", priced_only())];
+
+    for row_first in [true, false] {
+        pulled_again.store(false, Ordering::SeqCst);
+        let router = ollama_router(&server.base_url, if row_first { &priced } else { &[] });
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        let registry = router.model_registry();
+        if !row_first {
+            registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        }
+        let info = info_of(registry, "pulled-tag");
+        assert!(
+            info.supports_image && info.supports_tools,
+            "row first {row_first}: the first reading"
+        );
+
+        pulled_again.store(true, Ordering::SeqCst);
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        let info = info_of(registry, "pulled-tag");
+        assert!(
+            !info.supports_image,
+            "row first {row_first}: the latest, live"
+        );
+        assert!(
+            !info.supports_tools,
+            "row first {row_first}: the latest, live"
+        );
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        let info = info_of(registry, "pulled-tag");
+        assert!(
+            !info.supports_image,
+            "row first {row_first}: the latest, reloaded"
+        );
+        assert!(
+            !info.supports_tools,
+            "row first {row_first}: the latest, reloaded"
+        );
+    }
+}

@@ -783,8 +783,8 @@ but one you write by hand still overrides what was discovered, field by field:
 | `provider` | Which provider serves the tag. Required in the row. |
 | `input_price` / `output_price` | Dollars per million tokens. Discovery says `0`; say otherwise if you are costing your own hardware. |
 | `context` | The context window. Discovery uses `/api/show`, or `8192` when it does not say; a row that leaves `context` out keeps that window. |
-| `supports_image` | Discovery reads it from the `vision` capability; a row that leaves it out says `false`, over what discovery read. |
-| `supports_tools` | **Defaults to true when omitted**, here and in discovery, and is *recorded, not enforced*: nothing withholds tools from a call because of it. What it changes is the effective-model ladder, which prefers a tool-capable model when it has to choose one for you. Set `false` on a tag that cannot take tools so the ladder stops picking it. |
+| `supports_image` | Discovery reads it from the `vision` capability; a row that leaves it out keeps that. |
+| `supports_tools` | Discovery reads it from the `tools` capability; a row that leaves it out keeps that, and **defaults to true** when nothing was read. It is *recorded, not enforced*: nothing withholds tools from a call because of it. What it changes is the effective-model ladder, which prefers a tool-capable model when it has to choose one for you. Set `false` on a tag that cannot take tools so the ladder stops picking it. |
 | `supports_audio` / `supports_document` / `supports_reasoning` | Declared capabilities for the same row. |
 
 A **streamed** reply is not bound by the two timeouts above as a total. Three

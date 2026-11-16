@@ -274,8 +274,10 @@ brings it back with the owner's own fields. A `[models]` row that leaves out
 `context` keeps the window of the built-in row for that id, else the one
 discovery gave the tag, else none (a run is then budgeted at 200,000 tokens),
 whether the row was read before discovery or after it; it never sets a window
-of its own. Its capability flags are its own: one it leaves out takes the
-row's default, not what discovery read. A model that an
+of its own. A capability flag it leaves out is taken the same way, field by
+field: the built-in row's, else what discovery read (`vision` for
+`supports_image`, `tools` for `supports_tools`), else the default; a flag it
+states is its own. A model that an
 OpenAI-compatible server other than OpenAI's own — on this machine, the
 home network or elsewhere — lists with no window, and that no row sizes, is
 named once in `daemon.log` with the row that sizes it. Discovery needs no key, is not gated on

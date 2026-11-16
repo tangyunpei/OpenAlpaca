@@ -50,6 +50,26 @@ impl PriceGaps {
     }
 }
 
+/// What the registry keeps of a `[models."<id>"]` row the person wrote
+/// ([`ModelRegistry::reload_from_config`]): the prices it left with no
+/// figure (MODEL-ROWS) and the capability flags discovery reads that it
+/// left out (CAP-FLAGS, *Rev 110* (3) (b)).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PersonRow {
+    gaps: PriceGaps,
+    left_out: DiscoveredFlags,
+}
+
+/// The capability flags a provider's discovery reads
+/// ([`DiscoveredModel`]): kept per id as discovery last read them
+/// ([`ModelRegistry::register_discovered`]) and, in a [`PersonRow`],
+/// `true` for each flag the row left out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DiscoveredFlags {
+    supports_image: bool,
+    supports_tools: bool,
+}
+
 /// What a model's prompt cache costs, as multiples of the input rate the
 /// request pays (CACHE-MULT and CACHE-WRITE, the owner's items 9 and 10 of
 /// 2026-11-14).
@@ -268,7 +288,8 @@ pub struct ModelRegistry {
     /// compiled one ([`Self::is_compiled_only`], COMPAT-SERVER), and with
     /// each the prices it left with no figure, neither the row nor a
     /// compiled row stating one (MODEL-ROWS, *Rev 97* (b)).
-    person_rows: RwLock<HashMap<String, PriceGaps>>,
+    /// The flags each row left out ride with it (CAP-FLAGS).
+    person_rows: RwLock<HashMap<String, PersonRow>>,
     /// The window a provider's discovery last gave each id, when it gave
     /// one (Ollama's `/api/show`, or its 8,192 default): what a `[models]`
     /// row that leaves out `context` keeps when no compiled row names the
@@ -276,6 +297,12 @@ pub struct ModelRegistry {
     /// *Rev 102* (4) (b)). Kept apart from the row so that a reload never
     /// reads back, as discovered, a figure a deleted `context` line gave.
     discovered_windows: RwLock<HashMap<String, u32>>,
+    /// The capability flags a provider's discovery last read for each id
+    /// (Ollama's `/api/show`; a bare listing's defaults): what a `[models]`
+    /// row that leaves a flag out keeps when no compiled row names the id,
+    /// however the row and the discovery are ordered (CAP-FLAGS, *Rev 110*
+    /// (3) (b), as [`Self::discovered_windows`] does for `context`).
+    discovered_flags: RwLock<HashMap<String, DiscoveredFlags>>,
 }
 
 impl ModelRegistry {
@@ -285,6 +312,7 @@ impl ModelRegistry {
             local_server_providers: RwLock::new(HashSet::new()),
             person_rows: RwLock::new(HashMap::new()),
             discovered_windows: RwLock::new(HashMap::new()),
+            discovered_flags: RwLock::new(HashMap::new()),
         }
     }
 
@@ -584,6 +612,13 @@ impl ModelRegistry {
     /// later discovery fills and the agent loop reads as its own 200,000
     /// default) — never a figure of its own (MODEL-ROWS-2, *Rev 102* (4)
     /// (b), *Rev 97*'s rule field by field).
+    ///
+    /// A capability flag the row leaves out is the same (CAP-FLAGS, *Rev
+    /// 110* (3) (b)): the compiled row's flag, else what discovery last
+    /// read for the id (`supports_image`, `supports_tools`), else the old
+    /// default — `false`, but `true` for `supports_tools`. A flag the row
+    /// states is its own. Discovery read after the row fills the flags it
+    /// left out ([`Self::register_discovered`]).
     pub fn reload_from_config(
         &self,
         config_models: &HashMap<String, crate::config::ModelConfigEntry>,
@@ -595,6 +630,11 @@ impl ModelRegistry {
         let compiled = Self::default_models();
         let discovered_windows = self
             .discovered_windows
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let discovered_flags = self
+            .discovered_flags
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
@@ -617,11 +657,23 @@ impl ModelRegistry {
                     .unwrap_or_else(|p| p.into_inner())
                     .insert(
                         model_id.clone(),
-                        PriceGaps {
-                            input: input.is_none(),
-                            output: output.is_none(),
+                        PersonRow {
+                            gaps: PriceGaps {
+                                input: input.is_none(),
+                                output: output.is_none(),
+                            },
+                            left_out: DiscoveredFlags {
+                                supports_image: entry.supports_image.is_none(),
+                                supports_tools: entry.supports_tools.is_none(),
+                            },
                         },
                     );
+                // A flag the row leaves out: the compiled row's, else what
+                // discovery read, else the default (CAP-FLAGS).
+                let read = discovered_flags.get(model_id);
+                let flag = |stated: Option<bool>, of: fn(&ModelInfo) -> bool| {
+                    stated.or(compiled_row.map(of))
+                };
                 self.register(
                     model_id.clone(),
                     ModelInfo {
@@ -635,16 +687,27 @@ impl ModelRegistry {
                             .or_else(|| discovered_windows.get(model_id).copied())
                             .unwrap_or(0),
                         discovered: false,
-                        supports_image: entry.supports_image.unwrap_or(false),
-                        supports_audio: entry.supports_audio.unwrap_or(false),
-                        supports_document: entry.supports_document.unwrap_or(false),
-                        supports_reasoning: entry.supports_reasoning.unwrap_or(false),
+                        supports_image: flag(entry.supports_image, |row| row.supports_image)
+                            .or(read.map(|flags| flags.supports_image))
+                            .unwrap_or(false),
+                        supports_audio: flag(entry.supports_audio, |row| row.supports_audio)
+                            .unwrap_or(false),
+                        supports_document: flag(entry.supports_document, |row| {
+                            row.supports_document
+                        })
+                        .unwrap_or(false),
+                        supports_reasoning: flag(entry.supports_reasoning, |row| {
+                            row.supports_reasoning
+                        })
+                        .unwrap_or(false),
                         // The one flag that defaults on. The others withhold a
                         // content kind when omitted; this one only orders the
                         // ladder's preference, and a row the owner wrote for a
                         // model they mean to run agents on is tool-capable
-                        // until they say otherwise.
-                        supports_tools: entry.supports_tools.unwrap_or(true),
+                        // until they or discovery say otherwise.
+                        supports_tools: flag(entry.supports_tools, |row| row.supports_tools)
+                            .or(read.map(|flags| flags.supports_tools))
+                            .unwrap_or(true),
                         declared: true,
                         // Per half: a price the row leaves out is the
                         // compiled row's, its long-prompt rate included; a
@@ -772,22 +835,25 @@ impl ModelRegistry {
         model_id: &str,
         info: &ModelInfo,
         local_servers: &HashSet<String>,
-        person_rows: &HashMap<String, PriceGaps>,
+        person_rows: &HashMap<String, PersonRow>,
     ) -> PriceGaps {
         if info.provider.is_local() || local_servers.contains(&info.provider.to_string()) {
             PriceGaps::default()
         } else if !info.declared {
             PriceGaps::BOTH
         } else {
-            person_rows.get(model_id).copied().unwrap_or_default()
+            person_rows
+                .get(model_id)
+                .map(|row| row.gaps)
+                .unwrap_or_default()
         }
     }
 
     /// Taken before `person_rows` and `models`, never while holding either
     /// (nothing takes them the other way round; `person_rows` is likewise
-    /// never taken while holding `models`). `discovered_windows` is never
-    /// held while another of the four is taken, nor taken while one is
-    /// held.
+    /// never taken while holding `models`). `discovered_windows` and
+    /// `discovered_flags` are each never held while another of the five is
+    /// taken, nor taken while one is held.
     fn local_server_providers(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
         self.local_server_providers
             .read()
@@ -985,6 +1051,10 @@ impl ModelRegistry {
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .remove(model_id);
+        self.discovered_flags
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(model_id);
         self.models.write().unwrap_or_else(|p| p.into_inner()).remove(model_id).is_some()
     }
 
@@ -1012,6 +1082,14 @@ impl ModelRegistry {
             .unwrap_or_else(|p| p.into_inner());
         for id in &to_remove {
             windows.remove(id);
+        }
+        drop(windows);
+        let mut flags = self
+            .discovered_flags
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        for id in &to_remove {
+            flags.remove(id);
         }
         to_remove
     }
@@ -1048,7 +1126,11 @@ impl ModelRegistry {
     ///
     /// A window the provider gave is also recorded on its own, for a
     /// `[models]` row read later that leaves out `context`
-    /// ([`Self::reload_from_config`]).
+    /// ([`Self::reload_from_config`]); so are the capability flags it read,
+    /// for a row read later that leaves one out (CAP-FLAGS). A row read
+    /// before, for an id no compiled row names, takes the flags it left
+    /// out from this reading, the latest; a flag it states, and a compiled
+    /// row's, stay.
     pub fn register_discovered(&self, model_id: String, info: ModelInfo) {
         if info.context_window > 0 {
             self.discovered_windows
@@ -1056,6 +1138,23 @@ impl ModelRegistry {
                 .unwrap_or_else(|p| p.into_inner())
                 .insert(model_id.clone(), info.context_window);
         }
+        let read = DiscoveredFlags {
+            supports_image: info.supports_image,
+            supports_tools: info.supports_tools,
+        };
+        self.discovered_flags
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(model_id.clone(), read);
+        let left_out = if COMPILED_IDS.contains(&model_id) {
+            None
+        } else {
+            self.person_rows
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&model_id)
+                .map(|row| row.left_out)
+        };
         let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
         match models.get_mut(&model_id) {
             Some(existing) => {
@@ -1066,6 +1165,14 @@ impl ModelRegistry {
                 // `[models]` row does declare still wins (L2).
                 if existing.context_window == 0 && info.context_window > 0 {
                     existing.context_window = info.context_window;
+                }
+                if let Some(left_out) = left_out {
+                    if left_out.supports_image {
+                        existing.supports_image = read.supports_image;
+                    }
+                    if left_out.supports_tools {
+                        existing.supports_tools = read.supports_tools;
+                    }
                 }
             }
             None => {
