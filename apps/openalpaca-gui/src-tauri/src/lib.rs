@@ -682,9 +682,13 @@ fn announce_daemon_path(path: &DaemonPath) {
 /// the source, the capture time and the keys' names (`login-shell 212
 /// AWS_PROFILE`), never the `PATH` or a value. The listed keys are set
 /// first, so a variable the app sets itself always keeps the app's value
-/// (the list never holds one: `login_path::SET_BY_THE_APP`). Nothing else is
-/// set or removed: every other variable is the app's own, inherited as
-/// before.
+/// (the list never holds one, nor any other `OPENALPACA_` name:
+/// `login_path::passthrough_keys`). Nothing else is set or removed: every
+/// other variable is the app's own, inherited as before — launchd's minimal
+/// environment for an app opened from the Finder or the Dock, so there a
+/// login shell's variable reaches the daemon only through the list; the
+/// terminal's whole environment for an app started from one (*Rev 91* (4),
+/// *Rev 92* (2): no change).
 ///
 /// On Unix a `PATH` set on the command is also the one a bare program name
 /// is looked up on, so a debug build's `openalpacad` fallback (no daemon

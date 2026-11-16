@@ -211,8 +211,27 @@ pub const MANAGED_LOG_ENV: &str = "OPENALPACA_MANAGED_LOG";
 /// `[daemon.env] passthrough_keys` lists them, comma-separated —
 /// `login-shell 212 AWS_PROFILE` — never their values (N-DAEMON-2). The
 /// daemon logs it in one boot line; a daemon started without it (from a
-/// terminal) logs `inherited`.
+/// terminal) logs `inherited`. The daemon reads it once, in its preamble,
+/// and removes it ([`take_path_source`]), so no child it spawns inherits it.
 pub const PATH_SOURCE_ENV: &str = "OPENALPACA_PATH_SOURCE";
+
+/// [`PATH_SOURCE_ENV`]'s value, read and removed from this process's
+/// environment, so no child spawned after it — a shell command, an MCP
+/// server, a plugin, a daemon an agent starts — inherits the app's word
+/// about a `PATH` it did not capture for them (LOGIN-CAPTURE, *Rev 91* (2)).
+/// `None` when it was not set, which leaves the environment as it was.
+///
+/// # Safety
+///
+/// It changes the process's environment: call it only while no other thread
+/// can read or write it, as the daemon's single-threaded preamble does,
+/// beside the master key's removal (`std::env::remove_var`'s own contract).
+pub unsafe fn take_path_source() -> Option<std::ffi::OsString> {
+    let value = std::env::var_os(PATH_SOURCE_ENV)?;
+    // SAFETY: the caller guarantees no other thread touches the environment.
+    unsafe { std::env::remove_var(PATH_SOURCE_ENV) };
+    Some(value)
+}
 
 /// `daemon.log` is rotated once it is past this size — 16 MB.
 pub const DAEMON_LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;

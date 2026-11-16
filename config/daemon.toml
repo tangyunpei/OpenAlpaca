@@ -259,15 +259,17 @@ ephemeral_pressure_layer = false
 # Variables the desktop app passes from your login shell's environment to the
 # daemon it spawns, beside PATH: names only, never values. Empty by default,
 # so a credential pointer your profile exports (AWS_PROFILE,
-# GOOGLE_APPLICATION_CREDENTIALS, KUBECONFIG) reaches the app's daemon, and
-# every command and MCP server it starts, only when it is named here:
+# GOOGLE_APPLICATION_CREDENTIALS, KUBECONFIG) reaches the daemon of an app
+# opened from the Finder or the Dock only when it is named here, and then
+# every command, MCP server and plugin the daemon runs can read it:
 #   passthrough_keys = ["AWS_PROFILE", "KUBECONFIG"]
 # The app reads this list when it opens, with the login shell's PATH, and
 # hands it only to a daemon it spawns: a daemon already running keeps the
 # environment it started with, and a reopened app uses it as it is. So an edit
 # reaches the daemon once it is stopped (Settings -> Connection -> Stop, or
-# `openalpaca daemon stop`) and the app opened again. PATH and the three
-# variables the app sets itself (OPENALPACA_CONFIG_DIR, OPENALPACA_MANAGED_LOG,
-# OPENALPACA_PATH_SOURCE) are never taken from it. The daemon does not read
-# it: one started from a terminal inherits that terminal's environment.
+# `openalpaca daemon stop`) and the app opened again. PATH and every
+# OPENALPACA_ name (OPENALPACA_HOME_STORE, and the three the app sets itself)
+# are never taken from it. The daemon does not read it: one started from a
+# terminal, or by an app started from one, inherits that terminal's
+# environment whatever the list says.
 passthrough_keys = []

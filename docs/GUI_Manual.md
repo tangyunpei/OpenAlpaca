@@ -173,22 +173,30 @@ whole bridge (`src-tauri/src/lib.rs`):
 **The daemon's `PATH`.** An app opened from the Finder or the Dock gets the
 minimal environment macOS gives apps, not your shell's. So when the app starts
 it asks your account's login shell (the one your user account names, run as a
-non-interactive login shell, `-l -c`) for its `PATH`, once, in the background
-— the window never waits on it — and gives that `PATH` to the daemon it
-spawns. It waits for the answer at most 3 seconds from the app's start; a login
-shell still running then is stopped, with everything it started. If the
+login shell: zsh and bash as an interactive one, `-i -l -c`, any other shell
+as `-l -c`) for its `PATH`, once, in the background — the window never waits
+on it — and gives that `PATH` to the daemon it spawns. It waits for the answer
+at most 3 seconds from the app's start; a login shell still running then is
+stopped, with everything it started, and once it has answered anything it left
+running in the background (a `some-agent &` in your profile) is stopped too. An
+interactive profile that waits — on a prompt, on input, on a program that does
+not return — takes the capture to those 3 seconds and the daemon to the
+fallback list below, even where your login files alone would have answered;
+`gui.log` gives the reason. If the
 capture fails — the login shell exits with an error (a csh or tcsh login
 shell always does), takes too long, or prints no `PATH` — the daemon gets
 a fixed list instead: `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
 `/bin`, `/usr/sbin`, `/sbin` and `~/.cargo/bin`. Only `PATH` is taken, unless
 you name more: a credential pointer (`AWS_PROFILE`,
 `GOOGLE_APPLICATION_CREDENTIALS`, `KUBECONFIG`) your profile exports reaches
-the app's daemon — and every command and MCP server it starts — only when
+the daemon of an app opened from the Finder or the Dock only when
 `[daemon.env] passthrough_keys` in
 `~/.openalpaca/config/daemon.toml` lists its name
 (`passthrough_keys = ["AWS_PROFILE"]`; names only, never values; empty by
-default). The list takes any variable's name, so an API key named there
-reaches the daemon too; keep API keys in `llm.toml`. The app reads
+default). A listed variable is in the daemon's whole environment, so every
+command, MCP server and plugin it runs can read it. The list takes any
+variable's name, so an API key named there reaches the daemon too; keep API
+keys in `llm.toml`. The app reads
 that list when it opens, with the login shell's `PATH`, and hands it only to a
 daemon it spawns: the daemon outlives the window, a reopened app uses a daemon
 still running as it is, and that daemon keeps the environment it started with.
@@ -199,13 +207,18 @@ then `gui.log`'s capture line names the
 keys a daemon this launch spawns would get, not the running one's. A listed
 variable your login shell does not export, and every listed one when the
 capture fails, is not passed. `PATH`
-and the three `OPENALPACA_` variables the app sets itself are never taken
-from the list. An app started from a terminal (`bun run tauri dev`) still
-hands its daemon that terminal's own environment, whatever the list says. A
-non-interactive login shell reads your login files (`~/.zprofile`,
-`~/.zshenv`, `/etc/zprofile` for zsh; `~/.bash_profile` or `~/.profile` for
-bash), not `~/.zshrc` or `~/.bashrc`: a folder added to `PATH` only there is
-not in the daemon's `PATH`. Where the `PATH` came from, and how long the capture
+and every `OPENALPACA_` variable — the three the app sets itself, and the
+daemon's own, such as `OPENALPACA_HOME_STORE` — are never taken from the list;
+`gui.log` names each one it left out. "Only when the list names it" holds for
+an app opened from the Finder or the Dock, whose environment is the minimal
+one macOS gives apps: an app started from a terminal (`bun run tauri dev`, or
+its binary run by hand) also hands its daemon that terminal's own environment,
+whatever the list says. The login shell reads your login files
+(`/etc/zprofile`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin` for zsh;
+`~/.bash_profile` or `~/.profile` for bash) and, for zsh, `~/.zshrc`. A login
+bash never reads `~/.bashrc` itself, interactive or not: a folder added to
+`PATH` only there reaches the daemon when your `~/.bash_profile` sources
+`~/.bashrc`, as many do, and is not in the daemon's `PATH` otherwise. Where the `PATH` came from, and how long the capture
 took, is written to `state/logs/gui.log`, to the daemon's boot line in
 `daemon.log` (`PATH source: login-shell`, `fallback-list`, or `inherited` for a
 daemon started from a terminal), and to Settings → Connection for a daemon this
@@ -1639,10 +1652,12 @@ it reached.
 app starts runs on your login shell's `PATH`, or on the app's fallback list
 when that could not be read ([Connection lifecycle](#connection-lifecycle));
 Settings → Connection says which, and `daemon.log`'s `PATH source:` line too. A
-program found through a folder your `~/.zshrc` or `~/.bashrc` adds to `PATH`
-(where some installers write it), or one outside the fallback list when the
-capture failed, can still be found by a daemon that `openalpaca daemon start`
-started from a terminal and be missing for the one the app started. Give the
+program found through a folder your `~/.bashrc` adds to `PATH` (where some
+installers write it) when your `~/.bash_profile` does not source it, or one
+outside the fallback list when the capture failed — an interactive profile
+that waited past 3 seconds among the reasons — can still be found by a daemon
+that `openalpaca daemon start` started from a terminal and be missing for the
+one the app started. Give the
 server an absolute `command`, or set `PATH` in its `env`, in
 `config/mcp.toml` ([Daemon Manual → MCP Servers](Daemon_Manual.md#mcp-servers));
 move the `PATH` line to `~/.zprofile`; or start the daemon from a terminal

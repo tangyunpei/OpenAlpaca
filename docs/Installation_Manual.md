@@ -156,7 +156,11 @@ Installer behaviors:
   templates are copied into the runtime config dir only for files that do not
   already exist — existing config is never overwritten.
 - Appends PATH block to `~/.zshrc` and `~/.bashrc` (idempotent). With any other
-  shell it tells you to add `~/.local/bin` to your PATH yourself.
+  shell it tells you to add `~/.local/bin` to your PATH yourself. The daemon
+  the desktop app starts gets the `~/.zshrc` block too (the app runs a zsh
+  login shell interactively to read its `PATH`); a login bash never reads
+  `~/.bashrc` itself, so for bash it gets the block only when `~/.bash_profile`
+  sources `~/.bashrc` ([GUI Manual → Connection lifecycle](GUI_Manual.md#connection-lifecycle)).
 - Uses `jq` for manifest parsing when available, with a grep/sed fallback —
   `jq` is optional.
 

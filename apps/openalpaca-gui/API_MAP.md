@@ -140,16 +140,19 @@ build or the console, never through a command.
 
 The daemon the shell spawns runs on the account's login shell's `PATH`
 (Q21, `src-tauri/src/login_path.rs`): at start, on a thread of its own, the
-shell runs the login shell from the user database as `-l -c` with a start
-marker, `/usr/bin/env -0` and an end marker, in a process group of its own
-that is killed at a 3 s deadline, and takes `PATH` alone from between the
-markers; on any failure (no shell, a non-zero exit, no markers, no `PATH`,
+shell runs the login shell from the user database — zsh and bash as
+`-i -l -c`, any other as `-l -c` (LOGIN-CAPTURE) — with a start marker,
+`/usr/bin/env -0` and an end marker, in a session and process group of its
+own that is killed once the shell exits with status 0 or at a 3 s deadline
+(without a Terminal tab's `TERM_SESSION_ID`), and takes
+`PATH` alone from between the markers; on any failure (no shell, a non-zero exit, no markers, no `PATH`,
 more than 1 MiB of output, the deadline) the daemon gets the fallback list,
 `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` and
 `~/.cargo/bin`. It is taken once per launch. The source and the capture's
 duration — never the value — go to `gui.log`, to the daemon through
 `OPENALPACA_PATH_SOURCE` (one boot line in `daemon.log`; a daemon started
-without it logs `inherited`), and to the webview as `daemonPath` on the two
+without it logs `inherited`; the daemon's preamble removes it from its
+environment), and to the webview as `daemonPath` on the two
 commands' answers, which Settings → Connection shows. The carrier is a field
 on existing answers: no command is added (still five), and nothing is added
 to the daemon's API. `src/lib/daemon-path.json` holds `daemonPath`'s wire
@@ -163,8 +166,9 @@ empty by default (N-DAEMON-2): the shell reads the list on the capture's
 thread as the capture starts (the `toml` crate), keeps each listed variable
 the login shell exports from between the markers, and sets it on the
 daemon's command before its own variables. An entry that is not a variable
-name, and `PATH` and the three variables the shell sets itself, are dropped
-with a `gui.log` warning that never quotes a dropped entry. The keys passed
+name, and `PATH` and every `OPENALPACA_` name (the three variables the shell
+sets itself among them), are dropped with a `gui.log` warning that never
+quotes a dropped entry. The keys passed
 are named, never valued, in `gui.log` (`passed_keys`, and `absent_keys` for
 a listed one the login shell does not export), after the capture time in
 `OPENALPACA_PATH_SOURCE` (`login-shell 212 AWS_PROFILE,KUBECONFIG`, which
@@ -173,9 +177,10 @@ capture passes none. The list reaches only a daemon the shell spawns: an edit
 reaches the daemon once it is stopped and the app opened again (a daemon still
 running is reused by `ensure_daemon_running` as it is, its environment
 unchanged), and the capture's `passed_keys` name what a daemon this launch
-spawns would get. Nothing else is set or removed: an app started from a
-terminal still hands its daemon its own environment (`tasks/pending-decisions.md` §1
-_Rev 92_).
+spawns would get. Nothing else is set or removed: the list governs what the
+daemon of an app opened from the Finder or the Dock gets beside `PATH`, and an
+app started from a terminal still hands its daemon its own environment
+(`tasks/pending-decisions.md` §1 _Rev 91_ (4) and _Rev 92_ (2): no change).
 
 The token is rotated while the daemon runs (T21,
 `apps/openalpacad/src/discovery_rotation/`): 12 hours after its issue the

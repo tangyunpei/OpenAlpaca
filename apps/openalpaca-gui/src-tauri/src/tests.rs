@@ -22,9 +22,11 @@
 //! fails to find a daemon instead of starting one.
 //!
 //! The Q21 capture tests do spawn, but no daemon: each runs a stand-in
-//! `/bin/sh` login shell, and three start a `/bin/sleep 47` from it; the
-//! capture kills a shell past its deadline with its process group, and
-//! `KillOnDrop` kills a child still there when its test ends.
+//! `/bin/sh` login shell or, on macOS, the real `/bin/zsh` or `/bin/bash`
+//! under the guard's scratch `HOME` with `ZDOTDIR` removed (LOGIN-CAPTURE),
+//! and some start a `/bin/sleep 47` from it; the capture kills the shell's
+//! process group when the shell exits or at its deadline, and `KillOnDrop`
+//! kills a child still there when its test ends.
 //!
 //! Every test holds [`HomeStoreGuard`], this crate's copy of the home-store
 //! guard: a scratch `OPENALPACA_HOME_STORE`, `OPENALPACA_CONFIG_DIR`, `HOME`
@@ -1260,6 +1262,7 @@ const CAPTURED_PROFILE: &str = "q21-profile-captured-not-passed";
 const CAPTURED_KUBECONFIG: &str = "/q21/kube/config-captured-not-passed";
 const CAPTURED_GOOGLE: &str = "/q21/google/credentials-captured-not-passed.json";
 const CAPTURED_PROFILE_BACKUP: &str = "q21-backup-captured-not-passed";
+const CAPTURED_STORE: &str = "/q21/other-store-captured-not-passed";
 
 /// A stand-in login shell: a `/bin/sh` script at `<root>/<name>` running
 /// `body`, which reaches the command it is given as `"$3"` (`-l -c <cmd>`).
@@ -1277,8 +1280,9 @@ fn fake_login_shell(root: &Path, name: &str, body: &str) -> PathBuf {
 /// A login shell that prints noise around the markers — `PATH=` lines
 /// before and after them, one NUL-terminated as `env -0` writes — and
 /// exports an API key, the three credential pointers and
-/// `AWS_PROFILE_BACKUP` (a name extending a listed one) beside its `PATH`;
-/// it records each run's arguments.
+/// `AWS_PROFILE_BACKUP` (a name extending a listed one) and an
+/// `OPENALPACA_HOME_STORE` naming another store beside its `PATH`; it
+/// records each run's arguments.
 #[cfg(unix)]
 fn noisy_login_shell(root: &Path) -> PathBuf {
     let runs = root.join("runs");
@@ -1295,6 +1299,7 @@ fn noisy_login_shell(root: &Path) -> PathBuf {
              GOOGLE_APPLICATION_CREDENTIALS='{CAPTURED_GOOGLE}'; \
              export GOOGLE_APPLICATION_CREDENTIALS\n\
              AWS_PROFILE_BACKUP='{CAPTURED_PROFILE_BACKUP}'; export AWS_PROFILE_BACKUP\n\
+             OPENALPACA_HOME_STORE='{CAPTURED_STORE}'; export OPENALPACA_HOME_STORE\n\
              eval \"$3\"\n\
              echo 'PATH=/noise/after/bin'\n\
              printf 'PATH=/noise/after/nul/bin\\0'",
@@ -1413,12 +1418,13 @@ fn the_login_shells_path_and_nothing_else_reaches_the_daemons_command() {
 }
 
 /// The values the noisy login shell exports beside its `PATH`.
-const CAPTURED_VALUES: [&str; 5] = [
+const CAPTURED_VALUES: [&str; 6] = [
     CAPTURED_API_KEY,
     CAPTURED_PROFILE,
     CAPTURED_KUBECONFIG,
     CAPTURED_GOOGLE,
     CAPTURED_PROFILE_BACKUP,
+    CAPTURED_STORE,
 ];
 
 /// No value the noisy login shell exports beside its `PATH` is in the
@@ -2134,5 +2140,509 @@ fn the_apps_capture_reads_the_list_from_the_stores_daemon_toml() {
     assert_eq!(
         login_path::this_account().keys,
         ["KUBECONFIG", "AWS_PROFILE"]
+    );
+}
+
+// ============================================================================
+// The interactive profile, the process group and `OPENALPACA_` names
+// (LOGIN-CAPTURE)
+// ============================================================================
+
+/// The folders the scratch profiles below add to `PATH`, each in one file.
+const ZSHRC_DIR: &str = "/login-capture/zshrc/bin";
+const ZPROFILE_DIR: &str = "/login-capture/zprofile/bin";
+const BASHRC_DIR: &str = "/login-capture/bashrc/bin";
+
+/// A real login shell under the guard's scratch `HOME`: `<root>/real/<name>`,
+/// a `/bin/sh` script that records its arguments in `<root>/real/<name>.runs`
+/// and runs `target` with them, `ZDOTDIR`, `TERM_PROGRAM`, `ENV` and
+/// `BASH_ENV` removed, so no file of the developer's own is read: zsh reads
+/// its startup files from `HOME`, which the guard points at its scratch
+/// `home`. The capture picks `-i` by this script's name.
+#[cfg(unix)]
+fn real_shell(root: &Path, name: &str, target: &str) -> PathBuf {
+    let dir = root.join("real");
+    std::fs::create_dir_all(&dir).expect("the real shells' folder");
+    let runs = dir.join(format!("{name}.runs"));
+    fake_login_shell(
+        &dir,
+        name,
+        &format!(
+            "printf '%s\\n' \"$@\" >> '{runs}'\n\
+             exec /usr/bin/env -u ZDOTDIR -u TERM_PROGRAM -u ENV -u BASH_ENV {target} \"$@\"",
+            runs = runs.display()
+        ),
+    )
+}
+
+/// The arguments each run of [`real_shell`]'s `name` was given.
+fn real_shell_runs(root: &Path, name: &str) -> String {
+    std::fs::read_to_string(root.join("real").join(format!("{name}.runs"))).unwrap_or_default()
+}
+
+/// The entries of a `PATH` value.
+fn path_entries(value: &OsString) -> Vec<String> {
+    value
+        .to_string_lossy()
+        .split(':')
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether `pid` is gone within `within`.
+#[cfg(unix)]
+fn gone_within(pid: i32, within: Duration) -> bool {
+    let by = Instant::now() + within;
+    while process_exists(pid) && Instant::now() < by {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    !process_exists(pid)
+}
+
+/// The pid a profile wrote to `file`, when it did.
+fn pid_in(file: &Path) -> Option<i32> {
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+}
+
+/// *Rev 91* (1): zsh is run as an interactive login shell, `-i -l -c`, as
+/// ZCode does, so a folder only `~/.zshrc` adds to `PATH` — where this
+/// project's installer and `nvm` write theirs — is in the daemon's `PATH`.
+/// The real `/bin/zsh`, under the guard's scratch `HOME`.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_interactive_capture_finds_a_path_entry_only_zshrc_adds() {
+    let guard = HomeStoreGuard::set("interactive-zshrc");
+    let home = guard.root().join("home");
+    std::fs::write(
+        home.join(".zshrc"),
+        format!("export PATH=\"{ZSHRC_DIR}:$PATH\"\n"),
+    )
+    .expect(".zshrc");
+    let zsh = real_shell(guard.root(), "zsh", "/bin/zsh");
+    let path = capture_of(Some(zsh), Some(home), Duration::from_secs(10)).wait();
+
+    assert_eq!(path.failure, None);
+    assert_eq!(path.source, PathSource::LoginShell);
+    assert!(
+        path_entries(path.value()).iter().any(|e| e == ZSHRC_DIR),
+        "the folder ~/.zshrc adds is in the daemon's PATH"
+    );
+    assert_eq!(
+        real_shell_runs(guard.root(), "zsh"),
+        format!("-i\n-l\n-c\n{CAPTURE_COMMAND}\n"),
+        "run once, as an interactive login command"
+    );
+}
+
+/// *Rev 91* (1) for bash, as the facts on the day have it: bash is run as
+/// `-i -l -c` too, but a login bash, interactive or not, never reads
+/// `~/.bashrc` itself — only a `~/.bash_profile` that sources it does, and
+/// then `-i` takes it past the usual "not interactive: return" guard at its
+/// top. The real `/bin/bash`, under the guard's scratch `HOME`.
+#[cfg(target_os = "macos")]
+#[test]
+fn bash_is_run_interactively_and_reads_bashrc_only_through_its_profile() {
+    let guard = HomeStoreGuard::set("interactive-bashrc");
+    let home = guard.root().join("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        format!("case $- in *i*) ;; *) return ;; esac\nexport PATH=\"{BASHRC_DIR}:$PATH\"\n"),
+    )
+    .expect(".bashrc");
+    let bash = real_shell(guard.root(), "bash", "/bin/bash");
+    let deadline = Duration::from_secs(10);
+
+    let alone = capture_of(Some(bash.clone()), Some(home.clone()), deadline).wait();
+    assert_eq!(alone.failure, None);
+    assert!(
+        !path_entries(alone.value()).iter().any(|e| e == BASHRC_DIR),
+        "a login bash does not read ~/.bashrc by itself"
+    );
+
+    std::fs::write(home.join(".bash_profile"), ". \"$HOME/.bashrc\"\n").expect(".bash_profile");
+    let sourced = capture_of(Some(bash), Some(home), deadline).wait();
+    assert_eq!(sourced.failure, None);
+    assert!(
+        path_entries(sourced.value())
+            .iter()
+            .any(|e| e == BASHRC_DIR),
+        "sourced from ~/.bash_profile, ~/.bashrc passes its interactive guard"
+    );
+    assert_eq!(
+        real_shell_runs(guard.root(), "bash"),
+        format!("-i\n-l\n-c\n{CAPTURE_COMMAND}\n").repeat(2)
+    );
+}
+
+/// The one regression *Rev 91* (1)'s pick accepts: an interactive profile
+/// that hangs — `~/.zshrc` waiting on a child — takes the capture to its
+/// deadline and the daemon to the fallback list, killed with what it
+/// started, and `gui.log` says why, where the login profile alone
+/// (`~/.zprofile`, the same zsh run as `-l -c`) would have answered. Nothing
+/// runs the shell again without `-i`: the fallback recorded is the deadline's
+/// fixed list.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_hanging_interactive_profile_gets_the_fallback_list() {
+    let guard = HomeStoreGuard::set("interactive-hangs");
+    let home = guard.root().join("home");
+    let pid_file = guard.root().join("zshrc-child.pid");
+    std::fs::write(
+        home.join(".zprofile"),
+        format!("export PATH=\"{ZPROFILE_DIR}:$PATH\"\n"),
+    )
+    .expect(".zprofile");
+    std::fs::write(
+        home.join(".zshrc"),
+        format!(
+            "/bin/sleep 47 &\necho $! > '{}'\nwait\n",
+            pid_file.display()
+        ),
+    )
+    .expect(".zshrc");
+
+    // The login profile alone answers: the same zsh, by a name that is
+    // neither zsh nor bash, is run as `-l -c` and never reads ~/.zshrc.
+    let plain = real_shell(guard.root(), "login-zsh", "/bin/zsh");
+    let alone = capture_login_path(&plain, Instant::now(), Duration::from_secs(10), &[])
+        .expect("the login profile alone answers");
+    assert!(path_entries(&alone.path).iter().any(|e| e == ZPROFILE_DIR));
+    assert!(!pid_file.exists(), "-l -c did not read ~/.zshrc");
+
+    // As the capture runs zsh: the deadline, then the fallback list.
+    let zsh = real_shell(guard.root(), "zsh", "/bin/zsh");
+    let deadline = Duration::from_millis(1500);
+    let path = with_the_shell_log(|| capture_of(Some(zsh), Some(home.clone()), deadline).wait());
+    let child = pid_in(&pid_file);
+    let _stray = child.map(KillOnDrop);
+
+    assert_eq!(path.source, PathSource::FallbackList);
+    assert_eq!(path.failure, Some(CaptureFailure::TimedOut(deadline)));
+    assert_eq!(path.value(), &fallback_path(Some(&home)));
+    assert_eq!(
+        real_shell_runs(guard.root(), "zsh"),
+        format!("-i\n-l\n-c\n{CAPTURE_COMMAND}\n"),
+        "run once, interactively, and not again"
+    );
+    let child = child.expect("the interactive profile started its child");
+    assert!(
+        gone_within(child, Duration::from_secs(5)),
+        "the hanging profile's child outlived the deadline's kill"
+    );
+    let text = gui_log_text();
+    assert!(
+        text.lines().any(|l| l.contains(" WARN ")
+            && l.contains("The daemon's PATH is the fallback list.")
+            && l.contains("reason=the login shell did not finish within 1500 ms")),
+        "gui.log says why: {text:?}"
+    );
+}
+
+/// A stand-in login shell that puts `/bin/sleep 47` in the background,
+/// writes its pid to `pid_file`, exports [`CAPTURED_PATH`] and runs the
+/// capture's command.
+#[cfg(unix)]
+fn backgrounding_login_shell(root: &Path, pid_file: &Path) -> PathBuf {
+    fake_login_shell(
+        root,
+        "backgrounding-shell",
+        &format!(
+            "/bin/sleep 47 &\n\
+             echo $! > '{pid}'\n\
+             PATH='{CAPTURED_PATH}'; export PATH\n\
+             eval \"$3\"",
+            pid = pid_file.display()
+        ),
+    )
+}
+
+/// *Rev 91* (3): after a successful capture the login shell's process group
+/// is killed too, so a child a profile put in the background
+/// (`some-agent &` in `~/.zprofile`) is gone once the capture has answered.
+#[cfg(unix)]
+#[test]
+fn a_profiles_background_child_is_gone_after_a_successful_capture() {
+    let guard = HomeStoreGuard::set("background-killed");
+    let pid_file = guard.root().join("background.pid");
+    let shell = backgrounding_login_shell(guard.root(), &pid_file);
+    let outcome = capture_login_path(&shell, Instant::now(), Duration::from_secs(10), &[]);
+    let child = pid_in(&pid_file).expect("the profile started its child");
+    let _stray = KillOnDrop(child);
+
+    assert_eq!(
+        outcome.map(|captured| captured.path),
+        Ok(OsString::from(CAPTURED_PATH))
+    );
+    assert!(
+        gone_within(child, Duration::from_secs(2)),
+        "the profile's background child outlived the capture"
+    );
+}
+
+/// *Rev 91* (3) for zsh run interactively: its `&` children stay in the
+/// capture's process group (no terminal, so no job control to give them
+/// groups of their own), and are gone after a successful capture too.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_interactive_zshs_background_child_is_gone_after_a_successful_capture() {
+    let guard = HomeStoreGuard::set("background-killed-zsh");
+    let home = guard.root().join("home");
+    let pid_file = guard.root().join("zprofile-child.pid");
+    std::fs::write(
+        home.join(".zprofile"),
+        format!("/bin/sleep 47 &\necho $! > '{}'\n", pid_file.display()),
+    )
+    .expect(".zprofile");
+    let zsh = real_shell(guard.root(), "zsh", "/bin/zsh");
+    let path = capture_of(Some(zsh), Some(home), Duration::from_secs(10)).wait();
+    let child = pid_in(&pid_file).expect("the profile started its child");
+    let _stray = KillOnDrop(child);
+
+    assert_eq!(path.failure, None);
+    assert!(
+        gone_within(child, Duration::from_secs(2)),
+        "the interactive profile's background child outlived the capture"
+    );
+}
+
+/// *Rev 92* (1): every `OPENALPACA_` name the list holds is dropped with a
+/// `gui.log` warning naming it, as the app's own four are — a listed
+/// `OPENALPACA_HOME_STORE` would point the daemon at a store the app does
+/// not read `discovery.json` from — and none reaches the daemon's command,
+/// though the login shell exports it. An entry that is not a variable name
+/// is still named only by its place, `OPENALPACA_` or not.
+#[cfg(unix)]
+#[test]
+fn a_listed_openalpaca_name_is_dropped_with_a_warning_naming_it() {
+    let guard = HomeStoreGuard::set("keys-openalpaca");
+    write_daemon_toml(
+        &guard,
+        "[daemon.env]\npassthrough_keys = [\"OPENALPACA_HOME_STORE\", \"AWS_PROFILE\", \
+         \"OPENALPACA_Q21_ANY\", \"OPENALPACA_X=q21-value-in-the-list\"]\n",
+    );
+    let shell = noisy_login_shell(guard.root());
+    let (keys, path) = with_the_shell_log(|| {
+        let keys = configured_passthrough_keys();
+        let path = capture_listing(Some(shell), None, keys.clone(), Duration::from_secs(10)).wait();
+        (keys, path)
+    });
+
+    assert_eq!(keys, ["AWS_PROFILE"]);
+    assert_eq!(path.source, PathSource::LoginShell);
+    assert_eq!(path.passed_keys(), ["AWS_PROFILE"]);
+    let cmd = command_for(&guard, &path);
+    assert_eq!(
+        set_on(&cmd).keys().cloned().collect::<Vec<_>>(),
+        [
+            OsString::from("AWS_PROFILE"),
+            OsString::from("OPENALPACA_CONFIG_DIR"),
+            OsString::from(store::MANAGED_LOG_ENV),
+            OsString::from(store::PATH_SOURCE_ENV),
+            OsString::from("PATH"),
+        ]
+    );
+    assert_no_captured_value_but(&cmd, &[CAPTURED_PROFILE]);
+    let text = gui_log_text();
+    for name in ["OPENALPACA_HOME_STORE", "OPENALPACA_Q21_ANY"] {
+        assert!(
+            text.lines()
+                .any(|l| l.contains(" WARN ") && l.contains(&format!("key=\"{name}\""))),
+            "{name} is named as not passed: {text:?}"
+        );
+    }
+    assert!(text.contains("entry 4 is not a variable name"), "{text:?}");
+    assert!(!text.contains("q21-value-in-the-list"), "{text:?}");
+}
+
+/// *Rev 91* (3), the output's side: once the group is killed nothing holds
+/// the shell's standard output, so the capture's reader of it has ended by
+/// the time the capture answers — no thread is left behind per launch.
+#[cfg(unix)]
+#[test]
+fn the_output_reader_has_ended_when_the_capture_answers() {
+    use std::sync::atomic::Ordering;
+    let guard = HomeStoreGuard::set("reader-ended");
+    // A reader an earlier test's capture left is given time to end first.
+    let by = Instant::now() + Duration::from_secs(5);
+    while login_path::OUTPUT_READERS.load(Ordering::SeqCst) != 0 && Instant::now() < by {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        login_path::OUTPUT_READERS.load(Ordering::SeqCst),
+        0,
+        "a reader from before this test is still running"
+    );
+    let pid_file = guard.root().join("background.pid");
+    let shell = backgrounding_login_shell(guard.root(), &pid_file);
+    let outcome = capture_login_path(&shell, Instant::now(), Duration::from_secs(10), &[]);
+    let _stray = pid_in(&pid_file).map(KillOnDrop);
+
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(
+        login_path::OUTPUT_READERS.load(Ordering::SeqCst),
+        0,
+        "the output's reader had ended when the capture answered"
+    );
+}
+
+/// Built beyond the words (`tasks/pending-decisions.md` §1 *Rev 99*): the
+/// capture's shell leads a session of its own, not only a process group —
+/// so an interactive shell has no terminal to take, whatever started the
+/// app — and its pid is the session's and the group's id while it runs.
+#[cfg(unix)]
+#[test]
+fn the_capture_runs_the_shell_in_a_session_of_its_own() {
+    let guard = HomeStoreGuard::set("session-leader");
+    let pid_file = guard.root().join("shell.pid");
+    let shell = fake_login_shell(
+        guard.root(),
+        "waiting-shell",
+        &format!("echo $$ > '{}'\nexec /bin/sleep 47", pid_file.display()),
+    );
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = capture_login_path(&shell, Instant::now(), Duration::from_secs(3), &[]);
+        let _ = sent.send(outcome);
+    });
+    let by = Instant::now() + Duration::from_secs(2);
+    while pid_in(&pid_file).is_none() && Instant::now() < by {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = pid_in(&pid_file).expect("the shell wrote its pid");
+    let _stray = KillOnDrop(pid);
+    // SAFETY: plain queries of a live child's ids.
+    let (session, group) = unsafe { (libc::getsid(pid), libc::getpgid(pid)) };
+
+    assert_eq!(session, pid, "the shell leads a session of its own");
+    assert_eq!(group, pid, "and the session's one process group");
+    let outcome = received
+        .recv_timeout(Duration::from_secs(6))
+        .expect("the capture ends at its deadline");
+    assert_eq!(
+        outcome,
+        Err(CaptureFailure::TimedOut(Duration::from_secs(3)))
+    );
+}
+
+/// The variables an app started from a Terminal.app tab hands the capture:
+/// set on this process for the test's span, under the guard's lock (this
+/// binary's only writer of the environment), and put back on drop, before
+/// the guard's own.
+#[cfg(target_os = "macos")]
+struct TerminalTab {
+    prev: Vec<(&'static str, Option<OsString>)>,
+}
+
+#[cfg(target_os = "macos")]
+impl TerminalTab {
+    const VARS: [(&'static str, &'static str); 2] = [
+        ("TERM_PROGRAM", "Apple_Terminal"),
+        ("TERM_SESSION_ID", "login-capture-tab"),
+    ];
+
+    /// Only with a [`HomeStoreGuard`] held, whose lock it rides on.
+    fn open(_guard: &HomeStoreGuard) -> Self {
+        let prev = Self::VARS
+            .iter()
+            .map(|(name, _)| (*name, std::env::var_os(name)))
+            .collect();
+        for (name, value) in Self::VARS {
+            // SAFETY: serialized by ENV_LOCK, which the guard holds.
+            unsafe { std::env::set_var(name, value) };
+        }
+        Self { prev }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for TerminalTab {
+    fn drop(&mut self) {
+        for (name, value) in self.prev.drain(..) {
+            // SAFETY: as above — the guard, and so ENV_LOCK, outlives this.
+            match value {
+                Some(v) => unsafe { std::env::set_var(name, v) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
+    }
+}
+
+/// Every file under `dir`, by its path below it, with its bytes.
+#[cfg(target_os = "macos")]
+fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(at) = pending.pop() {
+        for entry in std::fs::read_dir(&at).expect("read a scratch folder") {
+            let path = entry.expect("a scratch entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("read a scratch file");
+                found.push((path.strip_prefix(dir).expect("below").to_path_buf(), bytes));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Built beyond the words (`tasks/pending-decisions.md` §1 *Rev 99*): an
+/// app started from a Terminal.app tab hands the capture the tab's
+/// `TERM_PROGRAM` and `TERM_SESSION_ID`; run as `-i`, zsh and bash would
+/// then run Apple's session scripts, whose exit hook rewrites the tab's
+/// session and history files and the history file in the person's home.
+/// The capture drops the session id for its shell, so the real `/bin/zsh`
+/// and `/bin/bash`, under the guard's scratch `HOME`, leave every file there
+/// byte for byte as it was — and still answer.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_terminal_started_apps_capture_leaves_the_tabs_session_files_alone() {
+    let guard = HomeStoreGuard::set("terminal-tab");
+    let home = guard.root().join("home");
+    let id = TerminalTab::VARS[1].1;
+    for (history, history_line, sessions) in [
+        (
+            ".zsh_history",
+            ": 1700000000:0;git status\n",
+            ".zsh_sessions",
+        ),
+        (".bash_history", "git status\n", ".bash_sessions"),
+    ] {
+        std::fs::write(home.join(history), history_line).expect("a history file");
+        let sessions = home.join(sessions);
+        std::fs::create_dir_all(&sessions).expect("a sessions folder");
+        std::fs::write(
+            sessions.join(format!("{id}.session")),
+            "echo the-tabs-own\n",
+        )
+        .expect("the tab's session file");
+        std::fs::write(sessions.join(format!("{id}.historynew")), "tab-cmd-1\n")
+            .expect("the tab's unsaved history");
+    }
+    let before = files_under(&home);
+
+    let dir = guard.root().join("terminal");
+    std::fs::create_dir_all(&dir).expect("the terminal shells' folder");
+    let _tab = TerminalTab::open(&guard);
+    for (name, target) in [("zsh", "/bin/zsh"), ("bash", "/bin/bash")] {
+        // Unlike [`real_shell`], `TERM_PROGRAM` is kept: what this test
+        // reads is what the capture itself passes on.
+        let shell = fake_login_shell(
+            &dir,
+            name,
+            &format!("exec /usr/bin/env -u ZDOTDIR -u ENV -u BASH_ENV {target} \"$@\""),
+        );
+        let path = capture_of(Some(shell), Some(home.clone()), Duration::from_secs(10)).wait();
+        assert_eq!(path.failure, None, "{name} answered");
+        assert_eq!(path.source, PathSource::LoginShell, "{name} answered");
+    }
+
+    assert_eq!(
+        files_under(&home),
+        before,
+        "the capture left the scratch home's history and session files as they were"
     );
 }

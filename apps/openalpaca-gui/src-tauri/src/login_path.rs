@@ -8,10 +8,19 @@
 //!
 //! So the shell asks the account's login shell, once, at start, on a thread
 //! of its own, so the window's first paint never waits on it: the shell is
-//! run as a non-interactive login command (`-l -c`) that prints a start
-//! marker, the environment (`/usr/bin/env -0`) and an end marker. The child
-//! leads its own process group, and at [`CAPTURE_DEADLINE`] the whole group
-//! is killed. Of what lies between the markers one key is taken, `PATH` —
+//! run as a login command that prints a start marker, the environment
+//! (`/usr/bin/env -0`) and an end marker — zsh and bash as an interactive
+//! one (`-i -l -c`), so zsh reads `~/.zshrc` and bash a `~/.bashrc` its
+//! profile sources, every other shell as `-l -c` ([`login_shell_args`];
+//! LOGIN-CAPTURE). The child leads a session and process group of its own,
+//! with no terminal and without a Terminal tab's `TERM_SESSION_ID` (so
+//! Apple's session scripts leave that tab's files alone), and the whole
+//! group is killed once the shell has exited with status 0 — a child a
+//! profile put in the background goes with it — or at
+//! [`CAPTURE_DEADLINE`]. An interactive profile that waits (on input, on a
+//! child) takes the capture to the deadline and the daemon to the fallback
+//! list below; nothing runs the shell again without `-i`. Of what lies
+//! between the markers one key is taken, `PATH` —
 //! the allowlist is `PATH` alone, so nothing else the login shell exports (an
 //! API key, a credential pointer) reaches the daemon this way. When the
 //! capture fails — no shell, a non-zero exit, no markers, no `PATH`, too much
@@ -26,8 +35,9 @@
 //!
 //! **The keys listed beside `PATH` (N-DAEMON-2).** A credential pointer the
 //! login shell exports — `AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`,
-//! `KUBECONFIG`, or any other variable — reaches the daemon only when the
-//! owner names it in `daemon.toml`, `[daemon.env] passthrough_keys = [...]`:
+//! `KUBECONFIG`, or any other variable — reaches the daemon from the login
+//! shell only when the owner names it in `daemon.toml`,
+//! `[daemon.env] passthrough_keys = [...]`:
 //! variable names only, never values, empty by default. The shell reads that
 //! list from the store's `config/daemon.toml` — the file the daemon it spawns
 //! reads, through `OPENALPACA_CONFIG_DIR` — on the capture's thread, as the
@@ -39,17 +49,29 @@
 //! name what a spawned daemon would get, not the running one's. A
 //! listed key the login shell exports is set on the daemon's command beside
 //! `PATH`; the announcement names the keys passed, by name, never their
-//! values. Claude Code's design (`settings.json`'s `env`, a map the user
-//! sets), not ZCode's, which passes the three by name
+//! values. No `OPENALPACA_` name is ever taken from the list (LOGIN-CAPTURE,
+//! *Rev 92* (1)): those are the app's and the daemon's own. A listed key is
+//! in the daemon's whole environment, so every command, MCP server and
+//! plugin it runs sees it. Claude Code's design (`settings.json`'s `env`, a
+//! map the user sets), not ZCode's, which passes the three by name
 //! (ZCode:packages/services/src/runtime-tools/runtimeCommandEnv.ts:48-106).
+//!
+//! **What the list does not govern.** The daemon's command is the app's own
+//! environment with these variables set over it, nothing removed: an app
+//! opened from the Finder or the Dock carries launchd's minimal environment,
+//! so there "only through the list" holds; an app started from a terminal
+//! (`bun run tauri dev`, its binary run by hand) hands its daemon whatever
+//! that terminal exported, listed or not (*Rev 91* (4), *Rev 92* (2): no
+//! change).
 //!
 //! The design is ZCode's capture read as a design and written fresh
 //! (ZCode:packages/services/src/runtime-tools/runtimeLoginShellEnvCapture.ts:6-11,
-//! :54-101, :173-216), with the entry's differences: a non-interactive login
-//! shell where ZCode asks zsh and bash for an interactive one, the account's
+//! :53-58, :54-101, :173-216), with the entry's differences: the account's
 //! shell from the user database where ZCode reads `$SHELL`, one key where
-//! ZCode keeps the whole environment, and the fallback list with
-//! `/opt/homebrew/bin` first and `~/.cargo/bin` added.
+//! ZCode keeps the whole environment, the fallback list with
+//! `/opt/homebrew/bin` first and `~/.cargo/bin` added. The session of its
+//! own matches ZCode's detached spawn (`detached`, which on a Unix makes the
+//! child a session's leader).
 
 use serde::Serialize;
 use std::ffi::OsString;
@@ -65,6 +87,20 @@ pub(crate) const CAPTURE_DEADLINE: Duration = Duration::from_secs(3);
 /// The most output the capture reads; past it the capture fails.
 const OUTPUT_CAP: usize = 1 << 20;
 
+/// How long, after the group is killed, the capture waits for the end of
+/// the shell's output once the end marker is in: only a process that left
+/// the group (a session of its own) can still hold the pipe then.
+const READER_GRACE: Duration = Duration::from_millis(250);
+
+/// The prefix of the app's and the daemon's own variables: no name with it
+/// is passed from the login shell (LOGIN-CAPTURE, *Rev 92* (1)).
+const OWN_PREFIX: &str = "OPENALPACA_";
+
+/// The capture's output readers still running, for the tests.
+#[cfg(test)]
+pub(crate) static OUTPUT_READERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// The line printed before the environment.
 const START_MARKER: &str = "__OPENALPACA_LOGIN_ENV_START__";
 
@@ -74,7 +110,7 @@ const END_MARKER: &str = "__OPENALPACA_LOGIN_ENV_END__";
 /// What the login shell runs: the start marker, the environment as
 /// NUL-terminated `KEY=value` entries (`env` by its absolute path, so a
 /// profile that empties `PATH` still runs it), a line break, the end marker.
-/// `echo` is a builtin of every shell `-l -c` reaches.
+/// `echo` is a builtin of every shell the capture runs.
 pub(crate) const CAPTURE_COMMAND: &str =
     "echo __OPENALPACA_LOGIN_ENV_START__; /usr/bin/env -0; echo; echo __OPENALPACA_LOGIN_ENV_END__";
 
@@ -310,10 +346,12 @@ fn is_variable_name(name: &str) -> bool {
 /// passthrough_keys`, in its order, each once. No file, no `[daemon.env]`
 /// table or no list is an empty list. A file that cannot be read or is not
 /// TOML, a value that is not a list, an entry that is not a string or not a
-/// variable name, and a variable the app sets itself ([`SET_BY_THE_APP`]) are
-/// each a `gui.log` warning and pass nothing; a warning names a dropped entry
-/// by its place in the list, never by what it holds (`KEY=value` would be a
-/// value), but for the app's own, named by name.
+/// variable name, a variable the app sets itself ([`SET_BY_THE_APP`]) and
+/// any other `OPENALPACA_` name (LOGIN-CAPTURE, *Rev 92* (1): a listed
+/// `OPENALPACA_HOME_STORE` would point the daemon at a store the app does not
+/// read `discovery.json` from) are each a `gui.log` warning and pass nothing;
+/// a warning names a dropped entry by its place in the list, never by what it
+/// holds (`KEY=value` would be a value), but a variable name by name.
 pub(crate) fn passthrough_keys(config_dir: &Path) -> Vec<String> {
     let file = config_dir.join("daemon.toml");
     let text = match std::fs::read_to_string(&file) {
@@ -370,6 +408,13 @@ pub(crate) fn passthrough_keys(config_dir: &Path) -> Vec<String> {
                 "[daemon.env] passthrough_keys lists a variable the app sets on the daemon \
                  itself; the app's value stands, and it is not passed from the login shell."
             ),
+            Some(name) if is_variable_name(name) && name.starts_with(OWN_PREFIX) => {
+                tracing::warn!(
+                    key = name,
+                    "[daemon.env] passthrough_keys lists one of OpenAlpaca's own variables; no \
+                     OPENALPACA_ name is passed from the login shell."
+                )
+            }
             Some(name) if is_variable_name(name) => {
                 if !keys.iter().any(|key| key == name) {
                     keys.push(name.to_owned());
@@ -622,15 +667,72 @@ fn account_login_shell() -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-/// Run `shell -l -c` [`CAPTURE_COMMAND`] in a process group of its own and
-/// take `PATH`, and each of `keys` it exports, from what it prints between
-/// the markers. Settled on the
+/// The arguments the login shell is run with, [`CAPTURE_COMMAND`] after
+/// them: zsh and bash (by the file's name) as an interactive login shell,
+/// `-i -l -c`, as ZCode does
+/// (ZCode:packages/services/src/runtime-tools/runtimeLoginShellEnvCapture.ts:53-58),
+/// so zsh reads `~/.zshrc` and bash a `~/.bashrc` its `~/.bash_profile`
+/// sources (a login bash never reads `~/.bashrc` itself); every other shell
+/// as `-l -c` (a csh or tcsh takes `-l` only alone, and fails either way).
+#[cfg(unix)]
+pub(crate) fn login_shell_args(shell: &Path) -> &'static [&'static str] {
+    match shell.file_name().and_then(|name| name.to_str()) {
+        Some("zsh" | "bash") => &["-i", "-l", "-c"],
+        _ => &["-l", "-c"],
+    }
+}
+
+/// The shell `pid`'s exit, seen without reaping it (`waitid` with
+/// `WNOWAIT`): `None` while it runs, `Some(true)` once it has exited with
+/// status 0, `Some(false)` for any other end. While it is unreaped its pid
+/// names this capture's process group and no other, so the group can still
+/// be killed by it.
+#[cfg(unix)]
+fn exit_seen(pid: libc::pid_t) -> std::io::Result<Option<bool>> {
+    // SAFETY: `siginfo_t` is plain data; zeroed, it reads "nothing exited".
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: a plain syscall on this capture's own child, writing only to
+    // `info`, which this frame owns.
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc == -1 {
+        let e = std::io::Error::last_os_error();
+        return if e.kind() == std::io::ErrorKind::Interrupted {
+            Ok(None)
+        } else {
+            Err(e)
+        };
+    }
+    // SAFETY: `info` is initialized (zeroed, then filled by `waitid`); its
+    // pid stays zero while the child has not exited (WNOHANG).
+    if unsafe { info.si_pid() } != pid {
+        return Ok(None);
+    }
+    // SAFETY: as above; `si_status` is the exit status under `CLD_EXITED`.
+    Ok(Some(
+        info.si_code == libc::CLD_EXITED && unsafe { info.si_status() } == 0,
+    ))
+}
+
+/// Run `shell` with [`login_shell_args`] and [`CAPTURE_COMMAND`] in a
+/// session and process group of its own and take `PATH`, and each of `keys`
+/// it exports, from what it prints between the markers. Settled on the
 /// shell's exit, not on the end of its output (a profile's background child
-/// may hold the pipe open); at `started + deadline` the group is killed and
-/// the shell reaped. After a successful exit the group is left alone: a
-/// child the profile put in the background keeps running, and the output's
-/// reader thread with it until the child closes the pipe (an owner's item,
-/// `tasks/pending-decisions.md` §1, Rev 91).
+/// may hold the pipe open). Once the shell has exited with status 0, or at
+/// `started + deadline`, the whole group is killed — a child the profile put
+/// in the background with it (LOGIN-CAPTURE, *Rev 91* (3)) — and the shell
+/// reaped; after a non-zero exit the shell is reaped and its group left as
+/// it was (`tasks/pending-decisions.md` §1 *Rev 99*). After a successful exit the output is read to its end, which the
+/// kill brings at once, bounded by the deadline and, once the end marker is
+/// in, by [`READER_GRACE`]: only a process that left the group can still
+/// hold the pipe, and then the output's reader thread stays until it lets
+/// go.
 #[cfg(unix)]
 pub(crate) fn capture_login_path(
     shell: &Path,
@@ -642,16 +744,40 @@ pub(crate) fn capture_login_path(
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let mut child = Command::new(shell)
-        .args(["-l", "-c", CAPTURE_COMMAND])
+    let mut command = Command::new(shell);
+    command
+        .args(login_shell_args(shell))
+        .arg(CAPTURE_COMMAND)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .env("TERM", "dumb")
-        .process_group(0)
+        // An app started from Apple's Terminal lends the shell its tab's
+        // session id, and an interactive zsh or bash then runs
+        // `/etc/zshrc_Apple_Terminal` (`/etc/bashrc_Apple_Terminal`), whose
+        // exit hook rewrites that tab's `~/.zsh_sessions/<id>.*` (or
+        // `~/.bash_sessions/`) and the history file in the person's own
+        // home; both scripts do nothing without the id. For the capture's
+        // shell only: the daemon's command never takes it from here.
+        .env_remove("TERM_SESSION_ID");
+    // A session of its own, so an interactive shell has no terminal to take
+    // (an app started from one would otherwise lend it its own) and no job
+    // control to give a background child a group of its own; the shell
+    // leads the session's one group, its pid the group's id.
+    // SAFETY: `setsid` is async-signal-safe and changes only the child.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| CaptureFailure::Start(e.to_string()))?;
-    let group = child.id();
+    let group = child.id() as libc::pid_t;
     let span = deadline;
     let deadline = started + deadline;
 
@@ -661,7 +787,9 @@ pub(crate) fn capture_login_path(
     let output = Arc::new(Mutex::new((Vec::new(), false)));
     if let Some(stdout) = child.stdout.take() {
         let sink = Arc::clone(&output);
-        let _ = std::thread::Builder::new()
+        #[cfg(test)]
+        OUTPUT_READERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let spawned = std::thread::Builder::new()
             .name("login-path-output".into())
             .spawn(move || {
                 let mut stdout = stdout.take(OUTPUT_CAP as u64 + 1);
@@ -676,53 +804,75 @@ pub(crate) fn capture_login_path(
                             .extend_from_slice(&chunk[..n]),
                     }
                 }
+                drop(stdout);
+                #[cfg(test)]
+                OUTPUT_READERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 sink.lock().unwrap_or_else(|p| p.into_inner()).1 = true;
             });
+        #[cfg(test)]
+        if spawned.is_err() {
+            OUTPUT_READERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        drop(spawned);
     }
 
-    let kill_group = |child: &mut std::process::Child| {
-        // SAFETY: a plain syscall. The group's leader is the shell, not yet
-        // reaped, so its id names this capture's group and no other.
+    // Called only before the shell is reaped: its id then names this
+    // capture's group and no other.
+    let kill_group = || {
+        // SAFETY: a plain syscall on this capture's own group.
         unsafe {
-            libc::killpg(group as libc::pid_t, libc::SIGKILL);
+            libc::killpg(group, libc::SIGKILL);
         }
+    };
+    let failed = |child: &mut std::process::Child, failure: CaptureFailure| {
+        kill_group();
         let _ = child.wait();
+        Err(failure)
     };
 
     let poll = Duration::from_millis(10);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
+    let succeeded = loop {
+        match exit_seen(group) {
+            Ok(Some(succeeded)) => break succeeded,
             Ok(None) => {}
-            Err(e) => {
-                kill_group(&mut child);
-                return Err(CaptureFailure::Exited(e.to_string()));
-            }
+            Err(e) => return failed(&mut child, CaptureFailure::Exited(e.to_string())),
         }
         let now = Instant::now();
         if now >= deadline {
-            kill_group(&mut child);
-            return Err(CaptureFailure::TimedOut(span));
+            return failed(&mut child, CaptureFailure::TimedOut(span));
         }
         if output.lock().unwrap_or_else(|p| p.into_inner()).0.len() > OUTPUT_CAP {
-            kill_group(&mut child);
-            return Err(CaptureFailure::TooMuchOutput);
+            return failed(&mut child, CaptureFailure::TooMuchOutput);
         }
         std::thread::sleep(poll.min(deadline - now));
     };
+    // The shell has exited: after a successful exit its group goes now,
+    // with whatever the profile left running, and then the shell is reaped.
+    // After a failed one the group is left as the parent left it (the
+    // pick's words, *Rev 91* (3): after a successful exit; *Rev 99*).
+    if succeeded {
+        kill_group();
+    }
+    let status = child
+        .wait()
+        .map_err(|e| CaptureFailure::Exited(e.to_string()))?;
     if !status.success() {
         return Err(CaptureFailure::Exited(status.to_string()));
     }
 
-    // The shell has exited, so what it printed is in the pipe: wait for the
-    // reader to reach the end, or the end marker, or the deadline.
+    // What the shell printed is in the pipe, and nothing in its group holds
+    // the pipe any more: wait for the reader to reach the end — at most to
+    // the deadline, and once the end marker is in, at most READER_GRACE.
+    let grace = Instant::now() + READER_GRACE;
     loop {
         {
             let (bytes, ended) = &*output.lock().unwrap_or_else(|p| p.into_inner());
             if bytes.len() > OUTPUT_CAP {
                 return Err(CaptureFailure::TooMuchOutput);
             }
-            if *ended || Instant::now() >= deadline || contains(bytes, END_MARKER.as_bytes()) {
+            let now = Instant::now();
+            if *ended || now >= deadline || (now >= grace && contains(bytes, END_MARKER.as_bytes()))
+            {
                 return environment_between_markers(bytes, keys);
             }
         }

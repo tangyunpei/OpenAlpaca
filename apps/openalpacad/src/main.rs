@@ -182,6 +182,15 @@ fn main() -> Result<()> {
         }
     }
 
+    // Q21, LOGIN-CAPTURE (Rev 91 (2)): where this daemon's PATH came from —
+    // the app's capture of the login shell's, its fallback list, or, with no
+    // word from the app, whatever started it — read once for the boot line
+    // and removed from the environment beside the master key, so no child
+    // this daemon spawns inherits the app's word about a PATH it never
+    // captured for it.
+    // SAFETY: as the master key's step above — no other thread exists yet.
+    let path_source = bootstrap::parse_path_source(unsafe { store::take_path_source() }.as_deref());
+
     // Install OS signal handlers BEFORE the tokio runtime starts.
     // This calls sigaction() in the single main thread, before any thread pools
     // (tokio, ONNX Runtime, etc.) are created. The handler sets an AtomicBool flag
@@ -195,12 +204,13 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("Failed to build tokio runtime")?
-        .block_on(async_main(config_base_dir, shutdown_flag))
+        .block_on(async_main(config_base_dir, shutdown_flag, path_source))
 }
 
 async fn async_main(
     config_base_dir: PathBuf,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+    path_source: bootstrap::PathSource,
 ) -> Result<()> {
     // Step 0: the run's own clock. Taken before anything can block — the bind,
     // the migrations, the boot sweep — so `GET /v1/status`'s `uptime_secs`
@@ -213,12 +223,9 @@ async fn async_main(
     // exists at the usual path (Important #3, T44 fix round 1).
     let managed_log = std::env::var_os(store::MANAGED_LOG_ENV).is_some();
 
-    // Step 0c (Q21): where this daemon's PATH came from — the app's capture
-    // of the login shell's, its fallback list, or, with no word from the
-    // app, whatever started it. The source and the capture's time, and the
-    // variables the app passed beside it by name (N-DAEMON-2), never the
-    // PATH or a value.
-    let path_source = bootstrap::read_path_source();
+    // Step 0c (Q21): where this daemon's PATH came from, as the preamble
+    // read it. The source and the capture's time, and the variables the app
+    // passed beside it by name (N-DAEMON-2), never the PATH or a value.
     info!("{}", bootstrap::path_source_line(&path_source));
 
     // Step 1: Bind to dynamic port (127.0.0.1:0 -> OS assigns port)

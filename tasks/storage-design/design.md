@@ -1,4 +1,4 @@
-# Storage and project work — design (rev 1.5, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built; the owner's blanket answer of 2026-10-17 recorded; the freshness sweep's S12 residue in §18; R30 and §18's `writing_agent.md` bullet amended for unedited copies by the bundled templates; §21's *App PATH* line marked built by Q21)
+# Storage and project work — design (rev 1.6, approved by the owner with ST-22, ST-23 taken; Stages 0, 1 and 2 built; the owner's blanket answer of 2026-10-17 recorded; the freshness sweep's S12 residue in §18; R30 and §18's `writing_agent.md` bullet amended for unedited copies by the bundled templates; §21's *App PATH* line marked built by Q21 and amended by LOGIN-CAPTURE)
 
 **Status:** approved. The owner read rev 0.5 on 2026-10-05 ("everything in the design file is good") and asked for one
 addition, an edit tool, taken as **ST-22**. Owner decisions **ST-1…ST-13** (2026-10-04) and **ST-14…ST-22** (2026-10-05)
@@ -1272,7 +1272,10 @@ Three things a beta needs that no stage covers:
   when that capture fails. What a tester still meets: a folder added to `PATH` only in `~/.zshrc` or `~/.bashrc` (where
   this project's installer writes `~/.local/bin`) is missing for that daemon, as is one outside the fallback list when
   the capture fails (a csh or tcsh login shell always fails it); the workaround (an absolute `command`, or `env.PATH`
-  in `mcp.toml`) stands for those cases. The owner's items on it: `tasks/pending-decisions.md` §1 *Rev 91*.
+  in `mcp.toml`) stands for those cases. The owner's items on it: `tasks/pending-decisions.md` §1 *Rev 91*. *Rev 1.6:*
+  LOGIN-CAPTURE (`fix(gui-shell,daemon): the login capture reads the interactive profile`) runs zsh and bash as an interactive login shell, so a folder
+  added in `~/.zshrc` reaches the daemon; one added only in `~/.bashrc` does when `~/.bash_profile` sources it, and an
+  interactive profile that waits past 3 s gives the fallback list (`tasks/pending-decisions.md` §1 *Rev 99*).
 
 Which stages the beta waits for is the owner's call. Stage 0 with B1–B3 is enough for a few testers who know the
 limits; Stage 1 is what keeps every tester's repository clean; Stage 2 is what a tester who expects help with their
@@ -1282,6 +1285,9 @@ beta waits for, so it stays the owner's call (Stages 0–2 are all built).
 
 ## Revision log
 
+- **rev 1.6 (2026-11-16).** The programme's LOGIN-CAPTURE (`fix(gui-shell,daemon): the login capture reads the interactive profile`, `tasks/deps-upgrade/programme-plan.md`
+  §3.3): §21's B3 paragraph gains a *Rev 1.6* note on what a beta tester now meets (`~/.zshrc` read; `~/.bashrc` only
+  through `~/.bash_profile`; a profile that waits gives the fallback list). Nothing else moves.
 - **rev 1.5 (2026-11-15).** The toolchain programme's Q21 (`tasks/deps-upgrade/programme-plan.md` §3.3, step 4;
   `feat(gui-shell,daemon): the app's daemon gets the login shell's PATH`): §21's B3 paragraph keeps its *App PATH*
   line and adds that it is built, what a beta tester still meets (the `~/.zshrc` / `~/.bashrc` case and the fallback

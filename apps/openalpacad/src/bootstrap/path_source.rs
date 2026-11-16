@@ -1,7 +1,7 @@
 //! Where this daemon's `PATH` came from (Q21): one boot line in
 //! `daemon.log`.
 //!
-//! The app sets [`store::PATH_SOURCE_ENV`] on the daemon it spawns —
+//! The app sets `store::PATH_SOURCE_ENV` on the daemon it spawns —
 //! `login-shell <ms>` when its capture of the login shell's `PATH` answered,
 //! `fallback-list <ms>` when it gave the fixed list instead. A daemon started
 //! any other way (`openalpaca daemon start` in a terminal, by hand) has no
@@ -17,8 +17,12 @@
 //! their values. A list that is not variable names, comma-separated, reads
 //! `inherited` like any other malformed value. This daemon does not read the
 //! list itself: the app reads it before the spawn.
+//!
+//! LOGIN-CAPTURE (*Rev 91* (2)): the daemon's preamble reads the variable
+//! once and removes it from its environment (`store::take_path_source`),
+//! beside the master key, so no child it spawns inherits it — a daemon an
+//! agent's shell command starts logs `inherited`, not the app's capture.
 
-use openalpaca_storage::store;
 use std::ffi::OsStr;
 
 /// What the boot line says.
@@ -47,7 +51,7 @@ fn is_variable_name(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// [`store::PATH_SOURCE_ENV`]'s value read strictly: a known source, one
+/// `store::PATH_SOURCE_ENV`'s value read strictly: a known source, one
 /// space, a whole number of milliseconds, and optionally one more space and
 /// the names of the keys passed, comma-separated; anything else, or nothing,
 /// is `inherited`.
@@ -110,11 +114,6 @@ pub fn path_source_line(path: &PathSource) -> String {
         line.push_str(&path.passed_keys.join(", "));
     }
     line
-}
-
-/// This daemon's [`PathSource`], from its environment.
-pub fn read_path_source() -> PathSource {
-    parse_path_source(std::env::var_os(store::PATH_SOURCE_ENV).as_deref())
 }
 
 #[cfg(test)]
