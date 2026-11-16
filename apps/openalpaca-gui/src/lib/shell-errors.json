@@ -37,7 +37,7 @@
     },
     {
       "kind": "still_starting",
-      "message": "The daemon (pid 51823) is still starting after 45 seconds: it is running but does not answer. Nothing was started, stopped or restarted. The last lines of its log (/s/state/logs/daemon.log):\n\nINFO Connecting to MCP server",
+      "message": "The daemon (pid 51823) is still starting after 45 seconds: it is running but does not answer. Nothing was started, stopped or restarted. The last lines of its log (/s/state/logs/daemon.log):\n\nINFO Connecting to MCP server\n\nIf it does not finish starting, stop it with `openalpaca daemon stop` and press Reconnect in Settings → Connection to start a new one.",
       "log_tail": "INFO Connecting to MCP server"
     },
     {

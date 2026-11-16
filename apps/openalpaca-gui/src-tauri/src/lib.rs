@@ -87,8 +87,10 @@ enum ShellError {
     DiscoveryUnreadable { message: String },
     /// `ensure_daemon_running`: no daemon came up — it could not be spawned,
     /// or within 5 seconds of the spawn `discovery.json` named no live
-    /// daemon. `log_tail` is what this run wrote to `daemon.log` (also quoted
-    /// in `message`), `None` when it wrote nothing or the log could not be
+    /// daemon, or the daemon it named died while the spawn's wait went on
+    /// (Q04-VERDICT: an ask after the `starting` answer that finds it gone).
+    /// `log_tail` is what this run wrote to `daemon.log` (also quoted in
+    /// `message`), `None` when it wrote nothing or the log could not be
     /// read.
     #[error("{message}")]
     SpawnFailed {
@@ -112,8 +114,10 @@ enum ShellError {
     },
     /// `ensure_daemon_running` (Q04, C-09 with A-18): the discovery pid is a
     /// live `openalpacad` that does not answer yet — booting, or in its
-    /// shutdown's tail. Nothing was spawned; the window waits and asks
-    /// again.
+    /// shutdown's tail. Nothing was spawned beside it: it is one found
+    /// running, or the one this app spawned (or the CLI's that took the
+    /// lock from it), answered so at once after the spawn (Q04-VERDICT);
+    /// the window waits and asks again.
     #[error("{message}")]
     Starting { message: String },
     /// `ensure_daemon_running` (Q04): the daemon has not answered
@@ -306,18 +310,29 @@ fn read_connection_info() -> Result<ShellConnection, ShellError> {
 /// then reported still starting — never spawned over, its log never
 /// rotated, its lock never probed. Only with no live daemon named is the
 /// sidecar spawned, once, and the daemon the file then names judged the
-/// same way: the CLI's, when it won the store's lock first.
+/// same way: the CLI's, when it won the store's lock first; one that is
+/// up but silent answers `starting` at once there too (Q04-VERDICT). Each
+/// change of the asking window's verdict is one line of `gui.log`, keyed
+/// by the webview's label.
 ///
 /// Every read of discovery.json, the process-table read, the spawn and the
 /// read of the log run on the blocking pool, and the probe is tokio's, so
 /// the command holds no runtime thread while it waits on a disk, a connect
 /// or the new process.
 #[tauri::command]
-async fn ensure_daemon_running() -> Result<ShellConnection, ShellError> {
+async fn ensure_daemon_running<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+) -> Result<ShellConnection, ShellError> {
+    ensure_for_window(webview.label().to_owned()).await
+}
+
+/// [`ensure_daemon_running`]'s work for the window labelled `window`.
+async fn ensure_for_window(window: String) -> Result<ShellConnection, ShellError> {
     reuse::ensure_with(
         &mut reuse::RealWorld,
         &reuse::STARTING,
         &reuse::ShellBuild::THIS,
+        &window,
     )
     .await
     .map(reused_connection)
@@ -552,11 +567,20 @@ fn sidecar_beside(exe: &Path) -> anyhow::Result<PathBuf> {
     if daemon.exists() {
         Ok(daemon)
     } else {
-        anyhow::bail!(
-            "Daemon binary not found at {}. The application may be incorrectly installed.",
-            daemon.display()
-        )
+        Err(SidecarMissing { looked_at: daemon }.into())
     }
+}
+
+/// [`sidecar_beside`]'s refusal, typed so the start can tell it from every
+/// other failure to spawn (`reuse::spawn_refusal`): `gui.log` logs it as a
+/// verdict of its own (Q04-VERDICT). Its sentence is the one it always was.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Daemon binary not found at {}. The application may be incorrectly installed.",
+    looked_at.display()
+)]
+struct SidecarMissing {
+    looked_at: PathBuf,
 }
 
 /// Spawn the daemon as a detached background process, its stdout and stderr

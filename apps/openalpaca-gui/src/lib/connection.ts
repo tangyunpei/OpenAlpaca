@@ -11,11 +11,13 @@
  *                             `starting` at once for one that is up but not
  *                             answering yet (this window asks again on its own
  *                             timer, `lib/events.ts`), and only with no live
- *                             daemon spawns the sidecar and waits (~5 s, or up
- *                             to the 45 s budget for one that is booting). Use
- *                             on boot. When the daemon does not come up, the
- *                             rejection carries the end of what it wrote to
- *                             `daemon.log` — its own reason, verbatim.
+ *                             daemon spawns the sidecar and waits ~5 s for the
+ *                             file to name a daemon, answering `starting` at
+ *                             once for one that is up but silent, as above
+ *                             (Q04-VERDICT). Use on boot. When the daemon does
+ *                             not come up, the rejection carries the end of
+ *                             what it wrote to `daemon.log` — its own reason,
+ *                             verbatim.
  *   `get_connection_info`   — reads discovery + expiry check, and refuses
  *                             (`mismatch`) a live daemon whose file states a
  *                             protocol this app does not speak, so the

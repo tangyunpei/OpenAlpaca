@@ -796,6 +796,36 @@ fn the_locator_refuses_an_absent_sidecar_naming_the_path() {
     assert!(!format!("{refused:#}").contains("symlink"));
 }
 
+/// The locator's refusal is told apart from every other failure to spawn,
+/// so `gui.log` logs it as the sidecar missing (Q04-VERDICT); the window's
+/// sentence is the one it was.
+#[test]
+fn an_absent_sidecar_is_a_spawn_refusal_of_its_own() {
+    let guard = HomeStoreGuard::set("locator-refusal-kind");
+    let dir = app_folder(&guard, "real", false);
+    let refused = sidecar_beside(&dir.join("openalpaca_gui")).expect_err("refused");
+    match reuse::spawn_refusal(&refused) {
+        reuse::SpawnRefusal::SidecarMissing(error) => assert_eq!(
+            serde_json::to_value(error).expect("as JSON"),
+            json!({
+                "kind": "spawn_failed",
+                "message": format!(
+                    "Failed to spawn daemon: Daemon binary not found at {}. The application \
+                     may be incorrectly installed.",
+                    dir.join(SIDECAR_NAME).display()
+                ),
+                "log_tail": null,
+            })
+        ),
+        other => panic!("not the sidecar missing: {other:?}"),
+    }
+    let elsewhere = anyhow::anyhow!("Failed to open the daemon log: permission denied");
+    assert!(matches!(
+        reuse::spawn_refusal(&elsewhere),
+        reuse::SpawnRefusal::Failed(_)
+    ));
+}
+
 // ============================================================================
 // read_daemon_log_tail
 // ============================================================================
@@ -1173,7 +1203,8 @@ fn ensure_daemon_running_reads_discovery_off_the_runtime() {
     let file = BlockedFile::at(store::discovery_path().expect("discovery path"));
     let d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), SHELL_VERSION);
     let bytes = serde_json::to_vec(&d).expect("discovery as JSON");
-    let (free, answer) = runtime_free_while_blocked(file, &bytes, ensure_daemon_running);
+    let (free, answer) =
+        runtime_free_while_blocked(file, &bytes, || ensure_for_window("main".into()));
     drop(server);
     assert!(
         free,
@@ -1343,7 +1374,8 @@ fn every_refusal() -> Vec<ShellError> {
             message: "The daemon (pid 51823) is still starting after 45 seconds: it is running \
                       but does not answer. Nothing was started, stopped or restarted. The last \
                       lines of its log (/s/state/logs/daemon.log):\n\nINFO Connecting to MCP \
-                      server"
+                      server\n\nIf it does not finish starting, stop it with `openalpaca daemon \
+                      stop` and press Reconnect in Settings → Connection to start a new one."
                 .into(),
             log_tail: Some("INFO Connecting to MCP server".into()),
         },

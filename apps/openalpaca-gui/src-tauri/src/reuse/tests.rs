@@ -606,6 +606,11 @@ struct FakeWorld {
     log_reads: VecDeque<Option<u64>>,
     /// Why the log cannot be read, when it cannot.
     log_unreadable: Option<String>,
+    /// A spawn refused: `true` for the sidecar missing, `false` for another
+    /// failure; `None` spawns.
+    refuse_spawn: Option<bool>,
+    /// The lines the shell logged, in order.
+    lines: Vec<String>,
 }
 
 impl FakeWorld {
@@ -619,6 +624,8 @@ impl FakeWorld {
             script: Box::new(script),
             log_reads: VecDeque::new(),
             log_unreadable: None,
+            refuse_spawn: None,
+            lines: Vec::new(),
         }
     }
 
@@ -637,7 +644,22 @@ impl World for FakeWorld {
         (self.script)(self.at, self.spawns)
     }
 
-    async fn spawn(&mut self) -> Result<SpawnedDaemon, ShellError> {
+    async fn spawn(&mut self) -> Result<SpawnedDaemon, SpawnRefusal> {
+        match self.refuse_spawn {
+            Some(true) => {
+                return Err(SpawnRefusal::SidecarMissing(crate::spawn_failed(
+                    "Failed to spawn daemon: Daemon binary not found at /a/App/openalpacad. \
+                     The application may be incorrectly installed."
+                        .into(),
+                )));
+            }
+            Some(false) => {
+                return Err(SpawnRefusal::Failed(crate::spawn_failed(
+                    "Failed to spawn daemon: Could not resolve the app's path /a/App: gone".into(),
+                )));
+            }
+            None => {}
+        }
         self.spawns += 1;
         Ok(SpawnedDaemon {
             pid: self.spawn_pid,
@@ -657,6 +679,10 @@ impl World for FakeWorld {
             Self::CEILING,
             self.looks
         );
+    }
+
+    fn log(&mut self, line: String) {
+        self.lines.push(line);
     }
 
     async fn log_tail(&mut self, from: Option<u64>) -> Result<(PathBuf, String), String> {
@@ -708,6 +734,35 @@ fn kind(result: &Result<Reused, ShellError>) -> String {
     }
 }
 
+/// The sentence every `still_starting` report ends with (*Rev 106* (9), the
+/// advisor's pick): the way out, worded for a boot that may still finish.
+const WAY_OUT: &str = "If it does not finish starting, stop it with `openalpaca daemon stop` \
+                       and press Reconnect in Settings → Connection to start a new one.";
+
+/// One ask of the window's: `ensure_with` over `world`, from [`WINDOW`].
+fn ask(world: &mut FakeWorld, watch: &Mutex<StartingWatch>) -> Result<Reused, ShellError> {
+    run(ensure_with(world, watch, &ShellBuild::THIS, WINDOW))
+}
+
+/// The window's asks, one a second as `STARTING_RETRY_MS` paces them, until
+/// one answers other than `starting`: every answer's kind, in order, and the
+/// last answer.
+fn ask_until_settled(
+    world: &mut FakeWorld,
+    watch: &Mutex<StartingWatch>,
+) -> (Vec<String>, Result<Reused, ShellError>) {
+    let mut kinds = Vec::new();
+    loop {
+        let result = ask(world, watch);
+        kinds.push(kind(&result));
+        if kind(&result) != "starting" {
+            return (kinds, result);
+        }
+        assert!(kinds.len() < 120, "the asks never settled: {kinds:?}");
+        world.pass(Duration::from_secs(1));
+    }
+}
+
 /// The CLI's daemon is still booting (its pid live, its health silent): the
 /// app parks in `starting`, invoke after invoke, and reuses it once it
 /// answers — one daemon, never a second spawn (the owner's rule: the CLI and
@@ -726,12 +781,12 @@ fn a_daemon_silent_then_answering_is_reused_and_never_spawned_over() {
     });
     let watch = Mutex::new(StartingWatch::default());
     for _ in 0..19 {
-        let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+        let result = ask(&mut world, &watch);
         assert_eq!(kind(&result), "starting");
         world.pass(Duration::from_secs(1));
     }
     world.pass(Duration::from_secs(1));
-    let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+    let result = ask(&mut world, &watch);
     assert_eq!(kind(&result), "reused");
     assert_eq!(world.spawns, 0);
 }
@@ -745,23 +800,22 @@ fn a_daemon_silent_past_the_budget_gets_the_timeout_report_and_no_spawn() {
     let script_d = d.clone();
     let mut world = FakeWorld::new(move |_, _| booting(&script_d));
     let watch = Mutex::new(StartingWatch::default());
-    let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+    let result = ask(&mut world, &watch);
     assert_eq!(kind(&result), "starting");
     world.pass(STARTING_BUDGET - Duration::from_millis(1));
-    assert_eq!(
-        kind(&run(ensure_with(&mut world, &watch, &ShellBuild::THIS))),
-        "starting"
-    );
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
     world.pass(Duration::from_millis(1));
     for _ in 0..3 {
-        let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+        let result = ask(&mut world, &watch);
         assert_eq!(kind(&result), "still_starting");
         let error = serde_json::to_value(result.err().unwrap()).unwrap();
         assert_eq!(
             error["message"],
-            "The daemon (pid 4242) is still starting after 45 seconds: it is running but \
-             does not answer. Nothing was started, stopped or restarted. The last lines of \
-             its log (/s/state/logs/daemon.log):\n\na line"
+            format!(
+                "The daemon (pid 4242) is still starting after 45 seconds: it is running but \
+                 does not answer. Nothing was started, stopped or restarted. The last lines of \
+                 its log (/s/state/logs/daemon.log):\n\na line\n\n{WAY_OUT}"
+            )
         );
         assert_eq!(error["log_tail"], "a line");
         world.pass(Duration::from_secs(10));
@@ -772,7 +826,8 @@ fn a_daemon_silent_past_the_budget_gets_the_timeout_report_and_no_spawn() {
 }
 
 /// A log that cannot be read past the budget is still the daemon's report,
-/// never a failed spawn: the kind stays `still_starting`, the reason said.
+/// never a failed spawn: the kind stays `still_starting`, the reason said,
+/// and the way out after it.
 #[test]
 fn a_log_that_cannot_be_read_past_the_budget_is_still_starting() {
     let d = this_build_discovery(4242);
@@ -780,26 +835,48 @@ fn a_log_that_cannot_be_read_past_the_budget_is_still_starting() {
     let mut world = FakeWorld::new(move |_, _| booting(&script_d));
     world.log_unreadable = Some("Could not read the daemon log: task 3 panicked".into());
     let watch = Mutex::new(StartingWatch::default());
-    let _ = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+    let _ = ask(&mut world, &watch);
     world.pass(STARTING_BUDGET);
-    let error = serde_json::to_value(
-        run(ensure_with(&mut world, &watch, &ShellBuild::THIS))
-            .err()
-            .unwrap(),
-    )
-    .unwrap();
+    let error = serde_json::to_value(ask(&mut world, &watch).err().unwrap()).unwrap();
     assert_eq!(
         error,
         serde_json::json!({
             "kind": "still_starting",
-            "message": "The daemon (pid 4242) is still starting after 45 seconds: it is \
-                        running but does not answer. Nothing was started, stopped or \
-                        restarted, and its log could not be read: Could not read the daemon \
-                        log: task 3 panicked",
+            "message": format!(
+                "The daemon (pid 4242) is still starting after 45 seconds: it is running but \
+                 does not answer. Nothing was started, stopped or restarted, and its log could \
+                 not be read: Could not read the daemon log: task 3 panicked. {WAY_OUT}"
+            ),
             "log_tail": null,
         })
     );
     assert_eq!(world.spawns, 0);
+}
+
+/// Every shape of the timeout report ends with the way out (*Rev 106* (9)):
+/// a log with lines, a log that holds nothing, a log that cannot be read;
+/// a daemon found, the one this app spawned, and another that won the lock.
+#[test]
+fn every_still_starting_report_ends_with_the_way_out() {
+    let path = PathBuf::from("/s/state/logs/daemon.log");
+    for waited in [Waited::Found, Waited::Spawned, Waited::Other { ours: 9090 }] {
+        for read in [
+            Ok((path.clone(), "a line".to_owned())),
+            Ok((path.clone(), String::new())),
+            Err("Could not read the daemon log: task 3 panicked".to_owned()),
+            Err("the log's path could not be had.".to_owned()),
+        ] {
+            let error = serde_json::to_value(still_starting(4242, read.clone(), waited)).unwrap();
+            let message = error["message"].as_str().unwrap();
+            assert!(
+                message.ends_with(&format!(". {WAY_OUT}"))
+                    || message.ends_with(&format!("\n\n{WAY_OUT}")),
+                "{waited:?} {read:?}: {message}"
+            );
+            assert_eq!(message.matches(WAY_OUT).count(), 1, "{message}");
+            assert!(!message.contains(".."), "{message}");
+        }
+    }
 }
 
 /// The first silent look is per daemon: another pid starts its own count.
@@ -817,22 +894,86 @@ fn the_budget_counts_from_the_first_silent_look_at_that_pid() {
         }
     });
     let watch = Mutex::new(StartingWatch::default());
-    assert_eq!(
-        kind(&run(ensure_with(&mut world, &watch, &ShellBuild::THIS))),
-        "starting"
-    );
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
     world.pass(STARTING_BUDGET);
     assert_eq!(
-        kind(&run(ensure_with(&mut world, &watch, &ShellBuild::THIS))),
+        kind(&ask(&mut world, &watch)),
         "starting",
         "a new pid's first look"
     );
 }
 
+/// *Rev 106* (8), the advisor's pick: after this app's own spawn, once
+/// `discovery.json` names a live `openalpacad` whose health is silent, the
+/// ask answers `starting` at once — the window reads `Daemon is starting`,
+/// not `connecting` — and never waits in the ask.
+#[test]
+fn after_a_spawn_a_live_silent_daemon_answers_starting_at_once() {
+    let ours = this_build_discovery(9090);
+    let script_d = ours.clone();
+    let mut world = FakeWorld::new(move |at, spawns| {
+        if spawns == 0 || at < Duration::from_millis(400) {
+            look(DiscoveryRead::Missing, silent(), false)
+        } else {
+            booting(&script_d)
+        }
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    let error = serde_json::to_value(ask(&mut world, &watch).err().unwrap()).unwrap();
+    assert_eq!(
+        error,
+        serde_json::json!({
+            "kind": "starting",
+            "message": "The daemon (pid 9090) is starting: it has written its discovery \
+                        file but does not answer yet. Waiting for it, up to 45 seconds.",
+        })
+    );
+    assert_eq!(world.spawns, 1);
+    // The spawn's polls until the file named it, and no longer.
+    assert_eq!(world.at, Duration::from_millis(400));
+}
+
+/// The next asks after a spawn keep the budget's count from the first
+/// silent look, made inside the spawn's ask: no ask restarts it, none
+/// spawns again, and past it the report is about this app's own daemon,
+/// quoting what its log holds since the spawn.
+#[test]
+fn the_asks_after_a_spawn_keep_the_first_silent_look_s_count() {
+    let ours = this_build_discovery(9090);
+    let script_d = ours.clone();
+    let mut world = FakeWorld::new(move |_, spawns| {
+        if spawns == 0 {
+            look(DiscoveryRead::Missing, silent(), false)
+        } else {
+            booting(&script_d)
+        }
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
+    let first_silent = world.at;
+    world.pass(STARTING_BUDGET - Duration::from_millis(1));
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
+    world.pass(Duration::from_millis(1));
+    assert_eq!(world.at - first_silent, STARTING_BUDGET);
+    let error = serde_json::to_value(ask(&mut world, &watch).err().unwrap()).unwrap();
+    assert_eq!(error["kind"], "still_starting");
+    assert_eq!(
+        error["message"],
+        format!(
+            "The daemon (pid 9090) is still starting after 45 seconds: it is running but does \
+             not answer. Nothing was stopped or restarted. Its log (/s/state/logs/daemon.log) \
+             ends with:\n\na line\n\n{WAY_OUT}"
+        )
+    );
+    assert_eq!(world.spawns, 1);
+    assert_eq!(world.log_reads, [Some(7)]);
+}
+
 /// The race the owner's rule judges: the app saw no daemon and spawned, but
 /// the CLI's daemon took the store's lock first, so the app's exits 1. The
-/// shell follows the daemon `discovery.json` names, the CLI's — booting,
-/// then answering — and ends reusing it, never with the spawn-failed report.
+/// shell follows the daemon `discovery.json` names, the CLI's — booting:
+/// `starting` at every ask, then answering — and ends reusing it, never with
+/// the spawn-failed report and never with a second spawn.
 #[test]
 fn a_spawn_that_lost_the_lock_to_the_cli_s_daemon_ends_reusing_it() {
     let cli = this_build_discovery(5151);
@@ -847,16 +988,18 @@ fn a_spawn_that_lost_the_lock_to_the_cli_s_daemon_ends_reusing_it() {
         }
     });
     let watch = Mutex::new(StartingWatch::default());
-    let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+    let (kinds, result) = ask_until_settled(&mut world, &watch);
+    assert_eq!(kinds.len(), 13, "{kinds:?}");
+    assert!(kinds[..12].iter().all(|k| k == "starting"), "{kinds:?}");
     assert_eq!(kind(&result), "reused");
     assert_eq!(result.unwrap().discovery.pid, 5151);
     assert_eq!(world.spawns, 1, "one spawn, never a second");
 }
 
-/// The same race with the CLI's daemon past the budget: the timeout report,
-/// naming the daemon this ask started apart from the one it waits for, and
-/// quoting what the log holds since this ask's spawn, named so; no second
-/// spawn.
+/// The same race with the CLI's daemon past the budget: `starting` at every
+/// ask until the budget has passed, then the timeout report, naming the
+/// daemon this app started apart from the one it waits for, and quoting
+/// what the log holds since this app's spawn, named so; no second spawn.
 #[test]
 fn a_spawn_that_lost_the_lock_to_a_daemon_still_booting_ends_still_starting() {
     let cli = this_build_discovery(5151);
@@ -869,22 +1012,26 @@ fn a_spawn_that_lost_the_lock_to_a_daemon_still_booting_ends_still_starting() {
         }
     });
     let watch = Mutex::new(StartingWatch::default());
-    let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+    let (kinds, result) = ask_until_settled(&mut world, &watch);
+    assert_eq!(kinds.len(), 46, "{kinds:?}");
     assert_eq!(kind(&result), "still_starting");
     let error = serde_json::to_value(result.err().unwrap()).unwrap();
     assert_eq!(
         error["message"],
-        "The daemon (pid 5151) is still starting after 45 seconds: it is running but does \
-         not answer. This app started a daemon too (pid 9090), but the discovery file names \
-         this one; nothing was stopped or restarted. What its log \
-         (/s/state/logs/daemon.log) holds since this app's start:\n\na line"
+        format!(
+            "The daemon (pid 5151) is still starting after 45 seconds: it is running but does \
+             not answer. This app started a daemon too (pid 9090), but the discovery file \
+             names this one; nothing was stopped or restarted. What its log \
+             (/s/state/logs/daemon.log) holds since this app's start:\n\na line\n\n{WAY_OUT}"
+        )
     );
     assert_eq!(world.spawns, 1);
     assert_eq!(world.log_reads, [Some(7)]);
 }
 
-/// The daemon this ask spawned, booting past the budget: the timeout report
-/// as its own, quoting what its log holds since the spawn.
+/// The daemon this app spawned, booting past the budget: `starting` at
+/// every ask, then the timeout report as its own, quoting what its log
+/// holds since the spawn.
 #[test]
 fn a_spawned_daemon_still_booting_past_the_budget_is_reported_as_this_ask_s() {
     let ours = this_build_discovery(6161);
@@ -898,13 +1045,16 @@ fn a_spawned_daemon_still_booting_past_the_budget_is_reported_as_this_ask_s() {
     });
     world.spawn_pid = 6161;
     let watch = Mutex::new(StartingWatch::default());
-    let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+    let (kinds, result) = ask_until_settled(&mut world, &watch);
+    assert_eq!(kinds.len(), 46, "{kinds:?}");
     let error = serde_json::to_value(result.err().unwrap()).unwrap();
     assert_eq!(
         error["message"],
-        "The daemon (pid 6161) is still starting after 45 seconds: it is running but does \
-         not answer. Nothing was stopped or restarted. Its log (/s/state/logs/daemon.log) \
-         ends with:\n\na line"
+        format!(
+            "The daemon (pid 6161) is still starting after 45 seconds: it is running but does \
+             not answer. Nothing was stopped or restarted. Its log (/s/state/logs/daemon.log) \
+             ends with:\n\na line\n\n{WAY_OUT}"
+        )
     );
     assert_eq!(error["kind"], "still_starting");
     assert_eq!(world.spawns, 1);
@@ -912,7 +1062,8 @@ fn a_spawned_daemon_still_booting_past_the_budget_is_reported_as_this_ask_s() {
 }
 
 /// A daemon this run spawned that boots slowly (its pid live, health silent
-/// past 5 s) is waited for under the budget, not failed at 5 s.
+/// past 5 s) is waited for under the budget, not failed at 5 s: `starting`
+/// at every ask until it answers, then reused, with one spawn.
 #[test]
 fn a_spawned_daemon_booting_past_five_seconds_is_waited_for() {
     let d = this_build_discovery(6161);
@@ -927,9 +1078,224 @@ fn a_spawned_daemon_booting_past_five_seconds_is_waited_for() {
         }
     });
     let watch = Mutex::new(StartingWatch::default());
-    let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+    let (kinds, result) = ask_until_settled(&mut world, &watch);
+    assert!(kinds.len() > 1, "{kinds:?}");
     assert_eq!(kind(&result), "reused");
     assert_eq!(world.spawns, 1);
+}
+
+/// A spawned daemon that writes its file and dies after the ask answered
+/// `starting` is the failed start, as when it died inside the one ask: the
+/// next ask finds its pid gone and reports this spawn's log lines, never
+/// spawning again — a daemon that dies at every boot is not restarted
+/// every second, its reason unseen.
+#[test]
+fn a_spawned_daemon_that_dies_after_answering_starting_is_reported_not_spawned_again() {
+    let ours = this_build_discovery(9090);
+    let script_d = ours.clone();
+    let mut world = FakeWorld::new(move |at, spawns| match spawns {
+        0 => look(DiscoveryRead::Missing, silent(), false),
+        1 if at < Duration::from_millis(500) => booting(&script_d),
+        1 => look(parsed(&script_d), silent(), false),
+        _ => healthy(&script_d),
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
+    world.pass(Duration::from_secs(1));
+    let result = ask(&mut world, &watch);
+    assert_eq!(kind(&result), "spawn_failed");
+    let error = serde_json::to_value(result.err().unwrap()).unwrap();
+    assert_eq!(
+        error["message"],
+        "The daemon did not start within 5 seconds. Its log (/s/state/logs/daemon.log) ends \
+         with:\n\na line"
+    );
+    assert_eq!(world.spawns, 1, "never a second spawn");
+    assert_eq!(world.log_reads, [Some(7)]);
+    // The wait ended where the one ask's would have: 5 s after the spawn.
+    assert!(world.at >= SPAWN_WAIT && world.at < SPAWN_WAIT + Duration::from_secs(1));
+    // The failed start is over: the next ask, a Reconnect, spawns afresh.
+    let result = ask(&mut world, &watch);
+    assert_eq!(kind(&result), "reused");
+    assert_eq!(world.spawns, 2);
+}
+
+/// Once the timeout report has been answered after a spawn, the spawn's
+/// wait is over, as the one ask's was: a Reconnect after the daemon was
+/// stopped (the report's way out) spawns afresh. The Reconnect comes 10 s
+/// after the report, well inside the budget since the last ask, so it is
+/// the report, not the spawn's staleness, that ends the wait (green on the
+/// parent, where the one ask ended it; a guard).
+#[test]
+fn after_the_report_a_stopped_daemon_s_reconnect_spawns_afresh() {
+    let ours = this_build_discovery(9090);
+    let script_d = ours.clone();
+    let stopped_at = STARTING_BUDGET + Duration::from_secs(5);
+    let mut world = FakeWorld::new(move |at, spawns| match spawns {
+        0 => look(DiscoveryRead::Missing, silent(), false),
+        1 if at < stopped_at => booting(&script_d),
+        1 => look(DiscoveryRead::Missing, silent(), false),
+        _ => healthy(&script_d),
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    let (_, result) = ask_until_settled(&mut world, &watch);
+    assert_eq!(kind(&result), "still_starting");
+    world.pass(Duration::from_secs(10));
+    let result = ask(&mut world, &watch);
+    assert_eq!(kind(&result), "reused");
+    assert_eq!(world.spawns, 2);
+}
+
+/// A spawn whose `starting` answer no ask followed for the budget (the
+/// window closed or disconnected) is over by then, as the one ask's wait
+/// would have been: a much later ask that finds no daemon spawns afresh,
+/// never a failed start quoting that old spawn's lines.
+#[test]
+fn a_spawn_no_ask_followed_for_the_budget_is_forgotten() {
+    let ours = this_build_discovery(9090);
+    let script_d = ours.clone();
+    let mut world = FakeWorld::new(move |at, spawns| match spawns {
+        0 => look(DiscoveryRead::Missing, silent(), false),
+        1 if at < Duration::from_secs(1) => booting(&script_d),
+        1 => look(DiscoveryRead::Missing, silent(), false),
+        _ => healthy(&script_d),
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
+    world.pass(STARTING_BUDGET);
+    let result = ask(&mut world, &watch);
+    assert_eq!(kind(&result), "reused");
+    assert_eq!(world.spawns, 2);
+    assert!(world.log_reads.is_empty(), "{:?}", world.log_reads);
+}
+
+/// The spawn is forgotten only once the budget has passed since the last
+/// ask, never since the spawn: a spawned daemon that dies just before its
+/// own budget (counted from the first silent look, which comes after the
+/// spawn) ends, while the window asks every second, is the failed start
+/// with this spawn's lines, never a silent second spawn.
+#[test]
+fn a_spawned_daemon_dying_just_before_its_budget_is_reported_not_respawned() {
+    let ours = this_build_discovery(9090);
+    let script_d = ours.clone();
+    let dies_at = Duration::from_millis(44_500);
+    let mut world = FakeWorld::new(move |at, spawns| match spawns {
+        0 => look(DiscoveryRead::Missing, silent(), false),
+        1 if at < dies_at => booting(&script_d),
+        1 => look(parsed(&script_d), silent(), false),
+        _ => healthy(&script_d),
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    let (_, result) = ask_until_settled(&mut world, &watch);
+    assert_eq!(kind(&result), "spawn_failed");
+    assert_eq!(world.spawns, 1, "never a second spawn");
+    assert_eq!(world.log_reads, [Some(7)]);
+}
+
+/// A spawn no ask followed for the budget is forgotten by every reader: a
+/// daemon found starting much later (the CLI's) is reported as a found
+/// one — the log's last lines, no word of this app's old spawn — and its
+/// reuse is one already running.
+#[test]
+fn a_forgotten_spawn_names_no_later_daemon() {
+    let ours = this_build_discovery(9090);
+    let cli = this_build_discovery(5151);
+    let (a, b) = (ours.clone(), cli.clone());
+    let mut world = FakeWorld::new(move |at, spawns| match spawns {
+        0 => look(DiscoveryRead::Missing, silent(), false),
+        _ if at < Duration::from_secs(1) => booting(&a),
+        _ if at < Duration::from_secs(200) => booting(&b),
+        _ => healthy(&b),
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
+    world.pass(Duration::from_secs(100));
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
+    world.pass(STARTING_BUDGET);
+    let result = ask(&mut world, &watch);
+    assert_eq!(kind(&result), "still_starting");
+    let message = serde_json::to_value(result.err().unwrap()).unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("Nothing was started, stopped or restarted. The last lines of its log"),
+        "{message}"
+    );
+    assert!(!message.contains("9090"), "{message}");
+    assert_eq!(world.log_reads, [None]);
+    world.pass(Duration::from_secs(100));
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    assert_eq!(world.spawns, 1);
+    assert!(
+        world
+            .lines
+            .last()
+            .is_some_and(|l| l.ends_with("already running: this run of the app did not start it.")),
+        "{:?}",
+        world.lines
+    );
+}
+
+/// The timeout report after a spawn ends the spawn's wait: an ask after it
+/// reports the daemon as a found one (the log's last lines), whether it is
+/// this app's own or the one that took the lock from it, and the latter's
+/// later reuse is one already running.
+#[test]
+fn after_the_report_the_spawn_s_wait_is_over_for_every_reader() {
+    // This app's own, still booting.
+    let ours = this_build_discovery(9090);
+    let script_d = ours.clone();
+    let mut world = FakeWorld::new(move |_, spawns| match spawns {
+        0 => look(DiscoveryRead::Missing, silent(), false),
+        _ => booting(&script_d),
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    let (_, result) = ask_until_settled(&mut world, &watch);
+    assert_eq!(kind(&result), "still_starting");
+    world.pass(Duration::from_secs(1));
+    let result = ask(&mut world, &watch);
+    assert_eq!(kind(&result), "still_starting");
+    let message = serde_json::to_value(result.err().unwrap()).unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("Nothing was started, stopped or restarted. The last lines of its log"),
+        "{message}"
+    );
+    assert_eq!(world.log_reads, [Some(7), None]);
+    // The CLI's, which took the lock from this app's own, answering later.
+    let cli = this_build_discovery(5151);
+    let script_d = cli.clone();
+    let mut world = FakeWorld::new(move |at, spawns| match spawns {
+        0 => look(DiscoveryRead::Missing, silent(), false),
+        _ if at < Duration::from_secs(60) => booting(&script_d),
+        _ => healthy(&script_d),
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    let (_, result) = ask_until_settled(&mut world, &watch);
+    assert_eq!(kind(&result), "still_starting");
+    world.pass(Duration::from_secs(1));
+    let result = ask(&mut world, &watch);
+    assert_eq!(kind(&result), "still_starting");
+    let message = serde_json::to_value(result.err().unwrap()).unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!message.contains("9090"), "{message}");
+    assert_eq!(world.log_reads, [Some(7), None]);
+    world.pass(Duration::from_secs(20));
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    assert_eq!(world.spawns, 1);
+    assert!(
+        world
+            .lines
+            .last()
+            .is_some_and(|l| l.ends_with("already running: this run of the app did not start it.")),
+        "{:?}",
+        world.lines
+    );
 }
 
 /// A spawned daemon that never writes a discovery file, or whose pid is
@@ -951,7 +1317,7 @@ fn a_spawned_daemon_that_never_comes_up_fails_at_five_seconds() {
             pid_live: false,
         });
         let watch = Mutex::new(StartingWatch::default());
-        let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+        let result = ask(&mut world, &watch);
         assert_eq!(kind(&result), "spawn_failed");
         let error = serde_json::to_value(result.err().unwrap()).unwrap();
         assert_eq!(
@@ -983,7 +1349,7 @@ fn a_mismatch_found_after_the_spawn_is_reported() {
         }
     });
     let watch = Mutex::new(StartingWatch::default());
-    let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+    let result = ask(&mut world, &watch);
     assert_eq!(kind(&result), "mismatch");
     assert_eq!(world.spawns, 1);
 }
@@ -1000,7 +1366,7 @@ fn a_mismatch_at_the_first_look_spawns_nothing() {
         )
     });
     let watch = Mutex::new(StartingWatch::default());
-    let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS));
+    let result = ask(&mut world, &watch);
     assert_eq!(kind(&result), "mismatch");
     assert_eq!(world.spawns, 0);
     assert_eq!(world.looks, 1);
@@ -1013,12 +1379,7 @@ fn the_starting_answer_names_the_pid_and_the_budget() {
     let script_d = d.clone();
     let mut world = FakeWorld::new(move |_, _| booting(&script_d));
     let watch = Mutex::new(StartingWatch::default());
-    let error = serde_json::to_value(
-        run(ensure_with(&mut world, &watch, &ShellBuild::THIS))
-            .err()
-            .unwrap(),
-    )
-    .unwrap();
+    let error = serde_json::to_value(ask(&mut world, &watch).err().unwrap()).unwrap();
     assert_eq!(
         error,
         serde_json::json!({
@@ -1027,4 +1388,234 @@ fn the_starting_answer_names_the_pid_and_the_budget() {
                         file but does not answer yet. Waiting for it, up to 45 seconds.",
         })
     );
+}
+
+// ============================================================================
+// The verdicts' lines in gui.log
+// ============================================================================
+
+/// The window every ask above comes from.
+const WINDOW: &str = "main";
+
+/// The lines `world` logged, with the prefix every verdict line carries for
+/// `window` taken off; a line without it fails the test.
+fn verdict_lines(world: &FakeWorld, window: &str) -> Vec<String> {
+    let prefix = format!("Daemon verdict for window `{window}`: ");
+    world
+        .lines
+        .iter()
+        .filter(|line| line.contains(&format!("window `{window}`")))
+        .map(|line| {
+            line.strip_prefix(&prefix)
+                .unwrap_or_else(|| panic!("not a verdict line: {line}"))
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Q04-LEG-B found the shell logs nothing for these verdicts: one line per
+/// change, not per ask — the window asks every second while a daemon
+/// starts. `starting` asked three times is one line; `still_starting` asked
+/// twice, one more; the reuse asked twice, one more.
+#[test]
+fn a_verdict_asked_again_logs_once_and_a_change_logs_again() {
+    let d = this_build_discovery(4242);
+    let script_d = d.clone();
+    let answers_at = STARTING_BUDGET + Duration::from_secs(15);
+    let mut world = FakeWorld::new(move |at, _| {
+        if at < answers_at {
+            booting(&script_d)
+        } else {
+            healthy(&script_d)
+        }
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    for _ in 0..3 {
+        assert_eq!(kind(&ask(&mut world, &watch)), "starting");
+        world.pass(Duration::from_secs(1));
+    }
+    world.pass(STARTING_BUDGET);
+    for _ in 0..2 {
+        assert_eq!(kind(&ask(&mut world, &watch)), "still_starting");
+        world.pass(Duration::from_secs(1));
+    }
+    world.pass(Duration::from_secs(15));
+    for _ in 0..2 {
+        assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    }
+    assert_eq!(
+        verdict_lines(&world, WINDOW),
+        [
+            "starting — pid 4242 has written its discovery file but its health does not answer \
+             yet; waiting up to 45 s, starting nothing beside it."
+                .to_owned(),
+            "still starting — pid 4242 has not answered 45 s after the first silent look; \
+             reported, nothing spawned over it."
+                .to_owned(),
+            format!(
+                "reuse — pid 4242, version {}, protocol {}, already running: this run of the \
+                 app did not start it.",
+                ShellBuild::THIS.version,
+                ShellBuild::THIS.protocol
+            ),
+        ]
+    );
+    assert_eq!(world.lines.len(), 3);
+}
+
+/// A mismatch asked again is one line, naming both sides' protocols.
+#[test]
+fn a_mismatch_asked_again_logs_once() {
+    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let mut world = FakeWorld::new(move |_, _| {
+        look(
+            parsed(&newer),
+            answered(INSTANCE, Some(ShellBuild::THIS.protocol + 1), "9.9.9"),
+            true,
+        )
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    for _ in 0..3 {
+        assert_eq!(kind(&ask(&mut world, &watch)), "mismatch");
+    }
+    assert_eq!(
+        verdict_lines(&world, WINDOW),
+        [format!(
+            "refusal (mismatch) — pid 4242, version 9.9.9, protocol {}; this app speaks \
+             protocol {}; nothing was stopped or started.",
+            ShellBuild::THIS.protocol + 1,
+            ShellBuild::THIS.protocol
+        )]
+    );
+}
+
+/// A sidecar missing asked again is one line, naming no path; a spawn that
+/// fails otherwise is no line of its own but a change, so the sidecar
+/// missing after it is logged again.
+#[test]
+fn a_missing_sidecar_asked_again_logs_once() {
+    let mut world = FakeWorld::new(|_, _| look(DiscoveryRead::Missing, silent(), false));
+    world.refuse_spawn = Some(true);
+    let watch = Mutex::new(StartingWatch::default());
+    for _ in 0..3 {
+        let result = ask(&mut world, &watch);
+        assert_eq!(kind(&result), "spawn_failed");
+    }
+    world.refuse_spawn = Some(false);
+    assert_eq!(kind(&ask(&mut world, &watch)), "spawn_failed");
+    world.refuse_spawn = Some(true);
+    assert_eq!(kind(&ask(&mut world, &watch)), "spawn_failed");
+    let missing = format!(
+        "refusal (sidecar missing) — no `{}` beside the app; nothing was started.",
+        crate::SIDECAR_NAME
+    );
+    assert_eq!(verdict_lines(&world, WINDOW), [missing.clone(), missing]);
+    assert_eq!(world.spawns, 0, "a refused spawn started nothing");
+}
+
+/// Each window keeps its own last verdict: the same `starting` asked from
+/// two windows is a line for each, and asked again, none.
+#[test]
+fn each_window_logs_its_own_changes() {
+    let d = this_build_discovery(4242);
+    let script_d = d.clone();
+    let mut world = FakeWorld::new(move |_, _| booting(&script_d));
+    let watch = Mutex::new(StartingWatch::default());
+    for _ in 0..2 {
+        for window in ["main", "second"] {
+            let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS, window));
+            assert_eq!(kind(&result), "starting");
+        }
+    }
+    assert_eq!(verdict_lines(&world, "main").len(), 1);
+    assert_eq!(verdict_lines(&world, "second").len(), 1);
+    assert_eq!(world.lines.len(), 2);
+}
+
+/// The reuse line says whose daemon it is, as far as the shell knows: the
+/// one this app spawned, another than the one this app spawned while that
+/// spawn's wait is not over (no cause claimed: the shell cannot know it),
+/// or one already running.
+#[test]
+fn the_reuse_line_says_whose_daemon_it_is() {
+    let version = ShellBuild::THIS.version;
+    let protocol = ShellBuild::THIS.protocol;
+    // This app's own.
+    let ours = this_build_discovery(9090);
+    let script_d = ours.clone();
+    let mut world = FakeWorld::new(move |_, spawns| {
+        if spawns == 0 {
+            look(DiscoveryRead::Missing, silent(), false)
+        } else {
+            healthy(&script_d)
+        }
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    assert_eq!(
+        verdict_lines(&world, WINDOW),
+        [format!(
+            "reuse — pid 9090, version {version}, protocol {protocol}, the daemon this app \
+             started."
+        )]
+    );
+    // Another's, named while this app's spawn waits: `starting` while it
+    // boots, then the reuse, naming this app's own pid.
+    let cli = this_build_discovery(5151);
+    let script_d = cli.clone();
+    let mut world = FakeWorld::new(move |at, spawns| {
+        if spawns == 0 {
+            look(DiscoveryRead::Missing, silent(), false)
+        } else if at < Duration::from_secs(3) {
+            booting(&script_d)
+        } else {
+            healthy(&script_d)
+        }
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    let (_, result) = ask_until_settled(&mut world, &watch);
+    assert_eq!(kind(&result), "reused");
+    let lines = verdict_lines(&world, WINDOW);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(
+        lines[1],
+        format!(
+            "reuse — pid 5151, version {version}, protocol {protocol}, not the one this app \
+             started (pid 9090)."
+        )
+    );
+}
+
+/// No line carries the daemon's token, its log's lines or a path: the
+/// discovery file's token, the tail the timeout report quotes and the log's
+/// path stay out of `gui.log`.
+#[test]
+fn no_verdict_line_carries_the_token_the_log_or_a_path() {
+    let d = this_build_discovery(4242);
+    let token = d.auth.token.clone();
+    assert!(!token.is_empty());
+    let script_d = d.clone();
+    let mut world = FakeWorld::new(move |at, _| {
+        if at < STARTING_BUDGET + Duration::from_secs(5) {
+            booting(&script_d)
+        } else {
+            healthy(&script_d)
+        }
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    let _ = ask(&mut world, &watch);
+    world.pass(STARTING_BUDGET);
+    assert_eq!(kind(&ask(&mut world, &watch)), "still_starting");
+    world.pass(Duration::from_secs(5));
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    let mut missing = FakeWorld::new(|_, _| look(DiscoveryRead::Missing, silent(), false));
+    missing.refuse_spawn = Some(true);
+    let _ = ask(&mut missing, &Mutex::new(StartingWatch::default()));
+    let lines: Vec<&String> = world.lines.iter().chain(&missing.lines).collect();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    for line in lines {
+        assert!(!line.contains(&token), "{line}");
+        assert!(!line.contains("a line"), "{line}");
+        assert!(!line.contains('/'), "{line}");
+    }
 }

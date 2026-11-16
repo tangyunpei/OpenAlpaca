@@ -19,10 +19,11 @@
 //! booting daemon exit).
 //!
 //! **[`ensure_with`]** is the start over a [`World`] — the file, the process
-//! table, the probe, the spawn, the clock — so a test drives every path with
-//! a world it writes; [`RealWorld`] is the machine's. The owner's rule
-//! judges it: whether the CLI or the app started the daemon, both use the
-//! same one (2026-11-16).
+//! table, the probe, the spawn, the clock, the log — so a test drives every
+//! path with a world it writes; [`RealWorld`] is the machine's. The owner's
+//! rule judges it: whether the CLI or the app started the daemon, both use
+//! the same one (2026-11-16). Each window's verdict, when it changes, is one
+//! line of `gui.log` (Q04-VERDICT).
 
 use crate::{ShellError, did_not_start, record_spawned, spawn_daemon, store};
 use openalpaca_storage::daemon_lifecycle::{self, STARTING_BUDGET};
@@ -332,6 +333,33 @@ const STOP_AND_RECONNECT_SENTENCE: &str = "Stop that daemon with `openalpaca dae
                                            this app's own.";
 
 impl Mismatch {
+    /// The daemon refused: its pid, and the version and protocol it states.
+    fn who(&self) -> String {
+        let mut who = format!("pid {}", self.pid);
+        if let Some(v) = &self.daemon_version {
+            who.push_str(&format!(", version {v}"));
+        }
+        if let Some(p) = self.daemon_protocol {
+            who.push_str(&format!(", protocol {p}"));
+        }
+        who
+    }
+
+    /// The refusal's line in `gui.log`: whom, and this shell's protocol.
+    fn log_line(&self) -> String {
+        let unreadable = if self.readable {
+            ""
+        } else {
+            ", in a discovery file this app cannot read"
+        };
+        format!(
+            "refusal (mismatch) — {}{unreadable}; this app speaks protocol {}; nothing was \
+             stopped or started.",
+            self.who(),
+            self.shell.protocol
+        )
+    }
+
     /// The mismatch as the webview receives it: the sentence, both sides'
     /// protocols and the remedy.
     pub(crate) fn into_error(self) -> ShellError {
@@ -343,13 +371,7 @@ impl Mismatch {
             (true, None) => format!("Update the app, or {STOP_AND_RECONNECT}"),
             (false, _) => STOP_AND_RECONNECT_SENTENCE.to_owned(),
         };
-        let mut who = format!("pid {}", self.pid);
-        if let Some(v) = &self.daemon_version {
-            who.push_str(&format!(", version {v}"));
-        }
-        if let Some(p) = self.daemon_protocol {
-            who.push_str(&format!(", protocol {p}"));
-        }
+        let who = self.who();
         let message = if self.readable {
             let range = if self.shell.oldest_supported < self.shell.protocol {
                 format!(
@@ -381,21 +403,62 @@ impl Mismatch {
 }
 
 // ============================================================================
-// The starting state's clock
+// The starting state's clock, the spawn waited for, the verdicts logged
 // ============================================================================
 
-/// When the shell first saw the daemon it is waiting for silent: its pid,
-/// its instance and the instant. The budget counts from there, across
-/// invokes, so a window that asks again every second never restarts it.
+/// A daemon this app spawned whose wait is not over: its pid, where its
+/// lines in the log begin, when it was spawned, and when an ask last
+/// answered (the spawn is forgotten once [`STARTING_BUDGET`] has passed
+/// since then with no ask: the window is gone).
+#[derive(Debug, Clone, Copy)]
+struct PendingSpawn {
+    pid: u32,
+    log_start: u64,
+    at: Instant,
+    asked: Instant,
+}
+
+/// What an ask answered, as `gui.log` tells one verdict from the next: its
+/// kind and the daemon it is about. A failed spawn is one too, though no
+/// line of its own: the same verdict after it is a change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Said {
+    Starting(u32),
+    StillStarting(u32),
+    Reuse(u32),
+    Mismatch(u32),
+    SidecarMissing,
+    SpawnFailed,
+}
+
+/// The app's memory between asks: when the shell first saw the daemon it is
+/// waiting for silent (its pid, its instance and the instant — the budget
+/// counts from there, across invokes, so a window that asks again every
+/// second never restarts it); the spawn whose wait is not over (*Rev 106*
+/// (8): an ask after this app's spawn answers `starting` at once, so the
+/// wait goes on across asks); every pid this run of the app spawned (only
+/// it knows a reuse of this app's own daemon as such once the spawn's wait
+/// is over, after the timeout report; `SPAWNED` in `lib.rs` is the real
+/// spawn's `PATH` report, kept only where one was captured, and this watch
+/// is the state the tests inject; a recycled pid can mislabel only a
+/// `gui.log` line); and each window's last verdict, by its label.
 #[derive(Debug, Default)]
 pub(crate) struct StartingWatch {
     seen: Option<(u32, String, Instant)>,
+    spawn: Option<PendingSpawn>,
+    spawned: Vec<u32>,
+    said: Vec<(String, Said)>,
 }
 
 impl StartingWatch {
     /// An empty watch.
     pub(crate) const fn new() -> Self {
-        Self { seen: None }
+        Self {
+            seen: None,
+            spawn: None,
+            spawned: Vec::new(),
+            said: Vec::new(),
+        }
     }
 
     /// When `pid` (`instance_id`) was first seen silent; `now` when this is
@@ -410,9 +473,54 @@ impl StartingWatch {
         }
     }
 
-    /// Forget the daemon waited for: it answered, or another verdict came.
-    pub(crate) fn clear(&mut self) {
+    /// Forget the spawn at an ask made `now` once [`STARTING_BUDGET`] has
+    /// passed since the last ask answered (the window closed or
+    /// disconnected meanwhile), as the one ask's wait would have been over
+    /// by then. Called once per ask, before any verdict is judged, so every
+    /// reader sees the same spawn.
+    fn forget_stale_spawn(&mut self, now: Instant) {
+        if self
+            .spawn
+            .is_some_and(|p| now.saturating_duration_since(p.asked) >= STARTING_BUDGET)
+        {
+            self.spawn = None;
+        }
+    }
+
+    /// An ask answered `now`: a spawn whose wait goes on counts its
+    /// staleness from here.
+    fn answered(&mut self, now: Instant) {
+        if let Some(p) = &mut self.spawn {
+            p.asked = now;
+        }
+    }
+
+    /// Forget the daemon waited for and the spawn: it answered, or another
+    /// verdict came.
+    fn settle(&mut self) {
         self.seen = None;
+        self.spawn = None;
+    }
+
+    /// Record `said` as `window`'s verdict: whether it is a change.
+    fn say(&mut self, window: &str, said: Said) -> bool {
+        match self.said.iter_mut().find(|(label, _)| label == window) {
+            Some((_, last)) if *last == said => false,
+            Some((_, last)) => {
+                *last = said;
+                true
+            }
+            None => {
+                self.said.push((window.to_owned(), said));
+                true
+            }
+        }
+    }
+
+    /// Forget everything, as at the app's start: no test inherits another's.
+    #[cfg(test)]
+    pub(crate) fn clear(&mut self) {
+        *self = Self::new();
     }
 }
 
@@ -437,16 +545,27 @@ fn starting(pid: u32) -> ShellError {
     }
 }
 
+/// The sentence every timeout report ends with (*Rev 106* (9)): the way
+/// out the mismatch names, worded for a boot that may yet finish, since a
+/// person may read it while a slow one still goes on. `openalpaca daemon
+/// stop` signals the pid, a hung boot included; `Reconnect` then starts a
+/// daemon afresh.
+const STILL_STARTING_WAY_OUT: &str = "If it does not finish starting, stop it with `openalpaca \
+                                      daemon stop` and press Reconnect in Settings → Connection \
+                                      to start a new one.";
+
 /// Whose daemon the timeout report is about, which sets its words and
 /// which of the log's lines it quotes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Waited {
-    /// One this ask found already there: the log's last lines.
+    /// One found already there, or waited for past a spawn's report: the
+    /// log's last lines.
     Found,
-    /// The one this ask spawned: what the log holds since that spawn.
+    /// The one this app spawned, its wait not over: what the log holds
+    /// since that spawn.
     Spawned,
-    /// Another than the one this ask spawned (`ours`) — the CLI's, which
-    /// took the store's lock first: what the log holds since this ask's
+    /// Another than the one this app spawned (`ours`) — the CLI's, which
+    /// took the store's lock first: what the log holds since this app's
     /// spawn, named so.
     Other { ours: u32 },
 }
@@ -472,8 +591,12 @@ fn still_starting(pid: u32, read: Result<(PathBuf, String), String>, waited: Wai
     let (log_path, tail) = match read {
         Ok(read) => read,
         Err(why) => {
+            let stop = if why.ends_with('.') { "" } else { "." };
             return ShellError::StillStarting {
-                message: format!("{head} {nothing}, and its log could not be read: {why}"),
+                message: format!(
+                    "{head} {nothing}, and its log could not be read: {why}{stop} \
+                     {STILL_STARTING_WAY_OUT}"
+                ),
                 log_tail: None,
             };
         }
@@ -481,7 +604,7 @@ fn still_starting(pid: u32, read: Result<(PathBuf, String), String>, waited: Wai
     if tail.is_empty() {
         return ShellError::StillStarting {
             message: format!(
-                "{head} {nothing}, and its log ({}) holds nothing yet.",
+                "{head} {nothing}, and its log ({}) holds nothing yet. {STILL_STARTING_WAY_OUT}",
                 log_path.display()
             ),
             log_tail: None,
@@ -496,7 +619,7 @@ fn still_starting(pid: u32, read: Result<(PathBuf, String), String>, waited: Wai
         ),
     };
     ShellError::StillStarting {
-        message: format!("{head} {nothing}. {quoted}\n\n{tail}"),
+        message: format!("{head} {nothing}. {quoted}\n\n{tail}\n\n{STILL_STARTING_WAY_OUT}"),
         log_tail: Some(tail),
     }
 }
@@ -520,17 +643,40 @@ pub(crate) struct SpawnedDaemon {
     pub(crate) log_start: u64,
 }
 
+/// A spawn refused, with the refusal the window reads: the sidecar is not
+/// beside the app, or the spawn failed otherwise. `gui.log` logs the first
+/// as a verdict of its own.
+#[derive(Debug)]
+pub(crate) enum SpawnRefusal {
+    SidecarMissing(ShellError),
+    Failed(ShellError),
+}
+
+/// `spawn_daemon`'s failure as a [`SpawnRefusal`]: its sentence, as before
+/// Q04-VERDICT, `Failed to spawn daemon: ` and the error, the sidecar
+/// missing told apart by its type ([`crate::SidecarMissing`]).
+pub(crate) fn spawn_refusal(e: &anyhow::Error) -> SpawnRefusal {
+    let refused = crate::spawn_failed(format!("Failed to spawn daemon: {e:#}"));
+    if e.downcast_ref::<crate::SidecarMissing>().is_some() {
+        SpawnRefusal::SidecarMissing(refused)
+    } else {
+        SpawnRefusal::Failed(refused)
+    }
+}
+
 /// What [`ensure_with`] reads and does, injected.
 pub(crate) trait World {
     /// One look: the file, health at its address, and the pid when the
     /// decision turns on it ([`needs_pid`]).
     fn look(&mut self) -> impl Future<Output = Look> + Send;
     /// Spawn a daemon: its pid and where this run's lines in the log begin.
-    fn spawn(&mut self) -> impl Future<Output = Result<SpawnedDaemon, ShellError>> + Send;
+    fn spawn(&mut self) -> impl Future<Output = Result<SpawnedDaemon, SpawnRefusal>> + Send;
     /// The monotonic clock.
     fn now(&self) -> Instant;
     /// Wait.
     fn sleep(&mut self, by: Duration) -> impl Future<Output = ()> + Send;
+    /// One `INFO` line of the shell's log.
+    fn log(&mut self, line: String);
     /// The daemon log's path and its last lines: from `from` (this run's
     /// spawn) to the end, or the last lines when `None`; why not, when the
     /// log's path cannot be had or the read cannot be run.
@@ -540,7 +686,16 @@ pub(crate) trait World {
     ) -> impl Future<Output = Result<(PathBuf, String), String>> + Send;
 }
 
-/// Ensure a daemon this shell can use, over `world`:
+/// What one ask answers, what it said for `gui.log`'s count of changes, and
+/// its line there, `None` for a verdict that has none.
+struct Answer {
+    result: Result<Reused, ShellError>,
+    said: Said,
+    line: Option<String>,
+}
+
+/// Ensure a daemon this shell can use, over `world`, for the window
+/// labelled `window`:
 ///
 /// - the first look's verdict: a reuse or a mismatch is the answer; a
 ///   daemon starting answers [`ShellError::Starting`] at once — the window
@@ -549,83 +704,191 @@ pub(crate) trait World {
 ///   every ask, and never a spawn;
 /// - only a spawn verdict spawns, once; the wait after it judges the daemon
 ///   the file then names, which need not be the one spawned (the CLI's may
-///   have taken the lock first): a reuse or a mismatch ends it, a daemon
-///   starting is waited for under the budget, and with no live daemon named
-///   [`SPAWN_WAIT`] after the spawn it ends with the two 5 s sentences.
+///   have taken the lock first): a reuse or a mismatch ends it, and a daemon
+///   starting answers `starting` at once (*Rev 106* (8)), the budget counted
+///   from that first silent look, as the first look's does. The spawn is
+///   remembered until its wait is over (or [`STARTING_BUDGET`] has passed
+///   since the last ask answered), so a later ask that finds no live
+///   daemon named goes on with it rather than spawning again; with none
+///   named [`SPAWN_WAIT`] after the spawn it ends with the two 5 s
+///   sentences. The timeout report ends the wait too, as the one ask's did.
+///
+/// Each answer that differs from `window`'s last is one line of the
+/// shell's log: starting, still starting, a reuse (whose daemon it is, as
+/// far as this run knows), a refusal (a mismatch, the sidecar missing). A
+/// reuse or a mismatch line names the daemon's pid, version and protocol,
+/// a starting or still-starting line its pid, the sidecar line the file;
+/// none its token, its log or a path.
 pub(crate) async fn ensure_with<W: World>(
     world: &mut W,
     starting_watch: &Mutex<StartingWatch>,
     shell: &ShellBuild,
+    window: &str,
 ) -> Result<Reused, ShellError> {
-    match decide_reuse(&world.look().await, shell) {
+    let Answer { result, said, line } = answer(world, starting_watch, shell).await;
+    let now = world.now();
+    let changed = {
+        let mut w = watch(starting_watch);
+        w.answered(now);
+        w.say(window, said)
+    };
+    if changed && let Some(line) = line {
+        world.log(format!("Daemon verdict for window `{window}`: {line}"));
+    }
+    result
+}
+
+/// [`ensure_with`]'s answer, before its line is logged.
+async fn answer<W: World>(
+    world: &mut W,
+    starting_watch: &Mutex<StartingWatch>,
+    shell: &ShellBuild,
+) -> Answer {
+    // A spawn no ask followed for the budget (the window gone meanwhile)
+    // is over, as the one ask's wait would have been by then: forgotten
+    // here, once, before any reader.
+    let now = world.now();
+    watch(starting_watch).forget_stale_spawn(now);
+    let verdict = decide_reuse(&world.look().await, shell);
+    if let Some(answer) = judge(world, starting_watch, verdict).await {
+        return answer;
+    }
+    // A spawn whose wait is not over (an ask after it answered `starting`)
+    // goes on, never a second spawn: its daemon is gone or not yet named,
+    // as a look inside the one ask would have found it.
+    let pending = watch(starting_watch).spawn;
+    let pending = match pending {
+        Some(pending) => pending,
+        None => {
+            watch(starting_watch).seen = None;
+            let SpawnedDaemon { pid, log_start } = match world.spawn().await {
+                Ok(spawned) => spawned,
+                Err(SpawnRefusal::SidecarMissing(refused)) => {
+                    return Answer {
+                        result: Err(refused),
+                        said: Said::SidecarMissing,
+                        line: Some(format!(
+                            "refusal (sidecar missing) — no `{}` beside the app; nothing was \
+                             started.",
+                            crate::SIDECAR_NAME
+                        )),
+                    };
+                }
+                Err(SpawnRefusal::Failed(refused)) => {
+                    return Answer {
+                        result: Err(refused),
+                        said: Said::SpawnFailed,
+                        line: None,
+                    };
+                }
+            };
+            let at = world.now();
+            let pending = PendingSpawn {
+                pid,
+                log_start,
+                at,
+                asked: at,
+            };
+            let mut w = watch(starting_watch);
+            w.spawn = Some(pending);
+            w.spawned.push(pid);
+            pending
+        }
+    };
+    loop {
+        if world.now().saturating_duration_since(pending.at) >= SPAWN_WAIT {
+            watch(starting_watch).settle();
+            // As before Q04: a log that cannot be read is the failed
+            // start's own sentence.
+            let result = match world.log_tail(Some(pending.log_start)).await {
+                Ok((path, tail)) => Err(did_not_start(&path, tail)),
+                Err(why) => Err(crate::spawn_failed(why)),
+            };
+            return Answer {
+                result,
+                said: Said::SpawnFailed,
+                line: None,
+            };
+        }
+        world.sleep(SPAWN_POLL).await;
+        let verdict = decide_reuse(&world.look().await, shell);
+        if let Some(answer) = judge(world, starting_watch, verdict).await {
+            return answer;
+        }
+    }
+}
+
+/// The answer to a verdict, the same at the first look and after a spawn;
+/// `None` for a spawn verdict, which the spawn and its wait answer.
+async fn judge<W: World>(
+    world: &mut W,
+    starting_watch: &Mutex<StartingWatch>,
+    verdict: Verdict,
+) -> Option<Answer> {
+    let pending = watch(starting_watch).spawn;
+    let answer = match verdict {
+        Verdict::Spawn => return None,
         Verdict::Reuse(reused) => {
-            watch(starting_watch).clear();
-            return Ok(reused);
+            let pid = reused.discovery.pid;
+            let spawned_here = watch(starting_watch).spawned.contains(&pid);
+            let whose = match pending {
+                _ if spawned_here => "the daemon this app started".to_owned(),
+                Some(ours) => format!("not the one this app started (pid {})", ours.pid),
+                None => "already running: this run of the app did not start it".to_owned(),
+            };
+            watch(starting_watch).settle();
+            let line = format!(
+                "reuse — pid {pid}, version {}, protocol {}, {whose}.",
+                reused.version, reused.protocol
+            );
+            Answer {
+                result: Ok(reused),
+                said: Said::Reuse(pid),
+                line: Some(line),
+            }
         }
         Verdict::Mismatch(mismatch) => {
-            watch(starting_watch).clear();
-            return Err(mismatch.into_error());
+            watch(starting_watch).settle();
+            Answer {
+                said: Said::Mismatch(mismatch.pid),
+                line: Some(mismatch.log_line()),
+                result: Err(mismatch.into_error()),
+            }
         }
         Verdict::Starting { pid, instance_id } => {
             let now = world.now();
             let since = watch(starting_watch).since(pid, &instance_id, now);
+            let budget = STARTING_BUDGET.as_secs();
             if now.saturating_duration_since(since) < STARTING_BUDGET {
-                return Err(starting(pid));
+                return Some(Answer {
+                    result: Err(starting(pid)),
+                    said: Said::Starting(pid),
+                    line: Some(format!(
+                        "starting — pid {pid} has written its discovery file but its health \
+                         does not answer yet; waiting up to {budget} s, starting nothing beside \
+                         it."
+                    )),
+                });
             }
-            return Err(still_starting(
-                pid,
-                world.log_tail(None).await,
-                Waited::Found,
-            ));
-        }
-        Verdict::Spawn => watch(starting_watch).clear(),
-    }
-
-    let SpawnedDaemon {
-        pid: spawned_pid,
-        log_start,
-    } = world.spawn().await?;
-    let spawned_at = world.now();
-    loop {
-        world.sleep(SPAWN_POLL).await;
-        match decide_reuse(&world.look().await, shell) {
-            Verdict::Reuse(reused) => {
-                watch(starting_watch).clear();
-                return Ok(reused);
-            }
-            Verdict::Mismatch(mismatch) => {
-                watch(starting_watch).clear();
-                return Err(mismatch.into_error());
-            }
-            Verdict::Starting { pid, instance_id } => {
-                let now = world.now();
-                let since = watch(starting_watch).since(pid, &instance_id, now);
-                if now.saturating_duration_since(since) >= STARTING_BUDGET {
-                    let waited = if pid == spawned_pid {
-                        Waited::Spawned
-                    } else {
-                        Waited::Other { ours: spawned_pid }
-                    };
-                    return Err(still_starting(
-                        pid,
-                        world.log_tail(Some(log_start)).await,
-                        waited,
-                    ));
-                }
-            }
-            Verdict::Spawn => {
-                if world.now().saturating_duration_since(spawned_at) >= SPAWN_WAIT {
-                    // As before Q04: a log that cannot be read is the
-                    // failed start's own sentence.
-                    let (path, tail) = world
-                        .log_tail(Some(log_start))
-                        .await
-                        .map_err(crate::spawn_failed)?;
-                    return Err(did_not_start(&path, tail));
-                }
+            let (from, waited) = match pending {
+                None => (None, Waited::Found),
+                Some(ours) if ours.pid == pid => (Some(ours.log_start), Waited::Spawned),
+                Some(ours) => (Some(ours.log_start), Waited::Other { ours: ours.pid }),
+            };
+            // The report ends the spawn's wait, as it ended the one ask:
+            // an ask after it that finds no live daemon spawns afresh.
+            watch(starting_watch).spawn = None;
+            Answer {
+                result: Err(still_starting(pid, world.log_tail(from).await, waited)),
+                said: Said::StillStarting(pid),
+                line: Some(format!(
+                    "still starting — pid {pid} has not answered {budget} s after the first \
+                     silent look; reported, nothing spawned over it."
+                )),
             }
         }
-    }
+    };
+    Some(answer)
 }
 
 // ============================================================================
@@ -661,11 +924,13 @@ impl World for RealWorld {
         }
     }
 
-    async fn spawn(&mut self) -> Result<SpawnedDaemon, ShellError> {
+    async fn spawn(&mut self) -> Result<SpawnedDaemon, SpawnRefusal> {
         let spawned = tauri::async_runtime::spawn_blocking(spawn_daemon)
             .await
-            .map_err(|e| crate::spawn_failed(format!("Failed to spawn daemon: {e}")))?
-            .map_err(|e| crate::spawn_failed(format!("Failed to spawn daemon: {e:#}")))?;
+            .map_err(|e| {
+                SpawnRefusal::Failed(crate::spawn_failed(format!("Failed to spawn daemon: {e}")))
+            })?
+            .map_err(|e| spawn_refusal(&e))?;
         record_spawned(spawned.pid, spawned.path);
         Ok(SpawnedDaemon {
             pid: spawned.pid,
@@ -679,6 +944,10 @@ impl World for RealWorld {
 
     async fn sleep(&mut self, by: Duration) {
         tokio::time::sleep(by).await;
+    }
+
+    fn log(&mut self, line: String) {
+        tracing::info!("{line}");
     }
 
     async fn log_tail(&mut self, from: Option<u64>) -> Result<(PathBuf, String), String> {

@@ -150,14 +150,17 @@ whole bridge (`src-tauri/src/lib.rs`):
   yet — one still opening its database or connecting to its MCP servers, the
   CLI's or an earlier run's — is waited for: the card reads `Daemon is
   starting` and the app asks again every second, starting nothing beside it;
-  after 45 s it reports the daemon still starting with the end of its log,
-  and keeps trying to reach it. Only when no daemon is running is one
-  spawned: the `openalpacad` beside the app (an app whose daemon is missing
-  says so, naming the path it looked at), detached (`setsid` on Unix), its
-  output appended to `state/logs/daemon.log`. The command then waits for the
-  daemon the file names — the one it spawned, or one the CLI started at the
-  same moment — about five seconds for it to appear, longer while it boots.
-  **If none appears, the error says why:** it ends with the last lines this
+  after 45 s it reports the daemon still starting with the end of its log
+  and the way out if it never finishes (stop it with `openalpaca daemon
+  stop`, then press `Reconnect`), and keeps trying to reach it. Only when no
+  daemon is running is one spawned: the `openalpacad` beside the app (an app
+  whose daemon is missing says so, naming the path it looked at), detached
+  (`setsid` on Unix), its output appended to `state/logs/daemon.log`. The
+  command then waits for the daemon the file names — the one it spawned, or
+  one the CLI started at the same moment — about five seconds for it to
+  appear; once it has and does not answer yet, the card reads `Daemon is
+  starting`, as above. **If none appears, or the one spawned dies while the
+  app waits for it, the error says why:** it ends with the last lines this
   spawn wrote to the log — the daemon's own refusal, verbatim (a database
   this build does not know, another daemon holding the lock) — or says the
   daemon wrote nothing at all. Only this spawn's lines are quoted, never an
@@ -1647,7 +1650,10 @@ the usual cause. If the error says the daemon wrote nothing to its log, the
 daemon binary did not run at all — check it is installed beside the app; an
 app with no daemon beside it says so, naming the path it looked at. `Daemon
 is starting` for long means a daemon is up but busy booting (often its MCP
-servers connecting); after 45 s the card shows the end of its log. In `bun run dev` there is no
+servers connecting); after 45 s the card shows the end of its log and, if
+it never finishes, how to stop it. `state/logs/gui.log` has one line each
+time what the window is told changes — starting, still starting, the daemon
+used, a refusal. In `bun run dev` there is no
 Tauri bridge, so every shell command fails by design.
 
 **The window says the daemon is stopped.** `stopped` means this window stopped
