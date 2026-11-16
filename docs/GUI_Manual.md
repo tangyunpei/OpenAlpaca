@@ -106,7 +106,9 @@ same rotation: the shell's lines (the daemon it spawned, and that daemon's
 exit), Tauri's own, a start-up mark for the shell's start and for each page
 load with the milliseconds since it, a panic of the shell, and a line when the
 window's web content process ends — after which the app reloads the window,
-whose page then connects as it does at launch. A source checkout's
+whose page then connects as it does at launch, at most three times within a
+minute: a fourth end inside that minute leaves the window blank, and its line
+says so (*Troubleshooting*). A source checkout's
 `openalpaca gui start` appends the dev build's output to `gui-dev.log` instead,
 and never truncates `gui.log`. A project you choose keeps its
 data in the home store, in its folder under `projects/` — its artifacts, uploads
@@ -1619,6 +1621,13 @@ means the daemon restarted, and the app deliberately re-bootstraps and drops
 every id it held. Repeated restarts are a daemon problem — read the log
 (`Show daemon log` in that panel, or the path it copies:
 `state/logs/daemon.log`).
+
+**The window is blank.** When the window's page keeps crashing WebKit's web
+content process, the app reloads it three times within a minute and then
+leaves it as it is, so a page that crashes as it loads does not reload in a
+loop; `state/logs/gui.log` has an `ERROR` line saying the window is left as it
+is. Quit and reopen the app to load it again. A blank window again at once
+points at the page or the build, not the daemon.
 
 **A list looks stale.** The event socket is best-effort and the daemon drops
 frames for a lagged client without telling it. Anything that arrived over the

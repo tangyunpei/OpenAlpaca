@@ -1112,11 +1112,16 @@ fn a_web_content_process_that_ended_is_logged_and_the_window_reloaded() {
     let (_app, webview) = mock_webview();
     let reloads = std::cell::Cell::new(0);
     with_the_shell_log(|| {
-        reload_after_web_content_ended(webview.as_ref());
-        log_and_reload("main", || {
-            reloads.set(reloads.get() + 1);
-            Ok(())
-        });
+        reload_after_web_content_ended(webview.as_ref(), &Mutex::new(ReloadBound::default()));
+        log_and_reload(
+            "main",
+            &Mutex::new(ReloadBound::default()),
+            Instant::now(),
+            || {
+                reloads.set(reloads.get() + 1);
+                Ok(())
+            },
+        );
     });
     assert_eq!(reloads.get(), 1, "the window is reloaded, once");
 
@@ -1133,7 +1138,14 @@ fn a_web_content_process_that_ended_is_logged_and_the_window_reloaded() {
     );
 
     // A reload that fails is said, after the line for the ended process.
-    with_the_shell_log(|| log_and_reload("main", || Err(tauri::Error::WebviewNotFound)));
+    with_the_shell_log(|| {
+        log_and_reload(
+            "main",
+            &Mutex::new(ReloadBound::default()),
+            Instant::now(),
+            || Err(tauri::Error::WebviewNotFound),
+        );
+    });
     let text = gui_log_text();
     let failed = text
         .lines()
@@ -1143,6 +1155,128 @@ fn a_web_content_process_that_ended_is_logged_and_the_window_reloaded() {
         .unwrap_or_else(|| panic!("no line for the failed reload: {text:?}"));
     assert!(failed.contains(" ERROR openalpaca_gui: "), "{failed}");
     assert!(failed.contains(" webview=\"main\""), "{failed}");
+}
+
+/// RELOAD-BOUND (`tasks/pending-decisions.md` §1's *Rev 90* (b)): a window
+/// whose web content process keeps ending is reloaded at most three times
+/// within 60 s, on an injected clock. A fourth end inside the span is
+/// refused: no reload, and one `ERROR` line in `gui.log` saying the window
+/// is left as it is, in place of the reloading line. The span slides over
+/// the reloads performed: a refused end never counts, a reload exactly 60 s
+/// old no longer counts, so the next end after it is reloaded and the one
+/// after that refused again until the next counted reload ages out. A
+/// reload that failed counts; another window's ends never spend this one's.
+/// The hook's registration with the builder and WebKit's own event are
+/// G-bundle leg A's; the hook's one bound is the next test's.
+#[test]
+fn a_fourth_reload_inside_60_s_is_refused_and_one_after_allowed() {
+    const ENDED: &str = "The window's web content process ended; reloading the window.";
+    const LEFT: &str = "The window's web content process ended again after 3 reloads within \
+                        60 s; the window is left as it is, not reloaded. Quit and reopen the \
+                        app to load it again.";
+    let _guard = HomeStoreGuard::set("gui-log-reload-bound");
+    let bound = Mutex::new(ReloadBound::default());
+    let t0 = Instant::now();
+    let reloads = std::cell::Cell::new(0);
+    // The window's process ends `ms` milliseconds after T0: whether it was
+    // reloaded.
+    let ended_at = |label: &str, ms: u64| {
+        let before = reloads.get();
+        with_the_shell_log(|| {
+            log_and_reload(label, &bound, t0 + Duration::from_millis(ms), || {
+                reloads.set(reloads.get() + 1);
+                Ok(())
+            });
+        });
+        reloads.get() > before
+    };
+    let count = |needle: &str| {
+        gui_log_text()
+            .lines()
+            .filter(|l| l.contains(needle))
+            .count()
+    };
+
+    for ms in [0, 1_000, 2_000] {
+        assert!(
+            ended_at("main", ms),
+            "a reload within the bound, at {ms} ms"
+        );
+    }
+    assert!(
+        !ended_at("main", 3_000),
+        "a fourth end inside 60 s is not reloaded"
+    );
+    assert_eq!((count(ENDED), count(LEFT)), (3, 1), "{}", gui_log_text());
+    let text = gui_log_text();
+    let left = text.lines().last().expect("a line for the refusal");
+    assert!(
+        left.contains(LEFT),
+        "the refusal is the last line: {text:?}"
+    );
+    assert!(left.contains(" ERROR openalpaca_gui: "), "{left}");
+    assert!(left.contains(" webview=\"main\""), "{left}");
+
+    // Still inside the span of the reload at 0 ms: refused, and not counted.
+    assert!(!ended_at("main", 59_999));
+    // The reload at 0 ms is 60 s old: no longer counted.
+    assert!(
+        ended_at("main", 60_000),
+        "a reload after the span is allowed"
+    );
+    // 1 s, 2 s and 60 s count: refused again ...
+    assert!(!ended_at("main", 60_500));
+    // ... until the reload at 1 s is 60 s old.
+    assert!(ended_at("main", 61_000));
+    assert_eq!(reloads.get(), 5);
+    assert_eq!(
+        (count(ENDED), count(LEFT)),
+        (5, 3),
+        "one line for each end, never two: {}",
+        gui_log_text()
+    );
+
+    // Another window's ends spend its own reloads, never this one's.
+    assert!(ended_at("second", 61_000));
+    assert!(
+        !ended_at("main", 61_500),
+        "the main window's bound is unchanged"
+    );
+
+    // A reload that failed counts as one given.
+    let failing = Mutex::new(ReloadBound::default());
+    let attempts = std::cell::Cell::new(0);
+    with_the_shell_log(|| {
+        for ms in [0, 1_000, 2_000, 3_000] {
+            log_and_reload("main", &failing, t0 + Duration::from_millis(ms), || {
+                attempts.set(attempts.get() + 1);
+                Err(tauri::Error::WebviewNotFound)
+            });
+        }
+    });
+    assert_eq!(attempts.get(), 3, "three failed reloads spend the bound");
+}
+
+/// The hook `run` registers (RELOAD-BOUND) owns one bound for every end it
+/// is called for: four ends of the window's process, one after another on
+/// the real clock, well inside 60 s, are three reloading lines and one line
+/// leaving the window as it is. Its registration with the builder and
+/// WebKit's own event are G-bundle leg A's, which no mock fires.
+#[test]
+fn the_registered_reload_hook_keeps_one_bound_across_ends() {
+    const ENDED: &str = "The window's web content process ended; reloading the window.";
+    const LEFT: &str = "the window is left as it is, not reloaded.";
+    let _guard = HomeStoreGuard::set("gui-log-reload-hook");
+    let (_app, webview) = mock_webview();
+    let hook = bounded_reload_hook();
+    with_the_shell_log(|| {
+        for _ in 0..4 {
+            hook(webview.as_ref());
+        }
+    });
+    let text = gui_log_text();
+    let count = |needle: &str| text.lines().filter(|l| l.contains(needle)).count();
+    assert_eq!((count(ENDED), count(LEFT)), (3, 1), "{text}");
 }
 
 /// The panic hook writes a panic to `gui.log` under the scratch store

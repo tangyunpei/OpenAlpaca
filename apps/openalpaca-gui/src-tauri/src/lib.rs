@@ -37,6 +37,7 @@ use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
 use openalpaca_storage::store;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -908,20 +909,100 @@ fn page_origin(url: &tauri::Url) -> String {
     }
 }
 
-/// The window's web content process ended (WebKit's `WebContent` crashed or
-/// was killed), which leaves a blank window: log it and reload the webview.
-/// Safe, because the state lives in the daemon: the reloaded page bootstraps
-/// against the same daemon and `instance_id`. macOS and iOS only, where
-/// Tauri reports it (`Builder::on_web_content_process_terminate`).
-#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
-fn reload_after_web_content_ended<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
-    log_and_reload(webview.label(), || webview.reload());
+/// At most this many reloads of one window within [`RELOAD_WINDOW`] after
+/// its web content process ended (RELOAD-BOUND, `tasks/pending-decisions.md`
+/// §1's *Rev 90* (b)): a page that crashes WebKit as it loads would
+/// otherwise reload, crash and log in a loop.
+const RELOAD_LIMIT: usize = 3;
+
+/// The span [`RELOAD_LIMIT`] counts over: a reload this old or older no
+/// longer counts.
+const RELOAD_WINDOW: Duration = Duration::from_secs(60);
+
+/// The reloads each window was given after its web content process ended,
+/// by the webview's label, so one window's crashes never spend another's.
+/// Only a reload performed counts — a failed one too, a refused one never —
+/// so the span slides over the reloads done, and a window left as it is
+/// gets a reload again once its oldest counted one is [`RELOAD_WINDOW`] old.
+/// The clock is [`Instant`], monotonic: a clock set back moves nothing. On
+/// macOS it is `CLOCK_UPTIME_RAW`, which stops while the Mac sleeps, so the
+/// span is 60 s of awake time: ends spread across a sleep, under 60 s awake
+/// apart, are refused though hours passed on the wall clock (an owner item,
+/// `tasks/pending-decisions.md` §1's *Rev 100*).
+#[derive(Default)]
+struct ReloadBound {
+    reloads: HashMap<String, Vec<Instant>>,
 }
 
-/// The line for `label`'s webview whose web content process ended, then
-/// `reload`, once; a reload that failed is a line too. The reload is a
-/// parameter so a test sees it called, which the mock runtime cannot show.
-fn log_and_reload(label: &str, reload: impl FnOnce() -> tauri::Result<()>) {
+impl ReloadBound {
+    /// Whether `label`'s window may be reloaded at `now`; when it may, the
+    /// reload counts from `now`.
+    fn admit(&mut self, label: &str, now: Instant) -> bool {
+        let recent = self.reloads.entry(label.to_owned()).or_default();
+        recent.retain(|at| now.saturating_duration_since(*at) < RELOAD_WINDOW);
+        if recent.len() >= RELOAD_LIMIT {
+            return false;
+        }
+        recent.push(now);
+        true
+    }
+}
+
+/// The hook [`with_app_hooks`] registers for a web content process that
+/// ended: [`reload_after_web_content_ended`] over one [`ReloadBound`] the
+/// hook owns for the app's life, so every end it is called for counts
+/// against the same bound.
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+fn bounded_reload_hook<R: tauri::Runtime>() -> impl Fn(&tauri::Webview<R>) + Send + Sync + 'static {
+    let bound = Mutex::new(ReloadBound::default());
+    move |webview| reload_after_web_content_ended(webview, &bound)
+}
+
+/// The window's web content process ended (WebKit's `WebContent` crashed or
+/// was killed), which leaves a blank window: log it and reload the webview,
+/// at most [`RELOAD_LIMIT`] times within [`RELOAD_WINDOW`] (`bound`, the
+/// state [`bounded_reload_hook`] owns). Safe, because the state lives
+/// in the daemon: the reloaded page bootstraps against the same daemon and
+/// `instance_id`. macOS and iOS only, where Tauri reports it
+/// (`Builder::on_web_content_process_terminate`).
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+fn reload_after_web_content_ended<R: tauri::Runtime>(
+    webview: &tauri::Webview<R>,
+    bound: &Mutex<ReloadBound>,
+) {
+    log_and_reload(webview.label(), bound, Instant::now(), || webview.reload());
+}
+
+/// The line for `label`'s webview whose web content process ended at `now`,
+/// then `reload`, once, when `bound` admits it; a reload that failed is a
+/// line too. Past the bound the window is left as it is, blank, and the one
+/// line says so; nothing reloads it but quitting and reopening the app, or
+/// its process ending again once a counted reload is out of the span. The
+/// reload and the clock are parameters so a test sees the reload called,
+/// which the mock runtime cannot show, at the instants it chooses.
+fn log_and_reload(
+    label: &str,
+    bound: &Mutex<ReloadBound>,
+    now: Instant,
+    reload: impl FnOnce() -> tauri::Result<()>,
+) {
+    let admitted = bound
+        .lock()
+        .unwrap_or_else(|p| {
+            tracing::warn!("The window reload bound's lock was poisoned; recovering.");
+            p.into_inner()
+        })
+        .admit(label, now);
+    if !admitted {
+        tracing::error!(
+            webview = label,
+            "The window's web content process ended again after {RELOAD_LIMIT} reloads \
+             within {} s; the window is left as it is, not reloaded. Quit and reopen \
+             the app to load it again.",
+            RELOAD_WINDOW.as_secs()
+        );
+        return;
+    }
     tracing::warn!(
         webview = label,
         "The window's web content process ended; reloading the window."
@@ -954,13 +1035,14 @@ pub fn run() {
 }
 
 /// The window's hooks (Q14): the page-load marks, and on macOS the reload
-/// after the web content process ended.
+/// after the web content process ended, bounded by the [`ReloadBound`] the
+/// hook owns, one per app ([`bounded_reload_hook`]).
 fn with_app_hooks<R: tauri::Runtime>(builder: tauri::Builder<R>, t0: Instant) -> tauri::Builder<R> {
     let builder = builder.on_page_load(move |webview, payload| {
         page_load_mark(t0, webview.label(), payload.event(), payload.url());
     });
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    let builder = builder.on_web_content_process_terminate(reload_after_web_content_ended);
+    let builder = builder.on_web_content_process_terminate(bounded_reload_hook());
     builder
 }
 
