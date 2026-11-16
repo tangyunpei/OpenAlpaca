@@ -623,9 +623,11 @@ cannot answer until you enable one:
   home network, at the built-in price for one of OpenAI's own ids). The
   server's list gives no context window, so a run is budgeted at 200,000
   tokens unless a `[models."<id>"]` row with `provider = "openai"` gives
-  the model's `context`; give one for a small local model, or its runs
-  overrun its window (on a server on this machine or your home network,
-  `daemon.log` names each such model once). A pin naming another model
+  the model's `context` (a row that leaves `context` out gives none, unless
+  it names a built-in id, which keeps its built-in window); give
+  one for a small local model, or its runs overrun its window. `daemon.log`
+  names each such model once, on any server that is not OpenAI's own,
+  on this machine, your home network or elsewhere. A pin naming another model
   the server lists moves an alias there: `fast`, `balanced` or `strong`
   under `[providers.openai.model_aliases]`. A server whose model list
   cannot be read is run only on models you name for it: add each as a
@@ -780,8 +782,8 @@ but one you write by hand still overrides what was discovered, field by field:
 |---|---|
 | `provider` | Which provider serves the tag. Required in the row. |
 | `input_price` / `output_price` | Dollars per million tokens. Discovery says `0`; say otherwise if you are costing your own hardware. |
-| `context` | The context window. Discovery uses `/api/show`, or `8192` when it does not say. |
-| `supports_image` | Discovery reads it from the `vision` capability. |
+| `context` | The context window. Discovery uses `/api/show`, or `8192` when it does not say; a row that leaves `context` out keeps that window. |
+| `supports_image` | Discovery reads it from the `vision` capability; a row that leaves it out says `false`, over what discovery read. |
 | `supports_tools` | **Defaults to true when omitted**, here and in discovery, and is *recorded, not enforced*: nothing withholds tools from a call because of it. What it changes is the effective-model ladder, which prefers a tool-capable model when it has to choose one for you. Set `false` on a tag that cannot take tools so the ladder stops picking it. |
 | `supports_audio` / `supports_document` / `supports_reasoning` | Declared capabilities for the same row. |
 

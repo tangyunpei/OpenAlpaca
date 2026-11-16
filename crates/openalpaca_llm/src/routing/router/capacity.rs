@@ -154,25 +154,29 @@ impl LlmRouter {
         self.record_discovery(provider_type, status)
     }
 
-    /// Say once a model that a keyed provider on a local server — in
-    /// practice the `openai` provider pointed at llama.cpp, LM Studio or
-    /// vLLM on this machine or the home network — listed one with no
-    /// context window and no row gives it one (MODEL-ROWS, *Rev 96* (5)).
+    /// Say once a model that a provider built to call another server than
+    /// its vendor's — the `openai` provider pointed at llama.cpp, LM
+    /// Studio, vLLM or a gateway, on this machine, the home network or
+    /// elsewhere — listed with no context window and no row gives it one
+    /// (MODEL-ROWS, *Rev 96* (5); MODEL-ROWS-2, *Rev 102* (5) (b): every
+    /// server that is not OpenAI's own, where the scope had been the local
+    /// ones).
     ///
     /// The window stays unknown, so a run on the model is budgeted at the
     /// agent loop's 200,000-token default rather than at
     /// [`DEFAULT_LOCAL_CONTEXT_WINDOW`]: the stock lead's system prompt and
     /// tools alone come to more than 8,192 tokens, and a loop sized there
     /// compacts on every round (the advisor's pick, built as its
-    /// conditional's fallback, option (a) with this warning). A server
-    /// elsewhere is not said, the pick's scope.
+    /// conditional's fallback, option (a) with this warning). OpenAI's own
+    /// API (`LlmProvider::serves_compiled_rows`) is not said: its models
+    /// are the compiled rows' vendor's, not a server's of unknown size.
+    /// Ollama gives each model a window of its own.
     fn note_unknown_windows(
         &self,
         provider_type: &ProviderType,
         listed: &[crate::routing::model_registry::DiscoveredModel],
     ) {
-        if provider_type.is_local() || !self.model_registry.is_local_server_provider(provider_type)
-        {
+        if provider_type.is_local() || self.serves_compiled_rows(provider_type) {
             return;
         }
         for model in listed {
@@ -185,9 +189,9 @@ impl LlmRouter {
                 tracing::warn!(
                     model = %model.id,
                     provider = %provider_type,
-                    "A model on a server on this machine or the home network reports no \
-                     context window, so a run on it is budgeted at 200,000 tokens and may \
-                     overrun the window the server gives it. Give it a [models.\"<id>\"] row \
+                    "A model on a server that is not OpenAI's own reports no context \
+                     window, so a run on it is budgeted at 200,000 tokens and may overrun \
+                     the window the server gives it. Give it a [models.\"<id>\"] row \
                      with provider = \"{provider_type}\" and context = <its window, in tokens> \
                      in llm.toml."
                 );

@@ -270,7 +270,15 @@ A model whose capabilities omit `completion` — embedding-only — is not
 registered. A tag that disappears from `/api/tags` is withdrawn at the next
 refresh; a row the owner declared in `[models]` only stops being offered —
 the declaration itself is left alone, so a later `ollama pull` of that tag
-brings it back with the owner's own fields. Discovery needs no key, is not gated on
+brings it back with the owner's own fields. A `[models]` row that leaves out
+`context` keeps the window of the built-in row for that id, else the one
+discovery gave the tag, else none (a run is then budgeted at 200,000 tokens),
+whether the row was read before discovery or after it; it never sets a window
+of its own. Its capability flags are its own: one it leaves out takes the
+row's default, not what discovery read. A model that an
+OpenAI-compatible server other than OpenAI's own — on this machine, the
+home network or elsewhere — lists with no window, and that no row sizes, is
+named once in `daemon.log` with the row that sizes it. Discovery needs no key, is not gated on
 the key pool, and runs whenever the provider is registered (boot, the enable
 toggle, a hot reload) and on `POST /v1/models/refresh`. An Ollama that cannot
 be reached leaves the provider registered with zero models, one `WARN`, and the

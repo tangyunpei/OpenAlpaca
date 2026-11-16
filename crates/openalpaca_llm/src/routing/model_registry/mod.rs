@@ -269,6 +269,13 @@ pub struct ModelRegistry {
     /// each the prices it left with no figure, neither the row nor a
     /// compiled row stating one (MODEL-ROWS, *Rev 97* (b)).
     person_rows: RwLock<HashMap<String, PriceGaps>>,
+    /// The window a provider's discovery last gave each id, when it gave
+    /// one (Ollama's `/api/show`, or its 8,192 default): what a `[models]`
+    /// row that leaves out `context` keeps when no compiled row names the
+    /// id, however the row and the discovery are ordered (MODEL-ROWS-2,
+    /// *Rev 102* (4) (b)). Kept apart from the row so that a reload never
+    /// reads back, as discovered, a figure a deleted `context` line gave.
+    discovered_windows: RwLock<HashMap<String, u32>>,
 }
 
 impl ModelRegistry {
@@ -277,6 +284,7 @@ impl ModelRegistry {
             models: RwLock::new(models),
             local_server_providers: RwLock::new(HashSet::new()),
             person_rows: RwLock::new(HashMap::new()),
+            discovered_windows: RwLock::new(HashMap::new()),
         }
     }
 
@@ -570,6 +578,12 @@ impl ModelRegistry {
     /// The compiled row's cache figures are kept, the row having no cache
     /// keys (*Rev 67*), and its long-prompt rate for each price the row
     /// leaves out: a price the row states is its own at every length.
+    ///
+    /// A `context` the row leaves out is the same: the compiled row's
+    /// window, else the one discovery gave the id, else none (`0`, which a
+    /// later discovery fills and the agent loop reads as its own 200,000
+    /// default) — never a figure of its own (MODEL-ROWS-2, *Rev 102* (4)
+    /// (b), *Rev 97*'s rule field by field).
     pub fn reload_from_config(
         &self,
         config_models: &HashMap<String, crate::config::ModelConfigEntry>,
@@ -579,6 +593,11 @@ impl ModelRegistry {
         // the model's own, so the compiled row's is kept (C7a), and so are
         // the compiled figures it leaves out (MODEL-ROWS).
         let compiled = Self::default_models();
+        let discovered_windows = self
+            .discovered_windows
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         for (model_id, entry) in config_models {
             if let Some(provider) = crate::config::parse_provider_type_pub(&entry.provider) {
                 if disabled.contains(&provider) {
@@ -610,7 +629,11 @@ impl ModelRegistry {
                         // A placeholder where `PriceGaps` names the half.
                         input_price_per_million: input.unwrap_or(0.0),
                         output_price_per_million: output.unwrap_or(0.0),
-                        context_window: entry.context.unwrap_or(200_000),
+                        context_window: entry
+                            .context
+                            .or(compiled_row.map(|row| row.context_window))
+                            .or_else(|| discovered_windows.get(model_id).copied())
+                            .unwrap_or(0),
                         discovered: false,
                         supports_image: entry.supports_image.unwrap_or(false),
                         supports_audio: entry.supports_audio.unwrap_or(false),
@@ -733,7 +756,9 @@ impl ModelRegistry {
     }
 
     /// Whether `provider` runs on a local server though keyed (item 17),
-    /// as the router last judged it.
+    /// as the router last judged it. Read by tests only since the window
+    /// warning's scope became every server not OpenAI's own (MODEL-ROWS-2).
+    #[cfg(test)]
     pub(crate) fn is_local_server_provider(&self, provider: &ProviderType) -> bool {
         self.local_server_providers()
             .contains(&provider.to_string())
@@ -760,7 +785,9 @@ impl ModelRegistry {
 
     /// Taken before `person_rows` and `models`, never while holding either
     /// (nothing takes them the other way round; `person_rows` is likewise
-    /// never taken while holding `models`).
+    /// never taken while holding `models`). `discovered_windows` is never
+    /// held while another of the four is taken, nor taken while one is
+    /// held.
     fn local_server_providers(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
         self.local_server_providers
             .read()
@@ -954,6 +981,10 @@ impl ModelRegistry {
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .remove(model_id);
+        self.discovered_windows
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(model_id);
         self.models.write().unwrap_or_else(|p| p.into_inner()).remove(model_id).is_some()
     }
 
@@ -973,6 +1004,14 @@ impl ModelRegistry {
         let mut person_rows = self.person_rows.write().unwrap_or_else(|p| p.into_inner());
         for id in &to_remove {
             person_rows.remove(id);
+        }
+        drop(person_rows);
+        let mut windows = self
+            .discovered_windows
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        for id in &to_remove {
+            windows.remove(id);
         }
         to_remove
     }
@@ -1006,7 +1045,17 @@ impl ModelRegistry {
     /// Register a model from API discovery. If the model already exists
     /// (e.g. from defaults), mark it as discovered but preserve its
     /// pricing/context metadata. If new, insert with discovered=true.
+    ///
+    /// A window the provider gave is also recorded on its own, for a
+    /// `[models]` row read later that leaves out `context`
+    /// ([`Self::reload_from_config`]).
     pub fn register_discovered(&self, model_id: String, info: ModelInfo) {
+        if info.context_window > 0 {
+            self.discovered_windows
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(model_id.clone(), info.context_window);
+        }
         let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
         match models.get_mut(&model_id) {
             Some(existing) => {

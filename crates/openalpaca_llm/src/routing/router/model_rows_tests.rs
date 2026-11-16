@@ -14,6 +14,14 @@
 //! listed model with no window keeps the loop's 200,000 default and is
 //! warned of once. Every server here is a loopback [`MockHttpServer`]; an
 //! address elsewhere is only given to a provider that is never called.
+//!
+//! MODEL-ROWS-2 (the advisor's picks of 2026-11-16 on *Rev 102*, §1's
+//! *Rev 105*): (4) a row that leaves out `context` keeps the compiled or
+//! the discovered window, *Rev 97*'s field-by-field rule; (5) the
+//! once-only warning covers a model any `openai`-provider server that is
+//! not OpenAI's own lists with no window; (2), conditional, first
+//! established here: a compiled id a local server lists with no row costs
+//! the compiled price, not 0, so (a) is kept.
 
 use super::*;
 use crate::config::{LlmRuntimeConfig, ModelConfigEntry};
@@ -54,16 +62,39 @@ fn row(provider: &str, input: Option<f64>, output: Option<f64>) -> ModelConfigEn
     }
 }
 
-/// A keyed OpenAI install whose provider is built to call `base` (`…/v1`
-/// added) and whose runtime config says the same, `rows` its `[models]`.
-fn openai_router(base: &str, rows: &[(&str, ModelConfigEntry)]) -> LlmRouter {
-    let provider = Arc::new(OpenAiProvider::with_client(
+/// [`row`] with `context` left out.
+fn unsized_row(provider: &str, input: Option<f64>, output: Option<f64>) -> ModelConfigEntry {
+    ModelConfigEntry {
+        context: None,
+        ..row(provider, input, output)
+    }
+}
+
+/// The OpenAI provider built to call `base` (`…/v1` added).
+fn openai_at(base: &str) -> OpenAiProvider {
+    OpenAiProvider::with_client(
         loopback_client(TIMEOUT),
         "sk-test-not-a-key".to_string(),
         Some("gpt-6-luna".to_string()),
         Some(format!("{base}/v1")),
         None,
-    ));
+    )
+}
+
+/// A keyed OpenAI install whose provider is built to call `base` (`…/v1`
+/// added) and whose runtime config says the same, `rows` its `[models]`.
+fn openai_router(base: &str, rows: &[(&str, ModelConfigEntry)]) -> LlmRouter {
+    openai_router_over(openai_at(base), &format!("{base}/v1"), rows)
+}
+
+/// [`openai_router`] over `provider`, the runtime config's `base_url`
+/// being `runtime_base`.
+fn openai_router_over(
+    provider: OpenAiProvider,
+    runtime_base: &str,
+    rows: &[(&str, ModelConfigEntry)],
+) -> LlmRouter {
+    let provider = Arc::new(provider);
     let mut providers = HashMap::new();
     providers.insert(
         ProviderType::OpenAI,
@@ -95,7 +126,7 @@ fn openai_router(base: &str, rows: &[(&str, ModelConfigEntry)]) -> LlmRouter {
         Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
         "gpt-6-luna".to_string(),
     );
-    runtime_base_url(&router, &format!("{base}/v1"));
+    runtime_base_url(&router, runtime_base);
     router
 }
 
@@ -377,11 +408,19 @@ fn the_no_routable_model_text_names_the_models_row_for_a_compatible_server() {
 
 /// A llama.cpp-like server listing `id` with no window.
 async fn listing(id: &'static str) -> MockHttpServer {
+    listing_of(vec![id]).await
+}
+
+/// A llama.cpp-like server listing `ids`, none with a window.
+async fn listing_of(ids: Vec<&'static str>) -> MockHttpServer {
     MockHttpServer::start(move |req| match req.path.as_str() {
         "/v1/models" => MockResponse::json(
             serde_json::json!({
                 "object": "list",
-                "data": [{"id": id, "object": "model", "owned_by": "local"}],
+                "data": ids
+                    .iter()
+                    .map(|id| serde_json::json!({"id": id, "object": "model", "owned_by": "local"}))
+                    .collect::<Vec<_>>(),
             })
             .to_string(),
         ),
@@ -417,22 +456,356 @@ async fn a_model_a_local_server_lists_with_no_window_is_warned_of_once() {
     assert!(logs_contain("context = "));
 }
 
-/// No warning where a `[models]` row gives the window, nor where the
-/// server is not on this machine or the home network (the pick's scope).
+/// No warning where a `[models]` row gives the window. A guard: green on
+/// the parent as well.
 #[tokio::test]
 #[tracing_test::traced_test]
-async fn a_sized_row_or_a_server_elsewhere_is_not_warned_of() {
+async fn a_sized_row_is_not_warned_of() {
     let server = listing("gguf-sized").await;
     let router = openai_router(
         &server.base_url,
         &[("gguf-sized", row("openai", None, None))],
     );
     router.refresh_models_for(&ProviderType::OpenAI).await;
-
-    let elsewhere = listing("gguf-elsewhere").await;
-    let router = openai_router(&elsewhere.base_url, &[]);
-    runtime_base_url(&router, &format!("{REMOTE}/v1"));
-    router.refresh_models_for(&ProviderType::OpenAI).await;
-    assert!(router.is_routable("gguf-elsewhere"));
+    assert!(router.is_routable("gguf-sized"));
     assert!(!logs_contain("no context window"));
+}
+
+// ── MODEL-ROWS-2, Rev 102 (5): every server that is not OpenAI's own ──────
+
+/// A gateway that is neither on this machine nor on the home network,
+/// listing a model with no window, is warned of once, the row that sizes
+/// it named (*Rev 102* (5) (b)). On the parent such a server was not
+/// warned of: the warning's scope was the local servers.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_model_a_gateway_elsewhere_lists_with_no_window_is_warned_of_once() {
+    let elsewhere = listing("gw-no-window").await;
+    let router = openai_router_over(openai_at(&elsewhere.base_url), &format!("{REMOTE}/v1"), &[]);
+    assert!(
+        !router
+            .model_registry()
+            .is_local_server_provider(&ProviderType::OpenAI),
+        "counted as a server elsewhere"
+    );
+    for _ in 0..3 {
+        router.refresh_models_for(&ProviderType::OpenAI).await;
+    }
+    assert!(router.is_routable("gw-no-window"));
+    logs_assert(
+        |lines| match warnings(lines, "no context window", "gw-no-window") {
+            1 => Ok(()),
+            n => Err(format!("warned once, not {n} times")),
+        },
+    );
+    assert!(logs_contain("context = "));
+}
+
+/// OpenAI's own API is not warned of: a model it lists that no compiled
+/// row names (a dated snapshot, an older id) is not a server's model of
+/// unknown size the person has to describe. A guard: green on the parent
+/// as well.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_model_openai_s_own_api_lists_with_no_window_is_not_warned_of() {
+    let server = listing("gpt-snapshot-2026-01-01").await;
+    let router = openai_router_over(
+        openai_at(&server.base_url).with_openai_api(true),
+        "https://api.openai.com/v1",
+        &[],
+    );
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert!(
+        router
+            .model_registry()
+            .get_model_info("gpt-snapshot-2026-01-01")
+            .is_some_and(|info| info.context_window == 0),
+        "listed, with no window"
+    );
+    assert!(!logs_contain("no context window"));
+}
+
+// ── MODEL-ROWS-2, Rev 102 (4): a row that leaves out `context` ────────────
+
+/// An Ollama at `base` (`/v1` added) with an empty catalogue, its
+/// `[models]` rows read from `rows` as at boot: before any discovery.
+fn ollama_router(base: &str, rows: &[(&str, ModelConfigEntry)]) -> LlmRouter {
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::Ollama,
+        ProviderEntry {
+            provider: ollama_at(base),
+            key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
+                vec![],
+                SelectionStrategy::RoundRobin,
+            ))),
+        },
+    );
+    let registry = ModelRegistry::new(HashMap::new());
+    registry.reload_from_config(&config_of(rows), &HashSet::new());
+    LlmRouter::new(
+        providers,
+        registry,
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "unset".to_string(),
+    )
+}
+
+/// An Ollama provider at `base` (`/v1` added).
+fn ollama_at(base: &str) -> Arc<dyn LlmProvider> {
+    Arc::new(crate::providers::ollama::OllamaProvider::with_client(
+        loopback_client(TIMEOUT),
+        "unset".to_string(),
+        Some(format!("{base}/v1")),
+        None,
+    ))
+}
+
+fn config_of(rows: &[(&str, ModelConfigEntry)]) -> HashMap<String, ModelConfigEntry> {
+    rows.iter()
+        .map(|(id, entry)| (id.to_string(), entry.clone()))
+        .collect()
+}
+
+/// An Ollama with `tag` installed, `/api/show` giving its window.
+async fn ollama_with(tag: &'static str, window: u64) -> MockHttpServer {
+    MockHttpServer::start(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/api/tags") => {
+            MockResponse::json(serde_json::json!({"models": [{"name": tag}]}).to_string())
+        }
+        ("POST", "/api/show") => MockResponse::json(
+            serde_json::json!({
+                "capabilities": ["completion", "tools"],
+                "model_info": {"llama.context_length": window},
+            })
+            .to_string(),
+        ),
+        _ => MockResponse::not_found(),
+    })
+    .await
+}
+
+fn window_of(router: &LlmRouter, id: &str) -> u32 {
+    router
+        .model_registry()
+        .get_model_info(id)
+        .unwrap_or_else(|| panic!("{id} is registered"))
+        .context_window
+}
+
+/// A row written only to price an Ollama tag keeps the window `/api/show`
+/// gave, whether the row was read before discovery (a boot) or after it
+/// (a hand edit's reload); a row's own `context` still wins, and one
+/// taken out again gives the discovered window back, not the figure the
+/// deleted line gave. On the parent the row set 200,000 over it.
+#[tokio::test]
+async fn a_row_that_leaves_out_context_keeps_the_discovered_window() {
+    let server = ollama_with("priced-tag", 32_768).await;
+    let priced = || [("priced-tag", unsized_row("ollama", Some(0.5), Some(1.0)))];
+
+    // The boot's order: the row first, then discovery.
+    let router = ollama_router(&server.base_url, &priced());
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert_eq!(
+        window_of(&router, "priced-tag"),
+        32_768,
+        "row, then discovery"
+    );
+
+    // A reload's order: discovery first, then the row.
+    let router = ollama_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert_eq!(window_of(&router, "priced-tag"), 32_768);
+    let registry = router.model_registry();
+    registry.reload_from_config(&config_of(&priced()), &HashSet::new());
+    assert_eq!(
+        window_of(&router, "priced-tag"),
+        32_768,
+        "discovery, then row"
+    );
+
+    // The row's own `context` wins, and taking it out again gives back
+    // the discovered window.
+    let sized = [(
+        "priced-tag",
+        ModelConfigEntry {
+            context: Some(16_384),
+            ..unsized_row("ollama", Some(0.5), Some(1.0))
+        },
+    )];
+    registry.reload_from_config(&config_of(&sized), &HashSet::new());
+    assert_eq!(window_of(&router, "priced-tag"), 16_384, "the row's own");
+    registry.reload_from_config(&config_of(&priced()), &HashSet::new());
+    assert_eq!(
+        window_of(&router, "priced-tag"),
+        32_768,
+        "the line taken out"
+    );
+}
+
+/// A row naming a compiled id that leaves out `context` keeps the
+/// compiled window; one stating it is its own. On the parent the row set
+/// 200,000 over the compiled 1,050,000.
+#[tokio::test]
+async fn a_row_naming_a_compiled_id_that_leaves_out_context_keeps_the_compiled_window() {
+    let sol = compiled("gpt-6.1-sol");
+    assert!(
+        sol.context_window > 200_000,
+        "a window the rule can be seen keeping"
+    );
+    let router = openai_router(
+        "https://api.openai.com",
+        &[("gpt-6.1-sol", unsized_row("openai", Some(1.0), Some(5.0)))],
+    );
+    assert_eq!(window_of(&router, "gpt-6.1-sol"), sol.context_window);
+    let router = openai_router(
+        "https://api.openai.com",
+        &[("gpt-6.1-sol", row("openai", Some(1.0), Some(5.0)))],
+    );
+    assert_eq!(window_of(&router, "gpt-6.1-sol"), 32_768, "the row's own");
+}
+
+/// A row that leaves out `context` for a model no compiled row names and
+/// a compatible server lists with no window states no window: the model
+/// keeps none, so a run on it is budgeted at the loop's 200,000 default,
+/// and it is warned of once as an unsized listed model is. On the parent
+/// the row set 200,000 and nothing was said.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_priced_row_with_no_window_anywhere_is_warned_of_once() {
+    let server = listing("gguf-priced").await;
+    let router = openai_router(
+        &server.base_url,
+        &[("gguf-priced", unsized_row("openai", Some(0.0), Some(0.0)))],
+    );
+    for _ in 0..2 {
+        router.refresh_models_for(&ProviderType::OpenAI).await;
+    }
+    assert_eq!(window_of(&router, "gguf-priced"), 0, "no window stated");
+    logs_assert(
+        |lines| match warnings(lines, "no context window", "gguf-priced") {
+            1 => Ok(()),
+            n => Err(format!("warned once, not {n} times")),
+        },
+    );
+}
+
+/// A provider turned off and on again asks discovery afresh: the window
+/// the turned-off provider's discovery gave goes with it, so the row read
+/// back on the enable (`set_provider_enabled`'s order: the defaults, the
+/// rows, the provider, then discovery) keeps the window the provider now
+/// reports, not the one it had (`remove_by_provider`'s clearing).
+#[tokio::test]
+async fn a_provider_turned_off_and_on_forgets_the_window_it_had() {
+    let before = ollama_with("priced-tag", 32_768).await;
+    let after = ollama_with("priced-tag", 65_536).await;
+    let priced = [("priced-tag", unsized_row("ollama", Some(0.5), Some(1.0)))];
+    let router = ollama_router(&before.base_url, &priced);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert_eq!(window_of(&router, "priced-tag"), 32_768, "before");
+
+    router.deregister_provider(&ProviderType::Ollama);
+    let registry = router.model_registry();
+    registry.restore_defaults_for_provider(&ProviderType::Ollama);
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    router.register_provider(
+        ProviderType::Ollama,
+        ollama_at(&after.base_url),
+        KeyPool::new(vec![], SelectionStrategy::RoundRobin),
+    );
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert_eq!(
+        window_of(&router, "priced-tag"),
+        65_536,
+        "the window the provider reports now"
+    );
+}
+
+/// An id taken out of the registry takes the window its discovery gave
+/// with it: a row for it read later that leaves out `context` states none
+/// (`remove`'s clearing).
+#[test]
+fn a_removed_id_forgets_the_window_discovery_gave_it() {
+    let registry = ModelRegistry::new(HashMap::new());
+    registry.register_discovered(
+        "priced-tag".to_string(),
+        crate::routing::model_registry::ModelInfo {
+            provider: ProviderType::Ollama,
+            context_window: 32_768,
+            ..compiled("gpt-6.1-sol")
+        },
+    );
+    assert!(registry.remove("priced-tag"));
+    let priced = [("priced-tag", unsized_row("ollama", Some(0.5), Some(1.0)))];
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    let window = registry
+        .get_model_info("priced-tag")
+        .expect("the row registers it")
+        .context_window;
+    assert_eq!(window, 0, "no window stated, none remembered");
+}
+
+/// A row naming a compiled id that leaves out `context` keeps the
+/// compiled window even when a discovery gave the id another: the
+/// compiled row's window comes before the discovered one, as
+/// `register_discovered` never replaces a compiled window.
+#[test]
+fn a_compiled_window_comes_before_a_discovered_one() {
+    let sol = compiled("gpt-6.1-sol");
+    let registry = ModelRegistry::new(HashMap::new());
+    registry.register_discovered(
+        "gpt-6.1-sol".to_string(),
+        crate::routing::model_registry::ModelInfo {
+            context_window: 8_192,
+            ..sol.clone()
+        },
+    );
+    let priced = [("gpt-6.1-sol", unsized_row("openai", Some(1.0), Some(5.0)))];
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    let window = registry
+        .get_model_info("gpt-6.1-sol")
+        .expect("the row registers it")
+        .context_window;
+    assert_eq!(window, sol.context_window, "the compiled window");
+}
+
+// ── MODEL-ROWS-2, Rev 102 (2): established first ──────────────────────────
+
+/// *Rev 102* (2)'s condition, established before anything was built: a
+/// compiled id a server on this machine or the home network lists, with
+/// no `[models]` row, costs the compiled row's price — not 0, which only a
+/// discovered id with no compiled row gets there — and is not announced;
+/// an uncatalogued id the same server lists costs 0. So the condition
+/// fails and (a) is kept: a row that states no price for that id counts
+/// what the bare listing counts (`a_row_naming_a_compiled_id_on_a_local_
+/// server_counts_the_compiled_price`). Green on the parent: a pin.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_compiled_id_a_local_server_lists_with_no_row_costs_the_compiled_price() {
+    let sol = compiled("gpt-6.1-sol");
+    let server = listing_of(vec!["gpt-6.1-sol", "gguf-local"]).await;
+    let router = openai_router(&server.base_url, &[]);
+    assert!(
+        router
+            .model_registry()
+            .is_local_server_provider(&ProviderType::OpenAI),
+        "a server on this machine"
+    );
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert!(router.is_routable("gpt-6.1-sol"), "listed, so served");
+    let cost = router
+        .cost_tracker
+        .calculate_cost("gpt-6.1-sol", MILLION / 10, MILLION / 10);
+    let expected = (sol.input_price_per_million + sol.output_price_per_million) / 10.0;
+    assert!(expected > 0.0);
+    assert!(
+        close(cost, expected),
+        "the compiled price {expected}, not {cost}"
+    );
+    let cost = router
+        .cost_tracker
+        .calculate_cost("gguf-local", MILLION, MILLION);
+    assert_eq!(cost, 0.0, "an uncatalogued id there is 0");
+    assert!(!logs_contain("no price"));
 }
