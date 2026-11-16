@@ -5,6 +5,12 @@
     "reason": null,
     "passedKeys": []
   },
+  "login_shell_noninteractive": {
+    "source": "login-shell-noninteractive",
+    "captureMs": 1840,
+    "reason": null,
+    "passedKeys": []
+  },
   "login_shell_with_keys": {
     "source": "login-shell",
     "captureMs": 212,

@@ -205,10 +205,13 @@ pub const MANAGED_LOG_ENV: &str = "OPENALPACA_MANAGED_LOG";
 
 /// Set by the app on the daemon it spawns, beside [`MANAGED_LOG_ENV`]: where
 /// the daemon's `PATH` came from and how long the app's capture of it took,
-/// `<source> <milliseconds>` — `login-shell 212` or `fallback-list 3001` —
-/// never the `PATH` itself (Q21). After the number, the names of the
-/// variables the app passed beside `PATH` because `daemon.toml`'s
-/// `[daemon.env] passthrough_keys` lists them, comma-separated —
+/// `<source> <milliseconds>` — `login-shell 212`, `fallback-list 3001`, or
+/// `login-shell-noninteractive 1840` when the login shell, run
+/// interactively, ended before it printed its environment and a second run
+/// without `-i` answered (CAPTURE-RETRY) — never the `PATH` itself (Q21).
+/// After the number, the names of the variables the app passed beside
+/// `PATH` because `daemon.toml`'s `[daemon.env] passthrough_keys` lists
+/// them, comma-separated —
 /// `login-shell 212 AWS_PROFILE` — never their values (N-DAEMON-2). The
 /// daemon logs it in one boot line; a daemon started without it (from a
 /// terminal) logs `inherited`. The daemon reads it once, in its preamble,

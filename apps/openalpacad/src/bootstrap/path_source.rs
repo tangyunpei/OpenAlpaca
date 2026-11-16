@@ -3,9 +3,12 @@
 //!
 //! The app sets `store::PATH_SOURCE_ENV` on the daemon it spawns —
 //! `login-shell <ms>` when its capture of the login shell's `PATH` answered,
-//! `fallback-list <ms>` when it gave the fixed list instead. A daemon started
-//! any other way (`openalpaca daemon start` in a terminal, by hand) has no
-//! such variable and runs on the `PATH` it inherited. The line names the
+//! `login-shell-noninteractive <ms>` when the login shell, run
+//! interactively, ended before it printed its environment and its second
+//! run, as a login shell without `-i`, answered (CAPTURE-RETRY, *Rev 99*
+//! (2)), `fallback-list <ms>` when it gave the fixed list instead. A daemon
+//! started any other way (`openalpaca daemon start` in a terminal, by hand)
+//! has no such variable and runs on the `PATH` it inherited. The line names the
 //! source and the capture's duration, never the `PATH`, and never echoes
 //! the variable's raw value: anything but a known source and a number reads
 //! `inherited`.
@@ -28,9 +31,10 @@ use std::ffi::OsStr;
 /// What the boot line says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathSource {
-    /// `login-shell`, `fallback-list` or `inherited`.
+    /// `login-shell`, `login-shell-noninteractive`, `fallback-list` or
+    /// `inherited`.
     pub source: &'static str,
-    /// The app's capture time, for the two sources the app sets.
+    /// The app's capture time, for the three sources the app sets.
     pub capture_ms: Option<u64>,
     /// The variables the app passed beside `PATH`, by name (N-DAEMON-2).
     pub passed_keys: Vec<String>,
@@ -78,6 +82,7 @@ pub fn parse_path_source(value: Option<&OsStr>) -> PathSource {
     };
     let source = match source {
         "login-shell" => "login-shell",
+        "login-shell-noninteractive" => "login-shell-noninteractive",
         "fallback-list" => "fallback-list",
         _ => return INHERITED,
     };
@@ -138,6 +143,44 @@ mod tests {
                 passed_keys: Vec::new(),
             }
         );
+    }
+
+    /// CAPTURE-RETRY (*Rev 99* (2)): the app's third source, its login
+    /// shell read again as `-l -c` after the interactive run ended before
+    /// it printed its environment, is read with its capture time and keys
+    /// and named as it is in the boot line.
+    #[test]
+    fn the_second_runs_source_is_read_and_named_in_the_boot_line() {
+        let read = parse_path_source(Some(OsStr::new("login-shell-noninteractive 1840")));
+        assert_eq!(
+            read,
+            PathSource {
+                source: "login-shell-noninteractive",
+                capture_ms: Some(1840),
+                passed_keys: Vec::new(),
+            }
+        );
+        assert_eq!(
+            path_source_line(&read),
+            "PATH source: login-shell-noninteractive (the app's capture took 1840 ms)"
+        );
+        let keyed = parse_path_source(Some(OsStr::new(
+            "login-shell-noninteractive 1840 AWS_PROFILE",
+        )));
+        assert_eq!(keyed.source, "login-shell-noninteractive");
+        assert_eq!(keyed.passed_keys, ["AWS_PROFILE"]);
+        for raw in [
+            "login-shell-noninteractive",
+            "login-shell-noninteractive x",
+            "login-shell-interactive 5",
+            "login-shell-noninteractive-q21 5",
+        ] {
+            assert_eq!(
+                parse_path_source(Some(OsStr::new(raw))),
+                INHERITED,
+                "{raw:?}"
+            );
+        }
     }
 
     /// No variable — a daemon started from a terminal — and anything that

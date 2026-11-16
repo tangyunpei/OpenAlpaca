@@ -135,7 +135,7 @@ const daemon = vi.hoisted(() => ({ data: undefined as unknown }));
 const link = vi.hoisted(() => ({
   /** The connection's `daemonPath` (Q21), `null` for none. */
   daemonPath: null as {
-    source: "login-shell" | "fallback-list";
+    source: "login-shell" | "login-shell-noninteractive" | "fallback-list";
     captureMs: number;
     reason: string | null;
     passedKeys: string[];
@@ -464,6 +464,22 @@ describe("the daemon's PATH (Q21)", () => {
     ).toBeTruthy();
   });
 
+  it("says the login shell's read again without -i, and why (CAPTURE-RETRY)", () => {
+    link.daemonPath = {
+      source: "login-shell-noninteractive",
+      captureMs: 1840,
+      reason: null,
+      passedKeys: ["AWS_PROFILE"],
+    };
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(
+        "This daemon's PATH is your login shell's without its interactive startup files (such as ~/.zshrc), read when the app started (1840 ms): run interactively, your shell ended before it printed its environment. Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: AWS_PROFILE.",
+      ),
+    ).toBeTruthy();
+  });
+
   it("names the keys passed beside it, never their values (N-DAEMON-2)", () => {
     link.daemonPath = {
       source: "login-shell",
@@ -502,6 +518,11 @@ describe("the daemon's PATH (Q21)", () => {
     );
     expect(daemonPathNote(daemonPaths.login_shell_with_keys as never)).toBe(
       "This daemon's PATH is your login shell's, read when the app started (212 ms). Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: AWS_PROFILE, KUBECONFIG.",
+    );
+    expect(
+      daemonPathNote(daemonPaths.login_shell_noninteractive as never),
+    ).toBe(
+      "This daemon's PATH is your login shell's without its interactive startup files (such as ~/.zshrc), read when the app started (1840 ms): run interactively, your shell ended before it printed its environment.",
     );
     expect(daemonPathNote(daemonPaths.fallback_list as never)).toBe(
       "This daemon's PATH is the app's fallback list: the login shell did not finish within 3000 ms (3000 ms).",

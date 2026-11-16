@@ -209,7 +209,14 @@ running in the background (a `some-agent &` in your profile) is stopped too. An
 interactive profile that waits — on a prompt, on input, on a program that does
 not return — takes the capture to those 3 seconds and the daemon to the
 fallback list below, even where your login files alone would have answered;
-`gui.log` gives the reason. If the
+`gui.log` gives the reason. An interactive profile that ends the shell
+before it has answered — an `exit` in `~/.zshrc`, or an `exec` of a program
+that then exits — has the app ask the same shell once more, as a plain
+login shell (`-l -c`: your login files, without `~/.zshrc`; for bash, a
+`~/.bashrc` your `~/.bash_profile` sources is read up to its "interactive
+only" check), in what is left of the 3 seconds; its `PATH` is then
+announced as `login-shell-noninteractive`, and what only your interactive
+startup files add is not in it. If the
 capture fails — the login shell exits with an error (a csh or tcsh login
 shell always does), takes too long, or prints no `PATH` — the daemon gets
 a fixed list instead: `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`,
@@ -247,7 +254,8 @@ bash never reads `~/.bashrc` itself, interactive or not: a folder added to
 `PATH` only there reaches the daemon when your `~/.bash_profile` sources
 `~/.bashrc`, as many do, and is not in the daemon's `PATH` otherwise. Where the `PATH` came from, and how long the capture
 took, is written to `state/logs/gui.log`, to the daemon's boot line in
-`daemon.log` (`PATH source: login-shell`, `fallback-list`, or `inherited` for a
+`daemon.log` (`PATH source: login-shell`, `login-shell-noninteractive`,
+`fallback-list`, or `inherited` for a
 daemon started from a terminal), and to Settings → Connection for a daemon this
 run of the app started — not for one an earlier launch started and this one
 found running — never the `PATH` itself. The listed variables passed beside it
@@ -1696,7 +1704,10 @@ app starts runs on your login shell's `PATH`, or on the app's fallback list
 when that could not be read ([Connection lifecycle](#connection-lifecycle));
 Settings → Connection says which, and `daemon.log`'s `PATH source:` line too. A
 program found through a folder your `~/.bashrc` adds to `PATH` (where some
-installers write it) when your `~/.bash_profile` does not source it, or one
+installers write it) when your `~/.bash_profile` does not source it, one
+in a folder only your `~/.zshrc` adds when Settings → Connection says your
+login shell's `PATH` was read without its interactive startup files
+(`login-shell-noninteractive`: your `~/.zshrc` ended the shell), or one
 outside the fallback list when the capture failed — an interactive profile
 that waited past 3 seconds among the reasons — can still be found by a daemon
 that `openalpaca daemon start` started from a terminal and be missing for the

@@ -34,7 +34,9 @@
  * `note` on a daemon of an older protocol or another version (Q04), and
  * `daemonPath` (Q21): where the `PATH` of a daemon this run
  * of the app spawned came from — the login shell's, captured at the app's
- * start, or the fallback list — and how long the capture took, never the
+ * start (read again without `-i` when, run interactively, it ended before
+ * it printed its environment: CAPTURE-RETRY), or the fallback list — and
+ * how long the capture took, never the
  * `PATH` itself, with the names of the variables passed beside it because
  * `daemon.toml`'s `[daemon.env] passthrough_keys` lists them (N-DAEMON-2),
  * never their values; `null` for a daemon the app did not spawn this run. A
@@ -81,11 +83,16 @@ export interface ConnectionInfo {
  * `DaemonPathReport`), pinned from both sides by `daemon-path.json`.
  */
 export interface DaemonPath {
-  /** `login-shell`: the login shell's; `fallback-list`: the fixed list. */
-  source: "login-shell" | "fallback-list";
+  /**
+   * `login-shell`: the login shell's; `login-shell-noninteractive`: the
+   * login shell's, read again without `-i` because, run interactively, it
+   * ended before it printed its environment (CAPTURE-RETRY);
+   * `fallback-list`: the fixed list.
+   */
+  source: "login-shell" | "login-shell-noninteractive" | "fallback-list";
   /** How long the capture took, from the app's start. */
   captureMs: number;
-  /** Why the capture failed, the shell's sentence; `null` for `login-shell`. */
+  /** Why the capture failed, the shell's sentence; `null` but for `fallback-list`. */
   reason: string | null;
   /**
    * The variables passed beside `PATH` from the login shell, by name, as
@@ -98,7 +105,13 @@ export interface DaemonPath {
 export function daemonPathOf(value: unknown): DaemonPath | null {
   if (typeof value !== "object" || value === null) return null;
   const v = value as Record<string, unknown>;
-  if (v.source !== "login-shell" && v.source !== "fallback-list") return null;
+  if (
+    v.source !== "login-shell" &&
+    v.source !== "login-shell-noninteractive" &&
+    v.source !== "fallback-list"
+  ) {
+    return null;
+  }
   if (typeof v.captureMs !== "number" || !Number.isFinite(v.captureMs)) {
     return null;
   }

@@ -19,7 +19,13 @@
 //! profile put in the background goes with it — or at
 //! [`CAPTURE_DEADLINE`]. An interactive profile that waits (on input, on a
 //! child) takes the capture to the deadline and the daemon to the fallback
-//! list below; nothing runs the shell again without `-i`. Of what lies
+//! list below. An interactive profile that ends the shell, or replaces it
+//! with a program that exits (`exit`, `exec /bin/sh`), before it prints the
+//! start marker has the shell
+//! run once more as `-l -c`, in the time left of the same deadline — its
+//! login files without the interactive ones — and that `PATH` is announced
+//! as `login-shell-noninteractive` ([`capture_login_shell`]; CAPTURE-RETRY,
+//! *Rev 99* (2), the advisor's pick). Of what lies
 //! between the markers one key is taken, `PATH` —
 //! the allowlist is `PATH` alone, so nothing else the login shell exports (an
 //! API key, a credential pointer) reaches the daemon this way. When the
@@ -148,6 +154,10 @@ pub(crate) const FALLBACK_DIRS: [&str; 6] = [
 pub(crate) enum PathSource {
     /// The account's login shell's, captured at the app's start.
     LoginShell,
+    /// The login shell's, read by its second run, as `-l -c`: run
+    /// interactively, it ended before it printed the start marker
+    /// (CAPTURE-RETRY, *Rev 99* (2)).
+    LoginShellNoninteractive,
     /// [`FALLBACK_DIRS`] and `~/.cargo/bin`: the capture failed.
     FallbackList,
 }
@@ -157,6 +167,7 @@ impl PathSource {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             PathSource::LoginShell => "login-shell",
+            PathSource::LoginShellNoninteractive => "login-shell-noninteractive",
             PathSource::FallbackList => "fallback-list",
         }
     }
@@ -206,12 +217,16 @@ impl std::fmt::Display for CaptureFailure {
 }
 
 /// What a capture that answered took from between the markers: `PATH`,
-/// and each listed key the login shell exported, in the list's order. Its
-/// `Debug` leaves every value out.
+/// and each listed key the login shell exported, in the list's order, and
+/// whether the second run, as `-l -c`, gave them. Its `Debug` leaves every
+/// value out.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Captured {
     pub(crate) path: OsString,
     pub(crate) passed: Vec<(String, OsString)>,
+    /// The interactive run ended before its markers and this is the second
+    /// run's (CAPTURE-RETRY).
+    pub(crate) second_run: bool,
 }
 
 impl std::fmt::Debug for Captured {
@@ -219,6 +234,7 @@ impl std::fmt::Debug for Captured {
         let names: Vec<&str> = self.passed.iter().map(|(k, _)| k.as_str()).collect();
         f.debug_struct("Captured")
             .field("passed_keys", &names)
+            .field("second_run", &self.second_run)
             .finish_non_exhaustive()
     }
 }
@@ -498,7 +514,7 @@ impl Capture {
                     let keys = runner.keys.get_or_init(|| account.keys);
                     let outcome = match account.shell {
                         Some(shell) => {
-                            capture_login_path(&shell, runner.started, runner.deadline, keys)
+                            capture_login_shell(&shell, runner.started, runner.deadline, keys)
                         }
                         None => Err(CaptureFailure::NoShell),
                     };
@@ -531,7 +547,11 @@ impl Capture {
         let listed = self.keys.get().cloned().unwrap_or_default();
         match outcome {
             Ok(captured) => DaemonPath {
-                source: PathSource::LoginShell,
+                source: if captured.second_run {
+                    PathSource::LoginShellNoninteractive
+                } else {
+                    PathSource::LoginShell
+                },
                 value: captured.path,
                 capture,
                 failure: None,
@@ -584,6 +604,14 @@ fn log_capture(path: &DaemonPath) {
     let passed = path.passed_keys().join(",");
     let absent = path.absent_keys().join(",");
     match &path.failure {
+        None if path.source == PathSource::LoginShellNoninteractive => tracing::info!(
+            source = path.source.as_str(),
+            capture_ms = path.capture_ms(),
+            passed_keys = passed.as_str(),
+            absent_keys = absent.as_str(),
+            "The daemon's PATH is the login shell's, read as a login shell without -i: what \
+             only the interactive startup files add is not in it."
+        ),
         None => tracing::info!(
             source = path.source.as_str(),
             capture_ms = path.capture_ms(),
@@ -685,8 +713,71 @@ fn account_login_shell() -> Option<PathBuf> {
 pub(crate) fn login_shell_args(shell: &Path) -> &'static [&'static str] {
     match shell.file_name().and_then(|name| name.to_str()) {
         Some("zsh" | "bash") => &["-i", "-l", "-c"],
-        _ => &["-l", "-c"],
+        _ => LOGIN_ARGS,
     }
+}
+
+/// A login command, not interactive: every shell but zsh and bash from the
+/// start, and zsh's or bash's second run (CAPTURE-RETRY).
+#[cfg(unix)]
+const LOGIN_ARGS: &[&str] = &["-l", "-c"];
+
+/// The capture of `shell`'s `PATH` the app makes: one run of
+/// [`capture_login_path`], and, when that run was interactive (`-i`) and the
+/// shell ended — exited, with any status, or was replaced by a program that
+/// exited — before it printed the start marker, one more run as `-l -c` in
+/// the time left of the same `started + deadline` (CAPTURE-RETRY, *Rev 99*
+/// (2), the advisor's pick of 2026-11-16). Each run's process group is
+/// handled as one run's is ([`capture_login_path`]: killed after a
+/// successful exit or at the deadline, left after a failed exit). A run that
+/// printed the start marker, one still running at the deadline (a profile
+/// that waits), one that printed too much, or a shell that could not start
+/// is never run again; nor is a run with no time left (among them a status-0
+/// exit whose output a child in a session of its own still holds: the reader
+/// is waited for to the deadline). When the second run fails too, its
+/// failure is the capture's. `gui.log` says why the second
+/// run was made, naming the first run's end.
+#[cfg(unix)]
+pub(crate) fn capture_login_shell(
+    shell: &Path,
+    started: Instant,
+    deadline: Duration,
+    keys: &[String],
+) -> Result<Captured, CaptureFailure> {
+    let args = login_shell_args(shell);
+    let first = run_login_shell(shell, args, started, deadline, keys);
+    let ended_first = !first.printed_start
+        && args.contains(&"-i")
+        && matches!(
+            first.outcome,
+            Err(CaptureFailure::Exited(_) | CaptureFailure::NoMarkers)
+        );
+    if !ended_first || Instant::now() >= started + deadline {
+        return first.outcome;
+    }
+    if let Err(failure) = &first.outcome {
+        tracing::info!(
+            reason = %failure,
+            "The login shell ended before it printed its environment when run interactively; \
+             it is run once more as a login shell without -i, in the time left."
+        );
+    }
+    run_login_shell(shell, LOGIN_ARGS, started, deadline, keys)
+        .outcome
+        .map(|captured| Captured {
+            second_run: true,
+            ..captured
+        })
+}
+
+#[cfg(not(unix))]
+pub(crate) fn capture_login_shell(
+    _shell: &Path,
+    _started: Instant,
+    _deadline: Duration,
+    _keys: &[String],
+) -> Result<Captured, CaptureFailure> {
+    Err(CaptureFailure::NoShell)
 }
 
 /// The shell `pid`'s exit, seen without reaping it (`waitid` with
@@ -727,7 +818,33 @@ fn exit_seen(pid: libc::pid_t) -> std::io::Result<Option<bool>> {
     ))
 }
 
-/// Run `shell` with [`login_shell_args`] and [`CAPTURE_COMMAND`] in a
+/// One run of `shell` with [`login_shell_args`], never a second: the capture
+/// as it was before CAPTURE-RETRY, kept for the tests that pin one run's
+/// rules ([`run_login_shell`]); the app's capture is [`capture_login_shell`].
+#[cfg(all(unix, test))]
+pub(crate) fn capture_login_path(
+    shell: &Path,
+    started: Instant,
+    deadline: Duration,
+    keys: &[String],
+) -> Result<Captured, CaptureFailure> {
+    run_login_shell(shell, login_shell_args(shell), started, deadline, keys).outcome
+}
+
+/// One run of the login shell: what it concluded, and whether that
+/// conclusion rules a second run out.
+#[cfg(unix)]
+struct Run {
+    outcome: Result<Captured, CaptureFailure>,
+    /// True when the run's output held the start marker — the line the
+    /// capture's command prints first, so a run without it ended (or was
+    /// replaced) before the command ran — and for a conclusion that is
+    /// never a reason for a second run whatever the output held: a shell
+    /// that did not start, the deadline, the output cap, a failed wait.
+    printed_start: bool,
+}
+
+/// Run `shell` with `args` and [`CAPTURE_COMMAND`] in a
 /// session and process group of its own and take `PATH`, and each of `keys`
 /// it exports, from what it prints between the markers. Settled on the
 /// shell's exit, not on the end of its output (a profile's background child
@@ -739,21 +856,31 @@ fn exit_seen(pid: libc::pid_t) -> std::io::Result<Option<bool>> {
 /// kill brings at once, bounded by the deadline and, once the end marker is
 /// in, by [`READER_GRACE`]: only a process that left the group can still
 /// hold the pipe, and then the output's reader thread stays until it lets
-/// go.
+/// go. After a failed exit of an interactive run (`-i` among `args`) it
+/// waits, at most [`READER_GRACE`] and the deadline, for the output's reader
+/// to reach the pipe's end or the start marker, so a run that printed the
+/// marker and then failed is told from one that ended first
+/// (CAPTURE-RETRY); the group is left as the failed exit left it.
 #[cfg(unix)]
-pub(crate) fn capture_login_path(
+fn run_login_shell(
     shell: &Path,
+    args: &[&str],
     started: Instant,
     deadline: Duration,
     keys: &[String],
-) -> Result<Captured, CaptureFailure> {
+) -> Run {
+    // A conclusion that is never a reason for a second run.
+    let unread = |outcome| Run {
+        outcome,
+        printed_start: true,
+    };
     use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     let mut command = Command::new(shell);
     command
-        .args(login_shell_args(shell))
+        .args(args)
         .arg(CAPTURE_COMMAND)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -781,9 +908,10 @@ pub(crate) fn capture_login_path(
             }
         });
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| CaptureFailure::Start(e.to_string()))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => return unread(Err(CaptureFailure::Start(e.to_string()))),
+    };
     let group = child.id() as libc::pid_t;
     let span = deadline;
     let deadline = started + deadline;
@@ -838,7 +966,7 @@ pub(crate) fn capture_login_path(
     let failed = |child: &mut std::process::Child, failure: CaptureFailure| {
         kill_group();
         let _ = child.wait();
-        Err(failure)
+        unread(Err(failure))
     };
 
     let poll = Duration::from_millis(10);
@@ -864,11 +992,33 @@ pub(crate) fn capture_login_path(
     if succeeded {
         kill_group();
     }
-    let status = child
-        .wait()
-        .map_err(|e| CaptureFailure::Exited(e.to_string()))?;
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(e) => return unread(Err(CaptureFailure::Exited(e.to_string()))),
+    };
+    let start_line = format!("{START_MARKER}\n");
     if !status.success() {
-        return Err(CaptureFailure::Exited(status.to_string()));
+        let failure = Err(CaptureFailure::Exited(status.to_string()));
+        if !args.contains(&"-i") {
+            return unread(failure);
+        }
+        // Whether the shell ended before its command ran: what it printed
+        // is in the pipe, but a child it left may hold the pipe open, so
+        // the wait is bounded.
+        let until = (Instant::now() + READER_GRACE).min(deadline);
+        loop {
+            {
+                let (bytes, ended) = &*output.lock().unwrap_or_else(|p| p.into_inner());
+                let printed_start = contains(bytes, start_line.as_bytes());
+                if printed_start || *ended || Instant::now() >= until {
+                    return Run {
+                        outcome: failure,
+                        printed_start,
+                    };
+                }
+            }
+            std::thread::sleep(poll);
+        }
     }
 
     // What the shell printed is in the pipe, and nothing in its group holds
@@ -879,19 +1029,22 @@ pub(crate) fn capture_login_path(
         {
             let (bytes, ended) = &*output.lock().unwrap_or_else(|p| p.into_inner());
             if bytes.len() > OUTPUT_CAP {
-                return Err(CaptureFailure::TooMuchOutput);
+                return unread(Err(CaptureFailure::TooMuchOutput));
             }
             let now = Instant::now();
             if *ended || now >= deadline || (now >= grace && contains(bytes, END_MARKER.as_bytes()))
             {
-                return environment_between_markers(bytes, keys);
+                return Run {
+                    outcome: environment_between_markers(bytes, keys),
+                    printed_start: contains(bytes, start_line.as_bytes()),
+                };
             }
         }
         std::thread::sleep(poll);
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), test))]
 pub(crate) fn capture_login_path(
     _shell: &Path,
     _started: Instant,
@@ -943,6 +1096,7 @@ pub(crate) fn environment_between_markers(
                 .zip(found)
                 .filter_map(|(key, value)| value.map(|value| (key.clone(), os_string(value))))
                 .collect(),
+            second_run: false,
         }),
         _ => Err(CaptureFailure::NoPath),
     }

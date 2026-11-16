@@ -214,6 +214,13 @@ describe("the daemon's PATH on the connection", () => {
     expect(daemonPathOf(daemonPaths.fallback_list)).toEqual(
       daemonPaths.fallback_list,
     );
+    // CAPTURE-RETRY: the login shell's, read again without -i.
+    expect(daemonPathOf(daemonPaths.login_shell_noninteractive)).toEqual({
+      source: "login-shell-noninteractive",
+      captureMs: 1840,
+      reason: null,
+      passedKeys: [],
+    });
     expect(daemonPathOf(daemonPaths.login_shell_with_keys)).toEqual({
       source: "login-shell",
       captureMs: 212,

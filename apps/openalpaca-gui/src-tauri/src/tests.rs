@@ -1873,7 +1873,7 @@ fn the_panic_hook_writes_a_panic_to_gui_log() {
 
 use login_path::{
     Account, CAPTURE_COMMAND, Capture, CaptureFailure, DaemonPathReport, PathSource,
-    capture_login_path, fallback_path,
+    capture_login_path, capture_login_shell, fallback_path,
 };
 
 /// A capture of `shell`'s `PATH`, the fallback list's home `home`: the
@@ -2472,6 +2472,15 @@ fn every_daemon_path_is_its_row_in_the_table_the_webview_reads() {
             },
         ),
         (
+            "login_shell_noninteractive",
+            DaemonPathReport {
+                source: PathSource::LoginShellNoninteractive,
+                capture_ms: 1840,
+                reason: None,
+                passed_keys: Vec::new(),
+            },
+        ),
+        (
             "login_shell_with_keys",
             DaemonPathReport {
                 source: PathSource::LoginShell,
@@ -2923,9 +2932,9 @@ fn bash_is_run_interactively_and_reads_bashrc_only_through_its_profile() {
 /// that hangs — `~/.zshrc` waiting on a child — takes the capture to its
 /// deadline and the daemon to the fallback list, killed with what it
 /// started, and `gui.log` says why, where the login profile alone
-/// (`~/.zprofile`, the same zsh run as `-l -c`) would have answered. Nothing
-/// runs the shell again without `-i`: the fallback recorded is the deadline's
-/// fixed list.
+/// (`~/.zprofile`, the same zsh run as `-l -c`) would have answered. A hang
+/// leaves no time for a second run (CAPTURE-RETRY's runs only in the time
+/// the first left): the fallback recorded is the deadline's fixed list.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_hanging_interactive_profile_gets_the_fallback_list() {
@@ -2981,6 +2990,372 @@ fn a_hanging_interactive_profile_gets_the_fallback_list() {
             && l.contains("reason=the login shell did not finish within 1500 ms")),
         "gui.log says why: {text:?}"
     );
+}
+
+/// *Rev 99* (2), the advisor's pick (CAPTURE-RETRY): an interactive profile
+/// that ends the shell before it prints the markers — `~/.zshrc` exiting
+/// with a failure, exiting with 0, or replacing the shell (`exec /bin/sh`,
+/// which reads its empty input and ends) — is read again, once, as `-l -c`
+/// in the time left of the one deadline, so the daemon gets the login
+/// profile's `PATH` (`~/.zprofile`'s folder, not the one `~/.zshrc` added
+/// before it ended), its source named `login-shell-noninteractive` in
+/// `gui.log`, on the daemon's command and on the connection; `gui.log` says
+/// why the second run was made. The real `/bin/zsh`, under the guard's
+/// scratch `HOME`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_profile_that_leaves_the_interactive_shell_is_read_again_as_a_login_shell() {
+    let guard = HomeStoreGuard::set("interactive-ends");
+    let home = guard.root().join("home");
+    std::fs::write(
+        home.join(".zprofile"),
+        format!("export PATH=\"{ZPROFILE_DIR}:$PATH\"\n"),
+    )
+    .expect(".zprofile");
+    let zsh = real_shell(guard.root(), "zsh", "/bin/zsh");
+    let runs_file = guard.root().join("real").join("zsh.runs");
+    let cases = [
+        ("exits 7", "exit 7\n"),
+        ("exits 0", "exit 0\n"),
+        ("execs", "exec /bin/sh\n"),
+    ];
+    let captured = with_the_shell_log(|| {
+        cases
+            .iter()
+            .map(|(case, ending)| {
+                std::fs::write(
+                    home.join(".zshrc"),
+                    format!("export PATH=\"{ZSHRC_DIR}:$PATH\"\n{ending}"),
+                )
+                .expect(".zshrc");
+                let _ = std::fs::remove_file(&runs_file);
+                let path = capture_of(
+                    Some(zsh.clone()),
+                    Some(home.clone()),
+                    Duration::from_secs(10),
+                )
+                .wait();
+                (*case, path, real_shell_runs(guard.root(), "zsh"))
+            })
+            .collect::<Vec<_>>()
+    });
+
+    for (case, path, runs) in &captured {
+        assert_eq!(path.failure, None, "{case}");
+        assert_eq!(path.source.as_str(), "login-shell-noninteractive", "{case}");
+        let entries = path_entries(path.value());
+        assert!(
+            entries.iter().any(|e| e == ZPROFILE_DIR),
+            "{case}: ~/.zprofile's folder is in the daemon's PATH"
+        );
+        assert!(
+            !entries.iter().any(|e| e == ZSHRC_DIR),
+            "{case}: the PATH is the second run's, which never read ~/.zshrc"
+        );
+        assert_eq!(
+            runs,
+            &format!("-i\n-l\n-c\n{CAPTURE_COMMAND}\n-l\n-c\n{CAPTURE_COMMAND}\n"),
+            "{case}: run interactively, then once more as a login command"
+        );
+        assert_eq!(
+            path.announcement(),
+            format!("login-shell-noninteractive {}", path.capture_ms()),
+            "{case}"
+        );
+        assert_eq!(
+            serde_json::to_value(path.report()).expect("serializes")["source"],
+            json!("login-shell-noninteractive"),
+            "{case}"
+        );
+    }
+    let text = gui_log_text();
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.contains(" INFO ")
+                && l.contains("it is run once more as a login shell without -i"))
+            .count(),
+        3,
+        "gui.log says why each second run was made: {text:?}"
+    );
+    for reason in [
+        "reason=the login shell failed (exit status: 7)",
+        "reason=the login shell did not print its environment",
+    ] {
+        assert!(
+            text.lines()
+                .any(|l| l.contains("run once more") && l.contains(reason)),
+            "{reason}: {text:?}"
+        );
+    }
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.contains(" INFO ") && l.contains("source=\"login-shell-noninteractive\""))
+            .count(),
+        3,
+        "gui.log names the second run's source: {text:?}"
+    );
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.contains("source=\"login-shell-noninteractive\"")
+                && l.contains("read as a login shell without -i"))
+            .count(),
+        3,
+        "gui.log's capture line says the interactive files were not read: {text:?}"
+    );
+    assert!(!text.contains(ZPROFILE_DIR), "gui.log never holds the PATH");
+}
+
+/// *Rev 99* (2) for bash, the real `/bin/bash` under the guard's scratch
+/// `HOME`: a `~/.bashrc` that `~/.bash_profile` sources and that exits when
+/// interactive ends the `-i -l -c` run before its markers; the second run,
+/// `-l -c`, still reads `~/.bash_profile` and the `~/.bashrc` it sources, up
+/// to that interactive check, and answers with the profile's folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_bashrc_that_ends_the_interactive_shell_is_read_again_as_a_login_shell() {
+    let guard = HomeStoreGuard::set("interactive-bash-ends");
+    let home = guard.root().join("home");
+    std::fs::write(
+        home.join(".bash_profile"),
+        format!("export PATH=\"{ZPROFILE_DIR}:$PATH\"\n. \"$HOME/.bashrc\"\n"),
+    )
+    .expect(".bash_profile");
+    std::fs::write(
+        home.join(".bashrc"),
+        format!("case $- in *i*) exit 7 ;; esac\nexport PATH=\"{BASHRC_DIR}:$PATH\"\n"),
+    )
+    .expect(".bashrc");
+    let bash = real_shell(guard.root(), "bash", "/bin/bash");
+    let path = capture_of(Some(bash), Some(home), Duration::from_secs(10)).wait();
+
+    assert_eq!(path.failure, None);
+    assert_eq!(path.source.as_str(), "login-shell-noninteractive");
+    let entries = path_entries(path.value());
+    assert!(
+        entries.iter().any(|e| e == ZPROFILE_DIR),
+        "~/.bash_profile's"
+    );
+    assert!(
+        entries.iter().any(|e| e == BASHRC_DIR),
+        "~/.bashrc, sourced, read past its interactive check"
+    );
+    assert_eq!(
+        real_shell_runs(guard.root(), "bash"),
+        format!("-i\n-l\n-c\n{CAPTURE_COMMAND}\n-l\n-c\n{CAPTURE_COMMAND}\n")
+    );
+}
+
+/// *Rev 99* (2): the second run has only the time the first left of the one
+/// deadline. A first run that ends late with a failure and a second that
+/// waits end together at that deadline — the fallback list, the second
+/// shell killed with its group — never a second deadline of its own. A
+/// profile that waits takes the whole deadline and leaves no time for a
+/// second run at all (`a_hanging_interactive_profile_gets_the_fallback_list`).
+/// A stand-in shell named `zsh`, so the capture runs it with `-i`; the
+/// capture's own function is timed, not the wait (which ends at the deadline
+/// by itself).
+#[cfg(unix)]
+#[test]
+fn the_second_run_has_only_the_time_the_first_left() {
+    let guard = HomeStoreGuard::set("retry-time-left");
+    let dir = guard.root().join("late");
+    std::fs::create_dir_all(&dir).expect("the late shell's folder");
+    let runs = dir.join("runs");
+    let pid_file = guard.root().join("second.pid");
+    let zsh = fake_login_shell(
+        &dir,
+        "zsh",
+        &format!(
+            "printf '%s\\n' \"$@\" >> '{runs}'\n\
+             case \"$1\" in\n\
+             -i) /bin/sleep 1; exit 4 ;;\n\
+             *) echo $$ > '{pid}'; exec /bin/sleep 47 ;;\n\
+             esac",
+            runs = runs.display(),
+            pid = pid_file.display()
+        ),
+    );
+    let deadline = Duration::from_millis(1500);
+    let started = Instant::now();
+    let outcome = capture_login_shell(&zsh, started, deadline, &[]);
+    let took = started.elapsed();
+    let second = pid_in(&pid_file);
+    let _stray = second.map(KillOnDrop);
+
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("the shell ran"),
+        format!("-i\n-l\n-c\n{CAPTURE_COMMAND}\n-l\n-c\n{CAPTURE_COMMAND}\n"),
+        "the first run's failure made a second, as a login command"
+    );
+    assert_eq!(outcome, Err(CaptureFailure::TimedOut(deadline)));
+    assert!(
+        took >= deadline && took < deadline + Duration::from_millis(500),
+        "the one deadline, not a second: {took:?}"
+    );
+    let second = second.expect("the second run started");
+    assert!(
+        gone_within(second, Duration::from_secs(2)),
+        "the second run outlived the deadline's kill"
+    );
+}
+
+/// *Rev 99* (2) with *Rev 99* (4) (a) unchanged: an interactive run that
+/// puts a child in the background, holding the shell's output, and exits
+/// with a failure before its markers is run again — the capture waits at
+/// most its reader's grace for the start marker, not the whole deadline — and
+/// the second run answers; the first run's group is left as a failed exit
+/// leaves it, so its child is still running when the capture has answered.
+#[cfg(unix)]
+#[test]
+fn a_failed_first_runs_child_is_left_and_the_second_run_answers() {
+    let guard = HomeStoreGuard::set("retry-child-left");
+    let dir = guard.root().join("child");
+    std::fs::create_dir_all(&dir).expect("the shell's folder");
+    let pid_file = guard.root().join("first-child.pid");
+    let zsh = fake_login_shell(
+        &dir,
+        "zsh",
+        &format!(
+            "case \"$1\" in\n\
+             -i) /bin/sleep 47 & echo $! > '{pid}'; exit 3 ;;\n\
+             *) PATH='{CAPTURED_PATH}'; export PATH\n{LAST_ARG} ;;\n\
+             esac",
+            pid = pid_file.display()
+        ),
+    );
+    let started = Instant::now();
+    let outcome = capture_login_shell(&zsh, started, Duration::from_secs(10), &[]);
+    let took = started.elapsed();
+    let child = pid_in(&pid_file).expect("the first run started its child");
+    let _stray = KillOnDrop(child);
+
+    let captured = outcome.expect("the second run answers");
+    assert_eq!(captured.path, OsString::from(CAPTURED_PATH));
+    assert!(captured.second_run);
+    assert!(
+        took < Duration::from_secs(2),
+        "the held pipe cost the reader's grace, not the deadline: {took:?}"
+    );
+    assert!(
+        !gone_within(child, Duration::from_millis(300)),
+        "the first run's group was killed after its failed exit"
+    );
+}
+
+/// *Rev 99* (2): a first run that ends before its markers with no time left
+/// is not run again. The interactive run puts a child in the background,
+/// holding the shell's output, and exits with a failure; under a deadline
+/// shorter than the reader's grace (250 ms) the wait for its start marker
+/// runs into the deadline, and the capture answers the first run's failure —
+/// not a second run's, which would answer at once, nor the deadline's. A
+/// stand-in shell named `zsh`, so the capture runs it with `-i`.
+#[cfg(unix)]
+#[test]
+fn a_first_run_that_ends_with_no_time_left_is_not_run_again() {
+    let guard = HomeStoreGuard::set("retry-no-time-left");
+    let dir = guard.root().join("no-time");
+    std::fs::create_dir_all(&dir).expect("the shell's folder");
+    let runs = dir.join("runs");
+    let pid_file = guard.root().join("held.pid");
+    let zsh = fake_login_shell(
+        &dir,
+        "zsh",
+        &format!(
+            "printf '%s\\n' \"$@\" >> '{runs}'\n\
+             case \"$1\" in\n\
+             -i) /bin/sleep 47 & echo $! > '{pid}'; exit 3 ;;\n\
+             *) PATH='{CAPTURED_PATH}'; export PATH\n{LAST_ARG} ;;\n\
+             esac",
+            runs = runs.display(),
+            pid = pid_file.display()
+        ),
+    );
+    // Under the reader's grace, so the wait after the failed exit always
+    // runs into the deadline, whenever the exit came.
+    let deadline = Duration::from_millis(240);
+    let outcome = capture_login_shell(&zsh, Instant::now(), deadline, &[]);
+    let _stray = pid_in(&pid_file).map(KillOnDrop);
+
+    assert_eq!(
+        outcome,
+        Err(CaptureFailure::Exited("exit status: 3".into())),
+        "the first run's failure, with no time left for a second"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("the shell ran"),
+        format!("-i\n-l\n-c\n{CAPTURE_COMMAND}\n"),
+        "run once"
+    );
+}
+
+/// Runs a stand-in shell's last argument, the capture's command, wherever
+/// `-i` put it.
+const LAST_ARG: &str = "for command; do :; done\neval \"$command\"";
+
+/// *Rev 99* (2)'s words, "before it prints the markers": an interactive run
+/// that printed its environment and then failed, or printed one with no
+/// `PATH`, is not run again — the profile did not end the shell first — and
+/// a shell run as `-l -c` from the start (neither zsh nor bash) is never run
+/// again, whether it fails or exits 0 without its markers.
+#[cfg(unix)]
+#[test]
+fn only_an_interactive_run_ended_before_its_markers_is_run_again() {
+    let guard = HomeStoreGuard::set("retry-only-before-markers");
+    let home = guard.root().join("home");
+    let deadline = Duration::from_secs(10);
+    let list = fallback_path(Some(&home));
+    for (folder, name, body, failure, args) in [
+        (
+            "after",
+            "bash",
+            format!("PATH='{CAPTURED_PATH}'; export PATH\n{LAST_ARG}\nexit 3"),
+            CaptureFailure::Exited("exit status: 3".into()),
+            "-i\n-l\n-c\n",
+        ),
+        (
+            "no-path",
+            "zsh",
+            format!("unset PATH\n{LAST_ARG}"),
+            CaptureFailure::NoPath,
+            "-i\n-l\n-c\n",
+        ),
+        (
+            "plain",
+            "dash",
+            "exit 5".to_owned(),
+            CaptureFailure::Exited("exit status: 5".into()),
+            "-l\n-c\n",
+        ),
+        (
+            "plain0",
+            "dash",
+            "exit 0".to_owned(),
+            CaptureFailure::NoMarkers,
+            "-l\n-c\n",
+        ),
+    ] {
+        let dir = guard.root().join(folder);
+        std::fs::create_dir_all(&dir).expect("the shell's folder");
+        let runs = dir.join("runs");
+        let shell = fake_login_shell(
+            &dir,
+            name,
+            &format!(
+                "printf '%s\\n' \"$@\" >> '{runs}'\n{body}",
+                runs = runs.display()
+            ),
+        );
+        let path = capture_of(Some(shell), Some(home.clone()), deadline).wait();
+
+        assert_eq!(path.source, PathSource::FallbackList, "{folder}");
+        assert_eq!(path.failure, Some(failure), "{folder}");
+        assert_eq!(path.value(), &list, "{folder}");
+        assert_eq!(
+            std::fs::read_to_string(&runs).expect("the shell ran"),
+            format!("{args}{CAPTURE_COMMAND}\n"),
+            "{folder}: run once"
+        );
+    }
 }
 
 /// A stand-in login shell that puts `/bin/sleep 47` in the background,

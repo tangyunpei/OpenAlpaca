@@ -40,7 +40,9 @@
  *
  * **Where a daemon this app spawned got its `PATH`** (Q21): the shell's
  * `daemonPath` on the connection — the login shell's, read once when the app
- * started, or the app's fallback list and why — with the capture's
+ * started (or read again without `-i` when, run interactively, it ended
+ * before it printed its environment: CAPTURE-RETRY), or the app's fallback
+ * list and why — with the capture's
  * duration, never the `PATH` itself, and the variables passed beside it by
  * name (`[daemon.env] passthrough_keys`, N-DAEMON-2); nothing for a daemon
  * this run of the app did not spawn (one started from a terminal logs
@@ -311,8 +313,14 @@ export function statusTitle(
  * beside it, by name, never their values (N-DAEMON-2).
  */
 export function daemonPathNote(path: DaemonPath): string {
-  if (path.source === "login-shell") {
-    const note = `This daemon's PATH is your login shell's, read when the app started (${path.captureMs} ms).`;
+  if (
+    path.source === "login-shell" ||
+    path.source === "login-shell-noninteractive"
+  ) {
+    const note =
+      path.source === "login-shell"
+        ? `This daemon's PATH is your login shell's, read when the app started (${path.captureMs} ms).`
+        : `This daemon's PATH is your login shell's without its interactive startup files (such as ~/.zshrc), read when the app started (${path.captureMs} ms): run interactively, your shell ended before it printed its environment.`;
     if (path.passedKeys.length === 0) return note;
     return `${note} Also passed from your login shell, as daemon.toml's [daemon.env] passthrough_keys lists: ${path.passedKeys.join(", ")}.`;
   }

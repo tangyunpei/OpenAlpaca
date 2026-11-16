@@ -96,9 +96,12 @@ interface ConnectionInfo {
   // Q21: the PATH of the daemon this run of the app spawned (matched by the
   // pid discovery.json names); null for any other daemon. Never the PATH.
   daemonPath: {
-    source: "login-shell" | "fallback-list";
+    // CAPTURE-RETRY: login-shell-noninteractive when zsh or bash, run as
+    // -i -l -c, ended before it printed its environment and its second run,
+    // as -l -c in the time left of the same 3 s, answered.
+    source: "login-shell" | "login-shell-noninteractive" | "fallback-list";
     captureMs: number; // the capture's duration, from the app's start
-    reason: string | null; // why the capture failed; null for login-shell
+    reason: string | null; // why the capture failed; null but for fallback-list
     // N-DAEMON-2: the variables passed beside PATH from the login shell
     // because daemon.toml's [daemon.env] passthrough_keys lists them, by
     // name; empty for none (always empty for fallback-list). Never a value.
