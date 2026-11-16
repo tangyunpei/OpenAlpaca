@@ -618,18 +618,24 @@ cannot answer until you enable one:
   agent it starts run on the server's model, counted at 0 on a server on
   this machine or your home network (elsewhere, at $3 / $15 per million
   tokens unless a `[models]` row names the model: such a row counts it at
-  the `input_price` and `output_price` it gives, and at 0 for each it
-  leaves out). The server's list gives no context window, so a run is
-  budgeted at 200,000 tokens unless a `[models."<id>"]` row with
-  `provider = "openai"` gives the model's `context`; give one for a small
-  local model, or its runs overrun its window. A pin naming another model
+  the `input_price` and `output_price` it gives, and each it leaves out as
+  if it had none — at $3 / $15 elsewhere, at 0 on this machine or your
+  home network, at the built-in price for one of OpenAI's own ids). The
+  server's list gives no context window, so a run is budgeted at 200,000
+  tokens unless a `[models."<id>"]` row with `provider = "openai"` gives
+  the model's `context`; give one for a small local model, or its runs
+  overrun its window (on a server on this machine or your home network,
+  `daemon.log` names each such model once). A pin naming another model
   the server lists moves an alias there: `fast`, `balanced` or `strong`
   under `[providers.openai.model_aliases]`. A server whose model list
   cannot be read is run only on models you name for it: add each as a
   `[models."<id>"]` row with `provider = "openai"` in `llm.toml`. On a
   paid gateway, or any server elsewhere, give both `input_price` and
-  `output_price` in every such row: a price left out is counted at 0, so
-  that spend does not count against the cost caps.
+  `output_price` in every such row: a price left out is counted at the
+  $3 / $15 fallback, and `daemon.log` says so once per model. A row of
+  yours from before this build that gives no prices there was counted at
+  0 and is now counted at the fallback; `input_price = 0` and
+  `output_price = 0` keep it at 0.
   See [Daemon Manual → Model aliases](Daemon_Manual.md#model-aliases) and
   [OpenAI's Responses API](Daemon_Manual.md#openais-responses-api).
 
@@ -1098,7 +1104,10 @@ The uninstaller removes the GUI MSI, the prefix, the Start Menu folder and the
     (`daemon.log.1` to `.3`).
 - `No model is available: no enabled provider offers one`
   - A fresh install has every provider switched off. Turn one on; see
-    [Connect a model](#connect-a-model).
+    [Connect a model](#connect-a-model). An OpenAI-compatible server whose
+    model list cannot be read runs only the models you name for it: add
+    each as a `[models."<id>"]` row with `provider = "openai"`, as the
+    message's last sentence says.
 - `Database … is at schema version <n>, which this build does not know` at startup
   - The database was created by a build from before the schema was
     re-baselined at version 1 (2026-09-28) — 42 from before the memory

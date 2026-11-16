@@ -19,6 +19,35 @@ pub struct PricingInfo {
     /// What a cache read and a cache write cost, when the row states it;
     /// `None` is [`CacheRates::UNSTATED`]'s figures.
     pub cache_rates: Option<CacheRates>,
+    /// The prices no row states (a `[models]` row left them out and no
+    /// compiled row names the id) on a provider counted as paid: the cost
+    /// tracker counts each at its fallback's figure for that half, as it
+    /// does an unpriced discovered row (MODEL-ROWS, *Rev 97* (b)). The
+    /// figure above is then the row's placeholder 0, not a price.
+    pub unpriced: PriceGaps,
+}
+
+/// Which of a row's two prices no one stated (MODEL-ROWS, *Rev 97* (b)):
+/// a `[models."<id>"]` row that leaves a price out states none, and the
+/// compiled row's figure stands in where the id has one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PriceGaps {
+    pub input: bool,
+    pub output: bool,
+}
+
+impl PriceGaps {
+    /// Both prices missing: the row is counted as an unpriced discovered
+    /// row is.
+    pub const BOTH: Self = Self {
+        input: true,
+        output: true,
+    };
+
+    /// Whether either price is missing.
+    pub fn any(self) -> bool {
+        self.input || self.output
+    }
 }
 
 /// What a model's prompt cache costs, as multiples of the input rate the
@@ -40,8 +69,9 @@ pub struct CacheRates {
 
 impl CacheRates {
     /// A row that states no figure — a discovered model, an id no row
-    /// names, a `[models]` row — keeps the tracker's figures from before
-    /// the per-row ones: reads at 0.1x, writes at 1.25x.
+    /// names, a `[models]` row for an id no compiled row names — keeps the
+    /// tracker's figures from before the per-row ones: reads at 0.1x,
+    /// writes at 1.25x.
     pub const UNSTATED: CacheRates = CacheRates {
         read: 0.10,
         write: 1.25,
@@ -201,14 +231,17 @@ pub struct ModelInfo {
     pub declared: bool,
     /// The rate a request pays once its prompt passes a length, for a model
     /// whose page prices long prompts higher; `None` for one priced the same
-    /// at any length. Only a compiled row carries one: a `[models]` row the
-    /// person writes replaces the compiled row whole, rate included.
+    /// at any length. Only a compiled row states one; a `[models]` row the
+    /// person writes for the same id keeps it for each price the row leaves
+    /// out, since that half counts at the compiled prices, and a price the
+    /// row states is its own at every length (MODEL-ROWS): `None` when the
+    /// row states both.
     pub long_prompt: Option<LongPromptRate>,
     /// What a cache read and a cache write cost on this model, for a
     /// compiled row whose pages state them (CACHE-MULT, CACHE-WRITE);
-    /// `None` for any other row, priced at [`CacheRates::UNSTATED`]. As with
-    /// the long-prompt rate, a `[models]` row the person writes replaces the
-    /// compiled row whole, figures included.
+    /// `None` for any other row, priced at [`CacheRates::UNSTATED`]. A
+    /// `[models]` row, which has no cache keys, keeps the compiled row's
+    /// figures for the same id (*Rev 67*, decided with *Rev 97* (b)).
     pub cache_rates: Option<CacheRates>,
     /// What the model's API refuses in a request (C7a). A compiled row's;
     /// a `[models]` row for the same id keeps it, since it is the model's
@@ -231,10 +264,11 @@ pub struct ModelRegistry {
     /// person's own (item 17).
     local_server_providers: RwLock<HashSet<String>>,
     /// The ids a `[models]` row the person wrote put here
-    /// ([`Self::reload_from_config`]): such a row replaces the compiled row
-    /// whole, so it is the person's, not a compiled one
-    /// ([`Self::is_compiled_only`], COMPAT-SERVER).
-    person_rows: RwLock<HashSet<String>>,
+    /// ([`Self::reload_from_config`]): such a row is the person's, not a
+    /// compiled one ([`Self::is_compiled_only`], COMPAT-SERVER), and with
+    /// each the prices it left with no figure, neither the row nor a
+    /// compiled row stating one (MODEL-ROWS, *Rev 97* (b)).
+    person_rows: RwLock<HashMap<String, PriceGaps>>,
 }
 
 impl ModelRegistry {
@@ -242,7 +276,7 @@ impl ModelRegistry {
         Self {
             models: RwLock::new(models),
             local_server_providers: RwLock::new(HashSet::new()),
-            person_rows: RwLock::new(HashSet::new()),
+            person_rows: RwLock::new(HashMap::new()),
         }
     }
 
@@ -527,29 +561,55 @@ impl ModelRegistry {
     /// [`Self::with_defaults_and_config`]. The watcher runs this on every
     /// `llm.toml` change, so without the skip a hand edit (or a settings write
     /// the dedup ring missed) would undo a disable's half of the work.
+    ///
+    /// A price the row leaves out is no price (MODEL-ROWS, *Rev 97* (b),
+    /// the advisor's pick of 2026-11-16 under the owner's delegation): the
+    /// compiled row's for the same id where there is one, else none — the
+    /// cost tracker then counts it as it counts an unpriced discovered row
+    /// ([`Self::get_pricing`]'s `unpriced`). An explicit `0` is a price.
+    /// The compiled row's cache figures are kept, the row having no cache
+    /// keys (*Rev 67*), and its long-prompt rate for each price the row
+    /// leaves out: a price the row states is its own at every length.
     pub fn reload_from_config(
         &self,
         config_models: &HashMap<String, crate::config::ModelConfigEntry>,
         disabled: &HashSet<ProviderType>,
     ) {
         // A row the person writes prices a model; its request contract is
-        // the model's own, so the compiled row's is kept (C7a).
+        // the model's own, so the compiled row's is kept (C7a), and so are
+        // the compiled figures it leaves out (MODEL-ROWS).
         let compiled = Self::default_models();
         for (model_id, entry) in config_models {
             if let Some(provider) = crate::config::parse_provider_type_pub(&entry.provider) {
                 if disabled.contains(&provider) {
                     continue;
                 }
+                let compiled_row = compiled.get(model_id);
+                let input = entry
+                    .input_price
+                    .or(compiled_row.map(|row| row.input_price_per_million));
+                let output = entry
+                    .output_price
+                    .or(compiled_row.map(|row| row.output_price_per_million));
+                let states_both_prices =
+                    entry.input_price.is_some() && entry.output_price.is_some();
                 self.person_rows
                     .write()
                     .unwrap_or_else(|p| p.into_inner())
-                    .insert(model_id.clone());
+                    .insert(
+                        model_id.clone(),
+                        PriceGaps {
+                            input: input.is_none(),
+                            output: output.is_none(),
+                        },
+                    );
                 self.register(
                     model_id.clone(),
                     ModelInfo {
                         provider,
-                        input_price_per_million: entry.input_price.unwrap_or(0.0),
-                        output_price_per_million: entry.output_price.unwrap_or(0.0),
+                        // A placeholder where `PriceGaps` names the half.
+                        input_price_per_million: input.unwrap_or(0.0),
+                        output_price_per_million: output.unwrap_or(0.0),
                         context_window: entry.context.unwrap_or(200_000),
                         discovered: false,
                         supports_image: entry.supports_image.unwrap_or(false),
@@ -563,10 +623,23 @@ impl ModelRegistry {
                         // until they say otherwise.
                         supports_tools: entry.supports_tools.unwrap_or(true),
                         declared: true,
-                        long_prompt: None,
-                        cache_rates: None,
-                        request_contract: compiled
-                            .get(model_id)
+                        // Per half: a price the row leaves out is the
+                        // compiled row's, its long-prompt rate included; a
+                        // price the row states is its own at every length.
+                        long_prompt: compiled_row
+                            .and_then(|row| row.long_prompt)
+                            .filter(|_| !states_both_prices)
+                            .map(|long| LongPromptRate {
+                                above_input_tokens: long.above_input_tokens,
+                                input_price_per_million: entry
+                                    .input_price
+                                    .unwrap_or(long.input_price_per_million),
+                                output_price_per_million: entry
+                                    .output_price
+                                    .unwrap_or(long.output_price_per_million),
+                            }),
+                        cache_rates: compiled_row.and_then(|row| row.cache_rates),
+                        request_contract: compiled_row
                             .map_or(RequestContract::NONE, |row| row.request_contract),
                     },
                 );
@@ -600,7 +673,7 @@ impl ModelRegistry {
                 .person_rows
                 .read()
                 .unwrap_or_else(|p| p.into_inner())
-                .contains(model_id)
+                .contains_key(model_id)
         {
             return false;
         }
@@ -613,52 +686,81 @@ impl ModelRegistry {
 
     /// The price the registry knows for a model.
     ///
-    /// `None` for an id it has never met, and for one only a keyed provider's
-    /// discovery registered ([`Self::is_unpriced`]): that row's 0 / 0 is the
-    /// absence of a price, not a price (O-18).
+    /// `None` for an id it has never met, and for one with no price anyone
+    /// stated ([`Self::is_unpriced`], both halves): only a keyed provider's
+    /// discovery registered it, or a `[models]` row left out both prices
+    /// and no compiled row names it — that row's 0 / 0 is the absence of a
+    /// price, not a price (O-18; MODEL-ROWS). A row missing one price
+    /// names it in `unpriced`.
     pub fn get_pricing(&self, model_id: &str) -> Option<PricingInfo> {
         let local = self.local_server_providers();
+        let person_rows = self.person_rows.read().unwrap_or_else(|p| p.into_inner());
         self.models
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .filter(|info| !Self::unpriced(info, &local))
-            .map(|info| PricingInfo {
+            .map(|info| (info, Self::unpriced(model_id, info, &local, &person_rows)))
+            .filter(|(_, gaps)| *gaps != PriceGaps::BOTH)
+            .map(|(info, unpriced)| PricingInfo {
                 input_price_per_million: info.input_price_per_million,
                 output_price_per_million: info.output_price_per_million,
                 long_prompt: info.long_prompt,
                 cache_rates: info.cache_rates,
+                unpriced,
             })
     }
 
-    /// Whether this id is registered with no price anyone stated: a keyed
-    /// provider's discovery listed it, and neither a compiled row nor a
-    /// `[models]` row prices it.
+    /// Whether this id is registered with a price no one stated: a keyed
+    /// provider's discovery listed it and neither a compiled row nor a
+    /// `[models]` row prices it, or a `[models]` row left a price out and
+    /// no compiled row names the id (MODEL-ROWS, *Rev 97* (b)).
     ///
-    /// Such a row stays routable; the cost tracker counts it at its fallback
-    /// for an unknown id (O-18 (b)). A discovered row is priced at its 0
-    /// instead where it runs on this machine: a local provider's (L8; "local"
-    /// is the set whose provider needs no key, only Ollama), and a keyed
-    /// provider's the router found on a local server (item 17): its
+    /// Such a row stays routable; the cost tracker counts the missing price
+    /// at its fallback for an unknown id (O-18 (b)). It is priced at 0
+    /// instead where it runs on this machine: a local provider's (L8;
+    /// "local" is the set whose provider needs no key, only Ollama), and a
+    /// keyed provider's the router found on a local server (item 17): its
     /// runtime-config `base_url` (learning's LR7 test) and the address it
     /// was built to call both on loopback or the home network.
     pub fn is_unpriced(&self, model_id: &str) -> bool {
         let local = self.local_server_providers();
+        let person_rows = self.person_rows.read().unwrap_or_else(|p| p.into_inner());
         self.models
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .is_some_and(|info| Self::unpriced(info, &local))
+            .is_some_and(|info| Self::unpriced(model_id, info, &local, &person_rows).any())
     }
 
-    fn unpriced(info: &ModelInfo, local_servers: &HashSet<String>) -> bool {
-        !info.declared
-            && !info.provider.is_local()
-            && !local_servers.contains(&info.provider.to_string())
+    /// Whether `provider` runs on a local server though keyed (item 17),
+    /// as the router last judged it.
+    pub(crate) fn is_local_server_provider(&self, provider: &ProviderType) -> bool {
+        self.local_server_providers()
+            .contains(&provider.to_string())
     }
 
-    /// Taken before `models`, never while holding it (nothing takes the two
-    /// the other way round).
+    /// The prices of `info` (registered as `model_id`) the tracker counts at
+    /// its fallback: none on a provider that runs on this machine or the
+    /// home network; both for a row only discovery wrote; for a person's
+    /// row, the ones it left out with no compiled row behind them.
+    fn unpriced(
+        model_id: &str,
+        info: &ModelInfo,
+        local_servers: &HashSet<String>,
+        person_rows: &HashMap<String, PriceGaps>,
+    ) -> PriceGaps {
+        if info.provider.is_local() || local_servers.contains(&info.provider.to_string()) {
+            PriceGaps::default()
+        } else if !info.declared {
+            PriceGaps::BOTH
+        } else {
+            person_rows.get(model_id).copied().unwrap_or_default()
+        }
+    }
+
+    /// Taken before `person_rows` and `models`, never while holding either
+    /// (nothing takes them the other way round; `person_rows` is likewise
+    /// never taken while holding `models`).
     fn local_server_providers(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
         self.local_server_providers
             .read()
@@ -948,7 +1050,7 @@ impl ModelRegistry {
         let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
         let mut count = 0;
         for (id, info) in models.iter_mut() {
-            let compiled_only = COMPILED_IDS.contains(id) && !person_rows.contains(id);
+            let compiled_only = COMPILED_IDS.contains(id) && !person_rows.contains_key(id);
             if info.provider == *provider && !info.discovered && (compiled || !compiled_only) {
                 info.discovered = true;
                 count += 1;

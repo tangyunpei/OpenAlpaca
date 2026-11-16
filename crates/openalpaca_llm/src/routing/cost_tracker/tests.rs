@@ -376,9 +376,9 @@ fn the_catalogue_carries_gpt_6_1_sols_long_prompt_rate() {
 /// A row with no cache figure keeps the tracker's figures from before the
 /// per-row ones: reads at 0.1x and writes at 1.25x its input rate. Here an
 /// id no row names (counted at the $3 fallback) and a `[models]` row the
-/// person writes, which replaces the compiled row whole as it does the
-/// long-prompt rate — so a `[models]` row for `gpt-6.1-sol` reads at 0.1x,
-/// not its compiled 0.05x.
+/// person writes for an id no compiled row names. A `[models]` row for a
+/// compiled id keeps the compiled figures (MODEL-ROWS, *Rev 67*:
+/// `model_rows_tests`'s `a_row_naming_a_compiled_id_keeps_its_cache_figures`).
 #[test]
 fn a_row_with_no_cache_figure_keeps_0_1x_reads_and_1_25x_writes() {
     let tracker = make_tracker();
@@ -391,7 +391,7 @@ fn a_row_with_no_cache_figure_keeps_0_1x_reads_and_1_25x_writes() {
     let registry = Arc::new(ModelRegistry::with_defaults());
     let mut declared = std::collections::HashMap::new();
     declared.insert(
-        "gpt-6.1-sol".to_string(),
+        "gw-row".to_string(),
         crate::config::ModelConfigEntry {
             provider: "openai".to_string(),
             input_price: Some(2.0),
@@ -407,8 +407,8 @@ fn a_row_with_no_cache_figure_keeps_0_1x_reads_and_1_25x_writes() {
     registry.reload_from_config(&declared, &std::collections::HashSet::new());
     let tracker = make_tracker();
     tracker.use_registry(registry);
-    let read = tracker.calculate_cost_with_cache("gpt-6.1-sol", million, 0, 0, million);
+    let read = tracker.calculate_cost_with_cache("gw-row", million, 0, 0, million);
     assert!((read - 0.20).abs() < 1e-9, "[models] row read: {read}");
-    let write = tracker.calculate_cost_with_cache("gpt-6.1-sol", million, 0, million, 0);
+    let write = tracker.calculate_cost_with_cache("gw-row", million, 0, million, 0);
     assert!((write - 2.50).abs() < 1e-9, "[models] row write: {write}");
 }

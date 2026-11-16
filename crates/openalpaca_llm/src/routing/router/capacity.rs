@@ -116,6 +116,7 @@ impl LlmRouter {
                         },
                     );
                 }
+                self.note_unknown_windows(provider_type, &models);
                 if provider_type.is_local() {
                     let withdrawn = self
                         .model_registry
@@ -151,6 +152,47 @@ impl LlmRouter {
         };
 
         self.record_discovery(provider_type, status)
+    }
+
+    /// Say once a model that a keyed provider on a local server — in
+    /// practice the `openai` provider pointed at llama.cpp, LM Studio or
+    /// vLLM on this machine or the home network — listed one with no
+    /// context window and no row gives it one (MODEL-ROWS, *Rev 96* (5)).
+    ///
+    /// The window stays unknown, so a run on the model is budgeted at the
+    /// agent loop's 200,000-token default rather than at
+    /// [`DEFAULT_LOCAL_CONTEXT_WINDOW`]: the stock lead's system prompt and
+    /// tools alone come to more than 8,192 tokens, and a loop sized there
+    /// compacts on every round (the advisor's pick, built as its
+    /// conditional's fallback, option (a) with this warning). A server
+    /// elsewhere is not said, the pick's scope.
+    fn note_unknown_windows(
+        &self,
+        provider_type: &ProviderType,
+        listed: &[crate::routing::model_registry::DiscoveredModel],
+    ) {
+        if provider_type.is_local() || !self.model_registry.is_local_server_provider(provider_type)
+        {
+            return;
+        }
+        for model in listed {
+            let unknown = model.context_window.is_none()
+                && self
+                    .model_registry
+                    .get_model_info(&model.id)
+                    .is_some_and(|info| info.context_window == 0);
+            if unknown && self.unknown_windows_logged.insert(model.id.clone()) {
+                tracing::warn!(
+                    model = %model.id,
+                    provider = %provider_type,
+                    "A model on a server on this machine or the home network reports no \
+                     context window, so a run on it is budgeted at 200,000 tokens and may \
+                     overrun the window the server gives it. Give it a [models.\"<id>\"] row \
+                     with provider = \"{provider_type}\" and context = <its window, in tokens> \
+                     in llm.toml."
+                );
+            }
+        }
     }
 
     /// Where a provider's list could not be read, or was empty, take its

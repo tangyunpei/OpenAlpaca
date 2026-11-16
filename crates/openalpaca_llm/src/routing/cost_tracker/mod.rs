@@ -88,49 +88,68 @@ impl CostTracker {
     /// than that rate's threshold (O-17 (a)), else its standard rate. With
     /// them, the row's cache figures (CACHE-MULT, CACHE-WRITE), multiples
     /// of whichever input rate applies; [`CacheRates::UNSTATED`] for a row
-    /// that states none and for an id no row prices.
+    /// that states none and for an id no row prices. A price no row states
+    /// — a `[models]` row left it out and no compiled row names the id
+    /// (MODEL-ROWS, *Rev 97* (b)) — is counted at the fallback's figure for
+    /// that half, as an id with no price at all is.
     fn pricing_for(&self, model: &str, input_tokens: u32) -> (f64, f64, CacheRates) {
         let registry = self.model_registry.load();
-        if let Some(pricing) = registry.get_pricing(model) {
-            let cache = pricing.cache_rates.unwrap_or(CacheRates::UNSTATED);
-            return match pricing.long_prompt {
-                Some(long) if input_tokens > long.above_input_tokens => (
-                    long.input_price_per_million,
-                    long.output_price_per_million,
+        // An id the catalogue has never met, or one with no price anyone
+        // stated (O-18 (b), MODEL-ROWS) off a local server — the registry
+        // prices one on loopback or the home network at its 0 (item 17).
+        // Where the whole catalogue is local, no call can have cost money,
+        // and billing this one at cloud rates would abort a free run on
+        // fictional spend.
+        let fallback = || {
+            if registry.is_local_only() {
+                (0.0, 0.0)
+            } else {
+                // Otherwise stay conservative: $3/1M input, $15/1M output
+                // (Sonnet-like). Counting high stops a run early; counting a
+                // paid model at 0 would let it pass every cost cap (N4).
+                (3.0, 15.0)
+            }
+        };
+        let priced = match registry.get_pricing(model) {
+            Some(pricing) => {
+                let cache = pricing.cache_rates.unwrap_or(CacheRates::UNSTATED);
+                let (input, output) = match pricing.long_prompt {
+                    Some(long) if input_tokens > long.above_input_tokens => {
+                        (long.input_price_per_million, long.output_price_per_million)
+                    }
+                    _ => (
+                        pricing.input_price_per_million,
+                        pricing.output_price_per_million,
+                    ),
+                };
+                if !pricing.unpriced.any() {
+                    return (input, output, cache);
+                }
+                let (fallback_input, fallback_output) = fallback();
+                let pick =
+                    |gap: bool, fallback: f64, price: f64| if gap { fallback } else { price };
+                (
+                    pick(pricing.unpriced.input, fallback_input, input),
+                    pick(pricing.unpriced.output, fallback_output, output),
                     cache,
-                ),
-                _ => (
-                    pricing.input_price_per_million,
-                    pricing.output_price_per_million,
-                    cache,
-                ),
-            };
-        }
-        // An id the catalogue has never met, or one a keyed provider's
-        // discovery registered with no price (O-18 (b)) off a local server —
-        // the registry prices one on loopback or the home network at its 0
-        // (item 17). Where the whole catalogue is local, no call can have
-        // cost money, and billing this one at cloud rates would abort a free
-        // run on fictional spend.
-        let fallback = if registry.is_local_only() {
-            (0.0, 0.0)
-        } else {
-            // Otherwise stay conservative: $3/1M input, $15/1M output
-            // (Sonnet-like). Counting high stops a run early; counting a paid
-            // model at 0 would let it pass every cost cap (N4).
-            (3.0, 15.0)
+                )
+            }
+            None => {
+                let (input, output) = fallback();
+                (input, output, CacheRates::UNSTATED)
+            }
         };
         if registry.is_unpriced(model) && self.unpriced_announced.insert(model.to_string()) {
             tracing::warn!(
                 model = model,
-                input_price_per_million = fallback.0,
-                output_price_per_million = fallback.1,
-                "Discovered model has no price in the catalogue — its calls are counted \
-                 at the fallback rate. Add a [models.\"<id>\"] row with its price to \
-                 llm.toml to count it at its own."
+                input_price_per_million = priced.0,
+                output_price_per_million = priced.1,
+                "Model has no price in the catalogue or in a [models] row — what no row \
+                 prices is counted at the fallback rate. Give its [models.\"<id>\"] row in \
+                 llm.toml an input_price and an output_price to count it at its own."
             );
         }
-        (fallback.0, fallback.1, CacheRates::UNSTATED)
+        priced
     }
 
     /// Calculate the cost for a given model and token counts.

@@ -116,6 +116,9 @@ pub struct LlmRouter {
     /// Models whose refusal of a forced tool choice was announced — a forced
     /// choice sent to one as `auto` is said once a model (C7a).
     pub(super) forced_choices_logged: DashSet<String>,
+    /// Models a keyed provider on a local server listed with no context
+    /// window, announced once a model (MODEL-ROWS, *Rev 96* (5)).
+    pub(super) unknown_windows_logged: DashSet<String>,
 }
 
 /// Append `candidate` unless it is the model we are already replacing, or is
@@ -155,6 +158,7 @@ impl LlmRouter {
             substitutions_logged: DashSet::new(),
             alias_collapses_logged: DashSet::new(),
             forced_choices_logged: DashSet::new(),
+            unknown_windows_logged: DashSet::new(),
         };
         router.note_local_server_providers();
         router
@@ -190,6 +194,7 @@ impl LlmRouter {
             substitutions_logged: DashSet::new(),
             alias_collapses_logged: DashSet::new(),
             forced_choices_logged: DashSet::new(),
+            unknown_windows_logged: DashSet::new(),
         };
         router.note_local_server_providers();
         router
@@ -238,6 +243,7 @@ impl LlmRouter {
             substitutions_logged: DashSet::new(),
             alias_collapses_logged: DashSet::new(),
             forced_choices_logged: DashSet::new(),
+            unknown_windows_logged: DashSet::new(),
         };
         router.note_local_server_providers();
         router
@@ -1018,3 +1024,6 @@ mod latest_models_tests;
 
 #[cfg(all(test, feature = "openai"))]
 mod compat_server_tests;
+
+#[cfg(all(test, feature = "openai"))]
+mod model_rows_tests;

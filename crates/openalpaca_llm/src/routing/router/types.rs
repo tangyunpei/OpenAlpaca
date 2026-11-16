@@ -110,12 +110,17 @@ pub enum LlmRouterError {
     /// Nothing in the catalogue belongs to a provider that is loaded, so no
     /// model can be called at all. Replaces the "Unknown model: …" and "All
     /// fallback models failed" an owner used to see for a daemon that simply
-    /// had no provider switched on (L3).
+    /// had no provider switched on (L3). Its last sentence is the way out
+    /// for an OpenAI-compatible server whose model list cannot be read,
+    /// which is run only on the models a person's rows name (COMPAT-SERVER;
+    /// MODEL-ROWS, *Rev 96* (1)).
     #[error(
         "No model is available: no enabled provider offers one. Turn one on — Settings → \
          Models in the GUI, or `openalpaca config set ai.<provider>.enabled true` — then \
          `openalpaca llm status` says what is loaded. A local Ollama needs no API key, only \
-         `ollama pull <model>`."
+         `ollama pull <model>`. An OpenAI-compatible server set as the openai provider's \
+         `base_url` whose model list cannot be read runs only the models you name for it: \
+         add each as a `[models.\"<id>\"]` row with `provider = \"openai\"` in llm.toml."
     )]
     NoRoutableModel,
 

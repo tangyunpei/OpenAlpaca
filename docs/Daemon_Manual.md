@@ -312,7 +312,8 @@ them, so its default is one the server listed or one of your `[models]`
 rows, and while the server has listed nothing (its list could not be
 read, or was empty) only your `[models]` rows stand — with none, the
 provider offers no default, and on an install with nothing else loaded
-nothing is routable. Every substitution is announced — one `WARN`
+nothing is routable (the refusal, `No model is available`, names that
+row as the way out). Every substitution is announced — one `WARN`
 per distinct (requested → effective) pair, and the call log carries the model
 actually used. `GET /v1/status` serves the pair:
 
@@ -584,7 +585,12 @@ fallback counts a model Anthropic's or OpenAI's discovery registered with no
 price: it still runs, its spend counts against the caps below, and
 `daemon.log` says once per id that it is counted at the fallback. A
 `[models."<id>"]` row with its `input_price` and `output_price` counts it at
-its own rate, and a price the row leaves out is `0`. A non-streaming OpenAI
+its own rate. A price the row leaves out is no price: for an id with a
+built-in row, that row's price; for any other, the same fallback and the
+same one line in `daemon.log` ($3 / $15; `0` for Ollama, and on a server on
+this machine or your home network, below). An explicit `0` is a price and stays `0`. A
+row written before this build that gives no prices for a model on a server
+elsewhere was counted at `0` and is now counted at $3 / $15. A non-streaming OpenAI
 answer, on either of its APIs, is counted by the model its body names,
 which may be a dated snapshot of the
 id asked for (such as `gpt-4o-mini-2024-07-18`): a snapshot the catalogue
@@ -609,8 +615,9 @@ resolves to, and neither is any other address: such a server is counted
 like a cloud one, and a `[models."<id>"]` row with `input_price = 0` and
 `output_price = 0` keeps such a model at `0`. A local `base_url` that
 forwards to a paid service (a gateway, a tunnel) has the models its
-discovery lists that nothing prices counted at `0` too; a built-in row it
-serves keeps its price.
+discovery lists that nothing prices counted at `0` too, and so is a price
+a `[models]` row leaves out there; a built-in row it serves keeps its
+price, and so does a `[models]` row naming that built-in id.
 
 A model whose provider prices a long prompt higher carries that second rate
 in its built-in row: `gpt-6.1-sol` costs $2 / $10 per million tokens, and a
@@ -644,8 +651,11 @@ provider, priced by your row, or at the $3 / $15 fallback when only the
 list names it, with none of a built-in row's rules. An `llm.toml` seeded
 before this build keeps naming the ids it was seeded with; nothing
 rewrites it and nothing warns at start. A `[models."<id>"]`
-row replaces a built-in row whole, its long-prompt rate and cache rates
-included.
+row naming a built-in id keeps that row's prices where it leaves them out,
+its cache rates always (a row has no cache keys), and its long-prompt rate
+for each price it leaves out: a price the row gives is counted at that
+price at any length, and one it leaves out at the built-in row's, its long
+rate past the threshold included.
 
 Cached input is counted at each built-in row's own rates, as the
 providers' pages gave them on 2026-11-14. A cache read costs 0.025x the
@@ -656,7 +666,7 @@ input rate on `claude-fable-5-2`, 0.05x on `claude-opus-5-5`,
 daemon asks for, and OpenAI's default 30-minute cache. The
 OpenAI provider reads the written count from the usage on both of its
 APIs. A model with no built-in row — a discovered one, an unknown id, or
-one a `[models]` row describes — is counted at 0.1x for a read and 1.25x
+a `[models]` row for an id with no built-in row — is counted at 0.1x for a read and 1.25x
 for a write. On a long prompt both scale with the long rate.
 
 | Cap | Default | Key in `daemon.toml` |
@@ -2228,6 +2238,6 @@ the app strips them for display and changes nothing else.
 - DB lock/contention: ensure single daemon instance and avoid conflicting external writers.
 - Config not loading: verify resolved config directory and presence of expected files.
 - GUI/CLI auth failures: ensure they read the current discovery token and instance.
-- "No model is available: no enabled provider offers one": nothing is routable. Turn a provider on (`openalpaca config set ai.<provider>.enabled true`, or Settings → Models in the GUI), then check `openalpaca llm status`. A cloud provider also needs a key (`openalpaca llm keys add`), and adding a key alone does not enable it. A local Ollama needs no API key, only `ollama pull <model>`. `GET /v1/status` shows the same fact as `llm.effective_default_model: null`.
+- "No model is available: no enabled provider offers one": nothing is routable. Turn a provider on (`openalpaca config set ai.<provider>.enabled true`, or Settings → Models in the GUI), then check `openalpaca llm status`. A cloud provider also needs a key (`openalpaca llm keys add`), and adding a key alone does not enable it. A local Ollama needs no API key, only `ollama pull <model>`. An OpenAI-compatible server set as the `openai` provider's `base_url` whose model list cannot be read runs only the models you name for it, each a `[models."<id>"]` row with `provider = "openai"`; the message says so too. `GET /v1/status` shows the same fact as `llm.effective_default_model: null`.
 - A local-model turn stalls, then answers all at once: the stream sat idle for 90 s (usually the model still loading into memory) and the turn was retried without streaming. Warm the model once before a long run. See [Timeouts and output ceiling](#timeouts-and-output-ceiling).
 - A tool call "timed out after 300s": nobody answered its approval prompt. Answer it from the GUI or with `openalpaca tasks confirmations list|approve|deny`; an API client that cannot answer should send `unattended: true`, so the call is refused at once instead (the CLI does this by itself when it is piped). See [Tool confirmations](#tool-confirmations).

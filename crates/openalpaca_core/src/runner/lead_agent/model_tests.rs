@@ -1577,3 +1577,187 @@ async fn a_per_call_openai_id_is_refused_on_a_compatible_server() {
         "{refusal}"
     );
 }
+
+// ── MODEL-ROWS: the stock lead against a local server's 8,192 ──────────────
+
+/// What a stock lead run on a local compatible server measured.
+struct StockLead {
+    /// The window its loop was sized to.
+    window: usize,
+    /// Its fixed zone: the system prompt and the tools, as the loop counts
+    /// them (bytes / 4).
+    system_prompt: usize,
+    tools: usize,
+    /// How many tools its first request carried.
+    tool_count: usize,
+    /// The rounds that compacted, and the lead's requests.
+    compactions: usize,
+    lead_requests: usize,
+    /// Requests without the lead's tools: a compaction's summary calls.
+    other_requests: usize,
+}
+
+/// The stock lead on [`SERVED`] at a loopback compatible server, its row's
+/// window `window` (0: none known, as the server's list leaves it), over
+/// `rounds` rounds of one cheap tool call each: the builtins and the
+/// memory reads in the registry, the built-in skills in the catalogue,
+/// the shipped templates, the default `daemon.toml`, no `USER.md`, no
+/// extension — the smallest surface a daemon gives its lead.
+async fn stock_lead(window: u32, rounds: usize) -> StockLead {
+    let mut script: Vec<ChatResponse> = (0..rounds)
+        .map(|_| {
+            answer(
+                &"a round's notes ".repeat(64),
+                vec![call("check_subagent_status", serde_json::json!({}))],
+            )
+        })
+        .collect();
+    script.push(answer("done", vec![]));
+    let models = Models::new(script);
+    let router = openai_install_at(&models, COMPAT_BASE, false, "");
+    let mut info = router.model_registry().get_model_info(SERVED).unwrap();
+    info.context_window = window;
+    router.model_registry().register(SERVED.to_string(), info);
+
+    let home = tempfile::tempdir().unwrap();
+    let home_root = home.path().canonicalize().unwrap();
+    let _guard = crate::test_util::HomeStoreGuard::set(&home_root);
+    let registry = ToolRegistry::default();
+    for tool in crate::tools::builtins::builtin_tools(None, None, None) {
+        registry.register(tool).unwrap();
+    }
+    let memory = Arc::new(crate::memory::service::MemoryService::open_default(None));
+    for tool in crate::tools::builtins::memory_read_tools(memory) {
+        registry.register(tool).unwrap();
+    }
+    let catalog = crate::orchestrator::skill_catalog::SkillCatalog::new();
+    let pack = openalpaca_storage::store::bundled_skills_dir().unwrap();
+    assert!(
+        catalog.load_bundled_layer(&pack) > 0,
+        "the built-in skills load"
+    );
+    let shared = shipped();
+    let lead = instance(&shared, "lead_agent");
+    let bus = EventBus::default();
+    let mut events = bus.subscribe();
+    let result = run_lead_agent(
+        &lead,
+        "weigh the herd",
+        router,
+        Arc::new(registry),
+        shared,
+        bus,
+        None,
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(catalog),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+        None,
+    )
+    .await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+
+    let mut budget = None;
+    let mut compactions = 0;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            crate::events::SystemEvent::CompactionTriggered { .. } => compactions += 1,
+            crate::events::SystemEvent::ContextBudgetComputed {
+                window_size,
+                section_breakdown,
+                ..
+            } if budget.is_none() => budget = Some((window_size, section_breakdown)),
+            _ => {}
+        }
+    }
+    let (window, sections) = budget.expect("the lead publishes its budget");
+    let section = |name: &str| {
+        sections
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(0, |(_, t)| *t)
+    };
+    let seen = models.seen();
+    StockLead {
+        window,
+        system_prompt: section("system_prompt"),
+        tools: section("tools"),
+        tool_count: models.lead_request(0).tools.len(),
+        compactions,
+        lead_requests: seen.iter().filter(|s| s.lead).count(),
+        other_requests: seen.iter().filter(|s| !s.lead).count(),
+    }
+}
+
+/// **MODEL-ROWS's measurement** (*Rev 96* (5), the advisor's pick of
+/// 2026-11-16, CONDITIONAL on it): the stock lead's prompt and tools do
+/// not fit 8,192 tokens, so a local compatible server's model is not sized
+/// at `DEFAULT_LOCAL_CONTEXT_WINDOW` and keeps the 200,000 default, warned
+/// once (option (a)). Sized at 8,192, the fixed zone alone — 5,087 tokens
+/// of system prompt and 5,320 of 17 tools at this commit — is past the
+/// window, let alone its compaction trigger (window less 16.5 %), so the
+/// loop compacts on every round and cannot get under it: what a turn adds
+/// is folded away each round. At the default, no round compacts. A change
+/// that brings the fixed zone under the trigger turns this red: then
+/// *Rev 96* (5)'s (b) is worth asking again. The tool count and the
+/// rounds are not pinned: a lead tool added or taken away moves the
+/// figures, not the finding.
+#[tokio::test]
+async fn the_stock_lead_does_not_fit_a_local_server_s_8192_window() {
+    const ROUNDS: usize = 6;
+    let small = stock_lead(8_192, ROUNDS).await;
+    assert_eq!(small.window, 8_192);
+    let fixed = small.system_prompt + small.tools;
+    let trigger = 8_192 - (8_192.0 * 0.165) as usize;
+    assert!(
+        fixed > 8_192,
+        "the fixed zone, {} + {} = {fixed}, is past the whole window",
+        small.system_prompt,
+        small.tools
+    );
+    assert!(fixed > trigger);
+    assert_eq!(
+        small.compactions, small.lead_requests,
+        "every round compacts: {} of {}",
+        small.compactions, small.lead_requests
+    );
+    assert!(
+        small.other_requests > 0,
+        "and its summary tier asks the same server to summarise"
+    );
+
+    let as_built = stock_lead(0, ROUNDS).await;
+    assert_eq!(as_built.window, DEFAULT_WINDOW, "as built: the default");
+    assert_eq!(as_built.system_prompt + as_built.tools, fixed);
+    assert_eq!(as_built.compactions, 0, "no round compacts at the default");
+    assert_eq!(as_built.other_requests, 0);
+    eprintln!(
+        "MEASURE window=8192 system_prompt={} tools={} tool_count={} fixed={fixed} \
+         trigger={trigger} rounds={} compactions={} summary_requests={}; \
+         window={} compactions={} summary_requests={}",
+        small.system_prompt,
+        small.tools,
+        small.tool_count,
+        small.lead_requests,
+        small.compactions,
+        small.other_requests,
+        as_built.window,
+        as_built.compactions,
+        as_built.other_requests
+    );
+}
