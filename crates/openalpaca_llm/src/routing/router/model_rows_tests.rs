@@ -1093,6 +1093,47 @@ fn a_compiled_flag_comes_before_a_discovered_one() {
     assert!(info.supports_reasoning, "row, then discovery");
 }
 
+/// The PDF flag rides the same rung: a row pricing a compiled id whose
+/// compiled row reads PDFs (`claude-opus-5-5`) and leaving the flag out
+/// keeps it, whatever a discovery read, in both orders. `gpt-6.1-sol`, the
+/// test above, cannot show it: its compiled `supports_document` is `false`.
+/// (No compiled row says `supports_audio`, so the audio flag's compiled
+/// rung has nothing to keep today.)
+#[test]
+fn a_compiled_pdf_flag_comes_before_a_discovered_one() {
+    let opus = compiled("claude-opus-5-5");
+    assert!(
+        opus.supports_document,
+        "the flag the rule can be seen keeping"
+    );
+    let bare = || crate::routing::model_registry::ModelInfo {
+        supports_document: false,
+        ..opus.clone()
+    };
+    let priced = [(
+        "claude-opus-5-5",
+        unsized_row("anthropic", Some(4.0), Some(20.0)),
+    )];
+
+    // Discovery first, then the row.
+    let registry = ModelRegistry::new(HashMap::new());
+    registry.register_discovered("claude-opus-5-5".to_string(), bare());
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    assert!(
+        info_of(&registry, "claude-opus-5-5").supports_document,
+        "discovery, then row"
+    );
+
+    // The row first, then discovery.
+    let registry = ModelRegistry::new(HashMap::new());
+    registry.reload_from_config(&config_of(&priced), &HashSet::new());
+    registry.register_discovered("claude-opus-5-5".to_string(), bare());
+    assert!(
+        info_of(&registry, "claude-opus-5-5").supports_document,
+        "row, then discovery"
+    );
+}
+
 /// A later discovery's reading replaces a flag the row left out (the
 /// latest wins, *Rev 115*'s second item, (a)): a tag `/api/show` first
 /// describes with vision and tools, then, with no provider turned off in

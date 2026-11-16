@@ -148,8 +148,9 @@ export type EventsStatus =
 /**
  * "You may have missed events" — the only honest signal available, since the
  * server never tells a lagged client that it dropped frames. Emitted whenever
- * the socket comes back after having been down, and whenever the daemon
- * identity changed underneath us.
+ * the socket comes back after having been down, on a first open that a
+ * failed start came before (a query that asked during it was left in error),
+ * and whenever the daemon identity changed underneath us.
  */
 export interface ResyncSignal {
   reason: "reconnected" | "instance_changed";
@@ -240,6 +241,16 @@ export class DaemonEventsClient {
   private nextEventId = 0;
   private instanceId: string | null = null;
   private everConnected = false;
+  /**
+   * Something failed since the socket last opened (or since this client was
+   * made): a bootstrap the shell refused, `starting` included, a rung, or a
+   * socket that closed before it opened. A query that asked meanwhile may
+   * have failed for good — its ask and its two retries (`shouldRetry`) all
+   * met a daemon that was not there yet — so the next open refetches, the
+   * window's first included. A first open with nothing failed before it
+   * still signals nothing.
+   */
+  private failedSinceOpen = false;
   private disconnectedAt: number | null = null;
 
   private status: EventsStatus = "idle";
@@ -323,6 +334,7 @@ export class DaemonEventsClient {
       this.openSocket(info);
     } catch (error) {
       if (gen !== this.generation) return;
+      this.failedSinceOpen = true;
       if (this.parkOrWait(error)) return;
       this.bootError = error instanceof Error ? error.message : String(error);
       this.setStatus("error");
@@ -394,9 +406,14 @@ export class DaemonEventsClient {
       this.bootError = null;
       this.backoffMs = BACKOFF_BASE_MS;
       this.setStatus("connected");
-      // A first connect cannot have missed anything; every later one can.
-      if (this.everConnected) this.emitResync("reconnected");
+      // A first connect with nothing failed before it cannot have missed
+      // anything; every later one can, and so can a first one that a failed
+      // start came before: a query that asked during it is left in error.
+      if (this.everConnected || this.failedSinceOpen) {
+        this.emitResync("reconnected");
+      }
       this.everConnected = true;
+      this.failedSinceOpen = false;
       this.disconnectedAt = null;
     };
 
@@ -463,6 +480,7 @@ export class DaemonEventsClient {
   }
 
   private scheduleReconnect(): void {
+    this.failedSinceOpen = true;
     if (this.reconnectTimer !== null || !this.reconnectEnabled) return;
     if (this.disconnectedAt === null) this.disconnectedAt = this.deps.now();
 
@@ -488,6 +506,7 @@ export class DaemonEventsClient {
         })
         .catch((error: unknown) => {
           if (gen !== this.generation) return;
+          this.failedSinceOpen = true;
           // A rung that found another instance re-bootstrapped, and the
           // shell may have answered that with a Q04 refusal.
           if (this.parkOrWait(error)) return;

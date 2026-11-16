@@ -1298,6 +1298,37 @@ fn after_the_report_the_spawn_s_wait_is_over_for_every_reader() {
     );
 }
 
+/// After the timeout report has ended the spawn's wait, this app's own
+/// daemon, answering at last, is reused as the daemon this app started:
+/// only the watch's list of this run's spawns still knows it (the pending
+/// spawn is gone with the report), so `gui.log` never calls it one already
+/// running.
+#[test]
+fn this_app_s_own_daemon_reused_after_the_report_is_named_as_its_own() {
+    let ours = this_build_discovery(9090);
+    let script_d = ours.clone();
+    let answers_at = STARTING_BUDGET + Duration::from_secs(20);
+    let mut world = FakeWorld::new(move |at, spawns| match spawns {
+        0 => look(DiscoveryRead::Missing, silent(), false),
+        _ if at < answers_at => booting(&script_d),
+        _ => healthy(&script_d),
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    let (_, result) = ask_until_settled(&mut world, &watch);
+    assert_eq!(kind(&result), "still_starting");
+    world.pass(Duration::from_secs(30));
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    assert_eq!(world.spawns, 1);
+    assert!(
+        world
+            .lines
+            .last()
+            .is_some_and(|l| l.ends_with("the daemon this app started.")),
+        "{:?}",
+        world.lines
+    );
+}
+
 /// A spawned daemon that never writes a discovery file, or whose pid is
 /// gone, fails at 5 s with the two pinned sentences' report.
 #[test]
