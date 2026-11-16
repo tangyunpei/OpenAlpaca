@@ -2541,6 +2541,43 @@ fn an_interactive_zshs_background_child_is_gone_after_a_successful_capture() {
     );
 }
 
+/// *Rev 99*'s fourth item as built, option (a): after a non-zero exit the
+/// capture reaps the shell and leaves its process group as it was, so a
+/// child a failing profile put in the background is still running when
+/// the capture has answered. Option (b), the group killed after a failed
+/// exit too, an enforcement point, is the owner's (built first in
+/// LOGIN-CAPTURE and taken out on its review).
+#[cfg(unix)]
+#[test]
+fn a_failed_captures_process_group_is_left_as_it_was() {
+    let guard = HomeStoreGuard::set("failed-group-left");
+    let pid_file = guard.root().join("background.pid");
+    let shell = fake_login_shell(
+        guard.root(),
+        "failing-backgrounding-shell",
+        &format!(
+            "/bin/sleep 47 >/dev/null 2>&1 &\n\
+             echo $! > '{pid}'\n\
+             PATH='{CAPTURED_PATH}'; export PATH\n\
+             eval \"$3\"\n\
+             exit 3",
+            pid = pid_file.display()
+        ),
+    );
+    let outcome = capture_login_path(&shell, Instant::now(), Duration::from_secs(10), &[]);
+    let child = pid_in(&pid_file).expect("the profile started its child");
+    let _stray = KillOnDrop(child);
+
+    assert_eq!(
+        outcome.map(|captured| captured.path),
+        Err(CaptureFailure::Exited("exit status: 3".into()))
+    );
+    assert!(
+        !gone_within(child, Duration::from_millis(500)),
+        "the group was killed after a failed exit"
+    );
+}
+
 /// *Rev 92* (1): every `OPENALPACA_` name the list holds is dropped with a
 /// `gui.log` warning naming it, as the app's own four are — a listed
 /// `OPENALPACA_HOME_STORE` would point the daemon at a store the app does
@@ -2591,12 +2628,24 @@ fn a_listed_openalpaca_name_is_dropped_with_a_warning_naming_it() {
 }
 
 /// *Rev 91* (3), the output's side: once the group is killed nothing holds
-/// the shell's standard output, so the capture's reader of it has ended by
-/// the time the capture answers — no thread is left behind per launch.
+/// the shell's standard output, and the capture waits for its reader of it
+/// to reach the end, so the reader has ended by the time the capture
+/// answers — no thread is left behind per launch. The reader is held 100 ms
+/// past the pipe's end (`READER_END_DELAY_MS`, under the 250 ms grace), so
+/// a capture that answered once the end marker was in, without that wait,
+/// would leave it running here every time, not only when the kill's end
+/// of the pipe came late (*Rev 99*'s built-beyond item).
 #[cfg(unix)]
 #[test]
 fn the_output_reader_has_ended_when_the_capture_answers() {
     use std::sync::atomic::Ordering;
+    /// Puts the reader's delay back to 0 however the test ends.
+    struct NoDelayOnDrop;
+    impl Drop for NoDelayOnDrop {
+        fn drop(&mut self) {
+            login_path::READER_END_DELAY_MS.store(0, Ordering::SeqCst);
+        }
+    }
     let guard = HomeStoreGuard::set("reader-ended");
     // A reader an earlier test's capture left is given time to end first.
     let by = Instant::now() + Duration::from_secs(5);
@@ -2608,6 +2657,8 @@ fn the_output_reader_has_ended_when_the_capture_answers() {
         0,
         "a reader from before this test is still running"
     );
+    let _no_delay = NoDelayOnDrop;
+    login_path::READER_END_DELAY_MS.store(100, Ordering::SeqCst);
     let pid_file = guard.root().join("background.pid");
     let shell = backgrounding_login_shell(guard.root(), &pid_file);
     let outcome = capture_login_path(&shell, Instant::now(), Duration::from_secs(10), &[]);

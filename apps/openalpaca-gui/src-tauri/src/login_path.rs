@@ -101,6 +101,13 @@ const OWN_PREFIX: &str = "OPENALPACA_";
 pub(crate) static OUTPUT_READERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// How long, in milliseconds, the output's reader waits after the pipe's
+/// end before it counts itself ended: 0 but in the test that pins the
+/// capture's wait for its reader, which sets it below [`READER_GRACE`].
+#[cfg(test)]
+pub(crate) static READER_END_DELAY_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// The line printed before the environment.
 const START_MARKER: &str = "__OPENALPACA_LOGIN_ENV_START__";
 
@@ -805,6 +812,10 @@ pub(crate) fn capture_login_path(
                     }
                 }
                 drop(stdout);
+                #[cfg(test)]
+                std::thread::sleep(Duration::from_millis(
+                    READER_END_DELAY_MS.load(std::sync::atomic::Ordering::SeqCst),
+                ));
                 #[cfg(test)]
                 OUTPUT_READERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 sink.lock().unwrap_or_else(|p| p.into_inner()).1 = true;
