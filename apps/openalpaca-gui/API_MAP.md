@@ -195,7 +195,14 @@ connection again through `refreshConnection` — one `get_connection_info` for
 every request refused together — and sends the request once more when the
 same `instanceId` names another token; a URL already built with a token
 (`wsUrl`, `sseUrl`, a content URL) carries what the cache held when it was
-built (`tasks/pending-decisions.md` §1 _Rev 93_).
+built (`tasks/pending-decisions.md` §1 _Rev 93_). So the window also reads the
+connection again once its cache is an hour old by the wall clock
+(`keepConnectionFresh`, mounted with `QueryProvider`, TOKEN-REREAD): it looks
+at the cache's age once a minute and when the window is shown or focused
+again, never while the window has no daemon by intent; a Mac's sleep stops
+the timer but not the wall clock, so a sleep is counted at the first look
+after the wake. An image's content URL is drawn again with the token read
+(`useArtifactContentUrl`).
 
 Auth on the wire:
 

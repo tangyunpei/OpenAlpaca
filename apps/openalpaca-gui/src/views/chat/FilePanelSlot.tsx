@@ -20,6 +20,7 @@ import { ArtifactDiffTab } from "@/components/work";
 import { ArtifactPreview } from "@/components/work/preview";
 import {
   useArtifact,
+  useArtifactContentUrl,
   useArtifactDiff,
   useArtifactText,
   useArtifactVersions,
@@ -28,7 +29,6 @@ import {
   useTogglePin,
 } from "@/hooks/useArtifacts";
 import { useArtifactFileActions } from "@/hooks/useFiles";
-import { artifactContentUrl } from "@/lib/api/artifacts";
 import { ApiError } from "@/lib/http";
 import { useUiStore } from "@/stores/ui";
 import { HistoryTab } from "@/views/library/HistoryTab";
@@ -57,6 +57,8 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
 
   const plan = model === null ? null : previewPlan(model);
   const content = useArtifactText(artifactId, plan?.mode === "text");
+  // Drawn again when the connection is read again (TOKEN-REREAD).
+  const imageSrc = useArtifactContentUrl(model?.id ?? null);
   useFoundAgain(model, content.isSuccess);
 
   const panelTab = useUiStore((s) => s.panelTab);
@@ -153,7 +155,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
             size="compact"
             meta={{ name: model.name, kind: "image" }}
             content={null}
-            src={artifactContentUrl(model.id)}
+            src={imageSrc}
             note={null}
             failedNote={plan.failedNote}
           />

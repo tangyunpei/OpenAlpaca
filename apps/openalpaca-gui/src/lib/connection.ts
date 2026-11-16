@@ -10,8 +10,10 @@
  *                             of what it wrote to `daemon.log` — its own
  *                             reason, verbatim.
  *   `get_connection_info`   — reads discovery + expiry check. Use on reconnect,
- *                             and when a request is refused `401`: the daemon
- *                             rotates its token while it runs (T21).
+ *                             when a request is refused `401`, and once the
+ *                             cache is an hour old by the wall clock
+ *                             (`keepConnectionFresh`): the daemon rotates its
+ *                             token while it runs (T21).
  *   `read_daemon_log_tail`  — the end of `daemon.log`, read straight from the
  *                             file, so it answers with no daemon serving.
  *   `await_daemon_stopped`  — after `POST /v1/command {"command":"shutdown"}`,
@@ -129,6 +131,8 @@ export type InstanceChangeListener = (
 ) => void;
 
 let current: ConnectionInfo | null = null;
+/** When `current` was read, by the wall clock (`Date.now()`); `null` with it. */
+let readAt: number | null = null;
 let bootstrapInFlight: Promise<ConnectionInfo> | null = null;
 let refreshInFlight: Promise<ConnectionInfo> | null = null;
 
@@ -147,6 +151,7 @@ function isConnectionInfo(value: unknown): value is ConnectionInfo {
 
 function publish(info: ConnectionInfo | null): void {
   current = info;
+  readAt = info === null ? null : Date.now();
   for (const listener of connectionListeners) listener(info);
 }
 
@@ -421,6 +426,75 @@ export async function ensureConnection(): Promise<ConnectionInfo> {
 /** Drop the cached connection (tests, and an explicit user-driven reconnect). */
 export function resetConnection(): void {
   publish(null);
+}
+
+// ── Keeping the token fresh (TOKEN-REREAD) ──────────────────────────────────
+
+/**
+ * How old the cached connection may grow, by the wall clock, before the
+ * window reads it again: one hour.
+ *
+ * The daemon renews its token twelve hours after its issue and honours the
+ * one it replaced until that one's `expires_at`, a day after its issue (T21),
+ * so a token is good for at least twelve hours after it was read. A URL that
+ * carries the token in its query — a content URL an `<img>` loads, the chat
+ * stream's `EventSource`, the events socket's — cannot answer a `401` by
+ * reading the connection again as `apiRequest` does; it carries whatever the
+ * cache held when it was built. Reading the cache again well inside those
+ * twelve hours keeps every such URL on a token the daemon honours
+ * (`tasks/pending-decisions.md` §1 _Rev 93_ (b)).
+ */
+export const CONNECTION_REREAD_AFTER_MS = 60 * 60 * 1000;
+
+/** How often the window looks at the cache's age: once a minute. */
+export const CONNECTION_CHECK_EVERY_MS = 60 * 1000;
+
+/**
+ * Read the connection again if the cache is due: `CONNECTION_REREAD_AFTER_MS`
+ * old or more by the wall clock, or read in the future (the clock was set
+ * back). Nothing while there is no cache (the first read is the boot's),
+ * while a boot is in flight, or while the window has no daemon by intent: a
+ * read that finds another instance re-bootstraps, and
+ * `ensure_daemon_running` would start a daemon the user stopped. A failed
+ * read keeps the cache and its stamp, so the next look tries again; the
+ * refusal itself is the socket's and `apiRequest`'s to report.
+ */
+function rereadIfDue(): void {
+  if (current === null || readAt === null) return;
+  if (bootstrapInFlight !== null) return;
+  if (getStopIntent() !== null) return;
+  const age = Date.now() - readAt;
+  if (age >= 0 && age < CONNECTION_REREAD_AFTER_MS) return;
+  refreshConnection().catch(() => undefined);
+}
+
+/**
+ * Keep the cached connection's token fresh while the window is open: look
+ * at its age every `CONNECTION_CHECK_EVERY_MS`, and at once when the window
+ * is shown (never while it is hidden) or focused again. Returns the function
+ * that stops it.
+ *
+ * Judged on the wall clock, not by a timer of hours: a Mac's sleep stops the
+ * webview's timers but not `Date.now()`, so a night's sleep is counted at the
+ * first look after the wake — at most one interval, plus the read, during
+ * which a URL built from the cache may still carry a lapsed token.
+ */
+export function keepConnectionFresh(): () => void {
+  // Listeners of this start's own, so one start's stop never removes
+  // another's (the DOM keeps one copy of a listener added twice).
+  const onTick = () => rereadIfDue();
+  const onFocus = () => rereadIfDue();
+  const onVisible = () => {
+    if (document.visibilityState !== "hidden") rereadIfDue();
+  };
+  const timer = setInterval(onTick, CONNECTION_CHECK_EVERY_MS);
+  document.addEventListener("visibilitychange", onVisible);
+  window.addEventListener("focus", onFocus);
+  return () => {
+    clearInterval(timer);
+    document.removeEventListener("visibilitychange", onVisible);
+    window.removeEventListener("focus", onFocus);
+  };
 }
 
 /** `http(s)://host:port` + path. */

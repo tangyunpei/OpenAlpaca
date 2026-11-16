@@ -152,7 +152,14 @@ whole bridge (`src-tauri/src/lib.rs`):
   accepts the one it replaced only until that one expires, so a window left
   open longer reads the file again, once for every request refused together,
   and sends the request again with the new token (never to a daemon that has
-  restarted).
+  restarted). An address that carries the token itself — an image preview,
+  the chat stream, the events socket — cannot be sent again, so the window
+  also reads the file again once what it holds is an hour old by the clock,
+  looking once a minute and, if what it holds is that old, at once when the
+  window is shown or focused again: a Mac that slept through the night is
+  caught up within a minute of waking, and an image preview is drawn again
+  with the new token. Nothing is read while the daemon is stopped, by this
+  window or elsewhere.
 - `await_daemon_stopped` — waits until a daemon asked to stop is really gone:
   its process first, then the single-instance lock, for up to 15 s. It signals
   nothing.

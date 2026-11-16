@@ -10,6 +10,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -20,7 +21,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Artifact } from "@/lib/api/artifacts";
-import { resetConnection } from "@/lib/connection";
+import { refreshConnection, resetConnection } from "@/lib/connection";
 import { revealLabel } from "@/lib/reveal";
 import { useUiStore } from "@/stores/ui";
 
@@ -345,6 +346,28 @@ describe("LibraryDetail", () => {
     expect(image).toHaveAttribute(
       "src",
       "http://127.0.0.1:9999/v1/artifacts/art-2/content?token=test-token",
+    );
+  });
+
+  // TOKEN-REREAD: the token rides in the image's URL, so a connection read
+  // again draws the image again with the token the daemon honours now.
+  it("draws the image again with the token the connection was read again for", async () => {
+    useUiStore.setState({ openArtifactId: "art-2" });
+    renderView();
+    await screen.findByAltText("spend.png");
+
+    vi.mocked(invoke).mockResolvedValueOnce({
+      baseUrl: "http://127.0.0.1:9999",
+      token: "renewed-token",
+      instanceId: "7f3a1122",
+    });
+    await act(async () => {
+      await refreshConnection();
+    });
+
+    expect(screen.getByAltText("spend.png")).toHaveAttribute(
+      "src",
+      "http://127.0.0.1:9999/v1/artifacts/art-2/content?token=renewed-token",
     );
   });
 

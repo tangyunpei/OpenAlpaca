@@ -11,13 +11,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import daemonPaths from "./daemon-path.json";
 
 import {
+  CONNECTION_CHECK_EVERY_MS,
+  CONNECTION_REREAD_AFTER_MS,
   ConnectionError,
   awaitDaemonStopped,
   bootstrapConnection,
   daemonPathOf,
+  getCachedConnection,
+  keepConnectionFresh,
   readDaemonLogTail,
   refreshConnection,
   resetConnection,
+  setStopIntent,
 } from "./connection";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -199,5 +204,239 @@ describe("the daemon's PATH on the connection", () => {
       reason: null,
       passedKeys: ["AWS_PROFILE", "KUBECONFIG"],
     });
+  });
+});
+
+/**
+ * TOKEN-REREAD (`tasks/pending-decisions.md` §1 _Rev 93_ (b)): the daemon
+ * renews its token twelve hours after its issue and honours the one it
+ * replaced until that one's `expires_at`, so a token the window read is good
+ * for at least twelve hours. The window reads the connection again before its
+ * cache is that old, judged on the wall clock: a Mac's sleep stops the
+ * webview's timers but not `Date.now()`, so a timer of hours alone would let
+ * a night's sleep carry a lapsed token into a content URL, the chat stream's
+ * `EventSource` or the events socket.
+ *
+ * Only the timers are faked here; the wall clock is held still and moved by
+ * hand, so a look that finds the clock unmoved is told apart from one that
+ * finds it moved, which a fake `Date` advancing with the timers cannot show.
+ */
+describe("the connection read again on the wall clock (TOKEN-REREAD)", () => {
+  const HOUR = 60 * 60 * 1000;
+  let wall = 0;
+  let stop: (() => void) | null = null;
+
+  /** The shell's answer from now on: `token`, the same daemon. */
+  function serving(token: string): void {
+    vi.mocked(invoke).mockResolvedValue({
+      baseUrl: "http://127.0.0.1:51823",
+      token,
+      instanceId: "i-1",
+      daemonPath: null,
+    });
+  }
+
+  /** How many times the window read the connection again. */
+  function rereads(): number {
+    return vi
+      .mocked(invoke)
+      .mock.calls.filter(([command]) => command === "get_connection_info")
+      .length;
+  }
+
+  beforeEach(async () => {
+    vi.useFakeTimers({
+      toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"],
+    });
+    wall = Date.UTC(2026, 10, 16, 12);
+    vi.spyOn(Date, "now").mockImplementation(() => wall);
+    setStopIntent(null);
+    serving("t1");
+    await bootstrapConnection();
+    stop = keepConnectionFresh();
+  });
+
+  afterEach(() => {
+    stop?.();
+    stop = null;
+    setStopIntent(null);
+    vi.useRealTimers();
+    vi.mocked(Date.now).mockRestore();
+  });
+
+  it("is due well inside the token's twelve hours", () => {
+    expect(CONNECTION_REREAD_AFTER_MS + CONNECTION_CHECK_EVERY_MS).toBeLessThan(
+      12 * HOUR,
+    );
+  });
+
+  it("reads it at the next look once the wall clock moved past twelve hours, a sleep no timer counted", async () => {
+    wall += 13 * HOUR;
+    serving("t2");
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+
+    expect(rereads()).toBe(1);
+    expect(getCachedConnection()?.token).toBe("t2");
+  });
+
+  it("does not read it while the wall clock stays inside the bound, however many looks", async () => {
+    await vi.advanceTimersByTimeAsync(5 * HOUR);
+    expect(rereads()).toBe(0);
+
+    wall += CONNECTION_REREAD_AFTER_MS - 1;
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(0);
+
+    wall += 1;
+    serving("t2");
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(1);
+    expect(getCachedConnection()?.token).toBe("t2");
+
+    // The read is the new stamp: the next is due a whole bound later.
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(1);
+  });
+
+  it("reads it when the wall clock was set back", async () => {
+    wall -= HOUR;
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(1);
+  });
+
+  it("reads a stale one at once when the window is shown or focused again", async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rereads()).toBe(0);
+
+    wall += 13 * HOUR;
+    serving("t2");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rereads()).toBe(1);
+    expect(getCachedConnection()?.token).toBe("t2");
+
+    wall += 13 * HOUR;
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rereads()).toBe(2);
+  });
+
+  it("does not read a stale one when the window is hidden, and does once it is shown", async () => {
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("hidden");
+    wall += 13 * HOUR;
+    serving("t2");
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rereads()).toBe(0);
+
+      visibility.mockReturnValue("visible");
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rereads()).toBe(1);
+      expect(getCachedConnection()?.token).toBe("t2");
+    } finally {
+      visibility.mockRestore();
+    }
+  });
+
+  it("does not read it while the window has no daemon by intent", async () => {
+    setStopIntent("stopped_here");
+    wall += 13 * HOUR;
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(0);
+    // Nor when the daemon was stopped elsewhere (the CLI, another window).
+    setStopIntent("stopped_elsewhere");
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(0);
+    // Nothing started one either: the boot's call is the only one.
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(([command]) => command === "ensure_daemon_running"),
+    ).toHaveLength(1);
+  });
+
+  it("does not read it while a boot is in flight", async () => {
+    let finish: (answer: unknown) => void = () => undefined;
+    const pending = new Promise((resolve) => {
+      finish = resolve;
+    });
+    vi.mocked(invoke).mockImplementation((command: string) =>
+      command === "ensure_daemon_running"
+        ? pending
+        : Promise.resolve({
+            baseUrl: "http://127.0.0.1:51823",
+            token: "t2",
+            instanceId: "i-1",
+            daemonPath: null,
+          }),
+    );
+    const boot = bootstrapConnection();
+    wall += 13 * HOUR;
+
+    let looked: number;
+    try {
+      await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+      looked = rereads();
+    } finally {
+      // Settled whatever the look did, so no boot is left in flight for the
+      // next test's.
+      finish({
+        baseUrl: "http://127.0.0.1:51823",
+        token: "t3",
+        instanceId: "i-1",
+        daemonPath: null,
+      });
+      await boot;
+    }
+    expect(looked).toBe(0);
+    expect(getCachedConnection()?.token).toBe("t3");
+  });
+
+  it("does not read an empty cache: the first read is the boot's", async () => {
+    resetConnection();
+    wall += 13 * HOUR;
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(0);
+  });
+
+  it("keeps the cache when a read fails and tries again at the next look", async () => {
+    vi.mocked(invoke).mockRejectedValue({
+      kind: "not_running",
+      message: "Discovery not found: daemon may not be running",
+    });
+    wall += 13 * HOUR;
+
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(1);
+    expect(getCachedConnection()?.token).toBe("t1");
+
+    serving("t3");
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(2);
+    expect(getCachedConnection()?.token).toBe("t3");
+  });
+
+  it("leaves nothing behind once stopped, and a second start holds one look", async () => {
+    stop?.();
+    stop = null;
+    expect(vi.getTimerCount()).toBe(0);
+
+    wall += 13 * HOUR;
+    await vi.advanceTimersByTimeAsync(5 * CONNECTION_CHECK_EVERY_MS);
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rereads()).toBe(0);
+
+    // StrictMode's mount, cleanup, mount: the second start is the only one.
+    stop = keepConnectionFresh();
+    expect(vi.getTimerCount()).toBe(1);
   });
 });

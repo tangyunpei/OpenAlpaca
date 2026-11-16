@@ -9,9 +9,15 @@
  */
 
 import { QueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+  CONNECTION_CHECK_EVERY_MS,
+  bootstrapConnection,
+  resetConnection,
+} from "./connection";
 import { daemonEvents, type ResyncSignal, type ServerEvent } from "./events";
 import { QueryProvider } from "./query-provider";
 import { qk } from "./query-keys";
@@ -54,8 +60,13 @@ function invalidated(client: QueryClient, key: readonly unknown[]): boolean {
   return client.getQueryState(key)?.isInvalidated === true;
 }
 
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.mocked(invoke).mockReset();
+  resetConnection();
 });
 
 describe("QueryProvider", () => {
@@ -114,6 +125,41 @@ describe("QueryProvider", () => {
     unmount();
     expect(captured.disposed).toBe(2);
     expect(daemonEvents.disconnect).toHaveBeenCalledOnce();
+  });
+
+  // TOKEN-REREAD: mounting keeps the connection fresh on the wall clock, and
+  // unmounting lets go of it (`lib/connection.ts`, `keepConnectionFresh`).
+  it("reads the connection again on the wall clock while mounted, and not after", async () => {
+    captureSocket();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let wall = Date.UTC(2026, 10, 16, 12);
+    vi.spyOn(Date, "now").mockImplementation(() => wall);
+    vi.mocked(invoke).mockResolvedValue({
+      baseUrl: "http://127.0.0.1:51823",
+      token: "t1",
+      instanceId: "i-1",
+      daemonPath: null,
+    });
+    await bootstrapConnection();
+    const rereads = () =>
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(([command]) => command === "get_connection_info")
+        .length;
+
+    const { unmount } = render(
+      <QueryProvider client={seeded()}>
+        <div />
+      </QueryProvider>,
+    );
+    wall += 13 * 60 * 60 * 1000;
+    await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(1);
+
+    unmount();
+    wall += 13 * 60 * 60 * 1000;
+    await vi.advanceTimersByTimeAsync(5 * CONNECTION_CHECK_EVERY_MS);
+    expect(rereads()).toBe(1);
   });
 
   it("mounts the cache without a socket when asked", () => {

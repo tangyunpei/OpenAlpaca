@@ -22,9 +22,10 @@ import {
   type UseMutationResult,
   type UseQueryResult,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 
 import {
+  artifactContentUrl,
   getArtifact,
   getArtifactDiff,
   getArtifactText,
@@ -38,6 +39,7 @@ import {
   type ArtifactVersion,
   type ListArtifactsQuery,
 } from "@/lib/api/artifacts";
+import { getCachedConnection, subscribeConnection } from "@/lib/connection";
 import { qk } from "@/lib/query-keys";
 import { useUiStore } from "@/stores/ui";
 
@@ -241,4 +243,18 @@ export function useTogglePin(): UseMutationResult<
       void client.invalidateQueries({ queryKey: qk.artifacts.all() });
     },
   });
+}
+
+/**
+ * `artifactContentUrl(id)` — the URL an `<img>` loads, its token in the
+ * query — drawn again whenever the connection is read again: at a `401`, at
+ * a reconnect, and once the cache is an hour old by the wall clock
+ * (`keepConnectionFresh`, TOKEN-REREAD). A view that called
+ * `artifactContentUrl` in its render kept the token it was drawn with until
+ * something else drew it again. `null` before the connection is read, and
+ * for no artifact.
+ */
+export function useArtifactContentUrl(id: string | null): string | null {
+  const info = useSyncExternalStore(subscribeConnection, getCachedConnection);
+  return id === null || info === null ? null : artifactContentUrl(id);
 }

@@ -18,6 +18,7 @@ import { ArtifactDiffTab } from "@/components/work";
 import { ArtifactPreview } from "@/components/work/preview";
 import {
   useArtifact,
+  useArtifactContentUrl,
   useArtifactDiff,
   useArtifactText,
   useArtifactVersions,
@@ -25,7 +26,7 @@ import {
   useTogglePin,
 } from "@/hooks/useArtifacts";
 import { useArtifactFileActions, useDownloadFile } from "@/hooks/useFiles";
-import { artifactContentUrl, type Artifact } from "@/lib/api/artifacts";
+import type { Artifact } from "@/lib/api/artifacts";
 import { escapeHiddenLine } from "@/lib/hidden-chars";
 import { ApiError } from "@/lib/http";
 import { useUiStore, type ArtifactTab } from "@/stores/ui";
@@ -213,6 +214,8 @@ function PreviewTab({ artifact }: { artifact: Artifact }) {
   const plan = previewPlan(artifact);
   const content = useArtifactText(artifact.id, plan.mode === "text");
   useFoundAgain(artifact, content.isSuccess);
+  // Drawn again when the connection is read again (TOKEN-REREAD).
+  const imageSrc = useArtifactContentUrl(artifact.id);
 
   const byline =
     artifact.version_count > 1
@@ -225,9 +228,9 @@ function PreviewTab({ artifact }: { artifact: Artifact }) {
         size="full"
         meta={{ name: artifact.name, kind: "image", byline }}
         content={null}
-        src={artifactContentUrl(artifact.id)}
+        src={imageSrc}
         note={
-          artifactContentUrl(artifact.id) === null
+          imageSrc === null
             ? "Not connected to the daemon, so the image cannot be loaded."
             : null
         }
