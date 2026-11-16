@@ -276,7 +276,7 @@ pub fn make_discovery(host: &str, port: u16, instance_id: String, version: &str)
         auth: issue_auth(now),
         build: Build {
             version: version.to_string(),
-            protocol: 1,
+            protocol: crate::support::protocol::reported(),
         },
     }
 }
@@ -286,12 +286,18 @@ pub fn make_discovery(host: &str, port: u16, instance_id: String, version: &str)
 // ============================================================================
 
 /// Simplified connection info returned to GUI/CLI.
+///
+/// `version` and `protocol` (Q04) are the daemon's `build.version` and
+/// `build.protocol`, additive: an older shell's webview never reads them, and
+/// a window reads them as absent from an older shell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInfo {
     pub base_url: String,
     pub token: String,
     pub instance_id: String,
+    pub version: String,
+    pub protocol: u32,
 }
 
 impl From<&Discovery> for ConnectionInfo {
@@ -300,6 +306,8 @@ impl From<&Discovery> for ConnectionInfo {
             base_url: format!("http://{}:{}", d.listen.host, d.listen.port),
             token: d.auth.token.clone(),
             instance_id: d.instance_id.clone(),
+            version: d.build.version.clone(),
+            protocol: d.build.protocol,
         }
     }
 }

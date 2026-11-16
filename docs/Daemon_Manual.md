@@ -873,7 +873,7 @@ extension routes differ by design: they answer a flat `{"error": "<word>"}`.
 | Method and path | Purpose |
 |---|---|
 | `GET /` | Name and version. Public. |
-| `GET /v1/health` | Liveness: status, version, pid, instance id. Public. |
+| `GET /v1/health` | Liveness: status, version, pid, instance id, and `protocol`, the wire protocol the daemon speaks, which the app judges it by (Q04). Public. |
 | `GET /v1/status` | Where the daemon keeps things and how it is doing: store root, state dir, database path, project root, start time and uptime, schema version, `log_path` (only when a launcher — `openalpaca daemon start` or the GUI app — manages the log), upload and artifact bytes, the session-log limits and the last boot sweep, `routing.resume_enabled`, the `llm` block described under [The effective model](#the-effective-model), and `busy` — what the daemon has in flight right now, as three counts and never contents: `running_tasks` (runs queued, running or paused, which a stop would leave `interrupted`), `pending_confirmations` (approval prompts nobody has answered) and `connected_clients` (open `/v1/events` sockets, the caller's own included). `busy` is `null` on a daemon with no confirmation broker, rather than a block with a guessed zero in it. |
 | `GET /v1/me` | The local user id, the default lane key, and the sources this user has conversations under. |
 | `POST /v1/command` | Daemon commands: `echo`, `process` (runs a full turn), `link_generate`, `link_consume`, `shutdown`. Takes `unattended`. |

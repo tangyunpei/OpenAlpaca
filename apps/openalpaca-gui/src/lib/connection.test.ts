@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import daemonPaths from "./daemon-path.json";
+import shellErrors from "./shell-errors.json";
 
 import {
   CONNECTION_CHECK_EVERY_MS,
@@ -161,18 +162,33 @@ describe("the daemon's PATH on the connection", () => {
     instanceId: "i-1",
   };
 
+  /** Q04's three fields, as an older shell leaves them: absent. */
+  const older = { version: null, protocol: null, note: null };
+
   it("carries each row of the shell's table as it is, at boot and on reconnect", async () => {
     for (const row of Object.values(daemonPaths)) {
       resetConnection();
       vi.mocked(invoke).mockResolvedValue({ ...info, daemonPath: row });
-      expect(await bootstrapConnection()).toEqual({ ...info, daemonPath: row });
-      expect(await refreshConnection()).toEqual({ ...info, daemonPath: row });
+      expect(await bootstrapConnection()).toEqual({
+        ...info,
+        ...older,
+        daemonPath: row,
+      });
+      expect(await refreshConnection()).toEqual({
+        ...info,
+        ...older,
+        daemonPath: row,
+      });
     }
   });
 
   it("is null for a daemon the app did not spawn", async () => {
     vi.mocked(invoke).mockResolvedValue({ ...info, daemonPath: null });
-    expect(await bootstrapConnection()).toEqual({ ...info, daemonPath: null });
+    expect(await bootstrapConnection()).toEqual({
+      ...info,
+      ...older,
+      daemonPath: null,
+    });
   });
 
   it("is null for anything that is not one of the shell's", () => {
@@ -204,6 +220,77 @@ describe("the daemon's PATH on the connection", () => {
       reason: null,
       passedKeys: ["AWS_PROFILE", "KUBECONFIG"],
     });
+  });
+});
+
+/**
+ * Q04's additive fields: the daemon's `version` and `protocol` and the
+ * shell's `note` on a daemon of an older protocol or another version, each
+ * `null` when the shell does not send it (an older shell).
+ */
+describe("the daemon's version, protocol and note on the connection (Q04)", () => {
+  const info = {
+    baseUrl: "http://127.0.0.1:51823",
+    token: "t",
+    instanceId: "i-1",
+    daemonPath: null,
+  };
+  const note =
+    "This daemon is version 0.1.0 and this app is 0.2.0; they speak the same protocol, so the app uses it. To run this app's own version, use Stop daemon…, then Start daemon.";
+
+  it("carries them at boot and on reconnect", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ...info,
+      version: "0.1.0",
+      protocol: 1,
+      note,
+    });
+    const expected = { ...info, version: "0.1.0", protocol: 1, note };
+    expect(await bootstrapConnection()).toEqual(expected);
+    expect(await refreshConnection()).toEqual(expected);
+  });
+
+  it("reads them as null from an older shell, or when they are not the shell's", async () => {
+    vi.mocked(invoke).mockResolvedValue(info);
+    expect(await bootstrapConnection()).toEqual({
+      ...info,
+      version: null,
+      protocol: null,
+      note: null,
+    });
+    resetConnection();
+    vi.mocked(invoke).mockResolvedValue({
+      ...info,
+      version: 1,
+      protocol: "1",
+      note: 7,
+    });
+    expect(await bootstrapConnection()).toEqual({
+      ...info,
+      version: null,
+      protocol: null,
+      note: null,
+    });
+  });
+});
+
+describe("the shell's Q04 refusals at boot", () => {
+  it("names a mismatch, its sentence as it is", async () => {
+    const row = shellErrors.refusals.find((r) => r.kind === "mismatch");
+    vi.mocked(invoke).mockRejectedValue(row);
+    const error = await rejection(bootstrapConnection());
+    expect(error.kind).toBe("mismatch");
+    expect(error.message).toBe(row?.message);
+  });
+
+  it("names a daemon still starting, and one past the budget", async () => {
+    for (const kind of ["starting", "still_starting"] as const) {
+      const row = shellErrors.refusals.find((r) => r.kind === kind);
+      vi.mocked(invoke).mockRejectedValue(row);
+      const error = await rejection(bootstrapConnection());
+      expect(error.kind).toBe(kind);
+      expect(error.message).toBe(row?.message);
+    }
   });
 });
 

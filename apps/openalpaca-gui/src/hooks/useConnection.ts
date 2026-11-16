@@ -155,6 +155,11 @@ export interface ConnectionStatus {
    * opens clears it.
    */
   lastError: string | null;
+  /**
+   * The shell's note on the daemon this window uses — an older protocol, or
+   * another version, with Stop then Start (Q04) — or `null`.
+   */
+  note: string | null;
   /** Why this window has no daemon, or `null` while it should have one. */
   stopIntent: StopIntent;
   /** When the stop intent was set (wall-clock ms), or `null`. */
@@ -228,6 +233,7 @@ export function useConnectionStatus(): ConnectionStatus {
     instanceChip: instanceId === null ? null : shortInstanceId(instanceId),
     endpoint: info === null ? null : info.baseUrl.replace(/^https?:\/\//, ""),
     lastError,
+    note: info?.note ?? null,
     stopIntent,
     stoppedAt: stopIntent === null ? null : getStoppedAt(),
     stopPhase,

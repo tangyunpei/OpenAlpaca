@@ -4,14 +4,24 @@
  * The webview never reads `discovery.json`. Tauri commands do — the names are
  * read from `src-tauri/src/lib.rs`'s `tauri::generate_handler!`:
  *
- *   `ensure_daemon_running` — probes liveness, spawns the sidecar if dead,
- *                             polls up to ~5 s. Use on boot. When the daemon
- *                             does not come up, the rejection carries the end
- *                             of what it wrote to `daemon.log` — its own
- *                             reason, verbatim.
- *   `get_connection_info`   — reads discovery + expiry check. Use on reconnect,
- *                             when a request is refused `401`, and once the
- *                             cache is an hour old by the wall clock
+ *   `ensure_daemon_running` — asks the daemon `discovery.json` names
+ *                             `GET /v1/health` and judges it (Q04): reuses one
+ *                             this app speaks to, refuses one it cannot use
+ *                             (`mismatch`, never parked on a spawn), answers
+ *                             `starting` at once for one that is up but not
+ *                             answering yet (this window asks again on its own
+ *                             timer, `lib/events.ts`), and only with no live
+ *                             daemon spawns the sidecar and waits (~5 s, or up
+ *                             to the 45 s budget for one that is booting). Use
+ *                             on boot. When the daemon does not come up, the
+ *                             rejection carries the end of what it wrote to
+ *                             `daemon.log` — its own reason, verbatim.
+ *   `get_connection_info`   — reads discovery + expiry check, and refuses
+ *                             (`mismatch`) a live daemon whose file states a
+ *                             protocol this app does not speak, so the
+ *                             reconnect ladder parks on it too (Q04). Use on
+ *                             reconnect, when a request is refused `401`, and
+ *                             once the cache is an hour old by the wall clock
  *                             (`keepConnectionFresh`): the daemon rotates its
  *                             token while it runs (T21).
  *   `read_daemon_log_tail`  — the end of `daemon.log`, read straight from the
@@ -20,7 +30,9 @@
  *                             waits until the process and its lock are gone.
  *
  * The first two return `ConnectionInfo`, serialized to the webview in
- * camelCase, with `daemonPath` (Q21): where the `PATH` of a daemon this run
+ * camelCase, with the daemon's `version` and `protocol` and the shell's
+ * `note` on a daemon of an older protocol or another version (Q04), and
+ * `daemonPath` (Q21): where the `PATH` of a daemon this run
  * of the app spawned came from — the login shell's, captured at the app's
  * start, or the fallback list — and how long the capture took, never the
  * `PATH` itself, with the names of the variables passed beside it because
@@ -49,6 +61,19 @@ export interface ConnectionInfo {
    * hand-written `ConnectionInfo`.
    */
   daemonPath?: DaemonPath | null;
+  /**
+   * The daemon's `build.version` and `build.protocol` (Q04); `null` from a
+   * shell that does not send them. Absent only in a test's hand-written
+   * `ConnectionInfo`.
+   */
+  version?: string | null;
+  protocol?: number | null;
+  /**
+   * The shell's sentence on a daemon it uses of an older protocol or another
+   * version — both named, and Stop then Start, never a restart — `null` for
+   * one of this app's (Q04's seventh row, A-20).
+   */
+  note?: string | null;
 }
 
 /**
@@ -170,11 +195,18 @@ async function invokeConnection(
       raw,
     );
   }
+  const v = raw as unknown as Record<string, unknown>;
   return {
     baseUrl: raw.baseUrl,
     token: raw.token,
     instanceId: raw.instanceId,
     daemonPath: daemonPathOf(raw.daemonPath),
+    version: typeof v.version === "string" ? v.version : null,
+    protocol:
+      typeof v.protocol === "number" && Number.isFinite(v.protocol)
+        ? v.protocol
+        : null,
+    note: typeof v.note === "string" ? v.note : null,
   };
 }
 

@@ -1212,6 +1212,8 @@ export interface HealthResponse {
   version: string;
   pid: number;
   instance_id: string;
+  /** The protocol the daemon speaks (Q04); absent from an older daemon. */
+  protocol?: number;
 }
 
 /**

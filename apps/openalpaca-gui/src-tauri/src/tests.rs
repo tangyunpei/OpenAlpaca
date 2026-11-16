@@ -9,17 +9,20 @@
 //! through from a local origin; whether `capabilities/default.json` admits a
 //! command is G-bundle leg A's to prove, never these tests'.
 //!
-//! **Nothing here spawns a daemon (C-12).** Until Q04 removes the debug `PATH`
-//! fallback in `spawn_daemon` (or injects its locator and spawner), the tests
-//! drive only the paths that spawn nothing: `ensure_daemon_running`'s reuse of
-//! a discovery file whose address an in-test loopback listener holds open (the
-//! shell's liveness probe is a bare TCP connect, which the listener's backlog
-//! completes), and the refusals. Its other arm — no live daemon — spawns
-//! one and has no test; nor has `reveal_path`'s admitted path, which runs
-//! `open -R` (Finder). As a backstop the guard points `PATH` at an empty
+//! **Nothing here spawns a daemon (C-12).** The sidecar is only ever the
+//! `openalpacad` beside the app's canonical path (Q04, D7 (a)) — the debug
+//! build's fallback to `PATH` is gone — and none sits beside the test
+//! binary, so `ensure_daemon_running`'s spawn arm, reached, refuses at the
+//! locator before it touches the store or the log. The tests drive its reuse
+//! of a discovery file whose address an in-test server answers `GET
+//! /v1/health` from ([`FakeServer`]), its `starting` answer for a stand-in
+//! daemon process that does not answer yet, and that refusal; every path
+//! past a spawn — the wait, the CLI's daemon winning the lock — is
+//! `reuse::ensure_with`'s, driven over a world its own tests write
+//! (`reuse/tests.rs`). `reveal_path`'s admitted path, which runs `open -R`
+//! (Finder), has no test. As a backstop the guard points `PATH` at an empty
 //! folder, and the reuse tests check that no `openalpacad` sits beside the
-//! test binary and that no daemon log was opened: a reuse that regressed
-//! fails to find a daemon instead of starting one.
+//! test binary and that no daemon log was opened.
 //!
 //! The Q21 capture tests do spawn, but no daemon: each runs a stand-in
 //! `/bin/sh` login shell or, on macOS, the real `/bin/zsh` or `/bin/bash`
@@ -32,6 +35,7 @@
 //! guard: a scratch `OPENALPACA_HOME_STORE`, `OPENALPACA_CONFIG_DIR`, `HOME`
 //! and `PATH`, never `~/.openalpaca`.
 
+use super::reuse::{HEALTH_PROBE_TIMEOUT, Health, first_answer, probe_health};
 use super::*;
 use openalpaca_storage::discovery::Discovery;
 use serde_json::{Value, json};
@@ -93,8 +97,13 @@ impl HomeStoreGuard {
             // SAFETY: serialized by ENV_LOCK — this binary's only writer.
             unsafe { std::env::set_var(name, value) };
         }
-        // No test inherits another's spawned daemon (Q21's `daemonPath`).
+        // No test inherits another's spawned daemon (Q21's `daemonPath`), nor
+        // the first silent look at another's starting daemon (Q04).
         forget_spawned();
+        super::reuse::STARTING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
         Self {
             _lock: lock,
             prev,
@@ -196,7 +205,7 @@ fn tauri_refusal(answer: Result<Value, Value>) -> String {
 
 /// A discovery file for `127.0.0.1:<port>`, written where the shell reads it.
 fn write_discovery(port: u16, expired: bool) -> Discovery {
-    let mut d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), "0.0.0");
+    let mut d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), SHELL_VERSION);
     if expired {
         let mut value = serde_json::to_value(&d).expect("discovery as JSON");
         value["auth"]["expires_at"] = json!("2000-01-01T00:00:00Z");
@@ -206,8 +215,15 @@ fn write_discovery(port: u16, expired: bool) -> Discovery {
     d
 }
 
-/// `{ baseUrl, token, instanceId, daemonPath }`, exactly those keys, with
-/// `daemonPath` `null`: no test spawns, so no daemon is this run's (Q21).
+/// The version every stand-in daemon here reports: the shell's own, so no
+/// answer carries Q04's note on another version unless a test asks for one.
+const SHELL_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// `{ baseUrl, token, instanceId, version, protocol, daemonPath, note }`,
+/// exactly those keys, with `daemonPath` `null` (no test spawns, so no daemon
+/// is this run's, Q21), the daemon's `version` and `protocol` (Q04's
+/// additive fields) and no `note`: the daemon speaks this shell's protocol
+/// and is its version.
 fn assert_connection_info(answer: &Value, d: &Discovery) {
     let mut keys: Vec<&str> = answer
         .as_object()
@@ -216,8 +232,22 @@ fn assert_connection_info(answer: &Value, d: &Discovery) {
         .map(String::as_str)
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["baseUrl", "daemonPath", "instanceId", "token"]);
+    assert_eq!(
+        keys,
+        [
+            "baseUrl",
+            "daemonPath",
+            "instanceId",
+            "note",
+            "protocol",
+            "token",
+            "version"
+        ]
+    );
     assert_eq!(answer["daemonPath"], Value::Null);
+    assert_eq!(answer["note"], Value::Null);
+    assert_eq!(answer["version"], d.build.version.as_str());
+    assert_eq!(answer["protocol"], d.build.protocol);
     assert_eq!(
         answer["baseUrl"],
         format!("http://127.0.0.1:{}", d.listen.port)
@@ -229,7 +259,10 @@ fn assert_connection_info(answer: &Value, d: &Discovery) {
 /// C-12's backstop for the reuse tests: no daemon beside the test binary for
 /// a regressed reuse to find, `PATH` already empty (the guard).
 fn assert_no_daemon_beside_the_test_binary() {
-    let exe = std::env::current_exe().expect("test binary");
+    let exe = std::env::current_exe()
+        .expect("test binary")
+        .canonicalize()
+        .expect("canonical test binary");
     let beside = exe.parent().expect("its folder").join("openalpacad");
     assert!(
         !beside.exists(),
@@ -278,7 +311,7 @@ fn get_connection_info_refuses_an_expired_discovery_file() {
 #[test]
 fn get_connection_info_reads_the_rotated_file() {
     let _guard = HomeStoreGuard::set("info-rotated");
-    let made = discovery::make_discovery("127.0.0.1", 1, "instance-q11".into(), "0.0.0");
+    let made = discovery::make_discovery("127.0.0.1", 1, "instance-q11".into(), SHELL_VERSION);
     // Twenty-five hours ago (the shell has no chrono of its own).
     let started = made.started_at - discovery::TOKEN_LIFETIME - discovery::ROTATE_AFTER / 12;
     let first = made.with_rotated_auth(started);
@@ -328,37 +361,439 @@ fn get_connection_info_refuses_a_discovery_file_it_cannot_read() {
     );
 }
 
-// ============================================================================
-// ensure_daemon_running — the reuse arm only (C-12)
-// ============================================================================
-
+/// The reconnect ladder's rung reads the file, not health (Q04): a file
+/// whose `build.protocol` this shell does not work with, over a live
+/// `openalpacad`, is refused as the mismatch `ensure_daemon_running` would
+/// give, so the window parks instead of connecting to a daemon it cannot use.
+#[cfg(unix)]
 #[test]
-fn ensure_daemon_running_reuses_a_discovery_file_whose_address_answers() {
-    let guard = HomeStoreGuard::set("ensure-live");
-    assert_no_daemon_beside_the_test_binary();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-    let d = write_discovery(listener.local_addr().expect("port").port(), false);
+fn get_connection_info_refuses_a_live_daemon_of_a_protocol_it_does_not_speak() {
+    let guard = HomeStoreGuard::set("info-mismatch");
+    let daemon = FakeDaemonProcess::start(&guard);
+    let mut d = write_discovery_for(daemon.pid, closed_port());
+    d.build.protocol = openalpaca_storage::support::protocol::PROTOCOL + 1;
+    d.build.version = "9.9.9".into();
+    discovery::write_discovery_atomic(&d).expect("write discovery.json");
 
-    let answer = invoke("ensure_daemon_running", json!({})).expect("reused");
-    assert_connection_info(&answer, &d);
-    drop(listener);
-    // The spawn arm opens the daemon log before it spawns; it never ran.
+    let refused = refusal(invoke("get_connection_info", json!({})));
+    drop(daemon);
+    assert_eq!(refused["kind"], "mismatch", "{refused}");
+    assert_eq!(
+        refused["daemon_protocol"],
+        openalpaca_storage::support::protocol::PROTOCOL + 1
+    );
+    assert_eq!(refused["daemon_version"], "9.9.9");
+    assert_eq!(
+        refused["shell_protocol"],
+        openalpaca_storage::support::protocol::PROTOCOL
+    );
+    let message = refused["message"].as_str().expect("a sentence");
+    assert!(
+        message.starts_with(&format!(
+            "The daemon running (pid {}, version 9.9.9, protocol {})",
+            d.pid,
+            openalpaca_storage::support::protocol::PROTOCOL + 1
+        )),
+        "{message}"
+    );
+    assert_nothing_spawned(&guard);
+}
+
+/// The same file over a pid that is no daemon (here the test's own) is
+/// answered as before Q04: a mismatch is never said of a process that is
+/// gone, and the socket's failure keeps the ladder going.
+#[test]
+fn get_connection_info_answers_a_stale_file_of_another_protocol_as_before() {
+    let _guard = HomeStoreGuard::set("info-mismatch-stale");
+    let mut d = write_discovery_for(std::process::id(), 1);
+    d.build.protocol = openalpaca_storage::support::protocol::PROTOCOL + 1;
+    discovery::write_discovery_atomic(&d).expect("write discovery.json");
+
+    let answer = invoke("get_connection_info", json!({})).expect("connection info");
+    assert_eq!(
+        answer["protocol"],
+        openalpaca_storage::support::protocol::PROTOCOL + 1
+    );
+    assert_eq!(answer["note"], Value::Null);
+}
+
+// ============================================================================
+// ensure_daemon_running against a stand-in daemon (Q04)
+// ============================================================================
+
+/// A loopback listener standing in for a daemon's address: every connection
+/// gets `response`, written once whole, after the request's headers are read
+/// (or 2 s pass), and then closed. It stops when dropped.
+struct FakeServer {
+    port: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FakeServer {
+    fn answering(response: String) -> Self {
+        Self::serving(response, false)
+    }
+
+    /// As [`FakeServer::answering`], but every connection is held open
+    /// after the answer, until the server is dropped: a daemon that keeps
+    /// the connection alive whatever the request asked.
+    fn answering_and_holding(response: String) -> Self {
+        Self::serving(response, true)
+    }
+
+    fn serving(response: String, hold: bool) -> Self {
+        use std::io::Read;
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let port = listener.local_addr().expect("port").port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = std::sync::Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                if stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < 16 * 1024 {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let _ = stream.write_all(response.as_bytes());
+                if hold {
+                    held.push(stream);
+                } else {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+            }
+            drop(held);
+        });
+        Self {
+            port,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// A daemon's `GET /v1/health` answer: `200` and the body the daemon
+    /// writes, for `instance` speaking `protocol` (none: a daemon from before
+    /// Q04, whose body has no `protocol`).
+    fn health(instance: &str, protocol: Option<u32>, version: &str) -> Self {
+        let mut body = json!({
+            "instance_id": instance,
+            "pid": 1,
+            "status": "ok",
+            "version": version,
+        });
+        if let Some(protocol) = protocol {
+            body["protocol"] = json!(protocol);
+        }
+        Self::answering(http_response(
+            "200 OK",
+            "application/json",
+            &body.to_string(),
+        ))
+    }
+}
+
+impl Drop for FakeServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// One whole HTTP/1.1 response, `Content-Length` set, the connection closed.
+fn http_response(status: &str, content_type: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\
+         connection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// A port nothing listens on: bound, then let go.
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    listener.local_addr().expect("port").port()
+}
+
+/// C-12's check that nothing spawned: the spawn arm opens and rotates the
+/// daemon log before it spawns, so the log is not there.
+fn assert_nothing_spawned(guard: &HomeStoreGuard) {
     let log = store::daemon_log_path().expect("log path");
     assert!(log.starts_with(guard.store()));
     assert!(!log.exists(), "the spawn arm ran: {}", log.display());
 }
 
 #[test]
-fn ensure_daemon_running_trusts_liveness_over_an_expired_token() {
-    let _guard = HomeStoreGuard::set("ensure-expired");
+fn ensure_daemon_running_reuses_a_daemon_whose_health_answers() {
+    let guard = HomeStoreGuard::set("ensure-live");
     assert_no_daemon_beside_the_test_binary();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-    let d = write_discovery(listener.local_addr().expect("port").port(), true);
+    let server = FakeServer::health("instance-q11", Some(1), SHELL_VERSION);
+    let d = write_discovery(server.port, false);
 
     let answer = invoke("ensure_daemon_running", json!({})).expect("reused");
     assert_connection_info(&answer, &d);
-    drop(listener);
-    assert!(!store::daemon_log_path().expect("log path").exists());
+    drop(server);
+    assert_nothing_spawned(&guard);
+}
+
+/// A reused daemon's `version` and `protocol` are what its health answered,
+/// not its file's: here a daemon of another version (the seventh row's note)
+/// whose file says otherwise, and one from before Q04 whose health names no
+/// protocol (the file's then stands).
+#[test]
+fn ensure_daemon_running_answers_the_version_and_protocol_health_gave() {
+    let guard = HomeStoreGuard::set("ensure-health-fields");
+    assert_no_daemon_beside_the_test_binary();
+    let server = FakeServer::health(
+        "instance-q11",
+        Some(openalpaca_storage::support::protocol::PROTOCOL),
+        "0.0.1-other",
+    );
+    write_discovery(server.port, false);
+    let answer = invoke("ensure_daemon_running", json!({})).expect("reused");
+    drop(server);
+    assert_eq!(answer["version"], "0.0.1-other");
+    assert_eq!(
+        answer["protocol"],
+        openalpaca_storage::support::protocol::PROTOCOL
+    );
+    let note = answer["note"].as_str().expect("a note on another version");
+    assert!(
+        note.starts_with(&format!(
+            "This daemon is version 0.0.1-other and this app is {SHELL_VERSION}"
+        )),
+        "{note}"
+    );
+
+    let server = FakeServer::health("instance-q11", None, SHELL_VERSION);
+    let mut d = write_discovery(server.port, false);
+    d.build.version = "0.0.2-file".into();
+    discovery::write_discovery_atomic(&d).expect("write discovery.json");
+    let answer = invoke("ensure_daemon_running", json!({})).expect("reused");
+    drop(server);
+    assert_eq!(
+        answer["version"], SHELL_VERSION,
+        "health's version, not the file's"
+    );
+    assert_eq!(
+        answer["protocol"], d.build.protocol,
+        "the file's, health naming none"
+    );
+    assert_eq!(answer["note"], Value::Null);
+    assert_nothing_spawned(&guard);
+}
+
+/// The rotated-token row (T21, Q04's table): a daemon up for more than a day
+/// has rotated its file, and the file read now names the token it honours.
+/// A lapsed file over a daemon whose health answers — hung before its
+/// rotation, or from before T21 — is reused too: liveness is the
+/// authority, as before Q04 (the no-change side, *Rev 95* (3)).
+#[test]
+fn ensure_daemon_running_trusts_a_live_daemon_over_an_expired_token() {
+    let guard = HomeStoreGuard::set("ensure-expired");
+    assert_no_daemon_beside_the_test_binary();
+    let server = FakeServer::health("instance-q11", Some(1), SHELL_VERSION);
+    let d = write_discovery(server.port, true);
+
+    let answer = invoke("ensure_daemon_running", json!({})).expect("reused");
+    assert_connection_info(&answer, &d);
+    drop(server);
+    assert_nothing_spawned(&guard);
+}
+
+/// A wrong server at the address an old discovery file names (its pid not a
+/// live `openalpacad`: here the test's own): its `404` page is not a
+/// daemon's health, so the file is stale and the shell goes to spawn — which
+/// refuses at once, with no daemon beside the test binary, before it has
+/// touched the store or the log.
+#[test]
+fn ensure_daemon_running_does_not_reuse_a_wrong_server_at_the_old_address() {
+    let guard = HomeStoreGuard::set("ensure-wrong-server");
+    assert_no_daemon_beside_the_test_binary();
+    let server = FakeServer::answering(http_response(
+        "404 Not Found",
+        "text/html",
+        "<html><body>Not Found</body></html>",
+    ));
+    write_discovery(server.port, false);
+
+    let refused = refusal(invoke("ensure_daemon_running", json!({})));
+    drop(server);
+    assert_eq!(refused["kind"], "spawn_failed");
+    let beside = std::env::current_exe()
+        .expect("test binary")
+        .canonicalize()
+        .expect("canonical test binary")
+        .parent()
+        .expect("its folder")
+        .join("openalpacad");
+    assert_eq!(
+        refused["message"],
+        format!(
+            "Failed to spawn daemon: Daemon binary not found at {}. The application may be \
+             incorrectly installed.",
+            beside.display()
+        )
+    );
+    assert_nothing_spawned(&guard);
+}
+
+/// A stand-in for a daemon that is up but not serving yet: a copy of
+/// `/bin/sleep` named `openalpacad`, so the process table calls it one. It
+/// is killed when dropped.
+#[cfg(unix)]
+struct FakeDaemonProcess {
+    _kill: KillOnDrop,
+    pid: u32,
+}
+
+#[cfg(unix)]
+impl FakeDaemonProcess {
+    fn start(guard: &HomeStoreGuard) -> Self {
+        let dir = guard.root().join("fake-daemon");
+        std::fs::create_dir_all(&dir).expect("its folder");
+        let program = dir.join("openalpacad");
+        std::fs::copy("/bin/sleep", &program).expect("a copy of /bin/sleep");
+        let child = Command::new(&program)
+            .arg("61")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the stand-in daemon");
+        let pid = child.id();
+        // Owned before anything can fail, so a failed wait below still kills
+        // it on the way out.
+        let kill = KillOnDrop(i32::try_from(pid).expect("a pid"));
+        // Reaped from a thread, so a kill leaves no zombie the table reads.
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+        let started = Instant::now();
+        while !daemon_lifecycle::pid_is_daemon(pid) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the stand-in never read as an openalpacad"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Self { _kill: kill, pid }
+    }
+}
+
+/// A discovery file naming `pid` at `port`.
+fn write_discovery_for(pid: u32, port: u16) -> Discovery {
+    let mut d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), SHELL_VERSION);
+    d.pid = pid;
+    discovery::write_discovery_atomic(&d).expect("write discovery.json");
+    d
+}
+
+/// The sixth case (C-09, A-18): the discovery pid is a live `openalpacad`
+/// whose health does not answer — a daemon still booting, the CLI's or an
+/// earlier run's. The shell answers `starting` at once and spawns nothing:
+/// no second daemon, no log rotated.
+#[cfg(unix)]
+#[test]
+fn ensure_daemon_running_parks_a_live_daemon_that_does_not_answer_yet() {
+    let guard = HomeStoreGuard::set("ensure-starting");
+    assert_no_daemon_beside_the_test_binary();
+    let daemon = FakeDaemonProcess::start(&guard);
+    write_discovery_for(daemon.pid, closed_port());
+
+    let refused = refusal(invoke("ensure_daemon_running", json!({})));
+    assert_eq!(refused["kind"], "starting", "{refused}");
+    assert_nothing_spawned(&guard);
+    drop(daemon);
+}
+
+// ============================================================================
+// The sidecar's locator (Q04, D7 (a))
+// ============================================================================
+
+/// An app's folder under the scratch root: `<name>/App/openalpaca_gui`, with
+/// the sidecar beside it when `with_sidecar`.
+fn app_folder(guard: &HomeStoreGuard, name: &str, with_sidecar: bool) -> PathBuf {
+    let dir = guard.root().join(name).join("App");
+    std::fs::create_dir_all(&dir).expect("the app's folder");
+    std::fs::write(dir.join("openalpaca_gui"), "the app").expect("the app");
+    if with_sidecar {
+        std::fs::write(dir.join(SIDECAR_NAME), "the daemon").expect("the sidecar");
+    }
+    dir
+}
+
+#[test]
+fn the_locator_finds_the_sidecar_beside_the_app() {
+    let guard = HomeStoreGuard::set("locator-beside");
+    let dir = app_folder(&guard, "real", true);
+    assert_eq!(
+        sidecar_beside(&dir.join("openalpaca_gui")).expect("found"),
+        dir.join(SIDECAR_NAME)
+    );
+}
+
+/// D7 (a): a symlinked folder above the app is followed, not refused — the
+/// path is canonicalized and the sidecar is the one in the real folder.
+#[cfg(unix)]
+#[test]
+fn the_locator_follows_a_symlinked_ancestor_to_the_real_folder() {
+    let guard = HomeStoreGuard::set("locator-ancestor");
+    let dir = app_folder(&guard, "real", true);
+    let link = guard.root().join("linked");
+    std::os::unix::fs::symlink(guard.root().join("real"), &link).expect("a symlinked ancestor");
+    assert_eq!(
+        sidecar_beside(&link.join("App").join("openalpaca_gui")).expect("found"),
+        dir.join(SIDECAR_NAME)
+    );
+}
+
+/// The app itself reached through a symlink elsewhere: the sidecar is the
+/// one beside the real app, not one beside the link.
+#[cfg(unix)]
+#[test]
+fn the_locator_follows_a_symlinked_app_to_its_own_folder() {
+    let guard = HomeStoreGuard::set("locator-link");
+    let dir = app_folder(&guard, "real", true);
+    let elsewhere = app_folder(&guard, "elsewhere", false);
+    let link = elsewhere.join("openalpaca_gui-link");
+    std::os::unix::fs::symlink(dir.join("openalpaca_gui"), &link).expect("a symlinked app");
+    assert_eq!(
+        sidecar_beside(&link).expect("found"),
+        dir.join(SIDECAR_NAME)
+    );
+}
+
+/// The one refusal, in every profile: no sidecar in the app's (canonical)
+/// folder. Its sentence names the path it looked at, and no symlink case;
+/// nothing on `PATH` is tried (the debug fallback is gone).
+#[test]
+fn the_locator_refuses_an_absent_sidecar_naming_the_path() {
+    let guard = HomeStoreGuard::set("locator-absent");
+    let dir = app_folder(&guard, "real", false);
+    std::fs::write(guard.root().join("bin").join(SIDECAR_NAME), "on PATH").expect("on PATH");
+    let refused = sidecar_beside(&dir.join("openalpaca_gui")).expect_err("refused");
+    assert_eq!(
+        format!("{refused:#}"),
+        format!(
+            "Daemon binary not found at {}. The application may be incorrectly installed.",
+            dir.join(SIDECAR_NAME).display()
+        )
+    );
+    assert!(!format!("{refused:#}").contains("symlink"));
 }
 
 // ============================================================================
@@ -576,15 +1011,16 @@ fn every_command_answers_off_the_thread_that_invoked_it() {
             inline.push(cmd);
         }
     }
-    // `ensure_daemon_running`'s reuse arm only (C-12): an address that answers.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-    write_discovery(listener.local_addr().expect("port").port(), false);
+    // `ensure_daemon_running`'s reuse arm only (C-12): a daemon whose
+    // health answers (Q04).
+    let server = FakeServer::health("instance-q11", Some(1), SHELL_VERSION);
+    write_discovery(server.port, false);
     let (thread, answer) = invoke_answered_on("ensure_daemon_running", json!({}));
     answer.expect("reused");
     if thread == here {
         inline.push("ensure_daemon_running");
     }
-    drop(listener);
+    drop(server);
     assert!(
         inline.is_empty(),
         "answered on the thread that invoked them (the window's, in the app): {inline:?}"
@@ -701,7 +1137,7 @@ where
 fn get_connection_info_reads_discovery_off_the_runtime() {
     let _guard = HomeStoreGuard::set("info-blocked");
     let file = BlockedFile::at(store::discovery_path().expect("discovery path"));
-    let d = discovery::make_discovery("127.0.0.1", 1, "instance-q11".into(), "0.0.0");
+    let d = discovery::make_discovery("127.0.0.1", 1, "instance-q11".into(), SHELL_VERSION);
     let bytes = serde_json::to_vec(&d).expect("discovery as JSON");
     let (free, answer) = runtime_free_while_blocked(file, &bytes, get_connection_info);
     assert!(
@@ -731,14 +1167,14 @@ fn read_daemon_log_tail_reads_the_log_off_the_runtime() {
 fn ensure_daemon_running_reads_discovery_off_the_runtime() {
     let guard = HomeStoreGuard::set("ensure-blocked");
     assert_no_daemon_beside_the_test_binary();
-    // The reuse arm only (C-12): the address the file names answers.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-    let port = listener.local_addr().expect("port").port();
+    // The reuse arm only (C-12): the daemon the file names answers health.
+    let server = FakeServer::health("instance-q11", Some(1), SHELL_VERSION);
+    let port = server.port;
     let file = BlockedFile::at(store::discovery_path().expect("discovery path"));
-    let d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), "0.0.0");
+    let d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), SHELL_VERSION);
     let bytes = serde_json::to_vec(&d).expect("discovery as JSON");
     let (free, answer) = runtime_free_while_blocked(file, &bytes, ensure_daemon_running);
-    drop(listener);
+    drop(server);
     assert!(
         free,
         "ensure_daemon_running held the runtime's thread while discovery.json would not open"
@@ -751,7 +1187,7 @@ fn ensure_daemon_running_reads_discovery_off_the_runtime() {
 }
 
 // ============================================================================
-// The liveness probe (Q12: tokio's connect under tokio's timeout)
+// The health probe (Q04's hand-written GET, Q12's tokio under its timeout)
 // ============================================================================
 
 /// `future` run to its end on a runtime of one thread.
@@ -764,32 +1200,74 @@ fn on_one_thread<F: std::future::Future>(future: F) -> F::Output {
 }
 
 #[test]
-fn the_liveness_probe_finds_an_address_that_answers() {
+fn the_health_probe_reads_a_daemon_that_answers() {
     let _guard = HomeStoreGuard::set("probe-live");
+    let server = FakeServer::health("instance-q11", Some(1), SHELL_VERSION);
+    assert_eq!(
+        on_one_thread(probe_health("127.0.0.1", server.port)),
+        Health::Answered {
+            instance_id: "instance-q11".into(),
+            protocol: Some(1),
+            version: Some(SHELL_VERSION.into()),
+        }
+    );
+}
+
+/// A daemon that answers and keeps the connection open is read as soon as
+/// its answer is whole, well inside the probe's timeout.
+#[test]
+fn the_health_probe_reads_a_whole_answer_on_a_connection_kept_open() {
+    let _guard = HomeStoreGuard::set("probe-held");
+    let body = json!({
+        "instance_id": "instance-q11",
+        "pid": 1,
+        "protocol": 1,
+        "status": "ok",
+        "version": SHELL_VERSION,
+    })
+    .to_string();
+    let server =
+        FakeServer::answering_and_holding(http_response("200 OK", "application/json", &body));
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        on_one_thread(probe_health("127.0.0.1", server.port)),
+        Health::Answered { .. }
+    ));
+    assert!(started.elapsed() < HEALTH_PROBE_TIMEOUT);
+}
+
+#[test]
+fn the_health_probe_finds_nothing_at_a_closed_port() {
+    let _guard = HomeStoreGuard::set("probe-closed");
+    assert!(matches!(
+        on_one_thread(probe_health("127.0.0.1", closed_port())),
+        Health::Unanswered(_)
+    ));
+}
+
+/// A port that accepts and never answers (a daemon bound and not yet
+/// serving): the probe gives it its timeout and says no.
+#[test]
+fn the_health_probe_reads_a_bound_port_that_never_answers_as_no_answer() {
+    let _guard = HomeStoreGuard::set("probe-bound");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
     let port = listener.local_addr().expect("port").port();
-    let d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), "0.0.0");
-    assert!(on_one_thread(daemon_is_alive(&d)));
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        on_one_thread(probe_health("127.0.0.1", port)),
+        Health::Unanswered(_)
+    ));
+    assert!(started.elapsed() >= HEALTH_PROBE_TIMEOUT);
+    drop(listener);
 }
 
-#[test]
-fn the_liveness_probe_finds_nothing_at_a_closed_port() {
-    let _guard = HomeStoreGuard::set("probe-closed");
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-        listener.local_addr().expect("port").port()
-    };
-    let d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), "0.0.0");
-    assert!(!on_one_thread(daemon_is_alive(&d)));
-}
-
-/// An address whose connect never completes costs the probe its timeout per
+/// An address whose attempt never completes costs the probe its timeout per
 /// address and no more, and the probe says no.
 #[test]
-fn the_liveness_probe_gives_each_silent_address_its_timeout_and_no_more() {
+fn the_health_probe_gives_each_silent_address_its_timeout_and_no_more() {
     let _guard = HomeStoreGuard::set("probe-silent");
     assert_eq!(
-        LIVENESS_PROBE_TIMEOUT,
+        HEALTH_PROBE_TIMEOUT,
         Duration::from_millis(300),
         "the probe's wait per address"
     );
@@ -798,13 +1276,13 @@ fn the_liveness_probe_gives_each_silent_address_its_timeout_and_no_more() {
         "[::1]:1".parse().expect("an address"),
     ];
     let started = std::time::Instant::now();
-    let answered = on_one_thread(any_address_answers(addrs, |_| {
+    let answered = on_one_thread(first_answer(addrs, |_| {
         std::future::pending::<std::io::Result<()>>()
     }));
     let waited = started.elapsed();
-    assert!(!answered);
+    assert!(answered.is_none());
     assert!(
-        waited >= LIVENESS_PROBE_TIMEOUT * 2,
+        waited >= HEALTH_PROBE_TIMEOUT * 2,
         "gave up after {waited:?}, before two timeouts"
     );
     assert!(
@@ -841,6 +1319,34 @@ fn every_refusal() -> Vec<ShellError> {
             message: "Failed to spawn daemon: No such file or directory (os error 2)".into(),
             log_tail: None,
         },
+        ShellError::Mismatch {
+            message: "The daemon running (pid 51823, version 0.2.0, protocol 2) is not one this \
+                      app can use: the app speaks protocol 1. Nothing was stopped or started. \
+                      Update the app to one that speaks protocol 2, or stop that daemon with \
+                      `openalpaca daemon stop` and press Reconnect in Settings → Connection to \
+                      start this app's own."
+                .into(),
+            daemon_version: Some("0.2.0".into()),
+            daemon_protocol: Some(2),
+            shell_protocol: 1,
+            remedy: "Update the app to one that speaks protocol 2, or stop that daemon with \
+                     `openalpaca daemon stop` and press Reconnect in Settings → Connection to \
+                     start this app's own."
+                .into(),
+        },
+        ShellError::Starting {
+            message: "The daemon (pid 51823) is starting: it has written its discovery file but \
+                      does not answer yet. Waiting for it, up to 45 seconds."
+                .into(),
+        },
+        ShellError::StillStarting {
+            message: "The daemon (pid 51823) is still starting after 45 seconds: it is running \
+                      but does not answer. Nothing was started, stopped or restarted. The last \
+                      lines of its log (/s/state/logs/daemon.log):\n\nINFO Connecting to MCP \
+                      server"
+                .into(),
+            log_tail: Some("INFO Connecting to MCP server".into()),
+        },
         ShellError::LogUnreadable {
             message: "Could not read /s/state/logs/daemon.log: Is a directory (os error 21)".into(),
         },
@@ -863,6 +1369,9 @@ fn every_refusal() -> Vec<ShellError> {
             | ShellError::Expired { .. }
             | ShellError::DiscoveryUnreadable { .. }
             | ShellError::SpawnFailed { .. }
+            | ShellError::Mismatch { .. }
+            | ShellError::Starting { .. }
+            | ShellError::StillStarting { .. }
             | ShellError::LogUnreadable { .. }
             | ShellError::StopUnconfirmed { .. }
             | ShellError::RevealRefused { .. }
@@ -1875,8 +2384,8 @@ fn the_announcement_names_the_source_and_the_duration_never_the_value() {
 #[test]
 fn the_connection_names_the_path_of_the_daemon_this_app_spawned() {
     let _guard = HomeStoreGuard::set("path-carried");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-    let d = write_discovery(listener.local_addr().expect("port").port(), false);
+    let listener = FakeServer::health("instance-q11", Some(1), SHELL_VERSION);
+    let d = write_discovery(listener.port, false);
     let report = DaemonPathReport {
         source: PathSource::LoginShell,
         capture_ms: 212,
@@ -1923,8 +2432,8 @@ fn the_connection_names_the_path_of_the_daemon_this_app_spawned() {
 #[test]
 fn a_daemon_this_run_spawned_keeps_its_path_after_a_later_spawn() {
     let _guard = HomeStoreGuard::set("path-two-spawns");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-    let d = write_discovery(listener.local_addr().expect("port").port(), false);
+    let listener = FakeServer::health("instance-q11", Some(1), SHELL_VERSION);
+    let d = write_discovery(listener.port, false);
     let report = DaemonPathReport {
         source: PathSource::FallbackList,
         capture_ms: 3000,

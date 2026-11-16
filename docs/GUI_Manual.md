@@ -132,22 +132,40 @@ The webview asks the Rust shell for a connection; these Tauri commands are the
 whole bridge (`src-tauri/src/lib.rs`):
 
 - `ensure_daemon_running` — the boot path. It reads `state/discovery.json` and
-  probes liveness by opening a TCP connection to the advertised address
-  (300 ms). A live daemon is used even if the file's 24 h expiry has lapsed,
-  because liveness is the authoritative signal (a running daemon renews its
-  token every 12 hours, so a lapsed file means a daemon that is hung or built
-  before the renewal). If nothing answers, the daemon
-  is spawned detached (`setsid` on Unix), its output appended to
-  `state/logs/daemon.log`, and the command polls for up to about five seconds
-  (25 × 200 ms) for a daemon that both advertises itself and accepts
-  connections. **If none does, the error says why:** it ends with the last
-  lines this spawn wrote to the log — the daemon's own refusal, verbatim (a
-  database this build does not know, another daemon holding the lock) — or
-  says the daemon wrote nothing at all. Only this spawn's lines are quoted,
-  never an earlier run's. The daemon it spawns runs on your login shell's
-  `PATH` (below).
+  asks the daemon it names `GET /v1/health` (300 ms), then judges what
+  answers. One daemon serves the CLI and the app alike: whichever started it,
+  the app uses the one the file names when it answers as that daemon and
+  speaks this app's protocol — even if the file's 24 h expiry has lapsed (a
+  running daemon renews its token every 12 hours, so a lapsed file means a
+  daemon that is hung or built before the renewal). A daemon of another
+  version that speaks the same protocol is used too, and Settings →
+  Connection says so, naming both versions: to run the app's own, use Stop
+  daemon…, then Start daemon. A daemon that speaks a protocol the app does
+  not is **refused, never stopped or replaced**: the card reads `Daemon
+  version mismatch` with both protocols and the way out (update the app, or
+  stop that daemon with `openalpaca daemon stop` and press `Reconnect`); the
+  window does not reconnect until you do, and while that daemon runs the app
+  starts nothing beside it. A daemon that is running but does not answer
+  yet — one still opening its database or connecting to its MCP servers, the
+  CLI's or an earlier run's — is waited for: the card reads `Daemon is
+  starting` and the app asks again every second, starting nothing beside it;
+  after 45 s it reports the daemon still starting with the end of its log,
+  and keeps trying to reach it. Only when no daemon is running is one
+  spawned: the `openalpacad` beside the app (an app whose daemon is missing
+  says so, naming the path it looked at), detached (`setsid` on Unix), its
+  output appended to `state/logs/daemon.log`. The command then waits for the
+  daemon the file names — the one it spawned, or one the CLI started at the
+  same moment — about five seconds for it to appear, longer while it boots.
+  **If none appears, the error says why:** it ends with the last lines this
+  spawn wrote to the log — the daemon's own refusal, verbatim (a database
+  this build does not know, another daemon holding the lock) — or says the
+  daemon wrote nothing at all. Only this spawn's lines are quoted, never an
+  earlier run's. The daemon it spawns runs on your login shell's `PATH`
+  (below).
 - `get_connection_info` — the reconnect path. It re-reads discovery and checks
-  the expiry without spawning anything. A request the daemon refuses with a
+  the expiry without spawning anything, and refuses a running daemon whose
+  file states a protocol this app does not speak, so the window stops there
+  as it does at the start. A request the daemon refuses with a
   `401` takes it too: a running daemon renews its token every 12 hours and
   accepts the one it replaced only until that one expires, so a window left
   open longer reads the file again, once for every request refused together,
@@ -245,7 +263,7 @@ merely reopening its socket (`src/lib/connection.ts`).
 None of the five runs on the window's own thread, so none can freeze the
 window: each answers on the shell's background runtime, every file read, the
 spawn and the wait for a stop run on a pool of threads of their own, and the
-liveness probe waits on the runtime's timers, not on a thread. A slow disk, a
+health probe waits on the runtime's timers, not on a thread. A slow disk, a
 daemon slow to answer or a long log read leaves the window responsive.
 
 **Three ways to have no daemon, told apart.** A window that stopped the daemon
@@ -1129,7 +1147,13 @@ rather than shown as `0`, because a zero is a claim.
 ### Connection
 
 The liveness dot and instance id (`GET /v1/health`), the endpoint, and
-`Reconnect` (re-bootstrap, then reopen the socket).
+`Reconnect` (re-bootstrap, then reopen the socket). While the daemon is up
+but not answering yet the card reads `Daemon is starting` (the rail's dot is
+gold, `daemon is starting`); a daemon the app cannot use reads `Daemon version
+mismatch` (red, `version mismatch`) with the shell's sentence and its remedy;
+a daemon of another version or an older protocol the app still works with
+carries a note naming both and Stop then Start (connection lifecycle,
+above).
 
 **Stop daemon…** opens a confirmation before anything happens. It re-reads what
 the daemon is doing — `Right now: 2 workflows running · 1 tool waiting for
@@ -1608,10 +1632,13 @@ extension; the replay-resume button is hidden unless the daemon enables it.
 
 **Cannot connect.** Settings → Connection shows why: a daemon that would not
 start leaves its reason at the end of `state/logs/daemon.log`, and the card
-quotes it (`Show daemon log` reads more). The shell probes TCP liveness before
-trusting `state/discovery.json`, so a stale file is not the usual cause. If the
-error says the daemon wrote nothing to its log, the daemon binary did not run
-at all — check it is installed beside the app. In `bun run dev` there is no
+quotes it (`Show daemon log` reads more). The shell asks the daemon's
+`GET /v1/health` before trusting `state/discovery.json`, so a stale file is not
+the usual cause. If the error says the daemon wrote nothing to its log, the
+daemon binary did not run at all — check it is installed beside the app; an
+app with no daemon beside it says so, naming the path it looked at. `Daemon
+is starting` for long means a daemon is up but busy booting (often its MCP
+servers connecting); after 45 s the card shows the end of its log. In `bun run dev` there is no
 Tauri bridge, so every shell command fails by design.
 
 **The window says the daemon is stopped.** `stopped` means this window stopped

@@ -30,6 +30,37 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 /// How often the two conditions are re-read.
 pub const STOP_POLL: Duration = Duration::from_millis(100);
 
+/// How long a client waits for a daemon that is up but not serving yet
+/// before it reports it still starting (Q04's starting state, C-09 with
+/// A-18): the daemon writes `discovery.json` before it opens its database,
+/// reconciles its MCP servers, starts its plugins and connectors and serves,
+/// and a client that finds the file's pid a live `openalpacad` whose
+/// `GET /v1/health` is silent waits — never spawning a second daemon,
+/// rotating its log or probing its lock — for at most this long, counted
+/// from its first silent look at that pid.
+///
+/// **An interim figure** (the owner's answer "b" of 2026-11-16 to
+/// `tasks/pending-decisions.md` §1 *Rev 95*): the MCP connect's shipped
+/// bound, `connect_timeout_secs = 30` in both `mcp.toml`s the daemon can be
+/// given, plus a 15 s margin. It does not cover the rest of an MCP server's
+/// bring-up, which boot awaits before it serves: after the connect, one
+/// `tools/list` under `request_timeout_secs` (30 s in both shipped files),
+/// and on a failed list a teardown of up to `request_timeout_secs` + 1 s —
+/// so one server that handshakes and then stalls holds the boot about 60 s,
+/// up to about 91 s, with the shipped config. Nor does it cover a slow
+/// `Database::open`, many plugins or connectors (started one after another,
+/// each bounded only per call), or a store whose `mcp.toml` raises either
+/// timeout. A boot slower than it is reported still starting, with the log's
+/// tail, while it goes on booting. The measured figure — `Discovery written
+/// to:` to `Daemon ready` in one ordinary start of the real store (plan-rev3
+/// Appendix B #51) — is deferred, not dropped: step 19's first real start
+/// gives it, and this figure is checked against it.
+///
+/// The one figure the app shell and the CLI share: the shell's
+/// `reuse::ensure_with` reads it, and the CLI's same check (CLI-PROTOCOL,
+/// step 5) will.
+pub const STARTING_BUDGET: Duration = Duration::from_secs(45);
+
 /// What waiting for a daemon to go away concluded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopOutcome {
@@ -299,6 +330,50 @@ mod tests {
             }
         );
         assert!(!outcome.is_clear());
+    }
+
+    /// The starting state's budget (Q04, the owner's answer "b" of
+    /// 2026-11-16): the MCP connect's shipped bound, 30 s in both
+    /// `mcp.toml`s the daemon can be given, plus a margin — 45 s. It is
+    /// below the connect plus one `tools/list` (`request_timeout_secs`, 30 s
+    /// shipped), which the figure's doc names as not covered: a change that
+    /// makes it cover that bring-up changes the doc too.
+    #[test]
+    fn the_starting_budget_is_the_shipped_mcp_connect_bound_plus_a_margin() {
+        assert_eq!(STARTING_BUDGET, Duration::from_secs(45));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let seconds = |text: &str, shipped: &str, key: &str| -> u64 {
+            let lines: Vec<&str> = text
+                .lines()
+                .filter(|line| line.trim_start().starts_with(key))
+                .collect();
+            assert_eq!(lines.len(), 1, "{shipped} sets {key} once");
+            lines[0]
+                .split('=')
+                .nth(1)
+                .and_then(|value| value.split('#').next())
+                .map(str::trim)
+                .and_then(|value| value.parse().ok())
+                .expect("a number of seconds")
+        };
+        for shipped in [
+            "config/mcp.toml",
+            "scripts/release/templates/config/mcp.toml",
+        ] {
+            let text = std::fs::read_to_string(root.join(shipped)).expect(shipped);
+            let connect = seconds(&text, shipped, "connect_timeout_secs");
+            let request = seconds(&text, shipped, "request_timeout_secs");
+            assert_eq!(connect, 30, "{shipped}'s connect bound");
+            assert_eq!(request, 30, "{shipped}'s request bound");
+            assert!(
+                STARTING_BUDGET >= Duration::from_secs(connect + 10),
+                "{shipped}: the budget leaves a margin past the connect bound"
+            );
+            assert!(
+                STARTING_BUDGET < Duration::from_secs(connect + request),
+                "{shipped}: the budget now covers a server's whole bring-up; say so in its doc"
+            );
+        }
     }
 
     #[test]

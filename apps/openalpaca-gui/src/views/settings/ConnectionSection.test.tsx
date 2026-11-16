@@ -6,6 +6,7 @@
  * usage/tasks hooks need mocking to exercise its rendering.
  */
 import {
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -28,6 +29,7 @@ import {
   daemonPathNote,
   homeStoreLabel,
   projectCardRoot,
+  statusTitle,
 } from "./ConnectionSection";
 
 /**
@@ -139,6 +141,10 @@ const link = vi.hoisted(() => ({
     passedKeys: string[];
   } | null,
   connected: true,
+  /** The socket's state when it is not the one `connected` implies (Q04). */
+  socket: null as "starting" | "mismatch" | null,
+  /** The shell's note on the daemon (Q04), `null` for none. */
+  note: null as string | null,
   lastError: null as string | null,
   stopIntent: null as "stopped_here" | "stopped_elsewhere" | null,
   stopPhase: null as
@@ -165,8 +171,9 @@ vi.mock("@/hooks/useConnection", () => ({
             daemonPath: link.daemonPath,
           },
     health: undefined,
-    socket: link.connected ? "connected" : "error",
+    socket: link.socket ?? (link.connected ? "connected" : "error"),
     connected: link.connected,
+    note: link.note,
     instanceChip: "7f3a",
     endpoint: "127.0.0.1:51823",
     lastError: link.lastError,
@@ -212,6 +219,8 @@ vi.mock("@/lib/connection", async (importOriginal) => ({
 afterEach(() => {
   link.daemonPath = null;
   link.connected = true;
+  link.socket = null;
+  link.note = null;
   link.lastError = null;
   link.stopIntent = null;
   link.stopPhase = null;
@@ -539,6 +548,64 @@ describe("why the daemon would not start", () => {
     render(<ConnectionSection />);
 
     expect(screen.queryByLabelText("Why the daemon is unreachable")).toBeNull();
+  });
+});
+
+/**
+ * Q04: a daemon still starting is a wait the card names, a daemon this app
+ * cannot use is named with the shell's sentence and its remedy, and a daemon
+ * of another version is used with the shell's note.
+ */
+describe("the daemon compatibility contract (Q04)", () => {
+  it("titles the card while the daemon is starting, with the shell's sentence", () => {
+    link.connected = false;
+    link.socket = "starting";
+    link.lastError =
+      "The daemon (pid 4242) is starting: it has written its discovery file but does not answer yet. Waiting for it, up to 45 seconds.";
+    render(<ConnectionSection />);
+    expect(screen.getByText("Daemon is starting")).toBeTruthy();
+    expect(
+      screen.getByLabelText("Why the daemon is unreachable").textContent,
+    ).toBe(link.lastError);
+  });
+
+  it("titles the card on a mismatch, with the shell's sentence and remedy", () => {
+    link.connected = false;
+    link.socket = "mismatch";
+    link.lastError =
+      "The daemon running (pid 4242, version 0.2.0, protocol 2) is not one this app can use: the app speaks protocol 1. Nothing was stopped or started. Update the app to one that speaks protocol 2, or stop that daemon with `openalpaca daemon stop` and press Reconnect in Settings → Connection to start this app's own.";
+    render(<ConnectionSection />);
+    expect(screen.getByText("Daemon version mismatch")).toBeTruthy();
+    expect(
+      screen.getByLabelText("Why the daemon is unreachable").textContent,
+    ).toBe(link.lastError);
+    expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
+  });
+
+  it("shows the shell's note on a daemon it uses, and none while stopped", () => {
+    link.note =
+      "This daemon is version 0.1.0 and this app is 0.2.0; they speak the same protocol, so the app uses it. To run this app's own version, use Stop daemon…, then Start daemon.";
+    render(<ConnectionSection />);
+    expect(screen.getByText(link.note)).toBeTruthy();
+
+    cleanup();
+    link.stopIntent = "stopped_here";
+    link.stopPhase = "stopped";
+    render(<ConnectionSection />);
+    expect(screen.queryByText(link.note)).toBeNull();
+  });
+
+  it("words the title from the socket's Q04 states, never over a stop", () => {
+    expect(statusTitle(null, false, null, "starting")).toBe(
+      "Daemon is starting",
+    );
+    expect(statusTitle(null, false, null, "mismatch")).toBe(
+      "Daemon version mismatch",
+    );
+    expect(statusTitle(null, false, null, "error")).toBe("Daemon unreachable");
+    expect(statusTitle("stopped_here", false, "stopped", "starting")).toBe(
+      "Daemon stopped",
+    );
   });
 });
 

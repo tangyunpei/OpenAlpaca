@@ -2,7 +2,11 @@
 //!
 //! Provides Tauri commands for:
 //! - Connecting to the daemon via discovery.json
-//! - Ensuring the daemon is running (spawning if needed)
+//! - Ensuring a daemon this app can use is running: reusing the one
+//!   discovery.json names when its `GET /v1/health` answers as that daemon
+//!   in a protocol this shell speaks, waiting for one that is still starting,
+//!   refusing one it cannot use, and spawning the sidecar beside the app only
+//!   when there is none (Q04, [`reuse`])
 //! - Waiting until a daemon the webview asked to stop is really gone
 //! - Reading the end of the daemon log, so a daemon that would not start can
 //!   say why
@@ -13,7 +17,7 @@
 //! spawn and every other blocking call runs on the blocking pool
 //! (`tauri::async_runtime::spawn_blocking`), so it never holds a thread of
 //! the async runtime either; and the liveness probe is tokio's connect under
-//! tokio's timeout (Q12).
+//! tokio's timeout (Q12) — since Q04 a hand-written `GET /v1/health`.
 //!
 //! A command refuses with a [`ShellError`] (Q13): `{ kind, message }` to the
 //! webview, `kind` what refused and `message` the sentence it shows.
@@ -31,6 +35,7 @@
 //! same announcement, never by value (N-DAEMON-2).
 
 mod login_path;
+mod reuse;
 
 use login_path::{DaemonPath, DaemonPathReport};
 use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
@@ -38,9 +43,7 @@ use openalpaca_storage::discovery::{self, ConnectionInfo};
 use openalpaca_storage::store;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::future::Future;
 use std::io::Write;
-use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
 use std::sync::Mutex;
@@ -82,11 +85,43 @@ enum ShellError {
     #[error("{message}")]
     DiscoveryUnreadable { message: String },
     /// `ensure_daemon_running`: no daemon came up — it could not be spawned,
-    /// or the one spawned did not answer within 5 seconds. `log_tail` is what
-    /// this run wrote to `daemon.log` (also quoted in `message`), `None` when
-    /// it wrote nothing or the log could not be read.
+    /// or within 5 seconds of the spawn `discovery.json` named no live
+    /// daemon. `log_tail` is what this run wrote to `daemon.log` (also quoted
+    /// in `message`), `None` when it wrote nothing or the log could not be
+    /// read.
     #[error("{message}")]
     SpawnFailed {
+        message: String,
+        log_tail: Option<String>,
+    },
+    /// `ensure_daemon_running` (Q04): the daemon running speaks a protocol
+    /// this shell does not — newer than `shell_protocol`, older than the
+    /// oldest it supports, or in a discovery file it cannot read. Also
+    /// `get_connection_info`, judged from the file's `build.protocol` alone
+    /// when its pid is a live `openalpacad`, so the reconnect ladder parks on
+    /// it too. Nothing was stopped or started; `remedy` is the way out, also
+    /// the end of `message`.
+    #[error("{message}")]
+    Mismatch {
+        message: String,
+        daemon_version: Option<String>,
+        daemon_protocol: Option<u32>,
+        shell_protocol: u32,
+        remedy: String,
+    },
+    /// `ensure_daemon_running` (Q04, C-09 with A-18): the discovery pid is a
+    /// live `openalpacad` that does not answer yet — booting, or in its
+    /// shutdown's tail. Nothing was spawned; the window waits and asks
+    /// again.
+    #[error("{message}")]
+    Starting { message: String },
+    /// `ensure_daemon_running` (Q04): the daemon has not answered
+    /// `daemon_lifecycle::STARTING_BUDGET` after the shell first saw it
+    /// silent. Nothing was spawned over it, stopped or rotated; `log_tail` is
+    /// the log's tail (also quoted in `message`), `None` when it holds
+    /// nothing or could not be read (the reason then in `message`).
+    #[error("{message}")]
+    StillStarting {
         message: String,
         log_tail: Option<String>,
     },
@@ -141,16 +176,20 @@ fn did_not_start(log_path: &Path, tail: String) -> ShellError {
 // ============================================================================
 
 /// What `ensure_daemon_running` and `get_connection_info` answer: the
-/// daemon's [`ConnectionInfo`] (`{ baseUrl, token, instanceId }`) and
-/// `daemonPath`, where the `PATH` of a daemon this app spawned came from
-/// (Q21) — `null` for a daemon this run of the app did not spawn: one started
-/// from a terminal, or by an earlier run of the app.
+/// daemon's [`ConnectionInfo`] (`{ baseUrl, token, instanceId, version,
+/// protocol }`), `daemonPath`, where the `PATH` of a daemon this app spawned
+/// came from (Q21) — `null` for a daemon this run of the app did not spawn:
+/// one started from a terminal, or by an earlier run of the app — and `note`
+/// (Q04), the sentence the window shows beside a daemon of an older
+/// protocol or another version (`reuse::compat_note`), `null` for one of
+/// this shell's.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShellConnection {
     #[serde(flatten)]
     info: ConnectionInfo,
     daemon_path: Option<DaemonPathReport>,
+    note: Option<String>,
 }
 
 /// Every daemon this run of the app spawned, by its process id, with the
@@ -178,17 +217,34 @@ fn forget_spawned() {
 }
 
 /// `d`'s connection, with `daemonPath` when `d` names a daemon this run
-/// spawned (its `pid`).
+/// spawned (its `pid`), and the note its file's build earns.
 fn shell_connection(d: &discovery::Discovery) -> ShellConnection {
+    let note = reuse::compat_note(&reuse::ShellBuild::THIS, d.build.protocol, &d.build.version);
+    connection_with(ConnectionInfo::from(d), d.pid, note)
+}
+
+/// The daemon `ensure_daemon_running` reuses, with the protocol and version
+/// its health answered and the note [`reuse::decide_reuse`] gave it.
+fn reused_connection(reused: reuse::Reused) -> ShellConnection {
+    let mut info = ConnectionInfo::from(&reused.discovery);
+    info.protocol = reused.protocol;
+    info.version = reused.version;
+    connection_with(info, reused.discovery.pid, reused.note)
+}
+
+/// `info` with the `daemonPath` of the daemon `pid` when this run spawned
+/// it, and `note`.
+fn connection_with(info: ConnectionInfo, pid: u32, note: Option<String>) -> ShellConnection {
     let daemon_path = SPAWNED
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .iter()
-        .find(|(pid, _)| *pid == d.pid)
+        .find(|(spawned, _)| *spawned == pid)
         .map(|(_, report)| report.clone());
     ShellConnection {
-        info: ConnectionInfo::from(d),
+        info,
         daemon_path,
+        note,
     }
 }
 
@@ -209,7 +265,12 @@ async fn get_connection_info() -> Result<ShellConnection, ShellError> {
         })?
 }
 
-/// [`get_connection_info`]'s work: read discovery.json and check its token.
+/// [`get_connection_info`]'s work: read discovery.json, refuse a daemon whose
+/// file states a protocol this shell does not work with while its pid is a
+/// live `openalpacad` (Q04: the reconnect ladder's rung asks no health, and
+/// would otherwise connect to a daemon `ensure_daemon_running` refuses), and
+/// check its token. A file over a pid that is gone is answered as before:
+/// the socket fails, and the ladder goes on.
 fn read_connection_info() -> Result<ShellConnection, ShellError> {
     let Some(d) = discovery::read_discovery().map_err(|e| ShellError::DiscoveryUnreadable {
         message: e.to_string(),
@@ -220,6 +281,12 @@ fn read_connection_info() -> Result<ShellConnection, ShellError> {
         });
     };
 
+    if let Some(mismatch) = reuse::file_mismatch(&d, &reuse::ShellBuild::THIS)
+        && daemon_lifecycle::pid_is_daemon(d.pid)
+    {
+        return Err(mismatch.into_error());
+    }
+
     discovery::ensure_not_expired(&d).map_err(|e| ShellError::Expired {
         message: e.to_string(),
     })?;
@@ -227,59 +294,32 @@ fn read_connection_info() -> Result<ShellConnection, ShellError> {
     Ok(shell_connection(&d))
 }
 
-/// Ensure the daemon is running, spawning it if necessary.
-/// Returns connection info once daemon is ready.
+/// Ensure a daemon this app can use is running, and answer its connection
+/// (Q04, [`reuse::ensure_with`] over the machine's world): the daemon
+/// `discovery.json` names is reused when its `GET /v1/health` answers as
+/// that daemon in a protocol this shell speaks (with a note for an older
+/// one, or another version); refused as a mismatch when it speaks another,
+/// stopping and starting nothing; answered `starting` while its pid is a
+/// live `openalpacad` that does not answer yet, at once and at every ask
+/// until `daemon_lifecycle::STARTING_BUDGET` from the first silent look,
+/// then reported still starting — never spawned over, its log never
+/// rotated, its lock never probed. Only with no live daemon named is the
+/// sidecar spawned, once, and the daemon the file then names judged the
+/// same way: the CLI's, when it won the store's lock first.
 ///
-/// Every read of discovery.json, the spawn and the read of the log run on
-/// the blocking pool, and the probe is tokio's, so the command holds no
-/// runtime thread while it waits on a disk, a connect or the new process.
+/// Every read of discovery.json, the process-table read, the spawn and the
+/// read of the log run on the blocking pool, and the probe is tokio's, so
+/// the command holds no runtime thread while it waits on a disk, a connect
+/// or the new process.
 #[tauri::command]
 async fn ensure_daemon_running() -> Result<ShellConnection, ShellError> {
-    // Step 1: Check if a daemon is already running AND actually alive. A stale
-    // discovery.json (left by a crashed/killed daemon or a reboot) would
-    // otherwise be trusted forever, so the GUI would never respawn. Liveness is
-    // the authoritative signal — a live daemon is used even if the file's own
-    // expiry has lapsed. A running daemon rotates its token before that
-    // (T21 (2)), so a lapsed file over a live address is a daemon that is hung
-    // or from before T21 (Q04's table decides that case).
-    if let Some(info) = live_daemon().await {
-        return Ok(info);
-    }
-
-    // Step 2: Spawn the daemon process
-    let spawned = tauri::async_runtime::spawn_blocking(spawn_daemon)
-        .await
-        .map_err(|e| spawn_failed(format!("Failed to spawn daemon: {e}")))?
-        .map_err(|e| spawn_failed(format!("Failed to spawn daemon: {e:#}")))?;
-    let log_start = spawned.log_start;
-    record_spawned(spawned.pid, spawned.path);
-
-    // Step 3: Wait for the new daemon to appear AND accept connections.
-    for _ in 0..25 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        if let Some(info) = live_daemon().await {
-            return Ok(info);
-        }
-    }
-
-    // It did not come up. The daemon's own reason — a database this build
-    // does not know, a store it cannot create, another daemon holding the
-    // lock — is in its log, and nothing else can
-    // say it: with no daemon serving `GET /v1/status` there is nobody to ask
-    // where the log is. Only what *this* spawn wrote is read, so an earlier
-    // run's last words are never presented as this one's.
-    let (log_path, tail) = tauri::async_runtime::spawn_blocking(move || {
-        let log_path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
-        let tail =
-            store::read_log_tail(&log_path, log_start, TIMEOUT_TAIL_LINES).unwrap_or_default();
-        Ok::<_, String>((log_path, tail))
-    })
+    reuse::ensure_with(
+        &mut reuse::RealWorld,
+        &reuse::STARTING,
+        &reuse::ShellBuild::THIS,
+    )
     .await
-    .map_err(|e| format!("Could not read the daemon log: {e}"))
-    .and_then(|read| read)
-    .map_err(spawn_failed)?;
-    Err(did_not_start(&log_path, tail))
+    .map(reused_connection)
 }
 
 /// How many log lines a failed start quotes. Enough for the longest refusal
@@ -478,52 +518,6 @@ fn without_verbatim_prefix(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// The daemon discovery.json names, if there is one and it answers the
-/// probe. The file is read on the blocking pool; a missing, unreadable or
-/// unparsable file is no daemon, as is a read that could not be run.
-async fn live_daemon() -> Option<ShellConnection> {
-    let d = tauri::async_runtime::spawn_blocking(discovery::read_discovery)
-        .await
-        .ok()?
-        .ok()??;
-    daemon_is_alive(&d).await.then(|| shell_connection(&d))
-}
-
-/// How long the probe waits for one address's connect.
-const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
-
-/// Liveness probe: can we open a TCP connection to the daemon's listen address?
-/// A stale discovery.json (dead daemon) fails this, so callers respawn instead
-/// of returning a dead endpoint.
-///
-/// tokio's resolver and connect, each address under tokio's timeout: the
-/// waits are the runtime's timers, so a slow or silent address holds no
-/// thread.
-async fn daemon_is_alive(d: &discovery::Discovery) -> bool {
-    let Ok(addrs) = tokio::net::lookup_host((d.listen.host.as_str(), d.listen.port)).await else {
-        return false;
-    };
-    any_address_answers(addrs, tokio::net::TcpStream::connect).await
-}
-
-/// Whether `connect` completes for any of `addrs`, tried in order, each
-/// given [`LIVENESS_PROBE_TIMEOUT`] and no more. The connect is a parameter
-/// so a test can give the probe an address that never answers.
-async fn any_address_answers<S, F>(
-    addrs: impl IntoIterator<Item = SocketAddr>,
-    connect: impl Fn(SocketAddr) -> F,
-) -> bool
-where
-    F: Future<Output = std::io::Result<S>>,
-{
-    for addr in addrs {
-        if let Ok(Ok(_)) = tokio::time::timeout(LIVENESS_PROBE_TIMEOUT, connect(addr)).await {
-            return true;
-        }
-    }
-    false
-}
-
 /// What [`spawn_daemon`] started.
 struct Spawned {
     /// The log's length just before the spawn — where this run's output
@@ -535,43 +529,42 @@ struct Spawned {
     path: Option<DaemonPathReport>,
 }
 
+/// The sidecar's file name.
+const SIDECAR_NAME: &str = if cfg!(windows) {
+    "openalpacad.exe"
+} else {
+    "openalpacad"
+};
+
+/// The sidecar beside the app whose executable is `exe` (D7 (a), Q04): `exe`
+/// canonicalized (`std::fs::canonicalize`, so a symlinked app or a
+/// symlinked folder above it leads to the real folder), and
+/// [`SIDECAR_NAME`] in that folder. Tauri's `current_exe()`, which refuses
+/// any symlinked ancestor on macOS, is not used. The one refusal, in every
+/// profile, is an absent sidecar, its sentence naming the path looked at;
+/// nothing on `PATH` is tried (a debug build's fallback to it is gone), so
+/// the daemon started is always the one staged beside the app.
+fn sidecar_beside(exe: &Path) -> anyhow::Result<PathBuf> {
+    let exe = std::fs::canonicalize(exe)
+        .map_err(|e| anyhow::anyhow!("Could not resolve the app's path {}: {e}", exe.display()))?;
+    let daemon = exe.parent().unwrap_or(Path::new(".")).join(SIDECAR_NAME);
+    if daemon.exists() {
+        Ok(daemon)
+    } else {
+        anyhow::bail!(
+            "Daemon binary not found at {}. The application may be incorrectly installed.",
+            daemon.display()
+        )
+    }
+}
+
 /// Spawn the daemon as a detached background process, its stdout and stderr
 /// appended to `daemon.log`, on the `PATH` [`login_path::for_the_daemon`]
 /// answers — the login shell's, or the fallback list — waiting for the
-/// app's capture at most until its deadline.
+/// app's capture at most until its deadline. The sidecar is located first
+/// ([`sidecar_beside`]), so a refusal touches neither the store nor the log.
 fn spawn_daemon() -> anyhow::Result<Spawned> {
-    // Find the daemon executable
-    // In development: should be in the same target directory
-    // In production: should be bundled with the app
-
-    let daemon_name = if cfg!(windows) {
-        "openalpacad.exe"
-    } else {
-        "openalpacad"
-    };
-
-    // Try to find daemon in common locations
-    let exe_path = std::env::current_exe()?;
-    let exe_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
-
-    let daemon_path = exe_dir.join(daemon_name);
-
-    let path_to_use = if daemon_path.exists() {
-        daemon_path
-    } else {
-        #[cfg(debug_assertions)]
-        {
-            // Dev convenience: fall back to PATH
-            std::path::PathBuf::from(daemon_name)
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            anyhow::bail!(
-                "Daemon binary not found at {}. The application may be incorrectly installed.",
-                daemon_path.display()
-            );
-        }
-    };
+    let path_to_use = sidecar_beside(&std::env::current_exe()?)?;
 
     // D1: one root. `ensure_store` seeds README/.layout; the config dir must
     // exist before the spawn — `resolve_config_base_dir` ignores an
@@ -690,10 +683,6 @@ fn announce_daemon_path(path: &DaemonPath) {
 /// login shell's variable reaches the daemon only through the list; the
 /// terminal's whole environment for an app started from one (*Rev 91* (4),
 /// *Rev 92* (2): no change).
-///
-/// On Unix a `PATH` set on the command is also the one a bare program name
-/// is looked up on, so a debug build's `openalpacad` fallback (no daemon
-/// beside the app) is looked up on the daemon's `PATH`, not the app's.
 fn daemon_command(
     program: &Path,
     app_dir: &Path,

@@ -71,6 +71,7 @@ import {
   type StopPhase,
 } from "@/lib/connection";
 import { stopDaemon, stopToast } from "@/lib/daemon-control";
+import type { EventsStatus } from "@/lib/events";
 import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
 import { useChooseProject } from "@/hooks/useWorkspaces";
@@ -131,7 +132,12 @@ export function ConnectionSection() {
       <StatusCard
         ok={!stopped && connection.connected}
         idle={stopped}
-        title={statusTitle(intent, connection.connected, phase)}
+        title={statusTitle(
+          intent,
+          connection.connected,
+          phase,
+          connection.socket,
+        )}
         meta={
           stopped
             ? stoppedMeta(connection.stoppedAt ?? null, phase)
@@ -210,6 +216,9 @@ export function ConnectionSection() {
         {!stopped && connection.info?.daemonPath ? (
           <GapNote>{daemonPathNote(connection.info.daemonPath)}</GapNote>
         ) : null}
+        {!stopped && connection.note ? (
+          <GapNote>{connection.note}</GapNote>
+        ) : null}
         {!stopped && !connection.connected && connection.lastError ? (
           <LogBlock label="Why the daemon is unreachable">
             {connection.lastError}
@@ -265,12 +274,15 @@ export function ConnectionSection() {
 /**
  * The status card's title, stopped or not (§6.3). A stop from this window is
  * titled by what `await_daemon_stopped` concluded, never by the intent alone:
- * the POST's `200` only says the daemon was asked.
+ * the POST's `200` only says the daemon was asked. With no stop, the two
+ * states the shell's answers put the socket in (Q04) have titles of their
+ * own: a daemon still starting, and one this app cannot use.
  */
 export function statusTitle(
   intent: StopIntent,
   connected: boolean,
   phase: StopPhase = null,
+  socket: EventsStatus | null = null,
 ): string {
   if (intent === "stopped_here") {
     switch (phase) {
@@ -287,7 +299,10 @@ export function statusTitle(
     }
   }
   if (intent === "stopped_elsewhere") return "Daemon stopped from elsewhere";
-  return connected ? "Daemon connected" : "Daemon unreachable";
+  if (connected) return "Daemon connected";
+  if (socket === "starting") return "Daemon is starting";
+  if (socket === "mismatch") return "Daemon version mismatch";
+  return "Daemon unreachable";
 }
 
 /**

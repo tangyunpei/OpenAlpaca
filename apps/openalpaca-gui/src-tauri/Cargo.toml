@@ -17,7 +17,10 @@ serde_json.workspace = true
 # Q12: `net` for the liveness probe (tokio::net::TcpStream, lookup_host). It
 # turns on tokio's `socket2` too, so the macOS build links socket2 0.6.5,
 # already in Cargo.lock and THIRD-PARTY-NOTICES: no lock or notices change.
-tokio = { workspace = true, features = ["net"] }
+# Q04: `io-util` for the hand-written `GET /v1/health` (AsyncReadExt,
+# AsyncWriteExt). It turns on tokio's `bytes`, already in Cargo.lock as
+# tokio's dependency: no lock or notices change.
+tokio = { workspace = true, features = ["net", "io-util"] }
 anyhow.workspace = true
 # Q13: the commands' typed refusals (`ShellError`). thiserror 2.0.21 is
 # already in Cargo.lock (tauri's); the lock gains only this crate's edge.
