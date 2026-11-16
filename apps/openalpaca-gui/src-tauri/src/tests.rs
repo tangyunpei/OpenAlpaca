@@ -1609,30 +1609,145 @@ fn the_startup_marks_are_logged_in_one_form() {
     assert_eq!(page_origin(&dev), "http://localhost:1420");
 }
 
+/// A stand-in for the window whose web content process ended (RELOAD-DIALOG):
+/// it counts each reload and quit and keeps each dialog it was asked to show
+/// open until the test answers it, so a test sees what the shell did and
+/// answers when it chooses. The real window ([`DialogWebview`]) differs only
+/// in its three effects: `Webview::reload`, `AppHandle::exit` and the dialog
+/// plugin's message dialog, whose click is step 19's check at the app.
+#[derive(Clone)]
+struct FakeWindow {
+    label: String,
+    /// Whether each reload fails.
+    failing: bool,
+    /// Answered at once, inside `ask`, when set: a prompt that answers while
+    /// `ask` is still running, on a thread `ask` waits for at most
+    /// [`AT_ONCE_DEADLINE`], so a lock held across the dialog fails the test
+    /// at once instead of hanging the run.
+    answers_at_once: Option<(ReloadAnswer, Instant)>,
+    seen: Arc<Mutex<FakeSeen>>,
+}
+
+#[derive(Default)]
+struct FakeSeen {
+    reloads: usize,
+    quits: usize,
+    asks: usize,
+    open: Vec<Box<dyn FnOnce(ReloadAnswer, Instant) + Send>>,
+}
+
+impl FakeWindow {
+    fn new(label: &str) -> Self {
+        Self {
+            label: label.to_owned(),
+            failing: false,
+            answers_at_once: None,
+            seen: Arc::default(),
+        }
+    }
+
+    fn seen(&self) -> std::sync::MutexGuard<'_, FakeSeen> {
+        self.seen.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// `(reloads, quits, asks, dialogs still open)`.
+    fn counts(&self) -> (usize, usize, usize, usize) {
+        let seen = self.seen();
+        (seen.reloads, seen.quits, seen.asks, seen.open.len())
+    }
+
+    /// The person answers the oldest open dialog at `at`.
+    fn answer(&self, answer: ReloadAnswer, at: Instant) {
+        let on_answer = self.seen().open.remove(0);
+        on_answer(answer, at);
+    }
+}
+
+impl EndedWindow for FakeWindow {
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn reload(&self) -> tauri::Result<()> {
+        self.seen().reloads += 1;
+        if self.failing {
+            Err(tauri::Error::WebviewNotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn quit(&self) {
+        self.seen().quits += 1;
+    }
+
+    fn ask(&self, on_answer: Box<dyn FnOnce(ReloadAnswer, Instant) + Send>) {
+        self.seen().asks += 1;
+        match self.answers_at_once {
+            Some((answer, at)) => {
+                let dispatch = tracing::dispatcher::get_default(Clone::clone);
+                let (done, answered) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    tracing::dispatcher::with_default(&dispatch, || on_answer(answer, at));
+                    let _ = done.send(());
+                });
+                assert!(
+                    answered.recv_timeout(AT_ONCE_DEADLINE).is_ok(),
+                    "the answer was left waiting: the bound's lock is held across the dialog"
+                );
+            }
+            None => self.seen().open.push(on_answer),
+        }
+    }
+}
+
+/// How long [`FakeWindow::ask`] waits for an answer given at once.
+const AT_ONCE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The line for an end the bound reloads.
+const ENDED: &str = "The window's web content process ended; reloading the window.";
+/// The line for an end past the bound, which asks (RELOAD-BOUND's line,
+/// its tail now the dialog's).
+const ASKED: &str = "The window's web content process ended again after 3 reloads within \
+                     60 s; the window is not reloaded by itself: a dialog asks whether to \
+                     reload it or quit the app.";
+/// The line for an end while the window's dialog is open.
+const STILL_ASKING: &str = "The window's web content process ended again while its dialog \
+                            is open; the window is not reloaded by itself, and no second \
+                            dialog is shown.";
+const CHOSE_RELOAD: &str = "Reload was chosen in the dialog; reloading the window.";
+const CHOSE_QUIT: &str = "The dialog answered Quit (its button, or an end of the dialog \
+                          that was not a click); quitting the app.";
+const CHOSE_NEITHER: &str = "The dialog answered neither Reload nor Quit; the window is \
+                             left as it is, and its next end asks again.";
+
+/// How many lines of `gui.log` contain `needle`.
+fn gui_log_count(needle: &str) -> usize {
+    gui_log_text()
+        .lines()
+        .filter(|l| l.contains(needle))
+        .count()
+}
+
 /// A web content process that ended is a line in `gui.log`, and the window
-/// is reloaded, once; a reload that failed is a line too. The reload is
-/// counted through [`log_and_reload`]'s parameter; the hook's own
-/// `Webview::reload` over the mock runtime answers `Ok`; the real reload,
-/// and the reconnect to the same `instance_id`, are G-bundle leg A's.
+/// is reloaded, once; a reload that failed is a line too. The real window's
+/// reload, `Webview::reload` over the mock runtime, answers `Ok`; the real
+/// reload, and the reconnect to the same `instance_id`, are G-bundle leg A's.
 #[test]
 fn a_web_content_process_that_ended_is_logged_and_the_window_reloaded() {
-    const ENDED: &str = "The window's web content process ended; reloading the window.";
     let _guard = HomeStoreGuard::set("gui-log-webcontent");
     let (_app, webview) = mock_webview();
-    let reloads = std::cell::Cell::new(0);
+    let window = FakeWindow::new("main");
     with_the_shell_log(|| {
-        reload_after_web_content_ended(webview.as_ref(), &Mutex::new(ReloadBound::default()));
-        log_and_reload(
-            "main",
-            &Mutex::new(ReloadBound::default()),
-            Instant::now(),
-            || {
-                reloads.set(reloads.get() + 1);
-                Ok(())
-            },
-        );
+        let real = DialogWebview(webview.as_ref().clone());
+        web_content_ended(&real, &Arc::default(), Instant::now());
+        web_content_ended(&window, &Arc::default(), Instant::now());
     });
-    assert_eq!(reloads.get(), 1, "the window is reloaded, once");
+    assert_eq!(
+        window.counts(),
+        (1, 0, 0, 0),
+        "the window is reloaded, once"
+    );
 
     let text = gui_log_text();
     let lines: Vec<&str> = text.lines().filter(|line| line.contains(ENDED)).collect();
@@ -1647,14 +1762,11 @@ fn a_web_content_process_that_ended_is_logged_and_the_window_reloaded() {
     );
 
     // A reload that fails is said, after the line for the ended process.
-    with_the_shell_log(|| {
-        log_and_reload(
-            "main",
-            &Mutex::new(ReloadBound::default()),
-            Instant::now(),
-            || Err(tauri::Error::WebviewNotFound),
-        );
-    });
+    let failing = FakeWindow {
+        failing: true,
+        ..FakeWindow::new("main")
+    };
+    with_the_shell_log(|| web_content_ended(&failing, &Arc::default(), Instant::now()));
     let text = gui_log_text();
     let failed = text
         .lines()
@@ -1667,125 +1779,327 @@ fn a_web_content_process_that_ended_is_logged_and_the_window_reloaded() {
 }
 
 /// RELOAD-BOUND (`tasks/pending-decisions.md` §1's *Rev 90* (b)): a window
-/// whose web content process keeps ending is reloaded at most three times
-/// within 60 s, on an injected clock. A fourth end inside the span is
-/// refused: no reload, and one `ERROR` line in `gui.log` saying the window
-/// is left as it is, in place of the reloading line. The span slides over
-/// the reloads performed: a refused end never counts, a reload exactly 60 s
+/// whose web content process keeps ending is reloaded by itself at most
+/// three times within 60 s, on an injected clock. A fourth end inside the
+/// span is not reloaded by itself: one `ERROR` line in `gui.log`, in place of
+/// the reloading line, and the dialog (RELOAD-DIALOG), answered here with
+/// neither button, so the bound alone is seen. The span slides over the
+/// reloads performed: an end refused never counts, a reload exactly 60 s
 /// old no longer counts, so the next end after it is reloaded and the one
 /// after that refused again until the next counted reload ages out. A
 /// reload that failed counts; another window's ends never spend this one's.
 /// The hook's registration with the builder and WebKit's own event are
-/// G-bundle leg A's; the hook's one bound is the next test's.
+/// G-bundle leg A's; the hook's one bound is a test of its own.
 #[test]
 fn a_fourth_reload_inside_60_s_is_refused_and_one_after_allowed() {
-    const ENDED: &str = "The window's web content process ended; reloading the window.";
-    const LEFT: &str = "The window's web content process ended again after 3 reloads within \
-                        60 s; the window is left as it is, not reloaded. Quit and reopen the \
-                        app to load it again.";
     let _guard = HomeStoreGuard::set("gui-log-reload-bound");
-    let bound = Mutex::new(ReloadBound::default());
+    let bound = Arc::default();
     let t0 = Instant::now();
-    let reloads = std::cell::Cell::new(0);
-    // The window's process ends `ms` milliseconds after T0: whether it was
-    // reloaded.
-    let ended_at = |label: &str, ms: u64| {
-        let before = reloads.get();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let main = FakeWindow::new("main");
+    // `window`'s process ends `ms` milliseconds after T0: whether it was
+    // reloaded by itself. A dialog it asks is answered with neither button.
+    let ended_at = |window: &FakeWindow, ms: u64| {
+        let (before, _, asks, _) = window.counts();
         with_the_shell_log(|| {
-            log_and_reload(label, &bound, t0 + Duration::from_millis(ms), || {
-                reloads.set(reloads.get() + 1);
-                Ok(())
-            });
+            web_content_ended(window, &bound, at(ms));
+            if window.counts().2 > asks {
+                window.answer(ReloadAnswer::Neither, at(ms));
+            }
         });
-        reloads.get() > before
-    };
-    let count = |needle: &str| {
-        gui_log_text()
-            .lines()
-            .filter(|l| l.contains(needle))
-            .count()
+        window.counts().0 > before
     };
 
     for ms in [0, 1_000, 2_000] {
-        assert!(
-            ended_at("main", ms),
-            "a reload within the bound, at {ms} ms"
-        );
+        assert!(ended_at(&main, ms), "a reload within the bound, at {ms} ms");
     }
     assert!(
-        !ended_at("main", 3_000),
-        "a fourth end inside 60 s is not reloaded"
+        !ended_at(&main, 3_000),
+        "a fourth end inside 60 s is not reloaded by itself"
     );
-    assert_eq!((count(ENDED), count(LEFT)), (3, 1), "{}", gui_log_text());
+    assert_eq!(
+        (gui_log_count(ENDED), gui_log_count(ASKED)),
+        (3, 1),
+        "{}",
+        gui_log_text()
+    );
     let text = gui_log_text();
-    let left = text.lines().last().expect("a line for the refusal");
-    assert!(
-        left.contains(LEFT),
-        "the refusal is the last line: {text:?}"
-    );
-    assert!(left.contains(" ERROR openalpaca_gui: "), "{left}");
-    assert!(left.contains(" webview=\"main\""), "{left}");
+    let asked = text
+        .lines()
+        .find(|l| l.contains(ASKED))
+        .expect("a line for the refusal");
+    assert!(asked.contains(" ERROR openalpaca_gui: "), "{asked}");
+    assert!(asked.contains(" webview=\"main\""), "{asked}");
 
     // Still inside the span of the reload at 0 ms: refused, and not counted.
-    assert!(!ended_at("main", 59_999));
+    assert!(!ended_at(&main, 59_999));
     // The reload at 0 ms is 60 s old: no longer counted.
     assert!(
-        ended_at("main", 60_000),
+        ended_at(&main, 60_000),
         "a reload after the span is allowed"
     );
     // 1 s, 2 s and 60 s count: refused again ...
-    assert!(!ended_at("main", 60_500));
+    assert!(!ended_at(&main, 60_500));
     // ... until the reload at 1 s is 60 s old.
-    assert!(ended_at("main", 61_000));
-    assert_eq!(reloads.get(), 5);
+    assert!(ended_at(&main, 61_000));
+    assert_eq!(main.counts(), (5, 0, 3, 0));
     assert_eq!(
-        (count(ENDED), count(LEFT)),
+        (gui_log_count(ENDED), gui_log_count(ASKED)),
         (5, 3),
         "one line for each end, never two: {}",
         gui_log_text()
     );
 
     // Another window's ends spend its own reloads, never this one's.
-    assert!(ended_at("second", 61_000));
+    assert!(ended_at(&FakeWindow::new("second"), 61_000));
     assert!(
-        !ended_at("main", 61_500),
+        !ended_at(&main, 61_500),
         "the main window's bound is unchanged"
     );
 
     // A reload that failed counts as one given.
-    let failing = Mutex::new(ReloadBound::default());
-    let attempts = std::cell::Cell::new(0);
+    let failing = FakeWindow {
+        failing: true,
+        ..FakeWindow::new("main")
+    };
+    let failing_bound = Arc::default();
     with_the_shell_log(|| {
         for ms in [0, 1_000, 2_000, 3_000] {
-            log_and_reload("main", &failing, t0 + Duration::from_millis(ms), || {
-                attempts.set(attempts.get() + 1);
-                Err(tauri::Error::WebviewNotFound)
-            });
+            web_content_ended(&failing, &failing_bound, at(ms));
         }
     });
-    assert_eq!(attempts.get(), 3, "three failed reloads spend the bound");
+    assert_eq!(
+        failing.counts(),
+        (3, 0, 1, 1),
+        "three failed reloads spend the bound"
+    );
 }
 
-/// The hook `run` registers (RELOAD-BOUND) owns one bound for every end it
-/// is called for: four ends of the window's process, one after another on
-/// the real clock, well inside 60 s, are three reloading lines and one line
-/// leaving the window as it is. Its registration with the builder and
-/// WebKit's own event are G-bundle leg A's, which no mock fires.
+/// RELOAD-DIALOG (`tasks/pending-decisions.md` §1's *Rev 100* (1) (c)): an
+/// end past the bound asks, once, with one dialog per window at a time, and
+/// each answer does what its button says, on the injected clock. `Reload`
+/// reloads the window once, whatever the bound says, and that reload counts
+/// as one given from the click, so the bound is never reset: the next end
+/// inside the span asks again. `Quit` quits the app. A dialog closed with
+/// neither leaves the window as it is. An end once the span has passed is
+/// still reloaded by itself, with no dialog; nothing ever answers for the
+/// person, and nothing waits on a timer.
+#[test]
+fn a_window_past_the_bound_asks_once_and_each_answer_does_what_it_says() {
+    let _guard = HomeStoreGuard::set("gui-log-reload-dialog");
+    let bound = Arc::default();
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let main = FakeWindow::new("main");
+
+    with_the_shell_log(|| {
+        for ms in [0, 1_000, 2_000] {
+            web_content_ended(&main, &bound, at(ms));
+        }
+    });
+    assert_eq!(main.counts(), (3, 0, 0, 0), "three reloads, no dialog");
+
+    // The fourth end inside the span asks, and is not reloaded by itself.
+    with_the_shell_log(|| web_content_ended(&main, &bound, at(3_000)));
+    assert_eq!(main.counts(), (3, 0, 1, 1), "one dialog, open");
+    let text = gui_log_text();
+    let last = text.lines().last().expect("a line for the end");
+    assert!(
+        last.contains(ASKED),
+        "the asking line is the last: {text:?}"
+    );
+    assert!(last.contains(" ERROR openalpaca_gui: "), "{last}");
+    assert!(last.contains(" webview=\"main\""), "{last}");
+
+    // An end while it is open: no reload, no second dialog, one line.
+    with_the_shell_log(|| web_content_ended(&main, &bound, at(4_000)));
+    assert_eq!(main.counts(), (3, 0, 1, 1), "still the one dialog");
+    let text = gui_log_text();
+    let last = text.lines().last().expect("a line for the end");
+    assert!(last.contains(STILL_ASKING), "{text:?}");
+    assert!(last.contains(" WARN openalpaca_gui: "), "{last}");
+    assert!(last.contains(" webview=\"main\""), "{last}");
+
+    // Reload: the window is reloaded once, and nothing quits.
+    with_the_shell_log(|| main.answer(ReloadAnswer::Reload, at(5_000)));
+    assert_eq!(main.counts(), (4, 0, 1, 0), "Reload reloads, once");
+    assert_eq!(gui_log_count(CHOSE_RELOAD), 1, "{}", gui_log_text());
+
+    // The bound is not reset: the next end inside the span asks again.
+    with_the_shell_log(|| web_content_ended(&main, &bound, at(6_000)));
+    assert_eq!(
+        main.counts(),
+        (4, 0, 2, 1),
+        "a new dialog, the old answered"
+    );
+
+    // Quit: the app quits, and the window is not reloaded.
+    with_the_shell_log(|| main.answer(ReloadAnswer::Quit, at(7_000)));
+    assert_eq!(main.counts(), (4, 1, 2, 0), "Quit quits");
+    assert_eq!(gui_log_count(CHOSE_QUIT), 1, "{}", gui_log_text());
+
+    // The reload clicked at 5 s counts: at 60.5 s the reload at 0 s is out
+    // of the span, and 1 s, 2 s and 5 s are three, so the end asks, where
+    // without the click it would be reloaded by itself.
+    with_the_shell_log(|| web_content_ended(&main, &bound, at(60_500)));
+    assert_eq!(main.counts(), (4, 1, 3, 1), "the clicked reload counted");
+
+    // A dialog answered with neither button: nothing reloads, nothing quits.
+    with_the_shell_log(|| main.answer(ReloadAnswer::Neither, at(60_600)));
+    assert_eq!(main.counts(), (4, 1, 3, 0), "neither leaves the window");
+    assert_eq!(gui_log_count(CHOSE_NEITHER), 1, "{}", gui_log_text());
+
+    // At 65 s the clicked reload is 60 s old: the end is reloaded by itself.
+    with_the_shell_log(|| web_content_ended(&main, &bound, at(65_000)));
+    assert_eq!(main.counts(), (5, 1, 3, 0), "a reload after the span");
+    assert_eq!(
+        (
+            gui_log_count(ENDED),
+            gui_log_count(ASKED),
+            gui_log_count(STILL_ASKING)
+        ),
+        (4, 3, 1),
+        "one line for each end: {}",
+        gui_log_text()
+    );
+
+    // One window's open dialog never holds another's.
+    let second = FakeWindow::new("second");
+    with_the_shell_log(|| {
+        web_content_ended(&main, &bound, at(65_100));
+        web_content_ended(&main, &bound, at(65_200));
+        web_content_ended(&main, &bound, at(65_300));
+        for ms in [65_100, 65_200, 65_300, 65_400] {
+            web_content_ended(&second, &bound, at(ms));
+        }
+    });
+    assert_eq!(main.counts(), (7, 1, 4, 1), "main asks");
+    assert_eq!(second.counts(), (3, 0, 1, 1), "second asks too");
+
+    // A clicked reload that fails is said, and counted like any reload.
+    with_the_shell_log(|| main.answer(ReloadAnswer::Reload, at(65_500)));
+    let failing = FakeWindow {
+        failing: true,
+        ..FakeWindow::new("third")
+    };
+    with_the_shell_log(|| {
+        for ms in [0, 1_000, 2_000, 3_000] {
+            web_content_ended(&failing, &bound, at(ms));
+        }
+        failing.answer(ReloadAnswer::Reload, at(4_000));
+    });
+    assert_eq!(failing.counts(), (4, 0, 1, 0), "the click reloads");
+    assert_eq!(
+        gui_log_count("Could not reload the window"),
+        4,
+        "each failed reload is said: {}",
+        gui_log_text()
+    );
+
+    // A prompt that answers while `ask` is still running: the bound's lock
+    // is not held across the dialog, so the answer is not left waiting on
+    // it (a lock held fails `FakeWindow::ask`'s deadline, not a hang).
+    let at_once = FakeWindow {
+        answers_at_once: Some((ReloadAnswer::Reload, at(3_500))),
+        ..FakeWindow::new("fourth")
+    };
+    with_the_shell_log(|| {
+        for ms in [0, 1_000, 2_000, 3_000] {
+            web_content_ended(&at_once, &bound, at(ms));
+        }
+    });
+    assert_eq!(at_once.counts(), (4, 0, 1, 0), "answered at once");
+
+    // An end once the span has passed, while the dialog is still open: the
+    // open dialog acts, so no reload by itself and no second dialog.
+    let waiting = FakeWindow::new("fifth");
+    with_the_shell_log(|| {
+        for ms in [0, 1_000, 2_000, 3_000, 70_000] {
+            web_content_ended(&waiting, &bound, at(ms));
+        }
+    });
+    assert_eq!(waiting.counts(), (3, 0, 1, 1), "the open dialog holds");
+    let text = gui_log_text();
+    let last = text.lines().last().expect("a line for the end");
+    assert!(last.contains(STILL_ASKING), "{text:?}");
+    assert!(last.contains(" webview=\"fifth\""), "{last}");
+}
+
+/// The dialog's two buttons and how its result is read (RELOAD-DIALOG):
+/// `Reload` first, the default button, then `Quit`. For these buttons
+/// tauri-plugin-dialog 2.8.3 delivers only `Custom(label)`: a click is its
+/// button's label, and an end that is not a click (rfd's `Cancel`, a failed
+/// alert too) arrives as `Custom("Quit")`, so it reads as `Quit`
+/// (`tasks/pending-decisions.md` §1's *Rev 109*). The other results, which
+/// the plugin does not deliver for these buttons, read as neither.
+#[test]
+fn the_dialogs_buttons_read_as_reload_or_quit_by_their_labels() {
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogResult};
+    let _guard = HomeStoreGuard::set("gui-reload-dialog-buttons");
+    match reload_dialog_buttons() {
+        MessageDialogButtons::OkCancelCustom(first, second) => {
+            assert_eq!((first.as_str(), second.as_str()), ("Reload", "Quit"));
+        }
+        other => panic!("two buttons, Reload then Quit: {other:?}"),
+    }
+    for (result, answer) in [
+        (
+            MessageDialogResult::Custom("Reload".to_owned()),
+            ReloadAnswer::Reload,
+        ),
+        (
+            MessageDialogResult::Custom("Quit".to_owned()),
+            ReloadAnswer::Quit,
+        ),
+        (MessageDialogResult::Cancel, ReloadAnswer::Neither),
+        (MessageDialogResult::Ok, ReloadAnswer::Neither),
+        (MessageDialogResult::Yes, ReloadAnswer::Neither),
+        (MessageDialogResult::No, ReloadAnswer::Neither),
+        (
+            MessageDialogResult::Custom("Close".to_owned()),
+            ReloadAnswer::Neither,
+        ),
+    ] {
+        assert_eq!(ReloadAnswer::from_dialog(&result), answer, "{result:?}");
+    }
+}
+
+/// The hook `run` registers (RELOAD-BOUND, RELOAD-DIALOG) owns one bound for
+/// every end it is called for: four ends of the window's process, one after
+/// another on the real clock, well inside 60 s, are three reloading lines
+/// and one asking; a fifth while that dialog is open shows none. Built here
+/// over [`FakeWindow`]: the real hook's window is the same function over
+/// [`DialogWebview`], whose dialog no test shows. Its registration with the
+/// builder and WebKit's own event are G-bundle leg A's, which no mock fires.
 #[test]
 fn the_registered_reload_hook_keeps_one_bound_across_ends() {
-    const ENDED: &str = "The window's web content process ended; reloading the window.";
-    const LEFT: &str = "the window is left as it is, not reloaded.";
     let _guard = HomeStoreGuard::set("gui-log-reload-hook");
     let (_app, webview) = mock_webview();
-    let hook = bounded_reload_hook();
+    let window = FakeWindow::new("main");
+    let shared = window.clone();
+    let hook =
+        reload_hook_over(
+            move |webview: &tauri::Webview<tauri::test::MockRuntime>| FakeWindow {
+                label: webview.label().to_owned(),
+                ..shared.clone()
+            },
+        );
     with_the_shell_log(|| {
-        for _ in 0..4 {
+        for _ in 0..5 {
             hook(webview.as_ref());
         }
     });
-    let text = gui_log_text();
-    let count = |needle: &str| text.lines().filter(|l| l.contains(needle)).count();
-    assert_eq!((count(ENDED), count(LEFT)), (3, 1), "{text}");
+    assert_eq!(window.counts(), (3, 0, 1, 1), "one dialog across the ends");
+    assert_eq!(
+        (
+            gui_log_count(ENDED),
+            gui_log_count(ASKED),
+            gui_log_count(STILL_ASKING)
+        ),
+        (3, 1, 1),
+        "{}",
+        gui_log_text()
+    );
 }
 
 /// The panic hook writes a panic to `gui.log` under the scratch store

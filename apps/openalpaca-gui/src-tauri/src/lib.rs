@@ -24,7 +24,8 @@
 //!
 //! The shell logs to `state/logs/gui.log` (Q14): its `tracing` lines and
 //! Tauri's `log` records, its startup marks, a panic, and a web content
-//! process that ended — after which the window is reloaded.
+//! process that ended — after which the window is reloaded, or, past the
+//! reload bound, a dialog offers Reload or Quit.
 //!
 //! The daemon it spawns runs on the `PATH` of the account's login shell,
 //! captured once at the app's start, or on a fixed list when that capture
@@ -42,11 +43,11 @@ use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
 use openalpaca_storage::store;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::webview::PageLoadEvent;
 use tracing_subscriber::EnvFilter;
@@ -908,19 +909,88 @@ const RELOAD_LIMIT: usize = 3;
 /// longer counts.
 const RELOAD_WINDOW: Duration = Duration::from_secs(60);
 
+/// The dialog's first button (RELOAD-DIALOG), its default button: reload
+/// the window once.
+const RELOAD_BUTTON: &str = "Reload";
+
+/// The dialog's second button: quit the app.
+const QUIT_BUTTON: &str = "Quit";
+
+/// The dialog's title and text, shown once a window's web content process
+/// has ended past [`RELOAD_LIMIT`] reloads within [`RELOAD_WINDOW`].
+const RELOAD_DIALOG_TITLE: &str = "The window keeps failing to load";
+const RELOAD_DIALOG_MESSAGE: &str = "OpenAlpaca's window stopped working again after three \
+     reloads within a minute, so it was not reloaded by itself. Reload it to try once more, \
+     or quit the app and open it again; state/logs/gui.log has the details.";
+
+/// The person's answer to the dialog a window past the reload bound shows
+/// (RELOAD-DIALOG, `tasks/pending-decisions.md` §1's *Rev 100* (1) (c)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReloadAnswer {
+    /// [`RELOAD_BUTTON`]: the window is reloaded once, and the reload counts
+    /// against the bound like any other, from the click.
+    Reload,
+    /// [`QUIT_BUTTON`] — or, through the dialog plugin, any end of the
+    /// dialog that is not a click: the app quits.
+    Quit,
+    /// A result that names neither button: the window is left as it is,
+    /// and its next end asks again. The dialog plugin does not deliver one
+    /// for these buttons: tauri-plugin-dialog 2.8.3 rewrites rfd's `Cancel`
+    /// — an end that is not a click on a button, or an alert that failed
+    /// to show — into the second button's label, so such an end reads as
+    /// [`ReloadAnswer::Quit`] (`tasks/pending-decisions.md` §1's *Rev 109*).
+    Neither,
+}
+
+impl ReloadAnswer {
+    /// The answer the dialog plugin reports, by the button's label; a result
+    /// with neither label answers neither. For these buttons the plugin
+    /// reports only labels: an end that is not a click arrives as
+    /// `Custom(QUIT_BUTTON)`, so it answers [`ReloadAnswer::Quit`].
+    fn from_dialog(result: &tauri_plugin_dialog::MessageDialogResult) -> Self {
+        use tauri_plugin_dialog::MessageDialogResult;
+        match result {
+            MessageDialogResult::Custom(label) if label == RELOAD_BUTTON => Self::Reload,
+            MessageDialogResult::Custom(label) if label == QUIT_BUTTON => Self::Quit,
+            _ => Self::Neither,
+        }
+    }
+}
+
+/// The dialog's buttons: [`RELOAD_BUTTON`] first, then [`QUIT_BUTTON`].
+fn reload_dialog_buttons() -> tauri_plugin_dialog::MessageDialogButtons {
+    tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+        RELOAD_BUTTON.to_owned(),
+        QUIT_BUTTON.to_owned(),
+    )
+}
+
+/// What the shell does for one end of a window's web content process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndAction {
+    /// Within the bound: reload the window by itself.
+    Reload,
+    /// Past the bound: ask, in a dialog, whether to reload it or quit.
+    Ask,
+    /// The window's dialog is open: nothing more, no second dialog.
+    StillAsking,
+}
+
 /// The reloads each window was given after its web content process ended,
-/// by the webview's label, so one window's crashes never spend another's.
-/// Only a reload performed counts — a failed one too, a refused one never —
-/// so the span slides over the reloads done, and a window left as it is
-/// gets a reload again once its oldest counted one is [`RELOAD_WINDOW`] old.
-/// The clock is [`Instant`], monotonic: a clock set back moves nothing. On
-/// macOS it is `CLOCK_UPTIME_RAW`, which stops while the Mac sleeps, so the
-/// span is 60 s of awake time: ends spread across a sleep, under 60 s awake
-/// apart, are refused though hours passed on the wall clock (an owner item,
-/// `tasks/pending-decisions.md` §1's *Rev 100*).
+/// by the webview's label, so one window's crashes never spend another's,
+/// and the windows whose dialog is open. Only a reload performed counts —
+/// a failed one too, and one the person chose in the dialog, from the click;
+/// an end refused never — so the span slides over the reloads done, and a
+/// window gets a reload by itself again once its oldest counted one is
+/// [`RELOAD_WINDOW`] old. The clock is [`Instant`], monotonic: a clock set
+/// back moves nothing. On macOS it is `CLOCK_UPTIME_RAW`, which stops while
+/// the Mac sleeps, so the span is 60 s of awake time (`tasks/
+/// pending-decisions.md` §1's *Rev 100* (2), taken as (a): awake time errs
+/// only toward fewer reloads, and the dialog is the way out).
 #[derive(Default)]
 struct ReloadBound {
     reloads: HashMap<String, Vec<Instant>>,
+    asking: HashSet<String>,
 }
 
 impl ReloadBound {
@@ -935,70 +1005,214 @@ impl ReloadBound {
         recent.push(now);
         true
     }
+
+    /// What `label`'s window gets for its process ending at `now`: while its
+    /// dialog is open, nothing more (the end is not counted); else a reload
+    /// when [`ReloadBound::admit`] admits one; else the dialog, now open.
+    fn on_end(&mut self, label: &str, now: Instant) -> EndAction {
+        if self.asking.contains(label) {
+            return EndAction::StillAsking;
+        }
+        if self.admit(label, now) {
+            return EndAction::Reload;
+        }
+        self.asking.insert(label.to_owned());
+        EndAction::Ask
+    }
+
+    /// `label`'s dialog answered at `at`: it is closed, and a reload chosen
+    /// counts from `at`, past the limit too, so the bound is never reset.
+    fn answered(&mut self, label: &str, answer: ReloadAnswer, at: Instant) {
+        self.asking.remove(label);
+        if answer == ReloadAnswer::Reload {
+            self.reloads.entry(label.to_owned()).or_default().push(at);
+        }
+    }
+}
+
+/// A window whose web content process ended, as the reload path acts on it:
+/// the webview and its app in the app ([`DialogWebview`]), a stand-in in the
+/// tests, which sees each reload, quit and dialog, and answers the dialog
+/// when it chooses.
+trait EndedWindow: Clone + Send + 'static {
+    /// The webview's label, which the bound counts by.
+    fn label(&self) -> &str;
+    /// Reloads the window's page.
+    fn reload(&self) -> tauri::Result<()>;
+    /// Quits the app.
+    fn quit(&self);
+    /// Shows the dialog without waiting for it; `on_answer` is called once,
+    /// with the person's answer and the instant it came.
+    fn ask(&self, on_answer: Box<dyn FnOnce(ReloadAnswer, Instant) + Send>);
+}
+
+/// The window in the app: its webview, the app it quits, and the dialog
+/// plugin's message dialog, shown without blocking (the hook runs on the
+/// main thread, where the plugin's `blocking_show` must not), whose answer
+/// arrives on a thread of the plugin's. The dialog has no parent window, so
+/// on macOS rfd shows it as a system `CFUserNotification` alert, not an
+/// app-modal `NSAlert` nor a sheet on the window; an end of it that is not
+/// a click reads as `Quit` ([`ReloadAnswer::from_dialog`]). Reached by no
+/// test: its reload is `Webview::reload`, its quit `AppHandle::exit(0)`,
+/// and its dialog the alert, the click on which is step 19's check at the
+/// app.
+struct DialogWebview<R: tauri::Runtime>(tauri::Webview<R>);
+
+impl<R: tauri::Runtime> Clone for DialogWebview<R> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<R: tauri::Runtime> EndedWindow for DialogWebview<R> {
+    fn label(&self) -> &str {
+        self.0.label()
+    }
+
+    fn reload(&self) -> tauri::Result<()> {
+        self.0.reload()
+    }
+
+    fn quit(&self) {
+        use tauri::Manager as _;
+        self.0.app_handle().exit(0);
+    }
+
+    fn ask(&self, on_answer: Box<dyn FnOnce(ReloadAnswer, Instant) + Send>) {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+        self.0
+            .dialog()
+            .message(RELOAD_DIALOG_MESSAGE)
+            .title(RELOAD_DIALOG_TITLE)
+            .kind(MessageDialogKind::Error)
+            .buttons(reload_dialog_buttons())
+            .show_with_result(move |result| {
+                on_answer(ReloadAnswer::from_dialog(&result), Instant::now());
+            });
+    }
 }
 
 /// The hook [`with_app_hooks`] registers for a web content process that
-/// ended: [`reload_after_web_content_ended`] over one [`ReloadBound`] the
-/// hook owns for the app's life, so every end it is called for counts
-/// against the same bound.
+/// ended: [`reload_hook_over`] the window in the app, [`DialogWebview`].
 #[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
 fn bounded_reload_hook<R: tauri::Runtime>() -> impl Fn(&tauri::Webview<R>) + Send + Sync + 'static {
-    let bound = Mutex::new(ReloadBound::default());
-    move |webview| reload_after_web_content_ended(webview, &bound)
+    reload_hook_over(|webview: &tauri::Webview<R>| DialogWebview(webview.clone()))
+}
+
+/// The hook over the window `window` makes of each webview:
+/// [`web_content_ended`] on the real clock, over one [`ReloadBound`] the hook
+/// owns for the app's life, so every end it is called for counts against
+/// the same bound and one dialog per window is open at a time.
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+fn reload_hook_over<R, W, F>(window: F) -> impl Fn(&tauri::Webview<R>) + Send + Sync + 'static
+where
+    R: tauri::Runtime,
+    W: EndedWindow,
+    F: Fn(&tauri::Webview<R>) -> W + Send + Sync + 'static,
+{
+    let bound = Arc::new(Mutex::new(ReloadBound::default()));
+    move |webview| web_content_ended(&window(webview), &bound, Instant::now())
+}
+
+/// `bound`, its lock recovered when poisoned.
+fn lock_bound(bound: &Mutex<ReloadBound>) -> std::sync::MutexGuard<'_, ReloadBound> {
+    bound.lock().unwrap_or_else(|p| {
+        tracing::warn!("The window reload bound's lock was poisoned; recovering.");
+        p.into_inner()
+    })
 }
 
 /// The window's web content process ended (WebKit's `WebContent` crashed or
-/// was killed), which leaves a blank window: log it and reload the webview,
-/// at most [`RELOAD_LIMIT`] times within [`RELOAD_WINDOW`] (`bound`, the
-/// state [`bounded_reload_hook`] owns). Safe, because the state lives
-/// in the daemon: the reloaded page bootstraps against the same daemon and
-/// `instance_id`. macOS and iOS only, where Tauri reports it
-/// (`Builder::on_web_content_process_terminate`).
+/// was killed) at `now`, which leaves a blank window: one line, then what
+/// [`ReloadBound::on_end`] decides. Within the bound the window is reloaded
+/// by itself — safe, because the state lives in the daemon: the reloaded
+/// page bootstraps against the same daemon and `instance_id`. Past it,
+/// RELOAD-BOUND's `ERROR` line, and a dialog asks whether to reload or quit
+/// ([`dialog_answered`]), never on a timer — though an end of the dialog
+/// that is not a click reads, through the dialog plugin, as `Quit`; while
+/// it is open, a further end is a line and nothing more. The
+/// bound's lock is never held across a reload, the dialog or its answer.
+/// macOS and iOS only, where Tauri reports it
+/// (`Builder::on_web_content_process_terminate`). The window and the clock
+/// are parameters, so a test sees each effect, at the instants it chooses.
 #[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
-fn reload_after_web_content_ended<R: tauri::Runtime>(
-    webview: &tauri::Webview<R>,
-    bound: &Mutex<ReloadBound>,
-) {
-    log_and_reload(webview.label(), bound, Instant::now(), || webview.reload());
+fn web_content_ended<W: EndedWindow>(window: &W, bound: &Arc<Mutex<ReloadBound>>, now: Instant) {
+    let label = window.label();
+    let action = lock_bound(bound).on_end(label, now);
+    match action {
+        EndAction::Reload => {
+            tracing::warn!(
+                webview = label,
+                "The window's web content process ended; reloading the window."
+            );
+            reload_logged(window);
+        }
+        EndAction::Ask => {
+            tracing::error!(
+                webview = label,
+                "The window's web content process ended again after {RELOAD_LIMIT} reloads \
+                 within {} s; the window is not reloaded by itself: a dialog asks whether \
+                 to reload it or quit the app.",
+                RELOAD_WINDOW.as_secs()
+            );
+            let (answering, bound) = (window.clone(), Arc::clone(bound));
+            window.ask(Box::new(move |answer, at| {
+                dialog_answered(&answering, &bound, answer, at);
+            }));
+        }
+        EndAction::StillAsking => {
+            tracing::warn!(
+                webview = label,
+                "The window's web content process ended again while its dialog is open; \
+                 the window is not reloaded by itself, and no second dialog is shown."
+            );
+        }
+    }
 }
 
-/// The line for `label`'s webview whose web content process ended at `now`,
-/// then `reload`, once, when `bound` admits it; a reload that failed is a
-/// line too. Past the bound the window is left as it is, blank, and the one
-/// line says so; nothing reloads it but quitting and reopening the app, or
-/// its process ending again once a counted reload is out of the span. The
-/// reload and the clock are parameters so a test sees the reload called,
-/// which the mock runtime cannot show, at the instants it chooses.
-fn log_and_reload(
-    label: &str,
+/// `window`'s dialog answered with `answer` at `at`: the bound told, then
+/// a line, then what the answer says — `Reload` reloads the window once,
+/// `Quit` (its button, or an end of the dialog that was not a click) quits
+/// the app, neither leaves the window as it is.
+fn dialog_answered<W: EndedWindow>(
+    window: &W,
     bound: &Mutex<ReloadBound>,
-    now: Instant,
-    reload: impl FnOnce() -> tauri::Result<()>,
+    answer: ReloadAnswer,
+    at: Instant,
 ) {
-    let admitted = bound
-        .lock()
-        .unwrap_or_else(|p| {
-            tracing::warn!("The window reload bound's lock was poisoned; recovering.");
-            p.into_inner()
-        })
-        .admit(label, now);
-    if !admitted {
-        tracing::error!(
-            webview = label,
-            "The window's web content process ended again after {RELOAD_LIMIT} reloads \
-             within {} s; the window is left as it is, not reloaded. Quit and reopen \
-             the app to load it again.",
-            RELOAD_WINDOW.as_secs()
-        );
-        return;
+    let label = window.label();
+    lock_bound(bound).answered(label, answer, at);
+    match answer {
+        ReloadAnswer::Reload => {
+            tracing::info!(
+                webview = label,
+                "Reload was chosen in the dialog; reloading the window."
+            );
+            reload_logged(window);
+        }
+        ReloadAnswer::Quit => {
+            tracing::info!(
+                webview = label,
+                "The dialog answered Quit (its button, or an end of the dialog that was \
+                 not a click); quitting the app."
+            );
+            window.quit();
+        }
+        ReloadAnswer::Neither => {
+            tracing::warn!(
+                webview = label,
+                "The dialog answered neither Reload nor Quit; the window is left as it \
+                 is, and its next end asks again."
+            );
+        }
     }
-    tracing::warn!(
-        webview = label,
-        "The window's web content process ended; reloading the window."
-    );
-    if let Err(e) = reload() {
+}
+
+/// Reloads `window`; a reload that failed is a line.
+fn reload_logged<W: EndedWindow>(window: &W) {
+    if let Err(e) = window.reload() {
         tracing::error!(
-            webview = label,
+            webview = window.label(),
             "Could not reload the window after its web content process ended: {e}"
         );
     }
@@ -1025,7 +1239,7 @@ pub fn run() {
 
 /// The window's hooks (Q14): the page-load marks, and on macOS the reload
 /// after the web content process ended, bounded by the [`ReloadBound`] the
-/// hook owns, one per app ([`bounded_reload_hook`]).
+/// hook owns, one per app, and past it the dialog ([`bounded_reload_hook`]).
 fn with_app_hooks<R: tauri::Runtime>(builder: tauri::Builder<R>, t0: Instant) -> tauri::Builder<R> {
     let builder = builder.on_page_load(move |webview, payload| {
         page_load_mark(t0, webview.label(), payload.event(), payload.url());

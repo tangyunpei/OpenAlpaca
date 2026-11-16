@@ -107,8 +107,9 @@ exit), Tauri's own, a start-up mark for the shell's start and for each page
 load with the milliseconds since it, a panic of the shell, and a line when the
 window's web content process ends — after which the app reloads the window,
 whose page then connects as it does at launch, at most three times within a
-minute: a fourth end inside that minute leaves the window blank, and its line
-says so (*Troubleshooting*). A source checkout's
+minute by itself: a fourth end inside that minute is not reloaded, its line
+says so, and a dialog asks whether to reload the window or quit the app
+(*Troubleshooting*). A source checkout's
 `openalpaca gui start` appends the dev build's output to `gui-dev.log` instead,
 and never truncates `gui.log`. A project you choose keeps its
 data in the home store, in its folder under `projects/` — its artifacts, uploads
@@ -1664,12 +1665,19 @@ every id it held. Repeated restarts are a daemon problem — read the log
 (`Show daemon log` in that panel, or the path it copies:
 `state/logs/daemon.log`).
 
-**The window is blank.** When the window's page keeps crashing WebKit's web
-content process, the app reloads it three times within a minute and then
-leaves it as it is, so a page that crashes as it loads does not reload in a
-loop; `state/logs/gui.log` has an `ERROR` line saying the window is left as it
-is. Quit and reopen the app to load it again. A blank window again at once
-points at the page or the build, not the daemon.
+**The window is blank, and a dialog offers Reload or Quit.** When the
+window's page keeps crashing WebKit's web content process, the app reloads it
+by itself three times within a minute and then stops, so a page that crashes
+as it loads does not reload in a loop: the window is left blank, and a dialog,
+*The window keeps failing to load*, asks what to do. `Reload` (the default)
+reloads the window once more, and that reload counts like the app's own, so a
+page that crashes again inside the minute brings the dialog back, not a loop.
+`Quit` quits the app, and so does closing the dialog any other way than with
+its two buttons. Nothing waits on a timer: the dialog stays until you answer
+it, and one is shown at a time.
+`state/logs/gui.log` has an `ERROR` line for the end the dialog was shown for
+and a line for your choice. The dialog back at once after a reload points at
+the page or the build, not the daemon.
 
 **A list looks stale.** The event socket is best-effort and the daemon drops
 frames for a lagged client without telling it. Anything that arrived over the

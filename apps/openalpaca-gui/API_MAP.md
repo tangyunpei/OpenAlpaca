@@ -165,7 +165,10 @@ caps: its `tracing` lines and Tauri's `log` records, a start-up mark for T0
 and each page load (`openalpaca_gui::startup`, `elapsed_ms` since T0), a
 panic, and the window's web content process ending, after which it reloads the
 window, at most three times within 60 s (RELOAD-BOUND): a fourth end inside
-that span leaves the window as it is, with one `ERROR` line saying so.
+that span is not reloaded, with one `ERROR` line saying so, and a native dialog
+(the dialog plugin's, from the shell; RELOAD-DIALOG) offers `Reload` — once,
+counted against the bound — or `Quit`, one dialog at a time, never on a timer
+(an end of the dialog that is not a click reads as `Quit`).
 That adds no command — still the five above — and nothing to the
 daemon's API; the webview's own marks reach a log through an instrumented
 build or the console, never through a command.
