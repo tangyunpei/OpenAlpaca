@@ -169,6 +169,15 @@ export type InstanceChangeListener = (
 ) => void;
 
 let current: ConnectionInfo | null = null;
+/**
+ * The connection a read on reconnect found replaced, kept while no
+ * connection is cached until a read lands, so that read announces the
+ * change: the re-bootstrap the read starts can fail first — since Q04 the
+ * shell answers `starting` at once while the new daemon boots — and the
+ * window then asks again through a boot or a rung of its own, which would
+ * otherwise see no previous connection and announce nothing.
+ */
+let replaced: ConnectionInfo | null = null;
 /** When `current` was read, by the wall clock (`Date.now()`); `null` with it. */
 let readAt: number | null = null;
 let bootstrapInFlight: Promise<ConnectionInfo> | null = null;
@@ -399,8 +408,10 @@ export function subscribeConnection(listener: ConnectionListener): () => void {
 }
 
 /**
- * Subscribe to daemon-identity changes. Fired when a refresh observes a
- * different `instanceId` — consumers must drop all server-derived state.
+ * Subscribe to daemon-identity changes. Fired once when a read observes a
+ * different `instanceId` than the connection it replaces — on reconnect, a
+ * read that lands after the re-bootstrap failed included — so consumers must
+ * drop all server-derived state.
  */
 export function subscribeInstanceChange(
   listener: InstanceChangeListener,
@@ -418,11 +429,7 @@ export function bootstrapConnection(): Promise<ConnectionInfo> {
 
   bootstrapInFlight = invokeConnection("ensure_daemon_running")
     .then((info) => {
-      const previous = current;
-      publish(info);
-      if (previous && previous.instanceId !== info.instanceId) {
-        for (const listener of instanceListeners) listener(info, previous);
-      }
+      adopt(info);
       return info;
     })
     .finally(() => {
@@ -449,18 +456,32 @@ export function refreshConnection(): Promise<ConnectionInfo> {
 }
 
 async function rereadConnection(): Promise<ConnectionInfo> {
-  const previous = current;
+  const previous = current ?? replaced;
   const info = await invokeConnection("get_connection_info");
 
   if (previous && previous.instanceId !== info.instanceId) {
+    // Kept until a read lands: the boot below, or a later one if it fails.
+    replaced = previous;
     publish(null);
-    const rebooted = await bootstrapConnection();
-    for (const listener of instanceListeners) listener(rebooted, previous);
-    return rebooted;
+    return bootstrapConnection();
   }
 
-  publish(info);
+  adopt(info);
   return info;
+}
+
+/**
+ * Cache `info`, and announce the change when it is another daemon than the
+ * connection it replaces: the cached one, or the one a read on reconnect
+ * found replaced (`replaced`).
+ */
+function adopt(info: ConnectionInfo): void {
+  const previous = current ?? replaced;
+  replaced = null;
+  publish(info);
+  if (previous && previous.instanceId !== info.instanceId) {
+    for (const listener of instanceListeners) listener(info, previous);
+  }
 }
 
 /** The cached connection, bootstrapping on first use. */
@@ -468,8 +489,12 @@ export async function ensureConnection(): Promise<ConnectionInfo> {
   return current ?? (await bootstrapConnection());
 }
 
-/** Drop the cached connection (tests, and an explicit user-driven reconnect). */
+/**
+ * Drop the cached connection, and a change not yet announced with it (tests,
+ * and an explicit user-driven reconnect).
+ */
 export function resetConnection(): void {
+  replaced = null;
   publish(null);
 }
 

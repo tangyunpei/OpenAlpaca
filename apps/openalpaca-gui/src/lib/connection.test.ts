@@ -24,6 +24,8 @@ import {
   refreshConnection,
   resetConnection,
   setStopIntent,
+  subscribeInstanceChange,
+  type ConnectionInfo,
 } from "./connection";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -298,6 +300,123 @@ describe("the shell's Q04 refusals at boot", () => {
       expect(error.kind).toBe(kind);
       expect(error.message).toBe(row?.message);
     }
+  });
+});
+
+/**
+ * A daemon restart seen on reconnect is announced to the instance listeners
+ * once, whatever the re-bootstrap meets first (`useConnection` clears the
+ * query cache on it: every cached id was the old daemon's). Since Q04 the
+ * shell answers `starting` at once for a discovery pid that is a live
+ * `openalpacad` whose health is silent — a restarted daemon writes
+ * `discovery.json` before it serves — so the re-bootstrap the read starts
+ * can fail before the new daemon answers, and the window asks again through
+ * a boot of its own (`lib/events.ts`, `parkOrWait`) or a ladder's rung. The
+ * daemon it left is kept until a read lands, so that read announces the
+ * change.
+ */
+describe("a daemon restart seen on reconnect", () => {
+  const info = (instanceId: string): ConnectionInfo => ({
+    baseUrl: "http://127.0.0.1:51823",
+    token: "t",
+    instanceId,
+    daemonPath: null,
+  });
+  let changes: string[] = [];
+  let unsubscribe: (() => void) | null = null;
+
+  /** The shell answering each command from its own queue, in order. */
+  function shell(answers: Record<string, Array<ConnectionInfo | Error>>) {
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      const next = answers[command]?.shift();
+      if (next === undefined) {
+        return Promise.reject(new Error(`unexpected ${command}`));
+      }
+      if (next instanceof Error) {
+        return Promise.reject(
+          shellErrors.refusals.find((r) => r.kind === next.message),
+        );
+      }
+      return Promise.resolve(next);
+    });
+  }
+  const starting = () => new Error("starting");
+
+  async function bootedOn(instanceId: string): Promise<void> {
+    shell({ ensure_daemon_running: [info(instanceId)] });
+    await bootstrapConnection();
+    unsubscribe = subscribeInstanceChange((next, previous) => {
+      changes.push(`${previous.instanceId}->${next.instanceId}`);
+    });
+  }
+
+  beforeEach(() => {
+    changes = [];
+  });
+
+  afterEach(() => {
+    unsubscribe?.();
+    unsubscribe = null;
+  });
+
+  it("is announced once when the re-bootstrap finds the new daemon at once", async () => {
+    await bootedOn("A");
+    shell({
+      get_connection_info: [info("B")],
+      ensure_daemon_running: [info("B")],
+    });
+
+    expect((await refreshConnection()).instanceId).toBe("B");
+    expect(changes).toEqual(["A->B"]);
+  });
+
+  it("is announced when the re-bootstrap met it starting and the next boot finds it", async () => {
+    await bootedOn("A");
+    shell({
+      get_connection_info: [info("B")],
+      ensure_daemon_running: [starting(), info("B")],
+    });
+
+    expect((await rejection(refreshConnection())).kind).toBe("starting");
+    expect(getCachedConnection()).toBeNull();
+    expect(changes).toEqual([]);
+
+    expect((await bootstrapConnection()).instanceId).toBe("B");
+    expect(changes).toEqual(["A->B"]);
+  });
+
+  it("is announced when the re-bootstrap met it starting and a later rung finds it", async () => {
+    await bootedOn("A");
+    shell({
+      get_connection_info: [info("B"), info("B")],
+      ensure_daemon_running: [starting(), info("B")],
+    });
+
+    expect((await rejection(refreshConnection())).kind).toBe("starting");
+    expect((await refreshConnection()).instanceId).toBe("B");
+    expect(changes).toEqual(["A->B"]);
+  });
+
+  it("is not announced again for the same daemon, and a reset forgets a change not yet announced", async () => {
+    await bootedOn("A");
+    shell({
+      get_connection_info: [info("B"), info("B")],
+      ensure_daemon_running: [starting(), info("B"), info("B")],
+    });
+    await rejection(refreshConnection());
+    await bootstrapConnection();
+    await refreshConnection();
+    await bootstrapConnection();
+    expect(changes).toEqual(["A->B"]);
+
+    shell({
+      get_connection_info: [info("C")],
+      ensure_daemon_running: [starting(), info("C")],
+    });
+    await rejection(refreshConnection());
+    resetConnection();
+    await bootstrapConnection();
+    expect(changes).toEqual(["A->B"]);
   });
 });
 
