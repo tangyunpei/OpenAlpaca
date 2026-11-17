@@ -204,7 +204,7 @@ pub async fn run(args: AgentsArgs) -> Result<()> {
         }
         AgentsCommands::Remove { agent_id } => remove_agent(&agent_id).await,
         AgentsCommands::Tidy { apply } => {
-            let (config_dir, daemon) = tidy::target()?;
+            let (config_dir, daemon) = tidy::target().await?;
             for line in tidy_lines(&config_dir, daemon.as_ref(), apply, Utc::now()).await? {
                 println!("{line}");
             }
@@ -225,7 +225,7 @@ pub(crate) async fn tidy_lines(
 }
 
 async fn list_agents(status: Option<String>, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let mut path = "/v1/agents?limit=50".to_string();
     if let Some(ref s) = status {
         path.push_str(&format!("&status={}", s));
@@ -236,7 +236,7 @@ async fn list_agents(status: Option<String>, format: OutputFormat) -> Result<()>
 }
 
 async fn agent_status(agent_id: &str, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let detail: AgentDetail = client.get(&format!("/v1/agents/{}", agent_id)).await?;
 
     match format {
@@ -285,7 +285,7 @@ async fn agent_status(agent_id: &str, format: OutputFormat) -> Result<()> {
 }
 
 async fn agent_config(agent_id: &str, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let config: AgentConfigResponse = client
         .get(&format!("/v1/agents/{}/config", agent_id))
         .await?;
@@ -310,7 +310,7 @@ async fn agent_config(agent_id: &str, format: OutputFormat) -> Result<()> {
 }
 
 async fn agent_action(agent_id: &str, action: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let body = serde_json::json!({ "action": action });
     let result: serde_json::Value = client
         .post(&format!("/v1/agents/{}/action", agent_id), &body)
@@ -327,7 +327,7 @@ async fn agent_action(agent_id: &str, action: &str) -> Result<()> {
 }
 
 async fn agent_set(agent_id: &str, key_path: &str, value: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     agent_set_with(&client, agent_id, key_path, value).await
 }
 
@@ -421,7 +421,7 @@ async fn agent_set_with(
 
 async fn create_from_file(path: &str) -> Result<()> {
     let content = std::fs::read_to_string(path)?;
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     let body = serde_json::json!({ "toml_content": content });
     let result: serde_json::Value = client.post("/v1/agents/from-toml", &body).await?;
@@ -507,7 +507,7 @@ async fn create_interactive() -> Result<()> {
         config["persona"] = serde_json::Value::String(persona);
     }
 
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let body = serde_json::json!({ "config": config });
     let result: serde_json::Value = client.post("/v1/agents", &body).await?;
 
@@ -517,7 +517,7 @@ async fn create_interactive() -> Result<()> {
 }
 
 async fn get_model_list() -> Result<Vec<String>> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let models: Vec<serde_json::Value> = client.get("/v1/models").await?;
     let names: Vec<String> = models
         .iter()
@@ -540,7 +540,7 @@ async fn remove_agent(agent_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let result: serde_json::Value = client
         .delete_req(&format!("/v1/agents/{}", agent_id))
         .await?;

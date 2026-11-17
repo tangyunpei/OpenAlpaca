@@ -276,7 +276,7 @@ pub async fn run(args: TasksArgs) -> Result<()> {
 }
 
 async fn list_tasks(status: Option<String>, limit: usize, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let mut path = format!("/v1/tasks?limit={}", limit);
     if let Some(ref s) = status {
         path.push_str(&format!("&status={}", s));
@@ -378,7 +378,7 @@ fn render_task_status(t: &TaskInner, lanes: Result<&[TimelineLane], &str>) -> St
 }
 
 async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let detail: TaskDetail = client.get(&format!("/v1/tasks/{}", task_id)).await?;
     // The agent runs come from the timeline now — the task routes stopped
     // carrying them with P8. It is a second call, so it fails independently:
@@ -417,7 +417,7 @@ async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
 }
 
 async fn task_log(task_id: &str, limit: usize) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     // The server filters by run now (GAP-10) — the whole page is this task's,
     // so `--limit` is a limit on *its* rows rather than on a global window
     // that a busy daemon would fill with other runs' events.
@@ -540,7 +540,7 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
         }
     };
 
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     // V6: the lane this CLI talks on, as the daemon names it — the same read
     // `openalpaca chat` does, not a second resolver.
     let lane_key = crate::commands::sessions::default_lane_key(&client).await?;
@@ -560,7 +560,7 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
 }
 
 async fn task_action(task_id: &str, action: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let body = serde_json::json!({ "action": action });
     let result: serde_json::Value = client
         .post(&format!("/v1/tasks/{}/action", task_id), &body)

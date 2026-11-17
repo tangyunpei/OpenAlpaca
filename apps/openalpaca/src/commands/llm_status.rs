@@ -473,7 +473,7 @@ pub(super) fn key_health_lines(
 // ── Handler functions ───────────────────────────────────────────
 
 pub(super) async fn llm_status(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     let key_health: serde_json::Value = client.get("/v1/settings/llm/status").await?;
     let orch_config: serde_json::Value = client.get("/v1/orchestrator/config").await?;
@@ -547,7 +547,7 @@ pub(super) async fn llm_usage(
     daily: bool,
     format: OutputFormat,
 ) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     if daily {
         let mut path = "/v1/llm/usage/daily?limit=30".to_string();
@@ -580,7 +580,7 @@ pub(super) async fn llm_usage(
 /// `ollama pull` appears without restarting the daemon or writing a line of
 /// `llm.toml`. Without it the catalogue is read as it stands.
 pub(super) async fn llm_models(refresh: bool, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let models: Vec<ModelEntry> = if refresh {
         client
             .post("/v1/models/refresh", &serde_json::json!({}))
@@ -609,7 +609,7 @@ pub(super) async fn llm_models(refresh: bool, format: OutputFormat) -> Result<()
 }
 
 pub(super) async fn llm_credentials(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let creds: Vec<CredentialEntry> = client.get("/v1/settings/llm/credentials").await?;
 
     if creds.is_empty() {
@@ -625,7 +625,7 @@ pub(super) async fn llm_credentials(format: OutputFormat) -> Result<()> {
 }
 
 pub(super) async fn llm_backends(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let backends: Vec<BackendEntry> = client.get("/v1/settings/llm/cli-backends").await?;
 
     if backends.is_empty() {
@@ -638,7 +638,7 @@ pub(super) async fn llm_backends(format: OutputFormat) -> Result<()> {
 }
 
 pub(super) async fn llm_provider_usage(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let usage: Vec<ProviderUsageEntry> = client.get("/v1/settings/llm/providers/usage").await?;
 
     if usage.is_empty() {
@@ -651,7 +651,7 @@ pub(super) async fn llm_provider_usage(format: OutputFormat) -> Result<()> {
 }
 
 pub(super) async fn llm_strategy(provider: &str, strategy: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     // Fetch current orchestrator config
     let config: serde_json::Value = client.get("/v1/orchestrator/config").await?;

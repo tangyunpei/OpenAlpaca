@@ -13,7 +13,6 @@ tauri-build.workspace = true
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
 # Q12: `net` for the liveness probe (tokio::net::TcpStream, lookup_host). It
 # turns on tokio's `socket2` too, so the macOS build links socket2 0.6.5,
 # already in Cargo.lock and THIRD-PARTY-NOTICES: no lock or notices change.
@@ -48,6 +47,8 @@ openalpaca_storage = { workspace = true }
 libc.workspace = true
 
 [dev-dependencies]
+# The tests' JSON (the health body moved to support's reader, CLI-PROTOCOL).
+serde_json.workspace = true
 # Q11: `tauri::test` (mock_builder, mock_context, get_ipc_response) for the
 # command-layer tests; the feature adds no crate.
 tauri = { workspace = true, features = ["test"] }

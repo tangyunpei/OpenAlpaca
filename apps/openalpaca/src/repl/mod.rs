@@ -72,8 +72,8 @@ impl SessionUsage {
 }
 
 impl ReplSession {
-    pub fn new(target: ChatTarget) -> anyhow::Result<Self> {
-        let client = DaemonClient::connect()?;
+    pub async fn new(target: ChatTarget) -> anyhow::Result<Self> {
+        let client = DaemonClient::connect().await?;
         Ok(Self {
             client,
             context: ReplContext {
@@ -84,19 +84,25 @@ impl ReplSession {
         })
     }
 
-    fn reconnect(&mut self) -> anyhow::Result<()> {
-        self.client = DaemonClient::connect()?;
+    async fn reconnect(&mut self) -> anyhow::Result<()> {
+        self.client = DaemonClient::connect().await?;
         Ok(())
     }
 
     /// Try reconnect, print feedback, return true if reconnected.
-    fn try_reconnect(&mut self) -> bool {
-        match self.reconnect() {
+    async fn try_reconnect(&mut self) -> bool {
+        match self.reconnect().await {
             Ok(()) => {
                 eprintln!("{}", "(reconnected to daemon)".yellow());
                 true
             }
-            Err(_) => false,
+            // A daemon this CLI cannot use, or one still starting, is said
+            // in its own sentence (CLI-PROTOCOL); the caller then reports
+            // the error that sent it here.
+            Err(why) => {
+                eprintln!("{}", format!("(not reconnected: {why})").yellow());
+                false
+            }
         }
     }
 
@@ -171,7 +177,7 @@ impl ReplSession {
         match commands::execute_line(line, &self.client, &mut self.context).await {
             Ok(()) => {}
             Err(e) if Self::should_reconnect(&e) => {
-                if self.try_reconnect() {
+                if self.try_reconnect().await {
                     if let Err(e2) =
                         commands::execute_line(line, &self.client, &mut self.context).await
                     {
@@ -198,7 +204,7 @@ impl ReplSession {
         let send_result = match chat_stream::send_chat(&self.client, content, &self.target).await {
             Ok(resp) => Ok(resp),
             Err(e) if Self::should_reconnect(&e) => {
-                if self.try_reconnect() {
+                if self.try_reconnect().await {
                     chat_stream::send_chat(&self.client, content, &self.target).await
                 } else {
                     Err(e)
@@ -220,7 +226,7 @@ impl ReplSession {
             match chat_stream::stream_chat(&self.client, &resp.stream_id, &opts).await {
                 Ok(result) => Ok(result),
                 Err(e) if Self::should_reconnect(&e) => {
-                    if self.try_reconnect() {
+                    if self.try_reconnect().await {
                         chat_stream::stream_chat(&self.client, &resp.stream_id, &opts).await
                     } else {
                         Err(e)

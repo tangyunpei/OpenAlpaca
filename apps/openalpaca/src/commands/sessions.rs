@@ -304,7 +304,7 @@ fn session_path(id: &str) -> String {
 /// the read is unscoped (R40) while the delete is owner-scoped, so a
 /// conversation this owner cannot delete answers `404` and nothing is printed.
 async fn delete(id: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let path = session_path(id);
     let session: SessionItem = client
         .get(&path)
@@ -331,7 +331,7 @@ fn deleted_line(session: &SessionItem) -> String {
 }
 
 async fn list(args: SessionsArgs) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     let workspace_id = match args.workspace.as_deref() {
         Some(path) => Some(resolve_workspace_filter(path)?),

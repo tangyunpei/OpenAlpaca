@@ -1,6 +1,6 @@
 //! Interactive TUI for `openalpaca config` (no subcommand).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use console::style;
 use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use openalpaca_llm::{ClaudeCodeCliProvider, CodexCliProvider};
@@ -1014,16 +1014,20 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 
 /// Fetch agents from the daemon. Returns empty vec on connection failure.
 fn fetch_agents() -> Vec<TuiAgentItem> {
-    let client = match DaemonClient::connect() {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    block_on(async {
+    fetch_agents_or_why().unwrap_or_default()
+}
+
+/// The daemon's agents, or why the daemon could not be asked — the
+/// connect's own sentence (not running, a mismatch, still starting). A
+/// failed read of a daemon that was reached is an empty list, as before.
+fn fetch_agents_or_why() -> Result<Vec<TuiAgentItem>> {
+    let client = block_on(DaemonClient::connect())?;
+    Ok(block_on(async {
         client
             .get::<Vec<TuiAgentItem>>("/v1/agents?limit=50")
             .await
             .unwrap_or_default()
-    })
+    }))
 }
 
 /// Format an agent as a menu item line.
@@ -1058,15 +1062,12 @@ fn interactive_manage_agents(
 ) -> Result<bool> {
     loop {
         // Fetch fresh agent list every iteration
-        let agents = fetch_agents();
+        let (agents, daemon_hint) = match fetch_agents_or_why() {
+            Ok(agents) => (agents, String::new()),
+            Err(why) => (Vec::new(), format!(" ({why})")),
+        };
 
         if agents.is_empty() {
-            let daemon_hint = if DaemonClient::connect().is_err() {
-                " (daemon is not running)"
-            } else {
-                ""
-            };
-
             println!(
                 "\n{}{}",
                 style("No agents found.").yellow(),
@@ -1176,7 +1177,7 @@ fn interactive_agent_detail(agent: &TuiAgentItem) -> Result<()> {
 
 /// Show full agent config as pretty-printed JSON.
 fn view_agent_config_json(agent_id: &str) -> Result<()> {
-    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let client = block_on(DaemonClient::connect())?;
     let config: TuiAgentConfigResponse =
         block_on(async { client.get(&format!("/v1/agents/{}/config", agent_id)).await })?;
 
@@ -1203,7 +1204,7 @@ fn view_agent_config_json(agent_id: &str) -> Result<()> {
 
 /// Interactive editor for an agent's config (key-by-key editing).
 fn interactive_edit_agent_config(agent_id: &str, agent_name: &str) -> Result<()> {
-    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let client = block_on(DaemonClient::connect())?;
     let resp: TuiAgentConfigResponse =
         block_on(async { client.get(&format!("/v1/agents/{}/config", agent_id)).await })?;
 
@@ -1403,7 +1404,7 @@ fn parse_json_value(s: &str) -> serde_json::Value {
 
 /// Perform a pause/resume action on an agent.
 fn agent_action_tui(agent_id: &str, action: &str) -> Result<()> {
-    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let client = block_on(DaemonClient::connect())?;
     let body = serde_json::json!({ "action": action });
     let result: serde_json::Value = block_on(async {
         client
@@ -1441,7 +1442,7 @@ fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let client = block_on(DaemonClient::connect())?;
     let result: serde_json::Value =
         block_on(async { client.delete_req(&format!("/v1/agents/{}", agent_id)).await })?;
 
@@ -1583,7 +1584,7 @@ fn interactive_create_agent() -> Result<()> {
         return Ok(());
     }
 
-    let client = DaemonClient::connect().context("Daemon is not running")?;
+    let client = block_on(DaemonClient::connect())?;
     let result: Result<serde_json::Value> =
         block_on(async { client.post("/v1/agents", &body).await });
 
@@ -1606,7 +1607,7 @@ fn interactive_create_agent() -> Result<()> {
 
 /// Try to fetch the list of available models from the daemon.
 fn fetch_model_list() -> Result<Vec<String>> {
-    let client = DaemonClient::connect()?;
+    let client = block_on(DaemonClient::connect())?;
     let models: Vec<serde_json::Value> = block_on(async { client.get("/v1/models").await })?;
     let names: Vec<String> = models
         .iter()

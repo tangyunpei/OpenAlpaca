@@ -15,9 +15,11 @@
 //! variant bumps [`PROTOCOL`] in the same commit, and
 //! [`OLDEST_SUPPORTED`] with it where the older protocol can no longer be
 //! served; an addition bumps neither. The daemon's contract test
-//! (`apps/openalpacad/src/contract/`) refuses a response or event sample
-//! that lost a field unless [`PROTOCOL`] moved; it does not see a request's
-//! fields or a route's path, which the rule binds all the same.
+//! (`apps/openalpacad/src/contract/`) refuses a response, event or request
+//! body sample, or one of a response only the CLI reads, that lost a field
+//! unless [`PROTOCOL`] moved (request bodies and the CLI's reads since
+//! CLI-PROTOCOL); it does not see a route's path or a query string's keys,
+//! which the rule binds all the same.
 //!
 //! Every sentence a person reads about a verdict — the note beside a daemon
 //! used, the refusal of a mismatch, the log line — is the client's own: a
@@ -98,9 +100,9 @@ fn reported_given(value: Option<&std::ffi::OsStr>) -> u32 {
 /// gives it, and this figure is checked against it.
 ///
 /// The one figure the app shell and the CLI share: the shell's
-/// `reuse::ensure_with` reads it, and the CLI's same check (CLI-PROTOCOL,
-/// step 5) will. Here, with the protocol, since Q05 (it was
-/// `daemon_lifecycle`'s).
+/// `reuse::ensure_with` reads it, and so do the CLI's same check and its
+/// wait after `openalpaca daemon start` (CLI-PROTOCOL). Here, with the
+/// protocol, since Q05 (it was `daemon_lifecycle`'s).
 pub const STARTING_BUDGET: Duration = Duration::from_secs(45);
 
 // ============================================================================
@@ -193,6 +195,41 @@ pub enum Health {
     /// No daemon's health — refused, silent past the timeout, closed early,
     /// another status, another body — and why, for the log.
     Unanswered(String),
+}
+
+/// A `200` answer's body to `GET /v1/health` as a daemon's health, or why
+/// it is not one: a JSON object whose `status` is `ok` and whose
+/// `instance_id` is a string; a `protocol` present must be a number a `u32`
+/// holds; `version` as it says. The one reader of the body the app shell
+/// (over its hand-written GET) and the CLI (over its HTTP client) share
+/// (CLI-PROTOCOL), so both clients judge one answer alike; the status and
+/// the transport are each client's own to read.
+pub fn read_health_body(body: &[u8]) -> Health {
+    let unanswered = |why: &str| Health::Unanswered(why.to_owned());
+    let Ok(serde_json::Value::Object(body)) = serde_json::from_slice(body) else {
+        return unanswered("a body that is not a JSON object");
+    };
+    if body.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
+        return unanswered("a body whose status is not ok");
+    }
+    let Some(instance_id) = body.get("instance_id").and_then(serde_json::Value::as_str) else {
+        return unanswered("a body with no instance_id");
+    };
+    let protocol = match body.get("protocol") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(protocol) => Some(protocol),
+            None => return unanswered("a protocol that is not a number"),
+        },
+    };
+    Health::Answered {
+        instance_id: instance_id.to_owned(),
+        protocol,
+        version: body
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    }
 }
 
 /// One look at the world.

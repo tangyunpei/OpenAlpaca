@@ -1,0 +1,16 @@
+{
+  "action": null,
+  "expected_revision": null,
+  "patch": {
+    "aliases": null,
+    "body": null,
+    "fact_key": null,
+    "review_after": null,
+    "tags": null,
+    "title": null,
+    "valid_from": null,
+    "valid_to": null
+  },
+  "reason": null,
+  "target_revision": null
+}

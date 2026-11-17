@@ -7,7 +7,13 @@
 //! folder, [`DIR`]; the GUI's vitest (`src/lib/api/contract.test.ts`) parses
 //! each sample against the TypeScript type that mirrors it. The repository's
 //! existing pattern, as `hidden-chars.json` is read by `utils::text` and by
-//! `lib/hidden-chars.test.ts`.
+//! `lib/hidden-chars.test.ts`. Since CLI-PROTOCOL two more kinds share the
+//! folder and its check: the **request bodies** the routes read (`requests/`,
+//! each its type's wire names, [`requests`]), against which vitest checks
+//! the keys the GUI's wrappers send and the CLI's own tests the keys the CLI
+//! sends; and the **responses only the CLI reads** (`cli/`), against which
+//! the CLI's tests check the keys it reads — under the owner's rule that the
+//! CLI and the app use one daemon, both clients are held to one `PROTOCOL`.
 //!
 //! **A sample is a shape, not a recording.** Every scalar is written as its
 //! kind's neutral value (`""`, `0`, `false`; `null` stays `null`), an array
@@ -32,6 +38,7 @@
 //! renamed or removed in `router.rs` alone moves no sample.
 
 mod events;
+pub(crate) mod requests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -48,18 +55,33 @@ pub(crate) const DIR: &str = concat!(
 /// a `PROTOCOL` bump).
 const WRITE_ENV: &str = "OPENALPACA_CONTRACT_WRITE";
 
-/// Where a sample lives: `responses/` or `events/`.
+/// Where a sample lives: `responses/`, `events/`, `requests/` or `cli/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Kind {
     Response,
     Event,
+    /// A request body a route reads (CLI-PROTOCOL).
+    Request,
+    /// A response only the CLI reads (CLI-PROTOCOL).
+    CliResponse,
 }
 
 impl Kind {
+    /// Every kind, as the folder is read: a kind missing here would leave
+    /// its files unread, and a removal in them unseen.
+    const ALL: [Kind; 4] = [
+        Kind::Response,
+        Kind::Event,
+        Kind::Request,
+        Kind::CliResponse,
+    ];
+
     fn folder(self) -> &'static str {
         match self {
             Kind::Response => "responses",
             Kind::Event => "events",
+            Kind::Request => "requests",
+            Kind::CliResponse => "cli",
         }
     }
 }
@@ -81,6 +103,22 @@ impl Samples {
     /// by data, written as one `"*"` key.
     pub(crate) fn response_with_maps(&mut self, name: &str, body: Value, maps: &[&str]) {
         self.insert(Kind::Response, name, shape(&body, "", maps, false));
+    }
+
+    /// A request body's sample, named after its route (`put-artifacts-id-pin`):
+    /// the type's wire names, as [`requests::Body`] reads them.
+    pub(crate) fn request(&mut self, name: &str, body: requests::Body) {
+        self.insert(
+            Kind::Request,
+            name,
+            shape(&body.into_value(), "", &[], false),
+        );
+    }
+
+    /// A response only the CLI reads, named after its route (`get-me`),
+    /// shaped as [`Self::response`] shapes one.
+    pub(crate) fn cli_response(&mut self, name: &str, body: Value) {
+        self.insert(Kind::CliResponse, name, shape(&body, "", &[], false));
     }
 
     /// An event's sample, named after its `type`.
@@ -226,7 +264,7 @@ impl Folder {
             .expect("a u32 protocol")
         });
         let mut samples = BTreeMap::new();
-        for kind in [Kind::Response, Kind::Event] {
+        for kind in Kind::ALL {
             let Ok(entries) = std::fs::read_dir(dir.join(kind.folder())) else {
                 continue;
             };
@@ -427,6 +465,7 @@ async fn produce() -> Samples {
     crate::router::contract_samples(&mut samples);
     events::samples(&mut samples);
     crate::routes::contract_samples(&mut samples).await;
+    crate::routes::request_samples::contract_samples(&mut samples);
     samples
 }
 
@@ -596,6 +635,43 @@ mod tests {
         let verdict = judge(&fresh, &folder(Some(3), fresh.clone()), 2, true);
         assert_eq!(verdict.problems.len(), 1);
         assert!(verdict.problems[0].contains("never moves back"));
+    }
+
+    /// CLI-PROTOCOL: a request body's field and a field of a response only
+    /// the CLI reads, renamed, fail as a response's field does, even when
+    /// writing, until `PROTOCOL` moves.
+    #[test]
+    fn a_renamed_request_or_cli_read_field_fails_without_a_bump() {
+        for kind in [Kind::Request, Kind::CliResponse] {
+            let fresh = one(kind, "post-x", json!({"b": null}));
+            let on_disk = folder(Some(1), one(kind, "post-x", json!({"a": null})));
+            for write in [false, true] {
+                let verdict = judge(&fresh, &on_disk, 1, write);
+                assert_eq!(verdict.problems.len(), 1, "{verdict:?}");
+                assert!(
+                    verdict.problems[0]
+                        .contains(&format!("{}/post-x: no longer carries a;", kind.folder()))
+                        && verdict.problems[0].contains("bumps support::protocol::PROTOCOL"),
+                    "{verdict:?}"
+                );
+            }
+            assert!(judge(&fresh, &on_disk, 2, true).problems.is_empty());
+        }
+    }
+
+    /// Every kind is read from its own folder: a kind the read skipped
+    /// would hide its removals.
+    #[test]
+    fn every_kind_is_read_from_its_folder() {
+        let tmp = tempfile::tempdir().expect("a temp folder");
+        for kind in Kind::ALL {
+            let dir = tmp.path().join(kind.folder());
+            std::fs::create_dir_all(&dir).expect("create the folder");
+            std::fs::write(dir.join("x.json"), b"{\"a\": null}\n").expect("a sample");
+        }
+        let read = Folder::read(tmp.path());
+        let kinds: Vec<Kind> = read.samples.keys().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, Kind::ALL.to_vec());
     }
 
     /// A hidden file a desktop leaves in the folder (Finder's `.DS_Store`)

@@ -1833,3 +1833,33 @@ pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
             .await;
     out.response("delete-extensions-kind-id", body);
 }
+
+/// CLI-PROTOCOL read the plugin source through `PluginSourceBody`: each
+/// body reads as the bare body read before — an object's `source` and
+/// `path`, a non-string value as the key left out, and anything but an
+/// object (serde would read an array's items as the fields in order) as
+/// nothing at all.
+#[test]
+fn a_plugin_source_is_read_as_the_bare_body_was() {
+    use serde_json::json;
+    assert_eq!(
+        plugin_source(&json!({"source": "path", "path": "/x"})).ok(),
+        Some(std::path::PathBuf::from("/x"))
+    );
+    assert_eq!(
+        plugin_source(&json!({"path": "/x"})).ok(),
+        Some(std::path::PathBuf::from("/x"))
+    );
+    for refused in [
+        json!(["path", "/x"]),
+        json!([null, "/x"]),
+        json!("/x"),
+        json!({"source": "path", "path": 7}),
+        json!({"source": 7, "path": ""}),
+    ] {
+        let refusal = plugin_source(&refused).expect_err("refused");
+        assert_eq!(refusal.code, "invalid_path", "{refused}");
+    }
+    let refusal = plugin_source(&json!({"source": "url", "path": "/x"})).expect_err("refused");
+    assert_eq!(refusal.code, "unsupported_source");
+}

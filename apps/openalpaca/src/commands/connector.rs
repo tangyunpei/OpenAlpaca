@@ -42,7 +42,7 @@ pub async fn run(args: ConnectorArgs) -> Result<()> {
 }
 
 async fn list_connectors() -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let connectors: Vec<ConnectorStatus> = client.get("/v1/connectors").await?;
 
     println!(
@@ -67,7 +67,7 @@ async fn list_connectors() -> Result<()> {
 }
 
 async fn perform_action(name: &str, action: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let body = serde_json::json!({ "action": action });
     let result: serde_json::Value = client
         .post(&format!("/v1/connectors/{}/action", name), &body)

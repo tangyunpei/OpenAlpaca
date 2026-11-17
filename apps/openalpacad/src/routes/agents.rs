@@ -374,18 +374,21 @@ pub async fn update_agent_config_handler(
                 config_version: new_version,
                 timestamp: Utc::now(),
             });
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "agent_id": id,
-                    "config_version": new_version,
-                    "status": "updated"
-                })),
-            )
-                .into_response()
+            (StatusCode::OK, Json(agent_config_updated(&id, new_version))).into_response()
         }
         Err(e) => config_update_refusal(&e),
     }
+}
+
+/// `PUT /v1/agents/{id}/config`'s answer (split out for the CLI's read's
+/// sample, CLI-PROTOCOL: `agent config set` and the TUI print its
+/// `config_version`).
+fn agent_config_updated(id: &str, config_version: u64) -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": id,
+        "config_version": config_version,
+        "status": "updated"
+    })
 }
 
 /// The answer to a `PUT /v1/agents/{id}/config` the service refused.
@@ -436,14 +439,7 @@ pub async fn create_agent_handler(
                 config_version: 0,
                 timestamp: Utc::now(),
             });
-            (
-                StatusCode::CREATED,
-                Json(serde_json::json!({
-                    "agent_id": agent_id,
-                    "status": "created"
-                })),
-            )
-                .into_response()
+            (StatusCode::CREATED, Json(agent_acted(&agent_id, "created"))).into_response()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -468,14 +464,7 @@ pub async fn create_agent_from_toml_handler(
                 config_version: 0,
                 timestamp: Utc::now(),
             });
-            (
-                StatusCode::CREATED,
-                Json(serde_json::json!({
-                    "agent_id": agent_id,
-                    "status": "created"
-                })),
-            )
-                .into_response()
+            (StatusCode::CREATED, Json(agent_acted(&agent_id, "created"))).into_response()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -500,14 +489,7 @@ pub async fn delete_agent_handler(
                 config_version: 0,
                 timestamp: Utc::now(),
             });
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "agent_id": id,
-                    "status": "archived"
-                })),
-            )
-                .into_response()
+            (StatusCode::OK, Json(agent_acted(&id, "archived"))).into_response()
         }
         Err(e) => (
             StatusCode::NOT_FOUND,
@@ -1625,5 +1607,20 @@ pub(crate) mod tests {
         let body = ok_body(agent_config(&t.service, "lead_agent")).await;
         out.response("get-agents-id-config", body);
         out.response("post-agents-id-action", agent_acted("agent-1", "waiting"));
+
+        // The CLI's own reads (CLI-PROTOCOL): the list `GET /v1/agents`
+        // answers (the repository's rows, as the handler serializes them),
+        // the creates', the delete's and the config update's answers.
+        out.cli_response(
+            "get-agents",
+            serde_json::to_value(repo.list(50).unwrap()).unwrap(),
+        );
+        out.cli_response("post-agents", agent_acted("agent-1", "created"));
+        out.cli_response("post-agents-from-toml", agent_acted("agent-1", "created"));
+        out.cli_response("delete-agents-id", agent_acted("agent-1", "archived"));
+        out.cli_response(
+            "put-agents-id-config",
+            agent_config_updated("lead_agent", 2),
+        );
     }
 }

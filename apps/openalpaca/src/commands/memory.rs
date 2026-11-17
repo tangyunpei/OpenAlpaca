@@ -384,7 +384,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             format,
             at,
         } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let mut query = vec![format!("limit={limit}")];
             if let Some(k) = kind {
                 query.push(format!("kind={}", urlencoding::encode(&k)));
@@ -423,7 +423,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             format,
             at,
         } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let path = search_path(&SearchFilters {
                 query: &query,
                 kind: kind.as_deref(),
@@ -451,7 +451,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             format,
             at,
         } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let found = timeline(
                 &api,
                 id.as_deref(),
@@ -473,7 +473,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             raw,
             at,
         } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let id = api.resolve_id(&id).await?;
             let path = match &revision {
                 Some(rev) => format!("/v1/memories/{id}?revision={}", urlencoding::encode(rev)),
@@ -498,7 +498,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             body,
             at,
         } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let body = match body.as_deref() {
                 Some("-") => {
                     let mut text = String::new();
@@ -570,7 +570,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             Ok(())
         }
         MemoryCommands::Edit { id, at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let id = api.resolve_id(&id).await?;
             match edit_note(&api, id, &open_in_editor).await? {
                 EditOutcome::Unchanged => {
@@ -617,7 +617,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             }
         }
         MemoryCommands::Suggestions { limit, format, at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let page = api
                 .get(&format!("/v1/memories/suggestions?limit={limit}"))
                 .await?;
@@ -628,7 +628,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             Ok(())
         }
         MemoryCommands::Confirm { id, at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let id = api.resolve_id(&id).await?;
             let confirmed = confirm_note(&api, id).await?;
             for line in confirmed.lines(id) {
@@ -637,7 +637,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             Ok(())
         }
         MemoryCommands::Undo { id, at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let id = api.resolve_id(&id).await?;
             let current = api.get(&format!("/v1/memories/{id}")).await?;
             let revision = revision_of(&current)?;
@@ -657,11 +657,11 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             Ok(())
         }
         MemoryCommands::Forget { ids, yes, at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             forget_verb(&api, &ids, yes, &mut |line| println!("{line}")).await
         }
         MemoryCommands::Sync { at } => {
-            let api = Api::connect(&at)?;
+            let api = Api::connect(&at).await?;
             let response = api
                 .send::<Value>(Method::POST, "/v1/memories/sync", None, None)
                 .await?;
@@ -692,7 +692,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 return repair_locally(&at);
             }
             let report = if crate::manager::is_daemon_running() {
-                Api::connect(&at)?.get("/v1/memories/doctor").await?
+                Api::connect(&at).await?.get("/v1/memories/doctor").await?
             } else {
                 println!("{}", "No daemon is running; scanning locally.".dimmed());
                 let (_db, owner_id) = open_owner_database()?;
@@ -715,9 +715,9 @@ pub(crate) struct Api {
 }
 
 impl Api {
-    fn connect(at: &ScopeArgs) -> Result<Self> {
+    async fn connect(at: &ScopeArgs) -> Result<Self> {
         Ok(Self {
-            client: DaemonClient::connect()?,
+            client: DaemonClient::connect().await?,
             headers: at.headers()?,
         })
     }

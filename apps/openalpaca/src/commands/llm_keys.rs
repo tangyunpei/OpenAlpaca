@@ -190,7 +190,7 @@ pub(super) async fn run_keys(args: KeysArgs) -> Result<()> {
 }
 
 async fn keys_list(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let config: serde_json::Value = client.get("/v1/settings/llm").await?;
     print_list(&key_rows(&config), format);
     Ok(())
@@ -232,7 +232,7 @@ async fn keys_add(
 
     // Auto-validate the key
     print!("{}", "Validating key... ".dimmed());
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let validate_body = serde_json::json!({
         "provider": provider,
         "secret": secret,
@@ -336,7 +336,7 @@ async fn keys_remove(provider: &str, key_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let _: serde_json::Value = client
         .delete_req(&format!("/v1/settings/llm/keys/{}/{}", provider, key_id))
         .await?;
@@ -383,7 +383,7 @@ pub(super) fn no_key_needed_line(provider: &str) -> String {
 /// which is a verdict on a key that does not exist and should not be sent:
 /// the one provider designed to need nothing was the one reported broken.
 async fn keys_validate(provider: &str, secret: Option<&str>) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     // A daemon that refuses the settings route tells us nothing about the
     // provider, and "keyed" is the safe reading of nothing.
     let settings: crate::commands::llm_status::LlmSettingsSnapshot = client
@@ -438,7 +438,7 @@ async fn keys_validate(provider: &str, secret: Option<&str>) -> Result<()> {
 }
 
 async fn keys_set_primary(provider: &str, key_id: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let body = serde_json::json!({
         "provider": provider,
         "primary_key_id": key_id,
@@ -449,7 +449,7 @@ async fn keys_set_primary(provider: &str, key_id: &str) -> Result<()> {
 }
 
 async fn keys_reorder(key_ids: Vec<String>) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let body = serde_json::json!({
         "key_ids": key_ids,
     });

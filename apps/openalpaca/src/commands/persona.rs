@@ -55,7 +55,7 @@ pub enum PersonaTarget {
 }
 
 pub async fn run(args: PersonaArgs) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     match args.command {
         PersonaCommands::Show {
             target: PersonaTarget::User,

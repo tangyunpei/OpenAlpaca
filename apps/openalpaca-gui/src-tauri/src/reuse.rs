@@ -883,9 +883,10 @@ pub(crate) fn answer_is_whole(answer: &[u8]) -> bool {
 }
 
 /// An HTTP/1.x answer as a daemon's health, or why it is not one: status
-/// `200`, a body (whole or chunked) that is a JSON object whose `status` is
-/// `ok` and whose `instance_id` is a string; a `protocol` present must be a
-/// number a `u32` holds.
+/// `200` and a body (whole or chunked) that
+/// [`protocol::read_health_body`] reads as one — a JSON object whose
+/// `status` is `ok` and whose `instance_id` is a string; a `protocol`
+/// present must be a number a `u32` holds.
 pub(crate) fn parse_health_response(bytes: &[u8]) -> Health {
     let unanswered = |why: String| Health::Unanswered(why);
     let Some(split) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
@@ -926,30 +927,8 @@ pub(crate) fn parse_health_response(bytes: &[u8]) -> Health {
         Some(length) if !chunked => body.get(..length).map(<[u8]>::to_vec).unwrap_or(body),
         _ => body,
     };
-    let Ok(serde_json::Value::Object(body)) = serde_json::from_slice(&body) else {
-        return unanswered("a body that is not a JSON object".into());
-    };
-    if body.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
-        return unanswered("a body whose status is not ok".into());
-    }
-    let Some(instance_id) = body.get("instance_id").and_then(serde_json::Value::as_str) else {
-        return unanswered("a body with no instance_id".into());
-    };
-    let protocol = match body.get("protocol") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
-            Some(protocol) => Some(protocol),
-            None => return unanswered("a protocol that is not a number".into()),
-        },
-    };
-    Health::Answered {
-        instance_id: instance_id.to_owned(),
-        protocol,
-        version: body
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-    }
+    // The body's reading is the one the CLI shares (CLI-PROTOCOL).
+    protocol::read_health_body(&body)
 }
 
 /// A chunked body's bytes, `None` when it is cut short or malformed.

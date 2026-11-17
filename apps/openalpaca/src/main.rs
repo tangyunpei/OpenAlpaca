@@ -18,9 +18,12 @@
 mod chat_stream;
 mod client;
 mod commands;
+#[cfg(test)]
+mod contract_reads;
 mod manager;
 mod output;
 mod repl;
+mod reuse;
 #[cfg(test)]
 pub(crate) mod test_util;
 mod unattended;

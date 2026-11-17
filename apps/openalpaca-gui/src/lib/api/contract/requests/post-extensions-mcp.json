@@ -1,0 +1,19 @@
+{
+  "api_key_env": null,
+  "api_key_header": null,
+  "args": null,
+  "bearer_env": null,
+  "command": null,
+  "connect_timeout_secs": null,
+  "cwd": null,
+  "enabled": null,
+  "env": null,
+  "env_from": null,
+  "extra_headers": null,
+  "extra_headers_from": null,
+  "id": null,
+  "name": null,
+  "request_timeout_secs": null,
+  "transport": null,
+  "url": null
+}

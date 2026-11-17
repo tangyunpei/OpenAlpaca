@@ -1,0 +1,22 @@
+{
+  "aliases": null,
+  "body": null,
+  "expected_revision": null,
+  "fact_key": null,
+  "kind": null,
+  "scope": null,
+  "sources": [
+    {
+      "id": null,
+      "type": null
+    }
+  ],
+  "supersedes": {
+    "expected_revision": null,
+    "id": null
+  },
+  "tags": null,
+  "title": null,
+  "valid_from": null,
+  "valid_to": null
+}

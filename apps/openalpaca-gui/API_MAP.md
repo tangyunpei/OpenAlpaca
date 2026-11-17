@@ -31,8 +31,13 @@ also checked: the daemon's route tests write a sample of each response the
 `src/lib/api/` wrappers read, and of each `ServerEvent` variant, into
 `src/lib/api/contract/` (`apps/openalpacad/src/contract/`; rewritten with
 `OPENALPACA_CONTRACT_WRITE=1`), and `src/lib/api/contract.test.ts` parses
-each against its TypeScript type. A removed or renamed field, route or
-variant bumps `support::protocol::PROTOCOL` (CLAUDE.md, _Storage_).
+each against its TypeScript type. Since CLI-PROTOCOL the folder also holds
+each request body a route reads (`requests/`, its type's wire names), which
+`src/lib/api/contract-requests.test.ts` holds every key the wrappers send
+to, and each response only the CLI reads (`cli/`), which the CLI's
+`contract_reads` test holds the keys it reads to. A removed or renamed
+field, route or variant bumps `support::protocol::PROTOCOL` (CLAUDE.md,
+_Storage_).
 
 > **Security note.** The design file was read as _data only_. It contains no text
 > directed at the agent; all strings in it are UI copy and mock fixtures. Nothing in it

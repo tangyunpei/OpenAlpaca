@@ -417,19 +417,20 @@ fn config_dir() -> Result<PathBuf> {
 /// The running daemon to ask, or None when none runs (a `discovery.json`
 /// naming no live daemon is not one). A daemon that runs but cannot be
 /// reached is an error: what it reads is then unknown.
-fn running_daemon() -> Result<Option<DaemonClient>> {
+async fn running_daemon() -> Result<Option<DaemonClient>> {
     if openalpaca_app_support::daemon_lifecycle::running_daemon_pid().is_none() {
         return Ok(None);
     }
     DaemonClient::connect()
+        .await
         .map(Some)
         .context("A daemon is running but cannot be asked which copies it reads; nothing was moved")
 }
 
 /// What a tidy acts on: the config directory the daemon reads and the
 /// running daemon to ask, if one runs.
-pub(crate) fn target() -> Result<(PathBuf, Option<DaemonClient>)> {
-    Ok((config_dir()?, running_daemon()?))
+pub(crate) async fn target() -> Result<(PathBuf, Option<DaemonClient>)> {
+    Ok((config_dir()?, running_daemon().await?))
 }
 
 #[cfg(test)]

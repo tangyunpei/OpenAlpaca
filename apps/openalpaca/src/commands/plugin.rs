@@ -115,7 +115,7 @@ async fn plugin_info(name: &str) -> Result<()> {
 }
 
 async fn plugin_config(name: &str, action: ConfigAction) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     match action {
         ConfigAction::Set { key, value } => {

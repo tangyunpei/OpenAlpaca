@@ -1744,6 +1744,30 @@ pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
     )
     .await;
     out.response("post-memories-id-undo", body);
+
+    // The CLI's own reads (CLI-PROTOCOL): `memory doctor`, `sync`,
+    // `timeline` and `forget`.
+    let body = ok_body(f.api.doctor(&Fixture::headers()).await).await;
+    out.cli_response("get-memories-doctor", body);
+    let body = ok_body(f.api.sync(&Fixture::headers()).await).await;
+    out.cli_response("post-memories-sync", body);
+    let query = TimelineMemoriesQuery {
+        anchor: Some(note.to_string()),
+        ..Default::default()
+    };
+    let body = ok_body(f.api.timeline(&Fixture::headers(), query).await).await;
+    out.cli_response("get-memories-timeline", body);
+    let (gone, gone_revision) = f.extracted("Gone", "# Gone\n\nForget me.\n");
+    let forget = ForgetMemoriesBody {
+        targets: vec![ForgetTargetBody {
+            id: gone.to_string(),
+            expected_revision: gone_revision,
+        }],
+        reason: Some("contract".to_string()),
+    };
+    let body = ok_body(f.api.forget(&Fixture::headers(), forget).await).await;
+    out.cli_response("post-memories-forget", body);
+
     let body = ok_body(
         f.api
             .delete(&Fixture::with_if_match(&current), &note.to_string())

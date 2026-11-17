@@ -54,13 +54,13 @@ fn the_config_directory_is_the_variable_s_else_the_store_s_never_a_walk_up() {
 
 /// No `discovery.json`, or one naming a process that is not a daemon (this
 /// test's own): no daemon runs, so a tidy asks none and needs none.
-#[test]
-fn no_daemon_runs_without_a_discovery_file_naming_a_live_one() {
+#[tokio::test]
+async fn no_daemon_runs_without_a_discovery_file_naming_a_live_one() {
     let dir = tempfile::tempdir().unwrap();
     let _env = EnvSandbox::enter(dir.path());
     let config = dir.path().join("config");
 
-    let (found, daemon) = target().unwrap();
+    let (found, daemon) = target().await.unwrap();
     assert_eq!(found, config);
     assert!(daemon.is_none());
 
@@ -87,7 +87,7 @@ fn no_daemon_runs_without_a_discovery_file_naming_a_live_one() {
         },
     )
     .unwrap();
-    let (found, daemon) = target().unwrap();
+    let (found, daemon) = target().await.unwrap();
     assert_eq!(found, config);
     assert!(daemon.is_none(), "a stale discovery file names no daemon");
 }

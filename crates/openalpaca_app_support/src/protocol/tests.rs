@@ -413,3 +413,59 @@ fn a_live_daemon_s_rotated_or_lapsed_token_is_reused() {
         Row::Reuse(None)
     );
 }
+
+// ============================================================================
+// The health body, as both clients read it (CLI-PROTOCOL)
+// ============================================================================
+
+/// A daemon's body: its instance, protocol and version.
+#[test]
+fn a_health_body_is_read_with_its_instance_protocol_and_version() {
+    let body = br#"{"status":"ok","version":"0.4.0","pid":7,"instance_id":"i-1","protocol":3}"#;
+    assert_eq!(
+        read_health_body(body),
+        Health::Answered {
+            instance_id: "i-1".into(),
+            protocol: Some(3),
+            version: Some("0.4.0".into()),
+        }
+    );
+    // A daemon from before Q04 answers no protocol; `null` is the same.
+    for body in [
+        &br#"{"status":"ok","instance_id":"i-1"}"#[..],
+        &br#"{"status":"ok","instance_id":"i-1","protocol":null}"#[..],
+    ] {
+        assert_eq!(
+            read_health_body(body),
+            Health::Answered {
+                instance_id: "i-1".into(),
+                protocol: None,
+                version: None,
+            }
+        );
+    }
+}
+
+/// What is no daemon's health, each with its reason.
+#[test]
+fn a_body_that_is_no_daemon_s_health_is_unanswered_with_why() {
+    for (body, why) in [
+        (&b"not json"[..], "a body that is not a JSON object"),
+        (&b"[1]"[..], "a body that is not a JSON object"),
+        (
+            &br#"{"status":"starting","instance_id":"i-1"}"#[..],
+            "a body whose status is not ok",
+        ),
+        (&br#"{"status":"ok"}"#[..], "a body with no instance_id"),
+        (
+            &br#"{"status":"ok","instance_id":"i-1","protocol":"3"}"#[..],
+            "a protocol that is not a number",
+        ),
+        (
+            &br#"{"status":"ok","instance_id":"i-1","protocol":4294967296}"#[..],
+            "a protocol that is not a number",
+        ),
+    ] {
+        assert_eq!(read_health_body(body), Health::Unanswered(why.into()));
+    }
+}

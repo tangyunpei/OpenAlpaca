@@ -246,7 +246,7 @@ struct DeleteResult {
 }
 
 pub async fn run(args: StoreArgs) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let text = match args.command {
         StoreCommands::List => list(&client).await?,
         StoreCommands::Rebase { old, new, dry_run } => {

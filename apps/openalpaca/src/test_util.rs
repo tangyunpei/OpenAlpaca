@@ -116,6 +116,63 @@ pub(crate) fn serve(
     (addr, server)
 }
 
+/// [`serve`], ending early when no connection comes for `idle`: what a
+/// test needs whose code under test may open fewer connections than it
+/// offers answers for (the daemon check's tests, which also run on the
+/// parent's code, where no health is asked). The requests received, on
+/// join, as [`serve`]'s.
+pub(crate) fn serve_until_idle(
+    answers: Vec<String>,
+    idle: std::time::Duration,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let addr = listener.local_addr().expect("the bound address");
+    listener
+        .set_nonblocking(true)
+        .expect("a non-blocking listener");
+    let server = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for answer in answers {
+            let deadline = std::time::Instant::now() + idle;
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break Some(socket),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            break None;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("accept: {e}"),
+                }
+            };
+            let Some(socket) = socket.as_mut() else {
+                break;
+            };
+            socket.set_nonblocking(false).expect("a blocking socket");
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut buf).expect("the request is readable");
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            seen.push(String::from_utf8_lossy(&raw).to_string());
+            socket
+                .write_all(answer.as_bytes())
+                .expect("the answer is written");
+            socket.flush().ok();
+        }
+        seen
+    });
+    (addr, server)
+}
+
 /// Whether the volume `dir` is on ignores letter case — what a test of a
 /// folder renamed by case only (ST-23) needs before it can rename one. Probes
 /// with a file and a stat of its other-case name, and removes the probe. A

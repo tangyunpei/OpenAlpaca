@@ -59,6 +59,18 @@ pub struct SetConfigRequest {
     pub value: serde_json::Value,
 }
 
+/// A plugin's source, the body of `POST /v1/extensions/plugin`, its
+/// `validate` and `PUT /v1/extensions/plugin/{id}`: `{source:"path", path}`.
+/// Each value is kept as the JSON it is, so [`plugin_source`] reads a
+/// non-string as the key left out, as it did over the bare body.
+#[derive(Deserialize, Default)]
+pub struct PluginSourceBody {
+    #[serde(default)]
+    pub source: Option<serde_json::Value>,
+    #[serde(default)]
+    pub path: Option<serde_json::Value>,
+}
+
 #[derive(Deserialize, Default)]
 pub struct ListQuery {
     /// `?include_orphaned=true`; default `false` (design §8).
@@ -521,8 +533,19 @@ impl IntoResponse for SourceRefusal {
 /// network is its own security review, and refusing it by name is more useful
 /// than a serde error about an unknown variant.
 fn plugin_source(body: &serde_json::Value) -> Result<std::path::PathBuf, SourceRefusal> {
-    match body.get("source").and_then(|s| s.as_str()) {
-        Some("path") | None => match body.get("path").and_then(|p| p.as_str()) {
+    // Read through the type the request sample is written from
+    // (CLI-PROTOCOL), so a key renamed here moves the sample. Each value is
+    // read as before: a body that is not an object, or a key whose value is
+    // not a string, reads as the key left out.
+    // Only an object is read: serde would read an array's items as the
+    // fields in order, which the bare body never did.
+    let body = if body.is_object() {
+        PluginSourceBody::deserialize(body).unwrap_or_default()
+    } else {
+        PluginSourceBody::default()
+    };
+    match body.source.as_ref().and_then(serde_json::Value::as_str) {
+        Some("path") | None => match body.path.as_ref().and_then(serde_json::Value::as_str) {
             Some(path) if !path.is_empty() => Ok(std::path::PathBuf::from(path)),
             _ => Err(SourceRefusal {
                 code: "invalid_path",

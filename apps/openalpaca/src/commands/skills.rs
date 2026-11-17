@@ -442,7 +442,7 @@ pub(crate) async fn tidy_lines(
 pub async fn run(args: SkillsArgs) -> Result<()> {
     match args.command {
         SkillsCommands::List { format } => {
-            let client = DaemonClient::connect()?;
+            let client = DaemonClient::connect().await?;
             let (skills, diagnostics) = fetch(&client).await?;
             match format {
                 OutputFormat::Json => println!(
@@ -460,7 +460,7 @@ pub async fn run(args: SkillsArgs) -> Result<()> {
             }
         }
         SkillsCommands::Info { skill, format } => {
-            let client = DaemonClient::connect()?;
+            let client = DaemonClient::connect().await?;
             let (skills, diagnostics) = fetch(&client).await?;
             let found = lookup(&skills, &diagnostics, &skill);
             match format {
@@ -484,7 +484,7 @@ pub async fn run(args: SkillsArgs) -> Result<()> {
             }
         }
         SkillsCommands::Tidy { apply } => {
-            let (config_dir, daemon) = tidy::target()?;
+            let (config_dir, daemon) = tidy::target().await?;
             let now = chrono::Utc::now();
             for line in tidy_lines(&config_dir, daemon.as_ref(), apply, now).await? {
                 println!("{line}");

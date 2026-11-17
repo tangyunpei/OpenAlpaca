@@ -29,6 +29,8 @@ pub mod followups;
 pub mod memories;
 pub mod orchestrator_latency;
 pub mod persona;
+#[cfg(test)]
+pub(crate) mod request_samples;
 pub mod sessions;
 pub mod settings;
 mod settings_types;

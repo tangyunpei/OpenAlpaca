@@ -356,7 +356,7 @@ pub async fn run(args: ExtArgs) -> Result<()> {
 }
 
 pub(crate) async fn fetch_rows(include_orphaned: bool) -> Result<Vec<ExtensionRow>> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let path = if include_orphaned {
         "/v1/extensions?include_orphaned=true"
     } else {
@@ -487,7 +487,7 @@ fn print_names(label: &str, names: &[String]) {
 
 pub(crate) async fn verb(kind: &str, id: &str, verb: &str) -> Result<()> {
     check_kind(kind)?;
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let row: ExtensionRow = client
         .post(
             &format!("/v1/extensions/{kind}/{id}/{verb}"),
@@ -516,7 +516,7 @@ pub(crate) async fn verb(kind: &str, id: &str, verb: &str) -> Result<()> {
 }
 
 async fn remove(id: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let _: serde_json::Value = client
         .delete_req(&format!("/v1/extensions/plugin/{id}"))
         .await?;
@@ -750,7 +750,7 @@ fn manifest_text(manifest: &ManifestSummary, tty: bool) -> String {
 }
 
 async fn install(path: &str, dry_run: bool) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     if dry_run {
         let response: ValidateResponse = client
             .post("/v1/extensions/plugin/validate", &source_body(path))
@@ -846,7 +846,7 @@ fn push_notice(out: &mut String, uncounted: usize) {
 }
 
 async fn update(id: &str, path: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let response: InstallResponse = client
         .put(&format!("/v1/extensions/plugin/{id}"), &source_body(path))
         .await?;
@@ -960,7 +960,7 @@ struct UninstallResponse {
 
 async fn uninstall(kind: &str, id: &str, keep_data: bool) -> Result<()> {
     check_kind(kind)?;
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let response: UninstallResponse = client
         .delete_req(&uninstall_path(kind, id, keep_data))
         .await?;
@@ -978,7 +978,7 @@ async fn uninstall(kind: &str, id: &str, keep_data: bool) -> Result<()> {
 }
 
 async fn mcp_add(body: serde_json::Value) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let response: InstallResponse = client.post("/v1/extensions/mcp", &body).await?;
     println!(
         "{} declared mcp:{} -> {} (enabled: {})",

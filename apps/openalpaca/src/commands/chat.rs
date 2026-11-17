@@ -52,7 +52,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let stdout_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let mut target = match args.project.as_deref() {
         Some(dir) => {
-            let client = DaemonClient::connect()?;
+            let client = DaemonClient::connect().await?;
             let project = choose_project(&client, dir).await?;
             eprintln!(
                 "{}",
@@ -64,7 +64,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     };
 
     if args.resume || args.session.is_some() {
-        let client = DaemonClient::connect()?;
+        let client = DaemonClient::connect().await?;
         let lane_key = sessions::default_lane_key(&client).await?;
         let session_id = match args.session.as_deref() {
             Some(id) => named_session(&client, id, &lane_key).await?,
@@ -85,7 +85,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         return single_message(msg, &args.files, &target).await;
     }
     if interactive {
-        let session = crate::repl::ReplSession::new(target)?;
+        let session = crate::repl::ReplSession::new(target).await?;
         return session.run().await;
     }
     pipe_mode(&target).await
@@ -347,7 +347,7 @@ async fn single_message(
     files: &[std::path::PathBuf],
     target: &ChatTarget,
 ) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
 
     // Upload files and collect attachment refs
     let attachments = upload_files(&client, files, target).await?;
@@ -472,7 +472,7 @@ async fn pipe_mode(target: &ChatTarget) -> Result<()> {
         bail!("No input on stdin");
     }
 
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let stdout_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
     print!("{}", reply_prefix(stdout_is_terminal));
     std::io::stdout().flush()?;

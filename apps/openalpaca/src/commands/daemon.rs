@@ -1,5 +1,6 @@
 use crate::commands::{status, tail};
 use crate::manager;
+use crate::reuse;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use openalpaca_app_support::daemon_lifecycle::{self, StopOutcome};
@@ -41,9 +42,12 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         DaemonAction::Start { daemon_only } => {
             manager::start_daemon()?;
             if !daemon_only {
-                // Brief wait for daemon to initialize resources if needed
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                manager::start_gui()?;
+                start_gui_after_the_daemon(
+                    &mut reuse::RealWorld,
+                    &reuse::THIS_CLI,
+                    manager::start_gui,
+                )
+                .await?;
             }
             Ok(())
         }
@@ -69,6 +73,27 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             manager::start_daemon()
         }
     }
+}
+
+/// The app started once the daemon serves (CLI-PROTOCOL; the owner's rule:
+/// the CLI and the app always use one daemon). [`reuse::wait_after_start`]
+/// replaces a fixed two-second sleep: the app's own check finds the daemon
+/// answering and uses it, where a daemon still booting after two seconds
+/// had the app find no discovery file and spawn a second one, which lost
+/// the store's lock to the first after rotating its log. A wait that ends
+/// otherwise — a daemon this CLI cannot use, one still starting, none at
+/// all — is said on stderr and the app is started all the same, as before:
+/// its own check then shows the same verdict in its window. `start_app`
+/// is `manager::start_gui` but in a test.
+pub(crate) async fn start_gui_after_the_daemon<W: reuse::World>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+    start_app: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if let reuse::StartWait::NotReady(why) = reuse::wait_after_start(world, cli).await {
+        world.say(format!("⚠️  {why} Starting the app all the same."));
+    }
+    start_app()
 }
 
 /// Ask the daemon to stop, then wait until its process has exited and the

@@ -170,7 +170,7 @@ fn listing_note(count: usize) -> String {
 }
 
 async fn list(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
     print!(
         "{}",
@@ -386,7 +386,7 @@ fn refusal_line(request_id: &str, error: &str) -> String {
 }
 
 async fn answer(request_id: &str, approved: bool, entire_tool: bool) -> Result<()> {
-    let client = DaemonClient::connect()?;
+    let client = DaemonClient::connect().await?;
     if approved && entire_tool {
         let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
         let prompts = pending_prompts(page);
@@ -577,7 +577,8 @@ async fn send_watch_answer(
     approved: bool,
     entire_tool: bool,
 ) -> Result<reqwest::Response> {
-    DaemonClient::connect()?
+    DaemonClient::connect()
+        .await?
         .post_raw(
             &answer_path(request_id),
             &answer_body(approved, entire_tool),
@@ -631,7 +632,20 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let _env = EnvSandbox::enter(tmp.path());
-        let (addr, server) = serve(vec![ok_json("{}"), ok_json("{}")]);
+        // Each answer's connect asks health first (CLI-PROTOCOL).
+        let health = serde_json::json!({
+            "status": "ok",
+            "version": crate::reuse::THIS_CLI.version,
+            "instance_id": "instance-t21",
+            "protocol": openalpaca_app_support::protocol::PROTOCOL,
+        })
+        .to_string();
+        let (addr, server) = serve(vec![
+            ok_json(&health),
+            ok_json("{}"),
+            ok_json(&health),
+            ok_json("{}"),
+        ]);
         let first = discovery_of_a_daemon_up_for(addr.port(), 13);
 
         send_watch_answer("req-1", true, false)
@@ -644,13 +658,15 @@ mod tests {
             .expect("the second answer");
 
         let requests = server.join().expect("the server finishes");
-        assert!(requests[0].starts_with("POST /v1/chat/confirmations/req-1 "));
-        assert_eq!(
-            bearer_of(&requests[0]).as_deref(),
-            Some(first.auth.token.as_str())
-        );
+        assert!(requests[0].starts_with("GET /v1/health "));
+        assert!(requests[1].starts_with("POST /v1/chat/confirmations/req-1 "));
         assert_eq!(
             bearer_of(&requests[1]).as_deref(),
+            Some(first.auth.token.as_str())
+        );
+        assert!(requests[3].starts_with("POST /v1/chat/confirmations/req-2 "));
+        assert_eq!(
+            bearer_of(&requests[3]).as_deref(),
             Some(later.auth.token.as_str())
         );
     }
