@@ -1657,8 +1657,8 @@ it never finishes, how to stop it. `state/logs/gui.log` has one line each
 time what the window is told changes — starting, still starting, the daemon
 used, a version mismatch (met when the window starts, reconnects or reads its
 connection again: one line per change, not per ask), the daemon missing beside
-the app; a daemon that failed to start writes no line there (its reason is on
-the card). In `bun run dev` there is no Tauri bridge, so every shell command
+the app; a daemon that failed to start writes no verdict line there (its reason is
+on the card; the spawn and the daemon's exit are logged). In `bun run dev` there is no Tauri bridge, so every shell command
 fails by design.
 
 **The window says the daemon is stopped.** `stopped` means this window stopped
