@@ -97,11 +97,12 @@ apps/openalpaca-gui/src-tauri/gen/
 # ============================================
 # Markdown Documentation (Except Manuals)
 # ============================================
+# Tracked Markdown: README files, the manuals, docs/api, docs/tools and documents that describe the app (the owner, 2026-11-17).
+# tasks/ records and IMPLEMENTATION_PROGRESS.md are local and never committed.
 *.md
 !README.md
 !CLAUDE.md
-!IMPLEMENTATION_PROGRESS.md
-# The memory invariant fixtures' format description (tasks/memory-redesign, slice 1).
+# The memory invariant fixtures' format description.
 !crates/openalpaca_storage/tests/fixtures/memory/README.md
 !docs/CLI_Manual.md
 !docs/GUI_Manual.md
@@ -119,37 +120,16 @@ apps/openalpaca-gui/src-tauri/gen/
 !docs/api/apps/*.md
 !docs/api/crates/*.md
 !docs/api/database/*.md
-!docs/plans/Unified_Memory_System.md
-!tasks/memory-redesign/*.md
-!tasks/store-revision/
-!tasks/store-revision/*.md
-!tasks/storage-design/
-!tasks/storage-design/*.md
 tasks/storage-design/maps/
 tasks/storage-design/panel/
 tasks/storage-design/plan-drafts/
-!tasks/approval-hidden-chars.md
-# The subagent brief design (SA-DESIGN: SA-1, SA-3, SA-4), programme step 3b.
-!tasks/subagent-brief-design.md
-# The toolchain, dependency and modernization programme (2026-09-25…): the
-# plans and reports are tracked; the evidence archives (patches, logs, tools)
-# stay local — they are 3–20 MB each and reproducible from the reports.
-!tasks/deps-upgrade/
-!tasks/deps-upgrade/*.md
-!tasks/deps-upgrade/reports/
-!tasks/deps-upgrade/reports/*.md
-!tasks/deps-upgrade/baselines/
-!tasks/deps-upgrade/baselines/*/
-!tasks/deps-upgrade/baselines/*/*.md
 # E6's corpus (P30; A-07 (2)): the SKILL.md edge-case fixtures beside its comparators.
+tasks/**/README.md
 !tasks/deps-upgrade/tools/e6/corpus/*/SKILL.md
+!tasks/deps-upgrade/tools/*/README.md
 # The earlier builds' shipped templates and skill files, as committed (subagent design §9).
 !crates/openalpaca_core/src/bundled/fixtures/**/*.md
 tasks/deps-upgrade/*.tar.gz
-!tasks/deps-upgrade-audit-*.md
-!tasks/pending-decisions.md
-# CLAUDE.md as it stood before the 2026-10-19 shrink (the narrative record of every wave through then).
-!tasks/claude-md-2026-10-19-pre-shrink.md
 !config/agents/*.md
 !config/orchestrator/templates/
 !config/orchestrator/templates/*.md
@@ -179,10 +159,3 @@ config/llm.toml.lock
 # UI rework reference docs (whitelisted from the *.md blanket ignore)
 !apps/openalpaca-gui/DESIGN_SPEC.md
 !apps/openalpaca-gui/API_MAP.md
-!tasks/gui-api-requirements.md
-!tasks/api-fix-plan.md
-!tasks/lessons.md
-!tasks/extension-enable-design.md
-!tasks/research/
-!tasks/research/*.md
-!tasks/bug-main-loop-cost-lockout.md
