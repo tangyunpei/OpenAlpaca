@@ -232,7 +232,7 @@ fn singleton_lock_holder_process() {
         Some(root),
         "the lock holder must inherit a sandboxed store; refusing to lock anything else"
     );
-    let _lock = openalpaca_storage::discovery::acquire_single_instance_lock(false)
+    let _lock = openalpaca_app_support::discovery::acquire_single_instance_lock(false)
         .expect("take the singleton lock");
     println!("{LOCKED}");
     std::io::stdout().flush().expect("flush");
@@ -255,8 +255,8 @@ fn the_storage_test_home_guard_is_armed_in_this_test_build() {
 pub(crate) fn discovery_of_a_daemon_up_for(
     port: u16,
     hours_up: i64,
-) -> openalpaca_storage::discovery::Discovery {
-    use openalpaca_storage::discovery;
+) -> openalpaca_app_support::discovery::Discovery {
+    use openalpaca_app_support::discovery;
     let now = chrono::Utc::now();
     let started = now - chrono::TimeDelta::hours(hours_up);
     let mut d = discovery::make_discovery("127.0.0.1", port, "instance-t21".into(), "0.1.0");

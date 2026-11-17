@@ -132,7 +132,7 @@ More detail: [docs/agent-loop.md](docs/agent-loop.md) and [docs/Daemon_Manual.md
 
 ## Project layout
 
-A Rust workspace (edition 2024) with three apps and eight library crates.
+A Rust workspace (edition 2024) with three apps and nine library crates.
 
 | Path | What it is |
 |---|---|
@@ -141,7 +141,8 @@ A Rust workspace (edition 2024) with three apps and eight library crates.
 | `apps/openalpaca-gui` | The desktop app: Tauri v2 shell, React 19 + TypeScript + Tailwind v4 frontend |
 | `crates/openalpaca_core` | Orchestrator, message routing, agent loop, tools, skills, security gate, event bus |
 | `crates/openalpaca_llm` | LLM router, providers, key pools, rate limiting, cost tracking |
-| `crates/openalpaca_storage` | SQLite, migrations, repositories, the memory note files and their search index, the `~/.openalpaca` store, artifacts, uploads |
+| `crates/openalpaca_app_support` | The `~/.openalpaca` store's own paths, `discovery.json`, the daemon's liveness, the wire protocol: what the daemon, the CLI and the app share |
+| `crates/openalpaca_storage` | SQLite, migrations, repositories, the memory note files and their search index, the content stores and projects, artifacts, uploads |
 | `crates/openalpaca_api` | Shared event types and plugin executor traits |
 | `crates/openalpaca_wake` | Cron scheduler and file watcher (scheduled skills, config hot reload) |
 | `crates/openalpaca_connectors` | Telegram, iMessage and Discord adapters |

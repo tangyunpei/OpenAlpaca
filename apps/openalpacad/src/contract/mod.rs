@@ -439,7 +439,7 @@ async fn the_samples_are_the_folder() {
     let verdict = judge(
         &samples.items,
         &folder,
-        openalpaca_storage::support::protocol::PROTOCOL,
+        openalpaca_app_support::protocol::PROTOCOL,
         write,
     );
     assert!(

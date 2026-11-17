@@ -38,7 +38,7 @@
 //! **`log_path` is the launcher-managed log, or nothing** (N2, resolved:
 //! serve it). Both launchers — `openalpaca daemon start` and the GUI sidecar —
 //! point the child's stdout and stderr at `state/logs/daemon.log`, rotate it
-//! at 16 MB, and mark the child with `store::MANAGED_LOG_ENV` — this run's own
+//! at 16 MB, and mark the child with `paths::MANAGED_LOG_ENV` — this run's own
 //! claim to the file, not just *a* file that happens to be there. A daemon
 //! started any other way (a bare `cargo run`), or one that inherited someone
 //! else's leftover `daemon.log` without the marker, reports `null`: the honest
@@ -61,10 +61,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
+use openalpaca_app_support::paths;
 use openalpaca_core::daemon_config::{RoutingConfig, SessionsConfig};
 use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_core::session_log::{SessionLogService, sweep::SweepReport};
-use openalpaca_storage::{Database, FileAssetRepository, TaskRepository, store};
+use openalpaca_storage::{Database, FileAssetRepository, TaskRepository};
 use serde::Serialize;
 
 use crate::state::AppState;
@@ -273,7 +274,7 @@ pub(crate) struct StatusInputs<'a> {
     pub db: &'a Database,
     pub session_log: Option<&'a SessionLogService>,
     /// Whether this run's launcher marked it as the owner of
-    /// `store::daemon_log_path()` (Important #3, T30). Gates `log_path`
+    /// `paths::daemon_log_path()` (Important #3, T30). Gates `log_path`
     /// alongside the file existing — the file alone is not proof this run
     /// wrote it.
     pub managed_log: bool,
@@ -406,16 +407,16 @@ fn database_unavailable(e: anyhow::Error) -> Response {
 /// what the store module exists to prevent.
 fn store_roots() -> anyhow::Result<(String, String, String)> {
     Ok((
-        display(store::home_root()?),
-        display(store::state_dir()?),
-        display(store::database_path()?),
+        display(paths::home_root()?),
+        display(paths::state_dir()?),
+        display(paths::database_path()?),
     ))
 }
 
 /// The launcher-managed daemon log, reported only when it is really there
 /// *and* this run is the one it was opened for.
 ///
-/// `store::daemon_log_path()` creates nothing, so asking the question does not
+/// `paths::daemon_log_path()` creates nothing, so asking the question does not
 /// answer it: a daemon no launcher pointed at the file has no
 /// `state/logs/daemon.log` and says so with `null` rather than handing the GUI
 /// a path whose Copy button would put a non-existent file on the clipboard.
@@ -429,7 +430,7 @@ fn daemon_log_path(managed: bool) -> Option<String> {
     if !managed {
         return None;
     }
-    let path = store::daemon_log_path().ok()?;
+    let path = paths::daemon_log_path().ok()?;
     path.is_file().then(|| display(path))
 }
 

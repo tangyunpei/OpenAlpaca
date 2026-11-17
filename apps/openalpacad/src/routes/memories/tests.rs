@@ -8,6 +8,7 @@
 use super::*;
 
 use axum::body::to_bytes;
+use openalpaca_app_support::paths;
 use openalpaca_core::bus::EventBus;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::memory::service::ExtractionProvenance;
@@ -36,7 +37,7 @@ impl Fixture {
             .path()
             .canonicalize()
             .unwrap()
-            .join(store::STORE_DIR_NAME);
+            .join(paths::STORE_DIR_NAME);
         std::fs::create_dir_all(&home_store).unwrap();
         let env = HomeStoreGuard::set(&home_store);
         let db_dir = tempfile::tempdir().unwrap();

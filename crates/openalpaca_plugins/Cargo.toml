@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 openalpaca_api = { workspace = true }
+openalpaca_app_support = { workspace = true }
 openalpaca_connectors = { workspace = true }
 openalpaca_core = { workspace = true }
 openalpaca_llm = { workspace = true }

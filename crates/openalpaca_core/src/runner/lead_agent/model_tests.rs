@@ -1631,7 +1631,7 @@ async fn stock_lead(window: u32, rounds: usize) -> StockLead {
         registry.register(tool).unwrap();
     }
     let catalog = crate::orchestrator::skill_catalog::SkillCatalog::new();
-    let pack = openalpaca_storage::store::bundled_skills_dir().unwrap();
+    let pack = openalpaca_app_support::paths::bundled_skills_dir().unwrap();
     assert!(
         catalog.load_bundled_layer(&pack) > 0,
         "the built-in skills load"

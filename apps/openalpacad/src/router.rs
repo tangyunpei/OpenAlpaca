@@ -510,7 +510,7 @@ fn health_json(instance_id: &str) -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "pid": std::process::id(),
         "instance_id": instance_id,
-        "protocol": openalpaca_storage::support::protocol::reported()
+        "protocol": openalpaca_app_support::protocol::reported()
     })
 }
 
@@ -620,7 +620,7 @@ mod health_tests {
                     r#""pid":{pid},"protocol":{protocol},"status":"ok","version":"{version}"}}"#
                 ),
                 pid = std::process::id(),
-                protocol = openalpaca_storage::support::protocol::PROTOCOL,
+                protocol = openalpaca_app_support::protocol::PROTOCOL,
                 version = env!("CARGO_PKG_VERSION"),
             )
         );
@@ -633,7 +633,7 @@ mod health_tests {
     #[cfg(debug_assertions)]
     #[test]
     fn the_health_body_s_protocol_is_the_one_read_site_s() {
-        use openalpaca_storage::support::protocol::{PROTOCOL, PROTOCOL_PLUS_ONE_ENV};
+        use openalpaca_app_support::protocol::{PROTOCOL, PROTOCOL_PLUS_ONE_ENV};
         const CHILD: &str = "OPENALPACA_TEST_HEALTH_PROTOCOL_CHILD";
         if std::env::var_os(CHILD).is_some() {
             assert_eq!(health_json("i")["protocol"], PROTOCOL + 1);

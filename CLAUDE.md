@@ -1,5 +1,5 @@
 # CLAUDE.md — OpenAlpaca
-This file is loaded into every session and every subagent, so it stays under 50 KB. It holds what a session needs on every turn: how to work here, where things stand, how to build and gate, the map of the tree, the settled rules and the gotchas. A landed wave changes the *Current Work* block (at most 25 lines) and the rows it affects; its narrative goes in its `tasks/` record, never here. Cite files by path and symbol, never by line number. The file as it stood before the 2026-10-19 shrink — the narrative of every wave through then — is `tasks/claude-md-2026-10-19-pre-shrink.md`.
+This file is loaded into every session and every subagent, so it stays under 50 KB and holds only what every turn needs. A landed wave changes the *Current Work* block (at most 25 lines) and the rows it affects; its narrative goes in its `tasks/` record, never here. Cite files by path and symbol, never by line number. The pre-shrink file (every wave's narrative through 2026-10-19) is `tasks/claude-md-2026-10-19-pre-shrink.md`.
 
 ## Core Principles
 - **Plan first.** Non-trivial work (3+ steps or a design choice) starts in plan mode; the plan is written to `tasks/todo.md` (untracked, local) as checkable items, with a review section when the chunk is done; `tasks/api-fix-plan.md` is the standing record of what shipped and, in its §0, of every owner decision.
@@ -12,14 +12,14 @@ This file is loaded into every session and every subagent, so it stays under 50 
 - A "default" that adds an enforcement point, widens a component's job, or reverses a row of an accepted design is a decision — present it, never adopt it silently.
 
 ## Current Work — read first (2026-11-16, branch `chore/programme-parts-2-3`)
-`main` is `36f58761` (PR #35, merged 2026-11-01); `chore/programme-parts-2-3` (draft PR #37) carries all since, its tip M18 (on `0793a6ff`, VIEW-STARTING), step 5 begun. Owner answers, readings the lead's: 2026-11-16 (§0's thirty-first to thirty-fourth): CLI and app one daemon, the picks built (`55245b55`..`0793a6ff`) or queued, Q04 on a 45 s interim, no old store to keep.
+`main` is `36f58761` (PR #35, merged 2026-11-01); `chore/programme-parts-2-3` (draft PR #37) carries all since, its tip Q05 (on `a130206f`, M18), step 5 under way. Owner answers of 2026-11-16 (§0's 31st–34th; readings the lead's): CLI and app one daemon, the picks built (`55245b55`..`0793a6ff`) or queued, Q04 on a 45 s interim, no old store to keep.
 
 **The toolchain, dependency and modernization programme: Part I merged, Parts II and III under way**: `tasks/deps-upgrade/programme-plan.md` §0 status, §1 rules and gates, §2 decisions, §3 sequence.
 - **Landed, `f253cc26`..`ec0695ea`, merged as `36f58761`** (programme-plan §3.1–3.2): the toolchain, frontend, the lock refresh and crate moves, the freshness sweep, E8-PROBE, S32 (Bun 1.4.4). Then, on this branch, steps 2a–4, C1–C8 and the security batch (rmcp 3.9.0, rusqlite 0.41.1), each row in `IMPLEMENTATION_PROGRESS.md`.
-- **Gate** (M18): G-check 0, the suite 6,036/0/18, fmt 1,540 hunks, clippy 0, shell 146, G-GUI; bun 1,782 (VIEW-STARTING); G-bundle leg B (`16a5e71d`; owed since `f8b0a678`: LEG-B-Q06), leg A and E1–E3 not since step 3c; the rest last re-run at `1cae2fe8`: `bun audit` 0, docs, notices, policy, cargo-deny and cargo-audit pass. Evidence: `tasks/deps-upgrade/`, git-ignored, indexed in its README; run logs go in `~/.cache/openalpaca-deps-tools/lead/runs/`, not `/tmp`.
-- **Next** (the owner, 2026-10-31: "implement the whole plan"): step 5 from Q05, steps 6–20, step 19 the beta's gate: E1–E8 once, locally, with the owner's checks at the app (he first removes the old store: the build refuses a pre-squash database, SQ-1), the beta. Open owner items: `tasks/pending-decisions.md` §1.
+- **Gate** (Q05): G-check 0, the suite 6,054/0/18, fmt 1,538 hunks, clippy 0, shell 131, G-GUI; bun 1,782; G-bundle leg B (`16a5e71d`; owed since `f8b0a678`: LEG-B-Q06), leg A and E1–E3 not since step 3c; docs, notices, policy at Q05; `bun audit` 0, cargo-deny and cargo-audit at `1cae2fe8`. Evidence: `tasks/deps-upgrade/`, git-ignored, indexed in its README; run logs go in `~/.cache/openalpaca-deps-tools/lead/runs/`, not `/tmp`.
+- **Next** (the owner, 2026-10-31: "implement the whole plan"): step 5 from CLI-PROTOCOL, steps 6–20, step 19 the beta's gate: E1–E8 once, locally, with the owner's checks at the app (he first removes the old store: the build refuses a pre-squash database, SQ-1), the beta. Open owner items: `tasks/pending-decisions.md` §1.
 - **Rules in force:** no compromise on migrations; macOS first (DU-33); no seven-day rule (DU-23 removed, 2026-11-06): versions move only in a batch the owner asks for, never one by one, a finding reported to the owner; a commit changing a lock's bytes regenerates `THIRD-PARTY-NOTICES` in it; tiny lock-only updates in one commit (2026-10-30); the full suite at a phase's end or for a product-code or behaviour change, else G-check, G-lint and the reached crates' tests (the owner, 2026-10-27; §1.7); the prep ref `refs/prep/deps-wave-2026-10-12` local, never pushed; a commit per group of work, but a step's purely mechanical entries one commit (the owner, 2026-11-07); a PR per important phase end (2026-10-27); commits by explicit paths; no agent runs `git stash` (baselines in a `git worktree`).
-- **Decisions:** *Settled rules*; the owner's rulings since 2026-10-19, `tasks/api-fix-plan.md` §0 (taken is not built: Part II's four additions of 2026-10-30 among them); what waits and the beta's known limits, `tasks/pending-decisions.md`; what a beta waits for, `tasks/storage-design/design.md` §21 (B1–B3).
+- **Decisions:** *Settled rules*; the owner's rulings since 2026-10-19, `tasks/api-fix-plan.md` §0; what waits and the beta's known limits, `tasks/pending-decisions.md`; what a beta waits for, `tasks/storage-design/design.md` §21 (B1–B3).
 
 ## Records
 
@@ -33,7 +33,6 @@ This file is loaded into every session and every subagent, so it stays under 50 
 | `tasks/research/claude-code-design-lessons.md` | Claude Code prior-art study; §6's tensions taken 2026-10-17. |
 | `tasks/research/zcode-audit-2026-10-17.md` | ZCode prior-art audit: §4 amends the programme, §5 informs pending decisions, §6 lists what a settled rule excludes; read it before borrowing from ZCode. |
 | `tasks/gui-api-requirements.md` | The 23-gap brief; `lib/unavailable.ts` lists what is still unserved. |
-| `tasks/bug-main-loop-cost-lockout.md` | The main-loop cost lockout (A5), fixed: `last_cost` baselined before round 0. |
 | `tasks/memory-redesign/` | `README.md` (reading order), `03-design.md` (MD-1…MD-16; §7a the frozen contracts), `04-implementation-plan.md`, `09-learning-design.md` (Learning v2), `08-evaluation-report.md`, `10-learning-evaluation.md`. Read 03 §7a and §7c and the 09 revision-log entry of the slice concerned before touching `memory_files`, `memory_index`, `memory::service` or `memory::learning`. |
 | `tasks/memory-redesign/11-continuity-design.md`, `12-continuity-evaluation.md` | The conversation working state and its carry-over (CQ-1…CQ-11), and its evaluation. Read the slice's revision-log entry before touching `orchestrator/working_state.rs`, the history layer's blocks or the close. |
 | `tasks/store-revision/design.md` | SQ-1 (schema version = the migration file's number; a pre-squash database refused, never upgraded), SQ-2 (four compatibility paths removed); §1.4 the refusal text of record. |
@@ -41,7 +40,6 @@ This file is loaded into every session and every subagent, so it stays under 50 
 | `tasks/approval-hidden-chars.md` | Spec of record for hidden characters on approval surfaces (A1–A32, the accepted residue, the `<U+XXXX>` form). Read it before changing what an approval surface shows. |
 | `tasks/lessons.md` | Correction log. Read at session start; append after any correction. |
 | `tasks/todo.md` | The active chunk's plan and review (untracked, local). |
-| Obsidian KB `~/Valuts/Main/Projects/OpenAlpaca/` | The owner's; no further work there (ADR-050 its last). |
 
 ## Build & Development
 ```bash
@@ -99,7 +97,8 @@ apps/
 crates/
   openalpaca_core/      # Orchestrator, agents, tools, runtime, bus, security, prompt composition
   openalpaca_llm/       # LLM router, providers (Anthropic/OpenAI/Ollama), key management
-  openalpaca_storage/   # SQLite (rusqlite), repositories, migrations, the store, memory notes (memory_files) + index (memory_index)
+  openalpaca_app_support/ # Home-store paths, discovery, daemon liveness, protocol + decide_reuse
+  openalpaca_storage/   # SQLite (rusqlite), repositories, migrations, content stores + projects, memory notes + index
   openalpaca_api/       # Shared event types (WakeEvent) + plugin executor traits
   openalpaca_wake/      # Cron scheduler (drives scheduled skills) + filesystem watcher
   openalpaca_connectors/# Chat platform adapters (Telegram, iMessage, Discord)
@@ -119,15 +118,16 @@ config/
 ```
 openalpaca_api          ← leaf (no internal deps)
 openalpaca_llm          ← leaf (no internal deps)
-openalpaca_storage      ← leaf (no internal deps)
+openalpaca_app_support  ← leaf (no internal deps)
+openalpaca_storage      ← openalpaca_app_support
 openalpaca_mcp          ← leaf (no internal deps)
 openalpaca_wake         ← openalpaca_api
-openalpaca_core         ← openalpaca_api, openalpaca_llm, openalpaca_mcp, openalpaca_storage
-openalpaca_connectors   ← openalpaca_api, openalpaca_core, openalpaca_storage
-openalpaca_plugins      ← openalpaca_api, openalpaca_connectors, openalpaca_core, openalpaca_llm
-openalpacad             ← api, connectors, core, llm, mcp, plugins, storage, wake
-openalpaca (CLI)        ← openalpaca_core, openalpaca_llm, openalpaca_storage
-openalpaca_gui          ← openalpaca_storage
+openalpaca_core         ← openalpaca_api, openalpaca_app_support, openalpaca_llm, openalpaca_mcp, openalpaca_storage
+openalpaca_connectors   ← openalpaca_api, openalpaca_core, openalpaca_storage (+ app_support, dev)
+openalpaca_plugins      ← openalpaca_api, openalpaca_app_support, openalpaca_connectors, openalpaca_core, openalpaca_llm
+openalpacad             ← api, app_support, connectors, core, llm, mcp, plugins, storage, wake
+openalpaca (CLI)        ← openalpaca_app_support, openalpaca_core, openalpaca_llm, openalpaca_storage
+openalpaca_gui          ← openalpaca_app_support, openalpaca_storage (until Q06)
 ```
 
 ### Execution Topology
@@ -160,7 +160,7 @@ openalpaca_gui          ← openalpaca_storage
 - **Event bus**: `tokio::sync::broadcast` channel (`EventBus`) for system-wide events
 - **Cancellation**: `tokio_util::sync::CancellationToken` per task, registered in `SharedContext.cancellation_tokens`. Checked at the top of every agentic-loop round.
 - **Global LLM concurrency**: `tokio::sync::Semaphore` in `LlmRouter` caps in-flight API calls
-- **Shutdown**: `POST /v1/command {"command":"shutdown"}` and SIGINT/SIGTERM converge on one `CancellationToken` (`AppState.cancel_token`): the events socket sends `daemon_shutting_down` and closes 1001, the chat SSE body sends one `error` frame, and `FORCE_EXIT_GRACE` (10 s) bounds the tail. Waiting for a daemon to be gone uses `openalpaca_storage::daemon_lifecycle` (`STOP_TIMEOUT` 15 s) — process, then lock, never the port.
+- **Shutdown**: `POST /v1/command {"command":"shutdown"}` and SIGINT/SIGTERM converge on one `CancellationToken` (`AppState.cancel_token`): the events socket sends `daemon_shutting_down` and closes 1001, the chat SSE body sends one `error` frame, and `FORCE_EXIT_GRACE` (10 s) bounds the tail. Waiting for a daemon to be gone uses `openalpaca_app_support::daemon_lifecycle` (`STOP_TIMEOUT` 15 s) — process, then lock, never the port.
 
 ### Hot-Reloadable Config
 `Arc<ArcSwap<T>>` for lock-free reads:
@@ -200,7 +200,7 @@ One SQLite connection (`Arc<Mutex<Connection>>`), WAL, `busy_timeout=5000ms`, no
 - **A migration's file number is its schema version** (SQ-1). `migrations::MIGRATIONS` (`migrations/mod.rs`): 1 `baseline` (the whole schema, no SQL memory engine), 2 `working_state` (`session` rebuilt with the working state), 3 `no_project_store_rows` (drops `file_assets` rows inside a project's own folder), 4 `project_files` (`file_assets.in_project`, a result file's pointer row); `BASELINE_VERSION` is 1, the oldest openable schema.
 - **At open** (`run_migrations`, by `schema_version`) a fresh database runs every migration in one transaction, an older one those it lacks, the newest returns early, and one **above** the newest — every pre-squash database — is refused, unchanged. As the only refusal it names both builds that could have written the file: a newer one (use it), or one from before the re-baseline, whose way through is `openalpaca config reset --factory` (deleting it and `llm.toml`'s keys).
 - **To add migration 005:** `005_<name>.sql` in `crates/openalpaca_storage/src/migrations/`, its SQL ending `INSERT INTO schema_version(version) VALUES (5);`; append `Migration { version: 5, name: "<name>", sql: include_str!("005_<name>.sql") }` to `MIGRATIONS`; bump the comment above it ("Future schema changes start at version 5") to 6.
-- **The PROTOCOL rule** (API-CONTRACT): removing or renaming a route, a field or an event variant bumps `support::protocol::PROTOCOL` in that commit (and `OLDEST_SUPPORTED` where the older one can no longer be served); an addition bumps neither. `apps/openalpacad/src/contract/` holds the GUI's `lib/api/contract/` response and event samples to it (rewrite: `OPENALPACA_CONTRACT_WRITE=1`); `contract.test.ts` reads each as its TS type.
+- **The PROTOCOL rule** (API-CONTRACT): removing or renaming a route, a field or an event variant bumps `openalpaca_app_support::protocol::PROTOCOL` in that commit (and `OLDEST_SUPPORTED` where the older one can no longer be served); an addition bumps neither. `apps/openalpacad/src/contract/` holds the GUI's `lib/api/contract/` response and event samples to it (rewrite: `OPENALPACA_CONTRACT_WRITE=1`); `contract.test.ts` reads each as its TS type.
 - **Memory is not in the database.** A note is one Markdown file (frontmatter `id`, `title`, `kind`, `status` ∈ `active | candidate | archived`; *superseded* is derived from links, never stored) in a partition, `<home>/memory/owners/<owner-key>/` or `<home>/projects/<name>/memory/owners/<owner-key>/` (`<owner-key>` = first 32 hex of `sha256(owner_id)`), whose authority is one control snapshot, `state/memory-control/<partition-key>.json`; a missing or invalid one quarantines the partition until `openalpaca memory doctor --repair`.
 - **Search** is a disposable index, `state/cache/memory-index-v1.sqlite` at `SCHEMA_VERSION` 8 (`fts_word`, `fts_tri_head`, `fts_tri`): lexical, no embedding, no model. `MemoryService` recalls index-first within 8 KiB and 2 KiB pinned, as quoted data outside the cached prompt layer; one writer slot per partition; a 30 s stat-scan reconciliation (`getattrlistbulk` on macOS), no watcher.
 - A missing or schema-bumped index rebuilds off the request path while recall and search scan at most `FILE_SCAN_MAX_NOTES` = 10,000 notes and `memory_timeline` is refused `index_rebuilding`; a reply waits at most 1.5 s for its recall (`REPLY_MEMORY_DEADLINE`). Parse and snapshot caches: `memory_files/cache.rs`. Episode notes (conversation summaries) reach automatic recall only when pinned. Nothing ages or prunes a note; a factory reset leaves notes, snapshots and index.
@@ -246,7 +246,7 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 | Model registry | `crates/openalpaca_llm/src/routing/model_registry/` |
 | Cost tracking | `crates/openalpaca_llm/src/routing/cost_tracker/` |
 | Database | `crates/openalpaca_storage/src/database/` |
-| Store / path resolution | `crates/openalpaca_storage/src/store/` (`ContentKind`, `artifact.rs`, `projects.rs`, `open_copies.rs`) |
+| Store / path resolution | `crates/openalpaca_app_support/src/paths.rs`; `crates/openalpaca_storage/src/store/` (`ContentKind`, `artifact.rs`, `projects.rs`, `open_copies.rs`) |
 | Artifact store | `crates/openalpaca_storage/src/artifacts/` (`ArtifactStore::put`, `record_project_file`), `uploads/`; `routes/artifacts.rs`; `tools/builtins/artifact_write.rs` (`put_tool_artifact`, `record_tool_project_file`) |
 | Working folder and the file tools | `crates/openalpaca_core/src/tools/working_folder.rs`; `tools/builtins/file_ops.rs`, `approval_preview.rs`, `pre_edit.rs`; `tools/platform.rs` (`run_bounded`) |
 | Session log | `crates/openalpaca_core/src/session_log/`; `tools/builtins/read_result.rs`; `routes/sessions.rs` |
@@ -270,7 +270,7 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 | CLI commands | `apps/openalpaca/src/commands/` (`confirmations.rs`, `chat_stream/mod.rs`); `apps/openalpaca/src/unattended.rs` |
 | GUI (Tauri) | `apps/openalpaca-gui/src-tauri/`, `apps/openalpaca-gui/src/` (`lib/api/`, `lib/unavailable.ts`); specs `DESIGN_SPEC.md`, `API_MAP.md` |
 | Extension ledger + gate | `crates/openalpaca_core/src/tools/extensions/`; `managers/mcp/`, `crates/openalpaca_plugins/src/manager.rs`; `routes/extensions.rs`; `commands/ext.rs` |
-| Daemon lifecycle | `crates/openalpaca_storage/src/daemon_lifecycle.rs`; `commands/daemon.rs`; `lib/daemon-control.ts` |
+| Daemon lifecycle | `crates/openalpaca_app_support/src/` (`daemon_lifecycle.rs`, `discovery/`, `protocol/`); `commands/daemon.rs`; `lib/daemon-control.ts` |
 | Approval cards in the GUI | `views/chat/useChatSession.ts`, `hooks/useChat.ts`, `lib/confirmations-over.ts`; `security/sandbox/mod.rs` (`OpenPrompt`) |
 | Conversation titles | `gateway/persistence.rs` (`derive_title`), `repository/conversation/mod.rs` (`set_title_if_empty`) |
 | Open / Reveal in Finder | `store/reveal.rs` (`revealable_path`), `src-tauri/src/lib.rs` (`reveal_path`), `lib/reveal.ts` |
@@ -283,7 +283,7 @@ Manuals: `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_Manual.md`, `Install
 ## Feature Flags
 - `openalpaca_llm`: `anthropic`, `openai`, `ollama`, each gating its provider + `reqwest`.
 - `openalpaca_core`: `live-eval` compiles the three providers into the core test binary for the two `#[ignore]`d live evals (`crates/openalpaca_core/tests/steer_routing_eval.rs`, `crates/openalpaca_core/tests/memory_eval.rs`); never on by default.
-- `openalpaca_storage`: `test-home-guard` makes `store::projects::register` panic unless the home store was set through `OPENALPACA_HOME_STORE` and not into the real `~/.openalpaca`; on in the test builds of storage, core, the daemon, the CLI, plugins, connectors and the Tauri shell, never in a `cargo build`, a release or the sidecar — a backstop, not the protection (*Gotchas*).
+- `openalpaca_storage`: `test-home-guard` makes `store::projects::register` panic unless the home store was set through `OPENALPACA_HOME_STORE` and not into the real `~/.openalpaca`; on in the test builds of storage, core, the daemon, the CLI, plugins, connectors and the Tauri shell, never in a `cargo build`, a release or the sidecar — a backstop, not the protection (*Gotchas*); app_support's tests carry their own `HomeStoreGuard`.
 - `openalpaca_connectors`: `telegram` (`teloxide`), `imessage` (`rusqlite`, macOS only), `discord` (`twilight-gateway`/`-http`/`-model` + `reqwest`). The daemon enables every provider and connector feature and installs aws-lc-rs as the one rustls provider at start (`tls.rs`); no library installs one.
 
 ## Settled rules — do not reopen or "improve"
@@ -291,10 +291,10 @@ Manuals: `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_Manual.md`, `Install
 - **Cost cap is per-workflow ($5 lead) and per-turn ($1 agent); there is no daily budget** and none is to be added (N4). These `daemon.toml` defaults yield to a template's `max_cost_per_task` (the shipped `lead_agent` sets `3.0`: a stock lead is capped at $3). Memory extraction, summaries and task-output extraction carry small daily ceilings under `[orchestrator.costs]`; the working-state writer and the episode summary count against `summary_max_daily_cost_usd` under their labels (`orchestrator_summary`, `orchestrator_episode`). T13 is taken, not built (no workflow-scoped accumulator; the cap to be relabelled "lead agent spend"): subagent spend is not counted today.
 - **Everything lives under `~/.openalpaca/`** (D1; `OPENALPACA_HOME_STORE` overrides the root, absolute paths only, empty/relative rejected). **`state/` is the machine's; everything else at the root is the human's**, and a new content kind exists only when it is added to `ContentKind`. Nothing is moved into place for you, and nothing looks for a development build's old data directory. The one exception: the app's webview keeps its own `localStorage` (the project selection, the pane widths) in WKWebView's data under `~/Library`, outside the store, until N-GUI-1 namespaces those keys by the served store (after Q07).
 - **Owner decisions:** every one then pending was taken on 2026-10-17 as its recommendation (ZCode's where the audit changed it) and on 2026-10-19 by the rule "Claude Code's design where one exists, else ZCode's, else the lead's"; rows with no recommendation stay pending. **A taken decision is not built until a commit builds it:** until then the shipped code is the "no change" answer, and the source says "taken; not built" with its plan entry. The 28 options a settled rule excludes (pending-decisions §6) stay excluded; a "default" is a decision (*Core Principles*).
-- **The known bugs are all fixed:** A (an empty allowlist = allow-all), B (`deny_plugin` never unloads), C (a redundant `enable_plugin` leaks the provider handle), D (a disabled MCP client respawns its child) and the main-loop cost lockout (A5). Don't re-audit them.
+- **The known bugs are all fixed:** A (an empty allowlist = allow-all), B (`deny_plugin` never unloads), C (a redundant `enable_plugin` leaks the provider handle), D (a disabled MCP client respawns its child) and the main-loop cost lockout (A5, `tasks/bug-main-loop-cost-lockout.md`). Don't re-audit them.
 
 ## Gotchas
-- **No test reads or writes the developer's `~/.openalpaca`, and every test that resolves, registers or lists projects holds its crate's home-store guard** (`HomeStoreGuard` in storage, core, the daemon and the Tauri shell's tests, `EnvSandbox` in the CLI, the module guards in plugins and connectors); `test-home-guard`'s panic is a backstop, not the protection. Run `cargo build -p openalpacad` before starting the daemon by hand.
+- **No test reads or writes the developer's `~/.openalpaca`, and every test that resolves, registers or lists projects holds its crate's home-store guard** (`HomeStoreGuard` in app_support, storage, core, the daemon and the Tauri shell's tests, `EnvSandbox` in the CLI, the module guards in plugins and connectors); `test-home-guard`'s panic is a backstop, not the protection. Run `cargo build -p openalpacad` before starting the daemon by hand.
 - **The file tools and the shell act on real files, so no test may run them in the repository or the process's directory:** tests use `GuardedProject` (`ctx()`, `scratch_ctx()`) and kill what they spawn (`KillOnFail`; each MCP stub leads its own process group); the gate checks `git status` unchanged and no `sleep 30` left.
 - **A test never reaches the machine's credentials:** discovery reads `~/.claude/.credentials.json` and `~/.codex/auth.json` and, on macOS, runs `security find-generic-password` for Claude Code's keychain item — at boot and every 30 s in a daemon — so it takes a `DiscoveryHost`, and `DiscoveryHost::system()` panics in `openalpaca_llm`'s unit tests (that crate only): a test passes a temporary home and no keychain, an empty `HOME` is no substitute, and a new path that shells out to `security`, the keyring or a credential file takes its host the same way. A live daemon on a scratch store seeds discovery and the CLI backends off before its first launch.
 - `SystemEvent` and `ServerEvent` are matched exhaustively, no catch-all: a new variant needs its arm in `event_bridge.rs` or `events/persistence.rs` in the same commit, and its GUI homes (`invalidationKeysFor`, the `ServerEvent` union, `lib/api/run-events.ts` if persisted). `ToolConfirmationRequested`'s `preview` and `per_call` are live only — keep it that way.

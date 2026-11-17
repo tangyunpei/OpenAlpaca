@@ -318,7 +318,7 @@ pub fn daemon_config_path() -> Result<PathBuf> {
         }
     }
     // 2. Writable home_root()/config/
-    if let Ok(dir) = openalpaca_storage::store::runtime_config_dir() {
+    if let Ok(dir) = openalpaca_app_support::paths::runtime_config_dir() {
         let p = dir.join("daemon.toml");
         if p.exists() {
             return Ok(p);

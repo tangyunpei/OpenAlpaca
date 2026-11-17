@@ -30,7 +30,7 @@
 //! maps one to the other is slice 3.
 //!
 //! **Nothing here reaches a real home directory on its own.** Every path
-//! starts from [`crate::store::home_root`] (which honours
+//! starts from `openalpaca_app_support::paths::home_root` (which honours
 //! `OPENALPACA_HOME_STORE`) or from an explicit project root.
 
 mod authority;

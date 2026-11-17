@@ -1,9 +1,9 @@
 //! Where this daemon's `PATH` came from (Q21): one boot line in
 //! `daemon.log`.
 //!
-//! The app sets `store::PATH_SOURCE_ENV` on the daemon it spawns —
-//! `login-shell <ms>` when its capture of the login shell's `PATH` answered,
-//! `login-shell-noninteractive <ms>` when the login shell, run
+//! The app sets `paths::PATH_SOURCE_ENV` (`openalpaca_app_support`) on the
+//! daemon it spawns — `login-shell <ms>` when its capture of the login
+//! shell's `PATH` answered, `login-shell-noninteractive <ms>` when the login shell, run
 //! interactively, ended before it printed its environment and its second
 //! run, as a login shell without `-i`, answered (CAPTURE-RETRY, *Rev 99*
 //! (2)), `fallback-list <ms>` when it gave the fixed list instead. A daemon
@@ -22,7 +22,7 @@
 //! list itself: the app reads it before the spawn.
 //!
 //! LOGIN-CAPTURE (*Rev 91* (2)): the daemon's preamble reads the variable
-//! once and removes it from its environment (`store::take_path_source`),
+//! once and removes it from its environment (`paths::take_path_source`),
 //! beside the master key, so no child it spawns inherits it — a daemon an
 //! agent's shell command starts logs `inherited`, not the app's capture.
 
@@ -55,7 +55,7 @@ fn is_variable_name(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// `store::PATH_SOURCE_ENV`'s value read strictly: a known source, one
+/// `paths::PATH_SOURCE_ENV`'s value read strictly: a known source, one
 /// space, a whole number of milliseconds, and optionally one more space and
 /// the names of the keys passed, comma-separated; anything else, or nothing,
 /// is `inherited`.

@@ -28,6 +28,7 @@ sysinfo.workspace = true
 rustyline.workspace = true
 
 # Workspace crates
+openalpaca_app_support = { workspace = true }
 openalpaca_storage = { workspace = true }
 openalpaca_llm = { workspace = true }
 openalpaca_core = { workspace = true }

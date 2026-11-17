@@ -199,7 +199,7 @@ pub async fn initialize_services(
         // into state/cache/bundled-skills/, where they run from, then the
         // config directory's folders over them. A pack that cannot be
         // written leaves no bundled skill, and says so (K-4).
-        match openalpaca_storage::store::bundled_skills_dir() {
+        match openalpaca_app_support::paths::bundled_skills_dir() {
             Ok(pack) => {
                 catalog.load_bundled_layer(&pack);
             }

@@ -38,6 +38,10 @@ tauri-plugin-dialog.workspace = true
 toml.workspace = true
 
 tauri.workspace = true
+# Q05: the home store's paths, discovery, the daemon's liveness and the
+# protocol. Storage stays for Reveal (`store::revealable_path`) until Q06,
+# which removes it.
+openalpaca_app_support = { workspace = true }
 openalpaca_storage = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

@@ -3002,7 +3002,7 @@ fn existing_encryptor() -> Result<Option<KeyEncryptor>, PluginError> {
 }
 
 fn master_key_dir() -> Result<PathBuf, PluginError> {
-    openalpaca_storage::store::master_key_dir()
+    openalpaca_app_support::paths::master_key_dir()
         .map_err(|e| PluginError::Unavailable(format!("no master key directory: {e}")))
 }
 

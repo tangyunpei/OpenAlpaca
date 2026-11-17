@@ -1606,7 +1606,7 @@ def generate_schema_doc(
         "",
         "## Files",
         "",
-        "- DB path resolver: `openalpaca_storage::paths::database_path()`",
+        "- DB path resolver: `openalpaca_app_support::paths::database_path()`",
         "- Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`",
         f"- Registered migrations: {len(migrations)}",
         "",

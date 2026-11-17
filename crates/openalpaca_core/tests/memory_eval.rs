@@ -1224,7 +1224,7 @@ impl Settings {
                         real.display()
                     );
                 }
-                openalpaca_storage::store::home_root().unwrap_or_else(|e| {
+                openalpaca_app_support::paths::home_root().unwrap_or_else(|e| {
                     panic!("memory_eval: OPENALPACA_HOME_STORE is not usable: {e}")
                 });
             }
@@ -9834,7 +9834,7 @@ impl EnvGuard {
 
     fn home_store(path: &Path) -> Self {
         Self::vars(&[(
-            openalpaca_storage::store::HOME_STORE_ENV,
+            openalpaca_app_support::paths::HOME_STORE_ENV,
             Some(path.as_os_str()),
         )])
     }
@@ -11846,7 +11846,7 @@ async fn a_replay_with_questions_writes_summaries_and_asks_them() {
             ("OPENALPACA_MEMORY_EVAL_LEARN_FROM", kept.path().as_os_str()),
             ("OPENALPACA_CONFIG_DIR", config.path().as_os_str()),
             (
-                openalpaca_storage::store::HOME_STORE_ENV,
+                openalpaca_app_support::paths::HOME_STORE_ENV,
                 home_path.as_os_str(),
             ),
         ];
@@ -12073,7 +12073,7 @@ const HARNESS_ENV: [&str; 13] = [
     "OPENALPACA_MEMORY_EVAL_KEEP",
     "OPENALPACA_MEMORY_EVAL_SESSIONS",
     "OPENALPACA_CONFIG_DIR",
-    openalpaca_storage::store::HOME_STORE_ENV,
+    openalpaca_app_support::paths::HOME_STORE_ENV,
 ];
 
 /// The harness's environment: `set` as given, every other variable of
@@ -12812,7 +12812,7 @@ async fn the_recall_mode_the_run_names_is_the_one_its_report_records() {
             ("OPENALPACA_MEMORY_EVAL_JUDGE_MODEL", OsStr::new("none")),
             ("OPENALPACA_CONFIG_DIR", config.path().as_os_str()),
             (
-                openalpaca_storage::store::HOME_STORE_ENV,
+                openalpaca_app_support::paths::HOME_STORE_ENV,
                 home_path.as_os_str(),
             ),
         ];

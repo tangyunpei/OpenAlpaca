@@ -233,13 +233,13 @@ fn short(etag: &str) -> String {
 }
 
 /// A new file for the editor, `<prefix>….md`, in the store's `state/editor/`
-/// (0700, `openalpaca_storage::store::editor_dir`) — never in `$TMPDIR`,
+/// (0700, `openalpaca_app_support::paths::editor_dir`) — never in `$TMPDIR`,
 /// where a kept text was out of reach of every cleanup the store has
 /// (N-STORE-1). It is removed when the handle drops, or kept with
 /// `into_temp_path().keep()` when an edit is refused or conflicts. Shared with
 /// `openalpaca memory add|edit`.
 pub(crate) fn editor_buffer(prefix: &str) -> Result<tempfile::NamedTempFile> {
-    let dir = openalpaca_storage::store::editor_dir()
+    let dir = openalpaca_app_support::paths::editor_dir()
         .context("could not make the folder for the editor's file")?;
     tempfile::Builder::new()
         .prefix(prefix)
@@ -495,7 +495,7 @@ mod tests {
             .unwrap()
             .clone()
             .expect("the editor was opened");
-        let folder = openalpaca_storage::store::home_root()
+        let folder = openalpaca_app_support::paths::home_root()
             .unwrap()
             .join("state")
             .join("editor");

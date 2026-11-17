@@ -39,9 +39,11 @@ mod login_path;
 mod reuse;
 
 use login_path::{DaemonPath, DaemonPathReport};
-use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
-use openalpaca_storage::discovery::{self, ConnectionInfo};
+use openalpaca_app_support::daemon_lifecycle::{self, StopOutcome};
+use openalpaca_app_support::discovery::{self, ConnectionInfo};
+use openalpaca_app_support::{paths, protocol};
 use openalpaca_storage::store;
+use reuse::MismatchWords;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -121,7 +123,7 @@ enum ShellError {
     #[error("{message}")]
     Starting { message: String },
     /// `ensure_daemon_running` (Q04): the daemon has not answered
-    /// `daemon_lifecycle::STARTING_BUDGET` after the shell first saw it
+    /// `protocol::STARTING_BUDGET` after the shell first saw it
     /// silent. Nothing was spawned over it, stopped or rotated; `log_tail` is
     /// the log's tail (also quoted in `message`), `None` when it holds
     /// nothing or could not be read (the reason then in `message`).
@@ -224,17 +226,19 @@ fn forget_spawned() {
 /// `d`'s connection, with `daemonPath` when `d` names a daemon this run
 /// spawned (its `pid`), and the note its file's build earns.
 fn shell_connection(d: &discovery::Discovery) -> ShellConnection {
-    let note = reuse::compat_note(&reuse::ShellBuild::THIS, d.build.protocol, &d.build.version);
+    let note = reuse::compat_note(&reuse::THIS_SHELL, d.build.protocol, &d.build.version);
     connection_with(ConnectionInfo::from(d), d.pid, note)
 }
 
 /// The daemon `ensure_daemon_running` reuses, with the protocol and version
-/// its health answered and the note [`reuse::decide_reuse`] gave it.
-fn reused_connection(reused: reuse::Reused) -> ShellConnection {
+/// its health answered and the note its `protocol::decide_reuse` verdict
+/// earns.
+fn reused_connection(reused: protocol::Reused) -> ShellConnection {
+    let note = reuse::reuse_note(&reuse::THIS_SHELL, &reused);
     let mut info = ConnectionInfo::from(&reused.discovery);
     info.protocol = reused.protocol;
     info.version = reused.version;
-    connection_with(info, reused.discovery.pid, reused.note)
+    connection_with(info, reused.discovery.pid, note)
 }
 
 /// `info` with the `daemonPath` of the daemon `pid` when this run spawned
@@ -299,7 +303,7 @@ fn read_connection_info(window: &str) -> Result<ShellConnection, ShellError> {
         });
     };
 
-    if let Some(mismatch) = reuse::file_mismatch(&d, &reuse::ShellBuild::THIS)
+    if let Some(mismatch) = protocol::file_mismatch(&d, &reuse::THIS_SHELL)
         && daemon_lifecycle::pid_is_daemon(d.pid)
     {
         reuse::ladder_mismatch(&reuse::STARTING, window, &mismatch, |line| {
@@ -322,7 +326,7 @@ fn read_connection_info(window: &str) -> Result<ShellConnection, ShellError> {
 /// one, or another version); refused as a mismatch when it speaks another,
 /// stopping and starting nothing; answered `starting` while its pid is a
 /// live `openalpacad` that does not answer yet, at once and at every ask
-/// until `daemon_lifecycle::STARTING_BUDGET` from the first silent look,
+/// until `protocol::STARTING_BUDGET` from the first silent look,
 /// then reported still starting — never spawned over, its log never
 /// rotated, its lock never probed. Only with no live daemon named is the
 /// sidecar spawned, once, and the daemon the file then names judged the
@@ -347,7 +351,7 @@ async fn ensure_for_window(window: String) -> Result<ShellConnection, ShellError
     reuse::ensure_with(
         &mut reuse::RealWorld,
         &reuse::STARTING,
-        &reuse::ShellBuild::THIS,
+        &reuse::THIS_SHELL,
         &window,
     )
     .await
@@ -365,8 +369,8 @@ const TIMEOUT_TAIL_LINES: usize = 40;
 /// Backs Settings → Connection's `Show daemon log`, for a daemon that did
 /// start but is misbehaving, or one that would not start at all: this reads
 /// the file directly, so it answers even when nothing is serving `/v1/*`.
-/// Reads at most `store::LOG_TAIL_READ_BYTES` from the end of the file; the
-/// line handling is `store::read_log_tail`'s, which is where it is tested —
+/// Reads at most `paths::LOG_TAIL_READ_BYTES` from the end of the file; the
+/// line handling is `paths::read_log_tail`'s, which is where it is tested —
 /// the workspace's gate set (`default-members`) leaves this crate out, and
 /// it is checked and tested only by hand (`-p openalpaca_gui`).
 ///
@@ -374,8 +378,8 @@ const TIMEOUT_TAIL_LINES: usize = 40;
 #[tauri::command]
 async fn read_daemon_log_tail(lines: usize) -> Result<String, ShellError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
-        store::read_log_tail(&path, 0, lines)
+        let path = paths::daemon_log_path().map_err(|e| format!("{e:#}"))?;
+        paths::read_log_tail(&path, 0, lines)
             .map_err(|e| format!("Could not read {}: {e}", path.display()))
     })
     .await
@@ -607,11 +611,11 @@ struct SidecarMissing {
 fn spawn_daemon() -> anyhow::Result<Spawned> {
     let path_to_use = sidecar_beside(&std::env::current_exe()?)?;
 
-    // D1: one root. `ensure_store` seeds README/.layout; the config dir must
-    // exist before the spawn — `resolve_config_base_dir` ignores an
+    // D1: one root. `ensure_home_store` seeds README/.layout; the config dir
+    // must exist before the spawn — `resolve_config_base_dir` ignores an
     // `OPENALPACA_CONFIG_DIR` that does not.
-    let app_dir = store::ensure_store(&store::StoreScope::Home)?;
-    let config_dir = store::ensure_runtime_config_dir()?;
+    let app_dir = paths::ensure_home_store()?;
+    let config_dir = paths::ensure_runtime_config_dir()?;
 
     // The sidecar's output used to go to /dev/null on both platforms, so a
     // daemon that refused to boot — a database this build does not know, a
@@ -622,9 +626,9 @@ fn spawn_daemon() -> anyhow::Result<Spawned> {
     // itself as that file's owner so `GET /v1/status` hands the path back
     // (T30: `MANAGED_LOG_ENV` means "the launcher pointed stdio at the file
     // and rotated it", which is now true of both launchers).
-    store::logs_dir()?;
-    let log_path = store::daemon_log_path()?;
-    if let Err(e) = store::rotate_daemon_log() {
+    paths::logs_dir()?;
+    let log_path = paths::daemon_log_path()?;
+    if let Err(e) = paths::rotate_daemon_log() {
         // Never fatal: a daemon that will not start because its log could not
         // be renamed is the worse bug.
         tracing::warn!("Could not rotate the daemon log ({e:#}); appending to it as it is.");
@@ -711,9 +715,9 @@ fn announce_daemon_path(path: &DaemonPath) {
 }
 
 /// The daemon's command but its stdio: its working directory the store's
-/// root, `OPENALPACA_CONFIG_DIR`, [`store::MANAGED_LOG_ENV`], and — with a
+/// root, `OPENALPACA_CONFIG_DIR`, [`paths::MANAGED_LOG_ENV`], and — with a
 /// [`DaemonPath`] — `PATH` set to it, each listed key the login shell
-/// exported set to its value (N-DAEMON-2), and [`store::PATH_SOURCE_ENV`] to
+/// exported set to its value (N-DAEMON-2), and [`paths::PATH_SOURCE_ENV`] to
 /// the source, the capture time and the keys' names (`login-shell 212
 /// AWS_PROFILE`), never the `PATH` or a value. The listed keys are set
 /// first, so a variable the app sets itself always keeps the app's value
@@ -736,10 +740,10 @@ fn daemon_command(
     }
     cmd.current_dir(app_dir)
         .env("OPENALPACA_CONFIG_DIR", config_dir)
-        .env(store::MANAGED_LOG_ENV, "1");
+        .env(paths::MANAGED_LOG_ENV, "1");
     if let Some(path) = path {
         cmd.env("PATH", path.value())
-            .env(store::PATH_SOURCE_ENV, path.announcement());
+            .env(paths::PATH_SOURCE_ENV, path.announcement());
     }
     cmd
 }
@@ -790,9 +794,9 @@ const PANIC_TARGET: &str = "openalpaca_gui::panic";
 /// failed comes back beside the file, for the caller to log once the log is
 /// up: it is never a reason not to open it.
 fn open_gui_log() -> anyhow::Result<(PathBuf, std::fs::File, Option<anyhow::Error>)> {
-    store::logs_dir()?;
-    let path = store::gui_log_path()?;
-    let rotation = store::rotate_gui_log().err();
+    paths::logs_dir()?;
+    let path = paths::gui_log_path()?;
+    let rotation = paths::rotate_gui_log().err();
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

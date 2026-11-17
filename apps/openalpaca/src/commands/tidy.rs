@@ -411,14 +411,14 @@ fn config_dir() -> Result<PathBuf> {
     {
         return Ok(dir);
     }
-    openalpaca_storage::store::runtime_config_dir()
+    openalpaca_app_support::paths::runtime_config_dir()
 }
 
 /// The running daemon to ask, or None when none runs (a `discovery.json`
 /// naming no live daemon is not one). A daemon that runs but cannot be
 /// reached is an error: what it reads is then unknown.
 fn running_daemon() -> Result<Option<DaemonClient>> {
-    if openalpaca_storage::daemon_lifecycle::running_daemon_pid().is_none() {
+    if openalpaca_app_support::daemon_lifecycle::running_daemon_pid().is_none() {
         return Ok(None);
     }
     DaemonClient::connect()

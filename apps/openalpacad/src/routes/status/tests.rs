@@ -249,7 +249,7 @@ async fn names_the_daemon_log_only_once_the_file_exists() {
         "no CLI-written log means no path: {body}"
     );
 
-    let log = openalpaca_storage::store::daemon_log_path().unwrap();
+    let log = openalpaca_app_support::paths::daemon_log_path().unwrap();
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     std::fs::write(&log, b"boot\n").unwrap();
 
@@ -268,7 +268,7 @@ async fn an_unmanaged_daemon_reports_null_even_when_a_log_file_exists() {
     let _guard = HomeStoreGuard::set(&home);
     let db = test_db(&tmp);
 
-    let log = openalpaca_storage::store::daemon_log_path().unwrap();
+    let log = openalpaca_app_support::paths::daemon_log_path().unwrap();
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     std::fs::write(&log, b"a previous CLI daemon's run\n").unwrap();
 

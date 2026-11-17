@@ -35,8 +35,8 @@
 //! failed until the app is opened again: it is taken once.
 //!
 //! What the daemon was given is announced by its source and the capture's
-//! duration, never by its value: in `gui.log`; through storage's
-//! `store::PATH_SOURCE_ENV`, to one boot line in `daemon.log`; and on the
+//! duration, never by its value: in `gui.log`; through support's
+//! `paths::PATH_SOURCE_ENV`, to one boot line in `daemon.log`; and on the
 //! connection the webview reads (Settings → Connection).
 //!
 //! **The keys listed beside `PATH` (N-DAEMON-2).** A credential pointer the
@@ -133,8 +133,8 @@ pub(crate) const CAPTURE_COMMAND: &str =
 pub(crate) const SET_BY_THE_APP: [&str; 4] = [
     "PATH",
     "OPENALPACA_CONFIG_DIR",
-    openalpaca_storage::store::MANAGED_LOG_ENV,
-    openalpaca_storage::store::PATH_SOURCE_ENV,
+    openalpaca_app_support::paths::MANAGED_LOG_ENV,
+    openalpaca_app_support::paths::PATH_SOURCE_ENV,
 ];
 
 /// The fixed list the daemon gets when the capture fails, `~/.cargo/bin`
@@ -300,7 +300,7 @@ impl DaemonPath {
         u64::try_from(self.capture.as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// Storage's `store::PATH_SOURCE_ENV` value: the source and the
+    /// Support's `paths::PATH_SOURCE_ENV` value: the source and the
     /// capture's milliseconds, `login-shell 212`, then the names of the keys
     /// passed, comma-separated, when there are any —
     /// `login-shell 212 AWS_PROFILE,KUBECONFIG` — never a value.
@@ -458,10 +458,10 @@ pub(crate) fn passthrough_keys(config_dir: &Path) -> Vec<String> {
 
 /// [`passthrough_keys`] of the store's `config/daemon.toml` — the file the
 /// daemon the app spawns reads, its `OPENALPACA_CONFIG_DIR` being the
-/// store's `config/` (`store::ensure_runtime_config_dir`). Empty when the
+/// store's `config/` (`paths::ensure_runtime_config_dir`). Empty when the
 /// store cannot be resolved.
 pub(crate) fn configured_passthrough_keys() -> Vec<String> {
-    match openalpaca_storage::store::runtime_config_dir() {
+    match openalpaca_app_support::paths::runtime_config_dir() {
         Ok(config_dir) => passthrough_keys(&config_dir),
         Err(e) => {
             tracing::warn!(

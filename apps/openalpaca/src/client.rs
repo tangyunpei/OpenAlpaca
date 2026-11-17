@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use reqwest::Response;
 use serde::{Serialize, de::DeserializeOwned};
 
-use openalpaca_storage::discovery;
+use openalpaca_app_support::discovery;
 
 /// Authenticated HTTP client for the daemon.
 pub struct DaemonClient {

@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use openalpaca_storage::discovery;
+use openalpaca_app_support::discovery;
 
 /// What `openalpaca status` found.
 #[derive(Debug)]

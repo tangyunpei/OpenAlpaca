@@ -30,9 +30,9 @@ const TEST_MASTER_KEY: &str =
 impl HomeStoreGuard {
     pub(crate) fn set(path: &Path) -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
+        let prev = std::env::var_os(openalpaca_app_support::paths::HOME_STORE_ENV);
         // SAFETY: serialized by ENV_LOCK — the binary's only writer.
-        unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
+        unsafe { std::env::set_var(openalpaca_app_support::paths::HOME_STORE_ENV, path) };
         Self {
             _lock: lock,
             prev,
@@ -65,8 +65,10 @@ impl Drop for HomeStoreGuard {
             }
         }
         match self.prev.take() {
-            Some(v) => unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v) },
-            None => unsafe { std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV) },
+            Some(v) => unsafe {
+                std::env::set_var(openalpaca_app_support::paths::HOME_STORE_ENV, v)
+            },
+            None => unsafe { std::env::remove_var(openalpaca_app_support::paths::HOME_STORE_ENV) },
         }
     }
 }

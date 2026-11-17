@@ -35,9 +35,11 @@
 //! guard: a scratch `OPENALPACA_HOME_STORE`, `OPENALPACA_CONFIG_DIR`, `HOME`
 //! and `PATH`, never `~/.openalpaca`.
 
-use super::reuse::{HEALTH_PROBE_TIMEOUT, Health, first_answer, probe_health};
+use super::reuse::{HEALTH_PROBE_TIMEOUT, first_answer, probe_health};
 use super::*;
-use openalpaca_storage::discovery::Discovery;
+use openalpaca_app_support::discovery::Discovery;
+use openalpaca_app_support::paths;
+use openalpaca_app_support::protocol::Health;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -56,7 +58,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The variables the guard re-points, restored on drop.
 const GUARDED_VARS: [&str; 4] = [
-    store::HOME_STORE_ENV,
+    paths::HOME_STORE_ENV,
     "OPENALPACA_CONFIG_DIR",
     "HOME",
     "PATH",
@@ -339,7 +341,7 @@ fn get_connection_info_reads_the_rotated_file() {
 #[test]
 fn get_connection_info_refuses_a_discovery_file_it_cannot_parse() {
     let _guard = HomeStoreGuard::set("info-unparsable");
-    let path = store::discovery_path().expect("discovery path");
+    let path = paths::discovery_path().expect("discovery path");
     std::fs::create_dir_all(path.parent().expect("its folder")).expect("its folder");
     std::fs::write(&path, "not discovery").expect("write discovery.json");
     assert_eq!(
@@ -353,7 +355,7 @@ fn get_connection_info_refuses_a_discovery_file_it_cannot_parse() {
 #[test]
 fn get_connection_info_refuses_a_discovery_file_it_cannot_read() {
     let _guard = HomeStoreGuard::set("info-unreadable");
-    let path = store::discovery_path().expect("discovery path");
+    let path = paths::discovery_path().expect("discovery path");
     std::fs::create_dir_all(&path).expect("a folder at discovery.json's path");
     assert_eq!(
         refusal(invoke("get_connection_info", json!({}))),
@@ -371,7 +373,7 @@ fn get_connection_info_refuses_a_live_daemon_of_a_protocol_it_does_not_speak() {
     let guard = HomeStoreGuard::set("info-mismatch");
     let daemon = FakeDaemonProcess::start(&guard);
     let mut d = write_discovery_for(daemon.pid, closed_port());
-    d.build.protocol = openalpaca_storage::support::protocol::PROTOCOL + 1;
+    d.build.protocol = openalpaca_app_support::protocol::PROTOCOL + 1;
     d.build.version = "9.9.9".into();
     discovery::write_discovery_atomic(&d).expect("write discovery.json");
 
@@ -380,19 +382,19 @@ fn get_connection_info_refuses_a_live_daemon_of_a_protocol_it_does_not_speak() {
     assert_eq!(refused["kind"], "mismatch", "{refused}");
     assert_eq!(
         refused["daemon_protocol"],
-        openalpaca_storage::support::protocol::PROTOCOL + 1
+        openalpaca_app_support::protocol::PROTOCOL + 1
     );
     assert_eq!(refused["daemon_version"], "9.9.9");
     assert_eq!(
         refused["shell_protocol"],
-        openalpaca_storage::support::protocol::PROTOCOL
+        openalpaca_app_support::protocol::PROTOCOL
     );
     let message = refused["message"].as_str().expect("a sentence");
     assert!(
         message.starts_with(&format!(
             "The daemon running (pid {}, version 9.9.9, protocol {})",
             d.pid,
-            openalpaca_storage::support::protocol::PROTOCOL + 1
+            openalpaca_app_support::protocol::PROTOCOL + 1
         )),
         "{message}"
     );
@@ -404,7 +406,7 @@ fn get_connection_info_refuses_a_live_daemon_of_a_protocol_it_does_not_speak() {
 #[cfg(unix)]
 fn write_newer_discovery_for(pid: u32) -> Discovery {
     let mut d = write_discovery_for(pid, closed_port());
-    d.build.protocol = openalpaca_storage::support::protocol::PROTOCOL + 1;
+    d.build.protocol = openalpaca_app_support::protocol::PROTOCOL + 1;
     d.build.version = "9.9.9".into();
     discovery::write_discovery_atomic(&d).expect("write discovery.json");
     d
@@ -425,8 +427,8 @@ fn get_connection_info_s_mismatch_is_the_asking_window_s_verdict() {
     let refused = refusal(invoke("get_connection_info", json!({})));
     drop(daemon);
     assert_eq!(refused["kind"], "mismatch", "{refused}");
-    let mismatch =
-        reuse::file_mismatch(&d, &reuse::ShellBuild::THIS).expect("a file of another protocol");
+    let mismatch = openalpaca_app_support::protocol::file_mismatch(&d, &reuse::THIS_SHELL)
+        .expect("a file of another protocol");
     let mut lines = Vec::new();
     reuse::ladder_mismatch(&reuse::STARTING, "main", &mismatch, |l| lines.push(l));
     assert_eq!(
@@ -441,8 +443,8 @@ fn get_connection_info_s_mismatch_is_the_asking_window_s_verdict() {
             "Daemon verdict for window `second`: refusal (mismatch) — pid {}, version 9.9.9, \
              protocol {}; this app speaks protocol {}; nothing was stopped or started.",
             d.pid,
-            openalpaca_storage::support::protocol::PROTOCOL + 1,
-            openalpaca_storage::support::protocol::PROTOCOL
+            openalpaca_app_support::protocol::PROTOCOL + 1,
+            openalpaca_app_support::protocol::PROTOCOL
         )]
     );
 }
@@ -485,13 +487,13 @@ fn the_ladder_s_mismatch_is_one_line_of_gui_log() {
 fn get_connection_info_answers_a_stale_file_of_another_protocol_as_before() {
     let _guard = HomeStoreGuard::set("info-mismatch-stale");
     let mut d = write_discovery_for(std::process::id(), 1);
-    d.build.protocol = openalpaca_storage::support::protocol::PROTOCOL + 1;
+    d.build.protocol = openalpaca_app_support::protocol::PROTOCOL + 1;
     discovery::write_discovery_atomic(&d).expect("write discovery.json");
 
     let answer = invoke("get_connection_info", json!({})).expect("connection info");
     assert_eq!(
         answer["protocol"],
-        openalpaca_storage::support::protocol::PROTOCOL + 1
+        openalpaca_app_support::protocol::PROTOCOL + 1
     );
     assert_eq!(answer["note"], Value::Null);
 }
@@ -609,7 +611,7 @@ fn closed_port() -> u16 {
 /// C-12's check that nothing spawned: the spawn arm opens and rotates the
 /// daemon log before it spawns, so the log is not there.
 fn assert_nothing_spawned(guard: &HomeStoreGuard) {
-    let log = store::daemon_log_path().expect("log path");
+    let log = paths::daemon_log_path().expect("log path");
     assert!(log.starts_with(guard.store()));
     assert!(!log.exists(), "the spawn arm ran: {}", log.display());
 }
@@ -637,7 +639,7 @@ fn ensure_daemon_running_answers_the_version_and_protocol_health_gave() {
     assert_no_daemon_beside_the_test_binary();
     let server = FakeServer::health(
         "instance-q11",
-        Some(openalpaca_storage::support::protocol::PROTOCOL),
+        Some(openalpaca_app_support::protocol::PROTOCOL),
         "0.0.1-other",
     );
     write_discovery(server.port, false);
@@ -646,7 +648,7 @@ fn ensure_daemon_running_answers_the_version_and_protocol_health_gave() {
     assert_eq!(answer["version"], "0.0.1-other");
     assert_eq!(
         answer["protocol"],
-        openalpaca_storage::support::protocol::PROTOCOL
+        openalpaca_app_support::protocol::PROTOCOL
     );
     let note = answer["note"].as_str().expect("a note on another version");
     assert!(
@@ -936,8 +938,8 @@ fn read_daemon_log_tail_is_empty_with_no_log() {
 #[test]
 fn read_daemon_log_tail_returns_the_last_lines_newest_last() {
     let _guard = HomeStoreGuard::set("log-tail");
-    store::logs_dir().expect("logs dir");
-    let log = store::daemon_log_path().expect("log path");
+    paths::logs_dir().expect("logs dir");
+    let log = paths::daemon_log_path().expect("log path");
     std::fs::write(&log, "one\ntwo\nthree\nfour\nfive\n").expect("write log");
     assert_eq!(
         invoke("read_daemon_log_tail", json!({ "lines": 2 })).expect("a tail"),
@@ -951,7 +953,7 @@ fn read_daemon_log_tail_returns_the_last_lines_newest_last() {
 #[test]
 fn read_daemon_log_tail_refuses_a_log_it_cannot_read() {
     let _guard = HomeStoreGuard::set("log-unreadable");
-    let log = store::daemon_log_path().expect("log path");
+    let log = paths::daemon_log_path().expect("log path");
     std::fs::create_dir_all(&log).expect("a folder at the log's path");
     assert_eq!(
         refusal(invoke("read_daemon_log_tail", json!({ "lines": 5 }))),
@@ -1260,7 +1262,7 @@ where
 #[test]
 fn get_connection_info_reads_discovery_off_the_runtime() {
     let _guard = HomeStoreGuard::set("info-blocked");
-    let file = BlockedFile::at(store::discovery_path().expect("discovery path"));
+    let file = BlockedFile::at(paths::discovery_path().expect("discovery path"));
     let d = discovery::make_discovery("127.0.0.1", 1, "instance-q11".into(), SHELL_VERSION);
     let bytes = serde_json::to_vec(&d).expect("discovery as JSON");
     let (free, answer) =
@@ -1277,7 +1279,7 @@ fn get_connection_info_reads_discovery_off_the_runtime() {
 #[test]
 fn read_daemon_log_tail_reads_the_log_off_the_runtime() {
     let _guard = HomeStoreGuard::set("log-blocked");
-    let file = BlockedFile::at(store::daemon_log_path().expect("log path"));
+    let file = BlockedFile::at(paths::daemon_log_path().expect("log path"));
     // Whatever a pipe gives a seek, the command answers once let through.
     let (free, _answer) =
         runtime_free_while_blocked(file, b"one\ntwo\n", || read_daemon_log_tail(5));
@@ -1295,7 +1297,7 @@ fn ensure_daemon_running_reads_discovery_off_the_runtime() {
     // The reuse arm only (C-12): the daemon the file names answers health.
     let server = FakeServer::health("instance-q11", Some(1), SHELL_VERSION);
     let port = server.port;
-    let file = BlockedFile::at(store::discovery_path().expect("discovery path"));
+    let file = BlockedFile::at(paths::discovery_path().expect("discovery path"));
     let d = discovery::make_discovery("127.0.0.1", port, "instance-q11".into(), SHELL_VERSION);
     let bytes = serde_json::to_vec(&d).expect("discovery as JSON");
     let (free, answer) =
@@ -1307,7 +1309,7 @@ fn ensure_daemon_running_reads_discovery_off_the_runtime() {
     );
     let info = answer.expect("reused");
     assert_connection_info(&serde_json::to_value(info).expect("as JSON"), &d);
-    let log = store::daemon_log_path().expect("log path");
+    let log = paths::daemon_log_path().expect("log path");
     assert!(log.starts_with(guard.store()));
     assert!(!log.exists(), "the spawn arm ran: {}", log.display());
 }
@@ -1622,7 +1624,7 @@ fn a_start_that_timed_out_quotes_what_this_run_wrote() {
 
 /// What `gui.log` holds now under the guard's scratch store.
 fn gui_log_text() -> String {
-    std::fs::read_to_string(store::gui_log_path().expect("the gui.log path")).unwrap_or_default()
+    std::fs::read_to_string(paths::gui_log_path().expect("the gui.log path")).unwrap_or_default()
 }
 
 /// `body` run with the shell's log subscriber as this thread's default,
@@ -1642,7 +1644,7 @@ fn with_the_shell_log<T>(body: impl FnOnce() -> T) -> T {
 #[test]
 fn the_shell_log_is_the_stores_gui_log_and_appended_to() {
     let guard = HomeStoreGuard::set("gui-log-append");
-    let path = store::gui_log_path().expect("the gui.log path");
+    let path = paths::gui_log_path().expect("the gui.log path");
     assert_eq!(path, guard.store().join("state/logs/gui.log"));
     std::fs::create_dir_all(path.parent().expect("logs dir")).expect("logs dir");
     std::fs::write(&path, "an earlier launch's line\n").expect("an earlier log");
@@ -1668,11 +1670,11 @@ fn the_shell_log_is_the_stores_gui_log_and_appended_to() {
 #[test]
 fn the_shell_log_is_rotated_past_the_stores_cap_before_it_is_opened() {
     let _guard = HomeStoreGuard::set("gui-log-rotate");
-    let path = store::gui_log_path().expect("the gui.log path");
+    let path = paths::gui_log_path().expect("the gui.log path");
     std::fs::create_dir_all(path.parent().expect("logs dir")).expect("logs dir");
     std::fs::File::create(&path)
         .expect("a full log")
-        .set_len(store::DAEMON_LOG_MAX_BYTES + 1)
+        .set_len(paths::DAEMON_LOG_MAX_BYTES + 1)
         .expect("a sparse 16 MB");
 
     let (_, file, rotation) = open_gui_log().expect("gui.log opens");
@@ -1685,7 +1687,7 @@ fn the_shell_log_is_rotated_past_the_stores_cap_before_it_is_opened() {
     let rotated = path.with_file_name("gui.log.1");
     assert_eq!(
         std::fs::metadata(&rotated).expect("gui.log.1").len(),
-        store::DAEMON_LOG_MAX_BYTES + 1
+        paths::DAEMON_LOG_MAX_BYTES + 1
     );
 }
 
@@ -2493,8 +2495,8 @@ fn the_login_shells_path_and_nothing_else_reaches_the_daemons_command() {
         set.keys().cloned().collect::<Vec<_>>(),
         [
             OsString::from("OPENALPACA_CONFIG_DIR"),
-            OsString::from(store::MANAGED_LOG_ENV),
-            OsString::from(store::PATH_SOURCE_ENV),
+            OsString::from(paths::MANAGED_LOG_ENV),
+            OsString::from(paths::PATH_SOURCE_ENV),
             OsString::from("PATH"),
         ],
         "the command sets these four and removes nothing"
@@ -2504,7 +2506,7 @@ fn the_login_shells_path_and_nothing_else_reaches_the_daemons_command() {
         Some(OsString::from(CAPTURED_PATH))
     );
     assert_eq!(
-        set[&OsString::from(store::PATH_SOURCE_ENV)],
+        set[&OsString::from(paths::PATH_SOURCE_ENV)],
         Some(OsString::from(format!("login-shell {}", path.capture_ms())))
     );
     assert_eq!(cmd.get_current_dir(), Some(app_dir.as_path()));
@@ -3017,8 +3019,8 @@ fn with_the_list_empty_no_credential_pointer_reaches_the_daemon() {
         set_on(&cmd).keys().cloned().collect::<Vec<_>>(),
         [
             OsString::from("OPENALPACA_CONFIG_DIR"),
-            OsString::from(store::MANAGED_LOG_ENV),
-            OsString::from(store::PATH_SOURCE_ENV),
+            OsString::from(paths::MANAGED_LOG_ENV),
+            OsString::from(paths::PATH_SOURCE_ENV),
             OsString::from("PATH"),
         ]
     );
@@ -3060,8 +3062,8 @@ fn a_listed_key_reaches_the_daemon_and_an_unlisted_one_does_not() {
         [
             OsString::from("AWS_PROFILE"),
             OsString::from("OPENALPACA_CONFIG_DIR"),
-            OsString::from(store::MANAGED_LOG_ENV),
-            OsString::from(store::PATH_SOURCE_ENV),
+            OsString::from(paths::MANAGED_LOG_ENV),
+            OsString::from(paths::PATH_SOURCE_ENV),
             OsString::from("PATH"),
         ],
         "the listed key beside Q21's four, and nothing removed"
@@ -3944,8 +3946,8 @@ fn a_listed_openalpaca_name_is_dropped_with_a_warning_naming_it() {
         [
             OsString::from("AWS_PROFILE"),
             OsString::from("OPENALPACA_CONFIG_DIR"),
-            OsString::from(store::MANAGED_LOG_ENV),
-            OsString::from(store::PATH_SOURCE_ENV),
+            OsString::from(paths::MANAGED_LOG_ENV),
+            OsString::from(paths::PATH_SOURCE_ENV),
             OsString::from("PATH"),
         ]
     );

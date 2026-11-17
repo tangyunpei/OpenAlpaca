@@ -2,8 +2,8 @@ use crate::commands::{status, tail};
 use crate::manager;
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
-use openalpaca_storage::store;
+use openalpaca_app_support::daemon_lifecycle::{self, StopOutcome};
+use openalpaca_app_support::paths;
 use std::path::Path;
 
 #[derive(Args)]
@@ -90,11 +90,11 @@ fn stop_and_wait(restarting: bool) -> Result<bool> {
 }
 
 /// [`stop_failure_message`] with the daemon log resolved through
-/// `store::daemon_log_path()` — never a literal `~/.openalpaca`, because
+/// `paths::daemon_log_path()` — never a literal `~/.openalpaca`, because
 /// `OPENALPACA_HOME_STORE` moves the root. A log that is not there is not
 /// offered: telling the user to `tail` a missing file is no help.
 fn stop_failure_report(pid: u32, outcome: &StopOutcome, restarting: bool) -> Option<String> {
-    let log = store::daemon_log_path().ok().filter(|path| path.is_file());
+    let log = paths::daemon_log_path().ok().filter(|path| path.is_file());
     stop_failure_message(pid, outcome, restarting, log.as_deref())
 }
 
@@ -186,7 +186,7 @@ mod tests {
     fn a_restart_that_outlives_the_budget_names_the_pid_the_budget_the_fallback_and_the_log() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = EnvSandbox::enter(tmp.path());
-        let log = store::daemon_log_path().unwrap();
+        let log = paths::daemon_log_path().unwrap();
         assert!(
             log.starts_with(tmp.path()),
             "the log path escaped the sandbox ({}); refusing to write",
@@ -215,7 +215,7 @@ mod tests {
     fn a_missing_daemon_log_is_not_offered() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = EnvSandbox::enter(tmp.path());
-        assert!(store::daemon_log_path().unwrap().starts_with(tmp.path()));
+        assert!(paths::daemon_log_path().unwrap().starts_with(tmp.path()));
 
         let report = stop_failure_report(PID, &still_alive(), true).expect("a failure is reported");
 

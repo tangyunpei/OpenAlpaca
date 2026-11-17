@@ -65,22 +65,22 @@ fn no_daemon_runs_without_a_discovery_file_naming_a_live_one() {
     assert!(daemon.is_none());
 
     let now = Utc::now();
-    openalpaca_storage::discovery::write_discovery_atomic(
-        &openalpaca_storage::discovery::Discovery {
+    openalpaca_app_support::discovery::write_discovery_atomic(
+        &openalpaca_app_support::discovery::Discovery {
             schema: 1,
             instance_id: "stale".to_string(),
             pid: std::process::id(),
             started_at: now,
-            listen: openalpaca_storage::discovery::Listen {
+            listen: openalpaca_app_support::discovery::Listen {
                 host: "127.0.0.1".to_string(),
                 port: 1,
             },
-            auth: openalpaca_storage::discovery::Auth {
+            auth: openalpaca_app_support::discovery::Auth {
                 token: "token".to_string(),
                 issued_at: now,
                 expires_at: now,
             },
-            build: openalpaca_storage::discovery::Build {
+            build: openalpaca_app_support::discovery::Build {
                 version: "0.0.0".to_string(),
                 protocol: 1,
             },

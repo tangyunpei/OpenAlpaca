@@ -33,9 +33,10 @@ use super::{
 };
 use crate::hash::sha256_hex;
 use crate::store::projects::{self, ProjectId};
-use crate::store::{ContentKind, StoreScope, home_root, state_dir};
+use crate::store::{ContentKind, StoreScope};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use openalpaca_app_support::paths::{home_root, state_dir};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};

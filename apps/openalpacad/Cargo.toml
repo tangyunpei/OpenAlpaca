@@ -28,6 +28,7 @@ tower-http = { workspace = true }
 openalpaca_core = { workspace = true }
 openalpaca_connectors = { workspace = true, features = ["telegram", "imessage", "discord"] }
 openalpaca_api = { workspace = true }
+openalpaca_app_support = { workspace = true }
 openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
 openalpaca_mcp = { path = "../../crates/openalpaca_mcp" }

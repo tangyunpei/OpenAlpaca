@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use openalpaca_storage::discovery::{self, Discovery};
+use openalpaca_app_support::discovery::{self, Discovery};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 

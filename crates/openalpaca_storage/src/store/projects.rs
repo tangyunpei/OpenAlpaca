@@ -22,6 +22,7 @@ use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
+use openalpaca_app_support::paths;
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 use uuid::Uuid;
@@ -204,7 +205,7 @@ pub fn canonical_root(path: &Path) -> Result<PathBuf> {
 /// it. `false` when there is no usable home root or `root` is relative: a
 /// question, never a reason to fail.
 pub fn overlaps_home_store(root: &Path) -> bool {
-    let Ok(home) = super::home_root() else {
+    let Ok(home) = paths::home_root() else {
         return false;
     };
     overlaps_home_store_in(&home, root)
@@ -392,7 +393,7 @@ pub fn is_not_registered(e: &anyhow::Error) -> bool {
 
 /// `home_root()/projects`. A path query: creates nothing.
 pub fn projects_dir() -> Result<PathBuf> {
-    Ok(projects_dir_in(&super::home_root()?))
+    Ok(projects_dir_in(&paths::home_root()?))
 }
 
 /// `home/projects`, for the home store `home` as [`register`] resolved it
@@ -419,7 +420,7 @@ fn projects_dir_in(home: &Path) -> PathBuf {
 /// folder per process (R11). An error is a relative `root`, no home root, or
 /// a folder that cannot be resolved.
 pub fn lookup(root: &Path) -> Result<Option<Project>> {
-    lookup_in(&super::home_root()?, root)
+    lookup_in(&paths::home_root()?, root)
 }
 
 /// [`lookup`] under the home store `home`, as [`register`] resolved it once.
@@ -696,7 +697,7 @@ fn first_warning(key: String) -> bool {
 /// folder — are both left out with one WARN (R11): neither can be told from
 /// the other, so neither is opened, and neither is deleted.
 pub fn list() -> Result<Vec<Project>> {
-    list_in(&super::home_root()?)
+    list_in(&paths::home_root()?)
 }
 
 /// [`list`] under the home store `home`, as [`register`] resolved it once.
@@ -839,10 +840,10 @@ fn unguarded_home(
 /// the variable in between — so a check that passed would no longer describe
 /// the store written to (the S1 review's I1).
 fn register_home() -> Result<PathBuf> {
-    let set = std::env::var_os(super::HOME_STORE_ENV);
+    let set = std::env::var_os(paths::HOME_STORE_ENV);
     let user_home = std::env::home_dir();
     refuse_unguarded_test_home(set.as_deref(), user_home.as_deref());
-    super::resolve_home_root(set.map(PathBuf::from), user_home)
+    paths::resolve_home_root(set.map(PathBuf::from), user_home)
 }
 
 /// The owner's rule that no test writes into a developer's real store:
@@ -856,10 +857,10 @@ fn register_home() -> Result<PathBuf> {
 /// even its metadata. A path that cannot be resolved is judged as written.
 #[cfg(any(test, feature = "test-home-guard"))]
 fn refuse_unguarded_test_home(set: Option<&std::ffi::OsStr>, user_home: Option<&Path>) {
-    let real = user_home.map(|home| home.join(super::STORE_DIR_NAME));
+    let real = user_home.map(|home| home.join(paths::STORE_DIR_NAME));
     let why = unguarded_home(set, real.as_deref()).or_else(|| {
         let set = set.map(|value| resolved_or_as_written(Path::new(value)));
-        let real = user_home.map(|home| resolved_or_as_written(home).join(super::STORE_DIR_NAME));
+        let real = user_home.map(|home| resolved_or_as_written(home).join(paths::STORE_DIR_NAME));
         unguarded_home(set.as_deref().map(Path::as_os_str), real.as_deref())
     });
     if let Some(why) = why {
@@ -868,7 +869,7 @@ fn refuse_unguarded_test_home(set: Option<&std::ffi::OsStr>, user_home: Option<&
              home-store guard (HomeStoreGuard; EnvSandbox in the CLI) first, so no test writes \
              into the developer's ~/.openalpaca. A daemon binary `cargo test` built carries this \
              check too: rebuild it with `cargo build -p openalpacad` before running it by hand",
-            super::HOME_STORE_ENV,
+            paths::HOME_STORE_ENV,
         );
     }
 }
@@ -1008,7 +1009,7 @@ pub(crate) fn name_for(
     this: Option<&ProjectId>,
     held: &ProjectsLock,
 ) -> Result<String> {
-    name_for_in(&super::home_root()?, root, this, held)
+    name_for_in(&paths::home_root()?, root, this, held)
 }
 
 /// [`name_for`] under the home store `home`, as [`register`] resolved it once.

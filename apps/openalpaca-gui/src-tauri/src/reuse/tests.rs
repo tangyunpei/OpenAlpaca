@@ -1,11 +1,12 @@
-//! `decide_reuse`'s table (Q04; plan-rev3 §7.2 G3-b, DU-29 (a), C-09, A-18,
-//! A-20) and the start it drives, over a world the test writes: no file, no
+//! `decide_reuse`'s verdicts as this shell words them (the table itself is
+//! `openalpaca_app_support::protocol`'s tests since Q05; Q04, plan-rev3 §7.2
+//! G3-b, DU-29 (a), C-09, A-18, A-20) and the start it drives, over a world the test writes: no file, no
 //! process table, no socket and no clock of the machine's. Nothing here
 //! spawns, reads the store or opens a port, so no test holds the home-store
 //! guard.
 
 use super::*;
-use openalpaca_storage::discovery::{self, Discovery};
+use openalpaca_app_support::discovery::{self, Discovery};
 use std::collections::VecDeque;
 
 // ============================================================================
@@ -15,7 +16,7 @@ use std::collections::VecDeque;
 /// A shell that speaks protocol 3 and reads back to 2, so the rows that need
 /// a protocol older than this shell's but still supported, and one too old,
 /// have values to run on (the build's own constants are both 1 today).
-const SHELL: ShellBuild = ShellBuild {
+const SHELL: ClientBuild = ClientBuild {
     protocol: 3,
     oldest_supported: 2,
     version: "0.4.0",
@@ -72,7 +73,7 @@ enum Row {
 fn row(verdict: Verdict) -> Row {
     match verdict {
         Verdict::Spawn => Row::Spawn,
-        Verdict::Reuse(reused) => Row::Reuse(reused.note),
+        Verdict::Reuse(reused) => Row::Reuse(reuse_note(&SHELL, &reused)),
         Verdict::Mismatch(m) => Row::Mismatch {
             daemon_version: m.daemon_version,
             daemon_protocol: m.daemon_protocol,
@@ -83,44 +84,6 @@ fn row(verdict: Verdict) -> Row {
 
 fn decide(look: &Look) -> Row {
     row(decide_reuse(look, &SHELL))
-}
-
-#[test]
-fn no_discovery_file_spawns() {
-    assert_eq!(
-        decide(&look(DiscoveryRead::Missing, silent(), false)),
-        Row::Spawn
-    );
-}
-
-#[test]
-fn a_compatible_daemon_is_reused_with_no_note() {
-    let d = discovery_of("0.4.0", 3);
-    assert_eq!(
-        decide(&look(
-            parsed(&d),
-            answered(INSTANCE, Some(3), "0.4.0"),
-            true
-        )),
-        Row::Reuse(None)
-    );
-}
-
-/// The reused daemon is the file's, with the protocol and version its
-/// health answered.
-#[test]
-fn a_reuse_carries_the_file_and_what_health_answered() {
-    let d = discovery_of("0.4.0", 3);
-    let Verdict::Reuse(reused) = decide_reuse(
-        &look(parsed(&d), answered(INSTANCE, Some(3), "0.4.0"), true),
-        &SHELL,
-    ) else {
-        panic!("not a reuse");
-    };
-    assert_eq!(reused.discovery.instance_id, INSTANCE);
-    assert_eq!(reused.discovery.auth.token, d.auth.token);
-    assert_eq!(reused.protocol, 3);
-    assert_eq!(reused.version, "0.4.0");
 }
 
 /// An older protocol this shell still reads: reused, with a note naming
@@ -143,143 +106,6 @@ fn an_older_supported_daemon_is_reused_with_a_note() {
     );
 }
 
-#[test]
-fn a_newer_daemon_is_a_mismatch() {
-    let d = discovery_of("0.5.0", 4);
-    assert_eq!(
-        decide(&look(
-            parsed(&d),
-            answered(INSTANCE, Some(4), "0.5.0"),
-            true
-        )),
-        Row::Mismatch {
-            daemon_version: Some("0.5.0".into()),
-            daemon_protocol: Some(4),
-        }
-    );
-}
-
-#[test]
-fn a_daemon_older_than_the_oldest_supported_is_a_mismatch() {
-    let d = discovery_of("0.1.0", 1);
-    assert_eq!(
-        decide(&look(
-            parsed(&d),
-            answered(INSTANCE, Some(1), "0.1.0"),
-            true
-        )),
-        Row::Mismatch {
-            daemon_version: Some("0.1.0".into()),
-            daemon_protocol: Some(1),
-        }
-    );
-}
-
-/// A health body with no `protocol` is a daemon from before Q04: the
-/// protocol its discovery file states is taken (every daemon has written
-/// one), so it is judged as any other — never a spawn over a live daemon.
-#[test]
-fn a_health_answer_without_protocol_is_judged_by_the_files_protocol() {
-    for (file_protocol, expected) in [
-        (3, Row::Reuse(None)),
-        (
-            4,
-            Row::Mismatch {
-                daemon_version: Some("0.4.0".into()),
-                daemon_protocol: Some(4),
-            },
-        ),
-    ] {
-        let d = discovery_of("0.4.0", file_protocol);
-        assert_eq!(
-            decide(&look(parsed(&d), answered(INSTANCE, None, "0.4.0"), true)),
-            expected,
-            "file protocol {file_protocol}"
-        );
-    }
-}
-
-/// What health answered is the daemon's word now; the file's `build` is
-/// what it wrote at its start.
-#[test]
-fn health_s_protocol_wins_over_the_file_s() {
-    let d = discovery_of("0.4.0", 3);
-    assert_eq!(
-        decide(&look(
-            parsed(&d),
-            answered(INSTANCE, Some(4), "0.4.0"),
-            true
-        )),
-        Row::Mismatch {
-            daemon_version: Some("0.4.0".into()),
-            daemon_protocol: Some(4),
-        }
-    );
-}
-
-/// A file with no `build.protocol` (or any other field this build needs)
-/// does not parse as this build's `Discovery`: over a live daemon's pid it
-/// is a mismatch, never a spawn or a kill (*Rev 95* (4)).
-#[test]
-fn a_file_missing_its_protocol_over_a_live_daemon_is_a_mismatch() {
-    let read = read_discovery_bytes(
-        br#"{"schema":2,"pid":4242,"instance_id":"x","build":{"version":"0.9.0"}}"#,
-    );
-    assert_eq!(
-        decide(&look(read, silent(), true)),
-        Row::Mismatch {
-            daemon_version: Some("0.9.0".into()),
-            daemon_protocol: None,
-        }
-    );
-}
-
-/// The same file over a pid that is not a live daemon is no daemon.
-#[test]
-fn a_file_this_build_cannot_read_over_no_live_daemon_spawns() {
-    let read = read_discovery_bytes(br#"{"schema":2,"pid":4242}"#);
-    assert_eq!(decide(&look(read, silent(), false)), Row::Spawn);
-}
-
-/// A malformed file — not JSON, or no numeric `pid` — names nothing, so
-/// there is nothing to reuse and nothing to protect: spawn (DU-29's first
-/// step).
-#[test]
-fn a_malformed_file_spawns() {
-    for bytes in [
-        &b"not discovery"[..],
-        &br#"{"pid":"4242"}"#[..],
-        &br#"[4242]"#[..],
-    ] {
-        let read = read_discovery_bytes(bytes);
-        assert!(
-            matches!(read, DiscoveryRead::Unreadable),
-            "{:?}",
-            String::from_utf8_lossy(bytes)
-        );
-        assert_eq!(decide(&look(read, silent(), true)), Row::Spawn);
-    }
-}
-
-/// A file this build writes parses as itself.
-#[test]
-fn this_build_s_file_parses() {
-    let d = discovery_of("0.4.0", 3);
-    let read = read_discovery_bytes(&serde_json::to_vec_pretty(&d).unwrap());
-    let DiscoveryRead::Parsed(back) = read else {
-        panic!("not parsed");
-    };
-    assert_eq!(back.instance_id, d.instance_id);
-}
-
-/// A stale file (a crash, a reboot): its pid is not a live daemon and its
-/// port answers nothing.
-#[test]
-fn a_stale_pid_with_a_dead_port_spawns() {
-    let d = discovery_of("0.4.0", 3);
-    assert_eq!(decide(&look(parsed(&d), silent(), false)), Row::Spawn);
-}
-
 /// A wrong server at the old address (its 404 page is no health answer),
 /// and the pid not a live daemon: the file is stale.
 #[test]
@@ -290,63 +116,6 @@ fn a_wrong_server_at_the_old_address_spawns() {
     );
     assert!(matches!(health, Health::Unanswered(_)), "{health:?}");
     assert_eq!(decide(&look(parsed(&d), health, false)), Row::Spawn);
-}
-
-/// Another instance answers at the address: the listener is not the
-/// file's daemon. With the file's pid gone, spawn.
-#[test]
-fn an_instance_change_between_the_file_and_health_spawns_when_the_pid_is_gone() {
-    let d = discovery_of("0.4.0", 3);
-    assert_eq!(
-        decide(&look(
-            parsed(&d),
-            answered("another-instance", Some(3), "0.4.0"),
-            false
-        )),
-        Row::Spawn
-    );
-}
-
-/// A live pid beats every spawn verdict: whatever the address says — silent,
-/// a 404, another instance — while the file's pid is a live `openalpacad`,
-/// a spawn would only lose the singleton lock to it (and rotate its log
-/// under it), so the shell parks in `starting`.
-#[test]
-fn a_live_pid_parks_in_starting_whatever_the_address_says() {
-    let d = discovery_of("0.4.0", 3);
-    for health in [
-        silent(),
-        Health::Unanswered("HTTP 404".into()),
-        answered("another-instance", Some(3), "0.4.0"),
-    ] {
-        assert_eq!(decide(&look(parsed(&d), health, true)), Row::Starting(4242));
-    }
-}
-
-/// The rotated-token row (T21): what is judged is the daemon, not the
-/// token's age, so a file past its first day — rotated or lapsed — over a
-/// daemon whose health answers is reused.
-#[test]
-fn a_live_daemon_s_rotated_or_lapsed_token_is_reused() {
-    let mut d = discovery_of("0.4.0", 3);
-    let rotated = d.with_rotated_auth(d.started_at + discovery::ROTATE_AFTER * 3);
-    assert_eq!(
-        decide(&look(
-            parsed(&rotated),
-            answered(INSTANCE, Some(3), "0.4.0"),
-            true
-        )),
-        Row::Reuse(None)
-    );
-    d.auth.expires_at = d.started_at - discovery::TOKEN_LIFETIME;
-    assert_eq!(
-        decide(&look(
-            parsed(&d),
-            answered(INSTANCE, Some(3), "0.4.0"),
-            true
-        )),
-        Row::Reuse(None)
-    );
 }
 
 /// The seventh row (A-20): the same protocol, another version — reused,
@@ -447,16 +216,16 @@ fn an_unreadable_file_s_refusal_says_another_build_wrote_it() {
 /// With one protocol supported, the sentence names one.
 #[test]
 fn the_build_s_own_range_is_one_protocol_today() {
-    assert_eq!(ShellBuild::THIS.protocol, ShellBuild::THIS.oldest_supported);
-    let mut d = discovery_of("0.1.0", ShellBuild::THIS.protocol + 1);
+    assert_eq!(THIS_SHELL.protocol, THIS_SHELL.oldest_supported);
+    let mut d = discovery_of("0.1.0", THIS_SHELL.protocol + 1);
     d.build.version = "9.9.9".into();
     let Verdict::Mismatch(m) = decide_reuse(
         &look(
             parsed(&d),
-            answered(INSTANCE, Some(ShellBuild::THIS.protocol + 1), "9.9.9"),
+            answered(INSTANCE, Some(THIS_SHELL.protocol + 1), "9.9.9"),
             true,
         ),
-        &ShellBuild::THIS,
+        &THIS_SHELL,
     ) else {
         panic!("not a mismatch");
     };
@@ -464,7 +233,7 @@ fn the_build_s_own_range_is_one_protocol_today() {
     assert!(
         message.contains(&format!(
             "the app speaks protocol {}. Nothing",
-            ShellBuild::THIS.protocol
+            THIS_SHELL.protocol
         )),
         "{message}"
     );
@@ -703,7 +472,7 @@ fn run<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 fn this_build_discovery(pid: u32) -> Discovery {
-    let mut d = discovery_of(ShellBuild::THIS.version, ShellBuild::THIS.protocol);
+    let mut d = discovery_of(THIS_SHELL.version, THIS_SHELL.protocol);
     d.pid = pid;
     d
 }
@@ -713,8 +482,8 @@ fn healthy(d: &Discovery) -> Look {
         parsed(d),
         answered(
             &d.instance_id,
-            Some(ShellBuild::THIS.protocol),
-            ShellBuild::THIS.version,
+            Some(THIS_SHELL.protocol),
+            THIS_SHELL.version,
         ),
         true,
     )
@@ -741,7 +510,7 @@ const WAY_OUT: &str = "If it does not finish starting, stop it with `openalpaca 
 
 /// One ask of the window's: `ensure_with` over `world`, from [`WINDOW`].
 fn ask(world: &mut FakeWorld, watch: &Mutex<StartingWatch>) -> Result<Reused, ShellError> {
-    run(ensure_with(world, watch, &ShellBuild::THIS, WINDOW))
+    run(ensure_with(world, watch, &THIS_SHELL, WINDOW))
 }
 
 /// The window's asks, one a second as `STARTING_RETRY_MS` paces them, until
@@ -1367,14 +1136,14 @@ fn a_spawned_daemon_that_never_comes_up_fails_at_five_seconds() {
 /// another protocol) is the mismatch, not a second spawn.
 #[test]
 fn a_mismatch_found_after_the_spawn_is_reported() {
-    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let newer = discovery_of("9.9.9", THIS_SHELL.protocol + 1);
     let mut world = FakeWorld::new(move |_, spawns| {
         if spawns == 0 {
             look(DiscoveryRead::Missing, silent(), false)
         } else {
             look(
                 parsed(&newer),
-                answered(INSTANCE, Some(ShellBuild::THIS.protocol + 1), "9.9.9"),
+                answered(INSTANCE, Some(THIS_SHELL.protocol + 1), "9.9.9"),
                 true,
             )
         }
@@ -1388,11 +1157,11 @@ fn a_mismatch_found_after_the_spawn_is_reported() {
 /// A mismatch at the first look spawns nothing, kills nothing.
 #[test]
 fn a_mismatch_at_the_first_look_spawns_nothing() {
-    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let newer = discovery_of("9.9.9", THIS_SHELL.protocol + 1);
     let mut world = FakeWorld::new(move |_, _| {
         look(
             parsed(&newer),
-            answered(INSTANCE, Some(ShellBuild::THIS.protocol + 1), "9.9.9"),
+            answered(INSTANCE, Some(THIS_SHELL.protocol + 1), "9.9.9"),
             true,
         )
     });
@@ -1486,8 +1255,7 @@ fn a_verdict_asked_again_logs_once_and_a_change_logs_again() {
             format!(
                 "reuse — pid 4242, version {}, protocol {}, already running: this run of the \
                  app did not start it.",
-                ShellBuild::THIS.version,
-                ShellBuild::THIS.protocol
+                THIS_SHELL.version, THIS_SHELL.protocol
             ),
         ]
     );
@@ -1497,11 +1265,11 @@ fn a_verdict_asked_again_logs_once_and_a_change_logs_again() {
 /// A mismatch asked again is one line, naming both sides' protocols.
 #[test]
 fn a_mismatch_asked_again_logs_once() {
-    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let newer = discovery_of("9.9.9", THIS_SHELL.protocol + 1);
     let mut world = FakeWorld::new(move |_, _| {
         look(
             parsed(&newer),
-            answered(INSTANCE, Some(ShellBuild::THIS.protocol + 1), "9.9.9"),
+            answered(INSTANCE, Some(THIS_SHELL.protocol + 1), "9.9.9"),
             true,
         )
     });
@@ -1514,8 +1282,8 @@ fn a_mismatch_asked_again_logs_once() {
         [format!(
             "refusal (mismatch) — pid 4242, version 9.9.9, protocol {}; this app speaks \
              protocol {}; nothing was stopped or started.",
-            ShellBuild::THIS.protocol + 1,
-            ShellBuild::THIS.protocol
+            THIS_SHELL.protocol + 1,
+            THIS_SHELL.protocol
         )]
     );
 }
@@ -1554,7 +1322,7 @@ fn each_window_logs_its_own_changes() {
     let watch = Mutex::new(StartingWatch::default());
     for _ in 0..2 {
         for window in ["main", "second"] {
-            let result = run(ensure_with(&mut world, &watch, &ShellBuild::THIS, window));
+            let result = run(ensure_with(&mut world, &watch, &THIS_SHELL, window));
             assert_eq!(kind(&result), "starting");
         }
     }
@@ -1569,8 +1337,8 @@ fn each_window_logs_its_own_changes() {
 /// or one already running.
 #[test]
 fn the_reuse_line_says_whose_daemon_it_is() {
-    let version = ShellBuild::THIS.version;
-    let protocol = ShellBuild::THIS.protocol;
+    let version = THIS_SHELL.version;
+    let protocol = THIS_SHELL.protocol;
     // This app's own.
     let ours = this_build_discovery(9090);
     let script_d = ours.clone();
@@ -1658,7 +1426,7 @@ fn no_verdict_line_carries_the_token_the_log_or_a_path() {
 /// `get_connection_info`'s refusal of a live daemon whose file states
 /// another protocol, as the window labelled `window` asked it.
 fn ladder(world: &mut FakeWorld, watch: &Mutex<StartingWatch>, window: &str, d: &Discovery) {
-    let mismatch = file_mismatch(d, &ShellBuild::THIS).expect("a file of another protocol");
+    let mismatch = protocol::file_mismatch(d, &THIS_SHELL).expect("a file of another protocol");
     ladder_mismatch(watch, window, &mismatch, |line| world.log(line));
 }
 
@@ -1668,7 +1436,7 @@ fn mismatch_line(protocol: u32) -> String {
     format!(
         "refusal (mismatch) — pid 4242, version 9.9.9, protocol {protocol}; this app speaks \
          protocol {}; nothing was stopped or started.",
-        ShellBuild::THIS.protocol
+        THIS_SHELL.protocol
     )
 }
 
@@ -1678,7 +1446,7 @@ fn mismatch_line(protocol: u32) -> String {
 /// window keeps its own.
 #[test]
 fn the_ladder_s_mismatch_logs_one_verdict_line_and_asked_again_none() {
-    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let newer = discovery_of("9.9.9", THIS_SHELL.protocol + 1);
     let mut world = FakeWorld::new(|_, _| look(DiscoveryRead::Missing, silent(), false));
     let watch = Mutex::new(StartingWatch::default());
     for _ in 0..3 {
@@ -1686,7 +1454,7 @@ fn the_ladder_s_mismatch_logs_one_verdict_line_and_asked_again_none() {
     }
     assert_eq!(
         verdict_lines(&world, WINDOW),
-        [mismatch_line(ShellBuild::THIS.protocol + 1)]
+        [mismatch_line(THIS_SHELL.protocol + 1)]
     );
     ladder(&mut world, &watch, "second", &newer);
     ladder(&mut world, &watch, "second", &newer);
@@ -1699,7 +1467,7 @@ fn the_ladder_s_mismatch_logs_one_verdict_line_and_asked_again_none() {
 /// `ensure_with` answered, then the ladder's mismatch again is three.
 #[test]
 fn a_changed_verdict_around_the_ladder_s_mismatch_logs_again() {
-    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let newer = discovery_of("9.9.9", THIS_SHELL.protocol + 1);
     let ours = this_build_discovery(5151);
     let script_d = ours.clone();
     let mut world = FakeWorld::new(move |_, _| healthy(&script_d));
@@ -1710,7 +1478,7 @@ fn a_changed_verdict_around_the_ladder_s_mismatch_logs_again() {
     ladder(&mut world, &watch, WINDOW, &newer);
     let lines = verdict_lines(&world, WINDOW);
     assert_eq!(lines.len(), 3, "{lines:?}");
-    assert_eq!(lines[0], mismatch_line(ShellBuild::THIS.protocol + 1));
+    assert_eq!(lines[0], mismatch_line(THIS_SHELL.protocol + 1));
     assert!(lines[1].starts_with("reuse — pid 5151, "), "{}", lines[1]);
     assert_eq!(lines[2], lines[0]);
 }
@@ -1720,7 +1488,7 @@ fn a_changed_verdict_around_the_ladder_s_mismatch_logs_again() {
 /// is not logged again by `ensure_with`.
 #[test]
 fn the_ladder_and_ensure_share_the_window_s_record() {
-    let protocol = ShellBuild::THIS.protocol + 1;
+    let protocol = THIS_SHELL.protocol + 1;
     let newer = discovery_of("9.9.9", protocol);
     let script_d = newer.clone();
     let mut world = FakeWorld::new(move |_, _| {
@@ -1774,7 +1542,7 @@ fn the_ladder_s_line_leaves_the_spawn_s_wait_alone() {
         &mut world,
         &watch,
         WINDOW,
-        &discovery_of("9.9.9", ShellBuild::THIS.protocol + 1),
+        &discovery_of("9.9.9", THIS_SHELL.protocol + 1),
     );
     let w = watch.lock().unwrap();
     assert_eq!(w.spawn.map(|p| (p.pid, p.at, p.asked)), spawn);
@@ -1784,7 +1552,7 @@ fn the_ladder_s_line_leaves_the_spawn_s_wait_alone() {
 /// The ladder's line carries no token, no log line and no path.
 #[test]
 fn the_ladder_s_line_carries_no_token_or_path() {
-    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let newer = discovery_of("9.9.9", THIS_SHELL.protocol + 1);
     let token = newer.auth.token.clone();
     assert!(!token.is_empty());
     let mut world = FakeWorld::new(|_, _| look(DiscoveryRead::Missing, silent(), false));

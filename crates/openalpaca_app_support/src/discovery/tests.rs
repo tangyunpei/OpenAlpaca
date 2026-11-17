@@ -22,12 +22,12 @@ fn test_make_discovery() {
 }
 
 /// `make_discovery` writes the protocol the one read site reports (Q04):
-/// `support::protocol::reported()`, which is `PROTOCOL` unless a debug build
+/// `protocol::reported()`, which is `PROTOCOL` unless a debug build
 /// is told otherwise.
 #[test]
 fn make_discovery_writes_the_reported_protocol() {
     let d = make_discovery("127.0.0.1", 9999, "my-instance".to_string(), "1.0.0");
-    assert_eq!(d.build.protocol, crate::support::protocol::reported());
+    assert_eq!(d.build.protocol, crate::protocol::reported());
     assert_eq!(d.build.version, "1.0.0");
 }
 
@@ -37,7 +37,7 @@ fn make_discovery_writes_the_reported_protocol() {
 #[cfg(debug_assertions)]
 #[test]
 fn make_discovery_s_protocol_is_the_one_read_site_s() {
-    use crate::support::protocol::{PROTOCOL, PROTOCOL_PLUS_ONE_ENV};
+    use crate::protocol::{PROTOCOL, PROTOCOL_PLUS_ONE_ENV};
     const CHILD: &str = "OPENALPACA_TEST_DISCOVERY_PROTOCOL_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let d = make_discovery("127.0.0.1", 9999, "my-instance".to_string(), "1.0.0");

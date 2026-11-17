@@ -79,7 +79,7 @@ function Compute-SHA256($path) {
 
 # The runtime data/config root: `%OPENALPACA_HOME_STORE%` when set, else
 # `<home>\.openalpaca` — the same root the daemon computes
-# (`crates/openalpaca_storage/src/store/mod.rs::home_root()`), which does not
+# (`crates/openalpaca_app_support/src/paths.rs::home_root()`), which does not
 # follow the OS's data-directory convention on any platform.
 function Get-DataRoot {
     $override = [Environment]::GetEnvironmentVariable('OPENALPACA_HOME_STORE')

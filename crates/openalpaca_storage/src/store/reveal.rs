@@ -16,7 +16,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::{home_root, projects};
+use super::projects;
+use openalpaca_app_support::paths::home_root;
 
 /// Why [`revealable_path`] refused a path. `Display` is one sentence, written
 /// to be shown as it is in a toast.

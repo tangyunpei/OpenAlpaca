@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use futures_util::StreamExt;
-use openalpaca_storage::discovery;
+use openalpaca_app_support::discovery;
 use serde::Deserialize;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 

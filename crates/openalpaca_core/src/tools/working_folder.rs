@@ -12,7 +12,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use openalpaca_storage::store::{self, ContentKind, projects};
+use openalpaca_app_support::paths;
+use openalpaca_storage::store::{ContentKind, projects};
 
 use crate::session_log::session_dir_name;
 use crate::tools::registry::ToolContext;
@@ -183,7 +184,7 @@ pub fn working_folder(ctx: &ToolContext) -> Result<WorkingFolder, WorkingFolderR
 /// nothing is created. `session_dir_name` makes the id one safe path segment,
 /// the mapping `sessions/<id>/` uses.
 pub fn scratch_dir(conversation_id: &str) -> anyhow::Result<PathBuf> {
-    Ok(store::home_root()?
+    Ok(paths::home_root()?
         .join(ContentKind::Scratch.dir_name())
         .join(session_dir_name(conversation_id)))
 }

@@ -97,9 +97,9 @@ impl HomeStoreGuard {
         let lock = HOME_STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
+        let prev = std::env::var_os(openalpaca_app_support::paths::HOME_STORE_ENV);
         // SAFETY: serialized by HOME_STORE_ENV_LOCK — the crate's only writer.
-        unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
+        unsafe { std::env::set_var(openalpaca_app_support::paths::HOME_STORE_ENV, path) };
         Self { _lock: lock, prev }
     }
 }
@@ -108,8 +108,10 @@ impl Drop for HomeStoreGuard {
     fn drop(&mut self) {
         // SAFETY: as above — still holding the lock.
         match self.prev.take() {
-            Some(v) => unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v) },
-            None => unsafe { std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV) },
+            Some(v) => unsafe {
+                std::env::set_var(openalpaca_app_support::paths::HOME_STORE_ENV, v)
+            },
+            None => unsafe { std::env::remove_var(openalpaca_app_support::paths::HOME_STORE_ENV) },
         }
     }
 }
@@ -174,7 +176,7 @@ impl GuardedProject {
         }
     }
 
-    /// The home store's root, canonical: what `store::home_root()` answers
+    /// The home store's root, canonical: what `paths::home_root()` answers
     /// while the guard holds.
     pub(crate) fn home_root(&self) -> std::path::PathBuf {
         self.home

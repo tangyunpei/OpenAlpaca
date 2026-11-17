@@ -16,7 +16,7 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, TimeDelta, Utc};
-use openalpaca_storage::discovery::{self, Discovery, ROTATE_AFTER, TOKEN_LIFETIME};
+use openalpaca_app_support::discovery::{self, Discovery, ROTATE_AFTER, TOKEN_LIFETIME};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;

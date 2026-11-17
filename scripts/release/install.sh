@@ -132,7 +132,7 @@ sed_inplace() {
 
 # The runtime data/config root: `<home>/.openalpaca` on every platform (it
 # does not follow the OS's data-directory convention — see
-# `crates/openalpaca_storage/src/store/mod.rs::home_root()`).
+# `crates/openalpaca_app_support/src/paths.rs::home_root()`).
 data_dir() {
   echo "$HOME/.openalpaca"
 }

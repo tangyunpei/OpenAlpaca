@@ -1,12 +1,13 @@
 //! The CLI's crypto edge.
 //!
 //! The master key is one file, `~/.openalpaca/state/.master_key`. The daemon
-//! resolves it through `store::master_key_dir()`; so must every CLI command, or
+//! resolves it through `paths::master_key_dir()`; so must every CLI command, or
 //! `openalpaca ai config set-key` writes secrets the daemon cannot read.
 
 use super::llm_config_path;
 use crate::commands::ai_config::{get_ai_value, set_ai_value};
 use crate::test_util::EnvSandbox;
+use openalpaca_app_support::paths;
 use openalpaca_llm::keys::key_encryption::KeyEncryptor;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -39,7 +40,7 @@ fn the_cli_keeps_one_master_key_and_it_is_the_state_dir_one() {
 
     set_ai_value("ai.anthropic.api_key", "sk-secret-value").unwrap();
 
-    let state = openalpaca_storage::store::master_key_dir().unwrap();
+    let state = paths::master_key_dir().unwrap();
     assert_eq!(
         master_key_files(tmp.path()),
         vec![state.join(".master_key")],
@@ -60,7 +61,7 @@ fn the_daemons_master_key_decrypts_what_the_cli_wrote() {
 
     // Exactly what the daemon does at boot (`apps/openalpacad/src/main.rs`):
     // resolve the state dir, load the key that lives there.
-    let daemon_dir = openalpaca_storage::store::master_key_dir().unwrap();
+    let daemon_dir = paths::master_key_dir().unwrap();
     let daemon = KeyEncryptor::load_or_generate_at(&daemon_dir).unwrap();
 
     let config = openalpaca_llm::config::read_config(&llm_config_path().unwrap()).unwrap();

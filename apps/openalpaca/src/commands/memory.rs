@@ -61,6 +61,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use colored::Colorize;
+use openalpaca_app_support::{discovery, paths};
 use openalpaca_core::memory::service::{WorkspaceHint, resolve_project_root, wire};
 use openalpaca_core::utils::text::{
     escape_hidden, escape_hidden_line, hidden_notice, is_hidden, one_line,
@@ -69,7 +70,7 @@ use openalpaca_storage::memory_files::{
     self as files, Note, NoteId, NoteKind, NoteSource, NoteStatus, Partition, SourceType,
 };
 use openalpaca_storage::store::StoreScope;
-use openalpaca_storage::{ConfigRepository, discovery, store};
+use openalpaca_storage::{ConfigRepository, store};
 use reqwest::Method;
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Read};
@@ -1703,7 +1704,7 @@ fn claim_store() -> Result<impl Sized> {
         if crate::manager::is_daemon_running() {
             e.context(DAEMON_RUNNING_REFUSAL)
         } else {
-            let lock = store::lock_path()
+            let lock = paths::lock_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "state/openalpacad.lock".to_string());
             e.context(format!(
@@ -1719,7 +1720,7 @@ fn claim_store() -> Result<impl Sized> {
 /// the row the daemon mints at its first start). No database means no
 /// owner yet, and nothing to repair or adopt *for*.
 fn open_owner_database() -> Result<(openalpaca_storage::Database, String)> {
-    let path = store::database_path()?;
+    let path = paths::database_path()?;
     if !path.exists() {
         bail!(
             "no database at {}: start the daemon once so it creates the store and mints an owner id, then try again",

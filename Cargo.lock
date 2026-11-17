@@ -3820,6 +3820,7 @@ dependencies = [
  "futures-util",
  "mime_guess",
  "nix",
+ "openalpaca_app_support",
  "openalpaca_core",
  "openalpaca_llm",
  "openalpaca_storage",
@@ -3847,6 +3848,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "openalpaca_app_support"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "chrono",
+ "file-lock",
+ "libc",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "openalpaca_connectors"
 version = "0.1.0"
 dependencies = [
@@ -3856,6 +3875,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "openalpaca_api",
+ "openalpaca_app_support",
  "openalpaca_core",
  "openalpaca_storage",
  "reqwest 0.13.5",
@@ -3892,6 +3912,7 @@ dependencies = [
  "libc",
  "lru",
  "openalpaca_api",
+ "openalpaca_app_support",
  "openalpaca_llm",
  "openalpaca_mcp",
  "openalpaca_storage",
@@ -3922,6 +3943,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
+ "openalpaca_app_support",
  "openalpaca_storage",
  "serde",
  "serde_json",
@@ -3995,6 +4017,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "openalpaca_api",
+ "openalpaca_app_support",
  "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_llm",
@@ -4014,17 +4037,14 @@ name = "openalpaca_storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.23.1",
  "chrono",
- "file-lock",
  "libc",
- "rand 0.10.3",
+ "openalpaca_app_support",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "similar",
- "sysinfo",
  "tempfile",
  "tracing",
  "tracing-test",
@@ -4062,6 +4082,7 @@ dependencies = [
  "infer",
  "libc",
  "openalpaca_api",
+ "openalpaca_app_support",
  "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_llm",

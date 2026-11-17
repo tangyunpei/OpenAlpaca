@@ -9,12 +9,14 @@
 //! asked before, is answered by a booting daemon's bound socket and by any
 //! other program on a recycled port.
 //!
-//! **[`decide_reuse`]** is the decision, pure, over what one look saw
+//! **[`decide_reuse`]** (`openalpaca_app_support::protocol` since Q05, for
+//! the CLI's same check) is the decision, pure, over what one look saw
 //! ([`Look`]): reuse, reuse with a note, a mismatch named and refused, a
 //! daemon still starting, or spawn. A discovery pid that is a live
 //! `openalpacad` beats every spawn verdict: a second daemon would only lose
 //! the singleton lock to it and exit, after rotating `daemon.log` under it.
-//! Nothing here ever kills a process or probes the lock
+//! The shell words each verdict: the note, the refusal and its `gui.log`
+//! line are its own. Nothing here ever kills a process or probes the lock
 //! (`daemon_lifecycle::singleton_lock_is_free` takes it, and can make a
 //! booting daemon exit).
 //!
@@ -26,10 +28,13 @@
 //! line of `gui.log` (Q04-VERDICT), the reconnect ladder's mismatch among
 //! them ([`ladder_mismatch`], LADDER-LINE).
 
-use crate::{ShellError, did_not_start, record_spawned, spawn_daemon, store};
-use openalpaca_storage::daemon_lifecycle::{self, STARTING_BUDGET};
-use openalpaca_storage::discovery::Discovery;
-use openalpaca_storage::support::protocol;
+use crate::{ShellError, did_not_start, record_spawned, spawn_daemon};
+use openalpaca_app_support::daemon_lifecycle;
+use openalpaca_app_support::paths;
+use openalpaca_app_support::protocol::{
+    self, ClientBuild, Compat, DiscoveryRead, Health, Look, Mismatch, Reused, STARTING_BUDGET,
+    Verdict, decide_reuse, needs_pid, read_discovery_bytes,
+};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -38,81 +43,16 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // ============================================================================
-// The shell's own build
+// The shell's own build, and what one look reads
 // ============================================================================
 
-/// The protocols and version a shell judges a daemon by.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ShellBuild {
-    /// The protocol it speaks (`support::protocol::PROTOCOL`).
-    pub(crate) protocol: u32,
-    /// The oldest it still works with (`OLDEST_SUPPORTED`).
-    pub(crate) oldest_supported: u32,
-    /// Its version, `CARGO_PKG_VERSION` (the workspace's).
-    pub(crate) version: &'static str,
-}
-
-impl ShellBuild {
-    /// This shell. The constants, never the debug override: the override is
-    /// a daemon's to report (`support::protocol::reported`).
-    pub(crate) const THIS: ShellBuild = ShellBuild {
-        protocol: protocol::PROTOCOL,
-        oldest_supported: protocol::OLDEST_SUPPORTED,
-        version: env!("CARGO_PKG_VERSION"),
-    };
-}
-
-// ============================================================================
-// What one look sees
-// ============================================================================
-
-/// What `discovery.json` held.
-#[derive(Debug, Clone)]
-pub(crate) enum DiscoveryRead {
-    /// No file: no daemon has written one, or the last removed it.
-    Missing,
-    /// A file that names nothing: not readable, not JSON, or no numeric
-    /// `pid`.
-    Unreadable,
-    /// JSON with a numeric `pid` that is not this build's `Discovery` — a
-    /// daemon of another build wrote it — with what of its build it says.
-    Foreign {
-        pid: u32,
-        version: Option<String>,
-        protocol: Option<u32>,
-    },
-    /// This build's `Discovery`.
-    Parsed(Discovery),
-}
-
-/// `discovery.json`'s bytes as a [`DiscoveryRead`].
-pub(crate) fn read_discovery_bytes(bytes: &[u8]) -> DiscoveryRead {
-    if let Ok(d) = serde_json::from_slice::<Discovery>(bytes) {
-        return DiscoveryRead::Parsed(d);
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return DiscoveryRead::Unreadable;
-    };
-    let number = |v: Option<&serde_json::Value>| {
-        v.and_then(serde_json::Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok())
-    };
-    let Some(pid) = number(value.get("pid")) else {
-        return DiscoveryRead::Unreadable;
-    };
-    DiscoveryRead::Foreign {
-        pid,
-        version: value
-            .pointer("/build/version")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        protocol: number(value.pointer("/build/protocol")),
-    }
-}
+/// This shell's build: the protocol's constants, never the debug override
+/// (`protocol::reported`, a daemon's to report), and the app's version.
+pub(crate) const THIS_SHELL: ClientBuild = ClientBuild::this_build(env!("CARGO_PKG_VERSION"));
 
 /// The store's `discovery.json`, read now.
 fn read_discovery_file() -> DiscoveryRead {
-    let Ok(path) = store::discovery_path() else {
+    let Ok(path) = paths::discovery_path() else {
         return DiscoveryRead::Unreadable;
     };
     match std::fs::read(&path) {
@@ -122,204 +62,41 @@ fn read_discovery_file() -> DiscoveryRead {
     }
 }
 
-/// What the address answered to `GET /v1/health`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Health {
-    /// A daemon's health: `status` `ok`, its `instance_id`, and — from Q04
-    /// on — the `protocol` it speaks; `version` as it says.
-    Answered {
-        instance_id: String,
-        protocol: Option<u32>,
-        version: Option<String>,
-    },
-    /// No daemon's health — refused, silent past the timeout, closed early,
-    /// another status, another body — and why, for the log.
-    Unanswered(String),
-}
-
-/// One look at the world.
-#[derive(Debug, Clone)]
-pub(crate) struct Look {
-    pub(crate) discovery: DiscoveryRead,
-    /// What the file's address answered; [`Health::Unanswered`] when there
-    /// was no address to ask.
-    pub(crate) health: Health,
-    /// Whether the file's pid is a live `openalpacad`
-    /// (`daemon_lifecycle::pid_is_daemon`). Read only when [`needs_pid`]
-    /// says the decision turns on it, `false` otherwise.
-    pub(crate) pid_live: bool,
-}
-
-/// The pid whose liveness [`decide_reuse`] turns on, given what the file
-/// held and health answered: a foreign file's, or a parsed file's whose
-/// address did not answer as its daemon.
-pub(crate) fn needs_pid(discovery: &DiscoveryRead, health: &Health) -> Option<u32> {
-    match discovery {
-        DiscoveryRead::Foreign { pid, .. } => Some(*pid),
-        DiscoveryRead::Parsed(d) => match health {
-            Health::Answered { instance_id, .. } if *instance_id == d.instance_id => None,
-            _ => Some(d.pid),
-        },
-        DiscoveryRead::Missing | DiscoveryRead::Unreadable => None,
-    }
-}
-
 // ============================================================================
-// The decision
+// The verdicts, as the window and the log say them
 // ============================================================================
-
-/// A daemon to reuse: its file, the protocol and version it answered (its
-/// file's where health did not say), and the note the window shows.
-#[derive(Debug, Clone)]
-pub(crate) struct Reused {
-    pub(crate) discovery: Discovery,
-    pub(crate) protocol: u32,
-    pub(crate) version: String,
-    pub(crate) note: Option<String>,
-}
-
-/// A daemon this shell cannot use.
-#[derive(Debug, Clone)]
-pub(crate) struct Mismatch {
-    pid: u32,
-    pub(crate) daemon_version: Option<String>,
-    pub(crate) daemon_protocol: Option<u32>,
-    shell: ShellBuild,
-    /// Whether this build could read the daemon's file: a file it cannot is
-    /// another build's whose protocol may be unknown.
-    readable: bool,
-}
-
-/// What [`decide_reuse`] concluded.
-#[derive(Debug)]
-pub(crate) enum Verdict {
-    /// No daemon to reuse or protect: start one.
-    Spawn,
-    /// Use this one.
-    Reuse(Reused),
-    /// A live daemon this shell cannot use: say so, start nothing, stop
-    /// nothing.
-    Mismatch(Mismatch),
-    /// The file's pid is a live `openalpacad` that does not answer as the
-    /// file's daemon: wait for it, start nothing.
-    Starting { pid: u32, instance_id: String },
-}
-
-/// The decision over one look (DU-29 (a)'s five steps, C-09's sixth case,
-/// A-20's seventh row):
-///
-/// 1. no file, or one that names nothing → spawn;
-/// 2. a file this build cannot read, over a live daemon → mismatch, over no
-///    live daemon → spawn;
-/// 3. the address answers as the file's daemon: its protocol — health's,
-///    else the file's `build.protocol` (a daemon from before Q04 answers
-///    none) — equal to the shell's → reuse, with a note when its version is
-///    another (seventh row); older but still supported → reuse with a note;
-///    newer, or older than the oldest supported → mismatch;
-/// 4. it does not (silent, a 404, another instance) and the pid is a live
-///    `openalpacad` → starting (sixth case);
-/// 5. it does not, and the pid is not → spawn.
-///
-/// The token's age is not judged: a daemon whose health answers is used
-/// whether its file was rotated or has lapsed (T21; liveness the authority).
-pub(crate) fn decide_reuse(look: &Look, shell: &ShellBuild) -> Verdict {
-    match &look.discovery {
-        DiscoveryRead::Missing | DiscoveryRead::Unreadable => Verdict::Spawn,
-        DiscoveryRead::Foreign {
-            pid,
-            version,
-            protocol,
-        } => {
-            if look.pid_live {
-                Verdict::Mismatch(Mismatch {
-                    pid: *pid,
-                    daemon_version: version.clone(),
-                    daemon_protocol: *protocol,
-                    shell: *shell,
-                    readable: false,
-                })
-            } else {
-                Verdict::Spawn
-            }
-        }
-        DiscoveryRead::Parsed(d) => {
-            if let Health::Answered {
-                instance_id,
-                protocol,
-                version,
-            } = &look.health
-                && *instance_id == d.instance_id
-            {
-                let protocol = protocol.unwrap_or(d.build.protocol);
-                let version = version.clone().unwrap_or_else(|| d.build.version.clone());
-                if protocol > shell.protocol || protocol < shell.oldest_supported {
-                    return Verdict::Mismatch(Mismatch {
-                        pid: d.pid,
-                        daemon_version: Some(version),
-                        daemon_protocol: Some(protocol),
-                        shell: *shell,
-                        readable: true,
-                    });
-                }
-                let note = compat_note(shell, protocol, &version);
-                return Verdict::Reuse(Reused {
-                    discovery: d.clone(),
-                    protocol,
-                    version,
-                    note,
-                });
-            }
-            if look.pid_live {
-                Verdict::Starting {
-                    pid: d.pid,
-                    instance_id: d.instance_id.clone(),
-                }
-            } else {
-                Verdict::Spawn
-            }
-        }
-    }
-}
 
 /// The note the window shows beside a daemon it uses, `None` for one of this
 /// shell's protocol and version — or one it does not use at all.
-pub(crate) fn compat_note(shell: &ShellBuild, protocol: u32, version: &str) -> Option<String> {
-    if protocol > shell.protocol || protocol < shell.oldest_supported {
-        return None;
-    }
-    if protocol < shell.protocol {
-        return Some(format!(
+pub(crate) fn compat_note(shell: &ClientBuild, protocol: u32, version: &str) -> Option<String> {
+    protocol::compat(shell, protocol, version)
+        .map(|why| note_sentence(shell, why, protocol, version))
+}
+
+/// The note for a daemon [`decide_reuse`] reused, worded from its reason.
+pub(crate) fn reuse_note(shell: &ClientBuild, reused: &Reused) -> Option<String> {
+    reused
+        .compat
+        .map(|why| note_sentence(shell, why, reused.protocol, &reused.version))
+}
+
+/// The sentence for `why`: an older protocol the app works with, or its own
+/// protocol at another version, each with the way to this app's own daemon.
+fn note_sentence(shell: &ClientBuild, why: Compat, protocol: u32, version: &str) -> String {
+    match why {
+        Compat::OlderProtocol => format!(
             "This daemon speaks protocol {protocol}, older than this app's {}; the app works \
              with it. To run this app's own daemon (version {}), use Stop daemon…, then Start \
              daemon.",
             shell.protocol, shell.version
-        ));
-    }
-    if version != shell.version {
-        return Some(format!(
+        ),
+        Compat::OtherVersion => format!(
             "This daemon is version {version} and this app is {}; they speak the same \
              protocol, so the app uses it. To run this app's own version, use Stop daemon…, \
              then Start daemon.",
             shell.version
-        ));
+        ),
     }
-    None
-}
-
-/// The mismatch a discovery file states by itself: `d`'s `build.protocol`
-/// outside what `shell` works with, `None` when it is inside. What
-/// `get_connection_info` refuses (the reconnect ladder's rung, which asks
-/// no health): the caller decides whether `d`'s pid is a live daemon first,
-/// since a mismatch is never said of a process that is gone.
-pub(crate) fn file_mismatch(d: &Discovery, shell: &ShellBuild) -> Option<Mismatch> {
-    let protocol = d.build.protocol;
-    (protocol > shell.protocol || protocol < shell.oldest_supported).then(|| Mismatch {
-        pid: d.pid,
-        daemon_version: Some(d.build.version.clone()),
-        daemon_protocol: Some(protocol),
-        shell: *shell,
-        readable: true,
-    })
 }
 
 /// The way out of a mismatch that runs this app's own daemon: the other
@@ -333,8 +110,20 @@ const STOP_AND_RECONNECT_SENTENCE: &str = "Stop that daemon with `openalpaca dae
                                            press Reconnect in Settings → Connection to start \
                                            this app's own.";
 
-impl Mismatch {
+/// A mismatch as this shell says it — the `who`, the `gui.log` line and the
+/// refusal the webview receives — over `support::protocol`'s
+/// [`Mismatch`], which carries the facts and no words.
+pub(crate) trait MismatchWords {
     /// The daemon refused: its pid, and the version and protocol it states.
+    fn who(&self) -> String;
+    /// The refusal's line in `gui.log`: whom, and this shell's protocol.
+    fn log_line(&self) -> String;
+    /// The mismatch as the webview receives it: the sentence, both sides'
+    /// protocols and the remedy.
+    fn into_error(self) -> ShellError;
+}
+
+impl MismatchWords for Mismatch {
     fn who(&self) -> String {
         let mut who = format!("pid {}", self.pid);
         if let Some(v) = &self.daemon_version {
@@ -346,7 +135,6 @@ impl Mismatch {
         who
     }
 
-    /// The refusal's line in `gui.log`: whom, and this shell's protocol.
     fn log_line(&self) -> String {
         let unreadable = if self.readable {
             ""
@@ -357,14 +145,14 @@ impl Mismatch {
             "refusal (mismatch) — {}{unreadable}; this app speaks protocol {}; nothing was \
              stopped or started.",
             self.who(),
-            self.shell.protocol
+            self.client.protocol
         )
     }
 
-    /// The mismatch as the webview receives it: the sentence, both sides'
-    /// protocols and the remedy.
-    pub(crate) fn into_error(self) -> ShellError {
-        let newer = self.daemon_protocol.is_none_or(|p| p > self.shell.protocol);
+    fn into_error(self) -> ShellError {
+        let newer = self
+            .daemon_protocol
+            .is_none_or(|p| p > self.client.protocol);
         let remedy = match (newer, self.daemon_protocol) {
             (true, Some(p)) => {
                 format!("Update the app to one that speaks protocol {p}, or {STOP_AND_RECONNECT}")
@@ -374,10 +162,10 @@ impl Mismatch {
         };
         let who = self.who();
         let message = if self.readable {
-            let range = if self.shell.oldest_supported < self.shell.protocol {
+            let range = if self.client.oldest_supported < self.client.protocol {
                 format!(
                     ", and reads back to protocol {}",
-                    self.shell.oldest_supported
+                    self.client.oldest_supported
                 )
             } else {
                 String::new()
@@ -385,7 +173,7 @@ impl Mismatch {
             format!(
                 "The daemon running ({who}) is not one this app can use: the app speaks \
                  protocol {}{range}. Nothing was stopped or started. {remedy}",
-                self.shell.protocol
+                self.client.protocol
             )
         } else {
             format!(
@@ -397,7 +185,7 @@ impl Mismatch {
             message,
             daemon_version: self.daemon_version,
             daemon_protocol: self.daemon_protocol,
-            shell_protocol: self.shell.protocol,
+            shell_protocol: self.client.protocol,
             remedy,
         }
     }
@@ -723,7 +511,7 @@ struct Answer {
 pub(crate) async fn ensure_with<W: World>(
     world: &mut W,
     starting_watch: &Mutex<StartingWatch>,
-    shell: &ShellBuild,
+    shell: &ClientBuild,
     window: &str,
 ) -> Result<Reused, ShellError> {
     let Answer { result, said, line } = answer(world, starting_watch, shell).await;
@@ -769,7 +557,7 @@ pub(crate) fn ladder_mismatch(
 async fn answer<W: World>(
     world: &mut W,
     starting_watch: &Mutex<StartingWatch>,
-    shell: &ShellBuild,
+    shell: &ClientBuild,
 ) -> Answer {
     // A spawn no ask followed for the budget (the window gone meanwhile)
     // is over, as the one ask's wait would have been by then: forgotten
@@ -982,9 +770,9 @@ impl World for RealWorld {
         // run's last words are never presented as this one's; else the
         // log's last lines, which the sentence names as such.
         tauri::async_runtime::spawn_blocking(move || {
-            let log_path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
+            let log_path = paths::daemon_log_path().map_err(|e| format!("{e:#}"))?;
             let tail =
-                store::read_log_tail(&log_path, from.unwrap_or(0), crate::TIMEOUT_TAIL_LINES)
+                paths::read_log_tail(&log_path, from.unwrap_or(0), crate::TIMEOUT_TAIL_LINES)
                     .unwrap_or_default();
             Ok::<_, String>((log_path, tail))
         })

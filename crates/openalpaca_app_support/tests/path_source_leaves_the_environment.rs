@@ -6,7 +6,7 @@
 //! for its boot line, and removes it — beside `OPENALPACA_MASTER_KEY` — so no
 //! child it spawns (a shell command, an MCP server, a plugin, a daemon an
 //! agent starts) inherits the app's word about a `PATH` it never captured.
-//! `store::take_path_source` is that step; this test drives it the way the
+//! `paths::take_path_source` is that step; this test drives it the way the
 //! daemon does and watches a child.
 //!
 //! **Its own process, one test**, as `openalpaca_llm`'s
@@ -16,7 +16,7 @@
 //! test in this file breaks that argument — put it in a file of its own.
 #![cfg(unix)]
 
-use openalpaca_storage::store::{PATH_SOURCE_ENV, take_path_source};
+use openalpaca_app_support::paths::{PATH_SOURCE_ENV, take_path_source};
 use std::ffi::OsStr;
 use std::process::Command;
 

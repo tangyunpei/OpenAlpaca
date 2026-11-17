@@ -85,7 +85,7 @@ fn a_malformed_edit_is_aborted_with_the_file_untouched() {
         "a failed re-parse leaves the file byte-identical"
     );
     // Nothing was rotated either — there was no successful write.
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
 
     // An edit closure that refuses is the same shape.
@@ -105,7 +105,7 @@ fn five_backups_are_kept_and_the_sixth_is_rotated_out() {
         atomic_write_toml(&path, set_enabled("github", i % 2 == 0), reparse_servers).unwrap();
     }
 
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     let mut kept: Vec<String> = std::fs::read_dir(&backups)
         .unwrap()
         .flatten()
@@ -145,7 +145,7 @@ fn the_byte_writer_replaces_the_file_and_keeps_what_it_replaced() {
     atomic_write_with_backup(&path, "second = 2\n").unwrap();
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "second = 2\n");
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     let kept: Vec<PathBuf> = std::fs::read_dir(&backups)
         .unwrap()
         .flatten()
@@ -164,7 +164,7 @@ fn the_byte_writer_keeps_five_versions_and_creates_a_missing_parent() {
 
     // A first write into a directory that does not exist yet rotates nothing.
     atomic_write_with_backup(&path, "n = 0\n").unwrap();
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
 
     for n in 1..=7 {
@@ -198,7 +198,7 @@ fn an_unparseable_file_is_copied_once() {
     let second = copy_unparseable_once(&path).expect("the same copy comes back");
     assert_eq!(first, second, "a boot loop must not fill the directory");
 
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     let copies = std::fs::read_dir(&backups)
         .unwrap()
         .flatten()
@@ -238,6 +238,6 @@ fn a_store_that_does_not_exist_yet_is_created() {
 
     assert!(std::fs::read_to_string(&path).unwrap().contains("enabled = false"));
     // Nothing to rotate on a first write.
-    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let backups = openalpaca_app_support::paths::backups_dir().unwrap();
     assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
 }

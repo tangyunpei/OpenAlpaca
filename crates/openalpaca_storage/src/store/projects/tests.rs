@@ -780,13 +780,19 @@ fn an_unguarded_home_store_stops_a_test_build_and_nothing_is_written() {
     ] {
         let _env = HomeStoreGuard::for_user_home(user_home.path(), store.as_deref());
         // With HOME moved, the store `home_root` falls back to is a temp dir.
-        assert_eq!(crate::store::home_root().unwrap(), real_store);
+        assert_eq!(
+            openalpaca_app_support::paths::home_root().unwrap(),
+            real_store
+        );
         let message = panic_of(|| {
             let _ = register_home();
         })
         .expect("the guard must refuse");
         assert!(
-            message.contains(&format!("{} {why}", crate::store::HOME_STORE_ENV)),
+            message.contains(&format!(
+                "{} {why}",
+                openalpaca_app_support::paths::HOME_STORE_ENV
+            )),
             "{message}"
         );
         assert!(
@@ -1081,9 +1087,12 @@ fn register_writes_only_under_the_home_store_it_checked_when_the_variable_change
                 // writes the variable takes the same lock.
                 unsafe {
                     if unset {
-                        std::env::remove_var(crate::store::HOME_STORE_ENV);
+                        std::env::remove_var(openalpaca_app_support::paths::HOME_STORE_ENV);
                     } else {
-                        std::env::set_var(crate::store::HOME_STORE_ENV, &other_store);
+                        std::env::set_var(
+                            openalpaca_app_support::paths::HOME_STORE_ENV,
+                            &other_store,
+                        );
                     }
                 }
             }));

@@ -78,8 +78,8 @@ After installation:
 
 Everything the daemon owns is under one root, `~/.openalpaca/` on every
 platform (`OPENALPACA_HOME_STORE` overrides it; absolute paths only). The GUI
-does not choose this layout — it asks the storage crate for it
-(`crates/openalpaca_storage/src/store/mod.rs`):
+does not choose this layout — it asks the app-support crate for it
+(`crates/openalpaca_app_support/src/paths.rs`):
 
 ```text
 ~/.openalpaca/

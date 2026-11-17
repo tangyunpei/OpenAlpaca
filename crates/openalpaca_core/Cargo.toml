@@ -46,6 +46,7 @@ shell-escape.workspace = true
 openalpaca_api.workspace = true
 openalpaca_llm.workspace = true
 openalpaca_mcp = { path = "../openalpaca_mcp" }
+openalpaca_app_support.workspace = true
 openalpaca_storage.workspace = true
 
 # R45 (storage design §11): `tools::platform::run_bounded` kills a timed-out

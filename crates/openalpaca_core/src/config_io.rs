@@ -204,7 +204,7 @@ fn write_locked(
 /// handle, because this is a diagnostic, not the operation.
 pub fn copy_unparseable_once(path: &Path) -> Option<PathBuf> {
     let bytes = std::fs::read(path).ok()?;
-    let dir = openalpaca_storage::store::backups_dir().ok()?;
+    let dir = openalpaca_app_support::paths::backups_dir().ok()?;
     let basename = file_name(path);
     let prefix = format!("{basename}.unparseable-");
 
@@ -258,7 +258,7 @@ fn acquire_write_lock(path: &Path) -> Result<file_lock::FileLock, ConfigWriteErr
 /// Keep the five newest prior versions under `state/backups/` — the machine's
 /// area, never beside the human's file.
 fn rotate_backup(path: &Path, contents: &str) {
-    let Ok(dir) = openalpaca_storage::store::backups_dir() else {
+    let Ok(dir) = openalpaca_app_support::paths::backups_dir() else {
         tracing::warn!(path = %path.display(), "no backups directory; skipping rotation");
         return;
     };

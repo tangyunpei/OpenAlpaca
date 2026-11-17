@@ -41,6 +41,7 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use events::EventBroadcaster;
+use openalpaca_app_support::{discovery, paths};
 use openalpaca_core::{
     bus::EventBus,
     chat::{ChatService, ChatStreamManager},
@@ -53,7 +54,7 @@ use openalpaca_core::{
     runner::LoopConfig,
 };
 use openalpaca_llm::keys::key_encryption::KeyEncryptor;
-use openalpaca_storage::{Database, discovery, store};
+use openalpaca_storage::{Database, store};
 use openalpaca_wake::manager::WakeManager;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -151,7 +152,7 @@ fn main() -> Result<()> {
 
     // D1: master key always in the state dir (canonical, CWD-independent).
     // Nothing relocates one from an older install's data directory (D-D).
-    let master_key_dir = store::master_key_dir().context("Failed to resolve the state dir")?;
+    let master_key_dir = paths::master_key_dir().context("Failed to resolve the state dir")?;
 
     // D6+D7: ensure_at is race-safe; on failure, fail fast.
     // F3: the key stays in this process. It is installed as openalpaca_llm's
@@ -191,7 +192,7 @@ fn main() -> Result<()> {
     // this daemon spawns inherits the app's word about a PATH it never
     // captured for it.
     // SAFETY: as the master key's step above — no other thread exists yet.
-    let path_source = bootstrap::parse_path_source(unsafe { store::take_path_source() }.as_deref());
+    let path_source = bootstrap::parse_path_source(unsafe { paths::take_path_source() }.as_deref());
 
     // Install OS signal handlers BEFORE the tokio runtime starts.
     // This calls sigaction() in the single main thread, before any thread pools
@@ -223,7 +224,7 @@ async fn async_main(
     // it. Read once, up front — `GET /v1/status`'s `log_path` must be `null`
     // for a daemon this env var was never set on, even when `daemon.log`
     // exists at the usual path (Important #3, T44 fix round 1).
-    let managed_log = std::env::var_os(store::MANAGED_LOG_ENV).is_some();
+    let managed_log = std::env::var_os(paths::MANAGED_LOG_ENV).is_some();
 
     // Step 0c (Q21): where this daemon's PATH came from, as the preamble
     // read it. The source and the capture's time, and the variables the app
@@ -252,7 +253,7 @@ async fn async_main(
     ));
 
     // Step 3: Initialize database
-    let db_path = store::database_path()?;
+    let db_path = paths::database_path()?;
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
     // R24: a project re-point the previous process did not finish is
@@ -439,7 +440,7 @@ async fn async_main(
     let cost_tracker_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
     // Initialize PluginManager
-    let plugin_dir = store::plugins_dir()?;
+    let plugin_dir = paths::plugins_dir()?;
     let plugin_manager = Arc::new(
         openalpaca_plugins::PluginManager::new(
             plugin_dir,

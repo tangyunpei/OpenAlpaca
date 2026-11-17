@@ -16,7 +16,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::store;
+use crate::paths;
 
 // ============================================================================
 // Data Structures
@@ -128,8 +128,8 @@ pub fn generate_token() -> String {
 pub fn write_discovery_atomic(d: &Discovery) -> anyhow::Result<PathBuf> {
     // `state_dir()` creates the directory (0700 on Unix) if it is missing;
     // `discovery_path()` itself is a pure path query.
-    store::state_dir()?;
-    let path = store::discovery_path()?;
+    paths::state_dir()?;
+    let path = paths::discovery_path()?;
     let tmp = path.with_extension("json.tmp");
 
     let json = serde_json::to_vec_pretty(d).context("Failed to serialize discovery")?;
@@ -169,7 +169,7 @@ pub fn write_discovery_atomic(d: &Discovery) -> anyhow::Result<PathBuf> {
 /// Reads discovery.json if it exists.
 /// Returns None if the file doesn't exist, error if it exists but is invalid.
 pub fn read_discovery() -> anyhow::Result<Option<Discovery>> {
-    let path = store::discovery_path()?;
+    let path = paths::discovery_path()?;
     if !path.exists() {
         return Ok(None);
     }
@@ -180,7 +180,7 @@ pub fn read_discovery() -> anyhow::Result<Option<Discovery>> {
 
 /// Removes discovery.json (called during daemon shutdown).
 pub fn remove_discovery() -> anyhow::Result<()> {
-    let path = store::discovery_path()?;
+    let path = paths::discovery_path()?;
     if path.exists() {
         fs::remove_file(&path).context("Failed to remove discovery.json")?;
     }
@@ -229,8 +229,8 @@ pub fn is_process_alive(_pid: u32) -> bool {
 pub fn acquire_single_instance_lock(block: bool) -> anyhow::Result<file_lock::FileLock> {
     // `state_dir()` creates the directory (0700 on Unix) if it is missing;
     // `lock_path()` itself is a pure path query.
-    store::state_dir()?;
-    let lock_path = store::lock_path()?;
+    paths::state_dir()?;
+    let lock_path = paths::lock_path()?;
     let lock_path_str = lock_path.to_str().context("Lock path is not valid UTF-8")?;
 
     let options = file_lock::FileOptions::new()
@@ -276,7 +276,7 @@ pub fn make_discovery(host: &str, port: u16, instance_id: String, version: &str)
         auth: issue_auth(now),
         build: Build {
             version: version.to_string(),
-            protocol: crate::support::protocol::reported(),
+            protocol: crate::protocol::reported(),
         },
     }
 }

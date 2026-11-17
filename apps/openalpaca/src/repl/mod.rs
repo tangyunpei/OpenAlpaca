@@ -29,7 +29,7 @@ fn keep_sigint_from_ending_the_repl() -> std::io::Result<()> {
 
 fn history_path() -> anyhow::Result<std::path::PathBuf> {
     // Machine state, not something the user edits — it lives under state/.
-    let dir = openalpaca_storage::store::state_dir()?;
+    let dir = openalpaca_app_support::paths::state_dir()?;
     Ok(dir.join("repl_history"))
 }
 

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use openalpaca_storage::{daemon_lifecycle, discovery, store};
+use openalpaca_app_support::{daemon_lifecycle, discovery, paths};
+use openalpaca_storage::store;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -33,15 +34,15 @@ pub fn start_daemon() -> Result<()> {
     println!("🚀 Starting OpenAlpaca Daemon...");
 
     let runtime_dir = ensure_runtime_dirs()?;
-    let config_dir = store::ensure_runtime_config_dir()?;
-    store::logs_dir().context("Failed to create the daemon log directory")?;
-    let log_path = store::daemon_log_path()?;
+    let config_dir = paths::ensure_runtime_config_dir()?;
+    paths::logs_dir().context("Failed to create the daemon log directory")?;
+    let log_path = paths::daemon_log_path()?;
     // Bound it before opening it: a log that is already past its cap becomes
     // `daemon.log.1` and this run starts a fresh one. A rotation that fails is
     // reported and not fatal — a daemon that will not start because its log
     // could not be renamed would be the worse bug. The rotation is the
     // store's, shared with the GUI sidecar, the other launcher.
-    if let Err(e) = store::rotate_daemon_log() {
+    if let Err(e) = paths::rotate_daemon_log() {
         println!("⚠️  Could not rotate the daemon log ({e:#}); appending to it as it is.");
     }
     // Append, not truncate: the rotation is what bounds the file, so a restart
@@ -116,7 +117,7 @@ pub fn stop_daemon() -> Result<StopRequest> {
 /// Whether `discovery.json` names a live `openalpacad` (not a recycled PID).
 ///
 /// The CLI's one name for the predicate; the implementation is shared with
-/// the app shell in `openalpaca_storage::daemon_lifecycle`.
+/// the app shell in `openalpaca_app_support::daemon_lifecycle`.
 pub fn is_daemon_running() -> bool {
     daemon_lifecycle::running_daemon_pid().is_some()
 }
@@ -167,9 +168,9 @@ pub fn start_gui() -> Result<()> {
 /// (16 MB, three older generations), like `daemon.log`. A rotation that fails
 /// is reported and not fatal.
 fn open_gui_dev_log() -> Result<(PathBuf, fs::File)> {
-    store::logs_dir().context("Failed to create the GUI log directory")?;
-    let log_path = store::gui_dev_log_path()?;
-    if let Err(e) = store::rotate_gui_dev_log() {
+    paths::logs_dir().context("Failed to create the GUI log directory")?;
+    let log_path = paths::gui_dev_log_path()?;
+    if let Err(e) = paths::rotate_gui_dev_log() {
         println!("⚠️  Could not rotate the GUI dev log ({e:#}); appending to it as it is.");
     }
     let log_file = fs::OpenOptions::new()
@@ -238,14 +239,14 @@ fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: 
     // — mark it so `GET /v1/status` can tell it apart from a daemon nobody
     // pointed at the file (Important #3, T44 fix round 1). The GUI sidecar
     // sets the same marker for the same reason (T30).
-    cmd.env(store::MANAGED_LOG_ENV, "1");
+    cmd.env(paths::MANAGED_LOG_ENV, "1");
     cmd
 }
 
 fn ensure_runtime_dirs() -> Result<PathBuf> {
     let home_root = store::ensure_store(&store::StoreScope::Home)
         .context("Failed to create the OpenAlpaca home store")?;
-    store::ensure_runtime_config_dir().context("Failed to create the runtime config directory")?;
+    paths::ensure_runtime_config_dir().context("Failed to create the runtime config directory")?;
     Ok(home_root)
 }
 
@@ -461,7 +462,7 @@ mod tests {
     fn a_dev_launch_appends_to_gui_dev_log_and_truncates_nothing() {
         let tmp = tempfile::tempdir().expect("a scratch root");
         let _env = crate::test_util::EnvSandbox::enter(tmp.path());
-        let logs = store::logs_dir().expect("the scratch logs dir");
+        let logs = paths::logs_dir().expect("the scratch logs dir");
         fs::write(logs.join("gui.log"), "the shell's own line\n").unwrap();
         fs::write(logs.join("gui-dev.log"), "an earlier dev launch\n").unwrap();
 
@@ -485,13 +486,13 @@ mod tests {
         // like daemon.log; gui.log is still left alone.
         fs::File::create(logs.join("gui-dev.log"))
             .unwrap()
-            .set_len(store::DAEMON_LOG_MAX_BYTES + 1)
+            .set_len(paths::DAEMON_LOG_MAX_BYTES + 1)
             .unwrap();
         let (_, file) = open_gui_dev_log().expect("the dev log opens again");
         assert_eq!(file.metadata().unwrap().len(), 0, "a fresh gui-dev.log");
         assert_eq!(
             fs::metadata(logs.join("gui-dev.log.1")).unwrap().len(),
-            store::DAEMON_LOG_MAX_BYTES + 1,
+            paths::DAEMON_LOG_MAX_BYTES + 1,
             "the full one rotated to gui-dev.log.1"
         );
         assert_eq!(
@@ -530,7 +531,7 @@ mod tests {
 
         let managed = cmd
             .get_envs()
-            .find(|(key, _)| *key == std::ffi::OsStr::new(store::MANAGED_LOG_ENV))
+            .find(|(key, _)| *key == std::ffi::OsStr::new(paths::MANAGED_LOG_ENV))
             .and_then(|(_, value)| value);
         assert_eq!(managed, Some(std::ffi::OsStr::new("1")));
     }

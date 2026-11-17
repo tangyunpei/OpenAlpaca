@@ -36,12 +36,13 @@ impl KeyEncryptor {
     /// This crate sits below `openalpaca_storage` in the dependency graph, so it
     /// never resolves a path of its own: a process that wants a key file says
     /// which directory holds it ([`Self::load_or_generate_at`], with
-    /// `store::master_key_dir()`). The daemon does that once in its boot
-    /// preamble and installs the key here — in process memory, never in its
-    /// environment, so no program it spawns receives it (F3) — and everything
-    /// downstream of it — router construction, keychain migration, the settings
-    /// service — reads the same key without knowing where it lives. The
-    /// environment read is the fallback the CLI and the test harnesses use.
+    /// `openalpaca_app_support::paths::master_key_dir()`). The daemon does
+    /// that once in its boot preamble and installs the key here — in process
+    /// memory, never in its environment, so no program it spawns receives it
+    /// (F3) — and everything downstream of it — router construction, keychain
+    /// migration, the settings service — reads the same key without knowing
+    /// where it lives. The environment read is the fallback the CLI and the
+    /// test harnesses use.
     pub fn from_env() -> Result<Self, String> {
         Self::from_env_opt()?.ok_or_else(|| {
             format!(

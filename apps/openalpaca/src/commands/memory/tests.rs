@@ -7,6 +7,7 @@
 use super::*;
 use crate::test_util::{EnvSandbox, LockHolder, json_answer, serve};
 use clap::Parser;
+use openalpaca_app_support::paths;
 use openalpaca_storage::Database;
 use openalpaca_storage::memory_files::{Actor, NewNote, PartitionHealth, owner_key};
 use tempfile::tempdir;
@@ -396,7 +397,7 @@ async fn a_409_keeps_the_edited_text_in_a_named_temp_file() {
         "{}",
         kept_at.display()
     );
-    let editor_folder = store::home_root().unwrap().join("state").join("editor");
+    let editor_folder = paths::home_root().unwrap().join("state").join("editor");
     assert_eq!(
         kept_at.parent(),
         Some(editor_folder.as_path()),
@@ -520,7 +521,7 @@ async fn the_edit_buffer_is_made_in_the_stores_state_editor_folder_at_0700() {
         .unwrap()
         .clone()
         .expect("the editor was opened");
-    let folder = store::home_root().unwrap().join("state").join("editor");
+    let folder = paths::home_root().unwrap().join("state").join("editor");
     assert_eq!(
         buffer.parent(),
         Some(folder.as_path()),
@@ -541,7 +542,7 @@ async fn the_edit_buffer_is_made_in_the_stores_state_editor_folder_at_0700() {
 /// The sandboxed store's database with the owner the daemon would have
 /// minted, so the local verbs have an owner id to read under the lock.
 fn seed_owner(owner_id: &str) {
-    let path = store::database_path().unwrap();
+    let path = paths::database_path().unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let db = Database::open(&path).unwrap();
     ConfigRepository::new(&db)
@@ -556,7 +557,7 @@ fn repair_and_adopt_refuse_while_the_store_lock_is_held() {
     let tmp = tempdir().unwrap();
     let _env = EnvSandbox::enter(tmp.path());
     seed_owner("reborn");
-    let root = store::home_root().unwrap();
+    let root = paths::home_root().unwrap();
     std::fs::create_dir_all(root.join("state")).unwrap();
     let _holder = LockHolder::spawn(&root);
 
@@ -631,7 +632,7 @@ fn repair_lifts_a_quarantine_and_adopt_rebinds_an_orphan() {
     assert!(format!("{err:#}").contains("already exists"), "{err:#}");
 
     // With the current owner's partition gone, the adoption goes through.
-    let owners = store::home_root().unwrap().join("memory").join("owners");
+    let owners = paths::home_root().unwrap().join("memory").join("owners");
     std::fs::remove_dir_all(owners.join(&new_key)).unwrap();
     std::fs::remove_file(files::snapshot_path_for(&format!("home-{new_key}")).unwrap()).unwrap();
     adopt_locally(&old_key).unwrap();
@@ -791,7 +792,7 @@ fn project_names_a_chosen_folder_moved_behind_a_link_by_its_old_root() {
 
     let sent = sent_path(&at);
     let answered = daemon_write_root(&sent);
-    let db_path = store::database_path().unwrap();
+    let db_path = paths::database_path().unwrap();
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
     let db = Database::open(&db_path).unwrap();
     openalpaca_storage::IdentityRepository::new(&db)
@@ -1042,7 +1043,7 @@ fn repair_answers_from_the_home_notes_for_an_unregistered_project() {
     })
     .unwrap();
 
-    assert!(!store::home_root().unwrap().join("projects").exists());
+    assert!(!paths::home_root().unwrap().join("projects").exists());
     assert!(!repo.join(".openalpaca").exists());
 }
 
