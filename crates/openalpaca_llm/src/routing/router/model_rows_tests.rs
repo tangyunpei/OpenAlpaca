@@ -1205,3 +1205,627 @@ async fn a_later_discovery_s_reading_replaces_a_left_out_flag() {
         );
     }
 }
+
+// ── BARE-NOT-READING, Rev 115 (3) (c) and (4) (b): a failed `/api/show` ──
+
+/// An Ollama with `tag` installed whose `/api/show` answers with vision and
+/// no tools and a 32,768 window, or, while the returned switch is set,
+/// fails (a busy server's 500): discovery then registers the tag bare.
+async fn ollama_flaky(tag: &'static str) -> (MockHttpServer, Arc<std::sync::atomic::AtomicBool>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let failing = Arc::new(AtomicBool::new(false));
+    let switch = Arc::clone(&failing);
+    let server = MockHttpServer::start(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/api/tags") => {
+            MockResponse::json(serde_json::json!({"models": [{"name": tag}]}).to_string())
+        }
+        ("POST", "/api/show") if switch.load(Ordering::SeqCst) => MockResponse::error(500, "busy"),
+        ("POST", "/api/show") => MockResponse::json(
+            serde_json::json!({
+                "capabilities": ["completion", "vision"],
+                "model_info": {"llama.context_length": 32_768},
+            })
+            .to_string(),
+        ),
+        _ => MockResponse::not_found(),
+    })
+    .await;
+    (server, failing)
+}
+
+fn set(switch: &std::sync::atomic::AtomicBool, failing: bool) {
+    switch.store(failing, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// `id`'s window and its two discovered flags, as `(window, image, tools)`.
+fn read_of(registry: &ModelRegistry, id: &str) -> (u32, bool, bool) {
+    let info = info_of(registry, id);
+    (
+        info.context_window,
+        info.supports_image,
+        info.supports_tools,
+    )
+}
+
+/// What `/api/show` reads for the flaky tag.
+const GOOD: (u32, bool, bool) = (32_768, true, false);
+/// What a bare fallback registers: the local default window, no image
+/// support, tools assumed.
+const BARE: (u32, bool, bool) = (8_192, false, true);
+
+/// The review's probe of `cd6bf327`: after a good refresh, a failed
+/// `/api/show` leaves a priced tag as the good reading gave it — its
+/// image support, its want of tools and its 32,768 window — live and on a
+/// reload, whichever order the row and the first discovery came in. On
+/// the parent the bare fallback replaced the row's left-out flags (image
+/// `false`, tools `true`) and its recorded window (8,192 on a reload).
+#[tokio::test]
+async fn a_failed_api_show_keeps_a_priced_tag_s_last_good_reading() {
+    let (server, failing) = ollama_flaky("vision-tag").await;
+    let priced = [("vision-tag", priced_only())];
+    for row_first in [true, false] {
+        set(&failing, false);
+        let router = ollama_router(&server.base_url, if row_first { &priced } else { &[] });
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        let registry = router.model_registry();
+        if !row_first {
+            registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        }
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            GOOD,
+            "row first {row_first}: read"
+        );
+
+        set(&failing, true);
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            GOOD,
+            "row first {row_first}: after a failed /api/show, live"
+        );
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            GOOD,
+            "row first {row_first}: after a failed /api/show, reloaded"
+        );
+    }
+}
+
+/// A row-less tag keeps its good reading across a failed `/api/show` and
+/// a reload of an unrelated row. Green on the parent (a row-less entry's
+/// flags were never updated): a guard for the fix.
+#[tokio::test]
+async fn a_failed_api_show_keeps_a_row_less_tag_s_last_good_reading() {
+    let (server, failing) = ollama_flaky("vision-tag").await;
+    let router = ollama_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    let registry = router.model_registry();
+    assert_eq!(read_of(registry, "vision-tag"), GOOD, "read");
+    set(&failing, true);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert_eq!(
+        read_of(registry, "vision-tag"),
+        GOOD,
+        "after a failed /api/show"
+    );
+    registry.reload_from_config(&config_of(&[("other-tag", priced_only())]), &HashSet::new());
+    assert_eq!(read_of(registry, "vision-tag"), GOOD, "after a reload");
+}
+
+/// A row-less tag first registered bare (its first `/api/show` failed)
+/// takes the first good reading, window and flags: the bare registration
+/// does not hold the first reading's place, which a row-less entry keeps
+/// (*Rev 110* (2) (a) for the window; its flags were never updated). On
+/// the parent it kept 8,192, no image support and tools.
+#[tokio::test]
+async fn a_row_less_tag_first_registered_bare_takes_the_first_good_reading() {
+    let (server, failing) = ollama_flaky("vision-tag").await;
+    set(&failing, true);
+    let router = ollama_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    let registry = router.model_registry();
+    assert_eq!(read_of(registry, "vision-tag"), BARE, "registered bare");
+
+    set(&failing, false);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert_eq!(read_of(registry, "vision-tag"), GOOD, "then read");
+    // A second good reading changes nothing: the first is kept.
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert_eq!(read_of(registry, "vision-tag"), GOOD, "read again");
+}
+
+/// A priced tag first registered bare keeps today's local default until
+/// read (a reload in between included), then takes the good reading's
+/// window, live and on a later reload, whichever order the row and the
+/// bare registration came in. On the parent the bare default filled the
+/// row's empty window and the good reading's 32,768 never replaced it
+/// live; its flags were already read (the left-out rule), and are pinned
+/// here beside the window.
+#[tokio::test]
+async fn a_priced_tag_first_registered_bare_takes_the_good_window() {
+    let (server, failing) = ollama_flaky("vision-tag").await;
+    let priced = [("vision-tag", priced_only())];
+    for row_first in [true, false] {
+        set(&failing, true);
+        let router = ollama_router(&server.base_url, if row_first { &priced } else { &[] });
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        let registry = router.model_registry();
+        if !row_first {
+            registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        }
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            BARE,
+            "row first {row_first}: bare"
+        );
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            BARE,
+            "row first {row_first}: bare, reloaded"
+        );
+
+        set(&failing, false);
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            GOOD,
+            "row first {row_first}: read, live"
+        );
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            GOOD,
+            "row first {row_first}: read, reloaded"
+        );
+    }
+}
+
+/// A tag only ever registered bare keeps today's default — the local
+/// 8,192 window, no image support, tools assumed — live, on a reload of a
+/// row that leaves them out, across more failed refreshes, and after a
+/// `context` line written and taken out again. Green on
+/// the parent: a guard that a bare fallback still registers the tag as it
+/// did, and that a reload does not drop its window to the loop's 200,000.
+#[tokio::test]
+async fn a_tag_only_ever_registered_bare_keeps_today_s_default() {
+    let (server, failing) = ollama_flaky("vision-tag").await;
+    set(&failing, true);
+    let priced = [("vision-tag", priced_only())];
+
+    let router = ollama_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    let registry = router.model_registry();
+    assert_eq!(read_of(registry, "vision-tag"), BARE, "row-less");
+    assert!(info_of(registry, "vision-tag").discovered, "listed");
+
+    for row_first in [true, false] {
+        let router = ollama_router(&server.base_url, if row_first { &priced } else { &[] });
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        let registry = router.model_registry();
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            BARE,
+            "row first {row_first}: reloaded"
+        );
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        let info = info_of(registry, "vision-tag");
+        assert_eq!(
+            (
+                info.context_window,
+                info.supports_image,
+                info.supports_tools
+            ),
+            BARE,
+            "row first {row_first}: refreshed bare again"
+        );
+        assert!(info.discovered, "row first {row_first}: listed");
+        // A `context` the row states, then takes out again: the
+        // fallback's window comes back, as the recorded default did.
+        let sized = [(
+            "vision-tag",
+            ModelConfigEntry {
+                context: Some(16_384),
+                ..priced_only()
+            },
+        )];
+        registry.reload_from_config(&config_of(&sized), &HashSet::new());
+        assert_eq!(
+            info_of(registry, "vision-tag").context_window,
+            16_384,
+            "row first {row_first}: the row's own"
+        );
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            info_of(registry, "vision-tag").context_window,
+            8_192,
+            "row first {row_first}: the line taken out"
+        );
+    }
+}
+
+/// A row written after a bare registration that states `context` and
+/// both flags keeps them over the later good reading; one that leaves
+/// them out is filled by it. Green on the parent: a guard that the bare
+/// registration's place, given up to a good reading, is never a stated
+/// figure's.
+#[tokio::test]
+async fn a_row_stated_after_a_bare_registration_wins_over_the_good_reading() {
+    let (server, failing) = ollama_flaky("vision-tag").await;
+    set(&failing, true);
+    let router = ollama_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    let registry = router.model_registry();
+    let stated = [(
+        "vision-tag",
+        ModelConfigEntry {
+            context: Some(16_384),
+            supports_image: Some(false),
+            supports_tools: Some(true),
+            ..priced_only()
+        },
+    )];
+    registry.reload_from_config(&config_of(&stated), &HashSet::new());
+    set(&failing, false);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+    assert_eq!(
+        read_of(registry, "vision-tag"),
+        (16_384, false, true),
+        "the row's own, live"
+    );
+    registry.reload_from_config(&config_of(&stated), &HashSet::new());
+    assert_eq!(
+        read_of(registry, "vision-tag"),
+        (16_384, false, true),
+        "the row's own, reloaded"
+    );
+}
+
+/// What a keyed provider's listing reads: ids only, no capability and no
+/// window (the trait's `discover_models`, [`DiscoveredModel::bare`] for
+/// every id: OpenAI's own API, a compatible server, Anthropic's), recorded
+/// as a reading, as on the parent (pending-decisions *Rev 118*). A listed
+/// id no compiled row names, and no other provider reads, reads image
+/// `false`, tools `true` and no window, with no row and with a priced row
+/// that leaves them out, read before the listing or after it, live and on
+/// a reload. Green on the parent: a guard on the keyed path, which
+/// BARE-NOT-READING leaves as it was; an id another provider also reads is
+/// [`a_keyed_listing_of_an_id_ollama_reads_is_still_a_reading`].
+///
+/// [`DiscoveredModel::bare`]: crate::routing::model_registry::DiscoveredModel::bare
+#[tokio::test]
+async fn a_keyed_listing_reads_no_capabilities_as_before() {
+    const UNREAD: (u32, bool, bool) = (0, false, true);
+    let server = listing("gguf-listed").await;
+    let priced = [("gguf-listed", unsized_row("openai", Some(0.5), Some(1.0)))];
+    for (vendor, rows) in [
+        (false, &[][..]),
+        (false, &priced[..]),
+        (true, &[][..]),
+        (true, &priced[..]),
+    ] {
+        let provider = openai_at(&server.base_url).with_openai_api(vendor);
+        let runtime_base = if vendor {
+            "https://api.openai.com/v1".to_string()
+        } else {
+            format!("{}/v1", server.base_url)
+        };
+        let router = openai_router_over(provider, &runtime_base, rows);
+        router.refresh_models_for(&ProviderType::OpenAI).await;
+        let registry = router.model_registry();
+        let label = format!("vendor {vendor}, rows {}", rows.len());
+        assert_eq!(read_of(registry, "gguf-listed"), UNREAD, "{label}: live");
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            read_of(registry, "gguf-listed"),
+            UNREAD,
+            "{label}: reloaded"
+        );
+        router.refresh_models_for(&ProviderType::OpenAI).await;
+        assert_eq!(
+            read_of(registry, "gguf-listed"),
+            UNREAD,
+            "{label}: listed again"
+        );
+    }
+}
+
+/// [`a_keyed_listing_reads_no_capabilities_as_before`] for Anthropic's
+/// Models API, which is read for ids only.
+#[cfg(feature = "anthropic")]
+#[tokio::test]
+async fn anthropic_s_listing_reads_no_capabilities_as_before() {
+    const UNREAD: (u32, bool, bool) = (0, false, true);
+    let server = anthropic_listing().await;
+    let priced = [(
+        "claude-listed-test",
+        unsized_row("anthropic", Some(0.5), Some(1.0)),
+    )];
+    for rows in [&[][..], &priced[..]] {
+        let provider = anthropic_at(&server.base_url);
+        let mut providers = HashMap::new();
+        providers.insert(
+            ProviderType::Anthropic,
+            ProviderEntry {
+                provider: Arc::new(provider) as Arc<dyn LlmProvider>,
+                key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
+                    vec![ApiKey::new(
+                        "test".to_string(),
+                        ProviderType::Anthropic,
+                        "sk-test-not-a-key".to_string(),
+                    )],
+                    SelectionStrategy::RoundRobin,
+                ))),
+            },
+        );
+        let registry = ModelRegistry::new(HashMap::new());
+        registry.reload_from_config(&config_of(rows), &HashSet::new());
+        let router = LlmRouter::new(
+            providers,
+            registry,
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            "unset".to_string(),
+        );
+        router.refresh_models_for(&ProviderType::Anthropic).await;
+        let registry = router.model_registry();
+        let label = format!("rows {}", rows.len());
+        assert_eq!(
+            read_of(registry, "claude-listed-test"),
+            UNREAD,
+            "{label}: live"
+        );
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            read_of(registry, "claude-listed-test"),
+            UNREAD,
+            "{label}: reloaded"
+        );
+    }
+}
+
+/// An id taken out of the registry, alone or with its provider, takes
+/// what a bare fallback put on it with it: a row for it read later that
+/// leaves out `context` states none (`remove`'s and `remove_by_provider`'s
+/// clearing), as for a discovered window.
+#[test]
+fn a_removed_id_forgets_its_bare_fallback() {
+    let bare = || crate::routing::model_registry::ModelInfo {
+        provider: ProviderType::Ollama,
+        context_window: 8_192,
+        supports_image: false,
+        supports_tools: true,
+        ..compiled("gpt-6.1-sol")
+    };
+    let priced = [("bare-tag", priced_only())];
+    for by_provider in [false, true] {
+        let registry = ModelRegistry::new(HashMap::new());
+        registry.register_listed("bare-tag".to_string(), bare());
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            read_of(&registry, "bare-tag"),
+            BARE,
+            "by provider {by_provider}: kept by a reload"
+        );
+        if by_provider {
+            registry.remove_by_provider(&ProviderType::Ollama);
+        } else {
+            assert!(registry.remove("bare-tag"));
+        }
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            info_of(&registry, "bare-tag").context_window,
+            0,
+            "by provider {by_provider}: no window stated, none remembered"
+        );
+    }
+}
+
+/// An Anthropic Models API listing one id no compiled row names.
+#[cfg(feature = "anthropic")]
+async fn anthropic_listing() -> MockHttpServer {
+    // The path carries the page's query (`?limit=…`).
+    MockHttpServer::start(|req| match req.path.split('?').next() {
+        Some("/v1/models") => MockResponse::json(
+            serde_json::json!({
+                "data": [{"id": "claude-listed-test", "type": "model"}],
+                "has_more": false,
+                "last_id": "claude-listed-test",
+            })
+            .to_string(),
+        ),
+        _ => MockResponse::not_found(),
+    })
+    .await
+}
+
+/// The Anthropic provider built to call `base` (`/v1` added).
+#[cfg(feature = "anthropic")]
+fn anthropic_at(base: &str) -> crate::providers::anthropic::AnthropicProvider {
+    crate::providers::anthropic::AnthropicProvider::with_client(
+        loopback_client(TIMEOUT),
+        "sk-test-not-a-key".to_string(),
+        None,
+        None,
+    )
+    .with_api_base(format!("{base}/v1"))
+}
+
+/// What each discovery says it described: an `/api/show` answer
+/// (`described`); a failed `/api/show`, and a keyed provider's listing
+/// of ids (a compatible server's, OpenAI's own, Anthropic's), not — no
+/// window, image `false`, tools `true`. The router counts only Ollama's
+/// undescribed row as no reading (`refresh_models_for`); a keyed listing
+/// stays a reading ([`a_keyed_listing_of_an_id_ollama_reads_is_still_a_reading`]).
+/// It does not compile on the parent (`described` is new).
+#[tokio::test]
+async fn only_an_api_show_answer_is_described() {
+    let unread = |model: &crate::routing::model_registry::DiscoveredModel, label: &str| {
+        assert!(!model.described, "{label}: no reading");
+        assert_eq!(model.context_window, None, "{label}: no window");
+        assert!(!model.supports_image, "{label}: no image support");
+        assert!(model.supports_tools, "{label}: tools assumed");
+    };
+
+    let (server, failing) = ollama_flaky("vision-tag").await;
+    let ollama = ollama_at(&server.base_url);
+    let read = ollama.discover_models("").await.expect("listed");
+    assert_eq!(read.len(), 1);
+    assert!(read[0].described, "an /api/show answer is a reading");
+    set(&failing, true);
+    let bare = ollama.discover_models("").await.expect("listed");
+    assert_eq!(bare.len(), 1);
+    unread(&bare[0], "a failed /api/show");
+
+    let server = listing("gguf-listed").await;
+    for vendor in [false, true] {
+        let listed = openai_at(&server.base_url)
+            .with_openai_api(vendor)
+            .discover_models("sk-test-not-a-key")
+            .await
+            .expect("listed");
+        assert_eq!(listed.len(), 1);
+        unread(&listed[0], &format!("an OpenAI listing, vendor {vendor}"));
+    }
+
+    #[cfg(feature = "anthropic")]
+    {
+        let server = anthropic_listing().await;
+        let listed = anthropic_at(&server.base_url)
+            .discover_models("sk-test-not-a-key")
+            .await
+            .expect("listed");
+        assert_eq!(listed.len(), 1);
+        unread(&listed[0], "Anthropic's listing");
+    }
+}
+
+// ── BARE-NOT-READING's review: one id, read by Ollama, listed elsewhere ──
+
+/// A router over an Ollama at `ollama_base` and a keyed OpenAI-compatible
+/// server at `compat_base` (`/v1` added to each), its `[models]` rows read
+/// from `rows` as at boot: before any discovery. Each test refreshes the
+/// providers one at a time, in an order it names (`refresh_models` takes
+/// them in the map's order).
+fn ollama_and_compat_router(
+    ollama_base: &str,
+    compat_base: &str,
+    rows: &[(&str, ModelConfigEntry)],
+) -> LlmRouter {
+    let mut providers = HashMap::new();
+    providers.insert(
+        ProviderType::Ollama,
+        ProviderEntry {
+            provider: ollama_at(ollama_base),
+            key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
+                vec![],
+                SelectionStrategy::RoundRobin,
+            ))),
+        },
+    );
+    providers.insert(
+        ProviderType::OpenAI,
+        ProviderEntry {
+            provider: Arc::new(openai_at(compat_base)) as Arc<dyn LlmProvider>,
+            key_pool: Arc::new(ArcSwap::from_pointee(KeyPool::new(
+                vec![ApiKey::new(
+                    "test".to_string(),
+                    ProviderType::OpenAI,
+                    "sk-test-not-a-key".to_string(),
+                )],
+                SelectionStrategy::RoundRobin,
+            ))),
+        },
+    );
+    let registry = ModelRegistry::new(HashMap::new());
+    registry.reload_from_config(&config_of(rows), &HashSet::new());
+    let router = LlmRouter::new(
+        providers,
+        registry,
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "unset".to_string(),
+    );
+    runtime_base_url(&router, &format!("{compat_base}/v1"));
+    router
+}
+
+/// A keyed provider's listing stays what it was on the parent, a reading
+/// (pending-decisions *Rev 118*, an owner item marked for the advisor): an
+/// id Ollama reads and an OpenAI-compatible server also lists, for a
+/// priced row that leaves its flags out, takes the flags of whichever
+/// discovery ran last — the listing's image `false` and tools `true` when
+/// it ran after Ollama's reading, Ollama's when it ran before — live and
+/// on a reload. Green on the parent; red with the listing counted as no
+/// reading, where Ollama's reading always stood (the review's probe).
+#[tokio::test]
+async fn a_keyed_listing_of_an_id_ollama_reads_is_still_a_reading() {
+    let (ollama, _failing) = ollama_flaky("vision-tag").await;
+    let compat = listing("vision-tag").await;
+    let priced = [("vision-tag", unsized_row("openai", Some(0.5), Some(1.0)))];
+    for listing_last in [true, false] {
+        let router = ollama_and_compat_router(&ollama.base_url, &compat.base_url, &priced);
+        let order = if listing_last {
+            [ProviderType::Ollama, ProviderType::OpenAI]
+        } else {
+            [ProviderType::OpenAI, ProviderType::Ollama]
+        };
+        for provider in &order {
+            router.refresh_models_for(provider).await;
+        }
+        let registry = router.model_registry();
+        let expected = if listing_last {
+            (32_768, false, true)
+        } else {
+            GOOD
+        };
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            expected,
+            "listing last {listing_last}: live"
+        );
+        registry.reload_from_config(&config_of(&priced), &HashSet::new());
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            expected,
+            "listing last {listing_last}: reloaded"
+        );
+    }
+}
+
+/// A keyed listing, a reading as before, does not take over what a bare
+/// fallback left: a tag Ollama first registered bare, then a compatible
+/// server listed, takes Ollama's next good reading, window and flags,
+/// row-less or priced, live and on a reload. Red on the parent (the bare
+/// registration held the first reading's place) and with the listing
+/// replacing the bare fallback's record as a reading from Ollama does.
+#[tokio::test]
+async fn a_keyed_listing_leaves_a_bare_fallback_for_ollama_s_next_reading() {
+    let (ollama, failing) = ollama_flaky("vision-tag").await;
+    let compat = listing("vision-tag").await;
+    let priced = [("vision-tag", unsized_row("openai", Some(0.5), Some(1.0)))];
+    for rows in [&[][..], &priced[..]] {
+        let label = format!("rows {}", rows.len());
+        set(&failing, true);
+        let router = ollama_and_compat_router(&ollama.base_url, &compat.base_url, rows);
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        let registry = router.model_registry();
+        assert_eq!(read_of(registry, "vision-tag"), BARE, "{label}: bare");
+        router.refresh_models_for(&ProviderType::OpenAI).await;
+        assert_eq!(read_of(registry, "vision-tag"), BARE, "{label}: listed");
+
+        set(&failing, false);
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        assert_eq!(read_of(registry, "vision-tag"), GOOD, "{label}: read, live");
+        registry.reload_from_config(&config_of(rows), &HashSet::new());
+        assert_eq!(
+            read_of(registry, "vision-tag"),
+            GOOD,
+            "{label}: read, reloaded"
+        );
+    }
+}

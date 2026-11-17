@@ -267,7 +267,13 @@ registered with:
 - `discovered = true`
 
 A model whose capabilities omit `completion` — embedding-only — is not
-registered. A tag that disappears from `/api/tags` is withdrawn at the next
+registered. A tag whose `/api/show` fails (a busy server, its deadline, an
+error) stays listed with what an earlier answer gave it — a tag with no
+`[models]` row keeps its first answer's, a row's left-out flags the latest's
+— or, if none has, with 8192, no image support and tools assumed, which the
+next answer replaces. A tag withdrawn and pulled again while `/api/show`
+fails starts from those defaults until the next answer.
+A tag that disappears from `/api/tags` is withdrawn at the next
 refresh; a row the owner declared in `[models]` only stops being offered —
 the declaration itself is left alone, so a later `ollama pull` of that tag
 brings it back with the owner's own fields. A `[models]` row that leaves out

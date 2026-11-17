@@ -713,7 +713,11 @@ from the `vision` capability and tool support from `tools`. A model whose
 capabilities omit `completion` — an embedding-only model — is deliberately not
 registered: it is not something a turn could use. Nothing needs an API key and
 nothing needs a `[models]` row; a `[models."<id>"]` row you write by hand still
-overrides the discovered fields.
+overrides the discovered fields. If `/api/show` fails for a tag (Ollama busy,
+its deadline, an error), the tag stays listed with what an earlier answer gave
+it (a tag with no `[models]` row keeps its first answer's), or, if none has,
+or it was removed and pulled again, with 8192, no image support and tools
+assumed, until an answer reads it.
 
 ```bash
 openalpaca llm models                 # the catalogue as it stands

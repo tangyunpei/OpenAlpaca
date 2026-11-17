@@ -70,6 +70,47 @@ struct DiscoveredFlags {
     supports_tools: bool,
 }
 
+/// What a bare fallback ([`DiscoveredModel::bare`]) gave an id that no
+/// reading has replaced since (BARE-NOT-READING, *Rev 115* (3) (c) and (4)
+/// (b)): the default window it gave, kept whether or not it reached the
+/// live row, and whether the live row's window and flags are still its.
+/// Not a reading, so never in `discovered_windows` or `discovered_flags`;
+/// kept so that the bare registration does not hold the first reading's
+/// place, and so that a tag never read well keeps today's default across
+/// a reload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BareFallback {
+    /// The default window the fallback gave (the local 8,192), kept until
+    /// a reading whether or not it filled the live row (a row stating
+    /// `context` then had its own): what a reload of a row that has no
+    /// window of its own, a compiled row's or a reading's, takes, as
+    /// before — also once a `context` line is taken out again.
+    window: Option<u32>,
+    /// The live row's window is [`Self::window`]: given a row-less entry
+    /// the fallback registered or a `0` it filled, or taken by a reload.
+    /// The next reading's window replaces it; never a window a row states.
+    window_live: bool,
+    /// The live row's two flags are the fallback's: a row-less entry it
+    /// registered. The next reading's flags replace them; a `[models]` row
+    /// read since takes them over.
+    flags: bool,
+}
+
+/// How a discovery registers a model ([`ModelRegistry::register_discovered`],
+/// [`ModelRegistry::register_listed`],
+/// [`ModelRegistry::register_keyed_listing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Discovery {
+    /// A reading (Ollama's `/api/show` answer): recorded, and replacing
+    /// what a bare fallback left.
+    Reading,
+    /// A keyed provider's listing of ids: recorded as a reading, as
+    /// before, but replacing nothing a bare fallback left.
+    KeyedListing,
+    /// Ollama's failed `/api/show`: no reading.
+    BareFallback,
+}
+
 /// What a model's prompt cache costs, as multiples of the input rate the
 /// request pays (CACHE-MULT and CACHE-WRITE, the owner's items 9 and 10 of
 /// 2026-11-14).
@@ -184,6 +225,16 @@ pub struct DiscoveredModel {
     pub supports_image: bool,
     /// The model can be given tools.
     pub supports_tools: bool,
+    /// The provider described this model — Ollama's `/api/show` answered —
+    /// so its window and flags are a reading the registry records
+    /// ([`ModelRegistry::register_discovered`]). `false` for a
+    /// [`Self::bare`] row: a failed `/api/show` read nothing
+    /// ([`ModelRegistry::register_listed`]; BARE-NOT-READING, *Rev 115*
+    /// (3) (c) and (4) (b)); a keyed provider's listing of ids, also bare,
+    /// is still recorded as a reading, as before
+    /// ([`ModelRegistry::register_keyed_listing`]; pending-decisions
+    /// *Rev 118*).
+    pub described: bool,
 }
 
 impl DiscoveredModel {
@@ -192,12 +243,19 @@ impl DiscoveredModel {
     /// Tool support is assumed: every agent path needs tools, and a provider
     /// that does not describe its models has not said this one lacks them.
     /// Ollama, which does describe them, says so explicitly.
+    ///
+    /// Not described ([`Self::described`] `false`). From Ollama, no
+    /// reading: the registry lists the model with these defaults but keeps
+    /// what a reading gave it (a row-less entry its first, a row's left-out
+    /// flags the latest; an entry new again, after a withdrawal, takes
+    /// these). From a keyed provider's listing, recorded as before.
     pub fn bare(id: String) -> Self {
         Self {
             id,
             context_window: None,
             supports_image: false,
             supports_tools: true,
+            described: false,
         }
     }
 }
@@ -291,18 +349,27 @@ pub struct ModelRegistry {
     /// The flags each row left out ride with it (CAP-FLAGS).
     person_rows: RwLock<HashMap<String, PersonRow>>,
     /// The window a provider's discovery last gave each id, when it gave
-    /// one (Ollama's `/api/show`, or its 8,192 default): what a `[models]`
+    /// one (Ollama's `/api/show`, or the local 8,192 default for an answer
+    /// that names no length; never a bare fallback's, BARE-NOT-READING):
+    /// what a `[models]`
     /// row that leaves out `context` keeps when no compiled row names the
     /// id, however the row and the discovery are ordered (MODEL-ROWS-2,
     /// *Rev 102* (4) (b)). Kept apart from the row so that a reload never
     /// reads back, as discovered, a figure a deleted `context` line gave.
     discovered_windows: RwLock<HashMap<String, u32>>,
     /// The capability flags a provider's discovery last read for each id
-    /// (Ollama's `/api/show`; a bare listing's defaults): what a `[models]`
+    /// (Ollama's `/api/show`; a bare listing reads none, BARE-NOT-READING):
+    /// what a `[models]`
     /// row that leaves a flag out keeps when no compiled row names the id,
     /// however the row and the discovery are ordered (CAP-FLAGS, *Rev 110*
     /// (3) (b), as [`Self::discovered_windows`] does for `context`).
     discovered_flags: RwLock<HashMap<String, DiscoveredFlags>>,
+    /// What a bare fallback gave each id that no reading has replaced
+    /// since ([`BareFallback`]: its default window, applied or not, and
+    /// whether the live window and flags are its): cleared by a reading
+    /// and with an id taken out of the catalogue or its provider's, kept
+    /// on a withdrawal as the records are.
+    bare_fallbacks: RwLock<HashMap<String, BareFallback>>,
 }
 
 impl ModelRegistry {
@@ -313,6 +380,7 @@ impl ModelRegistry {
             person_rows: RwLock::new(HashMap::new()),
             discovered_windows: RwLock::new(HashMap::new()),
             discovered_flags: RwLock::new(HashMap::new()),
+            bare_fallbacks: RwLock::new(HashMap::new()),
         }
     }
 
@@ -611,7 +679,10 @@ impl ModelRegistry {
     /// window, else the one discovery gave the id, else none (`0`, which a
     /// later discovery fills and the agent loop reads as its own 200,000
     /// default) — never a figure of its own (MODEL-ROWS-2, *Rev 102* (4)
-    /// (b), *Rev 97*'s rule field by field).
+    /// (b), *Rev 97*'s rule field by field). A bare fallback's window is
+    /// no reading: with none of those, the row takes the window a bare
+    /// fallback gave the id, as before, until a reading replaces it
+    /// (BARE-NOT-READING).
     ///
     /// A capability flag the row leaves out is the same (CAP-FLAGS, *Rev
     /// 110* (3) (b)): the compiled row's flag, else what discovery last
@@ -635,6 +706,11 @@ impl ModelRegistry {
             .clone();
         let discovered_flags = self
             .discovered_flags
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let bare_fallbacks = self
+            .bare_fallbacks
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
@@ -674,6 +750,26 @@ impl ModelRegistry {
                 let flag = |stated: Option<bool>, of: fn(&ModelInfo) -> bool| {
                     stated.or(compiled_row.map(of))
                 };
+                // A window the row leaves out: the compiled row's, else the
+                // one discovery read, else the one a bare fallback gave,
+                // for the next reading to replace (BARE-NOT-READING), else
+                // none.
+                let window = entry
+                    .context
+                    .or(compiled_row.map(|row| row.context_window))
+                    .or_else(|| discovered_windows.get(model_id).copied());
+                let kept_window = bare_fallbacks.get(model_id).and_then(|bare| bare.window);
+                let fallback_window = kept_window.filter(|_| window.is_none());
+                self.keep_bare_fallback(
+                    model_id,
+                    BareFallback {
+                        window: kept_window,
+                        window_live: fallback_window.is_some(),
+                        // A row's flags are its own, the compiled row's or
+                        // a reading's, filled as left out.
+                        flags: false,
+                    },
+                );
                 self.register(
                     model_id.clone(),
                     ModelInfo {
@@ -681,11 +777,7 @@ impl ModelRegistry {
                         // A placeholder where `PriceGaps` names the half.
                         input_price_per_million: input.unwrap_or(0.0),
                         output_price_per_million: output.unwrap_or(0.0),
-                        context_window: entry
-                            .context
-                            .or(compiled_row.map(|row| row.context_window))
-                            .or_else(|| discovered_windows.get(model_id).copied())
-                            .unwrap_or(0),
+                        context_window: window.or(fallback_window).unwrap_or(0),
                         discovered: false,
                         supports_image: flag(entry.supports_image, |row| row.supports_image)
                             .or(read.map(|flags| flags.supports_image))
@@ -851,9 +943,9 @@ impl ModelRegistry {
 
     /// Taken before `person_rows` and `models`, never while holding either
     /// (nothing takes them the other way round; `person_rows` is likewise
-    /// never taken while holding `models`). `discovered_windows` and
-    /// `discovered_flags` are each never held while another of the five is
-    /// taken, nor taken while one is held.
+    /// never taken while holding `models`). `discovered_windows`,
+    /// `discovered_flags` and `bare_fallbacks` are each never held while
+    /// another of the six is taken, nor taken while one is held.
     fn local_server_providers(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
         self.local_server_providers
             .read()
@@ -1055,6 +1147,10 @@ impl ModelRegistry {
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .remove(model_id);
+        self.bare_fallbacks
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(model_id);
         self.models.write().unwrap_or_else(|p| p.into_inner()).remove(model_id).is_some()
     }
 
@@ -1091,6 +1187,15 @@ impl ModelRegistry {
         for id in &to_remove {
             flags.remove(id);
         }
+        drop(flags);
+        let mut bare = self
+            .bare_fallbacks
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        for id in &to_remove {
+            bare.remove(id);
+        }
+        drop(bare);
         to_remove
     }
 
@@ -1124,29 +1229,84 @@ impl ModelRegistry {
     /// (e.g. from defaults), mark it as discovered but preserve its
     /// pricing/context metadata. If new, insert with discovered=true.
     ///
-    /// A window the provider gave is also recorded on its own, for a
-    /// `[models]` row read later that leaves out `context`
-    /// ([`Self::reload_from_config`]); so are the capability flags it read,
-    /// for a row read later that leaves one out (CAP-FLAGS). A row read
-    /// before, for an id no compiled row names, takes the flags it left
-    /// out from this reading, the latest; a flag it states, and a compiled
-    /// row's, stay.
+    /// `info` is a reading: the provider described the model
+    /// ([`DiscoveredModel::described`]). The window it gave is also
+    /// recorded on its own, for a `[models]` row read later that leaves
+    /// out `context` ([`Self::reload_from_config`]); so are the capability
+    /// flags it read, for a row read later that leaves one out (CAP-FLAGS).
+    /// A row read before, for an id no compiled row names, takes the flags
+    /// it left out from this reading, the latest; a flag it states, and a
+    /// compiled row's, stay. What a bare fallback put on the live row
+    /// ([`Self::register_listed`]) this reading replaces, the window and,
+    /// for a row-less entry, the flags (BARE-NOT-READING): the bare
+    /// registration does not hold the first reading's place. A keyed
+    /// listing goes through [`Self::register_keyed_listing`].
     pub fn register_discovered(&self, model_id: String, info: ModelInfo) {
-        if info.context_window > 0 {
-            self.discovered_windows
-                .write()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(model_id.clone(), info.context_window);
-        }
+        self.register_discovery(model_id, info, Discovery::Reading);
+    }
+
+    /// Register a model Ollama listed but did not describe: a
+    /// [`DiscoveredModel::bare`] row from a failed `/api/show`, `info`
+    /// holding the fallback's defaults. Not a reading (BARE-NOT-READING,
+    /// *Rev 115* (3) (c) and (4) (b)): the model is listed as
+    /// [`Self::register_discovered`] lists it, but neither record is
+    /// written and no flag a row left out is filled, so the registry keeps
+    /// what a reading gave (a row-less entry its first, a row's left-out
+    /// flags the latest). A new entry is registered with the defaults — a
+    /// tag withdrawn and listed again while `/api/show` fails starts from
+    /// them too — and a row's empty window takes the fallback's, as
+    /// before; both stay until a reading replaces them ([`BareFallback`]).
+    pub fn register_listed(&self, model_id: String, info: ModelInfo) {
+        self.register_discovery(model_id, info, Discovery::BareFallback);
+    }
+
+    /// Register a model a keyed provider's listing named (Anthropic's,
+    /// OpenAI's, an OpenAI-compatible server's: ids only,
+    /// [`DiscoveredModel::bare`]). Recorded as a reading, as on the parent
+    /// of BARE-NOT-READING (pending-decisions *Rev 118*, an owner item:
+    /// counting it as no reading would change a row a person meets, an id
+    /// Ollama reads and a compatible server also lists), so the latest
+    /// discovery's flags still fill a row's left-out ones. It does not
+    /// take over what an Ollama bare fallback left ([`BareFallback`]),
+    /// which Ollama's next reading replaces.
+    pub fn register_keyed_listing(&self, model_id: String, info: ModelInfo) {
+        self.register_discovery(model_id, info, Discovery::KeyedListing);
+    }
+
+    fn register_discovery(&self, model_id: String, info: ModelInfo, discovery: Discovery) {
+        let described = discovery != Discovery::BareFallback;
+        let listed_window = info.context_window;
         let read = DiscoveredFlags {
             supports_image: info.supports_image,
             supports_tools: info.supports_tools,
         };
-        self.discovered_flags
-            .write()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(model_id.clone(), read);
-        let left_out = if COMPILED_IDS.contains(&model_id) {
+        let compiled = COMPILED_IDS.contains(&model_id);
+        // What a bare fallback left on the live row, which this reading
+        // replaces.
+        let replaced = if described {
+            if info.context_window > 0 {
+                self.discovered_windows
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(model_id.clone(), info.context_window);
+            }
+            self.discovered_flags
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(model_id.clone(), read);
+            if discovery == Discovery::Reading {
+                self.bare_fallbacks
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&model_id)
+                    .unwrap_or_default()
+            } else {
+                BareFallback::default()
+            }
+        } else {
+            BareFallback::default()
+        };
+        let left_out = if compiled || !described {
             None
         } else {
             self.person_rows
@@ -1156,14 +1316,20 @@ impl ModelRegistry {
                 .map(|row| row.left_out)
         };
         let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
-        match models.get_mut(&model_id) {
+        let fallback = match models.get_mut(&model_id) {
             Some(existing) => {
                 existing.discovered = true;
                 // A zero window is not a declaration, it is the absence of one
                 // — and the lead agent reads it verbatim. Fill it in when the
                 // provider has now told us the real length; everything a
-                // `[models]` row does declare still wins (L2).
+                // `[models]` row does declare still wins (L2). A bare
+                // fallback's default fills it too, as before, until a
+                // reading replaces it.
+                let mut fallback = BareFallback::default();
                 if existing.context_window == 0 && info.context_window > 0 {
+                    existing.context_window = info.context_window;
+                    fallback.window_live = !described;
+                } else if replaced.window_live && info.context_window > 0 {
                     existing.context_window = info.context_window;
                 }
                 if let Some(left_out) = left_out {
@@ -1174,12 +1340,59 @@ impl ModelRegistry {
                         existing.supports_tools = read.supports_tools;
                     }
                 }
+                if replaced.flags {
+                    existing.supports_image = read.supports_image;
+                    existing.supports_tools = read.supports_tools;
+                }
+                fallback
             }
             None => {
                 let mut new_info = info;
                 new_info.discovered = true;
-                models.insert(model_id, new_info);
+                let fallback = BareFallback {
+                    window: None,
+                    window_live: new_info.context_window > 0,
+                    flags: true,
+                };
+                models.insert(model_id.clone(), new_info);
+                if described {
+                    BareFallback::default()
+                } else {
+                    fallback
+                }
             }
+        };
+        drop(models);
+        if !described {
+            let mut fallbacks = self
+                .bare_fallbacks
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            let mut kept = fallbacks.get(&model_id).copied().unwrap_or_default();
+            if listed_window > 0 {
+                kept.window = Some(listed_window);
+            }
+            kept.window_live |= fallback.window_live;
+            kept.flags |= fallback.flags;
+            if kept == BareFallback::default() {
+                fallbacks.remove(&model_id);
+            } else {
+                fallbacks.insert(model_id, kept);
+            }
+        }
+    }
+
+    /// Set what a reload keeps of a bare fallback on `model_id`'s live row
+    /// ([`Self::reload_from_config`]): nothing kept clears the record.
+    fn keep_bare_fallback(&self, model_id: &str, kept: BareFallback) {
+        let mut fallbacks = self
+            .bare_fallbacks
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        if kept == BareFallback::default() {
+            fallbacks.remove(model_id);
+        } else {
+            fallbacks.insert(model_id.to_string(), kept);
         }
     }
 

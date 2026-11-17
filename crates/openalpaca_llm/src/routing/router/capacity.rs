@@ -90,7 +90,21 @@ impl LlmRouter {
                 let present: std::collections::HashSet<String> =
                     models.iter().map(|m| m.id.clone()).collect();
                 for model in &models {
-                    self.model_registry.register_discovered(
+                    // A model Ollama only named (a failed `/api/show`) is no
+                    // reading: it is listed, but the registry keeps what a
+                    // reading gave (BARE-NOT-READING). A keyed provider's
+                    // listing of ids stays a reading, as before
+                    // (pending-decisions *Rev 118*).
+                    use crate::routing::model_registry::ModelRegistry;
+                    let register = if model.described {
+                        ModelRegistry::register_discovered
+                    } else if provider_type.is_local() {
+                        ModelRegistry::register_listed
+                    } else {
+                        ModelRegistry::register_keyed_listing
+                    };
+                    register(
+                        &self.model_registry,
                         model.id.clone(),
                         ModelInfo {
                             provider: provider_type.clone(),

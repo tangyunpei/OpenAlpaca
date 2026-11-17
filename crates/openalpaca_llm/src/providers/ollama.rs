@@ -167,6 +167,7 @@ impl OllamaProvider {
             context_window,
             supports_image: capabilities.contains(&"vision"),
             supports_tools: capabilities.contains(&"tools"),
+            described: true,
         }))
     }
 }
@@ -244,7 +245,7 @@ impl LlmProvider for OllamaProvider {
                     tracing::warn!(
                         model = %id,
                         error = %e,
-                        "Ollama /api/show failed — registering the model without its context length or capabilities"
+                        "Ollama /api/show failed — the model stays listed with the context length and capabilities last read, or the defaults if none was"
                     );
                     models.push(DiscoveredModel::bare(id));
                 }
