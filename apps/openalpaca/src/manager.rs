@@ -5,7 +5,7 @@ use openalpaca_app_support::{daemon_lifecycle, discovery, paths};
 use openalpaca_storage::store;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use sysinfo::System;
 
 const DAEMON_BIN_ENV: &str = "OPENALPACA_DAEMON_BIN";
@@ -24,11 +24,63 @@ enum GuiLaunch {
     DevTauri { workspace_root: PathBuf },
 }
 
-/// Start the Daemon if not running.
-pub fn start_daemon() -> Result<()> {
+/// The daemon process [`start_daemon`] spawned, kept so the wait after the
+/// start sees it exit (`reuse::Spawned`): dropping it, as the start did
+/// before, left the wait to find out only from the files.
+pub struct SpawnedDaemon {
+    child: Child,
+    /// Whether the child is the development fallback's `cargo run`, which
+    /// exits when the daemon it runs does.
+    cargo_run: bool,
+    /// The daemon log's length just before the spawn.
+    log_start: u64,
+}
+
+impl SpawnedDaemon {
+    pub(crate) fn new(child: Child, cargo_run: bool, log_start: u64) -> Self {
+        Self {
+            child,
+            cargo_run,
+            log_start,
+        }
+    }
+}
+
+impl crate::reuse::Spawned for SpawnedDaemon {
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn who(&self) -> String {
+        let pid = self.child.id();
+        if self.cargo_run {
+            format!("The `cargo run` this start spawned for the daemon (pid {pid})")
+        } else {
+            format!("The daemon this start spawned (pid {pid})")
+        }
+    }
+
+    fn exited(&mut self) -> Option<String> {
+        // An error asking is no answer: the wait goes on as it would have
+        // without the child, on the files alone.
+        self.child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| status.to_string())
+    }
+
+    fn log_start(&self) -> u64 {
+        self.log_start
+    }
+}
+
+/// Start the Daemon if not running: the process spawned, `None` when one
+/// was running already.
+pub fn start_daemon() -> Result<Option<SpawnedDaemon>> {
     if is_daemon_running() {
         println!("⚠️  Daemon is already running.");
-        return Ok(());
+        return Ok(None);
     }
 
     println!("🚀 Starting OpenAlpaca Daemon...");
@@ -52,6 +104,9 @@ pub fn start_daemon() -> Result<()> {
         .append(true)
         .open(&log_path)
         .with_context(|| format!("Failed to open daemon log file: {}", log_path.display()))?;
+    // Where this run's lines begin, for the tail the wait shows if the
+    // daemon exits at boot; an unreadable length shows the whole log's.
+    let log_start = log_file.metadata().map(|m| m.len()).unwrap_or(0);
 
     let current_exe = std::env::current_exe().context("Failed to resolve current executable")?;
     let launch = resolve_daemon_launch(&current_exe)?;
@@ -64,7 +119,12 @@ pub fn start_daemon() -> Result<()> {
     .stderr(Stdio::from(log_file))
     .stdin(Stdio::null());
 
-    cmd.spawn().context("Failed to spawn daemon process")?;
+    let child = cmd.spawn().context("Failed to spawn daemon process")?;
+    let spawned = SpawnedDaemon::new(
+        child,
+        matches!(launch, DaemonLaunch::CargoRun { .. }),
+        log_start,
+    );
 
     match launch {
         DaemonLaunch::Binary(path) => {
@@ -75,7 +135,7 @@ pub fn start_daemon() -> Result<()> {
         }
     }
     println!("📝 Daemon log: {}", log_path.display());
-    Ok(())
+    Ok(Some(spawned))
 }
 
 /// What [`stop_daemon`] did.

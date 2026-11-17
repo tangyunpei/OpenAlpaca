@@ -40,11 +40,12 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         DaemonAction::Status => status::run().await,
         DaemonAction::Tail { count } => tail::run(count).await,
         DaemonAction::Start { daemon_only } => {
-            manager::start_daemon()?;
+            let mut spawned = manager::start_daemon()?;
             if !daemon_only {
                 start_gui_after_the_daemon(
                     &mut reuse::RealWorld,
                     &reuse::THIS_CLI,
+                    spawned.as_mut().map(|s| s as &mut dyn reuse::Spawned),
                     manager::start_gui,
                 )
                 .await?;
@@ -70,7 +71,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             if !stop_and_wait(true)? {
                 std::process::exit(2);
             }
-            manager::start_daemon()
+            manager::start_daemon().map(drop)
         }
     }
 }
@@ -83,14 +84,16 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 /// the store's lock to the first after rotating its log. A wait that ends
 /// otherwise — a daemon this CLI cannot use, one still starting, none at
 /// all — is said on stderr and the app is started all the same, as before:
-/// its own check then shows the same verdict in its window. `start_app`
-/// is `manager::start_gui` but in a test.
+/// its own check then shows the same verdict in its window. `spawned` is
+/// the daemon this start spawned, whose exit ends the wait; `start_app` is
+/// `manager::start_gui` but in a test.
 pub(crate) async fn start_gui_after_the_daemon<W: reuse::World>(
     world: &mut W,
     cli: &openalpaca_app_support::protocol::ClientBuild,
+    spawned: Option<&mut dyn reuse::Spawned>,
     start_app: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    if let reuse::StartWait::NotReady(why) = reuse::wait_after_start(world, cli).await {
+    if let reuse::StartWait::NotReady(why) = reuse::wait_after_start(world, cli, spawned).await {
         world.say(format!("⚠️  {why} Starting the app all the same."));
     }
     start_app()

@@ -493,7 +493,7 @@ async fn the_wait_after_a_start_waits_for_the_file_then_the_answer() {
     let d = openalpaca_app_support::discovery::make_discovery("127.0.0.1", 1, "i".into(), "0.1.0");
     let mut world = Stub::canned([missing(), missing(), starting_look(&d), answering(&d, 1)]);
 
-    let waited = wait_after_start(&mut world, &cli(1, 1)).await;
+    let waited = wait_after_start(&mut world, &cli(1, 1), None).await;
 
     assert!(matches!(waited, StartWait::Ready), "{waited:?}");
     assert_eq!(world.looks, 4);
@@ -514,7 +514,7 @@ async fn the_wait_after_a_start_ends_on_a_mismatch_with_its_sentence() {
     let d = openalpaca_app_support::discovery::make_discovery("127.0.0.1", 1, "i".into(), "0.1.0");
     let mut world = Stub::canned([answering(&d, 2)]);
 
-    let waited = wait_after_start(&mut world, &cli(1, 1)).await;
+    let waited = wait_after_start(&mut world, &cli(1, 1), None).await;
 
     let StartWait::NotReady(why) = waited else {
         panic!("not refused: {waited:?}");
@@ -535,7 +535,7 @@ async fn the_wait_after_a_start_gives_up_on_no_daemon_after_the_budget() {
     let looks = (STARTING_BUDGET.as_millis() / POLL.as_millis()) as usize + 1;
     let mut world = Stub::canned(std::iter::repeat_n(missing(), looks));
 
-    let waited = wait_after_start(&mut world, &cli(1, 1)).await;
+    let waited = wait_after_start(&mut world, &cli(1, 1), None).await;
 
     let StartWait::NotReady(why) = waited else {
         panic!("not reported: {waited:?}");
@@ -558,7 +558,7 @@ async fn daemon_start_opens_the_app_once_the_daemon_answers() {
     let mut world = Stub::canned([missing(), starting_look(&d), answering(&d, 1)]);
     let mut started = false;
 
-    crate::commands::daemon::start_gui_after_the_daemon(&mut world, &cli(1, 1), || {
+    crate::commands::daemon::start_gui_after_the_daemon(&mut world, &cli(1, 1), None, || {
         started = true;
         Ok(())
     })
@@ -586,7 +586,7 @@ async fn daemon_start_says_a_failed_wait_and_opens_the_app_all_the_same() {
     let mut world = Stub::canned([answering(&d, 2)]);
     let mut started = false;
 
-    crate::commands::daemon::start_gui_after_the_daemon(&mut world, &cli(1, 1), || {
+    crate::commands::daemon::start_gui_after_the_daemon(&mut world, &cli(1, 1), None, || {
         started = true;
         Ok(())
     })
@@ -602,4 +602,229 @@ async fn daemon_start_says_a_failed_wait_and_opens_the_app_all_the_same() {
             && said.ends_with(" Starting the app all the same."),
         "{said}"
     );
+}
+
+// ============================================================================
+// The process the start spawned
+// ============================================================================
+
+/// A spawned process the test owns: who it is, and its exit once given.
+struct FakeSpawn {
+    pid: u32,
+    exit: Option<&'static str>,
+    log_start: u64,
+}
+
+impl Spawned for FakeSpawn {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn who(&self) -> String {
+        format!("The daemon this start spawned (pid {})", self.pid)
+    }
+
+    fn exited(&mut self) -> Option<String> {
+        self.exit.map(str::to_owned)
+    }
+
+    fn log_start(&self) -> u64 {
+        self.log_start
+    }
+}
+
+/// What a daemon that died at boot leaves: its file, naming its pid, which
+/// is no live `openalpacad`, at an address nothing answers.
+fn left_by_a_dead_daemon(d: &Discovery) -> Look {
+    Look {
+        discovery: DiscoveryRead::Parsed(d.clone()),
+        health: Health::Unanswered("connection refused".into()),
+        pid_live: false,
+    }
+}
+
+/// The sandbox's daemon log, holding an earlier run's line, and its length
+/// (the spawn's offset).
+fn a_log_with_an_earlier_run() -> (std::path::PathBuf, u64) {
+    let logs = paths::logs_dir().expect("the scratch logs dir");
+    let log = logs.join("daemon.log");
+    std::fs::write(&log, "an earlier run's last line\n").unwrap();
+    let start = std::fs::metadata(&log).unwrap().len();
+    (log, start)
+}
+
+/// A daemon that wrote its file and died at boot (a pre-squash database
+/// refused, SQ-1) ends the wait at its first look, with the lines this run
+/// wrote to its log said above the sentence, never an earlier run's. (On
+/// the parent the wait looked on for 45 s and said nothing.)
+#[tokio::test]
+async fn a_spawned_daemon_that_exits_at_boot_ends_the_wait_with_its_log() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let (log, start) = a_log_with_an_earlier_run();
+    std::fs::write(
+        &log,
+        "an earlier run's last line\nError: this database was written by another build\n",
+    )
+    .unwrap();
+    let d = openalpaca_app_support::discovery::make_discovery("127.0.0.1", 1, "i".into(), "0.1.0");
+    let mut world = Stub::canned([left_by_a_dead_daemon(&d)]);
+    let mut spawned = FakeSpawn {
+        pid: 4242,
+        exit: Some("exit status: 1"),
+        log_start: start,
+    };
+
+    let waited = wait_after_start(&mut world, &cli(1, 1), Some(&mut spawned)).await;
+
+    let StartWait::NotReady(why) = waited else {
+        panic!("not reported: {waited:?}");
+    };
+    assert_eq!(
+        why,
+        format!(
+            "The daemon this start spawned (pid 4242) exited (exit status: 1) before it \
+             answered; the lines above are what it wrote to its log ({}).",
+            log.display()
+        )
+    );
+    assert_eq!(
+        world.said,
+        vec!["Error: this database was written by another build".to_owned()],
+        "this run's lines only"
+    );
+    assert_eq!(world.looks, 1);
+    assert_eq!(world.waited(), Duration::ZERO);
+}
+
+/// A daemon that exits having written nothing says so, naming its log.
+#[tokio::test]
+async fn a_spawned_daemon_that_exits_writing_nothing_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let (log, start) = a_log_with_an_earlier_run();
+    let mut world = Stub::canned([missing()]);
+    let mut spawned = FakeSpawn {
+        pid: 4242,
+        exit: Some("signal: 9 (SIGKILL)"),
+        log_start: start,
+    };
+
+    let waited = wait_after_start(&mut world, &cli(1, 1), Some(&mut spawned)).await;
+
+    let StartWait::NotReady(why) = waited else {
+        panic!("not reported: {waited:?}");
+    };
+    assert_eq!(
+        why,
+        format!(
+            "The daemon this start spawned (pid 4242) exited (signal: 9 (SIGKILL)) before it \
+             answered, and wrote nothing to its log ({}).",
+            log.display()
+        )
+    );
+    assert!(world.said.is_empty(), "{:?}", world.said);
+}
+
+/// A spawned daemon still running is waited for as before: no file, then
+/// serving.
+#[tokio::test]
+async fn a_spawned_daemon_still_running_is_waited_for() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let d = openalpaca_app_support::discovery::make_discovery("127.0.0.1", 1, "i".into(), "0.1.0");
+    let mut world = Stub::canned([missing(), missing(), answering(&d, 1)]);
+    let mut spawned = FakeSpawn {
+        pid: 4242,
+        exit: None,
+        log_start: 0,
+    };
+
+    let waited = wait_after_start(&mut world, &cli(1, 1), Some(&mut spawned)).await;
+
+    assert!(matches!(waited, StartWait::Ready), "{waited:?}");
+    assert_eq!(world.looks, 3);
+}
+
+/// The start's own child, read through `manager::SpawnedDaemon`: a process
+/// that writes to the sandbox's log and exits is seen exited, with its
+/// status, and only what it wrote after the offset is said.
+#[tokio::test]
+async fn the_started_child_is_read_for_its_exit_and_its_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let (log, start) = a_log_with_an_earlier_run();
+    let out = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+    let child = std::process::Command::new("/bin/sh")
+        .args(["-c", "echo refused at boot >&2; exit 3"])
+        .stdin(std::process::Stdio::null())
+        .stdout(out.try_clone().unwrap())
+        .stderr(out)
+        .spawn()
+        .expect("sh runs");
+    let pid = child.id();
+    let mut spawned = crate::manager::SpawnedDaemon::new(child, false, start);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while spawned.exited().is_none() {
+        assert!(Instant::now() < deadline, "sh did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut world = Stub::canned([missing()]);
+
+    let waited = wait_after_start(&mut world, &cli(1, 1), Some(&mut spawned)).await;
+
+    let StartWait::NotReady(why) = waited else {
+        panic!("not reported: {waited:?}");
+    };
+    assert_eq!(
+        why,
+        format!(
+            "The daemon this start spawned (pid {pid}) exited (exit status: 3) before it \
+             answered; the lines above are what it wrote to its log ({}).",
+            log.display()
+        )
+    );
+    assert_eq!(world.said, vec!["refused at boot".to_owned()]);
+}
+
+/// The child exited but still in the process table as the file's live pid
+/// (unreaped): its exit ends the wait all the same; a daemon starting
+/// under another pid is still waited for.
+#[tokio::test]
+async fn an_exited_child_still_shown_as_starting_ends_the_wait() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let (log, start) = a_log_with_an_earlier_run();
+    let d = openalpaca_app_support::discovery::make_discovery("127.0.0.1", 1, "i".into(), "0.1.0");
+    let mut world = Stub::canned([starting_look(&d), starting_look(&d)]);
+    let mut other = FakeSpawn {
+        pid: d.pid + 1,
+        exit: Some("exit status: 1"),
+        log_start: start,
+    };
+    let mut world_other = Stub::canned([starting_look(&d), answering(&d, 1)]);
+
+    let waited = wait_after_start(&mut world_other, &cli(1, 1), Some(&mut other)).await;
+    assert!(matches!(waited, StartWait::Ready), "{waited:?}");
+
+    let mut spawned = FakeSpawn {
+        pid: d.pid,
+        exit: Some("exit status: 1"),
+        log_start: start,
+    };
+    let waited = wait_after_start(&mut world, &cli(1, 1), Some(&mut spawned)).await;
+
+    let StartWait::NotReady(why) = waited else {
+        panic!("not reported: {waited:?}");
+    };
+    assert_eq!(
+        why,
+        format!(
+            "The daemon this start spawned (pid {}) exited (exit status: 1) before it \
+             answered, and wrote nothing to its log ({}).",
+            d.pid,
+            log.display()
+        )
+    );
+    assert_eq!(world.looks, 1);
 }

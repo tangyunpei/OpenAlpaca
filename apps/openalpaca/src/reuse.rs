@@ -369,6 +369,53 @@ pub(crate) async fn ensure_with<W: World>(world: &mut W, cli: &ClientBuild) -> R
     }
 }
 
+/// The process `openalpaca daemon start` spawned, as the wait after it
+/// reads it: a daemon that exits at boot (a pre-squash database refused,
+/// SQ-1, among the reasons) ends the wait at once with what it wrote to
+/// its log, where a file it left naming its dead pid would read only as
+/// "not running" until [`STARTING_BUDGET`] had passed.
+pub(crate) trait Spawned {
+    /// Its pid.
+    fn pid(&self) -> u32;
+    /// Who it is, for the sentence: the daemon or, in a development
+    /// start, the `cargo run` that builds and runs it, with its pid.
+    fn who(&self) -> String;
+    /// How it exited (`ExitStatus`'s words), once it has; `None` while it
+    /// runs.
+    fn exited(&mut self) -> Option<String>;
+    /// The daemon log's length just before the spawn, where this run's
+    /// lines begin ([`paths::read_log_tail`]'s `from`).
+    fn log_start(&self) -> u64;
+}
+
+/// How many of its log's last lines a daemon that exited at boot is shown
+/// with: the app's figure for a daemon that did not start
+/// (`TIMEOUT_TAIL_LINES` in the shell).
+const EXIT_TAIL_LINES: usize = 40;
+
+/// The report of a spawned daemon that exited before it answered: the lines
+/// this run wrote to its log said first, verbatim, then the sentence naming
+/// the log, which the caller follows with what it does next.
+fn exited_at_boot<W: World>(world: &mut W, child: &dyn Spawned, status: &str) -> String {
+    let who = child.who();
+    let Ok(log) = paths::daemon_log_path() else {
+        return format!("{who} exited ({status}) before it answered.");
+    };
+    let tail = paths::read_log_tail(&log, child.log_start(), EXIT_TAIL_LINES).unwrap_or_default();
+    if tail.is_empty() {
+        return format!(
+            "{who} exited ({status}) before it answered, and wrote nothing to its log ({}).",
+            log.display()
+        );
+    }
+    world.say(tail);
+    format!(
+        "{who} exited ({status}) before it answered; the lines above are what it wrote to its \
+         log ({}).",
+        log.display()
+    )
+}
+
 /// What the wait after `openalpaca daemon start` found.
 #[derive(Debug)]
 pub(crate) enum StartWait {
@@ -383,10 +430,17 @@ pub(crate) enum StartWait {
 /// [`ensure_with`] judges it — a mismatch and a daemon still starting
 /// [`STARTING_BUDGET`] after its first silent look end it — and a file
 /// naming a live daemon waited for, up to [`STARTING_BUDGET`] from the
-/// wait's start (a development start through `cargo run` builds first).
+/// wait's start (a development start through `cargo run` builds first),
+/// unless the process this start spawned has exited, which ends it at
+/// once with what that process wrote to its log.
 /// It replaces a fixed two-second sleep, so the app started next finds the
-/// daemon serving and uses it (the owner's rule: one daemon).
-pub(crate) async fn wait_after_start<W: World>(world: &mut W, cli: &ClientBuild) -> StartWait {
+/// daemon serving and uses it (the owner's rule: one daemon). `spawned` is
+/// the process this start spawned, `None` when it found one running.
+pub(crate) async fn wait_after_start<W: World>(
+    world: &mut W,
+    cli: &ClientBuild,
+    mut spawned: Option<&mut dyn Spawned>,
+) -> StartWait {
     let started = world.now();
     let mut silent = Silent::default();
     loop {
@@ -400,11 +454,27 @@ pub(crate) async fn wait_after_start<W: World>(world: &mut W, cli: &ClientBuild)
             }
             Verdict::Mismatch(m) => return StartWait::NotReady(mismatch_sentence(&m)),
             Verdict::Starting { pid, instance_id } => {
+                // The child itself, exited but not yet reaped, should the
+                // process table still show it: this start's daemon is gone.
+                if let Some(child) = spawned.as_deref_mut()
+                    && child.pid() == pid
+                    && let Some(status) = child.exited()
+                {
+                    return StartWait::NotReady(exited_at_boot(world, child, &status));
+                }
                 if silent.overdue(world, pid, &instance_id) {
                     return StartWait::NotReady(still_starting(pid));
                 }
             }
             Verdict::Spawn => {
+                // The look's own verdicts come first: a daemon used or
+                // refused, or another one starting, is the answer whatever
+                // became of the child.
+                if let Some(child) = spawned.as_deref_mut()
+                    && let Some(status) = child.exited()
+                {
+                    return StartWait::NotReady(exited_at_boot(world, child, &status));
+                }
                 if world.now().saturating_duration_since(started) >= STARTING_BUDGET {
                     return StartWait::NotReady(format!(
                         "{} {} seconds after the start.",
