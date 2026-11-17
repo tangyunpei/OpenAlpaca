@@ -31,7 +31,6 @@ tracing.workspace = true
 # Tauri's `log` records. tracing-subscriber 0.3.23 is already in Cargo.lock
 # (the daemon's); the lock gains only this crate's edge.
 tracing-subscriber.workspace = true
-directories.workspace = true
 tauri-plugin-dialog.workspace = true
 # N-DAEMON-2: `daemon.toml`'s `[daemon.env] passthrough_keys`, read by the
 # shell before it spawns the daemon. toml 1.1.8 is already in Cargo.lock (the

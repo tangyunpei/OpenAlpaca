@@ -34,14 +34,14 @@ impl HomeStoreGuard {
         }
     }
 
-    /// Moves the user's home directory — `HOME`, which `directories::BaseDirs`
+    /// Moves the user's home directory — `HOME`, which `std::env::home_dir`
     /// reads, so `home_root()`'s fallback becomes `<home>/.openalpaca` — and
     /// sets `OPENALPACA_HOME_STORE` to `store`, or removes it for `None`. For
     /// the test-build guard of `store::projects::register`: its "unset" and
     /// "the real store" cases then name a temp directory, so even a guard that
     /// failed to fire could write nothing into the developer's store. Same
-    /// lock, no second one. Panics, restoring both variables, if `BaseDirs`
-    /// does not answer with `home`.
+    /// lock, no second one. Panics, restoring both variables, if
+    /// `std::env::home_dir` does not answer with `home`.
     pub(crate) fn for_user_home(home: &Path, store: Option<&Path>) -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let guard = Self {
@@ -58,7 +58,7 @@ impl HomeStoreGuard {
                 None => std::env::remove_var(HOME_STORE_ENV),
             }
         }
-        let resolved = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+        let resolved = std::env::home_dir();
         assert_eq!(
             resolved.as_deref(),
             Some(home),
@@ -142,6 +142,31 @@ fn default_root_is_dot_openalpaca_under_home() {
 #[test]
 fn missing_home_is_an_error() {
     assert!(resolve_home_root(None, None).is_err());
+}
+
+/// An empty home is no home: the store is never the relative `.openalpaca`
+/// the process's directory would resolve. `std::env::home_dir` answers an
+/// empty home field of the user database as `Some("")` (its documentation
+/// at Rust 1.99.1) where `directories` (dirs-sys 0.5.0) answered `None`, so
+/// since M18 the resolution itself refuses it.
+#[test]
+fn an_empty_home_is_no_home() {
+    let err = resolve_home_root(None, Some(PathBuf::new())).unwrap_err();
+    assert!(
+        err.to_string().contains("home directory"),
+        "unexpected error: {err}"
+    );
+}
+
+/// With no override the store is `.openalpaca` under the home
+/// `std::env::home_dir` reports — `HOME`, here a temp directory.
+#[test]
+fn home_root_falls_back_to_the_home_the_standard_library_reports() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let _guard = HomeStoreGuard::for_user_home(&home, None);
+    assert_eq!(std::env::home_dir().as_deref(), Some(home.as_path()));
+    assert_eq!(home_root().unwrap(), home.join(STORE_DIR_NAME));
 }
 
 #[test]

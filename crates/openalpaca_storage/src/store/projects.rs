@@ -840,7 +840,7 @@ fn unguarded_home(
 /// the store written to (the S1 review's I1).
 fn register_home() -> Result<PathBuf> {
     let set = std::env::var_os(super::HOME_STORE_ENV);
-    let user_home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+    let user_home = std::env::home_dir();
     refuse_unguarded_test_home(set.as_deref(), user_home.as_deref());
     super::resolve_home_root(set.map(PathBuf::from), user_home)
 }

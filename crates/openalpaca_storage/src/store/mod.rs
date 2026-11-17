@@ -47,7 +47,6 @@ pub use open_copies::{open_copies_dir, remove_open_copy, stage_open_copy, sweep_
 pub use reveal::{RevealRefusal, revealable_path};
 
 use anyhow::{Context, Result, bail};
-use directories::BaseDirs;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -75,18 +74,24 @@ const INSTALL_ID_KEY: &str = "install_id";
 // Roots
 // ============================================================================
 
-/// The home root: `$OPENALPACA_HOME_STORE` if set, else `<home>/.openalpaca`.
+/// The home root: `$OPENALPACA_HOME_STORE` if set, else `<home>/.openalpaca`,
+/// `<home>` the user's home as `std::env::home_dir` reports it (on Unix `HOME`
+/// unless empty, else the user database's entry).
 ///
 /// Read on every call — never cached — so a test (or a wrapper script) can point
 /// the whole process at another root by setting the variable. Relative values are
 /// rejected: a relative store root would silently re-introduce CWD dependence.
 pub fn home_root() -> Result<PathBuf> {
-    let home = BaseDirs::new().map(|b| b.home_dir().to_path_buf());
-    resolve_home_root(std::env::var_os(HOME_STORE_ENV).map(PathBuf::from), home)
+    resolve_home_root(
+        std::env::var_os(HOME_STORE_ENV).map(PathBuf::from),
+        std::env::home_dir(),
+    )
 }
 
 /// Pure resolution behind [`home_root`], so the rules are testable without
-/// mutating the process environment.
+/// mutating the process environment. An empty home is no home: the standard
+/// library answers a user-database entry whose home field is empty as
+/// `Some("")`, which would make the store the relative `.openalpaca`.
 fn resolve_home_root(override_value: Option<PathBuf>, home: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = override_value {
         if !path.is_absolute() {
@@ -97,7 +102,9 @@ fn resolve_home_root(override_value: Option<PathBuf>, home: Option<PathBuf>) -> 
         }
         return Ok(path);
     }
-    let home = home.context("Failed to determine the home directory")?;
+    let home = home
+        .filter(|home| !home.as_os_str().is_empty())
+        .context("Failed to determine the home directory")?;
     Ok(home.join(STORE_DIR_NAME))
 }
 

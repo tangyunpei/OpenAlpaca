@@ -2317,6 +2317,16 @@ use login_path::{
     capture_login_path, capture_login_shell, fallback_path,
 };
 
+/// An empty home adds no `.cargo/bin` to the fallback list: never the
+/// relative entry the daemon's directory would resolve. `std::env::home_dir`
+/// answers an empty home field of the user database as `Some("")` (its
+/// documentation at Rust 1.99.1) where `directories` (dirs-sys 0.5.0)
+/// answered `None` (M18).
+#[test]
+fn an_empty_home_adds_nothing_to_the_fallback_list() {
+    assert_eq!(fallback_path(Some(Path::new(""))), fallback_path(None));
+}
+
 /// A capture of `shell`'s `PATH`, the fallback list's home `home`: the
 /// account as the capture's thread would resolve it, given, with no key
 /// listed beside `PATH`.

@@ -339,9 +339,12 @@ pub(crate) struct DaemonPathReport {
 }
 
 /// [`FALLBACK_DIRS`] joined, then `<home>/.cargo/bin` when the home is known.
+/// An empty home is not known: the standard library answers a user-database
+/// entry whose home field is empty as `Some("")`, and `.cargo/bin` alone
+/// would be an entry relative to the daemon's directory.
 pub(crate) fn fallback_path(home: Option<&Path>) -> OsString {
     let mut path = OsString::from(FALLBACK_DIRS.join(":"));
-    if let Some(home) = home {
+    if let Some(home) = home.filter(|home| !home.as_os_str().is_empty()) {
         path.push(":");
         path.push(home.join(".cargo/bin"));
     }
@@ -634,10 +637,10 @@ fn log_capture(path: &DaemonPath) {
 static CAPTURE: OnceLock<Arc<Capture>> = OnceLock::new();
 
 /// Begin the app's one capture (`run`): the account's login shell, the home
-/// `directories` resolves and the keys `daemon.toml` lists beside `PATH`, all
-/// looked up on the capture's thread, [`CAPTURE_DEADLINE`]. Unix only;
-/// elsewhere the daemon inherits the app's `PATH` and environment, as it
-/// did.
+/// `std::env::home_dir` reports and the keys `daemon.toml` lists beside
+/// `PATH`, all looked up on the capture's thread, [`CAPTURE_DEADLINE`]. Unix
+/// only; elsewhere the daemon inherits the app's `PATH` and environment, as
+/// it did.
 pub(crate) fn start() {
     #[cfg(unix)]
     {
@@ -646,13 +649,14 @@ pub(crate) fn start() {
 }
 
 /// The account the app's capture runs for, resolved on the capture's
-/// thread: the login shell the user database names, the home `directories`
-/// resolves, and the keys the store's `daemon.toml` lists beside `PATH`.
+/// thread: the login shell the user database names, the home
+/// `std::env::home_dir` reports, and the keys the store's `daemon.toml`
+/// lists beside `PATH`.
 #[cfg(unix)]
 pub(crate) fn this_account() -> Account {
     Account {
         shell: account_login_shell(),
-        home: directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()),
+        home: std::env::home_dir(),
         keys: configured_passthrough_keys(),
     }
 }
