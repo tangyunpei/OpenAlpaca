@@ -2,14 +2,18 @@
  * A query mounted while the window's first daemon starts.
  *
  * Since Q04-VERDICT the shell answers `starting` at once after the app's own
- * spawn, as it does at the first look, so a query mounted at boot fails its
- * ask and its two retries while the daemon boots (`shouldRetry`). The
- * window's own ask opens the socket once the daemon serves; that first open
- * must refetch what failed before it, or a query with no interval of its own
- * stays in error until something else refetches it. Wired as
- * `QueryProvider` wires it: the real connection, `apiRequest`, the app's
- * query client and the resync bridge; only the shell's `invoke`, `fetch`
- * and the socket are doubles.
+ * spawn, as it does at the first look, so a query mounted at boot is refused
+ * `starting` while the daemon boots. While the window waits on `starting`
+ * the query keeps asking, a second apart (`shouldRetry`, `retryDelay`;
+ * VIEW-STARTING), so it shows loading, not an error, and loads once the
+ * daemon serves. Past the shell's 45 s budget the answer is
+ * `still_starting`, which is retried as any failure is, so the query goes to
+ * error beside the card; the window's socket, opened by the ladder's rung,
+ * must then refetch what failed before it (`843b269f`, the backstop), or a
+ * query with no interval of its own stays in error until something else
+ * refetches it. Wired as `QueryProvider` wires it: the real connection,
+ * `apiRequest`, the app's query client and the resync bridge; only the
+ * shell's `invoke`, `fetch` and the socket are doubles.
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -20,9 +24,14 @@ import {
   bootstrapConnection,
   refreshConnection,
   resetConnection,
+  setStopIntent,
   type ConnectionInfo,
 } from "./connection";
-import { DaemonEventsClient, type SocketLike } from "./events";
+import {
+  DaemonEventsClient,
+  STARTING_RETRY_MS,
+  type SocketLike,
+} from "./events";
 import { apiRequest } from "./http";
 import { createQueryClient, invalidateAfterResync } from "./query-client";
 import shellErrors from "./shell-errors.json";
@@ -60,9 +69,12 @@ interface Boot {
   ensureWhileBooting: (elapsedMs: number) => unknown;
   /** How long the daemon boots before it serves. */
   bootMs: number;
+  /** When, during the boot, to read the view's status. */
+  probeAtMs?: number[];
 }
 
 afterEach(() => {
+  setStopIntent(null);
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.mocked(invoke).mockReset();
@@ -116,10 +128,19 @@ async function coldStart(boot: Boot) {
     queryKey: ["conversations"],
     queryFn: async () => (await apiRequest("/v1/conversations")).json(),
   });
-  const unsubscribe = observer.subscribe(() => {});
+  // Every status the view is given, and when, from the mount on.
+  const seen: { atMs: number; status: string }[] = [];
+  const unsubscribe = observer.subscribe((result) => {
+    seen.push({ atMs: Date.now() - started, status: result.status });
+  });
   void events.connect();
 
-  await vi.advanceTimersByTimeAsync(boot.bootMs);
+  const probes: { atMs: number; status: string }[] = [];
+  for (const atMs of boot.probeAtMs ?? []) {
+    await vi.advanceTimersByTimeAsync(atMs - (Date.now() - started));
+    probes.push({ atMs, status: observer.getCurrentResult().status });
+  }
+  await vi.advanceTimersByTimeAsync(boot.bootMs - (Date.now() - started));
   const duringBoot = observer.getCurrentResult().status;
   serving = true;
   const dialledBefore = sockets.length;
@@ -135,6 +156,9 @@ async function coldStart(boot: Boot) {
   await vi.advanceTimersByTimeAsync(10_000);
   const result = {
     duringBoot,
+    probes,
+    seen,
+    firstErrorAtMs: seen.find((s) => s.status === "error")?.atMs ?? null,
     after: observer.getCurrentResult().status,
     socket: events.getStatus(),
     fetches: fetchMock.mock.calls.length,
@@ -146,29 +170,137 @@ async function coldStart(boot: Boot) {
 }
 
 describe("a query mounted while the window's first daemon starts", () => {
-  it("loads once the first socket opens after a boot answered `starting`", async () => {
+  it("keeps loading while the shell answers `starting`, then loads", async () => {
     const result = await coldStart({
       ensureWhileBooting: () => refusal("starting"),
       bootMs: 6_000,
+      probeAtMs: [3_500, 5_000],
     });
-    // Its ask and both retries met `starting`: in error while it boots.
-    expect(result.duringBoot).toBe("error");
+    // Past the two retries of any other failure (about 3 s), still loading.
+    expect(result.probes).toEqual([
+      { atMs: 3_500, status: "pending" },
+      { atMs: 5_000, status: "pending" },
+    ]);
+    expect(result.duringBoot).toBe("pending");
+    // Never in error, from the mount to the load.
+    expect(result.firstErrorAtMs).toBeNull();
     expect(result.socket).toBe("connected");
     expect(result.after).toBe("success");
     expect(result.fetches).toBeGreaterThanOrEqual(1);
   });
 
-  it("loads once the ladder's socket opens after `still_starting`", async () => {
+  it("goes to error past the budget and loads once the ladder's socket opens", async () => {
     // Past the shell's budget the answer is `still_starting`: the window
     // climbs the reconnect ladder, whose rung reads the file and dials.
     const result = await coldStart({
       ensureWhileBooting: (elapsedMs) =>
         elapsedMs < 45_000 ? refusal("starting") : refusal("still_starting"),
       bootMs: 50_000,
+      probeAtMs: [40_000],
     });
+    // Loading while the shell answers `starting`...
+    expect(result.probes).toEqual([{ atMs: 40_000, status: "pending" }]);
+    // ...in error past the budget, beside the card: the query has failed
+    // far more than twice by then, so its first failure that is not a
+    // `starting` wait ends it (here a `still_starting`, or a failed fetch
+    // once the rung has read the file; the rule on `still_starting` alone
+    // is pinned below).
+    expect(result.firstErrorAtMs).not.toBeNull();
+    expect(result.firstErrorAtMs).toBeGreaterThanOrEqual(45_000);
     expect(result.duringBoot).toBe("error");
+    // The ladder's socket opens: the resync refetches it (`843b269f`).
     expect(result.socket).toBe("connected");
     expect(result.after).toBe("success");
     expect(result.fetches).toBeGreaterThanOrEqual(1);
   });
+});
+
+/**
+ * A query mounted while the shell refuses every ask, with no window asking
+ * beside it: how often, how far apart and for how long the query asks
+ * again on each refusal.
+ */
+async function refusedFor(
+  answer: (elapsedMs: number) => unknown,
+  forMs: number,
+  options: { stopAtMs?: number } = {},
+) {
+  vi.useFakeTimers();
+  resetConnection();
+  const started = Date.now();
+  const asks: number[] = [];
+  vi.mocked(invoke).mockImplementation((command: string) => {
+    if (command === "ensure_daemon_running") {
+      asks.push(Date.now() - started);
+      return Promise.reject(answer(Date.now() - started));
+    }
+    return Promise.reject(refusal("not_running"));
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    }),
+  );
+  const client = createQueryClient();
+  const observer = new QueryObserver(client, {
+    queryKey: ["conversations"],
+    queryFn: async () => (await apiRequest("/v1/conversations")).json(),
+  });
+  const unsubscribe = observer.subscribe(() => {});
+  if (options.stopAtMs !== undefined) {
+    await vi.advanceTimersByTimeAsync(options.stopAtMs);
+    setStopIntent("stopped_elsewhere");
+    await vi.advanceTimersByTimeAsync(forMs - options.stopAtMs);
+  } else {
+    await vi.advanceTimersByTimeAsync(forMs);
+  }
+  const result = {
+    status: observer.getCurrentResult().status,
+    asks: [...asks],
+  };
+  // Long after: nothing asks again.
+  await vi.advanceTimersByTimeAsync(120_000);
+  const asksLater = asks.length;
+  unsubscribe();
+  client.clear();
+  return { ...result, asksLater };
+}
+
+function gaps(asks: number[]): number[] {
+  return asks.slice(1).map((at, i) => at - (asks[i] ?? at));
+}
+
+describe("how a query refused by the shell asks again", () => {
+  it("asks again on `starting` past the two retries, a capped delay apart", async () => {
+    const result = await refusedFor(() => refusal("starting"), 40_000);
+    expect(result.status).toBe("pending");
+    // TanStack's own delay doubles to 30 s: six asks in 40 s. Capped at the
+    // window's own cadence, about one a second.
+    expect(result.asks.length).toBeGreaterThanOrEqual(30);
+    // Every ask the window's own cadence after the last: never longer, and
+    // never shorter (a shorter one only asks the shell more).
+    expect(new Set(gaps(result.asks))).toEqual(new Set([STARTING_RETRY_MS]));
+  });
+
+  it("stops asking on `starting` once the window has no daemon by intent", async () => {
+    const result = await refusedFor(() => refusal("starting"), 10_000, {
+      stopAtMs: 5_000,
+    });
+    expect(result.status).toBe("error");
+    expect(result.asks.every((at) => at <= 6_000)).toBe(true);
+    expect(result.asksLater).toBe(result.asks.length);
+  });
+
+  for (const kind of ["still_starting", "mismatch", "spawn_failed"]) {
+    it(`gives up on \`${kind}\` after the two retries, never retried forever`, async () => {
+      const result = await refusedFor(() => refusal(kind), 60_000);
+      expect(result.status).toBe("error");
+      // The ask and its two retries, TanStack's doubling delay apart
+      // (`defaultRetryDelay` of 0, then 1), not the `starting` cap.
+      expect(result.asks).toHaveLength(3);
+      expect(gaps(result.asks)).toEqual([1_000, 2_000]);
+      expect(result.asksLater).toBe(3);
+    });
+  }
 });

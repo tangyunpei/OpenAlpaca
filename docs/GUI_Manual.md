@@ -149,13 +149,15 @@ whole bridge (`src-tauri/src/lib.rs`):
   starts nothing beside it. A daemon that is running but does not answer
   yet — one still opening its database or connecting to its MCP servers, the
   CLI's or an earlier run's — is waited for: the card reads `Daemon is
-  starting` and the app asks again every second, starting nothing beside it;
-  after 45 s it reports the daemon still starting with the end of its log
-  and the way out if it never finishes (stop it with `openalpaca daemon
-  stop`, then press `Reconnect`), and keeps trying to reach it. Only when no
-  daemon is running is one spawned: the `openalpacad` beside the app (an app
-  whose daemon is missing says so, naming the path it looked at), detached
-  (`setsid` on Unix), its output appended to `state/logs/daemon.log`. The
+  starting` and the app asks again every second, starting nothing beside it,
+  and the views open meanwhile show loading, not an error; after 45 s it
+  reports the daemon still starting with the end of its log and the way out
+  if it never finishes (stop it with `openalpaca daemon stop`, then press
+  `Reconnect`), and keeps trying to reach it, the views showing their error
+  beside the card until it answers, when they load without a reload. Only
+  when no daemon is running is one spawned: the `openalpacad` beside the app
+  (an app whose daemon is missing says so, naming the path it looked at),
+  detached (`setsid` on Unix), its output appended to `state/logs/daemon.log`. The
   command then waits for the daemon the file names — the one it spawned, or
   one the CLI started at the same moment — about five seconds for it to
   appear; once it has and does not answer yet, the card reads `Daemon is

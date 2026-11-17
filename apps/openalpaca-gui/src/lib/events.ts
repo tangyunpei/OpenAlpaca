@@ -149,7 +149,7 @@ export type EventsStatus =
  * "You may have missed events" — the only honest signal available, since the
  * server never tells a lagged client that it dropped frames. Emitted whenever
  * the socket comes back after having been down, on a first open that a
- * failed start came before (a query that asked during it was left in error),
+ * failed start came before (a query that asked during it may be in error),
  * and whenever the daemon identity changed underneath us.
  */
 export interface ResyncSignal {
@@ -245,10 +245,11 @@ export class DaemonEventsClient {
    * Something failed since the socket last opened (or since this client was
    * made): a bootstrap the shell refused, `starting` included, a rung, or a
    * socket that closed before it opened. A query that asked meanwhile may
-   * have failed for good — its ask and its two retries (`shouldRetry`) all
-   * met a daemon that was not there yet — so the next open refetches, the
-   * window's first included. A first open with nothing failed before it
-   * still signals nothing.
+   * have failed for good — a `starting` it keeps asking on, but past the
+   * shell's budget (`still_starting`), or on any other failure, its retries
+   * (`shouldRetry`) end — so the next open refetches, the window's first
+   * included. A first open with nothing failed before it still signals
+   * nothing.
    */
   private failedSinceOpen = false;
   private disconnectedAt: number | null = null;
@@ -408,7 +409,7 @@ export class DaemonEventsClient {
       this.setStatus("connected");
       // A first connect with nothing failed before it cannot have missed
       // anything; every later one can, and so can a first one that a failed
-      // start came before: a query that asked during it is left in error.
+      // start came before: a query that asked during it may be in error.
       if (this.everConnected || this.failedSinceOpen) {
         this.emitResync("reconnected");
       }

@@ -148,7 +148,10 @@ tell refusals apart branches on `kind`, never on the sentence's words:
 `lib/events.ts` parks the window on `mismatch` (no ladder, no re-bootstrap),
 from `ensure_daemon_running` or a rung's `get_connection_info`, and waits on
 `starting`, asking `ensure_daemon_running` again every
-`STARTING_RETRY_MS` (1 s) (Q04). `lib/shell-error.ts` mirrors
+`STARTING_RETRY_MS` (1 s) (Q04); `lib/query-client.ts` keeps a query
+refused `starting` asking again while the window waits, at most
+`STARTING_RETRY_MS` apart, and retries `still_starting`, `mismatch` and
+every other refusal as any failure (VIEW-STARTING). `lib/shell-error.ts` mirrors
 the type by hand, and `lib/connection.ts` turns a refusal into a
 `ConnectionError` carrying its `kind`, `lib/reveal.ts` into the sentence it
 toasts. Every variant's wire form is a row of `src/lib/shell-errors.json`: the
