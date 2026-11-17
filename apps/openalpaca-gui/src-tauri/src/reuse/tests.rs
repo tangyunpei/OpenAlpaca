@@ -1650,3 +1650,151 @@ fn no_verdict_line_carries_the_token_the_log_or_a_path() {
         assert!(!line.contains('/'), "{line}");
     }
 }
+
+// ============================================================================
+// The reconnect ladder's mismatch as a verdict (LADDER-LINE)
+// ============================================================================
+
+/// `get_connection_info`'s refusal of a live daemon whose file states
+/// another protocol, as the window labelled `window` asked it.
+fn ladder(world: &mut FakeWorld, watch: &Mutex<StartingWatch>, window: &str, d: &Discovery) {
+    let mismatch = file_mismatch(d, &ShellBuild::THIS).expect("a file of another protocol");
+    ladder_mismatch(watch, window, &mismatch, |line| world.log(line));
+}
+
+/// The mismatch line `ensure_with` writes, for a daemon of protocol
+/// `protocol` at version 9.9.9, pid 4242.
+fn mismatch_line(protocol: u32) -> String {
+    format!(
+        "refusal (mismatch) — pid 4242, version 9.9.9, protocol {protocol}; this app speaks \
+         protocol {}; nothing was stopped or started.",
+        ShellBuild::THIS.protocol
+    )
+}
+
+/// *Rev 114* (3) (b): the ladder's refusal is `ensure_with`'s mismatch by
+/// another path, so it writes the same line, naming the pid, version and
+/// protocol, once per change of the window's verdict, never per ask; each
+/// window keeps its own.
+#[test]
+fn the_ladder_s_mismatch_logs_one_verdict_line_and_asked_again_none() {
+    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let mut world = FakeWorld::new(|_, _| look(DiscoveryRead::Missing, silent(), false));
+    let watch = Mutex::new(StartingWatch::default());
+    for _ in 0..3 {
+        ladder(&mut world, &watch, WINDOW, &newer);
+    }
+    assert_eq!(
+        verdict_lines(&world, WINDOW),
+        [mismatch_line(ShellBuild::THIS.protocol + 1)]
+    );
+    ladder(&mut world, &watch, "second", &newer);
+    ladder(&mut world, &watch, "second", &newer);
+    assert_eq!(verdict_lines(&world, "second").len(), 1);
+    assert_eq!(world.lines.len(), 2, "{:?}", world.lines);
+    assert_eq!(world.looks, 0, "the ladder's line asks the world nothing");
+}
+
+/// A changed verdict is a line: the ladder's mismatch, then a reuse
+/// `ensure_with` answered, then the ladder's mismatch again is three.
+#[test]
+fn a_changed_verdict_around_the_ladder_s_mismatch_logs_again() {
+    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let ours = this_build_discovery(5151);
+    let script_d = ours.clone();
+    let mut world = FakeWorld::new(move |_, _| healthy(&script_d));
+    let watch = Mutex::new(StartingWatch::default());
+    ladder(&mut world, &watch, WINDOW, &newer);
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    ladder(&mut world, &watch, WINDOW, &newer);
+    ladder(&mut world, &watch, WINDOW, &newer);
+    let lines = verdict_lines(&world, WINDOW);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[0], mismatch_line(ShellBuild::THIS.protocol + 1));
+    assert!(lines[1].starts_with("reuse — pid 5151, "), "{}", lines[1]);
+    assert_eq!(lines[2], lines[0]);
+}
+
+/// The ladder and `ensure_with` keep one record per window: a mismatch
+/// `ensure_with` logged is not logged again by the ladder, and the ladder's
+/// is not logged again by `ensure_with`.
+#[test]
+fn the_ladder_and_ensure_share_the_window_s_record() {
+    let protocol = ShellBuild::THIS.protocol + 1;
+    let newer = discovery_of("9.9.9", protocol);
+    let script_d = newer.clone();
+    let mut world = FakeWorld::new(move |_, _| {
+        look(
+            parsed(&script_d),
+            answered(INSTANCE, Some(protocol), "9.9.9"),
+            true,
+        )
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "mismatch");
+    ladder(&mut world, &watch, WINDOW, &newer);
+    assert_eq!(verdict_lines(&world, WINDOW), [mismatch_line(protocol)]);
+
+    let mut world = FakeWorld::new(move |_, _| {
+        look(
+            parsed(&newer),
+            answered(INSTANCE, Some(protocol), "9.9.9"),
+            true,
+        )
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    let newer = discovery_of("9.9.9", protocol);
+    ladder(&mut world, &watch, WINDOW, &newer);
+    assert_eq!(kind(&ask(&mut world, &watch)), "mismatch");
+    assert_eq!(verdict_lines(&world, WINDOW), [mismatch_line(protocol)]);
+}
+
+/// The ladder's line leaves the spawn's wait and the starting clock as they
+/// were: only `ensure_with`'s answers end or extend them.
+#[test]
+fn the_ladder_s_line_leaves_the_spawn_s_wait_alone() {
+    let spawned = this_build_discovery(9090);
+    let script_d = spawned.clone();
+    let mut world = FakeWorld::new(move |_, spawns| {
+        if spawns == 0 {
+            look(DiscoveryRead::Missing, silent(), false)
+        } else {
+            booting(&script_d)
+        }
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
+    let (spawn, seen) = {
+        let w = watch.lock().unwrap();
+        (w.spawn.map(|p| (p.pid, p.at, p.asked)), w.seen.clone())
+    };
+    assert!(spawn.is_some() && seen.is_some());
+    world.pass(Duration::from_secs(3));
+    ladder(
+        &mut world,
+        &watch,
+        WINDOW,
+        &discovery_of("9.9.9", ShellBuild::THIS.protocol + 1),
+    );
+    let w = watch.lock().unwrap();
+    assert_eq!(w.spawn.map(|p| (p.pid, p.at, p.asked)), spawn);
+    assert_eq!(w.seen, seen);
+}
+
+/// The ladder's line carries no token, no log line and no path.
+#[test]
+fn the_ladder_s_line_carries_no_token_or_path() {
+    let newer = discovery_of("9.9.9", ShellBuild::THIS.protocol + 1);
+    let token = newer.auth.token.clone();
+    assert!(!token.is_empty());
+    let mut world = FakeWorld::new(|_, _| look(DiscoveryRead::Missing, silent(), false));
+    ladder(
+        &mut world,
+        &Mutex::new(StartingWatch::default()),
+        WINDOW,
+        &newer,
+    );
+    assert_eq!(world.lines.len(), 1);
+    assert!(!world.lines[0].contains(&token), "{}", world.lines[0]);
+    assert!(!world.lines[0].contains('/'), "{}", world.lines[0]);
+}

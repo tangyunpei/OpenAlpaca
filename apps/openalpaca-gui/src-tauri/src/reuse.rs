@@ -23,7 +23,8 @@
 //! path with a world it writes; [`RealWorld`] is the machine's. The owner's
 //! rule judges it: whether the CLI or the app started the daemon, both use
 //! the same one (2026-11-16). Each window's verdict, when it changes, is one
-//! line of `gui.log` (Q04-VERDICT).
+//! line of `gui.log` (Q04-VERDICT), the reconnect ladder's mismatch among
+//! them ([`ladder_mismatch`], LADDER-LINE).
 
 use crate::{ShellError, did_not_start, record_spawned, spawn_daemon, store};
 use openalpaca_storage::daemon_lifecycle::{self, STARTING_BUDGET};
@@ -733,9 +734,35 @@ pub(crate) async fn ensure_with<W: World>(
         w.say(window, said)
     };
     if changed && let Some(line) = line {
-        world.log(format!("Daemon verdict for window `{window}`: {line}"));
+        world.log(verdict_line(window, &line));
     }
     result
+}
+
+/// `line` as `gui.log` holds a verdict of the window labelled `window`.
+fn verdict_line(window: &str, line: &str) -> String {
+    format!("Daemon verdict for window `{window}`: {line}")
+}
+
+/// The reconnect ladder's mismatch — `get_connection_info`'s refusal from
+/// the file over a live pid ([`file_mismatch`]), which parks the window as
+/// [`ensure_with`]'s does — as the verdict of the window labelled `window`
+/// (*Rev 114* (3) (b), LADDER-LINE): recorded in the same per-window record
+/// and, when it changes that window's verdict, the same line handed to
+/// `log`, so a run of refusals is one line and a mismatch either path
+/// logged first is not logged again by the other. It is the same refusal
+/// by another path, and the common one when a daemon is replaced while the
+/// window is open. Nothing else of the watch is touched: the starting
+/// clock and a spawn's wait are [`ensure_with`]'s.
+pub(crate) fn ladder_mismatch(
+    starting_watch: &Mutex<StartingWatch>,
+    window: &str,
+    mismatch: &Mismatch,
+    log: impl FnOnce(String),
+) {
+    if watch(starting_watch).say(window, Said::Mismatch(mismatch.pid)) {
+        log(verdict_line(window, &mismatch.log_line()));
+    }
 }
 
 /// [`ensure_with`]'s answer, before its line is logged.

@@ -260,10 +260,20 @@ fn connection_with(info: ConnectionInfo, pid: u32, note: Option<String>) -> Shel
 /// Get connection info from discovery.json.
 /// Returns error if daemon is not running or discovery is invalid.
 ///
-/// The file is read on the blocking pool.
+/// The file is read on the blocking pool. Its mismatch is the asking
+/// window's verdict, by the webview's label, as `ensure_daemon_running`'s
+/// is (LADDER-LINE).
 #[tauri::command]
-async fn get_connection_info() -> Result<ShellConnection, ShellError> {
-    tauri::async_runtime::spawn_blocking(read_connection_info)
+async fn get_connection_info<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+) -> Result<ShellConnection, ShellError> {
+    connection_info_for_window(webview.label().to_owned()).await
+}
+
+/// [`get_connection_info`]'s work for the window labelled `window`, on the
+/// blocking pool.
+async fn connection_info_for_window(window: String) -> Result<ShellConnection, ShellError> {
+    tauri::async_runtime::spawn_blocking(move || read_connection_info(&window))
         .await
         .map_err(|e| ShellError::DiscoveryUnreadable {
             message: format!("Could not read the daemon's discovery file: {e}"),
@@ -275,8 +285,11 @@ async fn get_connection_info() -> Result<ShellConnection, ShellError> {
 /// live `openalpacad` (Q04: the reconnect ladder's rung asks no health, and
 /// would otherwise connect to a daemon `ensure_daemon_running` refuses), and
 /// check its token. A file over a pid that is gone is answered as before:
-/// the socket fails, and the ladder goes on.
-fn read_connection_info() -> Result<ShellConnection, ShellError> {
+/// the socket fails, and the ladder goes on. The refusal is `window`'s
+/// verdict, recorded where `ensure_daemon_running`'s are and, when it is a
+/// change, one `INFO` line of `gui.log` ([`reuse::ladder_mismatch`]); an
+/// answer, or another refusal, records nothing.
+fn read_connection_info(window: &str) -> Result<ShellConnection, ShellError> {
     let Some(d) = discovery::read_discovery().map_err(|e| ShellError::DiscoveryUnreadable {
         message: e.to_string(),
     })?
@@ -289,6 +302,9 @@ fn read_connection_info() -> Result<ShellConnection, ShellError> {
     if let Some(mismatch) = reuse::file_mismatch(&d, &reuse::ShellBuild::THIS)
         && daemon_lifecycle::pid_is_daemon(d.pid)
     {
+        reuse::ladder_mismatch(&reuse::STARTING, window, &mismatch, |line| {
+            tracing::info!("{line}");
+        });
         return Err(mismatch.into_error());
     }
 

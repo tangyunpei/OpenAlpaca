@@ -1653,10 +1653,11 @@ is starting` for long means a daemon is up but busy booting (often its MCP
 servers connecting); after 45 s the card shows the end of its log and, if
 it never finishes, how to stop it. `state/logs/gui.log` has one line each
 time what the window is told changes — starting, still starting, the daemon
-used, a version mismatch, the daemon missing beside the app; a daemon that
-failed to start writes no line there (its reason is on the card). In
-`bun run dev` there is no
-Tauri bridge, so every shell command fails by design.
+used, a version mismatch (met when the window starts, reconnects or reads its
+connection again: one line per change, not per ask), the daemon missing beside
+the app; a daemon that failed to start writes no line there (its reason is on
+the card). In `bun run dev` there is no Tauri bridge, so every shell command
+fails by design.
 
 **The window says the daemon is stopped.** `stopped` means this window stopped
 it; `stopped elsewhere` means it announced it was going away — `openalpaca

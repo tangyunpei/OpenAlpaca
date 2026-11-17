@@ -399,6 +399,85 @@ fn get_connection_info_refuses_a_live_daemon_of_a_protocol_it_does_not_speak() {
     assert_nothing_spawned(&guard);
 }
 
+/// A live daemon of another protocol for the ladder to refuse: version
+/// 9.9.9, this shell's protocol plus one, at a closed port.
+#[cfg(unix)]
+fn write_newer_discovery_for(pid: u32) -> Discovery {
+    let mut d = write_discovery_for(pid, closed_port());
+    d.build.protocol = openalpaca_storage::support::protocol::PROTOCOL + 1;
+    d.build.version = "9.9.9".into();
+    discovery::write_discovery_atomic(&d).expect("write discovery.json");
+    d
+}
+
+/// LADDER-LINE (*Rev 114* (3) (b)): the ladder's refusal is the asking
+/// window's verdict, by its label (`main`, the mock webview's), in the
+/// app's one record — the one `ensure_daemon_running` keeps — so the same
+/// mismatch for that window logs no second line, and another window's
+/// does.
+#[cfg(unix)]
+#[test]
+fn get_connection_info_s_mismatch_is_the_asking_window_s_verdict() {
+    let guard = HomeStoreGuard::set("info-mismatch-verdict");
+    let daemon = FakeDaemonProcess::start(&guard);
+    let d = write_newer_discovery_for(daemon.pid);
+
+    let refused = refusal(invoke("get_connection_info", json!({})));
+    drop(daemon);
+    assert_eq!(refused["kind"], "mismatch", "{refused}");
+    let mismatch =
+        reuse::file_mismatch(&d, &reuse::ShellBuild::THIS).expect("a file of another protocol");
+    let mut lines = Vec::new();
+    reuse::ladder_mismatch(&reuse::STARTING, "main", &mismatch, |l| lines.push(l));
+    assert_eq!(
+        lines,
+        Vec::<String>::new(),
+        "`main`'s verdict was not recorded"
+    );
+    reuse::ladder_mismatch(&reuse::STARTING, "second", &mismatch, |l| lines.push(l));
+    assert_eq!(
+        lines,
+        [format!(
+            "Daemon verdict for window `second`: refusal (mismatch) — pid {}, version 9.9.9, \
+             protocol {}; this app speaks protocol {}; nothing was stopped or started.",
+            d.pid,
+            openalpaca_storage::support::protocol::PROTOCOL + 1,
+            openalpaca_storage::support::protocol::PROTOCOL
+        )]
+    );
+}
+
+/// The ladder's refusal is one `INFO` line of `gui.log`, asked again none.
+#[cfg(unix)]
+#[test]
+fn the_ladder_s_mismatch_is_one_line_of_gui_log() {
+    let guard = HomeStoreGuard::set("info-mismatch-gui-log");
+    let daemon = FakeDaemonProcess::start(&guard);
+    let d = write_newer_discovery_for(daemon.pid);
+    let kinds = with_the_shell_log(|| {
+        (0..3)
+            .map(|_| {
+                let refused = read_connection_info("main").expect_err("refused");
+                serde_json::to_value(refused).expect("as JSON")["kind"].clone()
+            })
+            .collect::<Vec<_>>()
+    });
+    drop(daemon);
+    assert_eq!(kinds, vec![json!("mismatch"); 3]);
+    let line = format!(
+        "Daemon verdict for window `main`: refusal (mismatch) — pid {}, version 9.9.9",
+        d.pid
+    );
+    assert_eq!(gui_log_count(&line), 1, "{}", gui_log_text());
+    assert!(
+        gui_log_text()
+            .lines()
+            .any(|l| l.contains(" INFO ") && l.contains(&line)),
+        "{}",
+        gui_log_text()
+    );
+}
+
 /// The same file over a pid that is no daemon (here the test's own) is
 /// answered as before Q04: a mismatch is never said of a process that is
 /// gone, and the socket's failure keeps the ladder going.
@@ -666,6 +745,21 @@ impl FakeDaemonProcess {
         std::fs::create_dir_all(&dir).expect("its folder");
         let program = dir.join("openalpacad");
         std::fs::copy("/bin/sleep", &program).expect("a copy of /bin/sleep");
+        // macOS kills a bare copy of `/bin/sleep` at its start (SIGKILL,
+        // seen on Darwin 27.2, 2026-11-16), often after the process table
+        // has listed it, so a test racing that kill read it as a daemon or
+        // not by chance; signed afresh, ad hoc, the copy runs its 61 s.
+        #[cfg(target_os = "macos")]
+        {
+            let signed = Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&program)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("codesign runs");
+            assert!(signed.success(), "codesign refused the stand-in: {signed}");
+        }
         let child = Command::new(&program)
             .arg("61")
             .stdin(std::process::Stdio::null())
@@ -1169,7 +1263,8 @@ fn get_connection_info_reads_discovery_off_the_runtime() {
     let file = BlockedFile::at(store::discovery_path().expect("discovery path"));
     let d = discovery::make_discovery("127.0.0.1", 1, "instance-q11".into(), SHELL_VERSION);
     let bytes = serde_json::to_vec(&d).expect("discovery as JSON");
-    let (free, answer) = runtime_free_while_blocked(file, &bytes, get_connection_info);
+    let (free, answer) =
+        runtime_free_while_blocked(file, &bytes, || connection_info_for_window("main".into()));
     assert!(
         free,
         "get_connection_info held the runtime's thread while discovery.json would not open"
