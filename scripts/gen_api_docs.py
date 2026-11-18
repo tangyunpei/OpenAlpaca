@@ -732,9 +732,11 @@ def parse_subcommand_enums(text: str) -> list[dict[str, object]]:
     code = mask_rust_noncode(text)
     enums: list[dict[str, object]] = []
     # Attributes may sit between the derive and the enum (M61's
-    # `#[command(defer = true)]` on every CLI enum).
+    # `#[command(defer = true)]` on every CLI enum). The derive list need
+    # only hold `Subcommand` (`MemoryCommands` is `Subcommand, Debug`).
     for m in re.finditer(
-        r"#\[derive\(Subcommand\)\]\s*(?:#\[[^\]]*\]\s*)*pub\s+enum\s+([A-Za-z0-9_]+)\s*\{",
+        r"#\[derive\([^\]]*?\bSubcommand\b[^\]]*?\)\]\s*(?:#\[[^\]]*\]\s*)*"
+        r"pub\s+enum\s+([A-Za-z0-9_]+)\s*\{",
         code,
         re.S,
     ):
@@ -752,6 +754,34 @@ def parse_subcommand_enums(text: str) -> list[dict[str, object]]:
     return enums
 
 
+def strip_attributes(code: str) -> str:
+    """`code` with every `#[...]` attribute removed, brackets balanced.
+
+    A line-wise skip of `#[` lines missed an attribute spread over several
+    lines: `MemoryCommands`' `#[command(group(` left its next line,
+    `clap::ArgGroup::new(..)`, to be read as a variant named `clap`.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(code):
+        if code.startswith("#[", i):
+            depth = 0
+            j = i + 1
+            while j < len(code):
+                if code[j] == "[":
+                    depth += 1
+                elif code[j] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            i = j + 1
+            continue
+        out.append(code[i])
+        i += 1
+    return "".join(out)
+
+
 def parse_enum_variants(body: str) -> list[dict[str, object]]:
     """Variant names and struct-field names of one enum body.
 
@@ -766,7 +796,7 @@ def parse_enum_variants(body: str) -> list[dict[str, object]]:
         if not entry:
             continue
         cleaned_lines = []
-        for line in entry.splitlines():
+        for line in strip_attributes(entry).splitlines():
             s = line.strip()
             if not s or s.startswith("//") or s.startswith("#["):
                 continue

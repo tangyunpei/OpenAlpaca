@@ -219,6 +219,60 @@ pub enum GuiAction {
     assert [v["command"] for v in enums[0]["variants"]] == ["start", "stop"]
 
 
+def test_a_derive_list_holding_subcommand_is_a_subcommand_enum() -> None:
+    # `MemoryCommands` is `#[derive(Subcommand, Debug)]`: the exact
+    # `#[derive(Subcommand)]` match left `### memory` with no enum.
+    source = """
+#[derive(Subcommand, Debug)]
+#[command(defer = true)]
+pub enum MemoryCommands {
+    List,
+    Show { id: String },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum Other {
+    Run,
+}
+
+#[derive(Debug, SubcommandLike)]
+pub enum NotOne {
+    Nope,
+}
+"""
+    enums = gen.parse_subcommand_enums(source)
+    assert [e["name"] for e in enums] == ["MemoryCommands", "Other"], enums
+    assert [v["command"] for v in enums[0]["variants"]] == ["list", "show"]
+    assert enums[0]["variants"][1]["fields"] == ["id"]
+
+
+def test_a_variant_attribute_over_several_lines_is_no_variant() -> None:
+    # `MemoryCommands::Timeline` carries a `#[command(group(` attribute
+    # over four lines; its second line was read as a variant `clap`.
+    source = """
+#[derive(Subcommand, Debug)]
+pub enum MemoryCommands {
+    List,
+    #[command(group(
+        clap::ArgGroup::new("around")
+            .required(true)
+            .args(["id", "query", "date"])
+    ))]
+    Timeline {
+        id: Option<String>,
+        #[arg(
+            long
+        )]
+        query: Option<String>,
+    },
+}
+"""
+    enums = gen.parse_subcommand_enums(source)
+    variants = enums[0]["variants"]
+    assert [v["command"] for v in variants] == ["list", "timeline"], variants
+    assert variants[1]["fields"] == ["id", "query"], variants
+
+
 # ── case 5: the GUI endpoints table ─────────────────────────────────────
 
 

@@ -210,7 +210,20 @@
 ### `memory`
 
 - Source: `apps/openalpaca/src/commands/memory.rs`
-- No `Subcommand` enum found in module.
+- Enum `MemoryCommands` variants:
+  - `list` (fields: `kind`, `status`, `scope`, `history`, `candidates`, `limit`, `format`, `at`)
+  - `search` (fields: `query`, `kind`, `scope`, `limit`, `historical`, `as_of`, `since`, `until`, `order`, `format`, `at`)
+  - `timeline` (fields: `id`, `query`, `date`, `before`, `after`, `format`, `at`)
+  - `show` (fields: `id`, `revision`, `raw`, `at`)
+  - `add` (fields: `kind`, `title`, `scope`, `aliases`, `tags`, `fact_key`, `supersedes`, `body`, `at`)
+  - `edit` (fields: `id`, `at`)
+  - `suggestions` (fields: `limit`, `format`, `at`)
+  - `confirm` (fields: `id`, `at`)
+  - `undo` (fields: `id`, `at`)
+  - `forget` (fields: `ids`, `yes`, `at`)
+  - `sync` (fields: `at`)
+  - `doctor` (fields: `repair`, `at`)
+  - `adopt` (fields: `owner_key`)
 - Parsed flags: `--after`, `--alias`, `--as-of`, `--before`, `--candidates`, `--date`, `--fact-key`, `--format`, `--historical`, `--history`, `--kind`, `--limit`, `--order`, `--query`, `--raw`, `--repair`, `--revision`, `--scope`, `--since`, `--status`, `--supersedes`, `--tag`, `--title`, `--until`, `--yes`, `-y`
 
 ### `persona`
