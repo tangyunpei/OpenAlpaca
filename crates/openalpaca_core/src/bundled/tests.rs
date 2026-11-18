@@ -216,7 +216,7 @@ fn fixtures() -> Vec<(PathBuf, String)> {
 #[test]
 fn every_fixture_is_a_shipped_version() {
     let files = fixtures();
-    assert_eq!(files.len(), 15, "{files:?}");
+    assert_eq!(files.len(), 16, "{files:?}");
     for (file, path) in &files {
         let bytes = std::fs::read(file).unwrap();
         assert!(
@@ -357,6 +357,45 @@ fn the_side_before_c8_classifies_as_an_earlier_shipped_version() {
             "{path} names {word}"
         );
     }
+}
+
+/// OUTPUT-BUDGET-4 (c), the advisor's pick the owner took on 2026-11-17:
+/// `research_agent` runs on `fast`, so one round on the lead's model no
+/// longer spends most of its cap, and the cap stays the settled $0.35. An
+/// unedited copy of the version before — what an earlier build of this
+/// branch seeded, or a copy of the repository's `config/` — is an earlier
+/// shipped version, set aside like any other. On the parent the fixture was
+/// the current version.
+#[test]
+fn research_agent_runs_on_fast_under_its_settled_cap() {
+    let before = test_support::RESEARCH_AGENT_0DC0B2CD;
+    assert!(
+        before.contains("\nmodel: \"inherit\"\n"),
+        "the fixture is the side that named inherit"
+    );
+    assert_eq!(
+        classify_agent_file(before.as_bytes()),
+        Some(ShippedCopy {
+            version: ShippedVersion::Earlier,
+            edit: None
+        })
+    );
+    let bundled = BUNDLED_AGENTS
+        .iter()
+        .find(|file| file.path == "agents/research_agent.md")
+        .expect("research_agent.md is bundled");
+    assert_eq!(
+        classify_agent_file(bundled.contents.as_bytes()),
+        Some(ShippedCopy {
+            version: ShippedVersion::Current,
+            edit: None
+        })
+    );
+    let template = parse_agent_markdown(bundled.contents).expect("it parses");
+    let front = &template.frontmatter;
+    assert_eq!(front.id, "research_agent");
+    assert_eq!(front.model.as_deref(), Some("fast"));
+    assert_eq!(front.max_cost_per_task, Some(0.35));
 }
 
 /// **T4.** The main loop's tool calls are attributed to `orchestrator`, so

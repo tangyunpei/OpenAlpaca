@@ -373,9 +373,11 @@ provider. The router resolves one against the model of the agent that asks
 (its parent) before any call, so the call itself names a routable model.
 
 **What the shipped agent templates name.** `lead_agent` names `strong`;
-`explore_agent` and `system_agent` name `fast`; the other six (`general_agent`,
-`code_agent`, `planning_agent`, `research_agent`, `review_agent`,
-`writing_agent`) name `inherit`, and none keeps a `fallback_models` list.
+`explore_agent`, `research_agent` and `system_agent` name `fast`
+(`research_agent` so that a round or two on the lead's model does not spend
+its $0.35 cap); the other five (`general_agent`, `code_agent`,
+`planning_agent`, `review_agent`, `writing_agent`) name `inherit`, and none
+keeps a `fallback_models` list.
 `inherit` — also a template with no `model:` line, your own included — means,
 for a subagent, the model that answered its lead (after any substitution),
 read when it is spawned; for the lead, the model a request naming none
@@ -392,7 +394,15 @@ chosen, and never substituted, and the template's `max_cost_per_task` still
 caps the subagent. A plugin's template refuses a `model`: it runs on its
 plugin's own model. The spawn's reply names the model the subagent runs on,
 what chose it, and that the lead stays on its own; the lane's
-`subagent_open` record carries `model_choice` and `model`.
+`subagent_open` record carries `model_choice` and `model`. A model the
+agent's own model constraints deny (a set's `denied_models`, or one missing
+from its `allowed_models`) is still accepted, and the subagent is sent to the
+router default in its place, as it always has; its constraints may refuse
+that one in turn, at its first round. Where they allow it, the reply names it
+and says it replaced the one chosen, and `subagent_open`'s `model` is that
+model, with `model_replaced` naming the denied one; where they do not, or
+nothing is routable, the reply and the record name the chosen model, as
+before.
 
 | Alias | Anthropic | OpenAI (its own API) | Ollama, an OpenAI-compatible server, or any provider with no row |
 |---|---|---|---|

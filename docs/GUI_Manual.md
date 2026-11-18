@@ -1576,10 +1576,10 @@ A second chip shows the template's model as its file writes it: `inherit`
 (the model that answered its lead; a template with no `model:` line reads
 `inherit` too), an alias — `fast`, `balanced` or `strong`, which name one
 model per provider (the Daemon Manual's *Model aliases*) — or a model id.
-The shipped lead reads `strong`, `explore_agent` and `system_agent` `fast`,
-the others `inherit`. A plugin's template has no model chip: it runs on its
-plugin's own model. Which model a run actually used is on its rows in the
-chat, never on this chip.
+The shipped lead reads `strong`, `explore_agent`, `research_agent` and
+`system_agent` `fast`, the others `inherit`. A plugin's template has no model
+chip: it runs on its plugin's own model. Which model a run actually used is
+on its rows in the chat, never on this chip.
 
 A template a file in `~/.openalpaca/config/agents` switches off — a file
 holding its `id:` and `disabled: true` — is listed with a **Switched off**

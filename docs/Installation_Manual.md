@@ -606,40 +606,40 @@ cannot answer until you enable one:
   there, on either API, asks OpenAI not to store it (`store: false`;
   OpenAI's abuse-monitoring logs, 30 days by default, are apart). The
   model alias `strong` is `gpt-6.1-sol` there, and `fast` is `gpt-6-luna`:
-  a workflow's lead and the six agents that follow it run on `strong`,
-  `explore_agent` and `system_agent` on `fast`. Ollama is sent what it was
-  sent before. An OpenAI-compatible server set as the `openai` provider's
-  `base_url` (llama.cpp, LM Studio, vLLM, a gateway on your network) keeps
-  Chat Completions and is asked only for the models it lists: OpenAI's own
-  model ids are not offered there unless the server lists them or one of
-  your `[models]` rows names them, the main model is one it lists (or one
-  of your `[models]` rows) when the configured one is not, and every alias
-  is the model the asking agent runs on, so a workflow's lead and every
-  agent it starts run on the server's model, counted at 0 on a server on
-  this machine or your home network (elsewhere, at $3 / $15 per million
-  tokens unless a `[models]` row names the model: such a row counts it at
-  the `input_price` and `output_price` it gives, and each it leaves out as
-  if it had none — at $3 / $15 elsewhere, at 0 on this machine or your
-  home network, at the built-in price for one of OpenAI's own ids). The
-  server's list gives no context window, so a run is budgeted at 200,000
-  tokens unless a `[models."<id>"]` row with `provider = "openai"` gives
-  the model's `context` (a row that leaves `context` out gives none, unless
-  it names a built-in id, which keeps its built-in window); give
-  one for a small local model, or its runs overrun its window. `daemon.log`
-  names each such model once, on any server that is not OpenAI's own,
-  on this machine, your home network or elsewhere. A pin naming another model
-  the server lists moves an alias there: `fast`, `balanced` or `strong`
-  under `[providers.openai.model_aliases]`. A server whose model list
-  cannot be read is run only on models you name for it: add each as a
-  `[models."<id>"]` row with `provider = "openai"` in `llm.toml`. On a
-  paid gateway, or any server elsewhere, give both `input_price` and
+  a workflow's lead and the five agents that follow it run on `strong`,
+  `explore_agent`, `research_agent` and `system_agent` on `fast`. Ollama
+  is sent what it was sent before. An OpenAI-compatible server set as the
+  `openai` provider's `base_url` (llama.cpp, LM Studio, vLLM, a gateway on
+  your network) keeps Chat Completions and is asked only for the models it
+  lists: OpenAI's own model ids are not offered there unless the server
+  lists them or one of your `[models]` rows names them, the main model is
+  one it lists (or one of your `[models]` rows) when the configured one is
+  not, and every alias is the model the asking agent runs on, so a
+  workflow's lead and every agent it starts run on the server's model,
+  counted at 0 on a server on this machine or your home network (elsewhere,
+  at $3 / $15 per million tokens unless a `[models]` row names the model:
+  such a row counts it at the `input_price` and `output_price` it gives, and
+  each it leaves out as if it had none — at $3 / $15 elsewhere, at 0 on this
+  machine or your home network, at the built-in price for one of OpenAI's
+  own ids). The server's list gives no context window, so a run is budgeted
+  at 200,000 tokens unless a `[models."<id>"]` row with
+  `provider = "openai"` gives the model's `context` (a row that leaves
+  `context` out gives none, unless it names a built-in id, which keeps its
+  built-in window); give one for a small local model, or its runs overrun
+  its window. `daemon.log` names each such model once, on any server that is
+  not OpenAI's own, on this machine, your home network or elsewhere. A pin
+  naming another model the server lists moves an alias there: `fast`,
+  `balanced` or `strong` under `[providers.openai.model_aliases]`. A server
+  whose model list cannot be read is run only on models you name for it: add
+  each as a `[models."<id>"]` row with `provider = "openai"` in `llm.toml`.
+  On a paid gateway, or any server elsewhere, give both `input_price` and
   `output_price` in every such row: a price left out is counted at the
-  $3 / $15 fallback, and `daemon.log` says so once per model. A row of
-  yours from before this build that gives no prices there was counted at
-  0 and is now counted at the fallback; `input_price = 0` and
-  `output_price = 0` keep it at 0.
-  See [Daemon Manual → Model aliases](Daemon_Manual.md#model-aliases) and
-  [OpenAI's Responses API](Daemon_Manual.md#openais-responses-api).
+  $3 / $15 fallback, and `daemon.log` says so once per model. A row of yours
+  from before this build that gives no prices there was counted at 0 and is
+  now counted at the fallback; `input_price = 0` and `output_price = 0` keep
+  it at 0. See [Daemon Manual → Model
+  aliases](Daemon_Manual.md#model-aliases) and [OpenAI's Responses
+  API](Daemon_Manual.md#openais-responses-api).
 
 `openalpaca llm status` shows the result, and names the fix when nothing is
 routable.
@@ -777,7 +777,7 @@ All in `~/.openalpaca/config/llm.toml`:
 | `[providers.ollama] default_max_tokens` | `8192` | The output ceiling for one answer (the cloud providers' is 16000). A request that names its own `max_tokens` still wins. |
 | `[providers.ollama] request_timeout_secs` | `3600` | Wall clock for one **non-streaming** call to this provider: a call to a local model may run up to an hour, and one that uses up the whole figure is not asked again. An install seeded before this build keeps `600` (see [Upgrade](#upgrade)). |
 | `[timeouts] llm_request_timeout_secs` | `120` | The same budget for any provider that sets no override. |
-| `[providers.ollama.model_aliases]` | none (a commented-out example) | Pins for the model aliases `fast`, `balanced` and `strong`. Ollama has no built-in model for any of them, so each alias is the model the asking agent already runs on; a pin names another, e.g. `fast = "qwen3:4b"` for a smaller pulled model. A pin may name any model the router can reach, a cloud one included; another key is warned of and ignored. On a machine with only Ollama, every shipped agent — the lead names `strong`, `explore_agent` and `system_agent` `fast`, the other six `inherit` — therefore runs on the main model (`[orchestrator] model`, or the tag the router picks), with no substitution warning; pin `fast` to a smaller pulled model to give the two read-only agents one. See the Daemon Manual's *Model aliases*. |
+| `[providers.ollama.model_aliases]` | none (a commented-out example) | Pins for the model aliases `fast`, `balanced` and `strong`. Ollama has no built-in model for any of them, so each alias is the model the asking agent already runs on; a pin names another, e.g. `fast = "qwen3:4b"` for a smaller pulled model. A pin may name any model the router can reach, a cloud one included; another key is warned of and ignored. On a machine with only Ollama, every shipped agent — the lead names `strong`, `explore_agent`, `research_agent` and `system_agent` `fast`, the other five `inherit` — therefore runs on the main model (`[orchestrator] model`, or the tag the router picks), with no substitution warning; pin `fast` to a smaller pulled model to give those three agents one. See the Daemon Manual's *Model aliases*. |
 
 You should not need a `[models]` row at all — discovery fills the catalogue —
 but one you write by hand still overrides what was discovered, field by field:
@@ -878,21 +878,24 @@ default_max_tokens = 16000
 ```
 
 **The built-in agents' models move with this build.** The shipped templates
-name no model id any more: `lead_agent` names `strong`, `explore_agent` and
-`system_agent` name `fast`, and the other six name `inherit` — the model that
-answered their lead — with no `fallback_models` (the retry on Opus is gone).
+name no model id any more: `lead_agent` names `strong`, `explore_agent`,
+`research_agent` and `system_agent` name `fast`, and the other five name
+`inherit` — the model that answered their lead — with no `fallback_models`
+(the retry on Opus is gone).
 What a workflow runs on, per install, with the pin that keeps the old one:
 
-- **Anthropic** (the seeded `[orchestrator]`): the lead and its six
-  followers run on `claude-opus-5-5`, `explore_agent` and `system_agent` on
-  `claude-haiku-5-5`. From a build before the move to the latest models they
-  ran on Claude Sonnet 4.6 and Haiku 4.5; since that move, until this build,
-  the templates named those retired ids, so with a key whose model list
-  still named them they ran on them counted at $3 / $15, and otherwise on
+- **Anthropic** (the seeded `[orchestrator]`): the lead and its five
+  followers run on `claude-opus-5-5`, `explore_agent`, `research_agent` and
+  `system_agent` on `claude-haiku-5-5`. From a build before the move to the
+  latest models the lead, its followers and `research_agent` ran on Claude
+  Sonnet 4.6, `explore_agent` and `system_agent` on Haiku 4.5; since that
+  move, until this build, the templates named those retired ids, so with a
+  key whose model list still named them they ran on them counted at
+  $3 / $15, and otherwise on
   `claude-sonnet-5-5`, the seeded `[orchestrator] fallback_models`. To
   keep the lead off Opus:
   `[providers.anthropic.model_aliases] strong = "claude-sonnet-5-5"`.
-- **OpenAI only:** the lead and its six on `gpt-6.1-sol`, the two `fast`
+- **OpenAI only:** the lead and its five on `gpt-6.1-sol`, the three `fast`
   agents on `gpt-6-luna`, where they all ran on the main model before; a
   main model you set no longer carries the lead — the `strong` row does —
   and `strong = "<id>"` under `[providers.openai.model_aliases]` puts it back.
@@ -910,7 +913,7 @@ What a workflow runs on, per install, with the pin that keeps the old one:
   strong = "claude-sonnet-5-5"` sends them to the cloud model.
 - **Anthropic and OpenAI loaded, the main model on OpenAI:** workflows follow
   the main model's provider; pins send them back to Anthropic.
-- **A `lead_agent.md` you edited** keeps the model it names, and the six that
+- **A `lead_agent.md` you edited** keeps the model it names, and the five that
   inherit follow it; set its `model:` to `strong` to move them. **A template
   of your own with no `model:` line** now runs on its lead's model
   (`claude-opus-5-5` on a stock Anthropic install) where it ran on the main
@@ -925,11 +928,16 @@ tokens for the same text, so the same work costs about 1.7 times as much, and
 more where it thinks (thinking is billed as output). Each cap stops a run
 correspondingly sooner: in input tokens alone the lead's $3 buys 750,000,
 `general_agent`'s $5 1,250,000, `code_agent`'s $3 750,000,
-`planning_agent`'s $1.50 375,000, `review_agent`'s and `writing_agent`'s $1
-250,000, and `research_agent`'s $0.35 87,500. On OpenAI, `gpt-6.1-sol` is
-$2 / $10 (OpenAI's pricing page, the same day): the lead's $3 buys 1,500,000
-input tokens. A subagent's spend is still counted against its own cap, not
-the lead's.
+`planning_agent`'s $1.50 375,000, and `review_agent`'s and `writing_agent`'s
+$1 250,000. On OpenAI, `gpt-6.1-sol` is $2 / $10 (OpenAI's pricing page, the
+same day): the lead's $3 buys 1,500,000 input tokens. `research_agent`
+keeps its $0.35 cap on `fast`; on Opus 5.5 it would buy 87,500 input
+tokens, and one or two rounds could spend it. `claude-haiku-5-5` and
+`gpt-6-luna` are each $0.10 / $0.50 per million, so it buys 3,500,000
+input tokens while each request's prompt stays under its model's
+long-prompt line (Haiku 5.5's 100,000 tokens, $0.50 / $2.50 past it;
+GPT-6 Luna's 272,000, $0.20 / $0.75 past it). A subagent's spend is still
+counted against its own cap, not the lead's.
 
 An upgrade from any build before the schema re-baseline of 2026-09-28 is the one
 exception — a pre-redesign build at schema 42 as well as an earlier

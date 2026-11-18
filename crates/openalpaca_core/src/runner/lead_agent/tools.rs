@@ -19,6 +19,7 @@ use crate::prompt_ctx::{ExecutionPath, PackageSectionKind, SectionPriority};
 use crate::runner::plugin_agent::{PluginLoopOutcome, PluginRunScope, run_plugin_agent_loop};
 use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
+use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::extensions::ExtensionId;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
@@ -688,6 +689,35 @@ impl BuiltInTool for SpawnSubagentTool {
                 agent.llm_config.fallback_models.clear();
             }
         }
+        // C8-2 (c), the advisor's pick the owner took on 2026-11-17: a model
+        // the agent's own model constraints deny is still accepted — the
+        // refusal, (b), is the owner's and not taken — and its loop config
+        // drops it to the router default, by this same check
+        // (`LoopConfig::from_defaults`). The reply and the lane's
+        // `subagent_open` name the model the child will run on, then, and
+        // that it replaced the one chosen, never the denied one as used.
+        // A replacement is named only when the default the loop reaches is
+        // itself one the constraints allow: where it is the denied model,
+        // outside an `allowed_models` list, or nothing is routable, the
+        // reply and the record stay as they were.
+        let denies = |model: &str| {
+            CapabilityManager::check_model_access(&agent.id, model, &agent.constraints).is_err()
+        };
+        let replacement = match (&child_model, plugin_backed) {
+            (Some(model), false) if denies(model) => self
+                .router
+                .would_answer(
+                    &self.router.default_model(),
+                    &agent.llm_config.fallback_models,
+                )
+                .filter(|used| !denies(used))
+                .map(|used| (model.clone(), used)),
+            _ => None,
+        };
+        let (replaced, used_model) = match replacement {
+            Some((denied, used)) => (Some(denied), Some(used)),
+            None => (None, child_model.clone()),
+        };
         let instance_id = agent.id.clone();
         // The id the lead knows this subagent by — returned below, and named
         // on the lane's open and close records so a resumed run can rebuild
@@ -738,42 +768,49 @@ impl BuiltInTool for SpawnSubagentTool {
         // is a pure filter over one globally ordered log (P-20).
         let session_log = self.session_log();
         if let Some(ref log) = session_log {
+            let mut open = serde_json::json!({
+                "span_id": node_id,
+                "template": agent_id,
+                // A-3: whether the lead left `agent_id` out, so the
+                // record tells "chose it" from "left it to the
+                // default".
+                "agent_id_defaulted": defaulted,
+                "label": span_label,
+                "role": "subagent",
+                "run_id": run_id,
+                "objective": objective.chars().take(500).collect::<String>(),
+                // C8 (M-10): what chose the child's model — its
+                // template's word or the lead's call — and the id it
+                // resolved to before the call; the model that
+                // answered is the lane's rounds'.
+                "model_choice": {
+                    "choice": crate::runner::model_choice::choice_word(&choice),
+                    "per_call": chosen_per_call,
+                },
+                // C8-2 (c): the model the child will run on — the
+                // router default where its constraints deny the one
+                // chosen, which `model_replaced` then names.
+                "model": if plugin_backed { None } else { used_model.clone() },
+                // P-17: a plugin-backed template says so, so a reader
+                // never has to guess which extension ran the lane.
+                "plugin_id": self
+                    .shared_context
+                    .agent_registry
+                    .get_template(agent_id)
+                    .and_then(|t| match t.source {
+                        AgentSource::Plugin { plugin_id, .. } => Some(plugin_id),
+                        AgentSource::Internal => None,
+                    }),
+            });
+            if let Some(ref denied) = replaced {
+                open["model_replaced"] = serde_json::json!(denied);
+            }
             log.emit(
                 crate::session_log::Record::new(crate::session_log::RecordType::SubagentOpen)
                     .task(Some(&self.task_id))
                     .span(Some(&node_id))
                     .agent(Some(&instance_id))
-                    .with_data(serde_json::json!({
-                        "span_id": node_id,
-                        "template": agent_id,
-                        // A-3: whether the lead left `agent_id` out, so the
-                        // record tells "chose it" from "left it to the
-                        // default".
-                        "agent_id_defaulted": defaulted,
-                        "label": span_label,
-                        "role": "subagent",
-                        "run_id": run_id,
-                        "objective": objective.chars().take(500).collect::<String>(),
-                        // C8 (M-10): what chose the child's model — its
-                        // template's word or the lead's call — and the id it
-                        // resolved to before the call; the model that
-                        // answered is the lane's rounds'.
-                        "model_choice": {
-                            "choice": crate::runner::model_choice::choice_word(&choice),
-                            "per_call": chosen_per_call,
-                        },
-                        "model": if plugin_backed { None } else { child_model.clone() },
-                        // P-17: a plugin-backed template says so, so a reader
-                        // never has to guess which extension ran the lane.
-                        "plugin_id": self
-                            .shared_context
-                            .agent_registry
-                            .get_template(agent_id)
-                            .and_then(|t| match t.source {
-                                AgentSource::Plugin { plugin_id, .. } => Some(plugin_id),
-                                AgentSource::Internal => None,
-                            }),
-                    })),
+                    .with_data(open),
             );
         }
 
@@ -1435,7 +1472,7 @@ impl BuiltInTool for SpawnSubagentTool {
         // M-10: the model the child runs on, what chose it, and that the
         // lead's own stays — without it a lead reads a child's model as its
         // own switch.
-        let model_note = match (&child_model, plugin_backed) {
+        let model_note = match (&used_model, plugin_backed) {
             (Some(model), false) => {
                 let stay = self
                     .answering_model
@@ -1445,14 +1482,30 @@ impl BuiltInTool for SpawnSubagentTool {
                     .map(|lead| format!("; you stay on {lead}"))
                     .unwrap_or_default();
                 let word = crate::runner::model_choice::choice_word(&choice);
-                let why = if chosen_per_call {
-                    format!("as you asked: {word}{stay}")
-                } else {
-                    match &choice {
+                let why = match &replaced {
+                    // C8-2 (c): what chose the denied model, and that the
+                    // child runs on the router default in its place.
+                    Some(denied) => {
+                        let source = if chosen_per_call {
+                            "as you asked".to_string()
+                        } else {
+                            match &choice {
+                                ModelChoice::Inherit => "your model".to_string(),
+                                ModelChoice::Alias(_) => format!("its template's {word}"),
+                                ModelChoice::Id(_) => "its template's model".to_string(),
+                            }
+                        };
+                        format!(
+                            "it replaced {denied}, {source}, which this agent's model \
+                             constraints deny{stay}"
+                        )
+                    }
+                    None if chosen_per_call => format!("as you asked: {word}{stay}"),
+                    None => match &choice {
                         ModelChoice::Inherit => "your model".to_string(),
                         ModelChoice::Alias(_) => format!("its template's {word}{stay}"),
                         ModelChoice::Id(_) => format!("its template's model{stay}"),
-                    }
+                    },
                 };
                 format!(" on {model} ({why})")
             }

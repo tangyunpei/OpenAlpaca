@@ -32,6 +32,10 @@ pub(crate) const LEAD_AGENT_E00EE04A: &str = include_str!("fixtures/e00ee04a/age
 /// `claude-haiku-4-5-20251001` with its `claude-sonnet-4-6` fallback.
 pub(crate) const EXPLORE_AGENT_E00EE04A: &str =
     include_str!("fixtures/e00ee04a/agents/explore_agent.md");
+/// `0dc0b2cd`'s `research_agent.md`: the side before OUTPUT-BUDGET-4,
+/// naming `inherit` under its $0.35 cap.
+pub(crate) const RESEARCH_AGENT_0DC0B2CD: &str =
+    include_str!("fixtures/0dc0b2cd/agents/research_agent.md");
 
 /// The Installation Manual's step 7, as written: delete exactly the two
 /// lines `require_confirmation_for:` and `  - "file_delete"`.

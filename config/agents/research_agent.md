@@ -13,7 +13,7 @@ denied_capabilities:
   - "shell_execute"
   - "file_write"
 verbosity: "detailed"
-model: "inherit"
+model: "fast"
 max_tool_calls: 12
 max_cost_per_task: 0.35
 max_rounds: 8

@@ -338,6 +338,11 @@ const WORKERS: [&str; 8] = [
     "writing_agent",
 ];
 
+/// The shipped workers whose template names `fast`: the two read-only
+/// profiles, and `research_agent` since OUTPUT-BUDGET-4 (c), which keeps
+/// its $0.35 cap on the cheaper row. The other five name `inherit`.
+const ON_FAST: [&str; 3] = ["explore_agent", "research_agent", "system_agent"];
+
 /// The lead spawns `items` in one batch, waits, and answers.
 fn batch_lead(items: serde_json::Value) -> Vec<ChatResponse> {
     vec![
@@ -440,10 +445,11 @@ async fn every_template_on(models: &Arc<Models>, router: Arc<LlmRouter>) {
 
 /// **A stock Anthropic install** (the seeded `[orchestrator] model`, Claude
 /// Haiku 5.5): the lead names `strong` and runs on Anthropic's `strong` row,
-/// the six that follow it `inherit` the model that answered it, and
-/// `explore_agent` and `system_agent` run on `fast`'s row. On the parent the
-/// nine named retired ids (Sonnet 4.6, Haiku 4.5) that this router does not
-/// hold, so each walked the ladder to the main model, Haiku 5.5 (ML-9).
+/// the five that follow it `inherit` the model that answered it, and
+/// `explore_agent`, `research_agent` and `system_agent` run on `fast`'s
+/// row. On the parent the nine named retired ids (Sonnet 4.6, Haiku 4.5)
+/// that this router does not hold, so each walked the ladder to the main
+/// model, Haiku 5.5 (ML-9).
 #[tokio::test]
 async fn each_shipped_template_answers_on_its_latest_row_on_an_anthropic_only_install() {
     let models = Models::new(batch_lead(every_worker()));
@@ -454,7 +460,7 @@ async fn each_shipped_template_answers_on_its_latest_row_on_an_anthropic_only_in
     let fast = row(ProviderType::Anthropic, ModelAlias::Fast);
     assert_eq!(models.lead_model(), strong, "the lead names strong");
     for id in WORKERS {
-        let expected = if ["explore_agent", "system_agent"].contains(&id) {
+        let expected = if ON_FAST.contains(&id) {
             &fast
         } else {
             &strong
@@ -464,8 +470,8 @@ async fn each_shipped_template_answers_on_its_latest_row_on_an_anthropic_only_in
 }
 
 /// **An OpenAI-only install, catalogue only** (no discovery; the seeded
-/// OpenAI default, GPT-6 Luna, as the main model): the lead and its six on
-/// OpenAI's `strong` row, the two `fast` profiles on its `fast` row. On the
+/// OpenAI default, GPT-6 Luna, as the main model): the lead and its five on
+/// OpenAI's `strong` row, the three `fast` templates on its `fast` row. On the
 /// parent every shipped Claude pin was unroutable here and fell to Luna.
 #[tokio::test]
 async fn each_shipped_template_answers_on_its_latest_row_on_an_openai_only_install() {
@@ -477,7 +483,7 @@ async fn each_shipped_template_answers_on_its_latest_row_on_an_openai_only_insta
     let fast = row(ProviderType::OpenAI, ModelAlias::Fast);
     assert_eq!(models.lead_model(), strong);
     for id in WORKERS {
-        let expected = if ["explore_agent", "system_agent"].contains(&id) {
+        let expected = if ON_FAST.contains(&id) {
             &fast
         } else {
             &strong
@@ -1056,6 +1062,143 @@ async fn the_spawn_result_names_the_model_and_that_the_lead_stays() {
     }
 }
 
+/// C8-2 (c), the advisor's pick the owner took on 2026-11-17: a model the
+/// agent's own model constraints deny — here `general_agent`'s set denies
+/// the lead's model, which it would inherit, and a per-call one — is
+/// still accepted (the refusal, (b), is the owner's and not taken), and
+/// the child runs on the router default as before; the spawn's reply and
+/// the lane's `subagent_open` now name that model, saying it replaced the
+/// one chosen. An allowed per-call model still names itself, and so does a
+/// denied one when the default the loop reaches is denied too (here
+/// `writing_agent`'s set denies the router default it asks for): no
+/// replacement is claimed, and the reply and the record are the parent's.
+/// On the parent the reply named the denied model as the one the child
+/// ran on.
+#[tokio::test]
+async fn a_model_the_agents_constraints_deny_is_named_as_replaced_by_the_one_used() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let strong = row(ProviderType::Anthropic, ModelAlias::Strong);
+    let models = Models::new(batch_lead(serde_json::json!([
+        { "agent_id": "general_agent", "objective": "work for general_agent" },
+        {
+            "agent_id": "general_agent",
+            "objective": "asked work for general_agent",
+            "model": "claude-fable-5-2"
+        },
+        {
+            "agent_id": "review_agent",
+            "objective": "work for review_agent",
+            "model": "claude-sonnet-5-5"
+        },
+        {
+            "agent_id": "writing_agent",
+            "objective": "work for writing_agent",
+            "model": "claude-haiku-5-5"
+        }
+    ])));
+    let router = install(&models, &[ProviderType::Anthropic], "claude-haiku-5-5");
+    let shared = shipped();
+    shared.agent_registry.restore_set(
+        "general_agent",
+        Some(serde_json::json!({
+            "constraints": { "denied_models": [strong.clone(), "claude-fable-5-2"] }
+        })),
+    );
+    shared.agent_registry.restore_set(
+        "writing_agent",
+        Some(serde_json::json!({
+            "constraints": { "denied_models": ["claude-haiku-5-5"] }
+        })),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-lead");
+    shared.register_task_session_log("task-1", handle.clone());
+    let lead = instance(&shared, "lead_agent");
+    run(&lead, router, shared, EventBus::default()).await;
+
+    // What the children ran on: the router default for the denied ones,
+    // the asked model for the allowed one — unchanged from the parent.
+    assert_eq!(models.lead_model(), strong);
+    assert_eq!(models.child_model("asked work for"), "claude-haiku-5-5");
+    let inherited = models
+        .seen()
+        .into_iter()
+        .find(|s| {
+            !s.lead
+                && s.last_user.contains("work for general_agent")
+                && !s.last_user.contains("asked work")
+        })
+        .and_then(|s| s.model)
+        .expect("the inheriting child made a request");
+    assert_eq!(inherited, "claude-haiku-5-5");
+    assert_eq!(models.child_model("review_agent"), "claude-sonnet-5-5");
+
+    let summary = &models.tool_results()[0];
+    for expected in [
+        format!(
+            ") on claude-haiku-5-5 (it replaced {strong}, your model, which this agent's model \
+             constraints deny; you stay on {strong}),"
+        ),
+        format!(
+            ") on claude-haiku-5-5 (it replaced claude-fable-5-2, as you asked, which this \
+             agent's model constraints deny; you stay on {strong}),"
+        ),
+        format!(") on claude-sonnet-5-5 (as you asked: claude-sonnet-5-5; you stay on {strong}),"),
+        format!(") on claude-haiku-5-5 (as you asked: claude-haiku-5-5; you stay on {strong}),"),
+    ] {
+        assert!(summary.contains(&expected), "{expected} in {summary}");
+    }
+    assert!(
+        !summary.contains(&format!(") on {strong} (your model),")),
+        "the denied model is not named as the one used: {summary}"
+    );
+
+    assert!(handle.flush().await);
+    let records = read_records(&dir.path().join("sess-lead")).unwrap();
+    let opens: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == "subagent_open")
+        .collect();
+    assert_eq!(opens.len(), 4, "four lanes opened");
+    let by_objective = |key: &str| {
+        opens
+            .iter()
+            .find(|r| {
+                r.data["objective"]
+                    .as_str()
+                    .is_some_and(|o| o.starts_with(key))
+            })
+            .unwrap_or_else(|| panic!("no lane for {key}"))
+    };
+    let inherited = by_objective("work for general_agent");
+    assert_eq!(inherited.data["model"], "claude-haiku-5-5");
+    assert_eq!(inherited.data["model_replaced"], strong.as_str());
+    let asked = by_objective("asked work for general_agent");
+    assert_eq!(asked.data["model"], "claude-haiku-5-5");
+    assert_eq!(asked.data["model_replaced"], "claude-fable-5-2");
+    let allowed = by_objective("work for review_agent");
+    assert_eq!(allowed.data["model"], "claude-sonnet-5-5");
+    assert!(
+        allowed.data.get("model_replaced").is_none(),
+        "only a replacement says so: {}",
+        allowed.data
+    );
+    let denied_default = by_objective("work for writing_agent");
+    assert_eq!(denied_default.data["model"], "claude-haiku-5-5");
+    assert!(
+        denied_default.data.get("model_replaced").is_none(),
+        "no replacement where the default is denied too: {}",
+        denied_default.data
+    );
+}
+
 /// M-8: the `model` parameter of both spawn tools names what each alias is
 /// here, the routable ids and the lead's own model; the choices are in the
 /// parameter and nowhere else (§7 O-8 (a)).
@@ -1503,8 +1646,8 @@ async fn a_models_row_s_context_sizes_the_lead_on_a_compatible_server() {
 }
 
 /// The same install on OpenAI's own API (its default `base_url`) keeps the
-/// compiled rows: the lead and its six on `strong`'s, the two `fast`
-/// profiles on `fast`'s, though the provider's discovery listed another
+/// compiled rows: the lead and its five on `strong`'s, the three `fast`
+/// templates on `fast`'s, though the provider's discovery listed another
 /// model too. A guard: green on the parent as well.
 #[tokio::test]
 async fn on_openai_s_own_api_the_shipped_templates_keep_openai_s_rows() {
@@ -1516,7 +1659,7 @@ async fn on_openai_s_own_api_the_shipped_templates_keep_openai_s_rows() {
     let fast = row(ProviderType::OpenAI, ModelAlias::Fast);
     assert_eq!(models.lead_model(), strong);
     for id in WORKERS {
-        let expected = if ["explore_agent", "system_agent"].contains(&id) {
+        let expected = if ON_FAST.contains(&id) {
             &fast
         } else {
             &strong

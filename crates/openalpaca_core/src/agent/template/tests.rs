@@ -671,6 +671,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
     // read-only profiles `fast`, the six others `inherit`, and none keeps a
     // `fallback_models` list (the parent's named `claude-sonnet-4-6`,
     // `claude-haiku-4-5-20251001` and the `claude-opus-4-6` retry).
+    // OUTPUT-BUDGET-4 (c) moved `research_agent` to `fast`, its $0.35 cap
+    // kept, so five name `inherit`.
     const INHERIT: &str = "inherit";
     const FAST: &str = "fast";
     const STRONG: &str = "strong";
@@ -797,7 +799,8 @@ fn every_shipped_template_keeps_its_capabilities_denials_and_caps() {
             max_tool_calls: Some(12),
             max_cost_per_task: Some(0.35),
             max_rounds: Some(8),
-            model: INHERIT,
+            // OUTPUT-BUDGET-4 (c): on `fast`, under the settled $0.35 cap.
+            model: FAST,
             fallback_models: NONE,
         },
         Kept {
