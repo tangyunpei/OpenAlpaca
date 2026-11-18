@@ -8093,6 +8093,7 @@ impl openalpaca_llm::LlmProvider for StubModel {
             },
             thinking: None,
             parts: None,
+            echo: None,
         })
     }
 }
@@ -8190,6 +8191,7 @@ fn router_over(models: &[&str], stub: Arc<StubModel>) -> Arc<openalpaca_llm::Llm
                 declared: false,
                 long_prompt: None,
                 cache_rates: None,
+                request_contract: openalpaca_llm::RequestContract::NONE,
             },
         );
     }
@@ -8203,14 +8205,14 @@ fn an_unroutable_judge_is_refused() {
     let (router, stub) = stub_router(&[TEST_MODEL], |_| String::new());
     let err = judge_guard(
         &router,
-        Some("claude-opus-4-1-nonexistent"),
+        Some("claude-opus-5-5-nonexistent"),
         Some(TEST_MODEL),
         None,
     )
     .unwrap_err();
     assert!(err.contains("not routable"), "{err}");
     // A model the registry knows whose provider is not loaded.
-    let err = judge_guard(&router, Some("gpt-4o"), Some(TEST_MODEL), None).unwrap_err();
+    let err = judge_guard(&router, Some("gpt-6-luna"), Some(TEST_MODEL), None).unwrap_err();
     assert!(err.contains("not routable"), "{err}");
     let err = judge_guard(&router, None, None, None).unwrap_err();
     assert!(err.contains("no reader model is routable"), "{err}");
@@ -8266,7 +8268,7 @@ fn a_judge_of_the_readers_family_is_accepted_and_recorded() {
     assert!(!other.judge_is_reader && !other.judge_same_family);
     assert!(other.judge_is_extractor, "the extractor named it");
     assert_eq!(model_family("qwen3.8:27b-mlx"), "qwen3.8");
-    assert_eq!(model_family("claude-sonnet-4-5"), "claude-sonnet-4-5");
+    assert_eq!(model_family("claude-sonnet-5-5"), "claude-sonnet-5-5");
 }
 
 #[test]
