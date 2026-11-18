@@ -958,49 +958,37 @@ async fn run_agentic_loop_core(
         llm_call_span.in_scope(|| {
             tracing::trace!("llm_call step entered");
         });
-        let llm_result = if let Some(ref token) = cancel_token {
-            tokio::select! {
-                result = backend.complete(
-                    Arc::clone(&messages),
-                    Arc::clone(&tools_arc),
-                    config.model.clone(),
-                    tool_choice,
-                    tools_token_estimate,
-                    config.enable_caching,
-                    config.thinking.clone(),
-                    config.stream_callback.as_ref(),
-                    config.stream_rounds,
-                    config.max_stream_duration,
-                    config.max_keyless_stream_duration,
-                    context_management.clone(),
-                ).instrument(llm_call_span.clone()) => result,
-                _ = token.cancelled() => {
-                    tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
-                    // The interrupted call never delivered this round's
-                    // drained steering messages — return them to the inbox
-                    // for follow-up conversion.
-                    return_pending_steering(config, &mut pending_steering);
-                    return state.result(LoopFinishReason::Cancelled);
-                }
-            }
-        } else {
-            backend
-                .complete(
-                    Arc::clone(&messages),
-                    Arc::clone(&tools_arc),
-                    config.model.clone(),
-                    tool_choice,
-                    tools_token_estimate,
-                    config.enable_caching,
-                    config.thinking.clone(),
-                    config.stream_callback.as_ref(),
-                    config.stream_rounds,
-                    config.max_stream_duration,
-                    config.max_keyless_stream_duration,
-                    context_management.clone(),
-                )
-                .instrument(llm_call_span)
-                .await
+        // Raced against the cancel when the run has a token: the call is
+        // polled before the token, so an answer and a cancel ready in the
+        // same tick keep the answer (M60).
+        let llm_call = backend
+            .complete(
+                Arc::clone(&messages),
+                Arc::clone(&tools_arc),
+                config.model.clone(),
+                tool_choice,
+                tools_token_estimate,
+                config.enable_caching,
+                config.thinking.clone(),
+                config.stream_callback.as_ref(),
+                config.stream_rounds,
+                config.max_stream_duration,
+                config.max_keyless_stream_duration,
+                context_management.clone(),
+            )
+            .instrument(llm_call_span);
+        let Some(llm_result) = super::unless_cancelled(cancel_token.as_ref(), llm_call).await
+        else {
+            tracing::info!(
+                agent_id = agent_id,
+                round = state.rounds + 1,
+                "LLM call interrupted by cancellation"
+            );
+            // The interrupted call never delivered this round's drained
+            // steering messages — return them to the inbox for follow-up
+            // conversion.
+            return_pending_steering(config, &mut pending_steering);
+            return state.result(LoopFinishReason::Cancelled);
         };
 
         // ── 9/10. Parse response / persist or execute tools ────────
@@ -1290,22 +1278,17 @@ async fn run_agentic_loop_core(
                     // Race the whole round, every group, against
                     // cancellation; instrument it so events/spans inside tool
                     // execution nest under persist_or_tools.
-                    let results = if let Some(ref token) = cancel_token {
-                        tokio::select! {
-                            results = round.instrument(persist_span.clone()) => results,
-                            _ = token.cancelled() => {
-                                persist_span.in_scope(|| {
-                                    tracing::info!(
-                                        agent_id = agent_id,
-                                        round = state.rounds,
-                                        "Cancelled during tool execution"
-                                    );
-                                });
-                                return state.result(LoopFinishReason::Cancelled);
-                            }
-                        }
-                    } else {
-                        round.instrument(persist_span.clone()).await
+                    let round = round.instrument(persist_span.clone());
+                    let Some(results) = super::unless_cancelled(cancel_token.as_ref(), round).await
+                    else {
+                        persist_span.in_scope(|| {
+                            tracing::info!(
+                                agent_id = agent_id,
+                                round = state.rounds,
+                                "Cancelled during tool execution"
+                            );
+                        });
+                        return state.result(LoopFinishReason::Cancelled);
                     };
 
                     // Collect results in the model's order
@@ -1606,17 +1589,18 @@ async fn run_agentic_loop_core(
                             backoff_secs = backoff_secs,
                             "Transient LLM error, retrying after backoff"
                         );
-                        if let Some(ref token) = cancel_token {
-                            tokio::select! {
-                                () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
-                                () = token.cancelled() => {
-                                    tracing::info!(agent_id = agent_id, rounds = state.rounds, "Agentic loop cancelled during retry backoff");
-                                    return_pending_steering(config, &mut pending_steering);
-                                    return state.result(LoopFinishReason::Cancelled);
-                                }
-                            }
-                        } else {
-                            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                        let backoff = tokio::time::sleep(Duration::from_secs(backoff_secs));
+                        if super::unless_cancelled(cancel_token.as_ref(), backoff)
+                            .await
+                            .is_none()
+                        {
+                            tracing::info!(
+                                agent_id = agent_id,
+                                rounds = state.rounds,
+                                "Agentic loop cancelled during retry backoff"
+                            );
+                            return_pending_steering(config, &mut pending_steering);
+                            return state.result(LoopFinishReason::Cancelled);
                         }
                         continue;
                     }

@@ -66,19 +66,21 @@ impl NotificationDispatcher {
     pub async fn run(mut self) {
         info!("NotificationDispatcher started");
         loop {
-            let event = tokio::select! {
-                result = self.bus_rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("NotificationDispatcher lagged by {n} events");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        info!("NotificationDispatcher: bus closed, shutting down");
-                        break;
-                    }
-                },
-                _ = self.cancel_token.cancelled() => {
+            let event = match self
+                .cancel_token
+                .run_until_cancelled(self.bus_rx.recv())
+                .await
+            {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(n))) => {
+                    warn!("NotificationDispatcher lagged by {n} events");
+                    continue;
+                }
+                Some(Err(broadcast::error::RecvError::Closed)) => {
+                    info!("NotificationDispatcher: bus closed, shutting down");
+                    break;
+                }
+                None => {
                     info!("NotificationDispatcher: cancelled, shutting down");
                     break;
                 }

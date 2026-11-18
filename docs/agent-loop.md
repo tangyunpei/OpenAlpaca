@@ -28,7 +28,7 @@ siblings); `cache_markers` lives in the provider layer and carries only
 | 5 | `loop.step.build_request` | Assemble `RouterRequest` for this iteration | step 5 |
 | 6 | `loop.step.pressure_layer` | Append the budget notice to the run's list, where it stays (fires only at >=80% cost or rounds, flag-gated) | nested in step 5 |
 | 7 | `loop.step.cache_markers` | Apply the three Anthropic `cache_control: ephemeral` markers (system, last tool, last message) | `providers/anthropic/request.rs` |
-| 8 | `loop.step.llm_call` | Dispatch `backend.complete(...)` under `tokio::select!` with the cancel token | step 8 |
+| 8 | `loop.step.llm_call` | Dispatch `backend.complete(...)` through the cancel token's `run_until_cancelled` (the call polled first) | step 8 |
 | 9 | `loop.step.response_parse` | Parse the `ChatResponse`; split into tool-call branch or final-text branch | step 9 |
 | 10 | `loop.step.persist_or_tools` | Execute tools in groups, in the model's order (read-only calls together via `join_all`, every other call alone) OR persist final text and return | step 10 |
 
@@ -209,7 +209,9 @@ instructions, then `step()` polls capped at 50 iterations, with requested
 tool calls proxied through the same `SandboxManager::execute_tool` path
 (capability checks, sanitization, confirmation, timeouts) as internal
 subagents. Depth, concurrency-permit, and cancellation semantics are
-unchanged; the cancel token is checked between steps.
+unchanged; the cancel token is checked between steps and raced against
+the `spawn()` and `step()` RPCs, the poll sleep and each tool call, and
+a cancel sends the plugin `stop()`.
 
 **A spawn never waits** (N-LEAD-2). `spawn_subagent`, and each entry of
 `spawn_subagents_batch`, registers the subagent and returns its run id at
@@ -346,8 +348,10 @@ the lead's loop returns — an answer, its round or cost cap, an error, a
 cancel — `run_lead_agent` cancels the subagents token first (R45's kill of
 a running command's process group rides on it), waits up to 5 s for each
 subagent to close its lane as cancelled with the detail *"the run ended
-before this subagent finished"*, aborts whatever is still running (a
-plugin agent's RPC is not raced against the token), whose lane guard
+before this subagent finished"* (a plugin agent's spawn and step RPCs
+are raced against the token, so one mid-call is sent `stop()` and ends
+too), aborts whatever is still running (a plugin agent whose `stop()`
+does not answer within the grace), whose lane guard
 closes the lane the same way, and only then returns — so the dispatcher's
 `remove_cancellation_token` strands nothing, and the run's report lists
 the stopped lanes ([The Completion Report](#the-completion-report)). A
@@ -712,7 +716,7 @@ Hermes step      OpenAlpaca      Notes
 5. build API     Compliant       3 providers via adapter crate
 6. ephemeral     Compliant       Flag-gated (spec P0)
 7. cache marks   Compliant       3 Anthropic breakpoints (spec P1)
-8. interrupt     Compliant       tokio::select + CancellationToken
+8. interrupt     Compliant       CancellationToken::run_until_cancelled (future polled first)
 9a. tools+loop   Compliant       Grouped tool exec (reads in parallel)
 9b. text+return  Compliant       Background memory extraction
 10. persistence  Compliant       Optimistic-lock state_version

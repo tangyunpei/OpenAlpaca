@@ -95,9 +95,10 @@ pub const SUBAGENT_DAEMON_STOP_DETAIL: &str = "interrupted by the daemon's stop"
 
 /// How long a lead's run end waits for the subagents it cancelled to close
 /// their lanes themselves. An LLM subagent's loop races its model call and
-/// its tool calls against the token and ends at once; a plugin agent's RPC is
-/// not raced (it is bounded by the plugin channel's own timeout), so one in
-/// the middle of a call is aborted when this runs out.
+/// its tool calls against the token and ends at once; a plugin agent races
+/// its spawn and step RPCs against the token too and then sends `stop()`, so
+/// only one whose `stop()` does not answer in time is aborted when this runs
+/// out.
 const SUBAGENT_STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// How long the run end then waits for the tasks it aborted to be dropped —

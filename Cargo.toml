@@ -135,7 +135,7 @@ toml = "1.1.8"
 toml_edit = "0.25"
 dashmap = "6"
 which = "8"
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
 rustyline = "19.0.0"
 
 # middleware

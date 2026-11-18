@@ -544,7 +544,7 @@ async fn test_cancellation_during_tool_execution() {
     impl BuiltInTool for CancellingTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             self.token.cancel();
-            // Yield so tokio::select! can observe the cancellation
+            // Yield so the round's race can observe the cancellation
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             Ok("should be dropped".to_string())
         }
@@ -3101,8 +3101,8 @@ async fn test_steering_cancel_during_llm_call_reappends_undelivered() {
                 self.inbox.push(steering_msg("mid-flight fix")).unwrap();
                 Ok(MockProvider::tool_use_response())
             } else {
-                // Cancel while "in flight", then stall so the select! races
-                // the cancellation branch to victory.
+                // Cancel while "in flight", then stall so the token wins
+                // the call's race.
                 self.token.cancel();
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 Ok(MockProvider::simple_response("never delivered"))

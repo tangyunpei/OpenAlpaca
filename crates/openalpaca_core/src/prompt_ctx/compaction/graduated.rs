@@ -108,16 +108,24 @@ impl<'a> GraduatedCompactor<'a> {
                     let min_recent = self.budget.min_recent_messages();
                     let owned = std::mem::take(messages);
                     let result = if let Some(ref token) = cancel_token {
-                        tokio::select! {
-                            res = crate::context_budget::compaction::CompactionPipeline::compact(
-                                owned.clone(), self.kept_head, min_recent, previous, behind, self.summarizer, self.max_chars,
-                            ) => res,
-                            _ = token.cancelled() => {
-                                *messages = owned;
-                                tracing::info!("Compaction cancelled");
-                                break;
-                            }
-                        }
+                        // The summary is polled before the token: one that
+                        // finished in the tick the cancel landed is kept.
+                        let summary =
+                            crate::context_budget::compaction::CompactionPipeline::compact(
+                                owned.clone(),
+                                self.kept_head,
+                                min_recent,
+                                previous,
+                                behind,
+                                self.summarizer,
+                                self.max_chars,
+                            );
+                        let Some(result) = token.run_until_cancelled(summary).await else {
+                            *messages = owned;
+                            tracing::info!("Compaction cancelled");
+                            break;
+                        };
+                        result
                     } else {
                         crate::context_budget::compaction::CompactionPipeline::compact(
                             owned,

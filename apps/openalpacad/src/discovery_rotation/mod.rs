@@ -154,10 +154,14 @@ pub(crate) async fn run<C, W, F>(
     F: Future<Output = anyhow::Result<()>>,
 {
     loop {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => return,
-            () = tokio::time::sleep(check_every) => {}
+        // A sleep that ended in the tick the cancel landed wins the race;
+        // the check below still returns before a write is begun.
+        if cancel
+            .run_until_cancelled(tokio::time::sleep(check_every))
+            .await
+            .is_none()
+        {
+            return;
         }
         let at = now();
         if !written.rotation_due(at) {

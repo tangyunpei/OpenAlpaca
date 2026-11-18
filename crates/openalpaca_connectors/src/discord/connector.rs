@@ -288,8 +288,9 @@ fn guild_message_text(
 
 /// DiscordConnector manages the Discord bot lifecycle and message handling.
 ///
-/// Uses twilight's `Shard::next_event()` event loop with `tokio::select!`
-/// for cancellation (same pattern as iMessage connector's `run_loop()`).
+/// Uses twilight's `Shard::next_event()` event loop, each wait raced against
+/// the cancel token with `run_until_cancelled` (same pattern as iMessage
+/// connector's `run_loop()`).
 pub struct DiscordConnector {
     token: String,
     db: Arc<Database>,
@@ -354,43 +355,48 @@ impl DiscordConnector {
         }
 
         loop {
-            tokio::select! {
-                _ = self.cancel_token.cancelled() => {
-                    info!("Discord connector shutting down");
-                    return Ok(());
-                }
-                event = shard.next_event(EventTypeFlags::all()) => {
-                    match event {
-                        Some(Ok(Event::MessageCreate(msg))) => {
-                            if let Err(e) = self.handle_message(&msg.0, &http, bot_user_id).await {
-                                error!("Failed to handle Discord message: {e}");
-                            }
-                        }
-                        Some(Ok(Event::Ready(ready))) => {
-                            info!("Discord bot ready: {} (id: {})", ready.user.name, ready.user.id);
-                            bot_user_id = Some(ready.user.id);
-                        }
-                        Some(Err(e)) => {
-                            use twilight_gateway::error::ReceiveMessageErrorType;
-                            match e.kind() {
-                                ReceiveMessageErrorType::Reconnect => {
-                                    error!("Fatal Discord gateway error: {e}");
-                                    return Err(ConnectorError::ConnectionError(format!(
-                                        "Fatal gateway error: {e}"
-                                    )));
-                                }
-                                _ => {
-                                    warn!("Discord gateway error: {e}");
-                                }
-                            }
-                        }
-                        None => {
-                            info!("Discord gateway stream ended");
-                            return Ok(());
-                        }
-                        _ => {}
+            // The gateway's next event is polled before the token: one that
+            // arrived in the tick the cancel landed is handled first.
+            let Some(event) = self
+                .cancel_token
+                .run_until_cancelled(shard.next_event(EventTypeFlags::all()))
+                .await
+            else {
+                info!("Discord connector shutting down");
+                return Ok(());
+            };
+            match event {
+                Some(Ok(Event::MessageCreate(msg))) => {
+                    if let Err(e) = self.handle_message(&msg.0, &http, bot_user_id).await {
+                        error!("Failed to handle Discord message: {e}");
                     }
                 }
+                Some(Ok(Event::Ready(ready))) => {
+                    info!(
+                        "Discord bot ready: {} (id: {})",
+                        ready.user.name, ready.user.id
+                    );
+                    bot_user_id = Some(ready.user.id);
+                }
+                Some(Err(e)) => {
+                    use twilight_gateway::error::ReceiveMessageErrorType;
+                    match e.kind() {
+                        ReceiveMessageErrorType::Reconnect => {
+                            error!("Fatal Discord gateway error: {e}");
+                            return Err(ConnectorError::ConnectionError(format!(
+                                "Fatal gateway error: {e}"
+                            )));
+                        }
+                        _ => {
+                            warn!("Discord gateway error: {e}");
+                        }
+                    }
+                }
+                None => {
+                    info!("Discord gateway stream ended");
+                    return Ok(());
+                }
+                _ => {}
             }
         }
     }
@@ -404,12 +410,9 @@ impl DiscordConnector {
         let cancel = self.cancel_token.clone();
         tokio::spawn(async move {
             loop {
-                let event = tokio::select! {
-                    _ = cancel.cancelled() => {
-                        info!("Discord confirmation listener shutting down");
-                        break;
-                    }
-                    event = rx.recv() => event,
+                let Some(event) = cancel.run_until_cancelled(rx.recv()).await else {
+                    info!("Discord confirmation listener shutting down");
+                    break;
                 };
                 match event {
                     Ok(SystemEvent::ToolConfirmationRequested {

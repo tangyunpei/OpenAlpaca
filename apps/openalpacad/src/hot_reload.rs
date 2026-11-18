@@ -132,9 +132,12 @@ pub fn spawn_file_watcher(
 ) {
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                Some(ev) = wake_rx.recv() => ev,
-                _ = cancel.cancelled() => break,
+            // A closed channel (`Some(None)`) ends the loop, as the cancel
+            // does. Under `select!` its refutable arm was disabled instead and
+            // the loop parked on the token; neither is reachable while the
+            // loop lives, since `ctx.wake_manager` holds the sender.
+            let Some(Some(event)) = cancel.run_until_cancelled(wake_rx.recv()).await else {
+                break;
             };
             info!("Received WakeEvent: {:?}", event);
 
@@ -669,13 +672,10 @@ pub fn spawn_soul_reload_subscriber(
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
+            let event = match cancel.run_until_cancelled(rx.recv()).await {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Some(Err(broadcast::error::RecvError::Closed)) | None => break,
             };
             if let openalpaca_core::events::SystemEvent::SoulUpdated {
                 actor,
@@ -724,13 +724,10 @@ pub fn spawn_user_reload_subscriber(
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
+            let event = match cancel.run_until_cancelled(rx.recv()).await {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Some(Err(broadcast::error::RecvError::Closed)) | None => break,
             };
             if let openalpaca_core::events::SystemEvent::UserProfileUpdated {
                 actor,
@@ -782,13 +779,10 @@ pub fn spawn_identity_reload_subscriber(
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
+            let event = match cancel.run_until_cancelled(rx.recv()).await {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Some(Err(broadcast::error::RecvError::Closed)) | None => break,
             };
             if let openalpaca_core::events::SystemEvent::IdentityUpdated {
                 actor,

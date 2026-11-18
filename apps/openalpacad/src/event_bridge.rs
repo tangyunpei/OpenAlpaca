@@ -19,13 +19,12 @@ pub fn spawn_event_bridge(
     let mut system_rx = bus.subscribe();
     tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
-                result = system_rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
+            // The receive is polled before the token, so an event already
+            // published when the cancel lands in the same tick is forwarded.
+            let event = match cancel.run_until_cancelled(system_rx.recv()).await {
+                Some(Ok(ev)) => ev,
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Some(Err(broadcast::error::RecvError::Closed)) | None => break,
             };
             match event {
                 openalpaca_core::events::SystemEvent::ConnectorStatus { id, status, .. } => {
@@ -676,6 +675,34 @@ mod tests {
         let cancel = CancellationToken::new();
         spawn_event_bridge(eb, &bus, None, cancel.clone());
         (bus, rx, cancel)
+    }
+
+    /// M60: an event already on the bus when the shutdown token fires in the
+    /// same tick is forwarded, never dropped — `run_until_cancelled` polls
+    /// the receive first, where `select!` picked an arm at random. Repeated,
+    /// since the coin-flip it replaces passed half the time.
+    #[tokio::test(start_paused = true)]
+    async fn an_event_published_with_the_cancel_is_still_forwarded() {
+        for round in 0..64 {
+            let (bus, mut rx, cancel) = setup_bridge();
+            // Let the bridge park on its receive.
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            bus.publish(SystemEvent::WorkflowStarted {
+                request_id: Uuid::new_v4(),
+                task_id: format!("t-{round}"),
+                lane_key: "owner:cli".into(),
+                title: "Research task".into(),
+                timestamp: chrono::Utc::now(),
+            });
+            cancel.cancel();
+            let forwarded = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+            assert!(
+                matches!(forwarded, Ok(Ok(ServerEvent::WorkflowStarted { .. }))),
+                "round {round}: the event published with the cancel was dropped: {forwarded:?}"
+            );
+        }
     }
 
     async fn recv_event(rx: &mut broadcast::Receiver<ServerEvent>) -> ServerEvent {

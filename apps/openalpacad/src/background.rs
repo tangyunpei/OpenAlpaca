@@ -17,12 +17,13 @@ pub fn spawn_heartbeat(
     tokio::spawn(async move {
         loop {
             let secs = daemon_config.load().server.heartbeat_interval_secs;
-            tokio::select! {
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(secs)) => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("Heartbeat task shutting down");
-                    break;
-                }
+            if cancel
+                .run_until_cancelled(tokio::time::sleep(tokio::time::Duration::from_secs(secs)))
+                .await
+                .is_none()
+            {
+                tracing::info!("Heartbeat task shutting down");
+                break;
             }
             eb.heartbeat();
         }
@@ -42,12 +43,15 @@ pub fn spawn_chat_cleanup(
             let cfg = daemon_config.load();
             let cleanup_secs = cfg.server.chat_streams.cleanup_interval_secs;
             let stale_secs = cfg.server.chat_streams.stale_timeout_secs;
-            tokio::select! {
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(cleanup_secs)) => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("Chat cleanup task shutting down");
-                    break;
-                }
+            if cancel
+                .run_until_cancelled(tokio::time::sleep(tokio::time::Duration::from_secs(
+                    cleanup_secs,
+                )))
+                .await
+                .is_none()
+            {
+                tracing::info!("Chat cleanup task shutting down");
+                break;
             }
             csm.cleanup_stale(std::time::Duration::from_secs(stale_secs));
         }
@@ -74,12 +78,15 @@ pub fn spawn_file_processing_worker(
             let max_concurrent = gov.max_concurrent_extractions;
             let retry_count = gov.extraction_retry_count;
 
-            tokio::select! {
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)) => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("File processing worker shutting down");
-                    break;
-                }
+            if cancel
+                .run_until_cancelled(tokio::time::sleep(tokio::time::Duration::from_secs(
+                    poll_secs,
+                )))
+                .await
+                .is_none()
+            {
+                tracing::info!("File processing worker shutting down");
+                break;
             }
 
             let repo = FileAssetRepository::new(&db);
@@ -189,12 +196,15 @@ pub fn spawn_asset_cleanup(
             let interval_secs = cfg.upload.governance.cleanup_interval_hours * 3600;
             let grace_hours = cfg.upload.governance.orphan_grace_period_hours as i64;
 
-            tokio::select! {
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)) => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("Asset cleanup task shutting down");
-                    break;
-                }
+            if cancel
+                .run_until_cancelled(tokio::time::sleep(tokio::time::Duration::from_secs(
+                    interval_secs,
+                )))
+                .await
+                .is_none()
+            {
+                tracing::info!("Asset cleanup task shutting down");
+                break;
             }
 
             let cleaned = sweep_orphaned_uploads(&db, grace_hours);
@@ -299,12 +309,13 @@ pub fn spawn_memory_reconciliation(
 ) {
     tokio::spawn(async move {
         loop {
-            tokio::select! {
-                _ = tokio::time::sleep(MEMORY_RECONCILE_INTERVAL) => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("Memory reconciliation task shutting down");
-                    break;
-                }
+            if cancel
+                .run_until_cancelled(tokio::time::sleep(MEMORY_RECONCILE_INTERVAL))
+                .await
+                .is_none()
+            {
+                tracing::info!("Memory reconciliation task shutting down");
+                break;
             }
             let service = service.clone();
             let owner = owner_id.clone();
@@ -337,9 +348,14 @@ pub fn spawn_learning_sweeper(
 ) {
     tokio::spawn(async move {
         loop {
-            tokio::select! {
-                _ = tokio::time::sleep(openalpaca_core::memory::learning::SWEEP_INTERVAL) => {}
-                _ = cancel.cancelled() => break,
+            if cancel
+                .run_until_cancelled(tokio::time::sleep(
+                    openalpaca_core::memory::learning::SWEEP_INTERVAL,
+                ))
+                .await
+                .is_none()
+            {
+                break;
             }
             queue.sweep().await;
         }
@@ -354,11 +370,16 @@ pub fn spawn_learning_catch_up(
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
-        tokio::select! {
-            _ = tokio::time::sleep(openalpaca_core::memory::learning::BOOT_CATCHUP_DELAY) => {
-                queue.catch_up().await;
-            }
-            _ = cancel.cancelled() => {}
+        // The delay is raced against the token; the catch-up itself is not,
+        // as it was not under `select!` (an arm's body runs after the race).
+        if cancel
+            .run_until_cancelled(tokio::time::sleep(
+                openalpaca_core::memory::learning::BOOT_CATCHUP_DELAY,
+            ))
+            .await
+            .is_some()
+        {
+            queue.catch_up().await;
         }
     });
 }
@@ -374,12 +395,13 @@ pub const MEMORY_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::
 pub fn spawn_telemetry_cleanup(db: Database, cancel: CancellationToken) {
     tokio::spawn(async move {
         loop {
-            tokio::select! {
-                _ = tokio::time::sleep(tokio::time::Duration::from_hours(24)) => {}
-                _ = cancel.cancelled() => {
-                    tracing::info!("Telemetry cleanup task shutting down");
-                    break;
-                }
+            if cancel
+                .run_until_cancelled(tokio::time::sleep(tokio::time::Duration::from_hours(24)))
+                .await
+                .is_none()
+            {
+                tracing::info!("Telemetry cleanup task shutting down");
+                break;
             }
             let repo = openalpaca_storage::SkillExecutionRepository::new(&db);
             match repo.cleanup_old(90, 7) {

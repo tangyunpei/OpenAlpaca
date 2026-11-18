@@ -162,34 +162,37 @@ impl IMessageConnector {
         );
 
         loop {
-            tokio::select! {
-                _ = self.cancel_token.cancelled() => {
-                    info!("iMessage connector shutting down");
-                    Self::persist_watermark(&self.db, reader.watermark());
-                    return Ok(());
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                    // Re-read config each poll cycle so GUI/CLI changes take effect immediately
-                    let imsg_config = Self::load_imessage_config(&self.db);
+            // The poll interval is raced against the token; the poll itself
+            // is not, as it was not under `select!` (an arm's body runs
+            // after the race).
+            let napped = self
+                .cancel_token
+                .run_until_cancelled(tokio::time::sleep(std::time::Duration::from_secs(2)))
+                .await;
+            if napped.is_none() {
+                info!("iMessage connector shutting down");
+                Self::persist_watermark(&self.db, reader.watermark());
+                return Ok(());
+            }
+            // Re-read config each poll cycle so GUI/CLI changes take effect immediately
+            let imsg_config = Self::load_imessage_config(&self.db);
 
-                    match reader.poll_new_messages(imsg_config.allow_from_me) {
-                        Ok(messages) => {
-                            let had_messages = !messages.is_empty();
-                            for msg in messages {
-                                if let Err(e) = self.handle_message(msg, &imsg_config).await {
-                                    tracing::error!("Failed to handle iMessage: {}", e);
-                                }
-                            }
-                            // Persist watermark after processing so offline
-                            // messages are not lost on restart.
-                            if had_messages {
-                                Self::persist_watermark(&self.db, reader.watermark());
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to poll chat.db: {}", e);
+            match reader.poll_new_messages(imsg_config.allow_from_me) {
+                Ok(messages) => {
+                    let had_messages = !messages.is_empty();
+                    for msg in messages {
+                        if let Err(e) = self.handle_message(msg, &imsg_config).await {
+                            tracing::error!("Failed to handle iMessage: {}", e);
                         }
                     }
+                    // Persist watermark after processing so offline
+                    // messages are not lost on restart.
+                    if had_messages {
+                        Self::persist_watermark(&self.db, reader.watermark());
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to poll chat.db: {}", e);
                 }
             }
         }
@@ -204,12 +207,9 @@ impl IMessageConnector {
         let cancel = self.cancel_token.clone();
         tokio::spawn(async move {
             loop {
-                let event = tokio::select! {
-                    _ = cancel.cancelled() => {
-                        info!("iMessage confirmation listener shutting down");
-                        break;
-                    }
-                    event = rx.recv() => event,
+                let Some(event) = cancel.run_until_cancelled(rx.recv()).await else {
+                    info!("iMessage confirmation listener shutting down");
+                    break;
                 };
                 match event {
                     Ok(SystemEvent::ToolConfirmationRequested {

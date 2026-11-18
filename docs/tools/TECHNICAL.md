@@ -1626,8 +1626,9 @@ When the LLM response contains tool calls:
    and run together via `futures_util::future::join_all()`; every other
    call is a group of one.  The groups run one after another, each call
    through `execute_call` (which calls
-   `SandboxManager::execute_tool(tool_call, policy, ctx)`), and one
-   `select!` races the whole round against the cancellation token.  With
+   `SandboxManager::execute_tool(tool_call, policy, ctx)`), and the
+   token's `run_until_cancelled` races the whole round against the
+   cancellation token, polling the round first.  With
    no sandbox every call is a group of one and gets the stub error.  A
    `tool_result` record's `duration_ms` is its group's wall-clock.
 6. Per result: decide whether it spills, write the `tool_call` /

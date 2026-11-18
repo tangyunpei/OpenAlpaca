@@ -131,15 +131,11 @@ impl TokenManager {
             interval.tick().await;
 
             loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        tracing::info!("TokenManager refresh loop shutting down");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        tm.rescan(&settings_service, &router).await;
-                    }
+                if cancel.run_until_cancelled(interval.tick()).await.is_none() {
+                    tracing::info!("TokenManager refresh loop shutting down");
+                    break;
                 }
+                tm.rescan(&settings_service, &router).await;
             }
         })
     }

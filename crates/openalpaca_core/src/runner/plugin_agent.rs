@@ -14,6 +14,7 @@
 //! to the lead-agent subagent context: the outcome maps directly onto the
 //! `SubagentTracker` completion shape (content string + success flag).
 
+use super::unless_cancelled;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::extensions::{ExtensionId, ExtensionLedger, ScopedRun};
 use crate::tools::registry::ToolContext;
@@ -122,10 +123,12 @@ impl ScopedRun for PluginLoopOutcome {
 ///      result rather than aborting the loop.
 ///    - anything else (`"working"`) → wait [`POLL_INTERVAL`] and re-poll.
 /// 3. The cancellation token is checked between steps and raced against
-///    the poll sleep and against each proxied tool call, whose future a
-///    cancel drops (R45: a running command is killed with what it started,
-///    a waiting card withdrawn); `stop()` is sent to the plugin on every
-///    abnormal exit (cancel, RPC error, iteration cap).
+///    the `spawn()` and `step()` RPCs (A-35), the poll sleep and each
+///    proxied tool call, whose future a cancel drops (R45: a running command
+///    is killed with what it started, a waiting card withdrawn); `stop()` is
+///    sent to the plugin on every abnormal exit (cancel, RPC error,
+///    iteration cap). Each race is `run_until_cancelled`'s: a future and a
+///    cancel ready in the same tick yield the future's output.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_plugin_agent_loop(
     executor: &Arc<dyn PluginAgentExecutor>,
@@ -139,10 +142,16 @@ pub async fn run_plugin_agent_loop(
     cancel_token: Option<&CancellationToken>,
     scope: Option<&PluginRunScope>,
 ) -> PluginLoopOutcome {
-    let accepted = match executor
-        .spawn(instance_id, task_id, instructions, context)
-        .await
-    {
+    let spawned = unless_cancelled(
+        cancel_token,
+        executor.spawn(instance_id, task_id, instructions, context),
+    )
+    .await;
+    let Some(spawned) = spawned else {
+        tracing::info!(instance_id, "plugin agent cancelled during spawn");
+        return cancelled(executor, instance_id, 0).await;
+    };
+    let accepted = match spawned {
         Ok(v) => v,
         Err(e) => {
             return PluginLoopOutcome::Failed {
@@ -168,11 +177,7 @@ pub async fn run_plugin_agent_loop(
             && token.is_cancelled()
         {
             tracing::info!(instance_id, "plugin agent cancelled between steps");
-            let _ = executor.stop(instance_id).await;
-            return PluginLoopOutcome::Failed {
-                error: "Cancelled".to_string(),
-                tool_calls_made: total_tool_calls,
-            };
+            return cancelled(executor, instance_id, total_tool_calls).await;
         }
 
         // The step-boundary ledger check (design §3.2 T3(b)): a plugin that
@@ -194,17 +199,25 @@ pub async fn run_plugin_agent_loop(
             };
         }
 
-        let (status, output, tool_calls) =
-            match executor.step(instance_id, tool_results.as_ref()).await {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = executor.stop(instance_id).await;
-                    return PluginLoopOutcome::Failed {
-                        error: format!("plugin agent step failed: {e}"),
-                        tool_calls_made: total_tool_calls,
-                    };
-                }
-            };
+        let stepped = unless_cancelled(
+            cancel_token,
+            executor.step(instance_id, tool_results.as_ref()),
+        )
+        .await;
+        let Some(stepped) = stepped else {
+            tracing::info!(instance_id, "plugin agent cancelled during a step");
+            return cancelled(executor, instance_id, total_tool_calls).await;
+        };
+        let (status, output, tool_calls) = match stepped {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = executor.stop(instance_id).await;
+                return PluginLoopOutcome::Failed {
+                    error: format!("plugin agent step failed: {e}"),
+                    tool_calls_made: total_tool_calls,
+                };
+            }
+        };
 
         match status.as_str() {
             "complete" => {
@@ -241,30 +254,18 @@ pub async fn run_plugin_agent_loop(
                     // and timeout all apply. Denials are fed back to the
                     // plugin as the tool result.
                     let call = sandbox.execute_tool(&tool_call, sandbox_policy, tool_ctx);
-                    let result = if let Some(token) = cancel_token {
-                        // Raced against the cancel, as the agentic loop races
-                        // its tool calls (R45, storage design §11): `select!`
-                        // drops the call's future before the cancel arm runs,
-                        // and dropping it kills a running command with the
-                        // processes it started and withdraws a card still
-                        // waiting for a person.
-                        tokio::select! {
-                            result = call => result,
-                            _ = token.cancelled() => {
-                                tracing::info!(
-                                    instance_id,
-                                    tool = name,
-                                    "plugin agent cancelled during a tool call"
-                                );
-                                let _ = executor.stop(instance_id).await;
-                                return PluginLoopOutcome::Failed {
-                                    error: "Cancelled".to_string(),
-                                    tool_calls_made: total_tool_calls,
-                                };
-                            }
-                        }
-                    } else {
-                        call.await
+                    // Raced against the cancel, as the agentic loop races its
+                    // tool calls (R45, storage design §11): the call's future
+                    // is dropped before the cancel is handled, and dropping it
+                    // kills a running command with the processes it started
+                    // and withdraws a card still waiting for a person.
+                    let Some(result) = unless_cancelled(cancel_token, call).await else {
+                        tracing::info!(
+                            instance_id,
+                            tool = name,
+                            "plugin agent cancelled during a tool call"
+                        );
+                        return cancelled(executor, instance_id, total_tool_calls).await;
                     };
                     results.push(serde_json::json!({
                         "tool": name,
@@ -278,20 +279,10 @@ pub async fn run_plugin_agent_loop(
                 // "working" — wait briefly then poll again, respecting
                 // cancellation during the sleep.
                 tool_results = None;
-                if let Some(token) = cancel_token {
-                    tokio::select! {
-                        _ = tokio::time::sleep(POLL_INTERVAL) => {}
-                        _ = token.cancelled() => {
-                            tracing::info!(instance_id, "plugin agent cancelled during poll");
-                            let _ = executor.stop(instance_id).await;
-                            return PluginLoopOutcome::Failed {
-                                error: "Cancelled".to_string(),
-                                tool_calls_made: total_tool_calls,
-                            };
-                        }
-                    }
-                } else {
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                let slept = unless_cancelled(cancel_token, tokio::time::sleep(POLL_INTERVAL)).await;
+                if slept.is_none() {
+                    tracing::info!(instance_id, "plugin agent cancelled during poll");
+                    return cancelled(executor, instance_id, total_tool_calls).await;
                 }
             }
         }
@@ -303,6 +294,20 @@ pub async fn run_plugin_agent_loop(
     PluginLoopOutcome::Failed {
         error,
         tool_calls_made: total_tool_calls,
+    }
+}
+
+/// A run the cancel ended: the plugin is told to stop, and the run fails
+/// `"Cancelled"`, wherever the cancel landed.
+async fn cancelled(
+    executor: &Arc<dyn PluginAgentExecutor>,
+    instance_id: &str,
+    tool_calls_made: usize,
+) -> PluginLoopOutcome {
+    let _ = executor.stop(instance_id).await;
+    PluginLoopOutcome::Failed {
+        error: "Cancelled".to_string(),
+        tool_calls_made,
     }
 }
 
@@ -931,9 +936,121 @@ mod tests {
             PluginLoopOutcome::Failed { error, .. } => assert_eq!(error, "Cancelled"),
             other => panic!("expected Failed(Cancelled), got {other:?}"),
         }
-        // Cancelled before the first step() — nothing polled.
+        // Cancelled before spawn() — `run_until_cancelled`'s up-front check
+        // sends neither RPC; the plugin is still told to stop.
         assert!(executor.results_received().is_empty());
         assert!(executor.was_stopped());
+    }
+
+    /// Which of the plugin's two RPCs never answers.
+    #[derive(Clone, Copy)]
+    enum Hangs {
+        Spawn,
+        Step,
+    }
+
+    /// A plugin whose `spawn` or `step` RPC never answers: only the cancel
+    /// can end the run (A-35, Z4-12).
+    struct HangingExecutor {
+        hangs: Hangs,
+        entered: tokio::sync::Notify,
+        stopped: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl PluginAgentExecutor for HangingExecutor {
+        async fn spawn(
+            &self,
+            _instance_id: &str,
+            _task_id: &str,
+            _instructions: &str,
+            _context: &serde_json::Value,
+        ) -> Result<bool, String> {
+            if matches!(self.hangs, Hangs::Spawn) {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Ok(true)
+        }
+
+        async fn step(
+            &self,
+            _instance_id: &str,
+            _tool_results: Option<&serde_json::Value>,
+        ) -> Result<(String, String, Vec<serde_json::Value>), String> {
+            self.entered.notify_one();
+            std::future::pending::<()>().await;
+            unreachable!("the step RPC never answers")
+        }
+
+        async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+            *self.stopped.lock().unwrap() = true;
+            Ok(())
+        }
+
+        fn plugin_id(&self) -> &str {
+            "stub_plugin"
+        }
+
+        fn agent_id(&self) -> &str {
+            "stub_agent"
+        }
+    }
+
+    /// A cancel while the named RPC is in flight ends the run as the loop's
+    /// other cancel arms end it: the plugin stopped, `Failed("Cancelled")`.
+    async fn a_cancel_ends_a_hanging(hangs: Hangs) {
+        let executor = Arc::new(HangingExecutor {
+            hangs,
+            entered: tokio::sync::Notify::new(),
+            stopped: Mutex::new(false),
+        });
+        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let token = CancellationToken::new();
+        let run_token = token.clone();
+        let mut run = tokio::spawn(async move {
+            let (sandbox, _registry) = make_sandbox();
+            run_plugin_agent_loop(
+                &exec,
+                "plugin-instance",
+                "task-1",
+                "do the thing",
+                &serde_json::json!({}),
+                &sandbox,
+                &policy(),
+                &ToolContext::default(),
+                Some(&run_token),
+                None,
+            )
+            .await
+        });
+        executor.entered.notified().await;
+        token.cancel();
+        let outcome = match tokio::time::timeout(Duration::from_secs(60), &mut run).await {
+            Ok(joined) => joined.expect("the plugin loop's task panicked"),
+            Err(_) => {
+                run.abort();
+                panic!("the cancel did not end a run whose RPC never answers");
+            }
+        };
+        match outcome {
+            PluginLoopOutcome::Failed { error, .. } => assert_eq!(error, "Cancelled"),
+            other => panic!("expected Failed(Cancelled), got {other:?}"),
+        }
+        assert!(
+            *executor.stopped.lock().unwrap(),
+            "the plugin instance was not stopped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_ends_a_spawn_rpc_that_never_answers() {
+        a_cancel_ends_a_hanging(Hangs::Spawn).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_ends_a_step_rpc_that_never_answers() {
+        a_cancel_ends_a_hanging(Hangs::Step).await;
     }
 
     #[tokio::test]

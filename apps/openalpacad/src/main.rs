@@ -715,16 +715,14 @@ async fn async_main(
             let ct = cancel_token.clone();
             async move {
                 loop {
-                    tokio::select! {
-                        result = rx.recv() => match result {
-                            Ok(openalpaca_core::events::SystemEvent::ConnectorStatus { .. }) => {
-                                provider.update(cm.list_status().await);
-                            }
-                            Ok(_) => {}
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        },
-                        _ = ct.cancelled() => break,
+                    match ct.run_until_cancelled(rx.recv()).await {
+                        Some(Ok(openalpaca_core::events::SystemEvent::ConnectorStatus {
+                            ..
+                        })) => {
+                            provider.update(cm.list_status().await);
+                        }
+                        Some(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                        Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) | None => break,
                     }
                 }
             }
