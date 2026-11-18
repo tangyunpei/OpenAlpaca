@@ -19,6 +19,31 @@ fn resolve_key_secret(env_var: &str) -> Option<String> {
     std::env::var(env_var).ok()
 }
 
+/// Whether `build_router` may look `binary` up on PATH to register it as a
+/// CLI backend (no `[cli_backends]` entry for it, or one naming no `path`).
+/// A guarded test build never does (CLI-BACKEND-GUARD, pending-decisions
+/// *Rev 137* item 1, (b), taken *Rev 138*): a `claude` or `codex` found there
+/// is the developer's own, and the CLI fallback would run it under their own
+/// login. A configured `path` still registers, and a test registers its own
+/// backend with `LlmRouter::register_cli_backend`. Armed as
+/// `providers::test_endpoint_guard_armed` is: this crate's tests and the
+/// dependants' test builds (`test-endpoint-guard`), never `live-eval`.
+#[cfg(all(any(test, feature = "test-endpoint-guard"), not(feature = "live-eval")))]
+fn cli_path_lookup(binary: &str) -> bool {
+    tracing::debug!(
+        "a test build of openalpaca_llm (test-endpoint-guard) skips the PATH lookup of \
+         the {binary} CLI: configure its path to register it"
+    );
+    false
+}
+
+/// Release, `cargo run`, sidecar and `live-eval` builds: the lookup runs.
+#[cfg(not(all(any(test, feature = "test-endpoint-guard"), not(feature = "live-eval"))))]
+#[inline(always)]
+fn cli_path_lookup(_binary: &str) -> bool {
+    true
+}
+
 /// Build an LlmRouter from a config file path.
 pub fn build_router(path: &std::path::Path) -> Result<LlmRouter, LlmError> {
     build_router_with_secret_store(path, None)
@@ -324,19 +349,25 @@ fn build_router_from_hierarchical(
         rate_limit_config,
     );
 
-    // Register CLI backends if detected
+    // Register CLI backends: a configured one, else one found on PATH — but a
+    // guarded test build looks nothing up on PATH (`cli_path_lookup`).
     let cli_config = config.cli_backends.unwrap_or_default();
     let cli_timeout_secs = router.runtime_config().timeouts.cli_backend_timeout_secs;
 
     if let Some(ref cc_config) = cli_config.claude_code {
-        if let Some(provider) = crate::cli_backend::ClaudeCodeCliProvider::from_config(cc_config) {
+        if (cc_config.path.is_some() || cli_path_lookup("claude"))
+            && let Some(provider) =
+                crate::cli_backend::ClaudeCodeCliProvider::from_config(cc_config)
+        {
             tracing::info!(
                 "Registered Claude Code CLI backend at {:?}",
                 provider.binary_path()
             );
             router.register_cli_backend(ProviderType::Anthropic, Arc::new(provider));
         }
-    } else if let Some(path) = crate::cli_backend::ClaudeCodeCliProvider::detect() {
+    } else if cli_path_lookup("claude")
+        && let Some(path) = crate::cli_backend::ClaudeCodeCliProvider::detect()
+    {
         tracing::info!("Auto-detected Claude Code CLI at {:?}", path);
         let provider = crate::cli_backend::ClaudeCodeCliProvider::new(
             path,
@@ -346,14 +377,18 @@ fn build_router_from_hierarchical(
     }
 
     if let Some(ref codex_config) = cli_config.codex {
-        if let Some(provider) = crate::cli_backend::CodexCliProvider::from_config(codex_config) {
+        if (codex_config.path.is_some() || cli_path_lookup("codex"))
+            && let Some(provider) = crate::cli_backend::CodexCliProvider::from_config(codex_config)
+        {
             tracing::info!(
                 "Registered Codex CLI backend at {:?}",
                 provider.binary_path()
             );
             router.register_cli_backend(ProviderType::OpenAI, Arc::new(provider));
         }
-    } else if let Some(path) = crate::cli_backend::CodexCliProvider::detect() {
+    } else if cli_path_lookup("codex")
+        && let Some(path) = crate::cli_backend::CodexCliProvider::detect()
+    {
         tracing::info!("Auto-detected Codex CLI at {:?}", path);
         let provider = crate::cli_backend::CodexCliProvider::new(
             path,

@@ -659,3 +659,116 @@ fn a_provider_is_on_a_local_server_by_its_base_url() {
         );
     }
 }
+
+// ── No CLI found on PATH in a guarded test build (CLI-BACKEND-GUARD) ────────
+//
+// pending-decisions *Rev 137* item 1, the advisor's pick (b), taken *Rev 138*:
+// a `claude` or `codex` that `build_router` finds on PATH runs under the
+// developer's own login, so a test build that carries `test-endpoint-guard`
+// (this crate's own tests too) registers none; a configured `path` still
+// does. Off under `live-eval`, as the providers' guard is.
+#[cfg(all(unix, not(feature = "live-eval")))]
+mod cli_backend_guard {
+    use crate::cli_backend::{ClaudeCodeCliProvider, CodexCliProvider};
+    use crate::keys::key_pool::ProviderType;
+    use std::path::{Path, PathBuf};
+
+    const CHILD: &str = "OPENALPACA_TEST_CLI_GUARD_CHILD";
+
+    /// A config with no provider, one declared model and `extra` after it.
+    fn router_for(dir: &Path, extra: &str) -> crate::routing::router::LlmRouter {
+        let path = dir.join("llm.toml");
+        std::fs::write(
+            &path,
+            format!("[orchestrator]\nmodel = \"local-model\"\n{extra}"),
+        )
+        .unwrap();
+        super::build_router(&path).expect("router")
+    }
+
+    /// Stub `claude` and `codex` executables that, if anything ran them,
+    /// would append their arguments to `ran.log` and fail.
+    fn stub_dir() -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran.log");
+        for name in ["claude", "codex"] {
+            let stub = dir.path().join(name);
+            std::fs::write(
+                &stub,
+                format!("#!/bin/sh\necho \"$0 $*\" >> '{}'\nexit 1\n", ran.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (dir, ran)
+    }
+
+    /// In a child of this test binary whose PATH is only a folder of stubs
+    /// (so no other test in this process sees the change), the stubs are
+    /// what a PATH lookup finds, and still `build_router` registers no CLI
+    /// backend: not with no `[cli_backends]` section, and not from a
+    /// section that names no `path`. Nothing runs either stub.
+    #[test]
+    fn a_guarded_test_build_registers_no_cli_found_on_path() {
+        if let Some(stubs) = std::env::var_os(CHILD) {
+            let stubs = PathBuf::from(stubs);
+            assert_eq!(ClaudeCodeCliProvider::detect(), Some(stubs.join("claude")));
+            assert_eq!(CodexCliProvider::detect(), Some(stubs.join("codex")));
+            let dir = tempfile::tempdir().unwrap();
+            let router = router_for(dir.path(), "");
+            assert!(
+                router.cli_backend_providers().is_empty(),
+                "no [cli_backends]: {:?}",
+                router.cli_backend_providers()
+            );
+            let router = router_for(
+                dir.path(),
+                "\n[cli_backends.claude_code]\nenabled = true\n\n[cli_backends.codex]\nenabled = true\n",
+            );
+            assert!(
+                router.cli_backend_providers().is_empty(),
+                "a section with no path: {:?}",
+                router.cli_backend_providers()
+            );
+            return;
+        }
+        let (dir, ran) = stub_dir();
+        let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "config::llm_config::tests::cli_backend_guard::a_guarded_test_build_registers_no_cli_found_on_path",
+                "--test-threads=1",
+            ])
+            .env(CHILD, dir.path())
+            .env("PATH", dir.path())
+            .output()
+            .expect("the child run");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!ran.exists(), "a stub was run");
+    }
+
+    /// A configured `path` still registers each backend in a guarded build
+    /// (registering runs nothing). A pin: the parent registers it too.
+    #[test]
+    fn a_configured_cli_path_still_registers_in_a_guarded_test_build() {
+        let (stubs, ran) = stub_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let router = router_for(
+            dir.path(),
+            &format!(
+                "\n[cli_backends.claude_code]\npath = '{}'\n\n[cli_backends.codex]\npath = '{}'\n",
+                stubs.path().join("claude").display(),
+                stubs.path().join("codex").display()
+            ),
+        );
+        assert!(router.has_cli_backend(&ProviderType::Anthropic));
+        assert!(router.has_cli_backend(&ProviderType::OpenAI));
+        assert!(!ran.exists(), "a stub was run");
+    }
+}
