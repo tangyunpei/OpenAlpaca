@@ -74,9 +74,6 @@ impl<'a> LlmBackend<'a> {
                     enable_caching,
                     thinking,
                     context_management,
-                    // The loop's budget notice rides in `messages`
-                    // (BUDGET-NOTICE-KEPT), not beside them.
-                    ephemeral_system_notice: None,
                 };
                 provider.chat(request).await.map_err(LlmRouterError::Llm)
             }
@@ -101,7 +98,6 @@ impl<'a> LlmBackend<'a> {
                         thinking: thinking.clone(),
                         context_management: context_management.clone(),
                         fallback_models: fallback_models.clone(),
-                        ephemeral_system_notice: None,
                     };
                     match router.complete_streaming(stream_request).await {
                         Ok(routed) => {
@@ -232,7 +228,6 @@ impl<'a> LlmBackend<'a> {
                     thinking,
                     context_management,
                     fallback_models: fallback_models.clone(),
-                    ephemeral_system_notice: None,
                 };
                 match spent {
                     Some(spent) => router.complete_elsewhere(request, spent).await,

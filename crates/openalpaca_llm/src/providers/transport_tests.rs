@@ -46,7 +46,6 @@ fn request() -> ChatRequest {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     }
 }
 

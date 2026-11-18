@@ -29,7 +29,6 @@ fn a_failed_tool_result_keeps_its_marked_text_and_gains_no_field() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -60,7 +59,6 @@ fn test_request_format() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -91,7 +89,6 @@ fn a_request_naming_no_budget_asks_for_sixteen_thousand_tokens() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     for provider in [
         OpenAiProvider::new("test-key".to_string(), None, None, None),
@@ -208,7 +205,6 @@ fn test_request_serialization_filters_empty_text_parts() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -238,7 +234,6 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -282,7 +277,6 @@ fn strict_tool_body(parameters: serde_json::Value) -> serde_json::Value {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     body["tools"].as_array().unwrap()[0]["function"].clone()
@@ -605,7 +599,6 @@ fn test_openai_reasoning_effort_mapping() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Enabled { budget_tokens: 4096 }),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["reasoning_effort"], "high");
@@ -624,7 +617,6 @@ fn test_openai_reasoning_effort_mapping() {
             display: ThinkingDisplay::ModelDefault,
         }),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body2 = provider.build_request_body(&request2);
     assert_eq!(body2["reasoning_effort"], "medium");
@@ -640,7 +632,6 @@ fn test_openai_reasoning_effort_mapping() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body3 = provider.build_request_body(&request3);
     assert!(body3.get("reasoning_effort").is_none() || body3["reasoning_effort"].is_null());
@@ -665,7 +656,6 @@ fn test_disabled_thinking_asks_ollama_for_no_reasoning() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let ollama = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
@@ -701,7 +691,6 @@ fn test_ollama_flavour_leaves_the_other_thinking_arms_alone() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
@@ -1201,6 +1190,8 @@ async fn the_captured_ollama_body_collects_into_a_tool_call_with_arguments() {
     assert_eq!(response.thinking.as_deref(), Some("The user"));
 }
 
+/// A kept budget notice (`ChatMessage::notice`) sent last goes as the tail
+/// system-role message of Chat Completions' `messages`.
 #[test]
 fn test_openai_ephemeral_notice_placement() {
     use crate::types::{ChatMessage, ChatRequest};
@@ -1210,6 +1201,7 @@ fn test_openai_ephemeral_notice_placement() {
         messages: Arc::new(vec![
             ChatMessage::system("real system"),
             ChatMessage::user("hello"),
+            ChatMessage::notice("[budget_notice]\nwatch out\n[/budget_notice]"),
         ]),
         tools: Arc::new(vec![]),
         model: None,
@@ -1219,7 +1211,6 @@ fn test_openai_ephemeral_notice_placement() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: Some("[budget_notice]\nwatch out\n[/budget_notice]".to_string()),
     };
 
     let body =

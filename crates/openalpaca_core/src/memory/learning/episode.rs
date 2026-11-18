@@ -93,7 +93,6 @@ pub(crate) fn build_request(
         thinking: Some(openalpaca_llm::ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
     }
 }
 

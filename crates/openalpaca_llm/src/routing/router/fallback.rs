@@ -78,11 +78,6 @@ impl LlmRouter {
             && let Some(cli_backend) = self.cli_backends.get(&pt)
         {
             tracing::info!("Falling back to CLI backend for {:?}", pt);
-            if request.ephemeral_system_notice.is_some() {
-                tracing::debug!(
-                    "CLI fallback is dropping ephemeral_system_notice — the CLI prompt is flattened to a single string"
-                );
-            }
             let truncated = truncate_messages_for_cli(&request.messages);
             let flattened = flatten_messages(&truncated);
             let cli_request = ChatRequest {
@@ -95,7 +90,6 @@ impl LlmRouter {
                 enable_caching: false,
                 thinking: None,
                 context_management: None,
-                ephemeral_system_notice: None,
             };
             match cli_backend.chat(cli_request).await {
                 Ok(response) => {

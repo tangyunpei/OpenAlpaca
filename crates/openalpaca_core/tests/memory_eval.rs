@@ -2164,7 +2164,6 @@ async fn judge_call(
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
     };
     let response = router.complete(request).await.map_err(|e| e.to_string())?;
     gate.check(&response.model)?;

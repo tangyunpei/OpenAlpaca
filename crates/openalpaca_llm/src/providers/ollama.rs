@@ -287,7 +287,7 @@ impl LlmProvider for OllamaProvider {
         {
             // Standalone implementation (minimal OpenAI-compatible request)
             let url = format!("{}/chat/completions", self.base_url);
-            let mut messages: Vec<serde_json::Value> = request
+            let messages: Vec<serde_json::Value> = request
                 .messages
                 .iter()
                 .map(|m| {
@@ -300,14 +300,6 @@ impl LlmProvider for OllamaProvider {
                     serde_json::json!({ "role": role, "content": m.content })
                 })
                 .collect();
-
-            // Ephemeral system notice: append as tail system-role message (spec P0).
-            if let Some(ref notice) = request.ephemeral_system_notice {
-                messages.push(serde_json::json!({
-                    "role": "system",
-                    "content": notice,
-                }));
-            }
 
             let body = serde_json::json!({
                 "model": request.model.as_deref().unwrap_or(&self.model),
@@ -381,8 +373,8 @@ mod tests {
 
     /// Ollama delegates to the OpenAI provider's request builder when the
     /// `openai` feature is enabled (the default in the workspace). Exercise
-    /// placement through that same builder: a tail system-role message carrying
-    /// the notice when `ephemeral_system_notice.is_some()`.
+    /// placement through that same builder: a kept budget notice
+    /// (`ChatMessage::notice`) sent last goes as the tail system-role message.
     #[cfg(feature = "openai")]
     #[test]
     fn test_ollama_ephemeral_notice_placement() {
@@ -394,6 +386,7 @@ mod tests {
             messages: Arc::new(vec![
                 ChatMessage::system("real system"),
                 ChatMessage::user("hello"),
+                ChatMessage::notice("[budget_notice]\nollama path\n[/budget_notice]"),
             ]),
             tools: Arc::new(vec![]),
             model: None,
@@ -403,7 +396,6 @@ mod tests {
             enable_caching: false,
             thinking: None,
             context_management: None,
-            ephemeral_system_notice: Some("[budget_notice]\nollama path\n[/budget_notice]".to_string()),
         };
 
         let body = build_request_body(

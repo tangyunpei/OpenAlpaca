@@ -21,7 +21,7 @@
 //!   ([`EchoedTurn::from_response_items`]). No `include` is sent: the API
 //!   "doesn't require it".
 //! - System messages stay input items with the `system` role, each in its
-//!   place (a kept budget notice too), the per-request notice last — never
+//!   place (a kept budget notice too, the newest one last) — never
 //!   `instructions`: a change before a reasoning item is a prefix change,
 //!   after which "the API will drop reasoning items".
 
@@ -80,15 +80,6 @@ pub(crate) fn build_request_body(
                 "output": input_content(msg),
             })),
         }
-    }
-
-    // Ephemeral system notice: the last input item, as on Chat Completions
-    // (spec P0).
-    if let Some(ref notice) = request.ephemeral_system_notice {
-        input.push(serde_json::json!({
-            "role": "system",
-            "content": notice,
-        }));
     }
 
     let mut body = serde_json::json!({

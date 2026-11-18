@@ -18,7 +18,6 @@ fn test_request_serialization() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -50,7 +49,6 @@ fn a_request_naming_no_budget_asks_for_sixteen_thousand_tokens() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     assert_eq!(provider.build_request_body(&request)["max_tokens"], 16_000);
 }
@@ -209,7 +207,6 @@ fn test_request_serialization_filters_empty_text_parts() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -239,7 +236,6 @@ fn test_request_serialization_empty_parts_get_placeholder() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);
@@ -288,7 +284,6 @@ fn test_tool_with_strict_and_examples() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -316,7 +311,6 @@ fn test_tool_without_strict_no_extra_fields() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -340,7 +334,6 @@ fn test_system_prompt_caching_enabled() {
         enable_caching: true,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     // System should be array with cache_control
@@ -364,7 +357,6 @@ fn test_system_prompt_caching_disabled() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     // System should be plain string
@@ -399,7 +391,6 @@ fn test_tool_caching_breakpoint() {
         enable_caching: true,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     let tools = body["tools"].as_array().unwrap();
@@ -424,7 +415,6 @@ fn test_caching_with_empty_tools() {
         enable_caching: true,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     // System should still have cache_control
@@ -447,7 +437,6 @@ fn test_thinking_enabled_serialization() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Enabled { budget_tokens: 2048 }),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "enabled");
@@ -469,7 +458,6 @@ fn test_thinking_disabled_keeps_temperature() {
         enable_caching: false,
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"]["type"], "disabled");
@@ -528,7 +516,6 @@ fn test_thinking_adaptive_serialization() {
             display: ThinkingDisplay::ModelDefault,
         }),
         context_management: None,
-        ephemeral_system_notice: None,
     };
     let body = provider.build_request_body(&request);
     assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
@@ -739,7 +726,6 @@ fn test_build_request_body_with_context_management() {
                 },
             ],
         }),
-        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-sonnet-4-6", 4096, &request);
@@ -763,7 +749,6 @@ fn test_build_request_body_without_context_management() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-sonnet-4-6", 4096, &request);
@@ -787,7 +772,6 @@ fn test_anthropic_last_message_has_cache_control_when_caching_enabled() {
         enable_caching: true,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-test", 1024, &request);
@@ -817,7 +801,6 @@ fn test_anthropic_no_cache_control_when_caching_disabled() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = request::build_request_body("claude-test", 1024, &request);
@@ -840,22 +823,26 @@ fn test_anthropic_no_cache_control_when_caching_disabled() {
 // or `assistant` turns in your request will be combined into a single turn"
 // (.../api/messages).
 
-/// A request in a tool loop: a system prompt, a tool call and its result.
+/// A request in a tool loop: a system prompt, a tool call and its result,
+/// then, with `notice`, the budget notice the loop sends last and keeps
+/// (`ChatMessage::notice`, BUDGET-NOTICE-KEPT).
 fn notice_request(enable_caching: bool, notice: Option<&str>) -> ChatRequest {
+    let mut messages = vec![
+        ChatMessage::system("plain system"),
+        ChatMessage::user("hello"),
+        ChatMessage {
+            tool_calls: Some(vec![crate::types::ToolCall {
+                id: "tc_1".to_string(),
+                name: "search".to_string(),
+                arguments: serde_json::json!({"q": "x"}),
+            }]),
+            ..ChatMessage::assistant("")
+        },
+        ChatMessage::tool_result("tc_1", "found"),
+    ];
+    messages.extend(notice.map(ChatMessage::notice));
     ChatRequest {
-        messages: Arc::new(vec![
-            ChatMessage::system("plain system"),
-            ChatMessage::user("hello"),
-            ChatMessage {
-                tool_calls: Some(vec![crate::types::ToolCall {
-                    id: "tc_1".to_string(),
-                    name: "search".to_string(),
-                    arguments: serde_json::json!({"q": "x"}),
-                }]),
-                ..ChatMessage::assistant("")
-            },
-            ChatMessage::tool_result("tc_1", "found"),
-        ]),
+        messages: Arc::new(messages),
         tools: Arc::new(vec![]),
         model: None,
         temperature: None,
@@ -864,7 +851,6 @@ fn notice_request(enable_caching: bool, notice: Option<&str>) -> ChatRequest {
         enable_caching,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: notice.map(str::to_string),
     }
 }
 
@@ -974,10 +960,9 @@ fn kept_notice_rounds(enable_caching: bool) -> (ChatRequest, ChatRequest) {
     (first, second)
 }
 
-/// A kept notice goes where it was sent, a user text block of its own as
-/// the per-request one always went, never into `system`; the request that
-/// sent it is a prefix of the next, and the turn produced under it goes
-/// back with its thinking.
+/// A kept notice goes where it was sent, a user text block of its own,
+/// never into `system`; the request that sent it is a prefix of the next,
+/// and the turn produced under it goes back with its thinking.
 #[test]
 fn a_kept_notice_goes_in_its_place_and_the_turn_after_keeps_its_thinking() {
     let (first, second) = kept_notice_rounds(false);
@@ -996,14 +981,8 @@ fn a_kept_notice_goes_in_its_place_and_the_turn_after_keeps_its_thinking() {
             "role": "user",
             "content": [{"type": "text", "text": "[budget_notice]\n80% used\n[/budget_notice]"}],
         }),
-        "the notice as the per-request notice goes"
+        "the notice, a user text block of its own"
     );
-    let per_request = request::build_request_body(
-        "claude-test",
-        1024,
-        &notice_request(false, Some("[budget_notice]\n80% used\n[/budget_notice]")),
-    );
-    assert_eq!(before, per_request, "kept or per-request, the same body");
     assert_eq!(
         &sent[..sent.len() - 1],
         plain["messages"].as_array().unwrap().as_slice()
@@ -1025,12 +1004,11 @@ fn a_kept_notice_goes_in_its_place_and_the_turn_after_keeps_its_thinking() {
 fn a_kept_notice_carries_no_cache_control() {
     let (first, second) = kept_notice_rounds(true);
     let before = request::build_request_body("claude-test", 1024, &first);
-    let per_request = request::build_request_body(
-        "claude-test",
-        1024,
-        &notice_request(true, Some("[budget_notice]\n80% used\n[/budget_notice]")),
+    assert_eq!(
+        serde_json::to_string(&before).unwrap(),
+        GOLDEN_WITH_NOTICE,
+        "the bytes the removed per-request notice sent"
     );
-    assert_eq!(before, per_request, "kept or per-request, the same body");
 
     let after = request::build_request_body("claude-test", 1024, &second);
     let next = after["messages"].as_array().unwrap();
@@ -1044,13 +1022,23 @@ fn a_kept_notice_carries_no_cache_control() {
     );
 }
 
+/// Round N's body with caching on, as the per-request notice
+/// (a `ChatRequest` field of its own until NOTICE-FIELD-GONE removed it)
+/// sent it: captured at `3e2cf550` from
+/// `notice_request(true, Some("[budget_notice]\n80% used\n[/budget_notice]"))`
+/// built through that field. The kept notice sends the same bytes.
+const GOLDEN_WITH_NOTICE: &str = r#"{"max_tokens":1024,"messages":[{"content":"hello","role":"user"},{"content":[{"id":"tc_1","input":{"q":"x"},"name":"search","type":"tool_use"}],"role":"assistant"},{"content":[{"cache_control":{"type":"ephemeral"},"content":"found","tool_use_id":"tc_1","type":"tool_result"}],"role":"user"},{"content":[{"text":"[budget_notice]\n80% used\n[/budget_notice]","type":"text"}],"role":"user"}],"model":"claude-test","system":[{"cache_control":{"type":"ephemeral"},"text":"plain system","type":"text"}]}"#;
+
 /// With no system prompt, a notice adds none: it is the last message.
 #[test]
 fn a_notice_with_no_system_prompt_sends_no_system() {
     for caching in [false, true] {
         let request = ChatRequest {
-            messages: Arc::new(vec![ChatMessage::user("hello")]),
-            ..notice_request(caching, Some("[notice-only]"))
+            messages: Arc::new(vec![
+                ChatMessage::user("hello"),
+                ChatMessage::notice("[notice-only]"),
+            ]),
+            ..notice_request(caching, None)
         };
         let body = request::build_request_body("claude-test", 1024, &request);
         assert!(body.get("system").is_none(), "caching {caching}: {body}");
@@ -1152,7 +1140,6 @@ fn a_failed_tool_result_carries_is_error_and_a_successful_one_is_unchanged() {
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     };
 
     let body = provider.build_request_body(&request);

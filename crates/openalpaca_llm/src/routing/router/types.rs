@@ -35,8 +35,6 @@ pub struct RouterRequest {
     pub context_management: Option<crate::context_management::ContextManagement>,
     /// Per-request fallback model chain (overrides global fallback when non-empty).
     pub fallback_models: Vec<String>,
-    /// See ChatRequest::ephemeral_system_notice.
-    pub ephemeral_system_notice: Option<String>,
 }
 
 /// A started stream, and the model the router actually called (V4).

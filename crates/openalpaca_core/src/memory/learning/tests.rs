@@ -3307,7 +3307,6 @@ async fn a_keyed_flush_leaves_half_the_rate_budget() {
             thinking: None,
             context_management: None,
             fallback_models: Vec::new(),
-            ephemeral_system_notice: None,
         })
         .await
         .unwrap();

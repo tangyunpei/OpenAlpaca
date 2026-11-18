@@ -68,7 +68,6 @@ fn request(messages: Vec<ChatMessage>, tools: Vec<ToolDefinition>) -> ChatReques
         enable_caching: false,
         thinking: None,
         context_management: None,
-        ephemeral_system_notice: None,
     }
 }
 
@@ -352,15 +351,18 @@ fn thinking_maps_to_reasoning_effort_as_on_chat_completions() {
     assert!(body.get("reasoning_effort").is_none());
 }
 
-/// The ephemeral notice is the input's last item, a `system` message —
+/// A budget notice sent last is the input's last item, a `system` message —
 /// never `instructions`, which would change the prefix every round.
 #[test]
 fn the_ephemeral_notice_is_the_last_input_item() {
-    let mut req = request(
-        vec![ChatMessage::system("Base."), ChatMessage::user("go")],
+    let req = request(
+        vec![
+            ChatMessage::system("Base."),
+            ChatMessage::user("go"),
+            ChatMessage::notice("Budget: 2 rounds left."),
+        ],
         vec![closed_tool("search")],
     );
-    req.ephemeral_system_notice = Some("Budget: 2 rounds left.".to_string());
     let body = cloud().build_responses_body(&req);
     assert!(body.get("instructions").is_none());
     let input = body["input"].as_array().unwrap();
@@ -370,9 +372,9 @@ fn the_ephemeral_notice_is_the_last_input_item() {
     );
 }
 
-/// BUDGET-NOTICE-KEPT: a kept notice goes in its place, a `system` item as
-/// the per-request one goes; the request that sent it is a prefix of the
-/// next, and the turn produced under it goes back with its reasoning.
+/// BUDGET-NOTICE-KEPT: a kept notice goes in its place, a `system` item;
+/// the request that sent it is a prefix of the next, and the turn produced
+/// under it goes back with its reasoning.
 #[test]
 fn a_kept_notice_goes_in_its_place_and_the_turn_after_keeps_its_reasoning() {
     let provider = cloud();
@@ -384,15 +386,8 @@ fn a_kept_notice_goes_in_its_place_and_the_turn_after_keeps_its_reasoning() {
         .parse_responses_response(answer(output.clone()))
         .expect("parses");
     let mut list = vec![ChatMessage::system("Base."), ChatMessage::user("go")];
-    let mut per_request = request(list.clone(), vec![closed_tool("search")]);
-    per_request.ephemeral_system_notice = Some("[budget_notice] 80%".to_string());
     list.push(ChatMessage::notice("[budget_notice] 80%"));
     let first = provider.build_responses_body(&request(list.clone(), vec![closed_tool("search")]));
-    assert_eq!(
-        first,
-        provider.build_responses_body(&per_request),
-        "the same body"
-    );
     list.push(ChatMessage::assistant_with_tools(&response));
     list.push(ChatMessage::tool_result("call_2", "2 more"));
     list.push(ChatMessage::notice("[budget_notice] 90%"));

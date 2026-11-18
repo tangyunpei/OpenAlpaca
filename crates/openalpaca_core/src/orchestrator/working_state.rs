@@ -195,7 +195,6 @@ pub fn update(
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
     }
 }
 

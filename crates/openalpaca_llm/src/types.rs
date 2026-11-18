@@ -527,14 +527,6 @@ pub struct ChatRequest {
     pub thinking: Option<ThinkingConfig>,
     /// Context management configuration (Anthropic only). Other providers ignore this.
     pub context_management: Option<crate::context_management::ContextManagement>,
-    /// A notice injected into this request only, never persisted to
-    /// conversation history. Every provider places it last, after the
-    /// request's messages, and never in the system prompt (spec P0;
-    /// ANTHROPIC-THINKING moved Anthropic's out of `system`), in the form a
-    /// kept [`ChatMessage::notice`] takes there. The agentic loop's budget
-    /// notice no longer rides here: it stays in the run's list
-    /// (BUDGET-NOTICE-KEPT).
-    pub ephemeral_system_notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]

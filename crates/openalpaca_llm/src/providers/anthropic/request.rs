@@ -152,11 +152,24 @@ pub(super) fn build_request_body(
 
     for msg in request.messages.iter() {
         match msg.role {
-            // A kept budget notice (BUDGET-NOTICE-KEPT): in its place, as
-            // the per-request notice below has always gone — a user text
-            // block of its own, never in `system`, which stays the same on
-            // every request (.../preserved-thinking/prefix-checks, read
-            // 2026-11-14), so each later request repeats it as it was sent.
+            // A kept budget notice (BUDGET-NOTICE-KEPT): in its place, a
+            // user text block of its own, never in `system`, and never with
+            // `cache_control` (`notice_slots`, below), so each later request
+            // repeats it as it was sent (ANTHROPIC-THINKING). The pages,
+            // read 2026-11-14: keep `system` the same on every request and
+            // "Put every update in a new message at the end"
+            // (platform.claude.com/docs/en/build-with-claude/
+            // preserved-thinking/prefix-checks); an updated value goes "in
+            // its own text block of the user message you're about to send,
+            // after any tool results" (.../preserved-thinking/
+            // change-tools-or-instructions), and "Consecutive `user` or
+            // `assistant` turns in your request will be combined into a
+            // single turn" (.../api/messages) — so a message of its own
+            // after the tool results' is that block. Not a `role: "system"`
+            // message: .../preserved-thinking/change-tools-or-instructions
+            // says some models don't accept one (every model with preserved
+            // thinking does), and the arm sends the notice to every
+            // Anthropic row.
             Role::System if msg.notice => {
                 notice_slots.push(messages.len());
                 messages.push(serde_json::json!({
@@ -338,33 +351,6 @@ pub(super) fn build_request_body(
                 _ => {}
             }
         }
-    }
-
-    // The per-request notice (`ephemeral_system_notice`): the request's last
-    // message, a user text block after the tool results, added after the
-    // cache breakpoints so it never carries `cache_control` and the cached
-    // prefix is the request's without it (ANTHROPIC-THINKING). The pages,
-    // read 2026-11-14: keep `system` the same on every request and "Put
-    // every update in a new message at the end"
-    // (platform.claude.com/docs/en/build-with-claude/preserved-thinking/
-    // prefix-checks); an updated value goes "in its own text block of the
-    // user message you're about to send, after any tool results"
-    // (.../preserved-thinking/change-tools-or-instructions), and
-    // "Consecutive `user` or `assistant` turns in your request will be
-    // combined into a single turn" (.../api/messages) — so a message of its
-    // own after the tool results' is that block. Not a `role: "system"`
-    // message: .../preserved-thinking/change-tools-or-instructions says
-    // some models don't accept one (every model with preserved thinking
-    // does), and the arm sends the notice to every Anthropic row. The
-    // agentic loop no longer sends its budget notice here: it keeps it in
-    // the run's list, rendered in place above (BUDGET-NOTICE-KEPT).
-    if let Some(ref notice) = request.ephemeral_system_notice
-        && let Some(serde_json::Value::Array(msgs_arr)) = body.get_mut("messages")
-    {
-        msgs_arr.push(serde_json::json!({
-            "role": "user",
-            "content": [{"type": "text", "text": notice}],
-        }));
     }
 
     // Extended thinking

@@ -156,7 +156,6 @@ fn utility_request(model: Option<&str>) -> RouterRequest {
         thinking: Some(ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: vec![],
-        ephemeral_system_notice: None,
     }
 }
 

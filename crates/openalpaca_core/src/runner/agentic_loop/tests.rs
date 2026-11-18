@@ -1670,10 +1670,6 @@ fn test_truncate_min_cut_guard_skips_distant_sentence() {
 struct MockRouterProvider {
     responses: Vec<Result<ChatResponse, LlmError>>,
     call_count: AtomicUsize,
-    /// Records the `ephemeral_system_notice` field from every incoming
-    /// `ChatRequest`. Exposed via `notices_seen()`: the loop's budget notice
-    /// rides in the messages (BUDGET-NOTICE-KEPT), so it stays `None`.
-    notices: std::sync::Mutex<Vec<Option<String>>>,
     /// The content of every `Role::Tool` message the backend has been sent —
     /// what the *model* actually sees of a tool result, which is not what the
     /// session log records (§5.4: the log keeps the untruncated payload).
@@ -1687,7 +1683,6 @@ impl MockRouterProvider {
         Self {
             responses,
             call_count: AtomicUsize::new(0),
-            notices: std::sync::Mutex::new(Vec::new()),
             tool_results_seen: std::sync::Mutex::new(Vec::new()),
             contents_per_call: std::sync::Mutex::new(Vec::new()),
         }
@@ -1710,15 +1705,6 @@ impl MockRouterProvider {
             .unwrap_or_else(|p| p.into_inner())
             .clone()
     }
-
-    /// Snapshot the notices observed across all `chat()` calls so far.
-    #[allow(dead_code)]
-    fn notices_seen(&self) -> Vec<Option<String>> {
-        self.notices
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
-    }
 }
 
 #[async_trait]
@@ -1732,10 +1718,6 @@ impl LlmProvider for MockRouterProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
-        self.notices
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(request.ephemeral_system_notice.clone());
         self.contents_per_call
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -2508,7 +2490,7 @@ async fn test_ten_loop_step_spans_emitted() {
 /// simulated deterministically without depending on provider pricing.
 ///
 /// Returns `(result, provider)` so callers can both inspect the final
-/// `LoopResult` (messages, finish reason) and pull `notices_seen()` off
+/// `LoopResult` (messages, finish reason) and pull `contents_seen()` off
 /// the mock to verify what the backend actually received.
 async fn run_loop_with_seeded_cost(
     experimental_ephemeral_pressure: bool,
@@ -2578,7 +2560,7 @@ async fn run_loop_with_seeded_cost(
 #[tokio::test]
 async fn test_ephemeral_notice_absent_when_flag_off() {
     // Even though cost is at 90% of the budget, the flag is off — so the
-    // backend sees no notice, beside the messages or among them.
+    // backend sees no notice among the messages.
     let (_result, provider) = run_loop_with_seeded_cost(
         /* experimental_ephemeral_pressure = */ false,
         /* simulated_cost = */ 0.009,
@@ -2586,17 +2568,12 @@ async fn test_ephemeral_notice_absent_when_flag_off() {
     )
     .await;
 
-    let notices = provider.notices_seen();
+    let calls = provider.contents_seen();
     assert!(
-        !notices.is_empty(),
+        !calls.is_empty(),
         "expected at least one chat() call, got none"
     );
-    assert!(
-        notices.iter().all(|n| n.is_none()),
-        "flag off but backend saw a notice: {:?}",
-        notices
-    );
-    for contents in provider.contents_seen() {
+    for contents in calls {
         assert!(
             contents.iter().all(|c| !c.contains("[budget_notice]")),
             "flag off but a message is a notice: {contents:?}"
@@ -2633,11 +2610,10 @@ async fn test_ephemeral_notice_fires_over_cost_threshold() {
 }
 
 #[tokio::test]
-async fn test_ephemeral_notice_is_kept_in_the_list_not_beside_it() {
+async fn test_ephemeral_notice_is_kept_in_the_list() {
     // BUDGET-NOTICE-KEPT (the owner, 2026-11-17, reversing spec P0b's "never
     // appended"): flag on, cost at 90%, the notice is one message of the
-    // list — the original system prompt and user message, then the notice —
-    // and the per-request field is left empty.
+    // list — the original system prompt and user message, then the notice.
     let (result, provider) = run_loop_with_seeded_cost(
         /* experimental_ephemeral_pressure = */ true,
         /* simulated_cost = */ 0.009,
@@ -2651,7 +2627,6 @@ async fn test_ephemeral_notice_is_kept_in_the_list_not_beside_it() {
         "unexpected finish reason: {:?}",
         result.finish_reason
     );
-    assert_eq!(provider.notices_seen(), vec![None]);
     let contents = provider.contents_seen();
     assert_eq!(contents.len(), 1, "expected exactly one chat() call");
     assert_eq!(contents[0].len(), 3, "{:?}", contents[0]);
@@ -6969,12 +6944,6 @@ async fn ten_round_run(turn: fn(&str) -> ChatResponse, on: bool) -> Vec<ChatRequ
 /// reasoning (OpenAI's Responses API), as every other turn does.
 fn assert_notices_kept_in_place(requests: &[ChatRequest]) {
     assert_eq!(requests.len(), 10);
-    for (i, request) in requests.iter().enumerate() {
-        assert!(
-            request.ephemeral_system_notice.is_none(),
-            "request {i}: the notice rides in the list, not beside it"
-        );
-    }
     assert!(notices_in(&requests[7]).is_empty(), "no notice before 80%");
     let first = notices_in(&requests[8]);
     assert_eq!(first.len(), 1, "request 8 carries one notice");
@@ -7010,7 +6979,7 @@ async fn a_budget_notice_stays_where_it_was_sent_and_reasoning_goes_back() {
 }
 
 /// With the pressure layer off (the default) nothing of this reaches a
-/// request: no notice, in the list or beside it, and each request is the
+/// request: no notice in the list, and each request is the
 /// last one plus the turn and its result.
 #[tokio::test]
 async fn with_the_pressure_layer_off_no_request_carries_a_notice() {
@@ -7021,7 +6990,6 @@ async fn with_the_pressure_layer_off_no_request_carries_a_notice() {
         let requests = ten_round_run(turn, false).await;
         assert_eq!(requests.len(), 10);
         for (i, request) in requests.iter().enumerate() {
-            assert!(request.ephemeral_system_notice.is_none(), "request {i}");
             assert!(notices_in(request).is_empty(), "request {i}");
             assert_eq!(request.messages.len(), 2 + 2 * i, "request {i}");
             let kept: Vec<bool> = echoes(request).iter().map(Option::is_some).collect();

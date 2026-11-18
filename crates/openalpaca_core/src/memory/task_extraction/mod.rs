@@ -294,7 +294,6 @@ pub(crate) async fn extract_task_memories(
         thinking: Some(openalpaca_llm::ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
-        ephemeral_system_notice: None,
     };
     drop(dcfg);
 
