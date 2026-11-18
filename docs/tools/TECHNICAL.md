@@ -1158,6 +1158,10 @@ tools into the shared registry when the plugin loads:
 - name `<plugin>::<tool>`, where `<plugin>` is the plugin's directory name;
   a call reaches the plugin as `tools/call` under the bare `<tool>` it
   listed, and a failure reads `plugin <plugin>::<tool>: …`;
+- the answer follows MCP's `CallToolResult`: its text items are joined
+  with newlines (a result with none reads as its JSON), and
+  `isError: true` makes that text the tool's error, bare, as
+  `serialize_call_result()` does for an MCP tool (N-PLUG-1);
 - a call the sandbox cuts waits for the plugin's answer past the cut
   (`ToolContext::sandbox_cut_secs`, `PluginToolExecutor::execute_within`;
   5 s past it), so the sandbox's "Tool '<name>' timed out after <n>s"

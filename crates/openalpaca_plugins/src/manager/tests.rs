@@ -727,6 +727,36 @@ mcp_compatible = true
         tear_down_named_stub(&h, pid).await;
     }
 
+    /// **An `isError` result is an error** (N-PLUG-1, Z2-02). A plugin's
+    /// `tools/call` result follows MCP's `CallToolResult`: one that says
+    /// `isError: true` is the tool's own failure, and the call yields
+    /// `Err(<its joined text>)` — the text bare, as the MCP bridge's
+    /// `serialize_call_result` gives it — where it used to read as a success.
+    /// The plugin answered, so it stays `Enabled`.
+    #[tokio::test]
+    async fn an_is_error_result_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = h
+            .tools
+            .execute(
+                "named-test::echo",
+                &serde_json::json!({"message": "boom", "is_error": true}),
+            )
+            .await;
+        assert_eq!(
+            answer,
+            Err("boom".to_string()),
+            "an isError result was not read as the tool's error"
+        );
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
     // ── PLUGIN-WAIT: a plugin tool waits the sandbox's figure ────────
 
     /// The channel default these tests run under: a test-scale stand-in for
@@ -794,6 +824,33 @@ mcp_compatible = true
             Ok("echo: late"),
             "a plugin tool did not wait the sandbox's figure"
         );
+
+        tear_down_named_stub(&h, pid).await;
+    }
+
+    /// **Through the sandbox, an `isError` result is the call's `Err`**
+    /// (N-PLUG-1): the path every loop's tool calls take, where the call
+    /// is cut (`execute_within`), hands the plugin's text back as the
+    /// tool's failure, unwrapped.
+    #[tokio::test]
+    async fn through_the_sandbox_an_is_error_result_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_named_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        let (pid, _group) = load_named_stub(&h).await;
+
+        let answer = call_through_sandbox(
+            &h,
+            30,
+            serde_json::json!({"message": "boom", "is_error": true}),
+        )
+        .await;
+        assert_eq!(
+            answer,
+            Err("boom".to_string()),
+            "through the sandbox an isError result was not the call's error"
+        );
+        assert_eq!(h.state("named-test").await, ExtensionState::Enabled);
 
         tear_down_named_stub(&h, pid).await;
     }

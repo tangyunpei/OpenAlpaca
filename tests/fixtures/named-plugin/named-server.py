@@ -5,13 +5,16 @@ Speaks JSON-RPC 2.0 over Content-Length-framed stdio (LSP/MCP standard),
 as tests/fixtures/echo-plugin/echo-server.sh does, but in one process and
 strict about the tool's name. Responds to:
   tools/list  -> one tool, "echo", with a "message" string, optional
-                 "fail" and "silent" booleans and an optional "delay_secs"
-                 number
+                 "fail", "silent" and "is_error" booleans and an optional
+                 "delay_secs" number
   tools/call  -> for params.name == "echo": after "delay_secs" seconds
                  (none by default), "echo: <message>" -- with
                  " (timeout_secs <n>)" when the arguments carry one -- or,
-                 when "fail" is true, a JSON-RPC error, or, when "silent"
-                 is true, no answer at all (a plugin that never answers);
+                 when "fail" is true, a JSON-RPC error, or, when "is_error"
+                 is true, a result carrying "<message>" as its one text item
+                 and "isError": true (MCP's CallToolResult for a tool that
+                 failed), or, when "silent" is true, no answer at all (a
+                 plugin that never answers);
                  for any other name a JSON-RPC error naming the name it was
                  asked for
   initialize  -> {"ready": true}, after NAMED_STUB_INIT_DELAY_SECS seconds
@@ -74,6 +77,7 @@ def answer(msg):
                 "message": {"type": "string"},
                 "fail": {"type": "boolean"},
                 "silent": {"type": "boolean"},
+                "is_error": {"type": "boolean"},
                 "delay_secs": {"type": "number"},
             },
             "required": ["message"],
@@ -91,6 +95,9 @@ def answer(msg):
             return None
         if args.get("fail"):
             return error(mid, "echo was asked to fail")
+        if args.get("is_error"):
+            content = [{"type": "text", "text": args.get("message", "no message")}]
+            return {"jsonrpc": "2.0", "id": mid, "result": {"content": content, "isError": True}}
         text = "echo: %s" % args.get("message", "no message")
         if "timeout_secs" in args:
             text += " (timeout_secs %s)" % args["timeout_secs"]
