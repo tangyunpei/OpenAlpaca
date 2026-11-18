@@ -220,7 +220,7 @@ bun run check && bun run test && bun run format:check && bun run build
 - **The shell is not confined to the project.** A command an agent runs starts in the project's folder, but an approved command runs as you and can reach any file you can. Every command asks first: read it before you approve it.
 - **Reading never asks.** In a project an agent can read any file there, `.env` included, and what it reads goes to the model that answers — a remote provider's when that model is not local.
 - **Platforms.** Developed on macOS. Nothing builds or tests the workspace on Linux or Windows now. Windows has packaging scripts, whose Pester tests are run by hand.
-- **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
+- **Plugins** can add tools, skills and agent templates. Plugin connectors are declared in the manifest format but not wired. They do not work. Plugin LLM providers are removed: a manifest declaring one installs with a warning, and models come from the built-in providers.
 - **MCP** is client-side and tools only. MCP resources and prompts are not implemented: the client has no resource or prompt methods. Serving MCP is not a goal.
 - **Memory search is by keyword.** There is no embedding model, so a question worded very differently from the note, or in another language, can miss it. Aliases on a note (for example a Chinese and an English name for the same thing) are the remedy.
 - **Desktop app.** Two controls are shown as unavailable because the daemon has no route for them: adding a connector, and the per-agent-template on/off switch.

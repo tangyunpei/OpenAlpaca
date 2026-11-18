@@ -1303,11 +1303,14 @@ async fn validate_answers_the_preview_without_installing() {
 }
 
 /// **N-PLUG-2 — a warning, never a refusal.** A top-level `tool = true` (the
-/// switch is `types.tools`) and a `types.provider = true` (no bridge is wired)
-/// used to validate clean. Now the dry run's `manifest.warnings`, the install
-/// preview and the install's row each say so, and both still install.
+/// switch is `types.tools`) and a `types.provider = true` (the plugin provider
+/// type is removed, M86) used to validate clean. Now the dry run's
+/// `manifest.warnings`, the install preview and the install's row each say
+/// so, and both still install.
 #[tokio::test]
-async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
+async fn validate_and_install_warn_on_an_unknown_key_and_an_unused_type() {
+    const PROVIDER_REMOVED: &str = "the plugin provider type is removed: LLM providers are the \
+         built-in ones, configured in llm.toml or in Settings → Models & keys";
     let h = Harness::new();
     let typo = h.source("typo", "1.0.0", "");
     std::fs::write(
@@ -1345,14 +1348,11 @@ async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
     assert!(
         names(&body["manifest"]["warnings"])
             .iter()
-            .any(|w| w.contains("provider bridge is not wired")),
-        "the dry run says the provider bridge is not wired: {body}"
+            .any(|w| w.contains(PROVIDER_REMOVED) && !w.contains("not wired")),
+        "the dry run says the plugin provider type is removed: {body}"
     );
 
-    for (source, needle) in [
-        (&typo, "'tool'"),
-        (&provider, "provider bridge is not wired"),
-    ] {
+    for (source, needle) in [(&typo, "'tool'"), (&provider, PROVIDER_REMOVED)] {
         let (status, body) = h
             .install(
                 "plugin",
@@ -1388,10 +1388,7 @@ async fn validate_and_install_warn_on_an_unknown_key_and_an_unwired_type() {
     // manifest declares: `declared.warnings`, standing, while the row's own
     // `warnings` stays per-call.
     let rows = h.rows(false).await;
-    for (id, needle) in [
-        ("typo", "'tool'"),
-        ("modelish", "provider bridge is not wired"),
-    ] {
+    for (id, needle) in [("typo", "'tool'"), ("modelish", PROVIDER_REMOVED)] {
         let row = rows
             .iter()
             .find(|r| r["id"] == id)

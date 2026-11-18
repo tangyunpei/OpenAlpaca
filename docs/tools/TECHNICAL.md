@@ -1202,9 +1202,12 @@ Plugins can also declare virtual capabilities in their manifest, which
 are attached via a registered `CapabilityProvider`.
 
 Plugin **tools, skills, and agents** flow through the normal registries.
-Plugin *connector* and *LLM-provider* bridges exist in the plugin crate
-but are not yet wired into the daemon's connector manager or LLM router —
-treat those plugin types as not yet functional.
+The plugin *connector* bridge exists in the plugin crate but is not wired
+into the daemon's connector manager — treat that plugin type as not
+functional.  The plugin *LLM-provider* type is removed (M86): a manifest's
+`types.provider` installs with a warning and contributes nothing, and an
+enabled `[providers."plugin:<name>"]` section in `llm.toml` is skipped with
+one warning.
 
 `ToolContext` is not forwarded to plugin backends; plugin tools receive
 only the tool name and arguments.

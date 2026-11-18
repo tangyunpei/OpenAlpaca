@@ -15,6 +15,13 @@ use super::parse_provider_type;
 use super::router_config::LlmRouterConfig;
 use super::runtime::LlmRuntimeConfig;
 
+/// The prefix of a `[providers."plugin:<name>"]` section, recognised only to
+/// skip it with one warning (M86, its own question taken (a)): the plugin
+/// provider type is removed (D-I (revised)), and a section that never served
+/// a model should not stop every model at the next start. Every other unknown
+/// name keeps its refusal, `LlmError::UnknownProvider`.
+const REMOVED_PLUGIN_PROVIDER_PREFIX: &str = "plugin:";
+
 fn resolve_key_secret(env_var: &str) -> Option<String> {
     std::env::var(env_var).ok()
 }
@@ -80,6 +87,15 @@ fn build_router_from_hierarchical(
     if let Some(ref providers) = config.providers {
         for (provider_name, provider_config) in providers {
             if provider_config.enabled == Some(false) {
+                continue;
+            }
+            if provider_name.starts_with(REMOVED_PLUGIN_PROVIDER_PREFIX) {
+                tracing::warn!(
+                    "llm.toml's [providers.\"{provider_name}\"] section is skipped: the plugin \
+                     provider type is removed, and LLM providers are the built-in ones \
+                     (anthropic, openai, ollama), configured in llm.toml or in Settings → \
+                     Models & keys. Delete the section to stop this warning."
+                );
                 continue;
             }
 

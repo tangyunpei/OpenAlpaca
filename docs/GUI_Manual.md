@@ -1504,8 +1504,9 @@ plugin runs), and it answers for the plugin by the id the daemon listed.
   before anything is copied. Under it, a `Warning:` line names each key the
   manifest sets that OpenAlpaca does not read (a top-level `tool = true`, whose
   switch is `types.tools`, is ignored — the line says so and what it likely
-  meant), says that `types.connector` and `types.provider` do nothing while
-  their bridges are not wired, and says that a `[config]` on a plugin with
+  meant), says that `types.connector` does nothing while its bridge is not
+  wired and that `types.provider` does nothing because the plugin provider
+  type is removed (models come from Settings → Models & keys), and says that a `[config]` on a plugin with
   `mcp_compatible = true` is never sent to it. A warning never refuses the
   install. Installing **grants nothing**: the row lands unapproved, and
   `Approve` is the single action that starts it.

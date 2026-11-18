@@ -13,11 +13,11 @@ pub enum ProviderType {
     Anthropic,
     OpenAI,
     Ollama,
-    Plugin(String),
 }
 
 impl ProviderType {
-    /// Return all built-in provider variants (excludes dynamic Plugin variants).
+    /// Return every provider variant: the built-in ones are all there are
+    /// (the plugin provider type is removed, M86).
     pub fn all() -> &'static [ProviderType] {
         // SAFETY: These are the three unit variants which contain no heap data,
         // so a static slice is fine despite ProviderType not being Copy.
@@ -45,7 +45,6 @@ impl std::fmt::Display for ProviderType {
             Self::Anthropic => write!(f, "anthropic"),
             Self::OpenAI => write!(f, "openai"),
             Self::Ollama => write!(f, "ollama"),
-            Self::Plugin(name) => write!(f, "plugin:{name}"),
         }
     }
 }

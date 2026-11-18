@@ -1751,7 +1751,8 @@ POST /v1/extensions/plugin  { "source": "path", "path": "/Users/…/my-plugin" }
         capabilities, virtual_capabilities, types, required_config_keys,
         sensitive_config_keys, warnings }, "added_capabilities": [], "consent_reset": false }
         // `warnings` (N-PLUG-2): each key plugin.toml sets that nothing reads, and
-        // types.connector / types.provider while their bridges are unwired — never a
+        // types.connector while its bridge is unwired, types.provider (the plugin
+        // provider type is removed, M86; the row's `provider` reads null) — never a
         // refusal; the row's `warnings` repeats them on install, update and approve,
         // and every listed plugin row carries them standing as `declared.warnings`
         // (the row awaiting consent draws them before Approve)

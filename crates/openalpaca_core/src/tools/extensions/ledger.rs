@@ -202,7 +202,9 @@ pub struct ExtensionRecord {
     /// Plugins only — the contributed connector platform. A `disabled` row with
     /// a non-null `connector` is a T2 bug (design §3.2, §8).
     pub connector: Option<String>,
-    /// Plugins only — the contributed LLM provider. Same rule as `connector`.
+    /// Always `None`: the plugin provider type is removed (M86, D-I
+    /// (revised)). Kept in the row's wire shape beside `connector` until the
+    /// plugin connector bridge's deletion presents both.
     pub provider: Option<String>,
     /// Required config keys that are not set — the `Failed{NeedsConfig}` list.
     pub missing_config_keys: Vec<String>,

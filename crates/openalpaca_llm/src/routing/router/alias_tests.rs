@@ -40,7 +40,6 @@ fn name_of(provider: &ProviderType) -> &'static str {
         ProviderType::Anthropic => "anthropic",
         ProviderType::OpenAI => "openai",
         ProviderType::Ollama => "ollama",
-        ProviderType::Plugin(_) => "plugin",
     }
 }
 

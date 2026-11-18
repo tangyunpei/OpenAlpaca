@@ -73,6 +73,71 @@ fn test_parse_provider_type_fn() {
     assert_eq!(parse_provider_type("unknown"), None);
 }
 
+// ── M86: a `plugin:` provider section is skipped with one warning ───────────
+
+/// The plugin provider type is removed (D-I (revised)), and M86's own question
+/// was taken (a): a `[providers."plugin:<name>"]` section left in `llm.toml`
+/// (by hand, or by an earlier build's key route) is skipped with one warning,
+/// so it does not stop every model at the next start. The name is no provider
+/// any more.
+#[test]
+#[tracing_test::traced_test]
+fn an_enabled_plugin_provider_section_is_skipped_with_one_warning() {
+    assert_eq!(parse_provider_type("plugin:acme"), None);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("llm.toml");
+    std::fs::write(
+        &path,
+        r#"[orchestrator]
+model = "claude-haiku-5-5"
+
+[providers."plugin:acme"]
+enabled = true
+"#,
+    )
+    .unwrap();
+
+    let router = build_router(&path).expect("a plugin: section does not stop the router");
+    assert!(router.configured_providers().is_empty());
+    logs_assert(|lines: &[&str]| {
+        let said = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("plugin:acme"))
+            .count();
+        match said {
+            1 => Ok(()),
+            n => Err(format!(
+                "{n} warnings naming the section, not one: {lines:?}"
+            )),
+        }
+    });
+    assert!(logs_contain("the plugin provider type is removed"));
+}
+
+/// Every other unknown provider name keeps its refusal.
+#[test]
+fn an_enabled_unknown_provider_section_still_refuses_the_router() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("llm.toml");
+    std::fs::write(
+        &path,
+        r#"[orchestrator]
+model = "claude-haiku-5-5"
+
+[providers.bogus]
+enabled = true
+"#,
+    )
+    .unwrap();
+
+    match build_router(&path) {
+        Err(LlmError::UnknownProvider(name)) => assert_eq!(name, "bogus"),
+        Err(other) => panic!("expected UnknownProvider, got {other}"),
+        Ok(_) => panic!("an unknown provider section built the router"),
+    }
+}
+
 // ── R58(b): a disabled provider contributes no models ───────────────────────
 
 /// A provider the owner turned off must not be in the catalogue after a
@@ -638,7 +703,6 @@ fn a_provider_is_on_a_local_server_by_its_base_url() {
         .unwrap()
         .base_url = Some("http://127.0.0.1:8080/v1".to_string());
     assert!(runtime.is_on_local_server(&ProviderType::OpenAI));
-    assert!(!runtime.is_on_local_server(&ProviderType::Plugin("x".to_string())));
     for (base, local) in [
         ("http://192.168.1.20:8080/v1", true),
         ("http://gpu-box.local:8080/v1", true),

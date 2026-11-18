@@ -23,7 +23,6 @@
 
 - `pub use bridge::PluginAgentBridge;`
 - `pub use bridge::PluginConnector;`
-- `pub use bridge::PluginLlmProvider;`
 - `pub use bridge::PluginSkillBridge;`
 - `pub use bridge::PluginToolProxy;`
 - `pub use error::PluginError;`

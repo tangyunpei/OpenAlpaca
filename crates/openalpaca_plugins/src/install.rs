@@ -174,8 +174,9 @@ pub struct ManifestSummary {
     /// `plugins/.config/<name>.toml` (X-29).
     pub sensitive_config_keys: Vec<String>,
     /// What the manifest declares that OpenAlpaca will not act on — a key it
-    /// does not read, `types.connector` or `types.provider` while their
-    /// bridges are unwired ([`PluginManifest::warnings`], N-PLUG-2). Warnings,
+    /// does not read, `types.connector` while its bridge is unwired, or
+    /// `types.provider`, whose plugin provider type is removed
+    /// ([`PluginManifest::warnings`], N-PLUG-2, M86). Warnings,
     /// never refusals: the preview says them so approving is decided on what
     /// will actually run.
     pub warnings: Vec<String>,

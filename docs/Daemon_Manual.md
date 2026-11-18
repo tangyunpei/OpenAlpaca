@@ -231,6 +231,13 @@ field: `PUT /v1/settings/llm/providers/{provider}/enabled` (the GUI's switch),
 daemon writes `llm.toml` it edits the file in place: comments, key order and
 keys it does not know are kept.
 
+The provider names are `anthropic`, `openai` and `ollama`. An enabled section
+under any other name is refused when the daemon starts
+(`Unknown provider: <name>`): the daemon logs that it failed to build the LLM
+router, and no model answers. The exception is a `[providers."plugin:<name>"]`
+section left from the removed plugin provider type: it is skipped, with one
+warning in the log when the daemon starts.
+
 Every provider in the seeded `llm.toml` starts with `enabled = false`, and
 adding a key does not turn an existing provider section on. A cloud provider
 therefore takes two steps — enable it, then add its key:
@@ -854,7 +861,7 @@ Install, update and uninstall are their own routes rather than verbs:
 |---|---|
 | `POST /v1/extensions/plugin` | Copies the directory at `{"source":"path","path":"/abs/dir"}` into `~/.openalpaca/plugins/`. It grants nothing — the row lands unapproved and `approve` is the one action that starts it. `source: "url"` is declined by name. |
 | `POST /v1/extensions/mcp` | Writes a `[servers.<name>]` block into `config/mcp.toml`. A declaration handing the daemon a literal secret is refused `422` (`secret_literal_refused`) — use the `env_from` / `bearer_env` / `extra_headers_from` indirections. |
-| `POST /v1/extensions/plugin/validate` | Reads a candidate directory's `plugin.toml` and answers what it would install. Copies nothing. Its `manifest.warnings` — also in the install and update responses, on the row an install, update or approve returns, standing as `declared.warnings` on every listed plugin row, and in the daemon's log at each load — names each key the manifest sets that nothing reads (with the key it likely meant: a top-level `tool` is `types.tools`), says that `types.connector` and `types.provider` contribute nothing while their bridges are not wired, and says that a `[config]` on a plugin with `mcp_compatible = true` is never sent to it. A warning never refuses. |
+| `POST /v1/extensions/plugin/validate` | Reads a candidate directory's `plugin.toml` and answers what it would install. Copies nothing. Its `manifest.warnings` — also in the install and update responses, on the row an install, update or approve returns, standing as `declared.warnings` on every listed plugin row, and in the daemon's log at each load — names each key the manifest sets that nothing reads (with the key it likely meant: a top-level `tool` is `types.tools`), says that `types.connector` contributes nothing while its bridge is not wired, says that `types.provider` contributes nothing because the plugin provider type is removed (LLM providers are the built-in ones, configured in `llm.toml` or in Settings → Models & keys; the row's `provider` field reads `null`), and says that a `[config]` on a plugin with `mcp_compatible = true` is never sent to it. A warning never refuses. |
 | `PUT /v1/extensions/plugin/{id}` | Replaces an installed plugin's tree with the one at a given path, through the same drain-and-unload a disable uses. The swap writes `plugins/.staging/<id>.swap` (where the incumbent went in `.trash/`) before it moves the incumbent and removes it after the rename into place: a rename that fails moves the incumbent back before the error returns, with the consent decision a capability change had dropped, and a daemon that dies between the two moves puts it back at its next start (the tree only: a decision dropped before the crash stays dropped), which also sweeps the staging copies an earlier process left. An uninstall or an orphan row's removal drops the plugin's marker. |
 | `DELETE /v1/extensions/{kind}/{id}?uninstall=true` | The real removal. A plugin's directory is **moved to `~/.openalpaca/plugins/.trash/`**, never deleted, and the response says where; `&keep_data=false` sends its `.data/<name>/` to the trash too. An MCP server must be `Disabled` first, and its `[servers.<name>]` block is what goes. Nothing auto-purges `.trash/`. |
 

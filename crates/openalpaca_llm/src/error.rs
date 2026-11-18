@@ -1,9 +1,9 @@
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum LlmError {
-    /// A transport failure described by its text alone. No provider in this
-    /// crate builds it any more — they map `reqwest::Error` to
-    /// [`Self::Transport`] (M57) — but a plugin's provider bridge does, and so
-    /// do tests standing in for a provider.
+    /// A transport failure described by its text alone. No provider builds it
+    /// any more — they map `reqwest::Error` to [`Self::Transport`] (M57), and
+    /// the plugin provider bridge that did is removed (M86) — but tests
+    /// standing in for a provider do.
     #[error("HTTP error: {0}")]
     Http(String),
 

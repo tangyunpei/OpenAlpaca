@@ -323,9 +323,10 @@ mod tests {
         }
     }
 
-    /// The `Http` arm still reads its text: no provider here builds it any
-    /// more, but a plugin's provider bridge does (`provider/chat` failed), and
-    /// these are the words it is read for. These strings pinned the providers'
+    /// The `Http` arm still reads its text: no provider builds it any more
+    /// (the plugin provider bridge, whose failed `provider/chat` did, is
+    /// removed, M86), but a test standing in for a provider may, and these
+    /// are the words it is read for. These strings pinned the providers'
     /// errors before M57, which never carried them.
     #[test]
     fn the_http_arm_reads_its_own_text() {

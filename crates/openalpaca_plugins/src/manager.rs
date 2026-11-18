@@ -131,8 +131,6 @@ pub struct PluginState {
     pub process: Option<PluginProcess>,
     pub registered_tools: Vec<String>,
     pub registered_connector: Option<String>,
-    pub registered_provider: Option<String>,
-    pub registered_models: Vec<String>,
     pub registered_skills: Vec<String>,
     pub registered_agents: Vec<String>,
     pub plugin_dir: PathBuf,
@@ -163,8 +161,6 @@ impl PluginState {
             process: None,
             registered_tools: Vec::new(),
             registered_connector: None,
-            registered_provider: None,
-            registered_models: Vec::new(),
             registered_skills: Vec::new(),
             registered_agents: Vec::new(),
             plugin_dir,
@@ -195,8 +191,6 @@ impl PluginState {
 struct Discovered {
     tools: Vec<RegisteredTool>,
     connector: Option<String>,
-    provider: Option<String>,
-    models: Vec<String>,
     skill: Option<(String, SkillFrontmatter, Arc<PluginSkillBridge>)>,
     agent: Option<AgentTemplate>,
 }
@@ -981,7 +975,8 @@ impl PluginManager {
 
     /// **T2.** Withdraw everything else a plugin contributes: its capability
     /// provider and virtual capabilities, its skills, its agent templates, and
-    /// its connector/provider registrations (design §3.2 T2).
+    /// its connector registration (design §3.2 T2). There is no provider
+    /// registration: the plugin provider type is removed (M86).
     ///
     /// Step 1's tombstone is not optional. The provider's `derive_capabilities`
     /// returns `capabilities.virtual_.provides`, a list **separate from**
@@ -989,13 +984,13 @@ impl PluginManager {
     /// without this a template naming a virtual capability would classify
     /// `unknown` (a `debug!` only) at spawn instead of `withheld`.
     ///
-    /// Step 4 is the one `unload_plugin` used to decline. The connector and
-    /// provider bridges are not wired into `ConnectorManager`/`LlmRouter` yet,
-    /// so today clearing the registrations here **is** the whole withdrawal —
-    /// and the row data is what proves it: a `disabled` row with a non-null
-    /// `connector` is a T2 bug, and C3's guard test asserts it never happens.
-    /// When the bridges land, `LlmRouter::deregister_provider` and a
-    /// `ConnectorManager::unregister_platform` go here, beside these lines.
+    /// Step 4 is the one `unload_plugin` used to decline. The connector
+    /// bridge is not wired into `ConnectorManager`, so today clearing the
+    /// registration here **is** the whole withdrawal — and the row data is
+    /// what proves it: a `disabled` row with a non-null `connector` is a T2
+    /// bug, and C3's guard test asserts it never happens. When the bridge
+    /// lands, a `ConnectorManager::unregister_platform` goes here, beside
+    /// this line.
     /// **Whatever E4 registers, T2 deregisters, in the same supervisor.**
     ///
     /// Returns step 1's **virtual** capabilities, which T1 step 3 unions into
@@ -1048,10 +1043,8 @@ impl PluginManager {
             registry.forget_plugin_refusals(id);
         }
 
-        // 4. connector + provider.
+        // 4. connector.
         state.registered_connector = None;
-        state.registered_provider = None;
-        state.registered_models.clear();
         state.registered_tools.clear();
 
         virtual_caps
@@ -1314,7 +1307,9 @@ impl PluginManager {
     ///
     /// `tools/list` failing is fatal to the load; the optional `*/info` probes
     /// are not — a plugin that declares a contribution it cannot describe loses
-    /// that contribution, not its tools, exactly as before.
+    /// that contribution, not its tools, exactly as before. `types.provider`
+    /// is not probed: the plugin provider type is removed (M86), and the
+    /// manifest's warning says so.
     async fn discover(
         &self,
         id: &str,
@@ -1346,39 +1341,6 @@ impl PluginManager {
                     connector = Some(platform);
                 }
                 Err(e) => warn!(plugin = %id, error = %e, "connector/info failed"),
-            }
-        }
-
-        let mut provider = None;
-        let mut models = Vec::new();
-        if manifest.types.provider {
-            match process
-                .channel
-                .call("provider/info", Value::Object(Default::default()))
-                .await
-            {
-                Ok(info) => {
-                    let provider_name = info
-                        .get("provider_name")
-                        .and_then(|p| p.as_str())
-                        .unwrap_or(id)
-                        .to_string();
-                    if let Some(found) = info.get("models").and_then(|m| m.as_array()) {
-                        for model in found {
-                            if let Some(model_id) = model.get("id").and_then(|v| v.as_str()) {
-                                models.push(model_id.to_string());
-                            }
-                        }
-                    }
-                    info!(
-                        plugin = %id,
-                        provider = %provider_name,
-                        models = models.len(),
-                        "discovered provider"
-                    );
-                    provider = Some(provider_name);
-                }
-                Err(e) => warn!(plugin = %id, error = %e, "provider/info failed"),
             }
         }
 
@@ -1440,8 +1402,6 @@ impl PluginManager {
         Ok(Discovered {
             tools,
             connector,
-            provider,
-            models,
             skill,
             agent,
         })
@@ -1608,8 +1568,6 @@ impl PluginManager {
                 process: Some(process),
                 registered_tools: registered_tools.clone(),
                 registered_connector: discovered.connector,
-                registered_provider: discovered.provider,
-                registered_models: discovered.models,
                 registered_skills,
                 registered_agents,
                 capability_provider_handle,
@@ -1926,7 +1884,6 @@ impl PluginManager {
             record.skills = state.registered_skills.clone();
             record.agents = state.registered_agents.clone();
             record.connector = state.registered_connector.clone();
-            record.provider = state.registered_provider.clone();
             record.skipped_tools = state.skipped_tools.clone();
             record.hint = state.hint.clone();
         }
@@ -2635,28 +2592,6 @@ impl PluginManager {
             platform,
             channel,
         ))
-    }
-
-    /// Get the [`PluginLlmProvider`](crate::bridge::PluginLlmProvider) for a
-    /// loaded provider plugin, along with its discovered model IDs. Returns
-    /// `None` if the plugin is not loaded or does not provide an LLM provider.
-    pub async fn get_plugin_provider(
-        &self,
-        name: &str,
-    ) -> Option<(crate::bridge::PluginLlmProvider, Vec<String>)> {
-        let plugins = self.plugins.read().await;
-        let state = plugins.get(name)?;
-        let provider_name = state.registered_provider.as_ref()?.clone();
-        let channel = state.process.as_ref()?.channel.clone();
-        let models = state.registered_models.clone();
-        let provider = crate::bridge::PluginLlmProvider::new(
-            name.to_string(),
-            provider_name,
-            true,  // supports_tools (TODO: get from provider/info)
-            false, // supports_streaming (TODO: get from provider/info)
-            channel,
-        );
-        Some((provider, models))
     }
 }
 

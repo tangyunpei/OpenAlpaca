@@ -120,7 +120,6 @@ mod lifecycle_tests {
         tools: Vec<String>,
         skills: Vec<String>,
         agents: Vec<String>,
-        models: Vec<String>,
     }
 
     /// The committed stub: Content-Length-framed JSON-RPC over stdio, answers
@@ -296,7 +295,6 @@ mcp_compatible = true
                 tools: state.registered_tools.clone(),
                 skills: state.registered_skills.clone(),
                 agents: state.registered_agents.clone(),
-                models: state.registered_models.clone(),
             }
         }
 
@@ -2293,26 +2291,19 @@ mcp_compatible = true
     }
 
     /// **S2 residue guard** (design §3.2 T2 step 4): after `disable` the row
-    /// reads `connector: null, provider: null` and the plugin's recorded model
-    /// set is empty.
-    ///
-    /// The models third is asserted against `PluginState.registered_models` —
-    /// what E3 recorded and T2 clears — because that is the only place a plugin
-    /// provider's models exist today: the provider bridge is not wired into
-    /// `LlmRouter` yet, so a freshly built `ModelRegistry` is empty whatever the
-    /// supervisor does, and `LlmRouter::list_models_for_provider` is a live
-    /// network call (design §3.2 T2). When the bridge lands, the deregistration
-    /// goes beside T2's clear and this assertion gains a second half.
+    /// reads `connector: null`; `provider` reads `null` on every row, enabled
+    /// or not, since the plugin provider type is removed (M86) — even when
+    /// the plugin answers `provider/info` with a name and models.
     #[tokio::test]
-    async fn a_disabled_plugin_leaves_no_connector_or_provider_residue() {
+    async fn a_disabled_plugin_leaves_no_connector_residue_and_no_row_names_a_provider() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = install_stub_plugin(
             tmp.path(),
             "echo-test",
             "[types]\ntools = true\nconnector = true\nprovider = true\n",
         );
-        // The stub answers `provider/info` from a file when one is present, so
-        // the load has real models to record.
+        // The stub answers `provider/info` from a file when one is present:
+        // what the parent recorded as the row's provider and its models.
         std::fs::write(
             dir.join("provider-info.json"),
             r#"{"provider_name":"echo-provider","models":[{"id":"echo-small"},{"id":"echo-large"}]}"#,
@@ -2321,26 +2312,18 @@ mcp_compatible = true
         let h = Harness::new(tmp.path());
         load_running_stub(&h, "echo-test").await;
 
-        // Whatever E4 registered is on the row while it is enabled.
+        // Whatever E4 registered is on the row while it is enabled; no
+        // provider is.
         let row = h.row("echo-test").await;
         assert!(row.connector.is_some(), "the stub declared a connector");
-        assert_eq!(row.provider.as_deref(), Some("echo-provider"));
-        assert_eq!(
-            h.registered("echo-test").await.models,
-            vec!["echo-small".to_string(), "echo-large".to_string()],
-            "the load recorded no models to withdraw"
-        );
+        assert_eq!(row.provider, None, "an enabled row names a provider");
 
         h.manager.disable(&ext("echo-test")).await.unwrap();
 
         let row = h.row("echo-test").await;
         assert_eq!(row.state, ExtensionState::Disabled);
         assert_eq!(row.connector, None, "a disabled row still names a connector");
-        assert_eq!(row.provider, None, "a disabled row still names a provider");
-        assert!(
-            h.registered("echo-test").await.models.is_empty(),
-            "a disabled plugin's provider models are still registered"
-        );
+        assert_eq!(row.provider, None, "a disabled row names a provider");
     }
 
     /// **`two_dirs_same_manifest_name_second_is_config_invalid`** (design §2.2
@@ -3247,8 +3230,6 @@ mcp_compatible = true
         let discovered = Discovered {
             tools: vec![mock_plugin_tool("echo-test::intruder", "echo-test")],
             connector: None,
-            provider: None,
-            models: Vec::new(),
             skill: None,
             agent: None,
         };
@@ -3315,8 +3296,6 @@ mcp_compatible = true
         let discovered = Discovered {
             tools: Vec::new(),
             connector: None,
-            provider: None,
-            models: Vec::new(),
             skill: None,
             agent: Some(build_agent_template_from_info(
                 &serde_json::json!({"id": "writing_agent"}),
@@ -3379,8 +3358,6 @@ mcp_compatible = true
         let discovered = Discovered {
             tools: Vec::new(),
             connector: None,
-            provider: None,
-            models: Vec::new(),
             skill: None,
             agent: Some(build_agent_template_from_info(
                 &serde_json::json!({"id": "writing_agent"}),
@@ -4009,11 +3986,12 @@ mod install_tests {
         );
     }
 
-    /// **An unwired type is warned about, never refused.** `types.provider`
-    /// and `types.connector` are probed at load and were listed in the preview
-    /// with no caveat, though neither bridge has a production caller.
+    /// **An unused type is warned about, never refused.** `types.connector`
+    /// is told its bridge is not wired; `types.provider` is told the plugin
+    /// provider type is removed (M86, D-I (revised)), and never that a bridge
+    /// is not wired.
     #[tokio::test]
-    async fn an_unwired_type_installs_with_a_warning_that_its_bridge_is_not_wired() {
+    async fn an_unused_type_installs_with_a_warning() {
         let h = Harness::new();
         let source = h.source(
             "echo-test",
@@ -4023,8 +4001,15 @@ mod install_tests {
 
         let summary = h.manager.validate_source(&source).await.expect("validate");
         let warnings = summary_warnings(&summary);
+        let provider: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("types.provider"))
+            .collect();
+        assert_eq!(provider.len(), 1, "one provider warning: {warnings:?}");
         assert!(
-            warnings.iter().any(|w| w.contains("types.provider") && w.contains("provider bridge is not wired")),
+            provider[0].contains("the plugin provider type is removed")
+                && provider[0].contains("Settings → Models & keys")
+                && !provider[0].contains("not wired"),
             "the provider warning: {warnings:?}"
         );
         assert!(
@@ -4044,11 +4029,43 @@ mod install_tests {
                 .record
                 .warnings
                 .iter()
-                .any(|w| w.contains("provider bridge is not wired")),
+                .any(|w| w.contains("the plugin provider type is removed")),
             "the install's row: {:?}",
             outcome.record.warnings
         );
         assert!(h.root.join("echo-test/plugin.toml").is_file());
+
+        // M86: the plugin approves and loads, its tools register, and nothing
+        // it would offer as a provider is taken — though the stub answers
+        // `provider/info` with a name and models when asked.
+        std::fs::write(
+            h.root.join("echo-test/provider-info.json"),
+            r#"{"provider_name":"echo-provider","models":[{"id":"echo-small"}]}"#,
+        )
+        .unwrap();
+        let approved = h
+            .manager
+            .approve_plugin("echo-test")
+            .await
+            .expect("approve");
+        assert!(
+            approved
+                .warnings
+                .iter()
+                .any(|w| w.contains("the plugin provider type is removed")),
+            "the approve's row: {:?}",
+            approved.warnings
+        );
+        let row = h.row("echo-test").await;
+        assert_eq!(row.state, ExtensionState::Enabled);
+        assert!(
+            h.tools
+                .registered_tool_names()
+                .iter()
+                .any(|n| n == "echo-test::echo"),
+            "a provider plugin's tools register"
+        );
+        assert_eq!(row.provider, None, "an enabled row names no provider");
     }
 
     /// A manifest that says only what OpenAlpaca reads carries no warning —

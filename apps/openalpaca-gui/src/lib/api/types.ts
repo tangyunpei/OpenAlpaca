@@ -921,8 +921,9 @@ export interface DeclaredContributions {
   types: Record<string, boolean>;
   /**
    * What the manifest holds that nothing acts on — a key OpenAlpaca does not
-   * read, `types.connector` / `types.provider` while their bridges are
-   * unwired (N-PLUG-2) — in the daemon's words, a key's hidden characters
+   * read, `types.connector` while its bridge is unwired, or `types.provider`,
+   * whose plugin provider type is removed (N-PLUG-2, M86) — in the daemon's
+   * words, a key's hidden characters
    * already shown as `<U+XXXX>`. Standing, unlike the row's per-call
    * `warnings`: the row awaiting consent draws them before Approve. Absent
    * from a daemon built before them.
@@ -1003,8 +1004,9 @@ export interface ManifestSummary {
   sensitive_config_keys: string[];
   /**
    * What the manifest declares that OpenAlpaca will not act on — a key it
-   * does not read, `types.connector` / `types.provider` while their bridges
-   * are unwired (N-PLUG-2). Warnings, never refusals. Absent from a daemon
+   * does not read, `types.connector` while its bridge is unwired, or
+   * `types.provider`, whose plugin provider type is removed (N-PLUG-2, M86).
+   * Warnings, never refusals. Absent from a daemon
    * built before them.
    */
   warnings?: string[];

@@ -804,8 +804,9 @@ and the `/v1/extensions` routes.  See the *Extensions* section of
 
 From the tool system's perspective a plugin tool is another registry entry
 with author `plugin:<name>`.  Plugins can also contribute skills and agent
-templates.  Plugin *connector* and *LLM-provider* bridges exist in code but
-are not wired into the daemon — treat those plugin types as non-functional.
+templates.  The plugin *connector* bridge exists in code but is not wired
+into the daemon — treat that plugin type as non-functional.  The plugin
+*LLM-provider* type is removed (M86): `types.provider` contributes nothing.
 
 ### 7.5 Skill-Bundled Scripts
 
@@ -953,4 +954,4 @@ reset or a project purge.
 | **Result streaming** | Buffered, then spilled or cut | Streaming for long-running tools |
 | **Sandboxed execution** | Process-level timeout | Container/WASM isolation for command tools |
 | **`event_log` retention** | Grows without bound | A retention pass, if one is ever wanted |
-| **Plugin connector / LLM-provider types** | Bridges exist, not wired | Wire into the connector manager and the LLM router |
+| **Plugin connector type** | Bridge exists, not wired | Wire into the connector manager |

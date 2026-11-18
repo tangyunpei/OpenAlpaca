@@ -471,8 +471,9 @@ Under the manifest, a `warning:` line names each key `plugin.toml` sets that
 OpenAlpaca does not read — a top-level `tool = true` is ignored, since the
 switch is `types.tools`, and the line says what the key likely meant — and says
 that `types.connector` (connectors are not supported) and `types.provider` (the
-plugin provider bridge is not wired) contribute nothing, and that a
-`[config]` on a plugin with `mcp_compatible = true` is never sent to it (such
+plugin provider type is removed: LLM providers are the built-in ones,
+configured in `llm.toml` or with `openalpaca llm`) contribute nothing, and
+that a `[config]` on a plugin with `mcp_compatible = true` is never sent to it (such
 a plugin is opened with MCP's `initialize`, which carries no configuration).
 A warning never refuses: `install --dry-run`, `install` and `update` print it,
 the `ext approve` row repeats it, and `ext info plugin <id>` says it for an

@@ -154,8 +154,9 @@ pub struct DeclaredContributions {
     /// `plugin.toml`'s `[types]` table, as declared.
     pub types: std::collections::BTreeMap<String, bool>,
     /// What the declaration holds that nothing acts on — a key OpenAlpaca does
-    /// not read, `types.connector` / `types.provider` while their bridges are
-    /// unwired (N-PLUG-2) — in the daemon's words, a key's hidden characters
+    /// not read, `types.connector` while its bridge is unwired, or
+    /// `types.provider`, whose plugin provider type is removed (N-PLUG-2,
+    /// M86) — in the daemon's words, a key's hidden characters
     /// already shown as `<U+XXXX>`. Standing, unlike the row's per-call
     /// `warnings`, so the row awaiting consent says them before Approve.
     #[serde(default)]
