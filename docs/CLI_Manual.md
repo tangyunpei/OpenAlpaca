@@ -454,7 +454,7 @@ One line of OpenAlpaca's own says what approving grants. `install --dry-run`
 prints it under the manifest; `install`, and `update` when it leaves the plugin
 awaiting consent, print it last; `ext info` prints it for a plugin awaiting
 consent. An `update` that kept consent leaves nothing to approve and prints
-none:
+none. The line reads:
 
 ```text
 Approving lets this plugin's program run as you, with the daemon's environment (less OPENALPACA_MASTER_KEY) and all the file and network access your account has; the capabilities it asks for name what it contributes to agents, not what it can do (Daemon Manual, Extensions).
