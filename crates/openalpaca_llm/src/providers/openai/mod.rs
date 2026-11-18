@@ -196,6 +196,18 @@ impl OpenAiProvider {
         &self.client
     }
 
+    /// A guarded test build never sends to OpenAI's real hosts
+    /// (LLM-TEST-GUARD, pending-decisions *Rev 127* item 9 (b), taken
+    /// *Rev 128*): a provider whose base has one of [`OPENAI_API_HOSTS`] —
+    /// [`DEFAULT_BASE_URL`]'s host among them — refuses each call before any
+    /// lookup ([`super::refuse_real_host`]). Read from the base's host, not
+    /// from [`Self::with_openai_api`], so a loopback mock standing in for
+    /// OpenAI's API still answers, as does every LAN or other compatible
+    /// server. A release build has no such check.
+    fn refuse_real_endpoint(&self) -> Result<(), LlmError> {
+        super::refuse_real_host("OpenAI", &self.base_url, OPENAI_API_HOSTS)
+    }
+
     /// Whether this provider talks to OpenAI's own API (C7b, STORE-FALSE).
     fn own_api(&self) -> bool {
         self.openai_api && self.flavour == OpenAiFlavour::OpenAi
@@ -308,6 +320,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn list_models_with_key(&self, key: &str) -> Result<Vec<String>, LlmError> {
+        self.refuse_real_endpoint()?;
         let url = format!("{}/models", self.base_url);
         let mut req_builder = self.deadline(self.client.get(&url));
 
@@ -346,6 +359,7 @@ impl LlmProvider for OpenAiProvider {
         key: &str,
         request: ChatRequest,
     ) -> Result<ChatResponse, LlmError> {
+        self.refuse_real_endpoint()?;
         let responses = self.uses_responses(&request);
         let (url, body) = self.route(&request);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
@@ -428,6 +442,7 @@ impl LlmProvider for OpenAiProvider {
         key: &str,
         request: ChatRequest,
     ) -> Result<ChatStream, LlmError> {
+        self.refuse_real_endpoint()?;
         let responses = self.uses_responses(&request);
         let (url, mut body) = self.route(&request);
         body["stream"] = serde_json::json!(true);

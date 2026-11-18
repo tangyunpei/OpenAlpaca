@@ -1560,3 +1560,35 @@ fn the_arms_default_model_is_luna() {
             .is_some()
     );
 }
+
+/// LLM-TEST-GUARD (pending-decisions *Rev 127* item 9, (b), taken
+/// *Rev 128*): the guard refuses only OpenAI's real hosts, read from the
+/// base's host whatever its scheme, case or trailing dot, and never a
+/// loopback, LAN or other OpenAI-compatible server. Pure: no call is made.
+#[cfg(not(feature = "live-eval"))]
+#[test]
+fn the_test_build_guard_refuses_only_openais_real_hosts() {
+    let refused = |base: &str| {
+        OpenAiProvider::new("k".to_string(), None, Some(base.to_string()), None)
+            .refuse_real_endpoint()
+            .is_err()
+    };
+    assert!(refused(DEFAULT_BASE_URL));
+    for host in OPENAI_API_HOSTS {
+        assert!(refused(&format!("https://{host}/v1")), "{host}");
+    }
+    assert!(refused("http://api.openai.com/v1"));
+    assert!(refused("https://API.OpenAI.com/v1"));
+    assert!(refused("https://api.openai.com./v1"));
+    for base in [
+        "http://127.0.0.1:1/v1",
+        "http://localhost:11434/v1",
+        "http://192.168.1.10:1234/v1",
+        "http://[::1]:8080/v1",
+        "https://gateway.example.com/openai/v1",
+        "https://api.openai.com.example.com/v1",
+        "not a url",
+    ] {
+        assert!(!refused(base), "{base}");
+    }
+}

@@ -276,13 +276,13 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 | Wake/scheduler | `crates/openalpaca_wake/src/` |
 | Connectors | `crates/openalpaca_connectors/src/` |
 
-Manuals: `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_Manual.md`, `Installation_Manual.md`, `QuickStart_Manual.md`, `Skill_Template_Reference.md`); `docs/tools/DESIGN.md` and `TECHNICAL.md` date from 2026-07-19 — verify before citing. Unserved in the GUI: `GapId = "GAP-17" | "GAP-20"` (adding a connector, the per-template enable toggle).
+Manuals: `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_Manual.md`, `Installation_Manual.md`, `QuickStart_Manual.md`, `Skill_Template_Reference.md`); `docs/tools/DESIGN.md` and `TECHNICAL.md` date from 2026-07-19: verify before citing. Unserved in the GUI: `GapId = "GAP-17" | "GAP-20"` (adding a connector, the per-template enable toggle).
 
 ## Feature Flags
-- `openalpaca_llm`: `anthropic`, `openai`, `ollama`, each gating its provider + `reqwest`.
-- `openalpaca_core`: `live-eval` compiles the three providers into the core test binary for the two `#[ignore]`d live evals (`crates/openalpaca_core/tests/steer_routing_eval.rs`, `crates/openalpaca_core/tests/memory_eval.rs`); never on by default.
-- `openalpaca_storage`: `test-home-guard` makes `store::projects::register` panic unless the home store was set through `OPENALPACA_HOME_STORE` and not into the real `~/.openalpaca`; on in the test builds of storage, core, the daemon, the CLI, plugins, connectors and the Tauri shell, never in a `cargo build`, a release or the sidecar — a backstop, not the protection (*Gotchas*); app_support's tests carry their own `HomeStoreGuard`.
-- `openalpaca_connectors`: `telegram` (`teloxide`), `imessage` (`rusqlite`, macOS only), `discord` (`twilight-gateway`/`-http`/`-model` + `reqwest`). The daemon enables every provider and connector feature and installs aws-lc-rs as the one rustls provider at start (`tls.rs`); no library installs one.
+- `openalpaca_llm`: `anthropic`, `openai`, `ollama`, each gating its provider + `reqwest`; `test-endpoint-guard` refuses Anthropic's and OpenAI's real hosts in test builds (llm, core, daemon, CLI, plugins), never a `cargo build`, release or sidecar; off under its `live-eval`, set by core's.
+- `openalpaca_core`: `live-eval` builds the three providers into its test binary for its `#[ignore]`d live evals `crates/openalpaca_core/tests/steer_routing_eval.rs`, `crates/openalpaca_core/tests/memory_eval.rs`; off by default.
+- `openalpaca_storage`: `test-home-guard` makes `store::projects::register` panic unless `OPENALPACA_HOME_STORE` set the home store, not to the real `~/.openalpaca`; on in test builds (storage, core, daemon, CLI, plugins, connectors, shell), never in a `cargo build`, release or sidecar: a backstop, not the protection (*Gotchas*); app_support's tests hold their own `HomeStoreGuard`.
+- `openalpaca_connectors`: `telegram` (`teloxide`), `imessage` (`rusqlite`, macOS only), `discord` (`twilight-gateway`/`-http`/`-model` + `reqwest`). The daemon enables every provider and connector feature and at start installs aws-lc-rs, the one rustls provider (`tls.rs`; no library does).
 
 ## Settled rules — do not reopen or "improve"
 - **Tool governance is two axes.** ALLOW is per-agent (template `capabilities`, skills' `requires_capabilities`); ENABLE is one toggle per MCP server and per plugin. Builtins are never toggled. Disabled = unloaded (child killed, connection dropped, no reconnect). A withheld capability refuses the call and warns in the log/chat; silent degradation is rejected. (S1–S4, design §1.)

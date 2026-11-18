@@ -305,6 +305,18 @@ fn the_storage_test_home_guard_is_armed_in_this_test_build() {
     assert!(openalpaca_storage::store::projects::test_home_guard_armed());
 }
 
+/// LLM-TEST-GUARD: a provider refuses Anthropic's and OpenAI's real hosts
+/// only in a build that carries `openalpaca_llm`'s `test-endpoint-guard`,
+/// which this crate turns on through `[dev-dependencies]` — unless a
+/// workspace run unifies core's `live-eval` on, which turns it off.
+#[test]
+fn the_llm_test_endpoint_guard_is_armed_in_this_test_build() {
+    assert_eq!(
+        openalpaca_llm::providers::test_endpoint_guard_armed(),
+        !openalpaca_llm::providers::test_endpoint_guard_yields()
+    );
+}
+
 /// The `discovery.json` a daemon listening on `port`, started `hours_up`
 /// hours ago, has written by now on T21's schedule — the start's token, then
 /// a new one each time `rotation_due` said so, looked at every minute as the

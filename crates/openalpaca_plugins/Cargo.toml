@@ -29,3 +29,6 @@ tempfile = { workspace = true }
 # test-home-guard: store::projects::register refuses an unguarded home store in
 # this crate's test builds (storage design, Stage 1).
 openalpaca_storage = { workspace = true, features = ["test-home-guard"] }
+# test-endpoint-guard: a provider refuses Anthropic's and OpenAI's real hosts
+# in this crate's test builds (LLM-TEST-GUARD).
+openalpaca_llm = { workspace = true, features = ["test-endpoint-guard"] }

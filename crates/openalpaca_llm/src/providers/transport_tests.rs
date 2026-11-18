@@ -605,7 +605,11 @@ async fn anthropics_calls_say_what_failed() {
 /// no key leaves the process — while a loopback base still answers. Red on
 /// the parent, whose calls look the name up (here, through the test's
 /// resolver, to a refused loopback port; nothing leaves the machine).
-#[cfg(all(feature = "anthropic", any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    feature = "anthropic",
+    not(feature = "live-eval"),
+    any(target_os = "macos", target_os = "linux")
+))]
 #[tokio::test]
 async fn a_test_build_refuses_anthropics_real_endpoint() {
     use super::anthropic::AnthropicProvider;
@@ -632,7 +636,8 @@ async fn a_test_build_refuses_anthropics_real_endpoint() {
         .unwrap_err();
     for err in [chat, stream, list] {
         assert!(
-            matches!(&err, LlmError::Config(m) if m.contains("api.anthropic.com")),
+            matches!(&err, LlmError::Config(m)
+                if m.contains("test-endpoint-guard") && m.contains("(api.anthropic.com)")),
             "{err}"
         );
         assert!(!err.is_transient(), "{err}");
@@ -664,6 +669,82 @@ async fn a_test_build_refuses_anthropics_real_endpoint() {
             .await
             .expect("a loopback base answers"),
         vec!["claude-opus-5-5".to_string()]
+    );
+}
+
+/// LLM-TEST-GUARD (pending-decisions *Rev 127* item 9, (b), taken
+/// *Rev 128*): a guarded test build refuses OpenAI's real hosts too. A
+/// provider left on its default base, or on a regional host of OpenAI's
+/// API, refuses each of its three calls with a configuration error naming
+/// the guard and the host — before any lookup, so nothing is tried — while a
+/// loopback mock standing in for OpenAI's API still answers. Red on the
+/// parent, whose calls look the name up (here, through the test's resolver,
+/// to a refused loopback port; nothing leaves the machine).
+#[cfg(all(
+    not(feature = "live-eval"),
+    any(target_os = "macos", target_os = "linux")
+))]
+#[tokio::test]
+async fn a_test_build_refuses_openais_real_hosts() {
+    use crate::test_support::refused_addr;
+    assert!(super::test_endpoint_guard_armed());
+    let resolver = Resolver::to(refused_addr());
+    for base in [None, Some("https://eu.api.openai.com/v1".to_string())] {
+        let real = OpenAiProvider::with_client(
+            client_resolving_with(&resolver, CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+            "sk-test-not-a-key".to_string(),
+            None,
+            base.clone(),
+            None,
+        );
+        let host = if base.is_some() {
+            "eu.api.openai.com"
+        } else {
+            "api.openai.com"
+        };
+
+        let chat = real.chat(request()).await.unwrap_err();
+        let stream = match real
+            .chat_streaming_with_key("sk-test-not-a-key", request())
+            .await
+        {
+            Ok(_) => panic!("a stream opened on OpenAI's real endpoint"),
+            Err(e) => e,
+        };
+        let list = real
+            .list_models_with_key("sk-test-not-a-key")
+            .await
+            .unwrap_err();
+        for err in [chat, stream, list] {
+            assert!(
+                matches!(&err, LlmError::Config(m)
+                    if m.contains("test-endpoint-guard") && m.contains(&format!("({host})"))),
+                "{err}"
+            );
+            assert!(!err.is_transient(), "{err}");
+            assert!(!err.is_auth_error(), "{err}");
+        }
+    }
+    assert_eq!(resolver.lookups(), 0, "no connection was tried");
+
+    // A loopback mock that stands in for OpenAI's own API answers.
+    let server = MockHttpServer::start(|_| {
+        MockResponse::json(serde_json::json!({"data": [{"id": "m"}]}).to_string())
+    })
+    .await;
+    let mock = OpenAiProvider::with_client(
+        loopback_client(REQUEST_TIMEOUT),
+        "sk-test-not-a-key".to_string(),
+        None,
+        Some(format!("{}/v1", server.base_url)),
+        None,
+    )
+    .with_openai_api(true);
+    assert_eq!(
+        mock.list_models_with_key("sk-test-not-a-key")
+            .await
+            .expect("a loopback base answers"),
+        vec!["m".to_string()]
     );
 }
 

@@ -139,6 +139,72 @@ fn transport_kind(e: &reqwest::Error) -> crate::error::TransportKind {
     }
 }
 
+/// Whether this build refuses the providers' real hosts (LLM-TEST-GUARD,
+/// pending-decisions *Rev 127* items 8 and 9, (b), taken *Rev 128*): this
+/// crate's own tests and the test builds of the crates that turn on
+/// `test-endpoint-guard` through their `[dev-dependencies]`, unless the
+/// build carries `live-eval` (openalpaca_core's live evals call the real
+/// providers on purpose). Never a release, `cargo run` or sidecar build.
+#[doc(hidden)]
+pub const fn test_endpoint_guard_armed() -> bool {
+    cfg!(all(
+        any(test, feature = "test-endpoint-guard"),
+        not(feature = "live-eval")
+    ))
+}
+
+/// Whether this build carries `live-eval`, which switches the guard off. A
+/// dependant's armed test asserts `armed == !yields`, so a workspace run that
+/// unifies core's `live-eval` on still passes it.
+#[doc(hidden)]
+pub const fn test_endpoint_guard_yields() -> bool {
+    cfg!(feature = "live-eval")
+}
+
+/// A guarded test build never sends to a provider's real host: a `base`
+/// whose host is one of `real_hosts` is refused with a configuration error
+/// naming the guard and the host, before any lookup, so no connection is
+/// tried and no test's key leaves the process. Any other base — a loopback
+/// mock, a LAN or other compatible server — passes. Not transient and not an
+/// auth error, so the router neither retries nor counts a refused key.
+#[cfg(all(
+    any(feature = "anthropic", feature = "openai"),
+    any(test, feature = "test-endpoint-guard"),
+    not(feature = "live-eval")
+))]
+pub(crate) fn refuse_real_host(
+    provider: &str,
+    base: &str,
+    real_hosts: &[&str],
+) -> Result<(), crate::error::LlmError> {
+    let host = reqwest::Url::parse(base)
+        .ok()
+        .and_then(|url| url.host_str().map(|h| h.trim_end_matches('.').to_owned()));
+    match host {
+        Some(host) if real_hosts.contains(&host.as_str()) => {
+            Err(crate::error::LlmError::Config(format!(
+                "a test build of openalpaca_llm (test-endpoint-guard) refuses {provider}'s \
+                 real endpoint ({host}): point the provider at a loopback server"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Release, `cargo run`, sidecar and `live-eval` builds: no check.
+#[cfg(all(
+    any(feature = "anthropic", feature = "openai"),
+    not(all(any(test, feature = "test-endpoint-guard"), not(feature = "live-eval")))
+))]
+#[inline(always)]
+pub(crate) fn refuse_real_host(
+    _provider: &str,
+    _base: &str,
+    _real_hosts: &[&str],
+) -> Result<(), crate::error::LlmError> {
+    Ok(())
+}
+
 pub mod openai_tools;
 
 #[cfg(feature = "anthropic")]

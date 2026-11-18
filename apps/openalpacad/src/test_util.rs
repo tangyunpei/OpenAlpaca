@@ -374,3 +374,15 @@ pub(crate) fn run_with_home(test: &str, home: &Path, cwd: &Path) {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// LLM-TEST-GUARD: a provider refuses Anthropic's and OpenAI's real hosts
+/// only in a build that carries `openalpaca_llm`'s `test-endpoint-guard`,
+/// which this crate turns on through `[dev-dependencies]` — unless a
+/// workspace run unifies core's `live-eval` on, which turns it off.
+#[test]
+fn the_llm_test_endpoint_guard_is_armed_in_this_test_build() {
+    assert_eq!(
+        openalpaca_llm::providers::test_endpoint_guard_armed(),
+        !openalpaca_llm::providers::test_endpoint_guard_yields()
+    );
+}

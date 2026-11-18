@@ -326,6 +326,25 @@ fn the_storage_test_home_guard_is_armed_in_this_test_build() {
     assert!(openalpaca_storage::store::projects::test_home_guard_armed());
 }
 
+/// LLM-TEST-GUARD: a provider refuses Anthropic's and OpenAI's real hosts
+/// only in a build that carries `openalpaca_llm`'s `test-endpoint-guard`,
+/// which this crate turns on through `[dev-dependencies]` — unless the build
+/// carries `live-eval`, whose evals call the real providers.
+#[cfg(not(feature = "live-eval"))]
+#[test]
+fn the_llm_test_endpoint_guard_is_armed_in_this_test_build() {
+    assert!(openalpaca_llm::providers::test_endpoint_guard_armed());
+}
+
+/// The guard yields to `live-eval` (`openalpaca_llm/live-eval`), or the
+/// owner's live evals would be refused: proved when `cargo check
+/// --features live-eval --tests` compiles this, with nothing run.
+#[cfg(feature = "live-eval")]
+const _: () = assert!(
+    !openalpaca_llm::providers::test_endpoint_guard_armed(),
+    "a live-eval build must not carry the test-endpoint guard"
+);
+
 /// R45 tests (storage design §11): a process a test's own command started,
 /// sent SIGKILL when this guard drops, so an assertion that fails before the
 /// code under test killed it leaves no orphan behind.
