@@ -828,3 +828,460 @@ async fn an_exited_child_still_shown_as_starting_ends_the_wait() {
     );
     assert_eq!(world.looks, 1);
 }
+
+// ============================================================================
+// `daemon start` judges before it spawns (123-8), `--daemon-only` and
+// `restart` wait (123-2)
+// ============================================================================
+
+/// Another build's discovery file over its live daemon (pid 777, protocol
+/// 7), written into the sandbox, and the refusal every command says of it.
+fn another_builds_file(sandbox: &std::path::Path) -> &'static str {
+    let path = paths::discovery_path().unwrap();
+    assert!(path.starts_with(sandbox), "{}", path.display());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        br#"{"pid": 777, "schema": 9, "build": {"version": "5.0.0", "protocol": 7}}"#,
+    )
+    .unwrap();
+    "The daemon running (pid 777, version 5.0.0, protocol 7) wrote a discovery file this CLI \
+     cannot read: another build of OpenAlpaca. Nothing was stopped or started. Update the CLI \
+     to one that speaks protocol 7, or stop that daemon with the `openalpaca` of the build that \
+     started it (or `kill 777`), then start this CLI's own with `openalpaca daemon start`."
+}
+
+/// What a start closure did, for the test to read after.
+#[derive(Default)]
+struct Calls {
+    start: bool,
+    app: bool,
+}
+
+/// `openalpaca daemon start` over another build's live daemon refuses at
+/// its first look, with the sentence — now true — that nothing was stopped
+/// or started: the start (which rotates the daemon's log, then spawns) is
+/// never called and no log is written. With `--daemon-only` the refusal is
+/// the command's error; with the app it is said on stderr and the app is
+/// started all the same, as a wait that ends on such a daemon has it (Rev
+/// 123's first item). (On the parent the start rotated that daemon's log
+/// and spawned beside it.)
+#[tokio::test]
+async fn daemon_start_refuses_another_builds_daemon_before_it_rotates_or_spawns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let sentence = another_builds_file(tmp.path());
+    let log = paths::daemon_log_path().unwrap();
+    assert!(log.starts_with(tmp.path()), "{}", log.display());
+    for daemon_only in [false, true] {
+        let mut world = Stub::new(true);
+        let mut calls = Calls::default();
+
+        let outcome = crate::commands::daemon::start_with(
+            &mut world,
+            &cli(1, 1),
+            || -> Result<Option<FakeSpawn>> {
+                calls.start = true;
+                Ok(None)
+            },
+            (!daemon_only).then_some(|| {
+                calls.app = true;
+                Ok(())
+            }),
+        )
+        .await;
+
+        if daemon_only {
+            assert_eq!(outcome.expect_err("refused").to_string(), sentence);
+            assert!(!calls.app, "no app");
+            assert!(world.said.is_empty(), "{:?}", world.said);
+        } else {
+            outcome.expect("the app is started all the same");
+            assert!(calls.app, "the app is started all the same");
+            assert_eq!(
+                world.said,
+                vec![format!("⚠️  {sentence} Starting the app all the same.")]
+            );
+        }
+        assert!(
+            !calls.start,
+            "nothing rotated or spawned, daemon_only {daemon_only}"
+        );
+        assert_eq!(world.looks, 1, "one look; no wait");
+    }
+    assert!(!log.exists(), "no daemon log was rotated or opened");
+}
+
+/// The same over a daemon whose file this build reads and whose health
+/// states a protocol this CLI does not speak.
+#[tokio::test]
+async fn daemon_start_refuses_a_daemon_of_another_protocol_before_it_spawns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let d = openalpaca_app_support::discovery::make_discovery("127.0.0.1", 1, "i".into(), "0.1.0");
+    let mut world = Stub::canned([answering(&d, 2)]);
+    let mut calls = Calls::default();
+
+    let refused = crate::commands::daemon::start_with(
+        &mut world,
+        &cli(1, 1),
+        || -> Result<Option<FakeSpawn>> {
+            calls.start = true;
+            Ok(None)
+        },
+        None::<fn() -> Result<()>>,
+    )
+    .await
+    .expect_err("refused")
+    .to_string();
+
+    assert!(
+        refused.starts_with(&format!("The daemon running (pid {}, ", d.pid))
+            && refused.contains("protocol 2) is not one this CLI can use")
+            && refused.contains("Nothing was stopped or started."),
+        "{refused}"
+    );
+    assert!(!calls.start);
+}
+
+/// No daemon: the start is called, and `--daemon-only` waits for the
+/// daemon it spawned to answer, then succeeds.
+#[tokio::test]
+async fn daemon_start_daemon_only_spawns_and_waits_for_the_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let d = openalpaca_app_support::discovery::make_discovery("127.0.0.1", 1, "i".into(), "0.1.0");
+    let mut world = Stub::canned([missing(), missing(), starting_look(&d), answering(&d, 1)]);
+    let mut calls = Calls::default();
+
+    crate::commands::daemon::start_with(
+        &mut world,
+        &cli(1, 1),
+        || {
+            calls.start = true;
+            Ok(Some(FakeSpawn {
+                pid: d.pid,
+                exit: None,
+                log_start: 0,
+            }))
+        },
+        None::<fn() -> Result<()>>,
+    )
+    .await
+    .expect("the daemon answers");
+
+    assert!(calls.start);
+    assert_eq!(
+        world.looks, 4,
+        "the first look, then the wait to the answer"
+    );
+}
+
+/// `daemon start --daemon-only` over a daemon that dies at boot (a
+/// pre-squash database refused, SQ-1): the lines this run wrote to its log
+/// said, and the command fails with the wait's sentence. (On the parent it
+/// returned once the process was spawned, reporting it started.)
+#[tokio::test]
+async fn daemon_start_daemon_only_fails_on_a_daemon_that_dies_at_boot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let (log, start) = a_log_with_an_earlier_run();
+    std::fs::write(
+        &log,
+        "an earlier run's last line\nError: this database was written by another build\n",
+    )
+    .unwrap();
+    let d = openalpaca_app_support::discovery::make_discovery("127.0.0.1", 1, "i".into(), "0.1.0");
+    let mut world = Stub::canned([missing(), left_by_a_dead_daemon(&d)]);
+
+    let failed = crate::commands::daemon::start_with(
+        &mut world,
+        &cli(1, 1),
+        || {
+            Ok(Some(FakeSpawn {
+                pid: 4242,
+                exit: Some("exit status: 1"),
+                log_start: start,
+            }))
+        },
+        None::<fn() -> Result<()>>,
+    )
+    .await
+    .expect_err("a daemon that died at boot fails the command")
+    .to_string();
+
+    assert_eq!(
+        failed,
+        format!(
+            "The daemon this start spawned (pid 4242) exited (exit status: 1) before it \
+             answered; the lines above are what it wrote to its log ({}).",
+            log.display()
+        )
+    );
+    assert_eq!(
+        world.said,
+        vec!["Error: this database was written by another build".to_owned()]
+    );
+}
+
+/// `--daemon-only` with no daemon ever answering: the command fails after
+/// the shared budget (`STARTING_BUDGET`, 45 s) from the wait's start.
+#[tokio::test]
+async fn daemon_start_daemon_only_fails_when_no_daemon_answers_within_the_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let looks = (STARTING_BUDGET.as_millis() / POLL.as_millis()) as usize + 2;
+    let mut world = Stub::canned(std::iter::repeat_n(missing(), looks));
+
+    let failed = crate::commands::daemon::start_with(
+        &mut world,
+        &cli(1, 1),
+        || {
+            Ok(Some(FakeSpawn {
+                pid: 4242,
+                exit: None,
+                log_start: 0,
+            }))
+        },
+        None::<fn() -> Result<()>>,
+    )
+    .await
+    .expect_err("reported")
+    .to_string();
+
+    assert_eq!(
+        failed,
+        "Daemon is not running (no discovery file) 45 seconds after the start."
+    );
+    assert_eq!(world.waited(), STARTING_BUDGET);
+}
+
+/// `daemon restart`'s start waits the same way (`restart_start_with`, what
+/// the restart arm calls once the old daemon is gone): the daemon it
+/// spawned dying at boot fails the command; one that answers succeeds.
+#[tokio::test]
+async fn the_restarts_start_fails_on_a_daemon_that_dies_and_passes_one_that_answers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let (log, start) = a_log_with_an_earlier_run();
+    let d = openalpaca_app_support::discovery::make_discovery("127.0.0.1", 1, "i".into(), "0.1.0");
+    let mut world = Stub::canned([left_by_a_dead_daemon(&d)]);
+
+    let failed = crate::commands::daemon::restart_start_with(&mut world, &cli(1, 1), || {
+        Ok(Some(FakeSpawn {
+            pid: 4242,
+            exit: Some("exit status: 1"),
+            log_start: start,
+        }))
+    })
+    .await
+    .expect_err("failed")
+    .to_string();
+    assert_eq!(
+        failed,
+        format!(
+            "The daemon this start spawned (pid 4242) exited (exit status: 1) before it \
+             answered, and wrote nothing to its log ({}).",
+            log.display()
+        )
+    );
+
+    let mut world = Stub::canned([missing(), answering(&d, 1)]);
+    crate::commands::daemon::restart_start_with(&mut world, &cli(1, 1), || {
+        Ok(Some(FakeSpawn {
+            pid: d.pid,
+            exit: None,
+            log_start: 0,
+        }))
+    })
+    .await
+    .expect("answered");
+}
+
+// ============================================================================
+// `daemon tail`, `confirmations watch` and `status` run the same check
+// (123-3)
+// ============================================================================
+
+/// What a stub that is no WebSocket server answers the upgrade with.
+fn no_upgrade() -> String {
+    json_answer("404 Not Found", "x", "{}")
+}
+
+/// `daemon tail` and `confirmations watch` over another build's live
+/// daemon: refused with the shared sentence before any socket is opened.
+/// (On the parent each failed to parse the file.)
+#[tokio::test]
+async fn the_socket_readers_refuse_another_builds_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let sentence = another_builds_file(tmp.path());
+
+    let mut world = Stub::new(true);
+    let tail = crate::commands::tail::run_with(&mut world, &cli(1, 1), 1)
+        .await
+        .expect_err("tail refused")
+        .to_string();
+    assert_eq!(tail, sentence);
+
+    let mut world = Stub::new(true);
+    let watch = crate::commands::confirmations::watch_with(&mut world, &cli(1, 1))
+        .await
+        .expect_err("watch refused")
+        .to_string();
+    assert_eq!(watch, sentence);
+}
+
+/// The same over a daemon whose file this build reads and whose health
+/// states a newer protocol: refused with the sentence, the health asked and
+/// the events socket never. (On the parent each opened the socket.)
+#[tokio::test]
+async fn the_socket_readers_refuse_a_daemon_of_another_protocol() {
+    for reader in ["tail", "watch"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
+        let (addr, server) = serve_until_idle(vec![health(2, "0.2.0")], IDLE);
+        let d = discovery_of_a_daemon_up_for(addr.port(), 0);
+        let mut world = Stub::new(true);
+
+        let refused = match reader {
+            "tail" => crate::commands::tail::run_with(&mut world, &cli(1, 1), 1).await,
+            _ => crate::commands::confirmations::watch_with(&mut world, &cli(1, 1)).await,
+        }
+        .expect_err("refused")
+        .to_string();
+
+        assert!(
+            refused.starts_with(&format!(
+                "The daemon running (pid {}, version 0.2.0, protocol 2) is not one this CLI can \
+                 use",
+                d.pid
+            )),
+            "{reader}: {refused}"
+        );
+        let requests = server.join().expect("the stub finishes");
+        assert_eq!(requests.len(), 1, "{reader}: {requests:?}");
+        assert!(requests[0].starts_with("GET /v1/health "), "{requests:?}");
+    }
+}
+
+/// A daemon of this CLI's protocol: each reader goes on, as before, to open
+/// the events socket with the file's token (the stub, no WebSocket server,
+/// then refuses the upgrade).
+#[tokio::test]
+async fn the_socket_readers_open_the_socket_of_a_daemon_this_cli_uses() {
+    for reader in ["tail", "watch"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvSandbox::enter(tmp.path());
+        let (addr, server) =
+            serve_until_idle(vec![health(1, THIS_CLI.version), no_upgrade()], IDLE);
+        let d = discovery_of_a_daemon_up_for(addr.port(), 0);
+        let mut world = Stub::new(false);
+
+        let failed = match reader {
+            "tail" => crate::commands::tail::run_with(&mut world, &cli(1, 1), 1).await,
+            _ => crate::commands::confirmations::watch_with(&mut world, &cli(1, 1)).await,
+        };
+
+        assert!(failed.is_err(), "{reader}: the stub refuses the upgrade");
+        let requests = server.join().expect("the stub finishes");
+        assert_eq!(requests.len(), 2, "{reader}: {requests:?}");
+        assert!(requests[0].starts_with("GET /v1/health "), "{requests:?}");
+        let token = urlencoding::encode(&d.auth.token).into_owned();
+        assert!(
+            requests[1].starts_with(&format!("GET /v1/events?token={token} ")),
+            "{reader}: {requests:?}"
+        );
+        assert!(world.notes.is_empty() && world.said.is_empty());
+    }
+}
+
+/// `status` over another build's live daemon and over one of another
+/// protocol prints the shared sentence where it printed health; over
+/// another build's file whose process is gone, not running, saying why.
+#[tokio::test]
+async fn status_reports_a_daemon_this_cli_cannot_use_with_the_sentence() {
+    use crate::commands::status::{Found, look_with};
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let sentence = another_builds_file(tmp.path());
+
+    match look_with(&mut Stub::new(true), &cli(1, 1)).await.unwrap() {
+        Found::Mismatch(said) => assert_eq!(said, sentence),
+        other => panic!("not refused: {other:?}"),
+    }
+    match look_with(&mut Stub::new(false), &cli(1, 1)).await.unwrap() {
+        Found::NotRunning(why) => assert_eq!(
+            why,
+            "Daemon is not running (the discovery file names pid 777, which is not a running \
+             openalpacad)"
+        ),
+        other => panic!("not reported as not running: {other:?}"),
+    }
+
+    let (addr, server) = serve_until_idle(vec![health(2, "0.2.0")], IDLE);
+    let d = discovery_of_a_daemon_up_for(addr.port(), 0);
+    match look_with(&mut Stub::new(true), &cli(1, 1)).await.unwrap() {
+        Found::Mismatch(said) => assert!(
+            said.starts_with(&format!(
+                "The daemon running (pid {}, version 0.2.0, protocol 2) is not one this CLI \
+                 can use",
+                d.pid
+            )),
+            "{said}"
+        ),
+        other => panic!("not refused: {other:?}"),
+    }
+    assert_eq!(server.join().unwrap().len(), 1, "health asked once");
+}
+
+/// T21's second case: `openalpaca status` against a daemon up for more
+/// than a day — its `discovery.json` rotated on the daemon's schedule —
+/// finds it running, where the file as the start wrote it was refused
+/// with "Discovery token has expired" after 24 h. Its health is asked
+/// twice: by the look (123-3), then for what `status` prints.
+#[tokio::test]
+async fn status_finds_a_daemon_up_for_more_than_a_day_running() {
+    use crate::commands::status::{Found, look_with};
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let health = r#"{"status":"ok","version":"0.1.0","pid":51823,"instance_id":"instance-t21"}"#;
+    let (addr, server) = serve_until_idle(vec![ok_json(health), ok_json(health)], IDLE);
+    let d = discovery_of_a_daemon_up_for(addr.port(), 25);
+    assert!(d.auth.issued_at > d.started_at, "the file was rotated");
+
+    match look_with(&mut Stub::new(false), &cli(1, 1))
+        .await
+        .expect("status looks")
+    {
+        Found::Running { health, info } => {
+            assert_eq!(health["status"], "ok");
+            assert_eq!(info.token, d.auth.token);
+        }
+        other => panic!("not running: {other:?}"),
+    }
+    assert_eq!(server.join().expect("health was answered").len(), 2);
+}
+
+/// The client's check is kept: a file whose `expires_at` has passed —
+/// what a daemon wrote before T21, a day after its start — is still
+/// refused, before the health `status` prints is asked.
+#[tokio::test]
+async fn status_still_refuses_an_expired_file() {
+    use crate::commands::status::{Found, look_with};
+    use openalpaca_app_support::discovery;
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let started = chrono::Utc::now() - chrono::TimeDelta::hours(25);
+    let d = discovery::make_discovery("127.0.0.1", 1, "instance-t21".into(), "0.1.0")
+        .with_rotated_auth(started);
+    discovery::write_discovery_atomic(&d).unwrap();
+
+    match look_with(&mut Stub::new(false), &cli(1, 1))
+        .await
+        .expect("status looks")
+    {
+        Found::Expired(reason) => assert_eq!(reason, "Discovery token has expired"),
+        other => panic!("not refused as expired: {other:?}"),
+    }
+}

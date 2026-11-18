@@ -2,11 +2,12 @@
 //!
 //! Connects to /v1/events WebSocket and prints events in real-time.
 
+use crate::reuse;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use futures_util::StreamExt;
-use openalpaca_app_support::discovery;
+use openalpaca_app_support::protocol::ClientBuild;
 use serde::Deserialize;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -184,12 +185,18 @@ fn artifact_parts(
 }
 
 pub async fn run(count: usize) -> Result<()> {
-    // Read discovery file
-    let disc = discovery::read_discovery()?.context("Daemon is not running (no discovery file)")?;
+    run_with(&mut reuse::RealWorld, &reuse::THIS_CLI, count).await
+}
 
-    discovery::ensure_not_expired(&disc)?;
-
-    let info = discovery::ConnectionInfo::from(&disc);
+/// [`run`] over `world`, judged as `cli`: the daemon is the one every other
+/// command uses, through the same check (123-3 (b)), so one of another
+/// protocol is refused before its events socket is opened.
+pub(crate) async fn run_with<W: reuse::World>(
+    world: &mut W,
+    cli: &ClientBuild,
+    count: usize,
+) -> Result<()> {
+    let info = reuse::connection_with(world, cli).await?;
 
     // Build WebSocket URL
     let ws_url = format!(

@@ -35,7 +35,6 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use colored::Colorize;
 use futures_util::StreamExt;
-use openalpaca_app_support::discovery;
 use openalpaca_core::utils::text::{Escaped, escape_hidden, escape_hidden_line, hidden_notice};
 use serde::{Deserialize, Serialize};
 use std::io::{IsTerminal, Write};
@@ -43,6 +42,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::client::DaemonClient;
 use crate::output::{OutputFormat, TableRow, json_with_hidden_escaped, table_header_lines};
+use crate::reuse;
 
 #[derive(Subcommand)]
 pub enum ConfirmationCommands {
@@ -508,10 +508,17 @@ fn watch_prompt_text(frame: &ConfirmationFrame, tty: bool) -> String {
 /// connector's turn — and this window is a responder for all of them. Ctrl+C
 /// leaves every unanswered prompt exactly as it was.
 async fn watch() -> Result<()> {
-    let disc = discovery::read_discovery()?
-        .ok_or_else(|| anyhow::anyhow!("Daemon is not running (no discovery file)"))?;
-    discovery::ensure_not_expired(&disc)?;
-    let info = discovery::ConnectionInfo::from(&disc);
+    watch_with(&mut reuse::RealWorld, &reuse::THIS_CLI).await
+}
+
+/// [`watch`] over `world`, judged as `cli`: its events socket is the daemon
+/// every answer it sends connects to, through the same check (123-3 (b)),
+/// so one of another protocol is refused before the socket is opened.
+pub(crate) async fn watch_with<W: reuse::World>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+) -> Result<()> {
+    let info = reuse::connection_with(world, cli).await?;
     let ws_url = format!(
         "{}/v1/events?token={}",
         info.base_url.replace("http", "ws"),
@@ -621,6 +628,7 @@ fn read_answer(input: &str, per_call: bool) -> (bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openalpaca_app_support::discovery;
 
     /// T21: `confirmations watch` waits for days; each answer reads
     /// `discovery.json` again, so it carries the token the daemon names now,

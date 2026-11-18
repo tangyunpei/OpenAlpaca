@@ -26,7 +26,7 @@
 
 use anyhow::{Result, bail};
 use openalpaca_app_support::daemon_lifecycle;
-use openalpaca_app_support::discovery::Discovery;
+use openalpaca_app_support::discovery::{self, Discovery};
 use openalpaca_app_support::paths;
 use openalpaca_app_support::protocol::{
     self, ClientBuild, Compat, DiscoveryRead, Health, Look, Mismatch, Reused, STARTING_BUDGET,
@@ -283,7 +283,7 @@ fn still_starting(pid: u32) -> String {
 /// file this build reads, its pid is not a live `openalpacad` and its
 /// address either does not answer as a daemon (silent, refused, another
 /// status) or answers as another instance than the file's.
-fn not_running(look: &Look) -> String {
+pub(crate) fn not_running(look: &Look) -> String {
     match &look.discovery {
         DiscoveryRead::Missing => "Daemon is not running (no discovery file)".to_owned(),
         DiscoveryRead::Unreadable => {
@@ -369,6 +369,50 @@ pub(crate) async fn ensure_with<W: World>(world: &mut W, cli: &ClientBuild) -> R
     }
 }
 
+/// The address and token of the daemon this CLI uses: [`ensure_with`], then
+/// the file's token judged as before (`discovery::ensure_not_expired`).
+/// What `DaemonClient::connect_with` connects through, and the two readers
+/// of the events socket — `openalpaca daemon tail` and `tasks confirmations
+/// watch` — which read `discovery.json` themselves before (123-3 (b)): a
+/// daemon of another protocol is refused with [`mismatch_sentence`] before
+/// any socket is opened.
+pub(crate) async fn connection_with<W: World>(
+    world: &mut W,
+    cli: &ClientBuild,
+) -> Result<discovery::ConnectionInfo> {
+    let disc = ensure_with(world, cli).await?;
+    discovery::ensure_not_expired(&disc)?;
+    Ok(discovery::ConnectionInfo::from(&disc))
+}
+
+/// What `openalpaca daemon start`'s first look decided ([`judge_before_start`]).
+pub(crate) enum BeforeStart<S> {
+    /// A live daemon this CLI cannot use: `start` was not called, and this is
+    /// the [`mismatch_sentence`] that says so.
+    Refused(String),
+    /// `start` ran; the process it spawned, `None` when it found one running.
+    Started(Option<S>),
+}
+
+/// `openalpaca daemon start`'s first look (123-8 (b)): a live daemon this
+/// CLI cannot use — another build's file, or a protocol it does not speak —
+/// is refused with [`mismatch_sentence`] before `start` runs, so its log is
+/// not rotated and no daemon is spawned beside it (one that would lose the
+/// store's lock): "Nothing was stopped or started" is then true. Any other
+/// verdict hands over to `start` (`manager::start_daemon`, which spawns only
+/// when no daemon is running), whose spawned process it returns.
+pub(crate) async fn judge_before_start<W: World, S>(
+    world: &mut W,
+    cli: &ClientBuild,
+    start: impl FnOnce() -> Result<Option<S>>,
+) -> Result<BeforeStart<S>> {
+    let look = world.look().await;
+    if let Verdict::Mismatch(m) = decide_reuse(&look, cli) {
+        return Ok(BeforeStart::Refused(mismatch_sentence(&m)));
+    }
+    start().map(BeforeStart::Started)
+}
+
 /// The process `openalpaca daemon start` spawned, as the wait after it
 /// reads it: a daemon that exits at boot (a pre-squash database refused,
 /// SQ-1, among the reasons) ends the wait at once with what it wrote to
@@ -433,9 +477,11 @@ pub(crate) enum StartWait {
 /// wait's start (a development start through `cargo run` builds first),
 /// unless the process this start spawned has exited, which ends it at
 /// once with what that process wrote to its log.
-/// It replaces a fixed two-second sleep, so the app started next finds the
-/// daemon serving and uses it (the owner's rule: one daemon). `spawned` is
-/// the process this start spawned, `None` when it found one running.
+/// Before the app it replaces a fixed two-second sleep, so the app started
+/// next finds the daemon serving and uses it (the owner's rule: one
+/// daemon); `daemon start --daemon-only` and `daemon restart` wait the same
+/// way and fail on what it reports (123-2 (b)). `spawned` is the process
+/// this start spawned, `None` when it found one running.
 pub(crate) async fn wait_after_start<W: World>(
     world: &mut W,
     cli: &ClientBuild,

@@ -40,17 +40,13 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         DaemonAction::Status => status::run().await,
         DaemonAction::Tail { count } => tail::run(count).await,
         DaemonAction::Start { daemon_only } => {
-            let mut spawned = manager::start_daemon()?;
-            if !daemon_only {
-                start_gui_after_the_daemon(
-                    &mut reuse::RealWorld,
-                    &reuse::THIS_CLI,
-                    spawned.as_mut().map(|s| s as &mut dyn reuse::Spawned),
-                    manager::start_gui,
-                )
-                .await?;
-            }
-            Ok(())
+            start_with(
+                &mut reuse::RealWorld,
+                &reuse::THIS_CLI,
+                manager::start_daemon,
+                (!daemon_only).then_some(manager::start_gui),
+            )
+            .await
         }
         DaemonAction::Stop => {
             // The daemon only: an open app window stays open, keeps its
@@ -71,8 +67,84 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             if !stop_and_wait(true)? {
                 std::process::exit(2);
             }
-            manager::start_daemon().map(drop)
+            restart_start_with(
+                &mut reuse::RealWorld,
+                &reuse::THIS_CLI,
+                manager::start_daemon,
+            )
+            .await
         }
+    }
+}
+
+/// `openalpaca daemon start` over `world`, judged as `cli`: the first look
+/// refuses a live daemon this CLI cannot use before `start` rotates a log
+/// or spawns anything (123-8 (b), [`reuse::judge_before_start`]). With the
+/// app, the refusal is said on stderr and the app is started all the same,
+/// as a wait that ends on such a daemon has it (Rev 123's first item, (a));
+/// with `--daemon-only` (`start_app` `None`) it is the command's error.
+/// Otherwise the app is started once the daemon serves
+/// ([`start_gui_after_the_daemon`]), or, with `--daemon-only`, the command
+/// waits for the daemon the same way and fails on what the wait reports
+/// (123-2 (b), [`wait_for_the_daemon`]). `start` is `manager::start_daemon`
+/// and `start_app` `manager::start_gui` but in a test.
+pub(crate) async fn start_with<W: reuse::World, S: reuse::Spawned>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+    start: impl FnOnce() -> Result<Option<S>>,
+    start_app: Option<impl FnOnce() -> Result<()>>,
+) -> Result<()> {
+    let mut spawned = match reuse::judge_before_start(world, cli, start).await? {
+        reuse::BeforeStart::Started(spawned) => spawned,
+        reuse::BeforeStart::Refused(sentence) => {
+            return match start_app {
+                Some(start_app) => {
+                    world.say(format!("⚠️  {sentence} Starting the app all the same."));
+                    start_app()
+                }
+                None => anyhow::bail!("{sentence}"),
+            };
+        }
+    };
+    let spawned = spawned.as_mut().map(|s| s as &mut dyn reuse::Spawned);
+    match start_app {
+        Some(start_app) => start_gui_after_the_daemon(world, cli, spawned, start_app).await,
+        None => wait_for_the_daemon(world, cli, spawned).await,
+    }
+}
+
+/// `openalpaca daemon restart`'s start, once the old daemon is gone: `start`
+/// (`manager::start_daemon` but in a test), then [`wait_for_the_daemon`] on
+/// the process it spawned (123-2 (b)), where the child was dropped and the
+/// command reported a daemon that died at boot as started.
+pub(crate) async fn restart_start_with<W: reuse::World, S: reuse::Spawned>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+    start: impl FnOnce() -> Result<Option<S>>,
+) -> Result<()> {
+    let mut spawned = start()?;
+    wait_for_the_daemon(
+        world,
+        cli,
+        spawned.as_mut().map(|s| s as &mut dyn reuse::Spawned),
+    )
+    .await
+}
+
+/// The wait after `daemon start --daemon-only` and `daemon restart` started
+/// a daemon (123-2 (b)): [`reuse::wait_after_start`], the wait before the
+/// app — up to `protocol::STARTING_BUDGET`, a spawned daemon's exit ending
+/// it at once with the lines it wrote to its log said on stderr — whose
+/// failure is the command's: its reason is the error, and the command exits
+/// non-zero, where a daemon that died at boot was reported started.
+pub(crate) async fn wait_for_the_daemon<W: reuse::World>(
+    world: &mut W,
+    cli: &openalpaca_app_support::protocol::ClientBuild,
+    spawned: Option<&mut dyn reuse::Spawned>,
+) -> Result<()> {
+    match reuse::wait_after_start(world, cli, spawned).await {
+        reuse::StartWait::Ready => Ok(()),
+        reuse::StartWait::NotReady(why) => anyhow::bail!("{why}"),
     }
 }
 

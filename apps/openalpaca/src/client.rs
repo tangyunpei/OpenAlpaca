@@ -9,7 +9,7 @@ use reqwest::Response;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::reuse;
-use openalpaca_app_support::{discovery, protocol};
+use openalpaca_app_support::protocol;
 
 /// Authenticated HTTP client for the daemon.
 pub struct DaemonClient {
@@ -36,9 +36,7 @@ impl DaemonClient {
         world: &mut W,
         cli: &protocol::ClientBuild,
     ) -> Result<Self> {
-        let disc = reuse::ensure_with(world, cli).await?;
-        discovery::ensure_not_expired(&disc)?;
-        let info = discovery::ConnectionInfo::from(&disc);
+        let info = reuse::connection_with(world, cli).await?;
 
         let mut headers = reqwest::header::HeaderMap::new();
         let auth_value = format!("Bearer {}", info.token);
