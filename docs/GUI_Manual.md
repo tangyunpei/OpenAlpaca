@@ -77,7 +77,8 @@ After installation:
 ## Where things live
 
 Everything the daemon owns is under one root, `~/.openalpaca/` on every
-platform (`OPENALPACA_HOME_STORE` overrides it; absolute paths only). The GUI
+platform (`OPENALPACA_HOME_STORE` overrides it; absolute paths only; without
+it a relative `HOME` is no home, and the store is refused). The GUI
 does not choose this layout — it asks the app-support crate for it
 (`crates/openalpaca_app_support/src/paths.rs`):
 

@@ -177,7 +177,11 @@ pub(super) async fn build_token_manager(
     cancel_token: &CancellationToken,
 ) -> Option<Arc<openalpaca_llm::TokenManager>> {
     if cred_config.claude_code.unwrap_or(true) || cred_config.codex.unwrap_or(true) {
-        let tm = Arc::new(openalpaca_llm::TokenManager::new(cred_config.clone()).await);
+        // The home discovery reads `.claude/` and `.codex/` under: the one
+        // lookup (`paths::user_home`), none for an unset, empty or relative
+        // home (121-1/121-2).
+        let home = openalpaca_app_support::paths::user_home();
+        let tm = Arc::new(openalpaca_llm::TokenManager::new(cred_config.clone(), home).await);
         if let (Some(router), Some(svc)) = (llm_router, llm_settings_service) {
             tm.rescan(svc, router).await;
         }

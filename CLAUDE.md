@@ -121,7 +121,7 @@ openalpaca_storage      ← openalpaca_app_support
 openalpaca_mcp          ← leaf (no internal deps)
 openalpaca_wake         ← openalpaca_api
 openalpaca_core         ← openalpaca_api, openalpaca_app_support, openalpaca_llm, openalpaca_mcp, openalpaca_storage
-openalpaca_connectors   ← openalpaca_api, openalpaca_core, openalpaca_storage (+ app_support, dev)
+openalpaca_connectors   ← api, app_support, core, storage
 openalpaca_plugins      ← openalpaca_api, openalpaca_app_support, openalpaca_connectors, openalpaca_core, openalpaca_llm, openalpaca_storage
 openalpacad             ← api, app_support, connectors, core, llm, mcp, plugins, storage, wake
 openalpaca (CLI)        ← openalpaca_app_support, openalpaca_core, openalpaca_llm, openalpaca_storage

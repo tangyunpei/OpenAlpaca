@@ -66,6 +66,64 @@ fn an_empty_home_is_no_home() {
     );
 }
 
+/// A relative home is no home (121-1, the owner's word of 2026-11-17: "use
+/// treat a non-absolute home as no home. This is a new refusal."): the
+/// store is never `<relative>/.openalpaca`, which the process's directory
+/// would resolve — the rule the override already keeps.
+#[test]
+fn a_relative_home_is_no_home() {
+    let err = resolve_home_root(None, Some(PathBuf::from("relative/home"))).unwrap_err();
+    assert!(
+        err.to_string().contains("home directory"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        resolve_home_root(None, Some(PathBuf::from("/Users/someone"))).unwrap(),
+        PathBuf::from("/Users/someone/.openalpaca")
+    );
+}
+
+/// `HOME` set to a relative path (which `std::env::home_dir` answers as
+/// given) leaves `home_root` without a home: refused, not resolved against
+/// the process's directory.
+#[test]
+fn home_root_refuses_a_relative_home() {
+    let _guard = HomeStoreGuard::for_user_home(Path::new("relative-home"), None);
+    let err = home_root().unwrap_err();
+    assert!(
+        err.to_string().contains("home directory"),
+        "unexpected error: {err}"
+    );
+}
+
+/// The one filter every home lookup goes through: an absolute home is
+/// kept, an empty, relative or missing one is none.
+#[test]
+fn only_an_absolute_home_is_usable() {
+    assert_eq!(
+        usable_home(Some(PathBuf::from("/Users/someone"))),
+        Some(PathBuf::from("/Users/someone"))
+    );
+    assert_eq!(usable_home(Some(PathBuf::new())), None);
+    assert_eq!(usable_home(Some(PathBuf::from("relative/home"))), None);
+    assert_eq!(usable_home(Some(PathBuf::from("~"))), None);
+    assert_eq!(usable_home(None), None);
+}
+
+/// `user_home` is `std::env::home_dir` through that filter: the moved
+/// `HOME` when it is absolute, none when `HOME` is relative.
+#[test]
+fn user_home_is_the_standard_librarys_home_when_absolute() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    {
+        let _guard = HomeStoreGuard::for_user_home(&home, None);
+        assert_eq!(user_home(), Some(home.clone()));
+    }
+    let _guard = HomeStoreGuard::for_user_home(Path::new("relative-home"), None);
+    assert_eq!(user_home(), None);
+}
+
 /// With no override the store is `.openalpaca` under the home
 /// `std::env::home_dir` reports — `HOME`, here a temp directory.
 #[test]

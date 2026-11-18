@@ -79,6 +79,7 @@
 //! own matches ZCode's detached spawn (`detached`, which on a Unix makes the
 //! child a session's leader).
 
+use openalpaca_app_support::paths;
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -339,12 +340,12 @@ pub(crate) struct DaemonPathReport {
 }
 
 /// [`FALLBACK_DIRS`] joined, then `<home>/.cargo/bin` when the home is known.
-/// An empty home is not known: the standard library answers a user-database
-/// entry whose home field is empty as `Some("")`, and `.cargo/bin` alone
-/// would be an entry relative to the daemon's directory.
+/// A home that is not usable (`paths::usable_home`: empty or relative) is
+/// not known: its `.cargo/bin` would be an entry relative to the daemon's
+/// directory.
 pub(crate) fn fallback_path(home: Option<&Path>) -> OsString {
     let mut path = OsString::from(FALLBACK_DIRS.join(":"));
-    if let Some(home) = home.filter(|home| !home.as_os_str().is_empty()) {
+    if let Some(home) = paths::usable_home(home.map(Path::to_path_buf)) {
         path.push(":");
         path.push(home.join(".cargo/bin"));
     }
@@ -637,7 +638,7 @@ fn log_capture(path: &DaemonPath) {
 static CAPTURE: OnceLock<Arc<Capture>> = OnceLock::new();
 
 /// Begin the app's one capture (`run`): the account's login shell, the home
-/// `std::env::home_dir` reports and the keys `daemon.toml` lists beside
+/// `paths::user_home` reports and the keys `daemon.toml` lists beside
 /// `PATH`, all looked up on the capture's thread, [`CAPTURE_DEADLINE`]. Unix
 /// only; elsewhere the daemon inherits the app's `PATH` and environment, as
 /// it did.
@@ -650,13 +651,13 @@ pub(crate) fn start() {
 
 /// The account the app's capture runs for, resolved on the capture's
 /// thread: the login shell the user database names, the home
-/// `std::env::home_dir` reports, and the keys the store's `daemon.toml`
-/// lists beside `PATH`.
+/// `paths::user_home` reports (`std::env::home_dir`'s, when absolute), and
+/// the keys the store's `daemon.toml` lists beside `PATH`.
 #[cfg(unix)]
 pub(crate) fn this_account() -> Account {
     Account {
         shell: account_login_shell(),
-        home: std::env::home_dir(),
+        home: paths::user_home(),
         keys: configured_passthrough_keys(),
     }
 }

@@ -1747,11 +1747,20 @@ fn resolve_cli_path(
     }
 }
 
-/// Check if a credential file exists for the given provider.
+/// Check if a credential file exists for the given provider, under the
+/// user's home (`paths::user_home`).
 fn check_credential_file(provider: &str) -> bool {
-    let home = match std::env::var("HOME") {
-        Ok(h) => std::path::PathBuf::from(h),
-        Err(_) => return false,
+    credential_file_present(
+        openalpaca_app_support::paths::user_home().as_deref(),
+        provider,
+    )
+}
+
+/// Whether `provider`'s credential file is under `home`; with no usable
+/// home (unset, empty or relative) none is looked for.
+fn credential_file_present(home: Option<&Path>, provider: &str) -> bool {
+    let Some(home) = home else {
+        return false;
     };
     let cred_path = match provider {
         "claude_code" => home.join(".claude").join(".credentials.json"),

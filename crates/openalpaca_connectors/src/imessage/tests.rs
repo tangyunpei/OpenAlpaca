@@ -560,3 +560,45 @@ fn test_confirmation_intercept_broker_roundtrip() {
     assert!(reply.contains("Denied"));
     assert!(!rx.try_recv().unwrap().approved);
 }
+
+// ============================================================================
+// The user's home (121-1, 121-2)
+// ============================================================================
+
+/// chat.db is under the home `paths::user_home` reports; with no usable
+/// home there is no path, never one under a guessed `/Users`.
+#[test]
+fn chat_db_is_under_the_users_home_or_nowhere() {
+    use super::connector::chat_db_path;
+    use std::path::{Path, PathBuf};
+    assert_eq!(
+        chat_db_path(Some(Path::new("/Users/someone"))),
+        Some(PathBuf::from("/Users/someone/Library/Messages/chat.db"))
+    );
+    assert_eq!(chat_db_path(None), None);
+    let relative = openalpaca_app_support::paths::usable_home(Some("relative-home".into()));
+    assert_eq!(chat_db_path(relative.as_deref()), None);
+}
+
+/// An attachment's `~` expands to the user's home; with no usable home a
+/// path that needs one is none (the attachment skipped), and a path with no
+/// `~` is kept as chat.db stores it.
+#[test]
+fn an_attachments_tilde_needs_a_usable_home() {
+    use super::reader::resolve_attachment_path;
+    use std::path::Path;
+    let home = Path::new("/Users/someone");
+    assert_eq!(
+        resolve_attachment_path("~/Library/Messages/Attachments/a.png", Some(home)),
+        Some("/Users/someone/Library/Messages/Attachments/a.png".to_string())
+    );
+    assert_eq!(
+        resolve_attachment_path("~/Library/Messages/Attachments/a.png", None),
+        None
+    );
+    assert_eq!(
+        resolve_attachment_path("/var/tmp/b.png", None),
+        Some("/var/tmp/b.png".to_string())
+    );
+    assert_eq!(resolve_attachment_path("", None), Some(String::new()));
+}

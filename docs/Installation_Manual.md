@@ -826,7 +826,7 @@ local model that costs nothing.
 
 | Variable | Effect |
 |---|---|
-| `OPENALPACA_HOME_STORE=/abs/path` | Moves the whole runtime root (default `~/.openalpaca`). Must be an absolute path — an empty or relative value is rejected and the daemon refuses to start. |
+| `OPENALPACA_HOME_STORE=/abs/path` | Moves the whole runtime root (default `~/.openalpaca`). Must be an absolute path — an empty or relative value is rejected and the daemon refuses to start. Without it the default needs an absolute home: a relative `HOME` is no home, and the daemon refuses to start ("Failed to determine the home directory"). |
 | `OPENALPACA_CONFIG_DIR=/abs/path` | The config directory `openalpacad` reads when you run it directly. A path that does not exist is ignored with a warning. `openalpaca daemon start` and the desktop app always set it to `<root>/config` for the daemon they start. `openalpaca config` edits the `llm.toml` and `daemon.toml` in this directory when it is set. |
 | `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad` | The daemon binary `openalpaca daemon start` launches. Without it the CLI looks next to itself, then in `../libexec`, then on `PATH`. |
 | `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app` | The app bundle `openalpaca gui start` opens. Without it the CLI looks in `~/Applications`, then `/Applications`. |

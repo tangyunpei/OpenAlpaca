@@ -63,7 +63,14 @@ Install package (target machine):
 
 Runtime paths after installer-based startup. Everything lives under one root,
 `~/.openalpaca` (`OPENALPACA_HOME_STORE` overrides it; absolute paths only, an
-empty or relative value is rejected and the daemon refuses to start). The
+empty or relative value is rejected and the daemon refuses to start). Without
+the override `~` is your home as the system reports it (`HOME`, else your
+account's entry), and only an absolute home counts: a relative `HOME` (or an
+empty home field) is no home, so the daemon refuses to start with "Failed to
+determine the home directory" rather than make a store relative to its working
+directory, and nothing else is looked for under it — the credential files
+discovery reads, iMessage's `chat.db`, the CLI's `~/Applications` app, the
+app's `~/.cargo/bin` fallback entry. The
 organising rule is that `state/` is the machine's and everything else at the
 root is the human's:
 - config base dir: `~/.openalpaca/config`

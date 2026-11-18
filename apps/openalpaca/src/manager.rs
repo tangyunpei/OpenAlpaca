@@ -365,7 +365,7 @@ fn resolve_gui_launch(current_exe: &Path) -> Result<GuiLaunch> {
     resolve_gui_launch_from_inputs(
         current_exe,
         env_path(GUI_APP_ENV),
-        home_dir(),
+        paths::user_home(),
         Path::new("/Applications/openalpaca-gui.app"),
     )
 }
@@ -444,12 +444,6 @@ fn find_workspace_root(current_exe: &Path, required_relative_path: &str) -> Opti
         }
     }
     None
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
 }
 
 fn find_in_path(binary_name: &str) -> Option<PathBuf> {
@@ -761,6 +755,25 @@ mod tests {
         let launch =
             resolve_gui_launch_from_inputs(&current_exe, None, Some(home_dir), &system_app)
                 .expect("system app");
+        assert_eq!(launch, GuiLaunch::AppBundle(system_app));
+    }
+
+    /// With no usable home (`paths::user_home`: none for an unset, empty or
+    /// relative one, 121-1/121-2) no `Applications/openalpaca-gui.app` is
+    /// looked for under one: the system bundle is next, never a relative
+    /// path the process's directory resolves.
+    #[test]
+    fn gui_resolution_without_a_home_goes_to_the_system_app() {
+        let root = tempfile::TempDir::new().unwrap();
+        let current_exe = root.path().join("bin/openalpaca");
+        touch_executable(&current_exe);
+        let system_app = root.path().join("system/openalpaca-gui.app");
+        fs::create_dir_all(&system_app).expect("system app");
+
+        let home = paths::usable_home(Some(PathBuf::from("relative-home")));
+        assert_eq!(home, None);
+        let launch = resolve_gui_launch_from_inputs(&current_exe, None, home, &system_app)
+            .expect("system app");
         assert_eq!(launch, GuiLaunch::AppBundle(system_app));
     }
 

@@ -39,9 +39,25 @@ const INSTALL_ID_KEY: &str = "install_id";
 // Roots
 // ============================================================================
 
+/// The user's home, as `std::env::home_dir` reports it (on Unix `HOME`
+/// unless empty, else the user database's entry), when it is usable
+/// ([`usable_home`]): every home lookup of the workspace goes through this
+/// or through [`usable_home`], so none reads `HOME` by hand.
+pub fn user_home() -> Option<PathBuf> {
+    usable_home(std::env::home_dir())
+}
+
+/// A home is usable only when it is absolute: an empty or relative one is
+/// no home (121-1). The standard library answers a user-database entry
+/// whose home field is empty as `Some("")`, and a hand-set `HOME` as given,
+/// so either would make a path under it — the store, a `PATH` entry, a
+/// file looked for — one the process's directory resolves.
+pub fn usable_home(home: Option<PathBuf>) -> Option<PathBuf> {
+    home.filter(|home| home.is_absolute())
+}
+
 /// The home root: `$OPENALPACA_HOME_STORE` if set, else `<home>/.openalpaca`,
-/// `<home>` the user's home as `std::env::home_dir` reports it (on Unix `HOME`
-/// unless empty, else the user database's entry).
+/// `<home>` the user's home as [`user_home`] reports it.
 ///
 /// Read on every call — never cached — so a test (or a wrapper script) can point
 /// the whole process at another root by setting the variable. Relative values are
@@ -54,9 +70,9 @@ pub fn home_root() -> Result<PathBuf> {
 }
 
 /// Pure resolution behind [`home_root`], so the rules are testable without
-/// mutating the process environment. An empty home is no home: the standard
-/// library answers a user-database entry whose home field is empty as
-/// `Some("")`, which would make the store the relative `.openalpaca`.
+/// mutating the process environment. A home that is not usable
+/// ([`usable_home`]: empty or relative) is no home, and the store is
+/// refused rather than made relative.
 pub fn resolve_home_root(
     override_value: Option<PathBuf>,
     home: Option<PathBuf>,
@@ -70,9 +86,7 @@ pub fn resolve_home_root(
         }
         return Ok(path);
     }
-    let home = home
-        .filter(|home| !home.as_os_str().is_empty())
-        .context("Failed to determine the home directory")?;
+    let home = usable_home(home).context("Failed to determine the home directory")?;
     Ok(home.join(STORE_DIR_NAME))
 }
 

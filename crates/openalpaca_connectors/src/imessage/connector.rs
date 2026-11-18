@@ -23,6 +23,7 @@ use openalpaca_core::{
 };
 use openalpaca_storage::{Database, IdentityRepository};
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -30,6 +31,14 @@ use tracing::{debug, error, info, warn};
 use super::reader::ChatDbReader;
 use super::routing::{normalize_handle, IMessageConfig};
 use super::sender::IMessageSender;
+
+/// `chat.db` under `home` (`~/Library/Messages/chat.db`), `home` the user's
+/// as `openalpaca_app_support::paths::user_home` reports it: none when there
+/// is no usable home (unset, empty or relative, 121-1/121-2), never a guess
+/// such as `/Users`.
+pub(super) fn chat_db_path(home: Option<&Path>) -> Option<PathBuf> {
+    home.map(|home| home.join("Library").join("Messages").join("chat.db"))
+}
 
 /// IMessageConnector manages the iMessage integration lifecycle.
 ///
@@ -45,7 +54,9 @@ pub struct IMessageConnector {
     pub(super) gateway: Arc<Gateway>,
     pub(super) daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: CancellationToken,
-    chat_db_path: String,
+    /// `~/Library/Messages/chat.db` under the user's home, or none when the
+    /// home is not usable ([`chat_db_path`]).
+    chat_db_path: Option<PathBuf>,
     pub(super) local_user_id: Option<String>,
     pub(super) confirmation_broker: Option<Arc<ConfirmationBroker>>,
     /// Maps chat identifier -> queue of request_ids for pending tool
@@ -69,8 +80,7 @@ impl IMessageConnector {
         cancel_token: CancellationToken,
         local_user_id: Option<String>,
     ) -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
-        let chat_db_path = format!("{}/Library/Messages/chat.db", home);
+        let chat_db_path = chat_db_path(openalpaca_app_support::paths::user_home().as_deref());
         Self {
             db,
             bus,
@@ -104,8 +114,15 @@ impl IMessageConnector {
             self.spawn_confirmation_listener();
         }
 
-        let mut reader =
-            ChatDbReader::new(&self.chat_db_path).map_err(ConnectorError::InitFailed)?;
+        let chat_db_path = self.chat_db_path.as_deref().ok_or_else(|| {
+            ConnectorError::InitFailed(
+                "Failed to determine the home directory, so chat.db's place \
+                 (~/Library/Messages/chat.db) is unknown"
+                    .to_string(),
+            )
+        })?;
+        let mut reader = ChatDbReader::new(&chat_db_path.to_string_lossy())
+            .map_err(ConnectorError::InitFailed)?;
 
         // Restore persisted watermark, or initialize to current max ROWID
         let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);

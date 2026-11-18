@@ -115,6 +115,21 @@ async fn test_discover_all_default_config() {
     assert_eq!(found[1].token.access_token, "codex-token");
 }
 
+/// 121-2: with no usable home (the daemon's `paths::user_home` gives none
+/// for an unset-and-unknown, empty or relative one) discovery looks for no
+/// credential file, even with both sources on, and no keychain here.
+#[tokio::test]
+async fn with_no_home_discovery_finds_nothing() {
+    let host = DiscoveryHost {
+        home: None,
+        keychain: false,
+    };
+    let config = CredentialDiscoveryConfig::default();
+    assert!(discover_all_on(&config, &host).await.is_empty());
+    assert!(discover_claude_code_on(&host).await.is_none());
+    assert!(discover_codex_on(&host).await.is_none());
+}
+
 #[tokio::test]
 async fn test_discover_all_disabled() {
     let config = CredentialDiscoveryConfig {
@@ -123,7 +138,7 @@ async fn test_discover_all_disabled() {
         refresh_interval_secs: None,
         fetch_external_usage: None,
     };
-    let results = discover_all(&config).await;
+    let results = discover_all(&config, None).await;
     assert!(results.is_empty());
 }
 
@@ -181,4 +196,15 @@ fn test_discover_claude_code_malformed_json() {
     let malformed = b"{ not valid json }";
     let result = serde_json::from_slice::<OAuthToken>(malformed);
     assert!(result.is_err());
+}
+
+/// The machine's host, now given its home by the caller (121-2: the daemon
+/// passes `openalpaca_app_support::paths::user_home`), still refuses to be
+/// built in this crate's unit tests, whatever home it is handed: no test
+/// reaches the developer's credential files or keychain item.
+#[test]
+#[should_panic(expected = "credential discovery reached the host in a test")]
+fn the_machines_host_still_panics_in_a_unit_test() {
+    let home = tempfile::tempdir().unwrap();
+    let _ = DiscoveryHost::system(Some(home.path().to_path_buf()));
 }

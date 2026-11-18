@@ -285,7 +285,7 @@ A **user** row's text is the message's `content`, never `display_text`. For a tu
 
 - `~/.openalpaca/state/discovery.json` — daemon base URL, bearer token, instance id. Read by the Rust shell only.
 - `~/.openalpaca/config/` — created by the shell and passed to a daemon it spawns as `OPENALPACA_CONFIG_DIR`.
-- `OPENALPACA_HOME_STORE` (absolute path) moves the whole root, for the shell and the daemon alike.
+- `OPENALPACA_HOME_STORE` (absolute path) moves the whole root, for the shell and the daemon alike. Without it the root is `~/.openalpaca`, and a relative `HOME` is no home: the store is refused ("Failed to determine the home directory").
 - Dev server: port 1420, strict (`tauri.conf.json` `devUrl` points at it); `src-tauri/` is excluded from the watcher.
 - Per-machine `localStorage` keys:
   - `oa-pane-widths` — the resizable column widths.

@@ -5,7 +5,22 @@
 //! which messages have already been seen.
 
 use rusqlite::{Connection, OpenFlags, params};
+use std::path::Path;
 use tracing::warn;
+
+/// An attachment's path as chat.db stores it, its `~` (the first one, as
+/// before) expanded to `home`, the user's home as
+/// `openalpaca_app_support::paths::user_home` reports it. With no usable
+/// home (unset, empty or relative, 121-1/121-2) a path that needs one is
+/// none — never expanded to a guess such as `/Users` — and the attachment
+/// is skipped like one not on disk.
+pub(super) fn resolve_attachment_path(raw_path: &str, home: Option<&Path>) -> Option<String> {
+    if !raw_path.contains('~') {
+        return Some(raw_path.to_string());
+    }
+    let home = home?;
+    Some(raw_path.replacen('~', &home.to_string_lossy(), 1))
+}
 
 /// An attachment associated with an iMessage.
 #[derive(Debug, Clone)]
@@ -196,7 +211,7 @@ impl ChatDbReader {
 
     /// Fetch attachments for a specific message ROWID from chat.db.
     fn get_attachments_for_message(&self, message_rowid: i64) -> Vec<IMessageAttachment> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
+        let home = openalpaca_app_support::paths::user_home();
         let mut stmt = match self.conn.prepare(
             "SELECT a.filename, a.mime_type, a.transfer_name, a.total_bytes
              FROM attachment a
@@ -228,10 +243,12 @@ impl ChatDbReader {
         for (filename, mime_type, transfer_name, total_bytes) in rows.flatten() {
             // Resolve ~ to $HOME in the filename path
             let raw_path = filename.unwrap_or_default();
-            let resolved = raw_path.replacen('~', &home, 1);
+            let Some(resolved) = resolve_attachment_path(&raw_path, home.as_deref()) else {
+                continue;
+            };
 
             // Skip files that don't exist on disk
-            if resolved.is_empty() || !std::path::Path::new(&resolved).exists() {
+            if resolved.is_empty() || !Path::new(&resolved).exists() {
                 continue;
             }
 

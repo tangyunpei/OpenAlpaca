@@ -2329,6 +2329,23 @@ fn an_empty_home_adds_nothing_to_the_fallback_list() {
     assert_eq!(fallback_path(Some(Path::new(""))), fallback_path(None));
 }
 
+/// A relative home is no home either (121-1, the owner's word of
+/// 2026-11-17): its `.cargo/bin` would be an entry the daemon's directory
+/// resolves, so the fallback list ends without it.
+#[test]
+fn a_relative_home_adds_nothing_to_the_fallback_list() {
+    assert_eq!(
+        fallback_path(Some(Path::new("relative-home"))),
+        fallback_path(None)
+    );
+    let list = fallback_path(Some(Path::new("/Users/someone")));
+    assert!(
+        list.to_string_lossy()
+            .ends_with(":/Users/someone/.cargo/bin"),
+        "an absolute home keeps its entry: {list:?}"
+    );
+}
+
 /// A capture of `shell`'s `PATH`, the fallback list's home `home`: the
 /// account as the capture's thread would resolve it, given, with no key
 /// listed beside `PATH`.

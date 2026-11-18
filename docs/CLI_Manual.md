@@ -48,7 +48,7 @@ Defaults:
 - binaries: `~/.local/openalpaca`
 - GUI app: `~/Applications/openalpaca-gui.app`
 - PATH link: `~/.local/bin/openalpaca`
-- runtime config/data: `~/.openalpaca/` (`OPENALPACA_HOME_STORE` overrides — absolute paths only)
+- runtime config/data: `~/.openalpaca/` (`OPENALPACA_HOME_STORE` overrides — absolute paths only; without it a relative `HOME` is no home, and the store is refused: "Failed to determine the home directory")
 
 Linux and Windows packaging/install scripts also exist under `scripts/release/` (`package-linux.sh`, `package-windows.ps1`, `install-windows.ps1`, `uninstall.sh`, `uninstall-windows.ps1`).
 

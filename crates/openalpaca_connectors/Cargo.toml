@@ -17,8 +17,6 @@ tracing-subscriber.workspace = true
 # test-home-guard: store::projects::register refuses an unguarded home store in
 # this crate's test builds (storage design, Stage 1).
 openalpaca_storage = { workspace = true, features = ["test-home-guard"] }
-# The home store's paths its tests and the Telegram example name (Q05).
-openalpaca_app_support.workspace = true
 # A loopback stub of the Bot API for teloxide (A-09 (2)): crates the
 # workspace already locks.
 axum.workspace = true
@@ -60,6 +58,10 @@ tokio-util.workspace = true
 
 # Internal crates
 openalpaca_api.workspace = true
+# The user's home (`paths::user_home`, iMessage's chat.db and attachments,
+# 121-2) and the home store's paths its tests and the Telegram example name
+# (Q05).
+openalpaca_app_support.workspace = true
 openalpaca_core.workspace = true
 openalpaca_storage.workspace = true
 
