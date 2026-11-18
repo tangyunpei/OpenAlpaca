@@ -108,7 +108,7 @@ mod eval;
 use eval::{
     Category, ChangePair, ContinuityKind, ContinuitySet, Corpus, CorpusSession, CorpusTurn,
     GoldNote, Language, Question, TurnMode, change_pairs, eval_dir, is_uuid, load_json,
-    parse_instant, read_bytes, relied_on, repo_root,
+    parse_instant, read_bytes, real_store_refusal, relied_on, repo_root,
 };
 
 // ─── Seeding through the service ────────────────────────────────────────────
@@ -1161,62 +1161,6 @@ fn env_number(name: &str) -> Option<usize> {
             .parse::<usize>()
             .unwrap_or_else(|_| panic!("memory_eval: {name}={v} is not a number"))
     })
-}
-
-/// Why the live run may not use `home_store`, or `None` (EVAL-HOME,
-/// pending-decisions *Rev 127* item 2, (b), taken *Rev 128*). `home` is the
-/// user's home as `openalpaca_app_support::paths::user_home` reports it —
-/// the one lookup the store itself resolves by, absolute or none. A store
-/// that is `<home>/.openalpaca`, as written or resolved, is the real one;
-/// with no usable home the real store cannot be told apart, so the run is
-/// refused rather than let through.
-fn real_store_refusal(home_store: &Path, home: Option<PathBuf>) -> Option<String> {
-    let Some(home) = home else {
-        return Some(
-            "no usable home (an absolute home directory) to tell the real store \
-             from OPENALPACA_HOME_STORE; refusing the run"
-                .to_string(),
-        );
-    };
-    let real = home.join(".openalpaca");
-    let same = home_store == real
-        || matches!(
-            (home_store.canonicalize(), real.canonicalize()),
-            (Ok(a), Ok(b)) if a == b
-        );
-    same.then(|| {
-        format!(
-            "OPENALPACA_HOME_STORE points at the real store {}; use a scratch directory",
-            real.display()
-        )
-    })
-}
-
-/// EVAL-HOME: no usable home refuses the run; the real store, as written or
-/// through a symlink, is refused; a scratch store passes. Pure, no model —
-/// but it lives in the eval's binary, so it is compile-checked and runs only
-/// when the owner runs this file.
-#[test]
-fn the_store_guard_refuses_a_missing_home_and_the_real_store() {
-    let scratch = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    let real = home.path().join(".openalpaca");
-    std::fs::create_dir(&real).unwrap();
-    let store = scratch.path().join("store");
-    std::fs::create_dir(&store).unwrap();
-
-    assert!(real_store_refusal(&store, None).is_some());
-    assert!(real_store_refusal(&real, Some(home.path().to_path_buf())).is_some());
-    #[cfg(unix)]
-    {
-        let link = scratch.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        assert!(real_store_refusal(&link, Some(home.path().to_path_buf())).is_some());
-    }
-    assert_eq!(
-        real_store_refusal(&store, Some(home.path().to_path_buf())),
-        None
-    );
 }
 
 fn env_absolute(name: &str) -> Option<PathBuf> {
