@@ -15,7 +15,8 @@ use reqwest::header::HeaderMap;
 /// 2026-11-14).
 const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 /// Where the Messages and Models APIs live; [`AnthropicProvider::with_api_base`]
-/// points a test at a loopback server instead.
+/// points a test at a loopback server instead, and a test build refuses
+/// this host (`AnthropicProvider::refuse_real_endpoint`).
 const API_BASE: &str = "https://api.anthropic.com/v1";
 /// Ids asked for per page of the Models API's list: the most it allows
 /// (1 to 1000, default 20 — its reference page, read 2026-11-12).
@@ -115,6 +116,28 @@ impl AnthropicProvider {
         format!("{}/messages", self.api_base)
     }
 
+    /// A test build of this crate never sends to Anthropic's real endpoint
+    /// (ANTHROPIC-GUARD, pending-decisions *Rev 107* (b), taken *Rev 125*):
+    /// a provider left on [`API_BASE`]'s host refuses each call before any
+    /// lookup, so no test's key leaves the process. A test points the
+    /// provider at its own server with [`Self::with_api_base`]. Compiled
+    /// into this crate's tests only: a release build has no such check.
+    #[cfg(test)]
+    fn refuse_real_endpoint(&self) -> Result<(), LlmError> {
+        let host = |base: &str| {
+            reqwest::Url::parse(base)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+        };
+        match host(&self.api_base) {
+            Some(real) if host(API_BASE).as_ref() == Some(&real) => Err(LlmError::Config(format!(
+                "a test build of openalpaca_llm refuses Anthropic's real endpoint \
+                 ({real}): point the provider at a loopback server with with_api_base"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
     /// Give one non-streaming call this much wall clock, and no more.
     ///
     /// Streaming deliberately does not carry it — see
@@ -176,6 +199,8 @@ impl LlmProvider for AnthropicProvider {
     /// a failed first page answers as before. A `last_id` that is missing or
     /// repeats the cursor just sent ends it too.
     async fn list_models_with_key(&self, key: &str) -> Result<Vec<String>, LlmError> {
+        #[cfg(test)]
+        self.refuse_real_endpoint()?;
         let mut models: Vec<String> = Vec::new();
         let mut after_id: Option<String> = None;
         loop {
@@ -247,6 +272,8 @@ impl LlmProvider for AnthropicProvider {
         key: &str,
         request: ChatRequest,
     ) -> Result<ChatResponse, LlmError> {
+        #[cfg(test)]
+        self.refuse_real_endpoint()?;
         let body = request::build_request_body(&self.model, self.max_tokens, &request);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
 
@@ -326,6 +353,8 @@ impl LlmProvider for AnthropicProvider {
         key: &str,
         request: ChatRequest,
     ) -> Result<ChatStream, LlmError> {
+        #[cfg(test)]
+        self.refuse_real_endpoint()?;
         let mut body = request::build_request_body(&self.model, self.max_tokens, &request);
         body["stream"] = serde_json::json!(true);
         let model_id = request.model.as_deref().unwrap_or(&self.model);

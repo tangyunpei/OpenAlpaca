@@ -523,9 +523,11 @@ async fn a_stream_cut_mid_answer_says_why() {
 
 // ── the other providers' send sites ─────────────────────────────────────────
 
-/// Anthropic's three calls go to its one fixed URL; the test's resolver sends
-/// that name to a refused loopback port, to nowhere, or to a lookup that never
-/// completes, so each call fails in-process before any TLS.
+/// Anthropic's three calls go to the provider's one base; the test's resolver
+/// sends its name to a refused loopback port, to nowhere, or to a lookup that
+/// never completes, so each call fails in-process before any TLS. The base is
+/// a reserved name, not Anthropic's: a test build refuses Anthropic's real
+/// endpoint before any lookup (ANTHROPIC-GUARD, the test below).
 #[cfg(all(feature = "anthropic", any(target_os = "macos", target_os = "linux")))]
 #[tokio::test]
 async fn anthropics_calls_say_what_failed() {
@@ -538,6 +540,7 @@ async fn anthropics_calls_say_what_failed() {
             None,
             None,
         )
+        .with_api_base(format!("https://{UNRESOLVABLE_HOST}/v1"))
         .with_request_timeout(deadline)
     };
 
@@ -551,7 +554,8 @@ async fn anthropics_calls_say_what_failed() {
     assert_eq!(
         err.to_string(),
         format!(
-            "HTTP error: error sending request for url (https://api.anthropic.com/v1/messages): \
+            "HTTP error: error sending request for url \
+             (https://{UNRESOLVABLE_HOST}/v1/messages): \
              client error (Connect): tcp connect error: {}",
             connection_refused()
         )
@@ -569,8 +573,12 @@ async fn anthropics_calls_say_what_failed() {
     assert_eq!(kind(&err), Some(TransportKind::Dns));
     assert_eq!(
         err.to_string(),
-        "HTTP error: error sending request for url (https://api.anthropic.com/v1/messages): \
-         client error (Connect): dns error: error resolving DNS: no such name (test resolver)"
+        format!(
+            "HTTP error: error sending request for url \
+             (https://{UNRESOLVABLE_HOST}/v1/messages): \
+             client error (Connect): dns error: error resolving DNS: \
+             no such name (test resolver)"
+        )
     );
 
     let hanging = Resolver::never();
@@ -582,9 +590,80 @@ async fn anthropics_calls_say_what_failed() {
     assert_eq!(kind(&err), Some(TransportKind::ConnectTimeout));
     assert_eq!(
         err.to_string(),
-        "HTTP error: error sending request for url \
-         (https://api.anthropic.com/v1/models?limit=1000): \
-         client error (Connect): operation timed out"
+        format!(
+            "HTTP error: error sending request for url \
+             (https://{UNRESOLVABLE_HOST}/v1/models?limit=1000): \
+             client error (Connect): operation timed out"
+        )
+    );
+}
+
+/// ANTHROPIC-GUARD (pending-decisions *Rev 107*, (b), taken *Rev 125*): a
+/// test build of this crate refuses Anthropic's real endpoint. The provider
+/// left on its own base refuses each of its three calls with a configuration
+/// error naming the host — before any lookup, so no connection is tried and
+/// no key leaves the process — while a loopback base still answers. Red on
+/// the parent, whose calls look the name up (here, through the test's
+/// resolver, to a refused loopback port; nothing leaves the machine).
+#[cfg(all(feature = "anthropic", any(target_os = "macos", target_os = "linux")))]
+#[tokio::test]
+async fn a_test_build_refuses_anthropics_real_endpoint() {
+    use super::anthropic::AnthropicProvider;
+    use crate::test_support::refused_addr;
+    let resolver = Resolver::to(refused_addr());
+    let real = AnthropicProvider::with_client(
+        client_resolving_with(&resolver, CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+        "sk-ant-test-not-a-key".to_string(),
+        None,
+        None,
+    );
+
+    let chat = real.chat(request()).await.unwrap_err();
+    let stream = match real
+        .chat_streaming_with_key("sk-ant-test-not-a-key", request())
+        .await
+    {
+        Ok(_) => panic!("a stream opened on Anthropic's real endpoint"),
+        Err(e) => e,
+    };
+    let list = real
+        .list_models_with_key("sk-ant-test-not-a-key")
+        .await
+        .unwrap_err();
+    for err in [chat, stream, list] {
+        assert!(
+            matches!(&err, LlmError::Config(m) if m.contains("api.anthropic.com")),
+            "{err}"
+        );
+        assert!(!err.is_transient(), "{err}");
+        assert!(!err.is_auth_error(), "{err}");
+    }
+    assert_eq!(resolver.lookups(), 0, "no connection was tried");
+
+    // A loopback base answers.
+    let server = MockHttpServer::start(|_| {
+        MockResponse::json(
+            serde_json::json!({
+                "data": [{"id": "claude-opus-5-5"}],
+                "has_more": false,
+                "last_id": "claude-opus-5-5"
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let mock = AnthropicProvider::with_client(
+        loopback_client(REQUEST_TIMEOUT),
+        "sk-ant-test-not-a-key".to_string(),
+        None,
+        None,
+    )
+    .with_api_base(format!("{}/v1", server.base_url));
+    assert_eq!(
+        mock.list_models_with_key("sk-ant-test-not-a-key")
+            .await
+            .expect("a loopback base answers"),
+        vec!["claude-opus-5-5".to_string()]
     );
 }
 
