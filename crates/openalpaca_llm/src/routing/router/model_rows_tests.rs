@@ -1955,6 +1955,47 @@ async fn a_deregistered_provider_s_retired_ids_are_not_said_again() {
     assert!(router.warn_retired_listed().is_empty());
 }
 
+/// A provider taken out while its list is being read — the disable lands
+/// during the pass's wait on the server — keeps nothing either: the pass
+/// that comes back after `deregister_provider` does not put its record
+/// back, so a hot reload says no retired id of a provider that is switched
+/// off. The listing is held open until the deregistration is done (the
+/// handler says when the request arrived; the answer comes a second
+/// later). Red on the parent, whose pass inserted after its wait
+/// unconditionally.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_provider_deregistered_during_its_pass_keeps_no_retired_ids() {
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let signal = Arc::clone(&arrived);
+    let server = MockHttpServer::start(move |req| match req.path.as_str() {
+        "/v1/models" => {
+            signal.notify_one();
+            MockResponse::json(
+                serde_json::json!({
+                    "object": "list",
+                    "data": [{"id": "gpt-4o-mini", "object": "model", "owned_by": "local"}],
+                })
+                .to_string(),
+            )
+            .after(Duration::from_secs(1))
+        }
+        _ => MockResponse::not_found(),
+    })
+    .await;
+    let router = openai_router(&server.base_url, &[]);
+    let (status, ()) = tokio::join!(router.refresh_models_for(&ProviderType::OpenAI), async {
+        arrived.notified().await;
+        router.deregister_provider(&ProviderType::OpenAI);
+    });
+    assert!(status.error.is_none(), "the list was read: {status:?}");
+    assert!(!router.has_provider(&ProviderType::OpenAI));
+    assert!(
+        router.warn_retired_listed().is_empty(),
+        "a provider switched off is not said"
+    );
+}
+
 /// A listing with no retired id says nothing, at a pass or on a reload.
 /// Green on the parent: a guard.
 #[tokio::test]

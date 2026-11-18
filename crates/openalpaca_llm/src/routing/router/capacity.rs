@@ -143,6 +143,15 @@ impl LlmRouter {
                     provider_type.clone(),
                     retired.into_iter().map(str::to_string).collect(),
                 );
+                // The list was read across an await: a `deregister_provider`
+                // that ran meanwhile cleared a record this insert has just
+                // put back, and nothing else would clear it. Insert, then
+                // look: `deregister_provider` drops the provider before its
+                // record, so whichever order the two take, a provider gone
+                // keeps none (the registry's own rows are R59's).
+                if !self.has_provider(provider_type) {
+                    self.retired_listed.remove(provider_type);
+                }
                 if provider_type.is_local() {
                     let withdrawn = self
                         .model_registry
