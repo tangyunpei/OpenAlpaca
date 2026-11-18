@@ -1470,7 +1470,7 @@ fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
 
 // The `POST /v1/agents` body the creation screen sends is the one `agent
 // create` sends (AGENT-CREATE-CLI).
-use super::agents::create_agent_body;
+use super::agents::{CAPABILITIES_PROMPT, create_agent_body};
 
 /// Interactive agent creation wizard (mirrors agents.rs create_interactive).
 fn interactive_create_agent() -> Result<()> {
@@ -1527,7 +1527,7 @@ fn interactive_create_agent() -> Result<()> {
 
     // 5. Skills
     let skills_input: String = Input::with_theme(&theme)
-        .with_prompt("Skills (comma-separated, e.g., research,code_review)")
+        .with_prompt(CAPABILITIES_PROMPT)
         .allow_empty(true)
         .interact_text()?;
     let skills: Vec<String> = skills_input

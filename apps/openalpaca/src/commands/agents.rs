@@ -540,7 +540,7 @@ async fn create_interactive() -> Result<()> {
 
     // 4. Skills
     let skills_input: String = Input::with_theme(&theme)
-        .with_prompt("Skills (comma-separated, e.g., research,code_review)")
+        .with_prompt(CAPABILITIES_PROMPT)
         .allow_empty(true)
         .interact_text()?;
     let skills: Vec<String> = skills_input
@@ -590,6 +590,14 @@ pub(crate) fn config_body(config: serde_json::Value, version: u64) -> serde_json
 pub(crate) fn from_toml_body(toml_content: &str) -> serde_json::Value {
     serde_json::json!({ "toml_content": toml_content })
 }
+
+/// The prompt both interactive creations (`agents create` and the
+/// `openalpaca config` screen) ask the agent's capabilities with: the answer
+/// becomes `capabilities.assigned`, the names the sandbox admits tools by,
+/// so its examples are capabilities a shipped template assigns (a test
+/// holds them to the bundle). Nothing checks the answer.
+pub(crate) const CAPABILITIES_PROMPT: &str =
+    "Capabilities (comma-separated, e.g., web_access,memory_read)";
 
 /// The id an interactive creation gives the agent it names: the name in
 /// lower case, each run of characters other than ASCII letters and digits

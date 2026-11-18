@@ -819,3 +819,28 @@ fn agent_status_prints_the_rows_model_and_skills() {
     assert!(lines.contains(&"Model: -".to_string()), "{lines:?}");
     assert!(!lines.iter().any(|l| l.starts_with("Skills:")), "{lines:?}");
 }
+
+/// The capabilities prompt's examples are capabilities a shipped template
+/// assigns, so a person who types them gets an agent whose tools the
+/// sandbox admits (its answer is `capabilities.assigned`).
+#[test]
+fn the_capabilities_prompt_names_capabilities_a_shipped_template_assigns() {
+    let assigned: std::collections::HashSet<String> = openalpaca_core::bundled::bundled_templates()
+        .into_iter()
+        .flat_map(|t| t.frontmatter.capabilities)
+        .collect();
+    assert!(
+        CAPABILITIES_PROMPT.starts_with("Capabilities "),
+        "{CAPABILITIES_PROMPT}"
+    );
+    let examples = CAPABILITIES_PROMPT
+        .split_once("e.g., ")
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .expect("the prompt gives its examples as `(…, e.g., a,b)`");
+    for name in examples.split(',') {
+        assert!(
+            assigned.contains(name),
+            "{name:?} is not a capability any shipped template assigns: {assigned:?}"
+        );
+    }
+}
