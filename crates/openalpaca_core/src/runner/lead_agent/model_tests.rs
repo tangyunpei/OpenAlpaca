@@ -1068,12 +1068,12 @@ async fn the_spawn_result_names_the_model_and_that_the_lead_stays() {
 /// still accepted (the refusal, (b), is the owner's and not taken), and
 /// the child runs on the router default as before; the spawn's reply and
 /// the lane's `subagent_open` now name that model, saying it replaced the
-/// one chosen. An allowed per-call model still names itself, and so does a
-/// denied one when the default the loop reaches is denied too (here
-/// `writing_agent`'s set denies the router default it asks for): no
-/// replacement is claimed, and the reply and the record are the parent's.
-/// On the parent the reply named the denied model as the one the child
-/// ran on.
+/// one chosen. An allowed per-call model still names itself. Where the
+/// default the loop reaches is denied too (here `writing_agent`'s set
+/// denies the router default it asks for), no replacement is claimed and,
+/// since C8-2-REPLY, the reply says the child will be refused at its first
+/// round and `subagent_open` carries `model_refused`. On the parent the
+/// reply named the denied model as the one the child ran on.
 #[tokio::test]
 async fn a_model_the_agents_constraints_deny_is_named_as_replaced_by_the_one_used() {
     use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
@@ -1151,7 +1151,11 @@ async fn a_model_the_agents_constraints_deny_is_named_as_replaced_by_the_one_use
              agent's model constraints deny; you stay on {strong}),"
         ),
         format!(") on claude-sonnet-5-5 (as you asked: claude-sonnet-5-5; you stay on {strong}),"),
-        format!(") on claude-haiku-5-5 (as you asked: claude-haiku-5-5; you stay on {strong}),"),
+        // C8-2-REPLY: the default the loop reaches is denied too.
+        format!(
+            ") to be refused at its first round (claude-haiku-5-5, as you asked and the router \
+             default, is a model this agent's model constraints deny; you stay on {strong}),"
+        ),
     ] {
         assert!(summary.contains(&expected), "{expected} in {summary}");
     }
@@ -1196,6 +1200,234 @@ async fn a_model_the_agents_constraints_deny_is_named_as_replaced_by_the_one_use
         denied_default.data.get("model_replaced").is_none(),
         "no replacement where the default is denied too: {}",
         denied_default.data
+    );
+    assert_eq!(denied_default.data["model_refused"], true);
+    for lane in [inherited, asked, allowed] {
+        assert!(lane.data.get("model_refused").is_none(), "{}", lane.data);
+    }
+}
+
+/// The batch of [`a_child_whose_constraints_deny_the_model_it_reaches_is_refused_at_its_first_round`]
+/// and [`the_spawn_says_a_child_the_constraints_deny_everywhere_will_be_refused`]:
+/// `writing_agent` asked onto the router default its set denies, and
+/// `review_agent` inheriting the lead's model on a set whose
+/// `allowed_models` hold neither it nor the router default — the two shapes
+/// in which no model the agent may use is reachable (C8-2-REPLY).
+fn denied_everywhere(strong: &str) -> (Arc<Models>, Arc<LlmRouter>, Arc<SharedContext>) {
+    let models = Models::new(batch_lead(serde_json::json!([
+        {
+            "agent_id": "writing_agent",
+            "objective": "work for writing_agent",
+            "model": "claude-haiku-5-5"
+        },
+        { "agent_id": "review_agent", "objective": "work for review_agent" }
+    ])));
+    let router = install(&models, &[ProviderType::Anthropic], "claude-haiku-5-5");
+    let shared = shipped();
+    shared.agent_registry.restore_set(
+        "writing_agent",
+        Some(serde_json::json!({
+            "constraints": { "denied_models": ["claude-haiku-5-5"] }
+        })),
+    );
+    assert_ne!(
+        strong, "claude-sonnet-5-5",
+        "the lead's model is not allowed"
+    );
+    shared.agent_registry.restore_set(
+        "review_agent",
+        Some(serde_json::json!({
+            "constraints": { "allowed_models": ["claude-sonnet-5-5"] }
+        })),
+    );
+    (models, router, shared)
+}
+
+/// C8-2-REPLY's pin, written before its wording (the advisor's pick (b) on
+/// Rev 127's item 12, taken 2026-11-17): where an agent's model constraints
+/// deny the model chosen for it *and* the router default its loop is sent
+/// to in its place, the child is still spawned (no refusal is added at the
+/// spawn: option (c), the owner's), sends one request on that default, and
+/// its loop refuses the answer at its first round ("Model access denied");
+/// the lead reads that failure in `wait_for_subagents`. Green on the
+/// parent: the behaviour the reply now describes, unchanged.
+#[tokio::test]
+async fn a_child_whose_constraints_deny_the_model_it_reaches_is_refused_at_its_first_round() {
+    let strong = row(ProviderType::Anthropic, ModelAlias::Strong);
+    let (models, router, shared) = denied_everywhere(&strong);
+    let lead = instance(&shared, "lead_agent");
+    let result = run(&lead, router, shared, EventBus::default()).await;
+    assert!(result.success, "{:?}", result.loop_result.finish_reason);
+
+    for key in ["work for writing_agent", "work for review_agent"] {
+        let sent: Vec<Option<String>> = models
+            .seen()
+            .into_iter()
+            .filter(|s| !s.lead && s.last_user.contains(key))
+            .map(|s| s.model)
+            .collect();
+        assert_eq!(
+            sent,
+            vec![Some("claude-haiku-5-5".to_string())],
+            "{key}: one request, on the router default, then nothing"
+        );
+    }
+    let results = models.tool_results();
+    let waited = &results[1];
+    assert!(
+        waited.contains("0 completed, 2 failed"),
+        "both children failed: {waited}"
+    );
+    for (agent, reason) in [
+        ("writing_agent", "is on the deny list"),
+        ("review_agent", "is not in the allow list"),
+    ] {
+        let line = waited
+            .lines()
+            .find(|l| l.starts_with(&format!("- **{agent}::")))
+            .unwrap_or_else(|| panic!("no line for {agent}: {waited}"));
+        assert!(
+            line.contains(&format!(
+                "failed — Agent '{agent}' could not finish: Model access denied"
+            )) && line.contains("model='claude-haiku-5-5'")
+                && line.contains(reason),
+            "{agent} was refused at its first round on the router default: {line}"
+        );
+    }
+}
+
+/// C8-2-REPLY (Rev 127's item 12, the advisor's pick (b), taken
+/// 2026-11-17): in the two shapes the pin above shows refused, the spawn's
+/// reply says that the agent's model constraints deny the model chosen,
+/// and the default it would run on in its place, and that the child will
+/// be refused at its first round; `subagent_open` names the model it is
+/// sent to, `model_replaced` the chosen one where they differ, and
+/// `model_refused` says so. On the parent the reply said the child ran on
+/// the denied model, "(your model)" for the inheriting one.
+#[tokio::test]
+async fn the_spawn_says_a_child_the_constraints_deny_everywhere_will_be_refused() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let strong = row(ProviderType::Anthropic, ModelAlias::Strong);
+    let (models, router, shared) = denied_everywhere(&strong);
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-lead");
+    shared.register_task_session_log("task-1", handle.clone());
+    let lead = instance(&shared, "lead_agent");
+    run(&lead, router, shared, EventBus::default()).await;
+
+    let summary = &models.tool_results()[0];
+    for expected in [
+        format!(
+            ") to be refused at its first round (claude-haiku-5-5, as you asked and the router \
+             default, is a model this agent's model constraints deny; you stay on {strong}),"
+        ),
+        format!(
+            ") to be refused at its first round ({strong}, your model, is a model this agent's \
+             model constraints deny, and so is claude-haiku-5-5, the router default it would \
+             run on in its place; you stay on {strong}),"
+        ),
+    ] {
+        assert!(summary.contains(&expected), "{expected} in {summary}");
+    }
+    assert!(
+        !summary.contains(&format!(") on {strong} (your model),")),
+        "the denied model is not named as the one used: {summary}"
+    );
+
+    assert!(handle.flush().await);
+    let records = read_records(&dir.path().join("sess-lead")).unwrap();
+    let open = |key: &str| {
+        records
+            .iter()
+            .find(|r| {
+                r.kind == "subagent_open"
+                    && r.data["objective"]
+                        .as_str()
+                        .is_some_and(|o| o.starts_with(key))
+            })
+            .unwrap_or_else(|| panic!("no lane for {key}"))
+            .data
+            .clone()
+    };
+    let asked = open("work for writing_agent");
+    assert_eq!(asked["model"], "claude-haiku-5-5");
+    assert!(asked.get("model_replaced").is_none(), "{asked}");
+    assert_eq!(asked["model_refused"], true);
+    let inherited = open("work for review_agent");
+    assert_eq!(inherited["model"], "claude-haiku-5-5");
+    assert_eq!(inherited["model_replaced"], strong.as_str());
+    assert_eq!(inherited["model_refused"], true);
+}
+
+/// C8-2-REPLY (Rev 127's item 15, the advisor's pick (b), taken
+/// 2026-11-17): a child whose constraints deny the model chosen for it is
+/// budgeted on the window of the model it is sent to, not of the denied
+/// one: its `round` record's `context.window` is the router default's.
+/// Here the default's window is set to half the denied model's, so the
+/// two cannot coincide. On the parent the lane was sized on the denied
+/// model's window.
+#[tokio::test]
+async fn a_denied_childs_window_is_the_one_of_the_model_it_runs_on() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let strong = row(ProviderType::Anthropic, ModelAlias::Strong);
+    let models = Models::new(batch_lead(serde_json::json!([
+        { "agent_id": "general_agent", "objective": "work for general_agent" }
+    ])));
+    let router = install(&models, &[ProviderType::Anthropic], "claude-haiku-5-5");
+    let registry = router.model_registry();
+    let denied_window = registry.get_model_info(&strong).unwrap().context_window;
+    let mut info = registry.get_model_info("claude-haiku-5-5").unwrap();
+    info.context_window = denied_window / 2;
+    registry.register("claude-haiku-5-5".to_string(), info);
+    let used_window = denied_window / 2;
+    assert!(used_window > 0 && used_window != denied_window);
+    let shared = shipped();
+    shared.agent_registry.restore_set(
+        "general_agent",
+        Some(serde_json::json!({
+            "constraints": { "denied_models": [strong.clone()] }
+        })),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-lead");
+    shared.register_task_session_log("task-1", handle.clone());
+    let lead = instance(&shared, "lead_agent");
+    run(&lead, router, shared, EventBus::default()).await;
+    assert_eq!(
+        models.child_model("work for general_agent"),
+        "claude-haiku-5-5"
+    );
+
+    assert!(handle.flush().await);
+    let records = read_records(&dir.path().join("sess-lead")).unwrap();
+    let child_round = records
+        .iter()
+        .find(|r| {
+            r.kind == "round"
+                && r.agent
+                    .as_deref()
+                    .is_some_and(|a| a.starts_with("general_agent"))
+        })
+        .expect("the child answered a round");
+    assert_eq!(child_round.data["model"], "claude-haiku-5-5");
+    assert_eq!(
+        child_round.data["context"]["window"],
+        serde_json::json!(used_window),
+        "sized on the model used, not on {strong}'s {denied_window}"
     );
 }
 

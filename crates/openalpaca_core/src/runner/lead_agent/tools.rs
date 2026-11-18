@@ -691,32 +691,49 @@ impl BuiltInTool for SpawnSubagentTool {
         }
         // C8-2 (c), the advisor's pick the owner took on 2026-11-17: a model
         // the agent's own model constraints deny is still accepted — the
-        // refusal, (b), is the owner's and not taken — and its loop config
-        // drops it to the router default, by this same check
+        // refusal is the owner's and not taken — and its loop config drops
+        // it to the router default, by this same check
         // (`LoopConfig::from_defaults`). The reply and the lane's
         // `subagent_open` name the model the child will run on, then, and
         // that it replaced the one chosen, never the denied one as used.
-        // A replacement is named only when the default the loop reaches is
-        // itself one the constraints allow: where it is the denied model,
-        // outside an `allowed_models` list, or nothing is routable, the
-        // reply and the record stay as they were.
+        // C8-2-REPLY (the advisor's pick (b) on Rev 127's item 12, taken
+        // 2026-11-17): where the constraints deny the default the loop
+        // reaches too (it is the denied model, or outside an
+        // `allowed_models` list) the loop refuses the child's first answer
+        // ("Model access denied"), and where nothing is routable its first
+        // call fails; the reply and the record say so, and no refusal is
+        // added here.
         let denies = |model: &str| {
             CapabilityManager::check_model_access(&agent.id, model, &agent.constraints).is_err()
         };
-        let replacement = match (&child_model, plugin_backed) {
-            (Some(model), false) if denies(model) => self
-                .router
-                .would_answer(
+        let denied = match (&child_model, plugin_backed) {
+            (Some(model), false) if denies(model) => Some(DeniedModel {
+                chosen: model.clone(),
+                reached: self.router.would_answer(
                     &self.router.default_model(),
                     &agent.llm_config.fallback_models,
-                )
-                .filter(|used| !denies(used))
-                .map(|used| (model.clone(), used)),
+                ),
+            }),
             _ => None,
         };
-        let (replaced, used_model) = match replacement {
-            Some((denied, used)) => (Some(denied), Some(used)),
+        let refused = denied
+            .as_ref()
+            .is_some_and(|d| d.reached.as_deref().is_none_or(denies));
+        // The model the child is sent to, and the denied one it took the
+        // place of where the two differ (`model_replaced`).
+        let (replaced, used_model) = match &denied {
+            Some(d) => (
+                Some(d.chosen.clone()).filter(|chosen| d.reached.as_ref() != Some(chosen)),
+                d.reached.clone(),
+            ),
             None => (None, child_model.clone()),
+        };
+        // C8-2-REPLY (Rev 127's item 15, (b)): a denied child's window is
+        // the model's it is sent to, never the denied one's.
+        let window_model = if denied.is_some() {
+            used_model.clone()
+        } else {
+            agent.llm_config.model.clone()
         };
         let instance_id = agent.id.clone();
         // The id the lead knows this subagent by — returned below, and named
@@ -789,7 +806,8 @@ impl BuiltInTool for SpawnSubagentTool {
                 },
                 // C8-2 (c): the model the child will run on — the
                 // router default where its constraints deny the one
-                // chosen, which `model_replaced` then names.
+                // chosen, which `model_replaced` then names (null where
+                // nothing is routable).
                 "model": if plugin_backed { None } else { used_model.clone() },
                 // P-17: a plugin-backed template says so, so a reader
                 // never has to guess which extension ran the lane.
@@ -804,6 +822,11 @@ impl BuiltInTool for SpawnSubagentTool {
             });
             if let Some(ref denied) = replaced {
                 open["model_replaced"] = serde_json::json!(denied);
+            }
+            // C8-2-REPLY: the constraints deny the model it is sent to as
+            // well (or none is routable): its first round is refused.
+            if refused {
+                open["model_refused"] = serde_json::json!(true);
             }
             log.emit(
                 crate::session_log::Record::new(crate::session_log::RecordType::SubagentOpen)
@@ -853,10 +876,7 @@ impl BuiltInTool for SpawnSubagentTool {
         // 7. Build LoopConfig from daemon defaults + agent constraints
         let mut loop_config =
             LoopConfig::from_agent(&self.daemon_config.load().execution.agent_defaults, &agent)
-                .with_context_window(
-                    self.router.model_registry(),
-                    agent.llm_config.model.as_deref(),
-                );
+                .with_context_window(self.router.model_registry(), window_model.as_deref());
         loop_config.event_bus = Some(self.bus.clone());
         // Design 11, CQ-3: compaction's writer runs on `summary_model`.
         loop_config.writer = crate::orchestrator::working_state::WriterConfig::new(
@@ -886,11 +906,9 @@ impl BuiltInTool for SpawnSubagentTool {
         // local model's window, not against 200 000 it will never get. A
         // registry with no window for it — and a window of 0 — keeps the
         // default below.
-        let model_window = crate::runner::routed_context_window(
-            self.router.as_ref(),
-            agent.llm_config.model.as_deref(),
-        )
-        .unwrap_or(200_000);
+        let model_window =
+            crate::runner::routed_context_window(self.router.as_ref(), window_model.as_deref())
+                .unwrap_or(200_000);
 
         // Distill parent context for this sub-agent
         let mut context_package = self.context_manager.distill(
@@ -1472,44 +1490,76 @@ impl BuiltInTool for SpawnSubagentTool {
         // M-10: the model the child runs on, what chose it, and that the
         // lead's own stays — without it a lead reads a child's model as its
         // own switch.
-        let model_note = match (&used_model, plugin_backed) {
-            (Some(model), false) => {
-                let stay = self
-                    .answering_model
-                    .as_ref()
-                    .and_then(crate::runner::model_choice::read_answering)
-                    .or_else(|| self.lead_model.clone())
-                    .map(|lead| format!("; you stay on {lead}"))
-                    .unwrap_or_default();
-                let word = crate::runner::model_choice::choice_word(&choice);
-                let why = match &replaced {
-                    // C8-2 (c): what chose the denied model, and that the
-                    // child runs on the router default in its place.
-                    Some(denied) => {
-                        let source = if chosen_per_call {
-                            "as you asked".to_string()
-                        } else {
-                            match &choice {
-                                ModelChoice::Inherit => "your model".to_string(),
-                                ModelChoice::Alias(_) => format!("its template's {word}"),
-                                ModelChoice::Id(_) => "its template's model".to_string(),
-                            }
-                        };
-                        format!(
-                            "it replaced {denied}, {source}, which this agent's model \
-                             constraints deny{stay}"
-                        )
-                    }
-                    None if chosen_per_call => format!("as you asked: {word}{stay}"),
-                    None => match &choice {
+        let model_note = if plugin_backed {
+            String::new()
+        } else {
+            let stay = self
+                .answering_model
+                .as_ref()
+                .and_then(crate::runner::model_choice::read_answering)
+                .or_else(|| self.lead_model.clone())
+                .map(|lead| format!("; you stay on {lead}"))
+                .unwrap_or_default();
+            let word = crate::runner::model_choice::choice_word(&choice);
+            // What chose a model the constraints deny.
+            let source = || {
+                if chosen_per_call {
+                    "as you asked".to_string()
+                } else {
+                    match &choice {
                         ModelChoice::Inherit => "your model".to_string(),
-                        ModelChoice::Alias(_) => format!("its template's {word}{stay}"),
-                        ModelChoice::Id(_) => format!("its template's model{stay}"),
-                    },
-                };
-                format!(" on {model} ({why})")
+                        ModelChoice::Alias(_) => format!("its template's {word}"),
+                        ModelChoice::Id(_) => "its template's model".to_string(),
+                    }
+                }
+            };
+            match (&denied, &used_model) {
+                // C8-2-REPLY (b): no model the constraints allow is
+                // reachable; the child is spawned all the same, and its
+                // loop refuses its first answer (or its first call finds
+                // nothing routable). No refusal is added here.
+                (Some(d), _) if refused => {
+                    let chosen = &d.chosen;
+                    let source = source();
+                    let deny = "is a model this agent's model constraints deny";
+                    match &d.reached {
+                        Some(reached) if reached == chosen => format!(
+                            " to be refused at its first round ({chosen}, {source} and the \
+                             router default, {deny}{stay})"
+                        ),
+                        Some(reached) => format!(
+                            " to be refused at its first round ({chosen}, {source}, {deny}, \
+                             and so is {reached}, the router default it would run on in its \
+                             place{stay})"
+                        ),
+                        None => format!(
+                            " to fail at its first round ({chosen}, {source}, {deny}, and no \
+                             model is routable in its place{stay})"
+                        ),
+                    }
+                }
+                // C8-2 (c): what chose the denied model, and that the
+                // child runs on the router default in its place.
+                (Some(d), Some(model)) => format!(
+                    " on {model} (it replaced {}, {}, which this agent's model constraints \
+                     deny{stay})",
+                    d.chosen,
+                    source()
+                ),
+                (None, Some(model)) => {
+                    let why = if chosen_per_call {
+                        format!("as you asked: {word}{stay}")
+                    } else {
+                        match &choice {
+                            ModelChoice::Inherit => "your model".to_string(),
+                            ModelChoice::Alias(_) => format!("its template's {word}{stay}"),
+                            ModelChoice::Id(_) => format!("its template's model{stay}"),
+                        }
+                    };
+                    format!(" on {model} ({why})")
+                }
+                _ => String::new(),
             }
-            _ => String::new(),
         };
         Ok(format!(
             "Subagent '{agent_id}'{default_note} spawned (run_id: '{run_id}'){model_note}, \
@@ -1518,6 +1568,14 @@ impl BuiltInTool for SpawnSubagentTool {
              individually."
         ))
     }
+}
+
+/// A model chosen for a child that its agent's model constraints deny
+/// (C8-2): the child's loop is sent to the router default in its place,
+/// `reached` as the loop reaches it (`None`: nothing is routable).
+struct DeniedModel {
+    chosen: String,
+    reached: Option<String>,
 }
 
 // ── SpawnSubagentsBatchTool ──────────────────────────────────────────

@@ -400,9 +400,16 @@ from its `allowed_models`) is still accepted, and the subagent is sent to the
 router default in its place, as it always has; its constraints may refuse
 that one in turn, at its first round. Where they allow it, the reply names it
 and says it replaced the one chosen, and `subagent_open`'s `model` is that
-model, with `model_replaced` naming the denied one; where they do not, or
-nothing is routable, the reply and the record name the chosen model, as
-before.
+model, with `model_replaced` naming the denied one. Where they deny the
+router default too, the subagent is still started, sends its first request
+there, and is refused when that answer arrives ("Model access denied", in
+what `wait_for_subagents` reports): the reply says the constraints deny the
+model chosen and the default, and that the subagent will be refused at its
+first round, and `subagent_open` adds `model_refused: true`, its `model`
+being the default (with `model_replaced` naming the chosen one where the two
+differ). Where nothing is routable the reply says the subagent will fail at
+its first round, `model` is null and `model_refused` is true. A subagent sent to the default is
+budgeted on that model's context window.
 
 | Alias | Anthropic | OpenAI (its own API) | Ollama, an OpenAI-compatible server, or any provider with no row |
 |---|---|---|---|
