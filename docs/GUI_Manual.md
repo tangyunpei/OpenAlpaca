@@ -1504,10 +1504,11 @@ plugin runs), and it answers for the plugin by the id the daemon listed.
   before anything is copied. Under it, a `Warning:` line names each key the
   manifest sets that OpenAlpaca does not read (a top-level `tool = true`, whose
   switch is `types.tools`, is ignored — the line says so and what it likely
-  meant), and says that `types.connector` and `types.provider` do nothing while
-  their bridges are not wired. A warning never refuses the install. Installing
-  **grants nothing**: the row lands unapproved, and `Approve` is the single
-  action that starts it.
+  meant), says that `types.connector` and `types.provider` do nothing while
+  their bridges are not wired, and says that a `[config]` on a plugin with
+  `mcp_compatible = true` is never sent to it. A warning never refuses the
+  install. Installing **grants nothing**: the row lands unapproved, and
+  `Approve` is the single action that starts it.
 - **An MCP server is a declaration.** Writing it into your own
   `config/mcp.toml` is the consent, so there is no approve step — `Connect now`
   is the ENABLE bit.

@@ -691,6 +691,115 @@ mcp_compatible = true
         tear_down_named_stub(&h, pid).await;
     }
 
+    // ── N-PLUG-5: an mcp_compatible plugin is opened with MCP's lifecycle ──
+
+    /// The committed stub at `tests/fixtures/mcp-lifecycle-plugin/`: an MCP
+    /// server strict about its lifecycle, as an rmcp server is — a request
+    /// before `initialize` is refused, a notification before it ends the
+    /// process — that logs every method it is sent to `seen.log`.
+    fn install_strict_mcp_stub(root: &Path) -> PathBuf {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/mcp-lifecycle-plugin");
+        let dir = root.join("strict-mcp");
+        std::fs::create_dir_all(&dir).unwrap();
+        // fs::copy carries the mode across on Unix, so the entry stays executable.
+        for file in ["strict-mcp-server.py", "plugin.toml"] {
+            std::fs::copy(source.join(file), dir.join(file)).unwrap();
+        }
+        dir
+    }
+
+    /// **An `mcp_compatible` plugin gets MCP's lifecycle**: `initialize` at
+    /// `2025-11-25` with MCP's params, then `notifications/initialized`, and
+    /// only then `tools/list` — never OpenAlpaca's own `initialize` params,
+    /// and never `tools/list` first, which an MCP server refuses.
+    #[tokio::test]
+    async fn an_mcp_compatible_plugin_is_opened_with_the_mcp_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_strict_mcp_stub(tmp.path());
+        let h = Harness::new(tmp.path());
+        h.manager
+            .permission_gate
+            .approve("strict-mcp", &["testing".to_string()])
+            .expect("approve the stub");
+        h.scan().await;
+
+        let row = h.row("strict-mcp").await;
+        let seen = std::fs::read_to_string(dir.join("seen.log")).unwrap_or_default();
+        let group = h
+            .manager
+            .plugins
+            .read()
+            .await
+            .get("strict-mcp")
+            .and_then(|s| s.process.as_ref())
+            .and_then(|p| p.child.id())
+            .map(KillGroupOnDrop);
+        assert_eq!(
+            row.state,
+            ExtensionState::Enabled,
+            "the plugin did not load; it was sent, in order:\n{seen}"
+        );
+        let methods: Vec<&str> = seen.lines().collect();
+        assert_eq!(
+            methods.get(..3),
+            Some(&["initialize", "notifications/initialized", "tools/list"][..]),
+            "the lifecycle's order: {methods:?}"
+        );
+
+        let params: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("initialize-params.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(params["protocolVersion"], "2025-11-25");
+        assert_eq!(params["capabilities"], serde_json::json!({}));
+        assert_eq!(params["clientInfo"]["name"], "openalpaca-mcp");
+        assert_eq!(
+            params["clientInfo"]["version"],
+            env!("CARGO_PKG_VERSION"),
+            "the daemon's version, as the MCP client sends it"
+        );
+        assert!(
+            params.get("config").is_none() && params.get("plugin_id").is_none(),
+            "OpenAlpaca's own initialize params reached an MCP server: {params}"
+        );
+
+        assert_eq!(
+            h.registered("strict-mcp").await.tools,
+            vec!["strict-mcp::echo"]
+        );
+        let answer = h
+            .tools
+            .execute(
+                "strict-mcp::echo",
+                &serde_json::json!({"message": "lifecycle"}),
+            )
+            .await;
+        assert_eq!(answer.as_deref(), Ok("echo: lifecycle"));
+
+        let pid = h.child_pid("strict-mcp").await;
+        h.manager.disable(&ext("strict-mcp")).await.unwrap();
+        assert!(
+            !pid_alive(pid),
+            "the strict stub {pid} outlived its teardown"
+        );
+        drop(group);
+    }
+
+    /// The tolerant echo stub, which answers every method, still loads under
+    /// the lifecycle: its `initialize` answer (`{}`) carries no
+    /// `protocolVersion`, and the load goes on.
+    #[tokio::test]
+    async fn the_echo_fixture_still_loads_under_the_mcp_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        let pid = h.child_pid("echo-test").await;
+        h.manager.disable(&ext("echo-test")).await.unwrap();
+        assert!(!pid_alive(pid), "the echo stub {pid} outlived its teardown");
+    }
+
     /// **A failed plugin call names the tool once**: `plugin <plugin>::<tool>:
     /// …`, never `<plugin>::<plugin>::<tool>`. The error is the plugin's own
     /// (a JSON-RPC error while the plugin is `Enabled`), so the wording is
@@ -3836,6 +3945,15 @@ mod install_tests {
              [config.api_key]\ntype = \"secret\"\nrequired = true\nsensitive = true\n\
              description = \"key\"\ndefault = \"\"\n",
         );
+        // A `[config]` is read only by a plugin opened with OpenAlpaca's own
+        // `initialize`: on an `mcp_compatible` one it warns (N-PLUG-5).
+        let manifest = source.join("plugin.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            text.replace("mcp_compatible = true", "mcp_compatible = false"),
+        )
+        .unwrap();
 
         let summary = h.manager.validate_source(&source).await.expect("validate");
         assert!(

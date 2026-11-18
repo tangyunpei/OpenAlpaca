@@ -1180,6 +1180,13 @@ tools into the shared registry when the plugin loads:
   grows nothing; the plugin is not told (no JSON-RPC cancel is sent, which
   waits for a protocol design) and runs the request on — a plugin that
   answers one request at a time holds the next behind it;
+- the plugin is opened before `tools/list`: with OpenAlpaca's own
+  `initialize` (id, version, granted capabilities, `[config]`; answered
+  `{"ready": true}`), or, for an `mcp_compatible` plugin, with MCP's
+  legacy handshake as `openalpaca_mcp` sends it — `initialize` at
+  `2025-11-25` (`PluginProcess::mcp_initialize`, `MCP_INITIALIZE_VERSION`),
+  then `notifications/initialized` — carrying no configuration, over the
+  same `Content-Length`-framed channel (N-PLUG-5);
 - `author = "plugin:<id>"`, `version` from the manifest, no annotations,
   `exempt_from_timeout = false`;
 - `provides_capabilities` = the manifest's `capabilities.provides` — the

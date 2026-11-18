@@ -1246,12 +1246,17 @@ impl PluginManager {
             }
         };
 
-        if !manifest.plugin.mcp_compatible {
+        // An `mcp_compatible` plugin is opened with MCP's lifecycle and is
+        // sent no configuration (N-PLUG-5); any other with OpenAlpaca's own
+        // `initialize`, which carries it.
+        let initialized = if manifest.plugin.mcp_compatible {
+            process.mcp_initialize(&id).await
+        } else {
             let config_json: HashMap<String, Value> = provided
                 .iter()
                 .map(|(k, v)| (k.clone(), toml_to_json(v)))
                 .collect();
-            if let Err(e) = process
+            process
                 .initialize(
                     &id,
                     &manifest.plugin.version,
@@ -1259,19 +1264,19 @@ impl PluginManager {
                     config_json,
                 )
                 .await
-            {
-                // E-FAIL: the handle exists, so it goes before `Failed` is
-                // committed. Without this a `Failed` row would sit over a live
-                // child that nothing ever drops, and a later `disable` — legal
-                // from `Failed` — would run T4 on nothing while the child
-                // outlived the switch.
-                warn!(plugin = %id, error = %e, "plugin initialize failed");
-                shutdown_child(&id, process, None).await;
-                let (reason, hint) = classify_bringup(&e);
-                self.set_hint(&id, hint).await;
-                self.commit(ext, self.failure(reason, e.to_string()));
-                return;
-            }
+        };
+        if let Err(e) = initialized {
+            // E-FAIL: the handle exists, so it goes before `Failed` is
+            // committed. Without this a `Failed` row would sit over a live
+            // child that nothing ever drops, and a later `disable` — legal
+            // from `Failed` — would run T4 on nothing while the child
+            // outlived the switch.
+            warn!(plugin = %id, error = %e, "plugin initialize failed");
+            shutdown_child(&id, process, None).await;
+            let (reason, hint) = classify_bringup(&e);
+            self.set_hint(&id, hint).await;
+            self.commit(ext, self.failure(reason, e.to_string()));
+            return;
         }
 
         // ── E3 — DISCOVER ─────────────────────────────────────────────

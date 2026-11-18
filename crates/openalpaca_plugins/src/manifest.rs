@@ -75,6 +75,12 @@ pub const PROVIDER_NOT_WIRED: &str = "plugin.toml declares types.provider, but t
      provider bridge is not wired: OpenAlpaca does not use a plugin as a model provider, so \
      nothing this plugin offers as one is used";
 
+/// The warning for a `[config]` on an `mcp_compatible` plugin, which is opened
+/// with MCP's `initialize` and so is sent no configuration (N-PLUG-5).
+pub const MCP_COMPATIBLE_GETS_NO_CONFIG: &str = "plugin.toml declares [config] keys, but the \
+     plugin sets mcp_compatible = true: it is opened with MCP's initialize handshake, which \
+     carries no configuration, so it never receives them";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginMeta {
     pub name: String,
@@ -292,6 +298,9 @@ impl PluginManifest {
         }
         if self.types.provider {
             warnings.push(PROVIDER_NOT_WIRED.to_string());
+        }
+        if self.plugin.mcp_compatible && !self.config.is_empty() {
+            warnings.push(MCP_COMPATIBLE_GETS_NO_CONFIG.to_string());
         }
         warnings
     }
@@ -581,6 +590,32 @@ description = "Rate limit"
                 CONNECTOR_NOT_WIRED.to_string(),
                 PROVIDER_NOT_WIRED.to_string()
             ]
+        );
+    }
+
+    /// N-PLUG-5: an `mcp_compatible` plugin is opened with MCP's `initialize`,
+    /// which carries no configuration, so a `[config]` it declares warns —
+    /// and the same keys without the flag do not.
+    #[test]
+    fn config_keys_on_an_mcp_compatible_plugin_warn() {
+        let config = "[config.api_key]\ntype = \"secret\"\n";
+        let flagged =
+            PluginManifest::parse(&format!("{MINIMAL}mcp_compatible = true\n{config}")).unwrap();
+        let warnings = flagged.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("mcp_compatible") && warnings[0].contains("no configuration"),
+            "{warnings:?}"
+        );
+
+        let plain = PluginManifest::parse(&format!("{MINIMAL}{config}")).unwrap();
+        assert!(plain.warnings().is_empty(), "{:?}", plain.warnings());
+        let no_config =
+            PluginManifest::parse(&format!("{MINIMAL}mcp_compatible = true\n")).unwrap();
+        assert!(
+            no_config.warnings().is_empty(),
+            "{:?}",
+            no_config.warnings()
         );
     }
 

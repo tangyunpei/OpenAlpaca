@@ -312,3 +312,22 @@ impl Extensions {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// N-PLUG-5: an `mcp_compatible` plugin's `initialize` offers the version
+    /// and names the client as the daemon's MCP connections do. The plugins
+    /// crate does not depend on `openalpaca_mcp`, so its two constants are held
+    /// to that crate's here, where both are in reach.
+    #[test]
+    fn an_mcp_compatible_plugin_is_opened_as_the_mcp_client_opens_a_server() {
+        assert_eq!(
+            openalpaca_plugins::process_pool::MCP_INITIALIZE_VERSION,
+            openalpaca_mcp::ProtocolVersion::LATEST_WITH_INITIALIZE.as_str()
+        );
+        assert_eq!(
+            openalpaca_plugins::process_pool::MCP_CLIENT_NAME,
+            openalpaca_mcp::McpClientConfig::default().client_info.name
+        );
+    }
+}

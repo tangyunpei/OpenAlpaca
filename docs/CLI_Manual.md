@@ -470,9 +470,11 @@ Under the manifest, a `warning:` line names each key `plugin.toml` sets that
 OpenAlpaca does not read — a top-level `tool = true` is ignored, since the
 switch is `types.tools`, and the line says what the key likely meant — and says
 that `types.connector` (connectors are not supported) and `types.provider` (the
-plugin provider bridge is not wired) contribute nothing. A warning never
-refuses: `install --dry-run`, `install` and `update` print it, the
-`ext approve` row repeats it, and `ext info plugin <id>` says it for an
+plugin provider bridge is not wired) contribute nothing, and that a
+`[config]` on a plugin with `mcp_compatible = true` is never sent to it (such
+a plugin is opened with MCP's `initialize`, which carries no configuration).
+A warning never refuses: `install --dry-run`, `install` and `update` print it,
+the `ext approve` row repeats it, and `ext info plugin <id>` says it for an
 installed plugin — one dropped in by hand included, before you approve it. The
 key is shown with its hidden characters as `<U+XXXX>`, as every manifest line
 is.
