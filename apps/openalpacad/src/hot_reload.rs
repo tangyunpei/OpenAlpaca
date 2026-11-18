@@ -474,6 +474,10 @@ pub(crate) fn llm_config_watcher_tick(
     if let Some(ref models) = new_config.models {
         router.model_registry().reload_from_config(models, &disabled);
     }
+    // A reload runs no discovery for a provider already loaded, so the ids
+    // a provider listed that the catalogue retired are said again here
+    // (RETIRED-ID, pending-decisions *Rev 125*: (a) with (c)).
+    router.warn_retired_listed();
 
     // 3. Reload default model
     if let Some(ref orch) = new_config.orchestrator {

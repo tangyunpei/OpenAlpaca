@@ -1487,14 +1487,15 @@ async fn a_row_stated_after_a_bare_registration_wins_over_the_good_reading() {
 
 /// What a keyed provider's listing reads: ids only, no capability and no
 /// window (the trait's `discover_models`, [`DiscoveredModel::bare`] for
-/// every id: OpenAI's own API, a compatible server, Anthropic's), recorded
-/// as a reading, as on the parent (pending-decisions *Rev 118*). A listed
+/// every id: OpenAI's own API, a compatible server, Anthropic's), counted
+/// as no reading (pending-decisions *Rev 118*, taken as (a)). A listed
 /// id no compiled row names, and no other provider reads, reads image
 /// `false`, tools `true` and no window, with no row and with a priced row
 /// that leaves them out, read before the listing or after it, live and on
-/// a reload. Green on the parent: a guard on the keyed path, which
-/// BARE-NOT-READING leaves as it was; an id another provider also reads is
-/// [`a_keyed_listing_of_an_id_ollama_reads_is_still_a_reading`].
+/// a reload. Green on the parent and with the listing counted as no
+/// reading: what a person meets on such an id is unchanged; an id another
+/// provider also reads is
+/// [`a_keyed_listing_of_an_id_ollama_reads_leaves_ollama_s_reading`].
 ///
 /// [`DiscoveredModel::bare`]: crate::routing::model_registry::DiscoveredModel::bare
 #[tokio::test]
@@ -1658,9 +1659,9 @@ fn anthropic_at(base: &str) -> crate::providers::anthropic::AnthropicProvider {
 /// What each discovery says it described: an `/api/show` answer
 /// (`described`); a failed `/api/show`, and a keyed provider's listing
 /// of ids (a compatible server's, OpenAI's own, Anthropic's), not — no
-/// window, image `false`, tools `true`. The router counts only Ollama's
-/// undescribed row as no reading (`refresh_models_for`); a keyed listing
-/// stays a reading ([`a_keyed_listing_of_an_id_ollama_reads_is_still_a_reading`]).
+/// window, image `false`, tools `true`. The router counts every
+/// undescribed row as no reading (`refresh_models_for`;
+/// [`a_keyed_listing_of_an_id_ollama_reads_leaves_ollama_s_reading`]).
 /// It does not compile on the parent (`described` is new).
 #[tokio::test]
 async fn only_an_api_show_answer_is_described() {
@@ -1754,50 +1755,47 @@ fn ollama_and_compat_router(
     router
 }
 
-/// A keyed provider's listing stays what it was on the parent, a reading
-/// (pending-decisions *Rev 118*, an owner item marked for the advisor): an
-/// id Ollama reads and an OpenAI-compatible server also lists, for a
-/// priced row that leaves its flags out, takes the flags of whichever
-/// discovery ran last — the listing's image `false` and tools `true` when
-/// it ran after Ollama's reading, Ollama's when it ran before — live and
-/// on a reload. Green on the parent; red with the listing counted as no
-/// reading, where Ollama's reading always stood (the review's probe).
+/// A keyed provider's listing of ids is no reading, so Ollama's stands
+/// (pending-decisions *Rev 118*'s fourth item, taken as (a) on the owner's
+/// word of 2026-11-17): an id Ollama reads and an OpenAI-compatible server
+/// also lists keeps Ollama's window and flags whichever discovery ran
+/// last, row-less or under a priced row that leaves them out, live and on
+/// a reload. Red on the parent: the listing's image `false` and tools
+/// `true` replaced a priced row's left-out flags when it ran after
+/// Ollama's reading, and held a row-less entry's when it ran before.
 #[tokio::test]
-async fn a_keyed_listing_of_an_id_ollama_reads_is_still_a_reading() {
+async fn a_keyed_listing_of_an_id_ollama_reads_leaves_ollama_s_reading() {
     let (ollama, _failing) = ollama_flaky("vision-tag").await;
     let compat = listing("vision-tag").await;
     let priced = [("vision-tag", unsized_row("openai", Some(0.5), Some(1.0)))];
-    for listing_last in [true, false] {
-        let router = ollama_and_compat_router(&ollama.base_url, &compat.base_url, &priced);
-        let order = if listing_last {
-            [ProviderType::Ollama, ProviderType::OpenAI]
-        } else {
-            [ProviderType::OpenAI, ProviderType::Ollama]
-        };
-        for provider in &order {
-            router.refresh_models_for(provider).await;
+    for rows in [&[][..], &priced[..]] {
+        for listing_last in [true, false] {
+            let label = format!("rows {}, listing last {listing_last}", rows.len());
+            let router = ollama_and_compat_router(&ollama.base_url, &compat.base_url, rows);
+            let order = if listing_last {
+                [ProviderType::Ollama, ProviderType::OpenAI]
+            } else {
+                [ProviderType::OpenAI, ProviderType::Ollama]
+            };
+            for provider in &order {
+                router.refresh_models_for(provider).await;
+            }
+            let registry = router.model_registry();
+            assert_eq!(read_of(registry, "vision-tag"), GOOD, "{label}: live");
+            registry.reload_from_config(&config_of(rows), &HashSet::new());
+            assert_eq!(read_of(registry, "vision-tag"), GOOD, "{label}: reloaded");
+            // Listed again by the keyed server, after both: still Ollama's.
+            router.refresh_models_for(&ProviderType::OpenAI).await;
+            assert_eq!(
+                read_of(registry, "vision-tag"),
+                GOOD,
+                "{label}: listed again"
+            );
         }
-        let registry = router.model_registry();
-        let expected = if listing_last {
-            (32_768, false, true)
-        } else {
-            GOOD
-        };
-        assert_eq!(
-            read_of(registry, "vision-tag"),
-            expected,
-            "listing last {listing_last}: live"
-        );
-        registry.reload_from_config(&config_of(&priced), &HashSet::new());
-        assert_eq!(
-            read_of(registry, "vision-tag"),
-            expected,
-            "listing last {listing_last}: reloaded"
-        );
     }
 }
 
-/// A keyed listing, a reading as before, does not take over what a bare
+/// A keyed listing, no reading, does not take over what a bare
 /// fallback left: a tag Ollama first registered bare, then a compatible
 /// server listed, takes Ollama's next good reading, window and flags,
 /// row-less or priced, live and on a reload. Red on the parent (the bare
@@ -1828,4 +1826,143 @@ async fn a_keyed_listing_leaves_a_bare_fallback_for_ollama_s_next_reading() {
             "{label}: read, reloaded"
         );
     }
+}
+
+// ── RETIRED-ID: a listed id the catalogue retired, said once per pass ────
+
+/// The words the warning carries, which the tests count lines by.
+const RETIRED_WARNING: &str = "retired in the catalogue";
+
+/// How many logged lines name `id` with the retired-id warning.
+fn retired_lines(lines: &[&str], id: &str) -> usize {
+    lines
+        .iter()
+        .filter(|line| line.contains(RETIRED_WARNING) && line.contains(id))
+        .count()
+}
+
+/// A provider that still lists an id the catalogue retired is said once
+/// per discovery pass (at start, on the enable, on `POST
+/// /v1/models/refresh`) and once on each hot reload
+/// (`warn_retired_listed`, which the daemon's `llm.toml` watcher calls),
+/// naming the id and nothing else of the listing (RETIRED-ID,
+/// pending-decisions *Rev 125*: (a) with (c)). The id stays offered, as
+/// before. Red on the parent (a no-op `warn_retired_listed` in the red
+/// run), which says nothing.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_listed_retired_id_is_warned_once_per_pass_and_reload() {
+    let server = listing_of(vec!["gpt-4o-mini", "gguf-listed"]).await;
+    let router = openai_router(&server.base_url, &[]);
+    let expect = |n: usize, when: &'static str| {
+        logs_assert(|lines: &[&str]| {
+            match (
+                retired_lines(lines, "gpt-4o-mini"),
+                retired_lines(lines, "gguf-listed"),
+            ) {
+                (got, 0) if got == n => Ok(()),
+                (got, other) => Err(format!(
+                    "{when}: {got} lines name gpt-4o-mini (want {n}), {other} gguf-listed"
+                )),
+            }
+        });
+    };
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    expect(1, "at start");
+    assert!(router.is_routable("gpt-4o-mini"), "still offered");
+    assert_eq!(
+        router.warn_retired_listed(),
+        vec!["gpt-4o-mini".to_string()]
+    );
+    expect(2, "on a reload");
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    expect(3, "on a refresh");
+}
+
+/// A person's own `[models]` row for a retired id that no listing names —
+/// the list empty, then unreadable — is not said, at a pass or on a reload,
+/// though `mark_unlisted_served` marks the row discovered: only what a
+/// listing named is. Green on the parent, which says nothing; red with
+/// the reload's list read from `ModelInfo::discovered`.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_row_for_a_retired_id_no_listing_names_is_not_warned_of() {
+    let rows = [("gpt-4o-mini", row("openai", Some(0.15), Some(0.6)))];
+    let empty = listing_of(vec![]).await;
+    let router = openai_router(&empty.base_url, &rows);
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert!(
+        router.is_routable("gpt-4o-mini"),
+        "the row is taken as served"
+    );
+    assert!(router.warn_retired_listed().is_empty(), "an empty list");
+    let failing = MockHttpServer::start(|_| MockResponse::json("{not a list")).await;
+    let router = openai_router(&failing.base_url, &rows);
+    let status = router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert!(status.error.is_some(), "the list failed");
+    assert!(router.warn_retired_listed().is_empty(), "a failed list");
+    assert!(!logs_contain(RETIRED_WARNING));
+}
+
+/// A list that cannot be read keeps what the last read one named: a
+/// provider that listed a retired id, then answered a body that is no
+/// list, still has it said on a hot reload. (An error status from an
+/// OpenAI-compatible server reads as an empty list, which names none.)
+/// Red with the failed pass clearing the record.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_failed_list_keeps_the_last_listing_s_retired_ids() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let failing = Arc::new(AtomicBool::new(false));
+    let switch = Arc::clone(&failing);
+    let server = MockHttpServer::start(move |req| match req.path.as_str() {
+        "/v1/models" if !switch.load(Ordering::SeqCst) => MockResponse::json(
+            serde_json::json!({
+                "object": "list",
+                "data": [{"id": "gpt-4o-mini", "object": "model", "owned_by": "local"}],
+            })
+            .to_string(),
+        ),
+        "/v1/models" => MockResponse::json("{not a list"),
+        _ => MockResponse::not_found(),
+    })
+    .await;
+    let router = openai_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    set(&failing, true);
+    let status = router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert!(status.error.is_some(), "the second list failed");
+    assert_eq!(
+        router.warn_retired_listed(),
+        vec!["gpt-4o-mini".to_string()]
+    );
+}
+
+/// A provider taken out (disabled, its key removed) says nothing more on
+/// a hot reload: `deregister_provider` drops what its listing named. Red
+/// with the record kept past the deregistration.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_deregistered_provider_s_retired_ids_are_not_said_again() {
+    let server = listing_of(vec!["gpt-4o-mini"]).await;
+    let router = openai_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert_eq!(
+        router.warn_retired_listed(),
+        vec!["gpt-4o-mini".to_string()]
+    );
+    router.deregister_provider(&ProviderType::OpenAI);
+    assert!(router.warn_retired_listed().is_empty());
+}
+
+/// A listing with no retired id says nothing, at a pass or on a reload.
+/// Green on the parent: a guard.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_listing_with_no_retired_id_warns_of_none() {
+    let server = listing_of(vec!["gguf-listed", "gpt-6-luna"]).await;
+    let router = openai_router(&server.base_url, &[]);
+    router.refresh_models_for(&ProviderType::OpenAI).await;
+    assert!(router.warn_retired_listed().is_empty());
+    assert!(!logs_contain(RETIRED_WARNING));
 }

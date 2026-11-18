@@ -119,6 +119,11 @@ pub struct LlmRouter {
     /// Models a keyed provider on a local server listed with no context
     /// window, announced once a model (MODEL-ROWS, *Rev 96* (5)).
     pub(super) unknown_windows_logged: DashSet<String>,
+    /// The ids the catalogue retired that each provider's last read
+    /// listing named, said again on a hot reload (RETIRED-ID; not
+    /// [`ModelInfo::discovered`](crate::ModelInfo::discovered), which a
+    /// failed or empty listing also sets on a person's own row).
+    pub(super) retired_listed: DashMap<ProviderType, Vec<String>>,
 }
 
 /// Append `candidate` unless it is the model we are already replacing, or is
@@ -159,6 +164,7 @@ impl LlmRouter {
             alias_collapses_logged: DashSet::new(),
             forced_choices_logged: DashSet::new(),
             unknown_windows_logged: DashSet::new(),
+            retired_listed: DashMap::new(),
         };
         router.note_local_server_providers();
         router
@@ -195,6 +201,7 @@ impl LlmRouter {
             alias_collapses_logged: DashSet::new(),
             forced_choices_logged: DashSet::new(),
             unknown_windows_logged: DashSet::new(),
+            retired_listed: DashMap::new(),
         };
         router.note_local_server_providers();
         router
@@ -244,6 +251,7 @@ impl LlmRouter {
             alias_collapses_logged: DashSet::new(),
             forced_choices_logged: DashSet::new(),
             unknown_windows_logged: DashSet::new(),
+            retired_listed: DashMap::new(),
         };
         router.note_local_server_providers();
         router
@@ -910,6 +918,7 @@ impl LlmRouter {
     /// Returns the list of model IDs that were removed.
     pub fn deregister_provider(&self, provider_type: &ProviderType) -> Vec<String> {
         self.providers.remove(provider_type);
+        self.retired_listed.remove(provider_type);
         self.note_local_server_providers();
         self.model_registry.remove_by_provider(provider_type)
     }

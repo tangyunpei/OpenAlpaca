@@ -154,18 +154,8 @@ const LATEST: [&str; 8] = [
 ];
 
 /// The nine rows the directive retires (§4.9.7): every older row the
-/// parent's catalogue held.
-const RETIRED_ROWS: [&str; 9] = [
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-5-20250929",
-    "claude-haiku-4-5-20251001",
-    "gpt-5.2",
-    "gpt-5-mini",
-    "gpt-5-nano",
-    "gpt-4o-mini",
-    "o3",
-];
+/// parent's catalogue held, the list discovery's warning reads.
+const RETIRED_ROWS: [&str; 9] = super::RETIRED_IDS;
 
 /// None of the nine is a compiled row, and re-enabling a provider puts none
 /// back (§4.9.7). Red on the parent, which lists all nine.

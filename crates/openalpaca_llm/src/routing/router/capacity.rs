@@ -90,18 +90,18 @@ impl LlmRouter {
                 let present: std::collections::HashSet<String> =
                     models.iter().map(|m| m.id.clone()).collect();
                 for model in &models {
-                    // A model Ollama only named (a failed `/api/show`) is no
+                    // A model the provider only named — Ollama's failed
+                    // `/api/show` (BARE-NOT-READING), or a keyed provider's
+                    // listing of ids, which reads no capability or window
+                    // (pending-decisions *Rev 118*, taken as (a)) — is no
                     // reading: it is listed, but the registry keeps what a
-                    // reading gave (BARE-NOT-READING). A keyed provider's
-                    // listing of ids stays a reading, as before
-                    // (pending-decisions *Rev 118*).
+                    // reading gave, so Ollama's reading of an id a
+                    // compatible server also lists stands in either order.
                     use crate::routing::model_registry::ModelRegistry;
                     let register = if model.described {
                         ModelRegistry::register_discovered
-                    } else if provider_type.is_local() {
-                        ModelRegistry::register_listed
                     } else {
-                        ModelRegistry::register_keyed_listing
+                        ModelRegistry::register_listed
                     };
                     register(
                         &self.model_registry,
@@ -131,6 +131,18 @@ impl LlmRouter {
                     );
                 }
                 self.note_unknown_windows(provider_type, &models);
+                let retired: std::collections::BTreeSet<&str> = models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .filter(|id| crate::routing::model_registry::RETIRED_IDS.contains(id))
+                    .collect();
+                for id in &retired {
+                    warn_retired(id, provider_type);
+                }
+                self.retired_listed.insert(
+                    provider_type.clone(),
+                    retired.into_iter().map(str::to_string).collect(),
+                );
                 if provider_type.is_local() {
                     let withdrawn = self
                         .model_registry
@@ -213,6 +225,38 @@ impl LlmRouter {
         }
     }
 
+    /// Say once more, for a hot reload of `llm.toml`, each id a loaded
+    /// provider's last read listing named that the catalogue retired
+    /// ([`RETIRED_IDS`]), and return them, by id (RETIRED-ID,
+    /// pending-decisions *Rev 125*: (a) with (c)). A discovery pass says
+    /// its own listing's (`refresh_models_for`, which keeps them; a list
+    /// that could not be read keeps the last one's); a reload of a
+    /// provider already loaded runs none, so the daemon's watcher calls
+    /// this. Only listed ids are said: an id `llm.toml` itself names, in
+    /// `[orchestrator]` or a `[models]` row, is not (*Rev 105*, closed as
+    /// no change).
+    ///
+    /// [`RETIRED_IDS`]: crate::routing::model_registry::RETIRED_IDS
+    pub fn warn_retired_listed(&self) -> Vec<String> {
+        let mut listed: Vec<(String, ProviderType)> = self
+            .retired_listed
+            .iter()
+            .flat_map(|entry| {
+                let provider = entry.key().clone();
+                entry
+                    .value()
+                    .iter()
+                    .map(move |id| (id.clone(), provider.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        listed.sort_by_key(|(id, provider)| (id.clone(), provider.to_string()));
+        for (id, provider) in &listed {
+            warn_retired(id, provider);
+        }
+        listed.into_iter().map(|(id, _)| id).collect()
+    }
+
     /// Where a provider's list could not be read, or was empty, take its
     /// catalogue as served: every row, for a provider that calls its
     /// vendor's own API; for one built to call another server
@@ -256,6 +300,23 @@ impl LlmRouter {
             .ok_or(LlmError::NotConfigured)?;
         entry.value().provider.list_models_with_key(key).await
     }
+}
+
+/// The one line that says a provider lists `id`, which the catalogue
+/// retired: not an error — the id is offered as any id the catalogue
+/// lacks, with none of a built-in row's price, window or request rules
+/// (an Ollama listing still reads its window and flags, a local server's
+/// still costs 0); a person's own `[models."<id>"]` row can give it a
+/// price and a window.
+fn warn_retired(id: &str, provider: &ProviderType) {
+    tracing::warn!(
+        model = %id,
+        provider = %provider,
+        "The provider lists a model retired in the catalogue: it stays \
+         offered as any id the catalogue lacks, with none of a built-in \
+         row's price, window or request rules; a [models.\"<id>\"] row in \
+         llm.toml can give it a price and a window."
+    );
 }
 
 /// Rough estimate of tokens in a request.

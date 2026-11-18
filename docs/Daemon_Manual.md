@@ -290,7 +290,10 @@ whether the row was read before discovery or after it; it never sets a window
 of its own. A capability flag it leaves out is taken the same way, field by
 field: the built-in row's, else what discovery read (`vision` for
 `supports_image`, `tools` for `supports_tools`), else the default; a flag it
-states is its own. A model that an
+states is its own. Only Ollama's `/api/show` reads a model: a provider's
+list of ids (Anthropic's, OpenAI's, an OpenAI-compatible server's) reads
+none, so a tag Ollama reads keeps Ollama's reading when such a server
+lists it too, whichever was asked last. A model that an
 OpenAI-compatible server other than OpenAI's own — on this machine, the
 home network or elsewhere — lists with no window, and that no row sizes, is
 named once in `daemon.log` with the row that sizes it. Discovery needs no key, is not gated on
@@ -671,9 +674,14 @@ substitution ladder before the call, announced, instead of failing at the
 provider, unless your own `[models."<id>"]` row or the provider's model
 list still names it: then it stays routable and the call goes to the
 provider, priced by your row, or at the $3 / $15 fallback when only the
-list names it, with none of a built-in row's rules. An `llm.toml` seeded
-before this build keeps naming the ids it was seeded with; nothing
-rewrites it and nothing warns at start. A `[models."<id>"]`
+list names it, with none of a built-in row's rules. Each of the nine that
+a provider's list names is said in `daemon.log`, one `WARN` per id ("a
+model retired in the catalogue"), at every discovery pass (start, the
+enable toggle, `POST /v1/models/refresh`) and every hot reload of
+`llm.toml`. An `llm.toml` seeded before this build keeps naming the ids
+it was seeded with; nothing rewrites it, and its naming one does not by
+itself warn, at start or on a reload (only a provider's list naming one
+does). A `[models."<id>"]`
 row naming a built-in id keeps that row's prices where it leaves them out,
 its cache rates always (a row has no cache keys), and its long-prompt rate
 for each price it leaves out: a price the row gives is counted at that

@@ -9,6 +9,23 @@ use std::sync::{LazyLock, RwLock};
 static COMPILED_IDS: LazyLock<HashSet<String>> =
     LazyLock::new(|| ModelRegistry::default_models().into_keys().collect());
 
+/// The nine ids the move to the latest models retired from the catalogue
+/// (MODELS-LATEST, the owner's directive of 2026-11-14), every older row
+/// the catalogue then held. A provider may still list one; discovery then
+/// offers it as any id the catalogue lacks, and says so once per pass
+/// (RETIRED-ID, pending-decisions *Rev 125*: (a) with (c)).
+pub const RETIRED_IDS: [&str; 9] = [
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
+    "gpt-5.2",
+    "gpt-5-mini",
+    "gpt-5-nano",
+    "gpt-4o-mini",
+    "o3",
+];
+
 /// Pricing information for a model.
 #[derive(Debug, Clone)]
 pub struct PricingInfo {
@@ -97,17 +114,14 @@ struct BareFallback {
 }
 
 /// How a discovery registers a model ([`ModelRegistry::register_discovered`],
-/// [`ModelRegistry::register_listed`],
-/// [`ModelRegistry::register_keyed_listing`]).
+/// [`ModelRegistry::register_listed`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Discovery {
     /// A reading (Ollama's `/api/show` answer): recorded, and replacing
     /// what a bare fallback left.
     Reading,
-    /// A keyed provider's listing of ids: recorded as a reading, as
-    /// before, but replacing nothing a bare fallback left.
-    KeyedListing,
-    /// Ollama's failed `/api/show`: no reading.
+    /// A model only named: Ollama's failed `/api/show`, or a keyed
+    /// provider's listing of ids. No reading.
     BareFallback,
 }
 
@@ -228,12 +242,10 @@ pub struct DiscoveredModel {
     /// The provider described this model — Ollama's `/api/show` answered —
     /// so its window and flags are a reading the registry records
     /// ([`ModelRegistry::register_discovered`]). `false` for a
-    /// [`Self::bare`] row: a failed `/api/show` read nothing
-    /// ([`ModelRegistry::register_listed`]; BARE-NOT-READING, *Rev 115*
-    /// (3) (c) and (4) (b)); a keyed provider's listing of ids, also bare,
-    /// is still recorded as a reading, as before
-    /// ([`ModelRegistry::register_keyed_listing`]; pending-decisions
-    /// *Rev 118*).
+    /// [`Self::bare`] row: a failed `/api/show`, or a keyed provider's
+    /// listing of ids, read nothing ([`ModelRegistry::register_listed`];
+    /// BARE-NOT-READING, *Rev 115* (3) (c) and (4) (b); the keyed listing
+    /// pending-decisions *Rev 118*, taken as (a)).
     pub described: bool,
 }
 
@@ -244,11 +256,11 @@ impl DiscoveredModel {
     /// that does not describe its models has not said this one lacks them.
     /// Ollama, which does describe them, says so explicitly.
     ///
-    /// Not described ([`Self::described`] `false`). From Ollama, no
-    /// reading: the registry lists the model with these defaults but keeps
-    /// what a reading gave it (a row-less entry its first, a row's left-out
-    /// flags the latest; an entry new again, after a withdrawal, takes
-    /// these). From a keyed provider's listing, recorded as before.
+    /// Not described ([`Self::described`] `false`), so no reading, from
+    /// Ollama or a keyed provider's listing: the registry lists the model
+    /// with these defaults but keeps what a reading gave it (a row-less
+    /// entry its first, a row's left-out flags the latest; an entry new
+    /// again, after a withdrawal, takes these).
     pub fn bare(id: String) -> Self {
         Self {
             id,
@@ -635,7 +647,9 @@ impl ModelRegistry {
         // and Haiku 4.5 (`claude-haiku-4-5-20251001`); `gpt-5.2`,
         // `gpt-5-mini`, `gpt-5-nano`, `gpt-4o-mini` and `o3`. Several still
         // answer until their shutdown dates; a discovered listing of one is
-        // a bare row priced at the fallback (§4.9.8, the owner's open item).
+        // a bare row priced at the fallback (§4.9.8), said in the log once
+        // per discovery pass and hot reload ([`RETIRED_IDS`]; RETIRED-ID,
+        // pending-decisions *Rev 125*: (a) with (c)).
         models
     }
 
@@ -1240,15 +1254,20 @@ impl ModelRegistry {
     /// ([`Self::register_listed`]) this reading replaces, the window and,
     /// for a row-less entry, the flags (BARE-NOT-READING): the bare
     /// registration does not hold the first reading's place. A keyed
-    /// listing goes through [`Self::register_keyed_listing`].
+    /// provider's listing of ids is no reading: it goes through
+    /// [`Self::register_listed`].
     pub fn register_discovered(&self, model_id: String, info: ModelInfo) {
         self.register_discovery(model_id, info, Discovery::Reading);
     }
 
-    /// Register a model Ollama listed but did not describe: a
-    /// [`DiscoveredModel::bare`] row from a failed `/api/show`, `info`
-    /// holding the fallback's defaults. Not a reading (BARE-NOT-READING,
-    /// *Rev 115* (3) (c) and (4) (b)): the model is listed as
+    /// Register a model a provider listed but did not describe: a
+    /// [`DiscoveredModel::bare`] row, from Ollama's failed `/api/show` or
+    /// a keyed provider's listing of ids (Anthropic's, OpenAI's, an
+    /// OpenAI-compatible server's), `info` holding the fallback's
+    /// defaults. Not a reading (BARE-NOT-READING, *Rev 115* (3) (c) and
+    /// (4) (b); the keyed listing pending-decisions *Rev 118*, taken as
+    /// (a), so Ollama's reading of an id a compatible server also lists
+    /// stands whichever discovery ran last): the model is listed as
     /// [`Self::register_discovered`] lists it, but neither record is
     /// written and no flag a row left out is filled, so the registry keeps
     /// what a reading gave (a row-less entry its first, a row's left-out
@@ -1260,21 +1279,8 @@ impl ModelRegistry {
         self.register_discovery(model_id, info, Discovery::BareFallback);
     }
 
-    /// Register a model a keyed provider's listing named (Anthropic's,
-    /// OpenAI's, an OpenAI-compatible server's: ids only,
-    /// [`DiscoveredModel::bare`]). Recorded as a reading, as on the parent
-    /// of BARE-NOT-READING (pending-decisions *Rev 118*, an owner item:
-    /// counting it as no reading would change a row a person meets, an id
-    /// Ollama reads and a compatible server also lists), so the latest
-    /// discovery's flags still fill a row's left-out ones. It does not
-    /// take over what an Ollama bare fallback left ([`BareFallback`]),
-    /// which Ollama's next reading replaces.
-    pub fn register_keyed_listing(&self, model_id: String, info: ModelInfo) {
-        self.register_discovery(model_id, info, Discovery::KeyedListing);
-    }
-
     fn register_discovery(&self, model_id: String, info: ModelInfo, discovery: Discovery) {
-        let described = discovery != Discovery::BareFallback;
+        let described = discovery == Discovery::Reading;
         let listed_window = info.context_window;
         let read = DiscoveredFlags {
             supports_image: info.supports_image,
@@ -1294,15 +1300,11 @@ impl ModelRegistry {
                 .write()
                 .unwrap_or_else(|p| p.into_inner())
                 .insert(model_id.clone(), read);
-            if discovery == Discovery::Reading {
-                self.bare_fallbacks
-                    .write()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&model_id)
-                    .unwrap_or_default()
-            } else {
-                BareFallback::default()
-            }
+            self.bare_fallbacks
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&model_id)
+                .unwrap_or_default()
         } else {
             BareFallback::default()
         };
