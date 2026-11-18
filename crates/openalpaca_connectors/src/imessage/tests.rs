@@ -602,3 +602,98 @@ fn an_attachments_tilde_needs_a_usable_home() {
     );
     assert_eq!(resolve_attachment_path("", None), Some(String::new()));
 }
+
+/// Set in the child [`run_with_home`] starts: the test it runs checks the
+/// lookup under the home the child was given, and starts no child itself.
+pub(super) const HOME_CHILD_ENV: &str = "OPENALPACA_TEST_HOME_CHILD";
+
+/// Run this binary's test `test` (`module_path!()`-qualified) again in a
+/// child process whose `HOME` is `home` and whose directory is `cwd`, with
+/// [`HOME_CHILD_ENV`] set, and assert that the child ran that one test and
+/// it passed. A lookup of the user's home is tested this way (121-2's
+/// wiring) because this binary runs its tests on parallel threads and no
+/// guard of it holds `HOME`: moving it here would move it under every
+/// other test. `home` is never unset, since `std::env::home_dir` would then
+/// read the account's real home.
+pub(super) fn run_with_home(test: &str, home: &std::path::Path, cwd: &std::path::Path) {
+    let name = test.split_once("::").map_or(test, |(_, rest)| rest);
+    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env(HOME_CHILD_ENV, "1")
+        .output()
+        .expect("the test binary runs again");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success()
+            && stdout.contains("running 1 test")
+            && stdout.contains("test result: ok. 1 passed"),
+        "the child with HOME={} running {name}:\n{stdout}\n{}",
+        home.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// 121-2's wiring: `IMessageConnector::new` itself takes chat.db's place
+/// from the home `paths::user_home` reports. A child of this binary builds
+/// one under an absolute `HOME`, whose chat.db it names, and under a
+/// relative one, where it names none: a hand read of `HOME` would name
+/// `<relative>/Library/Messages/chat.db`, which the child's directory
+/// resolves. Nothing is opened: `new` only names the path.
+#[test]
+fn the_connector_takes_chat_db_from_the_home_user_home_reports() {
+    use super::connector::IMessageConnector;
+    use arc_swap::ArcSwap;
+    use async_trait::async_trait;
+    use openalpaca_core::{
+        bus::EventBus,
+        context::SharedContext,
+        daemon_config::DaemonConfig,
+        gateway::{Gateway, HandleRequest, HandleResult, MessageHandler},
+        lane::LaneManager,
+    };
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    struct Unused;
+    #[async_trait]
+    impl MessageHandler for Unused {
+        async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
+            Err("not called".to_string())
+        }
+    }
+
+    if std::env::var_os(HOME_CHILD_ENV).is_some() {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("the child's HOME"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap());
+        let gateway = Arc::new(Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(Unused),
+            EventBus::default(),
+            None,
+        ));
+        let connector = IMessageConnector::new(
+            db,
+            Arc::new(EventBus::default()),
+            gateway,
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        );
+        let expected = home
+            .is_absolute()
+            .then(|| home.join("Library").join("Messages").join("chat.db"));
+        assert_eq!(connector.chat_db_path, expected, "HOME={home:?}");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let test = concat!(
+        module_path!(),
+        "::the_connector_takes_chat_db_from_the_home_user_home_reports"
+    );
+    run_with_home(test, &root.path().join("abs-home"), root.path());
+    run_with_home(test, Path::new("rel-home"), root.path());
+}

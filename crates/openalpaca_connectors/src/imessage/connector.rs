@@ -56,7 +56,7 @@ pub struct IMessageConnector {
     cancel_token: CancellationToken,
     /// `~/Library/Messages/chat.db` under the user's home, or none when the
     /// home is not usable ([`chat_db_path`]).
-    chat_db_path: Option<PathBuf>,
+    pub(super) chat_db_path: Option<PathBuf>,
     pub(super) local_user_id: Option<String>,
     pub(super) confirmation_broker: Option<Arc<ConfirmationBroker>>,
     /// Maps chat identifier -> queue of request_ids for pending tool

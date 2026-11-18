@@ -45,3 +45,37 @@ fn the_credential_file_check_reads_the_home_it_is_given() {
         None
     );
 }
+
+/// 121-2's wiring: `check_credential_file` itself reads the home
+/// `paths::user_home` reports. A child of this binary runs the check under
+/// an absolute `HOME`, where the planted files are found, and under a
+/// relative one naming, from the child's directory, a folder that holds
+/// them too, where none is looked for: a hand read of `HOME` would find
+/// them. Everything is in a temporary folder, so no test reaches the
+/// machine's credential files.
+#[test]
+fn the_credential_check_reads_the_home_user_home_reports() {
+    use crate::test_util::{HOME_CHILD_ENV, run_with_home};
+    if std::env::var_os(HOME_CHILD_ENV).is_some() {
+        let home = std::env::var_os("HOME").expect("the child's HOME");
+        let usable = std::path::Path::new(&home).is_absolute();
+        assert_eq!(check_credential_file("claude_code"), usable, "{home:?}");
+        assert_eq!(check_credential_file("codex"), usable, "{home:?}");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for home in ["abs-home", "rel-home"] {
+        let home = root.join(home);
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude/.credentials.json"), "{}").unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/auth.json"), "{}").unwrap();
+    }
+    let test = concat!(
+        module_path!(),
+        "::the_credential_check_reads_the_home_user_home_reports"
+    );
+    run_with_home(test, &root.join("abs-home"), root, &[]);
+    run_with_home(test, std::path::Path::new("rel-home"), root, &[]);
+}

@@ -473,4 +473,58 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "shared msg");
     }
+
+    /// 121-2's wiring: `get_attachments_for_message` itself expands an
+    /// attachment's `~` to the home `paths::user_home` reports. A child of
+    /// this binary reads one under an absolute `HOME` holding the file,
+    /// which it keeps, and under a relative one naming, from the child's
+    /// directory, a folder that holds it too, which it skips: a hand read
+    /// of `HOME` would keep it.
+    #[test]
+    fn an_attachment_is_found_under_the_home_user_home_reports() {
+        use crate::imessage::tests::{HOME_CHILD_ENV, run_with_home};
+        if std::env::var_os(HOME_CHILD_ENV).is_some() {
+            let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+            let conn = create_test_db();
+            let handle = insert_handle(&conn, "+15551234567");
+            let chat = insert_chat(&conn, "iMessage;-;+15551234567");
+            let message = insert_message(&conn, "", handle, chat, "iMessage", 0);
+            conn.execute(
+                "INSERT INTO attachment (filename, mime_type, transfer_name, total_bytes)
+                 VALUES ('~/att/a.png', 'image/png', 'a.png', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (?1, ?2)",
+                [message, conn.last_insert_rowid()],
+            )
+            .unwrap();
+            let reader = ChatDbReader::from_connection(conn);
+            let found: Vec<String> = reader
+                .get_attachments_for_message(message)
+                .into_iter()
+                .map(|a| a.file_path)
+                .collect();
+            let expected: Vec<String> = if home.is_absolute() {
+                vec![home.join("att/a.png").to_string_lossy().into_owned()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(found, expected, "HOME={home:?}");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        for home in ["abs-home", "rel-home"] {
+            let att = root.path().join(home).join("att");
+            std::fs::create_dir_all(&att).unwrap();
+            std::fs::write(att.join("a.png"), b"png").unwrap();
+        }
+        let test = concat!(
+            module_path!(),
+            "::an_attachment_is_found_under_the_home_user_home_reports"
+        );
+        run_with_home(test, &root.path().join("abs-home"), root.path());
+        run_with_home(test, std::path::Path::new("rel-home"), root.path());
+    }
 }

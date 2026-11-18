@@ -342,3 +342,35 @@ pub(crate) fn note_titles(
 fn the_storage_test_home_guard_is_armed_in_this_test_build() {
     assert!(openalpaca_storage::store::projects::test_home_guard_armed());
 }
+
+/// Set in the child [`run_with_home`] starts: the test it runs checks the
+/// lookup under the home the child was given, and starts no child itself.
+pub(crate) const HOME_CHILD_ENV: &str = "OPENALPACA_TEST_HOME_CHILD";
+
+/// Run this binary's test `test` (`module_path!()`-qualified) again in a
+/// child process whose `HOME` is `home` and whose directory is `cwd`, with
+/// [`HOME_CHILD_ENV`] set, and assert that the child ran that one test and
+/// it passed. A lookup of the user's home is tested this way (121-2's
+/// wiring) because this binary runs its tests on parallel threads and
+/// `ENV_LOCK` does not hold `HOME`: moving it here would move it under
+/// every other test. `home` is never unset, since `std::env::home_dir`
+/// would then read the account's real home.
+pub(crate) fn run_with_home(test: &str, home: &Path, cwd: &Path) {
+    let name = test.split_once("::").map_or(test, |(_, rest)| rest);
+    let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env(HOME_CHILD_ENV, "1")
+        .output()
+        .expect("the test binary runs again");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success()
+            && stdout.contains("running 1 test")
+            && stdout.contains("test result: ok. 1 passed"),
+        "the child with HOME={} running {name}:\n{stdout}\n{}",
+        home.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

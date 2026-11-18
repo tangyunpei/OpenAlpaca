@@ -777,6 +777,54 @@ mod tests {
         assert_eq!(launch, GuiLaunch::AppBundle(system_app));
     }
 
+    /// 121-2's wiring: `resolve_gui_launch` itself looks under the home
+    /// `paths::user_home` reports. A child of this binary, `OPENALPACA_GUI_APP`
+    /// unset, resolves under an absolute `HOME` holding
+    /// `Applications/openalpaca-gui.app`, which it launches, and under a
+    /// relative one naming, from the child's directory, a folder that holds
+    /// one too, which it never launches: a hand read of `HOME` would.
+    #[test]
+    fn gui_resolution_reads_the_home_user_home_reports() {
+        use crate::test_util::{HOME_CHILD_ENV, run_with_home};
+        if std::env::var_os(HOME_CHILD_ENV).is_some() {
+            let home = PathBuf::from(std::env::var_os("HOME").expect("the child's HOME"));
+            let cwd = std::env::current_dir().expect("the child's directory");
+            let launch = resolve_gui_launch(&cwd.join("bin/openalpaca"));
+            let user_app = home.join("Applications").join("openalpaca-gui.app");
+            if home.is_absolute() {
+                assert_eq!(
+                    launch.expect("the user's app"),
+                    GuiLaunch::AppBundle(user_app)
+                );
+            } else if let Ok(GuiLaunch::AppBundle(app)) = &launch {
+                assert!(
+                    !app.starts_with(&home) && !app.starts_with(cwd.join(&home)),
+                    "a relative home's app was taken: {app:?}"
+                );
+            }
+            return;
+        }
+        let root = tempfile::TempDir::new().unwrap();
+        for home in ["abs-home", "rel-home"] {
+            let app = root
+                .path()
+                .join(home)
+                .join("Applications/openalpaca-gui.app");
+            fs::create_dir_all(app).expect("a user app");
+        }
+        let test = concat!(
+            module_path!(),
+            "::gui_resolution_reads_the_home_user_home_reports"
+        );
+        run_with_home(
+            test,
+            &root.path().join("abs-home"),
+            root.path(),
+            &[GUI_APP_ENV],
+        );
+        run_with_home(test, Path::new("rel-home"), root.path(), &[GUI_APP_ENV]);
+    }
+
     #[test]
     fn gui_resolution_uses_dev_fallback_when_workspace_exists() {
         let root = tempfile::TempDir::new().unwrap();

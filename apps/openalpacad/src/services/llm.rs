@@ -309,3 +309,54 @@ pub async fn flush_cost_tracker(
     }
     info!("Flushed CostTracker to DB: {flushed} row(s)");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::{HOME_CHILD_ENV, run_with_home};
+
+    /// 121-2's wiring: `build_token_manager` itself gives discovery the home
+    /// `paths::user_home` reports. A child of this binary builds one, Codex
+    /// only (Claude Code's discovery would read the macOS keychain), under
+    /// an absolute `HOME` holding `.codex/auth.json`, whose token it holds,
+    /// and under a relative one naming, from the child's directory, a
+    /// folder that holds one too, where it holds none: a hand read of
+    /// `HOME` would. The files are a temporary folder's, never the
+    /// machine's credentials.
+    #[tokio::test]
+    async fn the_token_manager_discovers_under_the_home_user_home_reports() {
+        if std::env::var_os(HOME_CHILD_ENV).is_some() {
+            let home = std::env::var_os("HOME").expect("the child's HOME");
+            let config = openalpaca_llm::CredentialDiscoveryConfig {
+                claude_code: Some(false),
+                codex: Some(true),
+                ..Default::default()
+            };
+            let tm = build_token_manager(&config, &None, &None, &CancellationToken::new())
+                .await
+                .expect("discovery is on");
+            let token = tm.get_token(openalpaca_llm::CredentialSource::Codex).await;
+            let expected = Path::new(&home)
+                .is_absolute()
+                .then(|| "wiring-test-token".to_string());
+            assert_eq!(token, expected, "HOME={home:?}");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        for home in ["abs-home", "rel-home"] {
+            let codex = root.path().join(home).join(".codex");
+            std::fs::create_dir_all(&codex).unwrap();
+            std::fs::write(
+                codex.join("auth.json"),
+                r#"{"access_token":"wiring-test-token"}"#,
+            )
+            .unwrap();
+        }
+        let test = concat!(
+            module_path!(),
+            "::the_token_manager_discovers_under_the_home_user_home_reports"
+        );
+        run_with_home(test, &root.path().join("abs-home"), root.path());
+        run_with_home(test, Path::new("rel-home"), root.path());
+    }
+}
