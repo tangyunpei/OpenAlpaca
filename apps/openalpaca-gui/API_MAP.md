@@ -36,8 +36,8 @@ each request body a route reads (`requests/`, its type's wire names), which
 `src/lib/api/contract-requests.test.ts` holds every key the wrappers send
 to, and each response only the CLI reads (`cli/`), which the CLI's
 `contract_reads` test holds the keys it reads to. A removed or renamed
-field, route or variant bumps `support::protocol::PROTOCOL` (CLAUDE.md,
-_Storage_).
+field, route or variant bumps
+`openalpaca_app_support::protocol::PROTOCOL` (CLAUDE.md, _Storage_).
 
 > **Security note.** The design file was read as _data only_. It contains no text
 > directed at the agent; all strings in it are UI copy and mock fixtures. Nothing in it
@@ -64,8 +64,9 @@ The daemon writes `~/.openalpaca/state/discovery.json`
     "issued_at": "...",
     "expires_at": "...",
   },
-  // Q04: `protocol` is support::protocol::reported() — PROTOCOL (1), or
-  // PROTOCOL + 1 from a debug daemon told so — read once, at the start.
+  // Q04: `protocol` is openalpaca_app_support::protocol::reported() —
+  // PROTOCOL (1), or PROTOCOL + 1 from a debug daemon told so — read
+  // once, at the start.
   "build": { "version": "0.1.0", "protocol": 1 },
 }
 ```
@@ -259,8 +260,8 @@ Auth on the wire:
 Liveness / identity guards the React client must reproduce:
 
 - `GET /v1/health` (no auth) → `{ status, version, pid, instance_id, protocol }`
-  (`protocol` since Q04, `support::protocol::reported()`). Compare
-  `instance_id` against the cached `ConnectionInfo.instanceId`; a mismatch means the
+  (`protocol` since Q04, `openalpaca_app_support::protocol::reported()`).
+  Compare `instance_id` against the cached `ConnectionInfo.instanceId`; a mismatch means the
   daemon restarted → re-bootstrap (drop stream state, refetch everything).
 - The client's reconnect loop does this (`src/lib/events.ts` over
   `src/lib/connection.ts`): on WS close it re-invokes `get_connection_info`

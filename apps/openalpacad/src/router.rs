@@ -502,8 +502,8 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::
 /// `GET /v1/health`'s body: the public liveness probe the GUI polls every
 /// 30 s, clearing its client when `instance_id` changes, and the second step
 /// of the app shell's probe (Q04), which reads `instance_id` and `protocol`
-/// (`support::protocol::reported()`, the one read site of the debug
-/// override). Its shape is a wire contract (`health_tests` pins it).
+/// (`openalpaca_app_support::protocol::reported()`, the one read site of
+/// the debug override). Its shape is a wire contract (`health_tests` pins it).
 fn health_json(instance_id: &str) -> serde_json::Value {
     serde_json::json!({
         "status": "ok",
@@ -626,10 +626,11 @@ mod health_tests {
         );
     }
 
-    /// `protocol` is the one read site's, `support::protocol::reported()`,
-    /// not a literal (C-20): in a child of this test binary given the debug
-    /// override — so no other test in this process, nor a daemon one spawns,
-    /// sees the variable — the body says `PROTOCOL + 1`.
+    /// `protocol` is the one read site's,
+    /// `openalpaca_app_support::protocol::reported()`, not a literal (C-20):
+    /// in a child of this test binary given the debug override — so no other
+    /// test in this process, nor a daemon one spawns, sees the variable — the
+    /// body says `PROTOCOL + 1`.
     #[cfg(debug_assertions)]
     #[test]
     fn the_health_body_s_protocol_is_the_one_read_site_s() {

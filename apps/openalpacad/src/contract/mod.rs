@@ -30,12 +30,13 @@
 //! `OPENALPACA_CONTRACT_WRITE=1`. A **removal** — a key path in the file the
 //! fresh sample lacks (a rename is a removal and an addition), or a whole
 //! sample no longer written (its producer gone) — fails even then, unless
-//! `support::protocol::PROTOCOL` is above the protocol the folder records
-//! (`protocol.json`): the PROTOCOL rule (CLAUDE.md, *Storage*). An addition
-//! — a new key path or a new sample — needs no bump. The rewrite records the
-//! new `PROTOCOL`. The check reads bodies and events only: a sample's name
-//! is its producer's literal, never read from the router, so a route path
-//! renamed or removed in `router.rs` alone moves no sample.
+//! `openalpaca_app_support::protocol::PROTOCOL` is above the protocol the
+//! folder records (`protocol.json`): the PROTOCOL rule (CLAUDE.md,
+//! *Storage*). An addition — a new key path or a new sample — needs no
+//! bump. The rewrite records the new `PROTOCOL`. The check reads bodies and
+//! events only: a sample's name is its producer's literal, never read from
+//! the router, so a route path renamed or removed in `router.rs` alone moves
+//! no sample.
 
 mod events;
 pub(crate) mod requests;
@@ -352,7 +353,8 @@ fn judge(
     };
     let rewrite = "rewrite the folder with OPENALPACA_CONTRACT_WRITE=1";
     let bump = "a removed or renamed field, route or event variant bumps \
-                support::protocol::PROTOCOL in the same commit (CLAUDE.md, Storage)";
+                openalpaca_app_support::protocol::PROTOCOL in the same commit \
+                (CLAUDE.md, Storage)";
 
     for ((kind, name), value) in fresh {
         let label = format!("{}/{name}", kind.folder());
@@ -557,7 +559,8 @@ mod tests {
             assert_eq!(verdict.problems.len(), 1, "{verdict:?}");
             assert!(
                 verdict.problems[0].contains("responses/get-x: no longer carries a;")
-                    && verdict.problems[0].contains("bumps support::protocol::PROTOCOL"),
+                    && verdict.problems[0]
+                        .contains("bumps openalpaca_app_support::protocol::PROTOCOL"),
                 "{verdict:?}"
             );
             assert!(verdict.writes.is_empty() && verdict.record.is_none());
@@ -651,7 +654,8 @@ mod tests {
                 assert!(
                     verdict.problems[0]
                         .contains(&format!("{}/post-x: no longer carries a;", kind.folder()))
-                        && verdict.problems[0].contains("bumps support::protocol::PROTOCOL"),
+                        && verdict.problems[0]
+                            .contains("bumps openalpaca_app_support::protocol::PROTOCOL"),
                     "{verdict:?}"
                 );
             }

@@ -111,8 +111,9 @@ const STOP_AND_RECONNECT_SENTENCE: &str = "Stop that daemon with `openalpaca dae
                                            this app's own.";
 
 /// A mismatch as this shell says it — the `who`, the `gui.log` line and the
-/// refusal the webview receives — over `support::protocol`'s
-/// [`Mismatch`], which carries the facts and no words.
+/// refusal the webview receives — over
+/// `openalpaca_app_support::protocol`'s [`Mismatch`], which carries the
+/// facts and no words.
 pub(crate) trait MismatchWords {
     /// The daemon refused: its pid, and the version and protocol it states.
     fn who(&self) -> String;
