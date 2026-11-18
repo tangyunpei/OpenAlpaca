@@ -245,7 +245,7 @@ impl LlmProvider for OllamaProvider {
                     tracing::warn!(
                         model = %id,
                         error = %e,
-                        "Ollama /api/show failed — the model stays listed with the context length and capabilities last read, or the defaults if none was"
+                        "Ollama /api/show failed — the model stays listed with what an earlier answer gave it, or, if none has or it was pulled again, with the defaults (8192 tokens, no image support, tools assumed), until an answer reads it"
                     );
                     models.push(DiscoveredModel::bare(id));
                 }
