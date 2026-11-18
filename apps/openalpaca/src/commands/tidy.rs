@@ -40,10 +40,19 @@
 //! item 6 of 2026-11-14), and so is one that is a work tree itself, a
 //! folder of the config directory's own holding a `.git` entry (TIDY-LINKED,
 //! "check it too"): a move there is a move inside the work tree.
-//! A template file or skill folder inside it is not checked: one holding a
-//! `.git` entry, or one that is itself a link (a move renames the link, not
-//! what it names), is tidied as before. [`git_work_tree`] says how a work
-//! tree is found.
+//!
+//! One copy's own folder is checked too, and only for a `.git` entry
+//! (TIDY-COPY-GIT, the advisor's "leave that one copy with a line"): a
+//! skill's folder holding one is left where it is, the listing saying it
+//! would be left and `--apply` saying it was, each naming it and why, while
+//! every other copy is tidied as before and the run is not refused. Few
+//! folders reach it: core's rule counts every file under a folder, so a
+//! `.git` holding any file (a work tree's `HEAD`, a linked worktree's
+//! `.git` file) makes the folder the person's, never listed; only a `.git`
+//! holding no file but a `.DS_Store` leaves it a copy. A template is a
+//! file, with no folder of its own. A copy that is itself a link (a move
+//! renames the link, not what it names) is tidied as before.
+//! [`git_work_tree`] says how a work tree is found.
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -287,8 +296,8 @@ impl WorkTree {
 /// the config directory's own holding a `.git` entry (TIDY-LINKED). `None`
 /// otherwise, and for a missing `dir`. The config directory is in no work
 /// tree by then, so `dir`, its child, is in one only by being a link into
-/// one or by holding its own `.git`; a `.git` deeper down, in a template's
-/// or a skill's folder, is not looked for.
+/// one or by holding its own `.git`; a `.git` deeper down, in a skill's own
+/// folder, is not looked for here: [`tidy_lines`] leaves that one copy.
 fn work_tree_of(config_dir: &Path, dir: &Path) -> Option<WorkTree> {
     if let Some(root) = git_work_tree(config_dir) {
         return Some(WorkTree {
@@ -317,7 +326,10 @@ fn work_tree_of(config_dir: &Path, dir: &Path) -> Option<WorkTree> {
 /// to tidy, it says so first, `apply` or not (TIDY-1). With a copy to move
 /// and `config_dir` inside a git work tree, or the folder a link into one or
 /// one itself ([`work_tree_of`]), `apply` is refused before anything moves
-/// or the daemon is asked.
+/// or the daemon is asked. A copy whose own folder holds a `.git` entry is
+/// left, with a line saying why, and the others tidied (TIDY-COPY-GIT);
+/// when the listing would leave every copy, its last line says `apply`
+/// would move none.
 pub(crate) async fn tidy_lines(
     kind: Kind,
     config_dir: &Path,
@@ -364,6 +376,7 @@ pub(crate) async fn tidy_lines(
         ));
     }
     let mut moved = 0;
+    let mut would_move = 0;
     for copy in copies {
         let target = archive.join(&copy.archived_as);
         let left = daemon_lists
@@ -371,17 +384,31 @@ pub(crate) async fn tidy_lines(
             .is_some_and(|listed| !listed.contains(&canonical(&copy.path)));
         const LEFT: &str = "the running daemon does not list it as an unused copy, so it may \
                             read it as yours";
+        // A copy whose own folder holds a `.git` entry is left, that copy
+        // alone (TIDY-COPY-GIT). Only a skill's folder can: a template is a
+        // file, so the test finds nothing there.
+        let own_git = std::fs::symlink_metadata(copy.path.join(".git")).is_ok();
+        const OWN_GIT: &str = "its folder holds a .git entry; move it yourself if you mean to";
+        let left_because = if own_git {
+            Some(OWN_GIT)
+        } else if left {
+            Some(LEFT)
+        } else {
+            None
+        };
         if !apply {
             lines.push(format!("  {} ({})", shown(&copy.path), copy.describe()));
-            lines.push(if left {
-                format!("    would be left: {LEFT}")
-            } else {
-                format!("    would move to {}", shown(&target))
+            lines.push(match left_because {
+                Some(why) => format!("    would be left: {why}"),
+                None => {
+                    would_move += 1;
+                    format!("    would move to {}", shown(&target))
+                }
             });
             continue;
         }
-        if left {
-            lines.push(format!("Left {}: {LEFT}", shown(&copy.path)));
+        if let Some(why) = left_because {
+            lines.push(format!("Left {}: {why}", shown(&copy.path)));
             continue;
         }
         if std::fs::symlink_metadata(&target).is_ok() {
@@ -415,6 +442,12 @@ pub(crate) async fn tidy_lines(
                 kind.dir(),
                 shown(&tree.named),
                 tree.listed_relation()
+            ),
+            // Every listed copy left: `--apply` would move none, so the
+            // line promises no move (TIDY-COPY-GIT).
+            None if would_move == 0 => format!(
+                "Nothing was moved, and `openalpaca {} tidy --apply` would move none of them.",
+                kind.dir()
             ),
             None => format!(
                 "Nothing was moved; `openalpaca {} tidy --apply` moves them.",

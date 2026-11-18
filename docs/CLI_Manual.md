@@ -1036,10 +1036,15 @@ Notes:
   an earlier build. A folder you edited or added a file to stays. A folder
   moved there is not read as a skill. Inside a git work tree `tidy --apply`
   moves nothing and stops with an error naming it, as `agents tidy --apply`
-  does, also when `skills/` is a link into one or holds its own `.git`
-  (a `.git` inside a skill's own folder is not looked for); `tidy` alone
-  still lists, and with no unedited copy either says there is nothing to
-  tidy.
+  does, also when `skills/` is a link into one or holds its own `.git`;
+  `tidy` alone still lists, and with no unedited copy either says there is
+  nothing to tidy. A `.git` with any file in it (a repository's `HEAD`, a
+  linked worktree's `.git` file) makes a skill's folder yours, so it is not
+  listed at all; an unedited copy whose folder holds a `.git` with no file
+  in it is left where it is: `tidy` says it would be left and
+  `tidy --apply` that it was left, each naming it and why, and every other
+  copy moves as before; when every copy listed would be left, `tidy`'s
+  last line says `tidy --apply` would move none of them.
 
 ### `chat`
 
