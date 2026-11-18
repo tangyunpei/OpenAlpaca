@@ -431,6 +431,90 @@ def test_the_chrono_manifests_are_read_from_the_members() -> None:
         assert guard.chrono_manifests(root) == ["crates/b/Cargo.toml"], guard.chrono_manifests(root)
 
 
+PACKAGE_IGNORING = """\
+{
+  "name": "x",
+  "private": true,
+  "scripts": {
+    "audit": "bun audit --ignore=GHSA-fc5q-39xc-vjpf"
+  }
+}"""
+PICO_LOCK = """\
+{
+  "lockfileVersion": 2,
+  "packages": {
+    "fdir": ["fdir@6.5.0", "", { "peerDependencies": { "picomatch": "^3 || ^4" } }, "sha512-x"],
+    "picomatch": ["picomatch@{version}", "", {}, "sha512-y"],
+  }
+}
+"""
+
+
+def _bun(version: str | None, package: str = PACKAGE_IGNORING) -> dict[str, str]:
+    lock = PICO_LOCK.replace("{version}", version) if version else PICO_LOCK.replace(
+        '    "picomatch": ["picomatch@{version}", "", {}, "sha512-y"],\n', "")
+    return {"package.json": package, "bun.lock": lock}
+
+
+def test_the_picomatch_ignore_beside_an_affected_picomatch_passes() -> None:
+    for version in ("4.0.7", "4.0.6", "2.3.1"):
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), files=_bun(version)))
+            assert rc == 0, (version, out)
+    # one affected picomatch among others is enough
+    files = _bun("4.0.8")
+    files["bun.lock"] = files["bun.lock"].replace(
+        '  }\n}', '    "x/picomatch": ["picomatch@4.0.7", "", {}, "sha512-z"],\n  }\n}')
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), files=files))
+        assert rc == 0, out
+
+
+def test_the_picomatch_ignore_with_only_a_fixed_picomatch_fails() -> None:
+    for version in ("4.0.8", "4.1.0", "5.0.0"):
+        out = _planted("picomatch", files=_bun(version))
+        assert "package.json:5: picomatch: GHSA-fc5q-39xc-vjpf is ignored" in out, (version, out)
+        assert "lift the ignore" in out, out
+
+
+def test_the_picomatch_ignore_with_no_picomatch_fails() -> None:
+    _planted("picomatch", files=_bun(None))
+    files = _bun("4.0.7")
+    del files["bun.lock"]
+    _planted("picomatch", files=files)
+
+
+def test_the_picomatch_ignore_is_read_in_either_flag_form() -> None:
+    spaced = PACKAGE_IGNORING.replace("--ignore=GHSA", "--ignore GHSA")
+    _planted("picomatch", files=_bun("4.0.8", package=spaced))
+
+
+def test_no_picomatch_ignore_needs_no_picomatch() -> None:
+    plain = PACKAGE_IGNORING.replace(" --ignore=GHSA-fc5q-39xc-vjpf", "")
+    named = '{\n  "name": "x",\n  "description": "GHSA-fc5q-39xc-vjpf named outside a script"\n}'
+    for package in (plain, named):
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), files=_bun("4.0.8", package=package)))
+            assert rc == 0, out
+
+
+def test_a_package_json_that_is_not_json_beside_the_lock_is_no_verdict() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = _tree(pathlib.Path(d), files=_bun("4.0.7", package='{"scripts": {'))
+        rc, out = _run(root)
+        assert rc == 2, out
+        want = "repo_policy: cannot read %s: not JSON: " % (root.resolve() / "package.json")
+        assert out.startswith(want) and len(out.splitlines()) == 1, out
+
+
+def test_the_picomatch_versions_are_read_from_the_lock() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        lock = pathlib.Path(d) / "bun.lock"
+        assert guard.locked_picomatch_versions(lock) == [], "a missing bun.lock reads as no picomatch"
+        lock.write_text(PICO_LOCK.replace("{version}", "4.0.7"), encoding="utf-8")
+        assert guard.locked_picomatch_versions(lock) == [(4, 0, 7)], guard.locked_picomatch_versions(lock)
+
+
 def test_a_repository_without_workflows_checks_its_gate_scripts() -> None:
     # no remote CI (the owner, 2026-11-06): zero workflows is a tree to check, not a usage error
     with tempfile.TemporaryDirectory() as d:

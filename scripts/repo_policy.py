@@ -41,6 +41,12 @@ The rules:
              ignore is lifted when the workspace moves off chrono: cargo-deny's
              `unmaintained = "workspace"` then passes without it. Crates that bring chrono
              in transitively (rmcp, teloxide-core) are not read, and need not be.
+  picomatch  while a script of the root package.json runs `bun audit` ignoring
+             GHSA-fc5q-39xc-vjpf (`--ignore=<id>` or `--ignore <id>`; Bun reads the ignore
+             from the command line only), bun.lock holds a picomatch at or below 4.0.7 — so
+             the ignore is lifted when a fixed picomatch reaches the lock. It does not walk
+             the dependency graph: whether that picomatch is reached only by dev tools is
+             not checked.
 
 The workflows are .github/workflows/*.yml and *.yaml. The gate scripts are the *.sh,
 *.py, *.ps1, *.ts and *.mjs files under scripts/, tasks/deps-upgrade/tools/ and
@@ -58,6 +64,7 @@ read: another spelling of the pin's path (`./.python-version`), an empty
 `python-version: ''`, and a `- uses:` line inside a `run: |` text.
 """
 
+import json
 import pathlib
 import re
 import sys
@@ -69,6 +76,10 @@ GATE_DIRS = ("scripts", "tasks/deps-upgrade/tools", "apps/openalpaca-gui/scripts
 GATE_SUFFIXES = (".sh", ".py", ".ps1", ".ts", ".mjs")
 ZIP_IDS = ("RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369")
 CHRONO_ID = "RUSTSEC-2026-0543"
+PICOMATCH_ID = "GHSA-fc5q-39xc-vjpf"
+PICOMATCH_AFFECTED = (4, 0, 7)  # the advisory's range: picomatch <= 4.0.7
+PICOMATCH_IGNORE = re.compile(r"--ignore(?:=|\s+)" + re.escape(PICOMATCH_ID) + r"(?![\w-])")
+PICOMATCH_ENTRY = re.compile(r'"picomatch@(\d+)\.(\d+)\.(\d+)')
 DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies",
               "dev_dependencies", "build_dependencies")
 
@@ -416,6 +427,37 @@ def check_chrono(root, out):
             out.append("%s:%d: chrono: %s is ignored but no workspace manifest names chrono — lift the chrono ignore (the workspace has moved off chrono)" % (rel, n, ident))
 
 
+def picomatch_ignore_line(package: pathlib.Path):
+    """The line of the root package.json where a script ignores GHSA-fc5q-39xc-vjpf, or None."""
+    if not package.is_file():
+        return None
+    lines = read(package)
+    try:
+        doc = json.loads("\n".join(lines))
+    except json.JSONDecodeError as e:
+        raise Unreadable("%s: not JSON: %s" % (package, e))
+    scripts = doc.get("scripts") if isinstance(doc, dict) else None
+    if not isinstance(scripts, dict):
+        return None
+    if not any(isinstance(v, str) and PICOMATCH_IGNORE.search(v) for v in scripts.values()):
+        return None
+    return next((n for n, l in enumerate(lines, 1) if PICOMATCH_IGNORE.search(l)), 1)
+
+
+def locked_picomatch_versions(lock: pathlib.Path) -> list[tuple[int, int, int]]:
+    """Every resolved picomatch bun.lock holds, as (major, minor, patch); [] with no bun.lock."""
+    if not lock.is_file():
+        return []
+    text = "\n".join(read(lock))
+    return [tuple(int(x) for x in m.groups()) for m in PICOMATCH_ENTRY.finditer(text)]
+
+
+def check_picomatch(root, out):
+    n = picomatch_ignore_line(root / "package.json")
+    if n is not None and not any(v <= PICOMATCH_AFFECTED for v in locked_picomatch_versions(root / "bun.lock")):
+        out.append("package.json:%d: picomatch: %s is ignored but bun.lock holds no picomatch at or below 4.0.7 — lift the ignore (a fixed picomatch has reached the lock)" % (n, PICOMATCH_ID))
+
+
 def check(root: pathlib.Path) -> list[str]:
     out: list[str] = []
     for path in workflows(root):
@@ -433,6 +475,7 @@ def check(root: pathlib.Path) -> list[str]:
     check_python_pin_file(root, out)
     check_zip8(root, out)
     check_chrono(root, out)
+    check_picomatch(root, out)
     return out
 
 

@@ -2,6 +2,9 @@
   "name": "openalpaca",
   "private": true,
   "packageManager": "bun@1.4.4",
+  "scripts": {
+    "audit": "bun audit --ignore=GHSA-fc5q-39xc-vjpf"
+  },
   "workspaces": [
     "apps/openalpaca-gui"
   ]
