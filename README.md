@@ -50,7 +50,7 @@ openalpaca daemon start --daemon-only
 openalpaca daemon status
 ```
 
-`start` prints the path of the daemon log and returns at once. `status` prints `✓ Daemon is running` once the daemon answers. If it says the daemon is not running, run it again a second later.
+`start` prints the path of the daemon log, then waits, up to 45 seconds, until the daemon answers. If the daemon exits at boot, `start` prints the lines it wrote to its log and exits 1; if no daemon answers within the 45 seconds, it says so and exits 1. `status` then prints `✓ Daemon is running`.
 
 The first start downloads nothing and takes a few seconds. To watch it, open a second terminal and run `tail -f ~/.openalpaca/state/logs/daemon.log`; the line `Daemon ready` means it is up. Wait for it before step 4.
 

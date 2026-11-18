@@ -522,11 +522,22 @@ pub(crate) async fn wait_after_start<W: World>(
                     return StartWait::NotReady(exited_at_boot(world, child, &status));
                 }
                 if world.now().saturating_duration_since(started) >= STARTING_BUDGET {
-                    return StartWait::NotReady(format!(
+                    let mut why = format!(
                         "{} {} seconds after the start.",
                         not_running(&look),
                         STARTING_BUDGET.as_secs()
-                    ));
+                    );
+                    // A child still running is named, never stopped: from a
+                    // checkout it is the `cargo run` fallback, whose build
+                    // can outlast the budget and start a daemon after it.
+                    if let Some(child) = spawned.as_deref() {
+                        why.push_str(&format!(
+                            " {} is still running: it was not stopped, so a daemon may yet \
+                             start.",
+                            child.who()
+                        ));
+                    }
+                    return StartWait::NotReady(why);
                 }
             }
         }

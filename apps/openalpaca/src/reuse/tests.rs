@@ -1025,7 +1025,9 @@ async fn daemon_start_daemon_only_fails_on_a_daemon_that_dies_at_boot() {
 }
 
 /// `--daemon-only` with no daemon ever answering: the command fails after
-/// the shared budget (`STARTING_BUDGET`, 45 s) from the wait's start.
+/// the shared budget (`STARTING_BUDGET`, 45 s) from the wait's start, and
+/// names the process it spawned, still running and not stopped. (On the
+/// parent the sentence said nothing of it.)
 #[tokio::test]
 async fn daemon_start_daemon_only_fails_when_no_daemon_answers_within_the_budget() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1051,7 +1053,63 @@ async fn daemon_start_daemon_only_fails_when_no_daemon_answers_within_the_budget
 
     assert_eq!(
         failed,
-        "Daemon is not running (no discovery file) 45 seconds after the start."
+        "Daemon is not running (no discovery file) 45 seconds after the start. The daemon \
+         this start spawned (pid 4242) is still running: it was not stopped, so a daemon may \
+         yet start."
+    );
+    assert_eq!(world.waited(), STARTING_BUDGET);
+}
+
+/// The development fallback's `cargo run`, still building or starting the
+/// daemon when the budget ends.
+struct StillRunningCargoRun {
+    pid: u32,
+}
+
+impl Spawned for StillRunningCargoRun {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn who(&self) -> String {
+        format!(
+            "The `cargo run` this start spawned for the daemon (pid {})",
+            self.pid
+        )
+    }
+
+    fn exited(&mut self) -> Option<String> {
+        None
+    }
+
+    fn log_start(&self) -> u64 {
+        0
+    }
+}
+
+/// `daemon restart` from a checkout, whose `cargo run` is still building
+/// when the budget ends: the failure names it, so the person knows a build
+/// or start is still under way and a daemon may yet appear. (On the parent
+/// the sentence said only that no daemon was running.)
+#[tokio::test]
+async fn the_restarts_start_names_a_cargo_run_still_running_at_the_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let looks = (STARTING_BUDGET.as_millis() / POLL.as_millis()) as usize + 2;
+    let mut world = Stub::canned(std::iter::repeat_n(missing(), looks));
+
+    let failed = crate::commands::daemon::restart_start_with(&mut world, &cli(1, 1), || {
+        Ok(Some(StillRunningCargoRun { pid: 4243 }))
+    })
+    .await
+    .expect_err("reported")
+    .to_string();
+
+    assert_eq!(
+        failed,
+        "Daemon is not running (no discovery file) 45 seconds after the start. The `cargo \
+         run` this start spawned for the daemon (pid 4243) is still running: it was not \
+         stopped, so a daemon may yet start."
     );
     assert_eq!(world.waited(), STARTING_BUDGET);
 }
