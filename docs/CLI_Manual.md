@@ -431,23 +431,40 @@ directory can never load.
 
 **Installing grants nothing.** The plugin arrives with its toggle at the
 default (on) and *no consent decision*, so it sits `unapproved`/`never_seen`
-and nothing runs. `ext approve <id>` is the single action that starts it. The
-command prints the manifest first — what it contributes, what capabilities it
-asks for, which config keys it needs — because that is the decision approving
-makes. Every hidden character the plugin's author put in it — in the name,
-version, description, entry, capabilities or keys: a bidi override, a zero-width
-or control character, a variation selector, any space but a plain one, an object
-replacement character, a code point Unicode has not assigned or leaves to
-private use, a line break or a tab — is shown as `<U+XXXX>`, and a line under
-the manifest counts them (`Note: this request contains 2 hidden characters,
-shown as <U+…>.`). On a terminal the manifest starts with the same reset as an
-approval prompt (see [Approval prompts](#approval-prompts)). `install --dry-run`
-and `update` print it the same way. The lines under the manifest — `ok installed
-<id>`, the `ext approve <id>` it tells you to run, and `update`'s `ok updated
-<id>` and `now also asks for:` — show the id and each capability the same way,
-and the count under the manifest covers them: they are the manifest's own name
-and capabilities. A warning `update` prints shows its control characters as
+and nothing runs. `ext approve <id>` is the single action that starts it.
+`ext install` prints the manifest first — what it contributes, what
+capabilities it asks for, which config keys it needs — because that is the
+decision approving makes. Every hidden character the plugin's author put in the
+manifest — in the name, version, description, entry, capabilities or keys: a
+bidi override, a zero-width or control character, a variation selector, any
+space but a plain one, an object replacement character, a code point Unicode
+has not assigned or leaves to private use, a line break or a tab — is shown as
+`<U+XXXX>`, and a line under the manifest counts them (`Note: this request
+contains 2 hidden characters, shown as <U+…>.`). On a terminal the manifest
+starts with the same reset as an approval prompt (see
+[Approval prompts](#approval-prompts)). `install --dry-run` and `update` print
+it the same way. The lines under the manifest — `ok installed <id>`, the
+`ext approve <id>` it tells you to run, and `update`'s `ok updated <id>` and
+`now also asks for:` — show the id and each capability the same way, and the
+count under the manifest covers them: they are the manifest's own name and
+capabilities. A warning `update` prints shows its control characters as
 `<U+XXXX>` and is not counted.
+
+One line of OpenAlpaca's own says what approving grants. `install --dry-run`
+prints it under the manifest; `install`, and `update` when it leaves the plugin
+awaiting consent, print it last; `ext info` prints it for a plugin awaiting
+consent. An `update` that kept consent leaves nothing to approve and prints
+none:
+
+```text
+Approving lets this plugin's program run as you, with the daemon's environment (less OPENALPACA_MASTER_KEY) and all the file and network access your account has; the capabilities it asks for name what it contributes to agents, not what it can do (Daemon Manual, Extensions).
+```
+
+The capabilities are what consent is recorded for: they name what the plugin
+contributes to agents, not what the program can do — the program runs
+unconfined (see the Daemon Manual's
+[Extensions](Daemon_Manual.md#extensions-mcp-servers--plugins)). The line is
+not the author's, so nothing in it is escaped or counted.
 
 Under the manifest, a `warning:` line names each key `plugin.toml` sets that
 OpenAlpaca does not read — a top-level `tool = true` is ignored, since the

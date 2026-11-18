@@ -1486,8 +1486,16 @@ this request contains 1 hidden character, shown as <U+…>.` Under what it asks
 for, a `Warning:` line says each thing its manifest declares that nothing acts
 on — the lines `Check` shows below — so a plugin dropped in by hand says them
 before `Approve` too. The id and the version wrap at the row's edge rather than
-being cut or pushing `Approve` aside. `Approve` grants exactly those strings,
-and it answers for the plugin by the id the daemon listed.
+being cut or pushing `Approve` aside. Under it all, one line of OpenAlpaca's
+own — never escaped or counted, since the plugin's author did not write it —
+says what approving grants:
+
+> Approving lets this plugin's program run as you, with the daemon's environment (less OPENALPACA_MASTER_KEY) and all the file and network access your account has; the capabilities it asks for name what it contributes to agents, not what it can do (Daemon Manual, Extensions).
+
+`Approve` records consent for exactly those strings, which name what the
+plugin contributes to agents, not what the program can do (the Daemon Manual's
+[Extensions](Daemon_Manual.md#extensions-mcp-servers--plugins) says how a
+plugin runs), and it answers for the plugin by the id the daemon listed.
 
 `Add extension` installs either kind:
 

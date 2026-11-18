@@ -21,15 +21,16 @@
  * teaches the declaration/disposition model without documentation.
  *
  * **The consent row is an approval** (`lib/hidden-chars`). What Approve
- * grants is exactly the plugin's own strings — its id (the directory name)
- * and the capabilities its manifest declares, or the ones an update added —
- * so on an `unapproved` row every hidden character in them, and in the
+ * records consent for is the plugin's own strings — its id (the directory
+ * name) and the capabilities its manifest declares, or the ones an update
+ * added — so on an `unapproved` row every hidden character in them, and in the
  * manifest's version the row shows beside Approve, is shown as `<U+XXXX>`
  * (the one-line escape: a name, a version or a capability has no layout of
  * its own) and the row counts them in the words every approval surface
  * uses, as the CLI's manifest does. It also says the manifest's standing
  * warnings (`declared.warnings`, N-PLUG-2) — a key nothing reads, a type
- * nothing wires — so they are read before Approve, not after it. Every other
+ * nothing wires — so they are read before Approve, not after it, and ends
+ * with `APPROVE_GRANTS`, our own fixed words (N-PLUG-3). Every other
  * row's text — a failed row's quoted detail among it — is shown as it came.
  * Display only: every verb is sent the id the daemon listed.
  */
@@ -43,6 +44,17 @@ import {
 } from "@/lib/hidden-chars";
 
 import { whenStamp } from "./format";
+
+/**
+ * What approving a plugin grants, under every approve preview (N-PLUG-3;
+ * the CLI's approve previews say the same). Our own words, drawn as they
+ * are and counted by no notice: the daemon spawns the plugin's program with
+ * its own environment, from which it took the master-key variable at boot,
+ * and nothing confines it; the capabilities a manifest lists are what its
+ * tools contribute to agents.
+ */
+export const APPROVE_GRANTS =
+  "Approving lets this plugin's program run as you, with the daemon's environment (less OPENALPACA_MASTER_KEY) and all the file and network access your account has; the capabilities it asks for name what it contributes to agents, not what it can do (Daemon Manual, Extensions).";
 
 /** Primary affordances. `reload` is deliberately not one — see `menu`. */
 export type ExtensionAction =

@@ -511,6 +511,54 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
   });
 
+  /**
+   * N-PLUG-3: the approve preview says what approving grants — our own fixed
+   * sentence, under what the plugin asks for and its count, on every row
+   * awaiting consent and on no other row.
+   */
+  it("says what approving grants under the approve preview", () => {
+    const grants =
+      "Approving lets this plugin's program run as you, with the daemon's environment (less OPENALPACA_MASTER_KEY) and all the file and network access your account has; the capabilities it asks for name what it contributes to agents, not what it can do (Daemon Manual, Extensions).";
+    state.rows = [
+      extensionRow({
+        id: "risky",
+        state: "unapproved",
+        reason: "never_seen",
+        declared: {
+          capabilities: ["fs\u200B_write"],
+          virtual_capabilities: [],
+          types: { tool: true },
+        },
+      }),
+      extensionRow({
+        id: "refused",
+        state: "unapproved",
+        reason: "denied",
+        enabled: false,
+      }),
+      extensionRow({ id: "running", state: "enabled" }),
+    ];
+    const { container } = render(<ExtensionsSection />);
+
+    const lines = screen.getAllByText(grants);
+    expect(lines).toHaveLength(2);
+    // Under the count, not between the plugin's strings and it.
+    const notice = screen.getByText(
+      "Note: this request contains 1 hidden character, shown as <U+…>.",
+    );
+    expect(
+      notice.compareDocumentPosition(lines[0]!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Our own words: nothing in them is escaped or counted.
+    expect(
+      Array.from(
+        container.querySelectorAll("[data-hidden-char]"),
+        (node) => node.textContent,
+      ),
+    ).toEqual(["<U+200B>"]);
+  });
+
   it("declares an MCP server from the same add panel", async () => {
     render(<ExtensionsSection />);
     const user = userEvent.setup();
