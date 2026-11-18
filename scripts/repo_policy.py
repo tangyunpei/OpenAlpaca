@@ -46,7 +46,9 @@ The rules:
              from the command line only), bun.lock holds a picomatch at or below 4.0.7 — so
              the ignore is lifted when a fixed picomatch reaches the lock. It does not walk
              the dependency graph: whether that picomatch is reached only by dev tools is
-             not checked.
+             not checked. An ignore counts only in a `scripts` value that also runs
+             `bun audit` (those two words, as written); the flag elsewhere in the file, or
+             in a script spelling the command another way, is not read.
 
 The workflows are .github/workflows/*.yml and *.yaml. The gate scripts are the *.sh,
 *.py, *.ps1, *.ts and *.mjs files under scripts/, tasks/deps-upgrade/tools/ and
@@ -79,6 +81,7 @@ CHRONO_ID = "RUSTSEC-2026-0543"
 PICOMATCH_ID = "GHSA-fc5q-39xc-vjpf"
 PICOMATCH_AFFECTED = (4, 0, 7)  # the advisory's range: picomatch <= 4.0.7
 PICOMATCH_IGNORE = re.compile(r"--ignore(?:=|\s+)" + re.escape(PICOMATCH_ID) + r"(?![\w-])")
+BUN_AUDIT = re.compile(r"(?<![\w-])bun\s+audit(?![\w-])")
 PICOMATCH_ENTRY = re.compile(r'"picomatch@(\d+)\.(\d+)\.(\d+)')
 DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies",
               "dev_dependencies", "build_dependencies")
@@ -428,7 +431,8 @@ def check_chrono(root, out):
 
 
 def picomatch_ignore_line(package: pathlib.Path):
-    """The line of the root package.json where a script ignores GHSA-fc5q-39xc-vjpf, or None."""
+    """The line of the root package.json where a script running `bun audit` ignores
+    GHSA-fc5q-39xc-vjpf, or None."""
     if not package.is_file():
         return None
     lines = read(package)
@@ -439,9 +443,14 @@ def picomatch_ignore_line(package: pathlib.Path):
     scripts = doc.get("scripts") if isinstance(doc, dict) else None
     if not isinstance(scripts, dict):
         return None
-    if not any(isinstance(v, str) and PICOMATCH_IGNORE.search(v) for v in scripts.values()):
+    ignoring = [re.compile(re.escape(json.dumps(k, ensure_ascii=False)) + r"\s*:\s*"
+                           + re.escape(json.dumps(v, ensure_ascii=False)))
+                for k, v in scripts.items()
+                if isinstance(v, str) and BUN_AUDIT.search(v) and PICOMATCH_IGNORE.search(v)]
+    if not ignoring:
         return None
-    return next((n for n, l in enumerate(lines, 1) if PICOMATCH_IGNORE.search(l)), 1)
+    # the line of the first such `"name": "command"` pair; 1 when it is not on one line
+    return next((n for n, l in enumerate(lines, 1) if any(r.search(l) for r in ignoring)), 1)
 
 
 def locked_picomatch_versions(lock: pathlib.Path) -> list[tuple[int, int, int]]:

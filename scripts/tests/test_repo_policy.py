@@ -491,11 +491,23 @@ def test_the_picomatch_ignore_is_read_in_either_flag_form() -> None:
 
 def test_no_picomatch_ignore_needs_no_picomatch() -> None:
     plain = PACKAGE_IGNORING.replace(" --ignore=GHSA-fc5q-39xc-vjpf", "")
-    named = '{\n  "name": "x",\n  "description": "GHSA-fc5q-39xc-vjpf named outside a script"\n}'
-    for package in (plain, named):
+    # the whole flag, outside the scripts table, is no ignore
+    named = '{\n  "name": "x",\n  "description": "run bun audit --ignore=GHSA-fc5q-39xc-vjpf"\n}'
+    # nor is the flag in a script that does not run bun audit
+    echoed = PACKAGE_IGNORING.replace('"audit": "bun audit --ignore', '"note": "echo --ignore')
+    for package in (plain, named, echoed):
         with tempfile.TemporaryDirectory() as d:
             rc, out = _run(_tree(pathlib.Path(d), files=_bun("4.0.8", package=package)))
             assert rc == 0, out
+
+
+def test_the_picomatch_ignore_is_reported_at_its_script_line() -> None:
+    # a description carrying the flag above the scripts table is not the ignore's line
+    # (the same text as the script's own command, so only the `"name": "command"` pair tells them apart)
+    described = PACKAGE_IGNORING.replace(
+        '"private": true,', '"private": true,\n  "description": "bun audit --ignore=GHSA-fc5q-39xc-vjpf",')
+    out = _planted("picomatch", files=_bun("4.0.8", package=described))
+    assert "package.json:6: picomatch: GHSA-fc5q-39xc-vjpf is ignored" in out, out
 
 
 def test_a_package_json_that_is_not_json_beside_the_lock_is_no_verdict() -> None:
