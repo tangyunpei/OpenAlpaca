@@ -800,6 +800,75 @@ mcp_compatible = true
         assert!(!pid_alive(pid), "the echo stub {pid} outlived its teardown");
     }
 
+    /// **An `mcp_compatible` plugin that refuses MCP's `initialize` ends
+    /// `Failed`, its child shut down** (E-FAIL on the MCP branch): the strict
+    /// stub answers `initialize` with a JSON-RPC error, and the load sends it
+    /// `shutdown` and reaps it before it commits the row. The entry is a
+    /// wrapper that logs the stub's pid (`exec` keeps it), since a `Failed`
+    /// row holds no child to ask.
+    #[tokio::test]
+    async fn an_mcp_compatible_plugin_refusing_initialize_fails_and_is_shut_down() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_strict_mcp_stub(tmp.path());
+        let wrapper = dir.join("logged-entry.sh");
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\necho $$ >> spawns.log\n\
+             STRICT_STUB_INIT_ERROR=1 exec ./strict-mcp-server.py\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let manifest_path = dir.join("plugin.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("mcp_compatible = true"), "{manifest}");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace("./strict-mcp-server.py", "./logged-entry.sh"),
+        )
+        .unwrap();
+
+        let h = Harness::new(tmp.path());
+        h.manager
+            .permission_gate
+            .approve("strict-mcp", &["testing".to_string()])
+            .expect("approve the stub");
+        h.scan().await;
+
+        let pids = spawned_pids(&dir);
+        let _groups: Vec<KillGroupOnDrop> = pids.iter().copied().map(KillGroupOnDrop).collect();
+        assert_eq!(pids.len(), 1, "one child was spawned: {pids:?}");
+        let seen = std::fs::read_to_string(dir.join("seen.log")).unwrap_or_default();
+        let methods: Vec<&str> = seen.lines().collect();
+        assert_eq!(
+            methods,
+            ["initialize", "shutdown"],
+            "a refused handshake is followed by the shutdown request alone"
+        );
+        let row = h.row("strict-mcp").await;
+        assert!(
+            matches!(
+                row.state,
+                ExtensionState::Failed {
+                    reason: FailureReason::Unreachable,
+                    ..
+                }
+            ),
+            "a refused initialize leaves the row Failed: {:?}",
+            row.state
+        );
+        assert!(
+            !h.holds_process("strict-mcp").await,
+            "a child is still held"
+        );
+        assert!(
+            !pid_alive(pids[0]),
+            "the refused stub {} outlived the failed load",
+            pids[0]
+        );
+    }
+
     /// **A failed plugin call names the tool once**: `plugin <plugin>::<tool>:
     /// …`, never `<plugin>::<plugin>::<tool>`. The error is the plugin's own
     /// (a JSON-RPC error while the plugin is `Enabled`), so the wording is
@@ -1154,6 +1223,57 @@ mcp_compatible = true
         process.kill();
         let _ = process.child.wait().await;
         assert!(!pid_alive(pid), "the stub {pid} outlived the test");
+    }
+
+    /// **MCP's `initialize` keeps the same figure, 10 s**: the named stub,
+    /// still `mcp_compatible = true`, answers it after 2 s under a channel
+    /// default of 1 s, and the load goes through the MCP branch to `Enabled`.
+    #[tokio::test]
+    async fn mcp_initialize_keeps_its_own_figure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_named_stub(tmp.path());
+        let manifest_path = dir.join("plugin.toml");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("mcp_compatible = true"), "{manifest}");
+        std::fs::write(
+            &manifest_path,
+            manifest.replace(
+                "\n[capabilities]",
+                "\n[plugin.env]\nNAMED_STUB_INIT_DELAY_SECS = \"2\"\n\n[capabilities]",
+            ),
+        )
+        .unwrap();
+        assert!(
+            PluginManifest::from_dir(&dir)
+                .unwrap()
+                .plugin
+                .mcp_compatible
+        );
+
+        let h = Harness::with_channel_timeout(tmp.path(), CHANNEL_WAIT);
+        h.manager
+            .permission_gate
+            .approve("named-test", &["testing".to_string()])
+            .expect("approve the stub");
+        h.scan().await;
+        let group = h
+            .manager
+            .plugins
+            .read()
+            .await
+            .get("named-test")
+            .and_then(|s| s.process.as_ref())
+            .and_then(|p| p.child.id())
+            .map(KillGroupOnDrop);
+        assert_eq!(
+            h.state("named-test").await,
+            ExtensionState::Enabled,
+            "MCP's initialize did not wait its own figure"
+        );
+
+        let pid = h.child_pid("named-test").await;
+        tear_down_named_stub(&h, pid).await;
+        drop(group);
     }
 
     // ── PLUGIN-WAIT-2: a cut call leaves nothing waiting ─────────────

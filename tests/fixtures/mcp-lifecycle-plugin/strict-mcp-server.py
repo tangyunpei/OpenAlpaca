@@ -13,6 +13,10 @@ server refuses before `initialize` (rmcp-3.9.0 `src/service/server.rs`,
                                         `ExpectedInitializeRequest`)
   `initialize` without `protocolVersion`, `capabilities` and `clientInfo`
                                      -> a JSON-RPC error (-32602)
+  `initialize` while STRICT_STUB_INIT_ERROR is set in its environment
+                                     -> a JSON-RPC error (-32603), and it
+                                        waits on, still uninitialized (a
+                                        server that refuses the handshake)
 Once initialized it answers:
   tools/list  -> one tool, "echo", with a "message" string
   tools/call  -> "echo: <message>"
@@ -76,6 +80,8 @@ def initialize(msg):
     params = msg.get("params") or {}
     with open("initialize-params.json", "w") as f:
         json.dump(params, f)
+    if os.environ.get("STRICT_STUB_INIT_ERROR"):
+        return error(mid, -32603, "this server refuses the handshake")
     if not (
         isinstance(params.get("protocolVersion"), str)
         and isinstance(params.get("capabilities"), dict)
