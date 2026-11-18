@@ -229,35 +229,55 @@ fn approval_reply(
         .map(|reply| discord_plain_text(&reply))
 }
 
+/// The `discord.guild_id` restriction: the one guild the bot answers in,
+/// `None` when the key is unset, empty or unreadable (no restriction).
+fn allowed_guild(db: &Database) -> Option<String> {
+    openalpaca_storage::ConfigRepository::new(db)
+        .get("discord.guild_id")
+        .ok()
+        .flatten()
+        .filter(|guild| !guild.is_empty())
+}
+
 /// The guild mention gate: a message in a server channel reaches the bot
 /// only when its mentions include the bot's own user id, and its text comes
 /// back with those mentions (`<@id>`, `<@!id>`) removed; `None` drops it.
+/// Before the gateway's Ready names the bot's user id (`bot_user_id` is
+/// `None`) every guild message is dropped, with no line.
 ///
 /// A dropped message that mentions a role is the one drop a sender may not
 /// expect (Discord's autocomplete offers the bot's role beside its user), so
 /// it logs one INFO line naming why, with the guild and channel ids the
 /// neighbouring lines write and never the text, the author or the role. The
 /// connector cannot tell whose role it is (the bot's roles are not in the
-/// message), so the line says "a role", not "the bot's role". INFO, not
-/// WARN: nothing is at fault and nothing is the operator's to fix, and the
-/// line fires for every role mention the bot reads; not DEBUG, which the
-/// daemon's default `info` filter hides, leaving the sender's silence
+/// message), so the line says "a role", not "the bot's role". The line is
+/// written only for a guild the `discord.guild_id` restriction lets in (read
+/// from `db` on this drop alone): in a guild it excludes, a mention of the
+/// bot's user is dropped too, so the line's reason would be false there, and
+/// that guild's messages stay as unlogged as before. INFO, not WARN: nothing
+/// is at fault and nothing is the operator's to fix, and the line fires for
+/// every role mention the bot reads in an allowed guild; not DEBUG, which
+/// the daemon's default `info` filter hides, leaving the sender's silence
 /// unexplained.
 fn guild_message_text(
     msg: &twilight_model::channel::Message,
     bot_user_id: Option<twilight_model::id::Id<twilight_model::id::marker::UserMarker>>,
+    db: &Database,
 ) -> Option<String> {
-    let Some(bid) = bot_user_id.filter(|bid| msg.mentions.iter().any(|m| m.id == *bid)) else {
+    let bid = bot_user_id?;
+    if !msg.mentions.iter().any(|m| m.id == bid) {
         if !msg.mention_roles.is_empty() {
             let guild = msg.guild_id.map(|g| g.to_string()).unwrap_or_default();
-            info!(
-                "Discord message in guild {guild} channel {} mentions a role, not the \
-                 bot's user; ignored: only a mention of the bot's user is answered",
-                msg.channel_id
-            );
+            if allowed_guild(db).is_none_or(|allowed| allowed == guild) {
+                info!(
+                    "Discord message in guild {guild} channel {} mentions a role, not the \
+                     bot's user; ignored: only a mention of the bot's user is answered",
+                    msg.channel_id
+                );
+            }
         }
         return None;
-    };
+    }
     let mut text = msg.content.clone();
     for mention in msg.mentions.iter().filter(|m| m.id == bid) {
         text = text.replace(&format!("<@{}>", mention.id), "");
@@ -497,17 +517,14 @@ impl DiscordConnector {
         let content = if is_dm {
             msg.content.clone()
         } else {
-            match guild_message_text(msg, bot_user_id) {
+            match guild_message_text(msg, bot_user_id, &self.db) {
                 Some(text) => text,
                 None => return Ok(()),
             }
         };
 
         // Check guild_id restriction
-        let config_repo = openalpaca_storage::ConfigRepository::new(&self.db);
-        if let Ok(Some(allowed_guild)) = config_repo.get("discord.guild_id")
-            && !allowed_guild.is_empty()
-        {
+        if let Some(allowed_guild) = allowed_guild(&self.db) {
             if let Some(gid) = guild_id {
                 if gid.to_string() != allowed_guild {
                     debug!("Discord message from non-allowed guild {gid}, skipping");
@@ -1026,8 +1043,19 @@ mod tests {
         .expect("a gateway message")
     }
 
-    /// Runs the guild mention gate under a capturing subscriber.
+    /// Runs the guild mention gate under a capturing subscriber, the bot's
+    /// user id known and no `discord.guild_id` restriction set.
     fn gate(msg: &twilight_model::channel::Message) -> (Option<String>, String) {
+        gate_with(msg, Some(twilight_model::id::Id::new(BOT)), &test_db())
+    }
+
+    /// Runs the guild mention gate under a capturing subscriber with the
+    /// given bot user id and store (whose `discord.guild_id` it reads).
+    fn gate_with(
+        msg: &twilight_model::channel::Message,
+        bot_user_id: Option<twilight_model::id::Id<twilight_model::id::marker::UserMarker>>,
+        db: &Database,
+    ) -> (Option<String>, String) {
         let logs = LogBuf::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(logs.clone())
@@ -1035,9 +1063,18 @@ mod tests {
             .with_max_level(tracing::Level::TRACE)
             .finish();
         let text = tracing::subscriber::with_default(subscriber, || {
-            guild_message_text(msg, Some(twilight_model::id::Id::new(BOT)))
+            guild_message_text(msg, bot_user_id, db)
         });
         (text, logs.text())
+    }
+
+    /// A store whose `discord.guild_id` restriction is `guild`.
+    fn db_restricted_to(guild: &str) -> Database {
+        let db = test_db();
+        openalpaca_storage::ConfigRepository::new(&db)
+            .set("discord.guild_id", guild, "string")
+            .expect("set discord.guild_id");
+        db
     }
 
     /// DISCORD-ROLE: a guild message that mentions a role and not the bot's
@@ -1088,6 +1125,54 @@ mod tests {
             let (text, logs) = gate(&msg);
             assert_eq!(text.as_deref(), Some(format!("<@&{ROLE}> hello").as_str()));
             assert_eq!(logs, "", "no line");
+        }
+    }
+
+    /// The line is for a guild the `discord.guild_id` restriction lets in:
+    /// a role mention in a guild it excludes is dropped as silently as the
+    /// restriction drops every other message there, whatever it mentions.
+    #[test]
+    fn a_role_mention_in_a_guild_the_restriction_excludes_writes_no_line() {
+        let msg = guild_message(&format!("<@&{ROLE}> {PLANTED_TEXT}"), &[], &[ROLE]);
+        let (text, logs) = gate_with(
+            &msg,
+            Some(twilight_model::id::Id::new(BOT)),
+            &db_restricted_to("44"),
+        );
+        assert_eq!(text, None, "dropped as before");
+        assert_eq!(logs, "", "no line for an excluded guild");
+    }
+
+    /// In the guild the restriction names, and with the restriction set
+    /// empty (no restriction), the role mention still writes its one line.
+    #[test]
+    fn a_role_mention_in_an_allowed_guild_writes_its_line() {
+        for db in [db_restricted_to("33"), db_restricted_to("")] {
+            let msg = guild_message(&format!("<@&{ROLE}> {PLANTED_TEXT}"), &[], &[ROLE]);
+            let (text, logs) = gate_with(&msg, Some(twilight_model::id::Id::new(BOT)), &db);
+            assert_eq!(text, None, "dropped as before");
+            assert_eq!(logs.lines().count(), 1, "one line: {logs}");
+            assert!(logs.contains(" INFO "), "{logs}");
+            assert!(logs.contains("mentions a role"), "{logs}");
+            for planted in [PLANTED_TEXT, &AUTHOR.to_string(), &ROLE.to_string()] {
+                assert!(!logs.contains(planted), "{planted} in {logs}");
+            }
+        }
+    }
+
+    /// Before the gateway's Ready names the bot's user id, the gate cannot
+    /// tell a mention of the bot from any other, so it drops every guild
+    /// message as before and writes no line, not "not the bot's user" about
+    /// a message that may mention it.
+    #[test]
+    fn before_ready_a_guild_message_is_dropped_without_a_line() {
+        for msg in [
+            guild_message(&format!("<@{BOT}> <@&{ROLE}> hello"), &[BOT], &[ROLE]),
+            guild_message(&format!("<@&{ROLE}> {PLANTED_TEXT}"), &[], &[ROLE]),
+        ] {
+            let (text, logs) = gate_with(&msg, None, &test_db());
+            assert_eq!(text, None, "dropped as before");
+            assert_eq!(logs, "", "no line before Ready");
         }
     }
 
