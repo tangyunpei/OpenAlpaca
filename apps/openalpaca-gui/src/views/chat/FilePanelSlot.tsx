@@ -144,9 +144,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
           ? undefined
           : () => fileActions.open(model)
       }
-      onReveal={
-        model === null ? undefined : () => fileActions.reveal(model.path)
-      }
+      onReveal={model === null ? undefined : () => fileActions.reveal(model.id)}
       pinned={pinned}
       onTogglePin={() => togglePin.mutate({ id: artifactId, pinned: !pinned })}
       preview={

@@ -47,14 +47,6 @@
     {
       "kind": "stop_unconfirmed",
       "message": "Could not wait for the daemon to stop: task 7 panicked"
-    },
-    {
-      "kind": "reveal_refused",
-      "message": "/s/artifacts/gone.md is not there any more, so it cannot be shown in its folder."
-    },
-    {
-      "kind": "reveal_failed",
-      "message": "open could not show /s/artifacts/notes.md in its folder (exit status: 1)."
     }
   ]
 }

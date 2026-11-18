@@ -1,11 +1,12 @@
 /**
  * `Reveal in Finder`'s three helpers: whether the window can, what the button
- * says, and what the shell is asked.
+ * says, and what the daemon is asked (Q06: its `POST /v1/files/{id}/reveal`).
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { resetConnection } from "./connection";
 import { canReveal, revealInFolder, revealLabel } from "./reveal";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -53,57 +54,106 @@ describe("revealLabel", () => {
 });
 
 describe("revealInFolder", () => {
-  it("asks the shell's `reveal_path` command for the path as given", async () => {
-    vi.mocked(invoke).mockResolvedValue(null);
+  interface Recorded {
+    url: string;
+    method: string;
+    body: unknown;
+  }
+  let requests: Recorded[] = [];
+  let reply: () => Response = () => new Response(null);
 
-    await revealInFolder("/Users/me/.openalpaca/artifacts/01-notes.md");
+  function json(payload: unknown, status = 200): Response {
+    return new Response(JSON.stringify(payload), { status });
+  }
 
-    expect(invoke).toHaveBeenCalledWith("reveal_path", {
-      path: "/Users/me/.openalpaca/artifacts/01-notes.md",
+  beforeEach(() => {
+    requests = [];
+    resetConnection();
+    vi.mocked(invoke).mockResolvedValue({
+      baseUrl: "http://127.0.0.1:9999",
+      token: "tok",
+      instanceId: "7f3a1122",
     });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        requests.push({
+          url: String(input),
+          method: init?.method ?? "GET",
+          body: init?.body ?? null,
+        });
+        return reply();
+      }),
+    );
   });
 
-  it("rejects with the shell's own sentence, read from its typed refusal", async () => {
-    vi.mocked(invoke).mockRejectedValue({
-      kind: "reveal_refused",
-      message:
-        "/tmp/notes.md is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder.",
-    });
+  it("asks the daemon's `POST /v1/files/{id}/reveal` for the file id, never a path", async () => {
+    reply = () => json({ id: "art 1", status: "revealed" });
 
-    await expect(revealInFolder("/tmp/notes.md")).rejects.toThrow(
+    await revealInFolder("art 1");
+
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:9999/v1/files/art%201/reveal",
+        method: "POST",
+        body: null,
+      },
+    ]);
+    // The shell is asked for the connection only — no command of its own.
+    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
+  });
+
+  it("rejects with the daemon's own sentence for a file it does not show", async () => {
+    reply = () =>
+      json(
+        {
+          error: {
+            code: "REVEAL_REFUSED",
+            message:
+              "/tmp/notes.md is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder.",
+          },
+        },
+        409,
+      );
+
+    await expect(revealInFolder("art-1")).rejects.toThrow(
       "/tmp/notes.md is not in an OpenAlpaca store or one of your projects, so it is not shown in its folder.",
     );
   });
 
   it("rejects with the sentence of a reveal the platform could not do", async () => {
-    vi.mocked(invoke).mockRejectedValue({
-      kind: "reveal_failed",
-      message:
-        "open could not show /Users/me/.openalpaca/artifacts/01-notes.md in its folder (exit status: 1).",
-    });
+    reply = () =>
+      json(
+        {
+          error: {
+            code: "REVEAL_FAILED",
+            message:
+              "open could not show /Users/me/.openalpaca/artifacts/01-notes.md in its folder (exit status: 1).",
+          },
+        },
+        500,
+      );
 
-    await expect(
-      revealInFolder("/Users/me/.openalpaca/artifacts/01-notes.md"),
-    ).rejects.toThrow(
+    await expect(revealInFolder("art-1")).rejects.toThrow(
       "open could not show /Users/me/.openalpaca/artifacts/01-notes.md in its folder (exit status: 1).",
     );
   });
 
-  it("rejects with Tauri's own refusal, a bare string, as it is", async () => {
-    vi.mocked(invoke).mockRejectedValue(
-      "command reveal_path missing required key path",
-    );
+  it("rejects with a missing project's sentence, 410", async () => {
+    reply = () =>
+      json(
+        {
+          error: {
+            code: "ARTIFACT_PROJECT_MISSING",
+            message:
+              "/Users/me/proj: this project's folder is gone or has moved; re-point the project to read its files.",
+          },
+        },
+        410,
+      );
 
-    await expect(revealInFolder("/tmp/notes.md")).rejects.toThrow(
-      "command reveal_path missing required key path",
-    );
-  });
-
-  it("rejects with a sentence of its own for an answer it does not know", async () => {
-    vi.mocked(invoke).mockRejectedValue({ kind: "unheard_of", message: "x" });
-
-    await expect(revealInFolder("/tmp/notes.md")).rejects.toThrow(
-      "The file could not be shown in its folder.",
+    await expect(revealInFolder("art-1")).rejects.toThrow(
+      "/Users/me/proj: this project's folder is gone or has moved; re-point the project to read its files.",
     );
   });
 });

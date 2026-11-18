@@ -143,7 +143,7 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
           }}
           onExport={onExport}
           onOpen={() => fileActions.open(model)}
-          onReveal={() => fileActions.reveal(model.path)}
+          onReveal={() => fileActions.reveal(model.id)}
           onJumpRun={taskId === null ? undefined : () => focusRun(taskId)}
         />
       }

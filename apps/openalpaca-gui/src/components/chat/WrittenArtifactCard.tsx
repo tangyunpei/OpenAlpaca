@@ -10,8 +10,8 @@
  * not have. Everything it shows came off the frame.
  *
  * Beside `Open in Library`: `Open` (the file in its default app, through the
- * daemon) and `Reveal in Finder` (the file in its folder, through the Tauri
- * shell — drawn only inside the app's window, `canReveal`).
+ * daemon) and `Reveal in Finder` (the file in its folder, through the daemon
+ * too — drawn only inside the app's window, `canReveal`).
  *
  * A file written into the project (storage design §13, ST-12) is the project's
  * own file with a pointer row, not an artifact: the eyebrow says `in the

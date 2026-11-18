@@ -162,6 +162,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/files/{id}/open",
             post(crate::routes::open_file_handler),
         )
+        // Q06: Reveal by file id — the daemon shows the file in its folder
+        // and answers no path; the shell's `reveal_path` went.
+        .route(
+            "/v1/files/{id}/reveal",
+            post(crate::routes::reveal_file_handler),
+        )
         // Artifact routes (plan §4.9). The content routes are likewise on the
         // `content` sub-router; everything that returns JSON stays here.
         .route("/v1/artifacts", get(crate::routes::list_artifacts_handler))

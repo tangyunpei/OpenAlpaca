@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 123.
+- Total documented method/path endpoints: 124.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -73,6 +73,7 @@
 | GET | `/v1/files/{id}` | `bearer` | `get_file_metadata_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
 | GET | `/v1/files/{id}/content` | `bearer_or_query_token` | `get_file_content_handler` | - | `super::TokenParams` | `apps/openalpacad/src/routes/files.rs` |
 | POST | `/v1/files/{id}/open` | `bearer` | `open_file_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
+| POST | `/v1/files/{id}/reveal` | `bearer` | `reveal_file_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
 | GET | `/v1/health` | `none` | `health_handler` | - | - | `apps/openalpacad/src/router.rs` |
 | GET | `/v1/lanes/{lane_key}/followups` | `bearer` | `list_followups_handler` | - | - | `apps/openalpacad/src/routes/followups.rs` |
 | POST | `/v1/lanes/{lane_key}/followups` | `bearer` | `queue_followup_handler` | `followups::QueueFollowupRequest` | - | `apps/openalpacad/src/routes/followups.rs` |

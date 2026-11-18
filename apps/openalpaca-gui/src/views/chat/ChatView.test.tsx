@@ -4945,7 +4945,7 @@ describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("asks the shell for the path the artifact_written frame carried", async () => {
+  it("asks the daemon to reveal the file id the artifact_written frame carried", async () => {
     vi.stubGlobal("isTauri", true);
     const path =
       "/Users/dev/.openalpaca/artifacts/loose/2026-10-02/01-pasta-night.md";
@@ -4966,8 +4966,14 @@ describe("ChatView — a written file's Reveal in Finder (Round G, G4)", () => {
     fireEvent.click(await screen.findByRole("button", { name: revealLabel() }));
 
     await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("reveal_path", { path }),
+      expect(
+        requests.some(
+          (r) =>
+            r.method === "POST" && r.url.endsWith("/v1/files/art-9/reveal"),
+        ),
+      ).toBe(true),
     );
+    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
   });
 });
 

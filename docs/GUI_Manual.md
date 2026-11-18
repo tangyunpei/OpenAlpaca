@@ -2,8 +2,8 @@
 
 OpenAlpaca GUI (`openalpaca-gui`) is a Tauri 2 desktop app — a React 19 +
 TypeScript + Tailwind 4 frontend in a webview, with a small Rust shell that
-finds (or starts) the local daemon, waits for it to stop, reads its log and
-shows a file in its folder (*Connection lifecycle* lists its five commands).
+finds (or starts) the local daemon, waits for it to stop and reads its log
+(*Connection lifecycle* lists its four commands).
 Everything on screen comes from the daemon over HTTP, one WebSocket and one SSE
 stream; the webview itself never reads the database, the config files or
 `discovery.json`.
@@ -193,19 +193,6 @@ whole bridge (`src-tauri/src/lib.rs`):
   nothing.
 - `read_daemon_log_tail` — the end of `state/logs/daemon.log`, read straight
   from the file, so it answers when no daemon is serving anything.
-- `reveal_path` — shows an artifact's file in its folder: Finder with the file
-  selected on macOS (`open -R`), Explorer with it selected on Windows, the
-  folder in the file manager on Linux (`xdg-open`). It takes no path on trust:
-  the path is resolved, symlinks included, and only a regular file under the
-  home root (`OPENALPACA_HOME_STORE` moves it), or under the root of one of your
-  projects, is shown — every store file lives under the home root, a project's
-  in its folder under `projects/`, and a file an agent wrote into a project
-  lives in that project. A project whose folder is gone or has moved admits
-  nothing through its old path, and its refusal says so:
-  `<root>: this project's folder is gone or has moved; re-point the project to read its files.`
-  The program gets the path as an argument of its own, never through a shell,
-  and a refusal is one sentence, shown as a toast. Behind `Reveal in Finder`
-  (Library, below).
 
 **The daemon's `PATH`.** An app opened from the Finder or the Dock gets the
 minimal environment macOS gives apps, not your shell's. So when the app starts
@@ -278,7 +265,7 @@ guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
 `request_id` the client holds is dead and the app re-bootstraps rather than
 merely reopening its socket (`src/lib/connection.ts`).
 
-None of the five runs on the window's own thread, so none can freeze the
+None of the four runs on the window's own thread, so none can freeze the
 window: each answers on the shell's background runtime, every file read, the
 spawn and the wait for a stop run on a pool of threads of their own, and the
 health probe waits on the runtime's timers, not on a thread. A slow disk, a
@@ -1004,13 +991,14 @@ whose extension no kind keeps, say) is not offered `Open` at all. `Reveal in
 Finder` still shows either.
 
 `Reveal in Finder` — `Show in folder` on Windows and Linux — shows the file in
-its folder instead, through the app's own shell (`reveal_path`, above): Finder
-comes forward with the file selected. It is drawn only inside the app's window,
-never in the Vite preview, which has no shell to ask. A file that is gone, is
-not a regular file, or is in neither an OpenAlpaca store nor one of your
-projects is refused, and the toast is the shell's own sentence — for a file of
-a project whose folder is gone or has moved, the same sentence as the
-Preview's. The `File written` card in the chat and the file panel in the chat's
+its folder instead, through the daemon (`POST /v1/files/{id}/reveal`): the app
+sends the file's id, never a path, and the daemon checks the file and shows it
+on the machine it runs on, the one the app connects to — Finder comes forward
+with the file selected. It is drawn only inside the app's window, never in the
+Vite preview. A file that is gone, is not a regular file, or is in neither an
+OpenAlpaca store nor one of your projects is refused, and the toast is the
+daemon's own sentence — for a file of a project whose folder is gone or has
+moved, the same sentence as the Preview's. The `File written` card in the chat and the file panel in the chat's
 aside carry the same two buttons.
 
 ## Memory

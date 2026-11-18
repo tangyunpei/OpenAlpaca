@@ -19,8 +19,7 @@
 //! daemon process that does not answer yet, and that refusal; every path
 //! past a spawn — the wait, the CLI's daemon winning the lock — is
 //! `reuse::ensure_with`'s, driven over a world its own tests write
-//! (`reuse/tests.rs`). `reveal_path`'s admitted path, which runs `open -R`
-//! (Finder), has no test. As a backstop the guard points `PATH` at an empty
+//! (`reuse/tests.rs`). As a backstop the guard points `PATH` at an empty
 //! folder, and the reuse tests check that no `openalpacad` sits beside the
 //! test binary and that no daemon log was opened.
 //!
@@ -135,14 +134,6 @@ impl Drop for HomeStoreGuard {
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
-}
-
-/// Storage's `store::projects::register` refuses an unguarded home store only
-/// in a build that carries its `test-home-guard` feature, which this crate
-/// turns on through `[dev-dependencies]` (storage design, Stage 1, S1.9).
-#[test]
-fn the_storage_test_home_guard_is_armed_in_this_test_build() {
-    assert!(openalpaca_storage::store::projects::test_home_guard_armed());
 }
 
 // ============================================================================
@@ -1075,68 +1066,34 @@ fn a_stop_report_spells_every_outcome_in_camel_case() {
 }
 
 // ============================================================================
-// reveal_path — the refusals only (the admitted path runs `open -R`)
+// The four commands (Q06: `reveal_path` went to the daemon)
 // ============================================================================
 
+/// The webview invokes four commands. `reveal_path` went with Q06, when the
+/// daemon's `POST /v1/files/{id}/reveal` took Reveal over: Tauri answers it
+/// as a command it does not know. Three of the other four are asked here
+/// with no discovery file, and none is answered as unknown;
+/// `ensure_daemon_running` is driven by the reuse tests above, never here,
+/// where its spawn arm would be reached.
 #[test]
-fn reveal_path_refuses_a_path_that_is_not_there() {
-    let guard = HomeStoreGuard::set("reveal-missing");
-    let gone = guard.store().join("artifacts").join("gone.md");
+fn reveal_path_is_not_a_command_and_three_of_the_four_still_are() {
+    let _guard = HomeStoreGuard::set("four-commands");
     assert_eq!(
-        refusal(invoke("reveal_path", json!({ "path": gone }))),
-        shell_refusal(
-            "reveal_refused",
-            format!(
-                "{} is not there any more, so it cannot be shown in its folder.",
-                gone.display()
-            )
-        )
+        tauri_refusal(invoke("reveal_path", json!({ "path": "/x" }))),
+        "Command reveal_path not found"
     );
-}
-
-#[test]
-fn reveal_path_refuses_a_folder() {
-    let guard = HomeStoreGuard::set("reveal-folder");
-    let folder = guard.store().join("artifacts");
-    std::fs::create_dir_all(&folder).expect("folder");
-    assert_eq!(
-        refusal(invoke("reveal_path", json!({ "path": folder }))),
-        shell_refusal(
-            "reveal_refused",
-            format!(
-                "{} is not a file, so it cannot be shown in its folder.",
-                folder.display()
-            )
-        )
-    );
-}
-
-#[test]
-fn reveal_path_refuses_a_file_outside_every_store() {
-    let guard = HomeStoreGuard::set("reveal-outside");
-    let outside = guard.root.join("elsewhere.md");
-    std::fs::write(&outside, "not the store's").expect("file");
-    assert_eq!(
-        refusal(invoke("reveal_path", json!({ "path": outside }))),
-        shell_refusal(
-            "reveal_refused",
-            format!(
-                "{} is not in an OpenAlpaca store or one of your projects, so it is not \
-                 shown in its folder.",
-                outside.display()
-            )
-        )
-    );
-}
-
-#[test]
-fn reveal_path_refuses_a_call_without_path() {
-    let _guard = HomeStoreGuard::set("reveal-no-arg");
-    let text = tauri_refusal(invoke("reveal_path", json!({ "file": "/x" })));
-    assert!(
-        text.contains("command reveal_path missing required key path"),
-        "{text}"
-    );
+    for (cmd, args) in [
+        ("get_connection_info", json!({})),
+        ("await_daemon_stopped", json!({})),
+        ("read_daemon_log_tail", json!({ "lines": 5 })),
+    ] {
+        let not_found = format!("Command {cmd} not found");
+        let answer = invoke(cmd, args);
+        assert!(
+            !matches!(&answer, Err(Value::String(text)) if *text == not_found),
+            "{cmd} is answered as unknown: {answer:?}"
+        );
+    }
 }
 
 // ============================================================================
@@ -1176,17 +1133,15 @@ fn invoke_answered_on(cmd: &str, args: Value) -> (std::thread::ThreadId, Result<
 /// so an answer produced on it is a command that ran inline.
 #[test]
 fn every_command_answers_off_the_thread_that_invoked_it() {
-    let guard = HomeStoreGuard::set("off-the-invoking-thread");
+    let _guard = HomeStoreGuard::set("off-the-invoking-thread");
     assert_no_daemon_beside_the_test_binary();
     let here = std::thread::current().id();
-    let gone = guard.store().join("artifacts").join("gone.md");
     let mut inline = Vec::new();
     // Before discovery.json exists: `await_daemon_stopped` then answers
     // `not_running` at once.
     for (cmd, args) in [
         ("await_daemon_stopped", json!({})),
         ("read_daemon_log_tail", json!({ "lines": 5 })),
-        ("reveal_path", json!({ "path": gone })),
         ("get_connection_info", json!({})),
     ] {
         let (thread, _answer) = invoke_answered_on(cmd, args);
@@ -1539,15 +1494,6 @@ fn every_refusal() -> Vec<ShellError> {
         ShellError::StopUnconfirmed {
             message: "Could not wait for the daemon to stop: task 7 panicked".into(),
         },
-        ShellError::RevealRefused {
-            message: "/s/artifacts/gone.md is not there any more, so it cannot be shown in its \
-                      folder."
-                .into(),
-        },
-        ShellError::RevealFailed {
-            message: "open could not show /s/artifacts/notes.md in its folder (exit status: 1)."
-                .into(),
-        },
     ];
     for error in &all {
         match error {
@@ -1559,9 +1505,7 @@ fn every_refusal() -> Vec<ShellError> {
             | ShellError::Starting { .. }
             | ShellError::StillStarting { .. }
             | ShellError::LogUnreadable { .. }
-            | ShellError::StopUnconfirmed { .. }
-            | ShellError::RevealRefused { .. }
-            | ShellError::RevealFailed { .. } => {}
+            | ShellError::StopUnconfirmed { .. } => {}
         }
     }
     all

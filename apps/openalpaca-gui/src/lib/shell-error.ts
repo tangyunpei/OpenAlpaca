@@ -35,10 +35,6 @@ export const SHELL_ERROR_KINDS = [
   "log_unreadable",
   /** `await_daemon_stopped`: the wait could not be run. */
   "stop_unconfirmed",
-  /** `reveal_path`: a path the shell does not show. */
-  "reveal_refused",
-  /** `reveal_path`: the platform could not show it. */
-  "reveal_failed",
 ] as const;
 
 export type ShellErrorKind = (typeof SHELL_ERROR_KINDS)[number];

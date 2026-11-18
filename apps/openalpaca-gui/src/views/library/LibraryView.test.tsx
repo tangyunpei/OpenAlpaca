@@ -676,7 +676,7 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
     expect(screen.queryByText(/no longer at/)).not.toBeInTheDocument();
   });
 
-  it("toasts Reveal's refusal for a missing project's file as the shell words it", async () => {
+  it("toasts Reveal's refusal for a missing project's file as the daemon words it", async () => {
     vi.stubGlobal("isTauri", true);
     route("/v1/artifacts/art-9/content", () =>
       json(
@@ -684,10 +684,11 @@ describe("Results — a file marked missing (d7-app-1, R-T26)", () => {
         410,
       ),
     );
-    vi.mocked(invoke).mockImplementation(async (command: string) =>
-      command === "reveal_path"
-        ? Promise.reject({ kind: "reveal_refused", message: sentence })
-        : connection,
+    route("/v1/files/art-9/reveal", () =>
+      json(
+        { error: { code: "ARTIFACT_PROJECT_MISSING", message: sentence } },
+        410,
+      ),
     );
     const user = userEvent.setup();
     renderView();
@@ -773,13 +774,11 @@ describe("LibraryDetail — Open and Reveal", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("asks the shell to reveal the artifact's path, and toasts its refusal", async () => {
+  it("asks the daemon to reveal the artifact by its id, and toasts its refusal", async () => {
     vi.stubGlobal("isTauri", true);
     const refusal = `${findings.path} is not there any more, so it cannot be shown in its folder.`;
-    vi.mocked(invoke).mockImplementation(async (command: string) =>
-      command === "reveal_path"
-        ? Promise.reject({ kind: "reveal_refused", message: refusal })
-        : connection,
+    route(`/v1/files/${findings.id}/reveal`, () =>
+      json({ error: { code: "REVEAL_REFUSED", message: refusal } }, 409),
     );
     const user = userEvent.setup();
     renderView();
@@ -788,12 +787,17 @@ describe("LibraryDetail — Open and Reveal", () => {
       await screen.findByRole("button", { name: revealLabel() }),
     );
 
-    expect(invoke).toHaveBeenCalledWith("reveal_path", {
-      path: findings.path,
-    });
     await waitFor(() => expect(useUiStore.getState().toast).toBe(refusal));
-    // Revealing is the shell's; nothing went to the daemon's open route.
-    expect(requests.some((r) => r.url.includes("/open"))).toBe(false);
+    expect(
+      requests.filter((r) => r.url.includes(`/v1/files/${findings.id}/`)),
+    ).toEqual([
+      {
+        url: `http://127.0.0.1:9999/v1/files/${findings.id}/reveal`,
+        method: "POST",
+        body: null,
+      },
+    ]);
+    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
   });
 });
 
@@ -864,16 +868,19 @@ describe("LibraryDetail — toasts name an agent's file escaped (d7-app-3, S6a M
     );
   });
 
-  it("quotes the shell's Reveal refusal", async () => {
+  it("quotes the daemon's Reveal refusal", async () => {
     vi.stubGlobal("isTauri", true);
-    vi.mocked(invoke).mockImplementation(async (command: string) =>
-      command === "reveal_path"
-        ? Promise.reject({
-            kind: "reveal_refused",
+    route("/v1/files/art-h/reveal", () =>
+      json(
+        {
+          error: {
+            code: "REVEAL_REFUSED",
             message:
               "/w/docs/\u{202E}notes\u{200B}.md is not there any more, so it cannot be shown in its folder.",
-          })
-        : connection,
+          },
+        },
+        409,
+      ),
     );
     const user = userEvent.setup();
     renderView();

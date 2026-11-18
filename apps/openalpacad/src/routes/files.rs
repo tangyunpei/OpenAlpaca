@@ -4,6 +4,7 @@
 //! GET  /v1/files/{id}     — Get file metadata
 //! GET  /v1/files/{id}/content — Stream file content
 //! POST /v1/files/{id}/open — Open file with system default app
+//! POST /v1/files/{id}/reveal — Show the file in its folder (Q06)
 
 use axum::{
     Json,
@@ -388,6 +389,22 @@ pub async fn open_file_handler(
     {
         Ok(resp) => Json(resp).into_response(),
         Err(err) => open_file_error_response(err),
+    }
+}
+
+/// POST /v1/files/{id}/reveal — show the file in its folder (Q06): Finder
+/// with it selected on macOS. Answers `{ id, status: "revealed" }`, never a
+/// path; refuses as the shell's `reveal_path` did — `409 REVEAL_REFUSED`
+/// with `RevealRefusal`'s sentence, `410 ARTIFACT_PROJECT_MISSING` for a
+/// missing project's file (R-T26) — and `500 REVEAL_FAILED` with Round G
+/// G4's sentence when the platform could not show it.
+pub async fn reveal_file_handler(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match reveal_asset_for_user(&state.db, &id, &state.local_user_id, reveal_with_system).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(err) => reveal_file_error_response(err),
     }
 }
 
@@ -1426,9 +1443,331 @@ pub(crate) mod tests {
         );
     }
 
+    // --- Q06: Reveal by file id, in the daemon ---
+    //
+    // The route resolves the id to its row's stored path, the `path` the
+    // webview handed the shell's `reveal_path` before, checks it with
+    // `store::revealable_path`, and reveals it through the seam
+    // `reveal_asset_for_user` takes. No test here reveals anything: the
+    // seams report what would have been shown, or refuse to be called.
+
+    /// A reveal that succeeds and shows nothing.
+    fn reveal_ok(_path: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Hands back, through the error, the path the route would reveal.
+    fn reveal_report(path: &std::path::Path) -> Result<(), String> {
+        Err(format!("revealed:{}", path.display()))
+    }
+
+    /// A reveal a refusal must come before.
+    fn reveal_never(path: &std::path::Path) -> Result<(), String> {
+        Err(format!("the reveal was called for {}", path.display()))
+    }
+
+    /// A reveal whose blocking task panics.
+    fn reveal_panics(_path: &std::path::Path) -> Result<(), String> {
+        panic!("a reveal that panics")
+    }
+
+    /// A refusal as the route answers it: its status and its JSON body.
+    async fn reveal_answer(err: RevealFileApiError) -> (StatusCode, serde_json::Value) {
+        let response = reveal_file_error_response(err);
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("read the body");
+        (status, serde_json::from_slice(&bytes).expect("JSON"))
+    }
+
+    /// An upload of `user1`'s whose stored file is `path`.
+    fn upload_at(db: &Database, id: &str, path: &std::path::Path) {
+        let mut asset = sample_asset(id, "user1");
+        asset.storage_path = path.to_string_lossy().into_owned();
+        FileAssetRepository::new(db)
+            .insert(&asset)
+            .expect("insert asset");
+    }
+
+    /// A by-product in the home store is revealed at its own file there —
+    /// the canonical path `revealable_path` admits — and the answer names the
+    /// id and `revealed`, never a path.
+    #[tokio::test]
+    async fn reveal_of_a_by_product_shows_its_file_in_the_store_and_answers_no_path() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+        let canonical = std::path::Path::new(&row.storage_path)
+            .canonicalize()
+            .expect("the by-product's file");
+
+        let err = reveal_asset_for_user(&db, &row.id, "user1", reveal_report)
+            .await
+            .expect_err("reveal_report reports");
+        assert_eq!(
+            err,
+            RevealFileApiError::RevealFailed(format!("revealed:{}", canonical.display()))
+        );
+
+        let answer = reveal_asset_for_user(&db, &row.id, "user1", reveal_ok)
+            .await
+            .expect("revealed");
+        assert_eq!(
+            serde_json::to_value(&answer).expect("JSON"),
+            serde_json::json!({ "id": row.id, "status": "revealed" })
+        );
+    }
+
+    /// An upload is revealed at its stored file in the store — no copy is
+    /// staged, as Open stages one: Reveal shows the file the store keeps.
+    #[tokio::test]
+    async fn reveal_of_an_upload_shows_its_stored_file_and_stages_no_copy() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let stored = gp
+            .home_root()
+            .join("uploads")
+            .join("2026-11-18")
+            .join("01-report.pdf");
+        std::fs::create_dir_all(stored.parent().expect("its folder")).expect("mkdir");
+        std::fs::write(&stored, b"%PDF-1.7 report").expect("the stored upload");
+        upload_at(&db, "u1", &stored);
+
+        let err = reveal_asset_for_user(&db, "u1", "user1", reveal_report)
+            .await
+            .expect_err("reveal_report reports");
+        assert_eq!(
+            err,
+            RevealFileApiError::RevealFailed(format!("revealed:{}", stored.display()))
+        );
+        assert!(
+            !gp.home_root()
+                .join("state")
+                .join("cache")
+                .join("open")
+                .join("u1")
+                .exists(),
+            "Reveal staged a copy"
+        );
+    }
+
+    /// A row whose stored path is a link in the store is revealed at the
+    /// file the link resolves to — the canonical path `revealable_path`
+    /// admits — never at the link the row names.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reveal_of_a_row_stored_through_a_link_shows_the_file_it_resolves_to() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Linked");
+        let canonical = std::path::Path::new(&row.storage_path)
+            .canonicalize()
+            .expect("the by-product's file");
+        let link = gp
+            .home_root()
+            .join("uploads")
+            .join("2026-11-18")
+            .join("02-linked.md");
+        std::fs::create_dir_all(link.parent().expect("its folder")).expect("mkdir");
+        std::os::unix::fs::symlink(&canonical, &link).expect("the link");
+        upload_at(&db, "u2", &link);
+
+        let err = reveal_asset_for_user(&db, "u2", "user1", reveal_report)
+            .await
+            .expect_err("reveal_report reports");
+        assert_eq!(
+            err,
+            RevealFileApiError::RevealFailed(format!("revealed:{}", canonical.display()))
+        );
+        assert_ne!(canonical, link, "the link is its own path");
+    }
+
+    /// A result file in a registered project is revealed at its file under
+    /// the project's root (ST-18: whatever its kind — a script too).
+    #[tokio::test]
+    async fn reveal_of_a_result_file_shows_it_in_its_project_whatever_its_kind() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        for rel in ["docs/plan.md", "scripts/build.sh"] {
+            let row = result_file(&gp, &db, rel, b"body\n");
+            let err = reveal_asset_for_user(&db, &row.id, "user1", reveal_report)
+                .await
+                .expect_err("reveal_report reports");
+            assert_eq!(
+                err,
+                RevealFileApiError::RevealFailed(format!(
+                    "revealed:{}",
+                    gp.root.join(rel).display()
+                ))
+            );
+        }
+    }
+
+    /// R-T26: a result file of a missing project — moved with a link left at
+    /// its root (ST-23) — is `410 ARTIFACT_PROJECT_MISSING` with the sentence
+    /// naming the root and the re-point, and nothing is revealed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reveal_of_a_missing_projects_result_file_is_a_410_naming_the_project() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = result_file(&gp, &db, "docs/plan.md", b"# Plan\n");
+        let aside = tempfile::tempdir().expect("aside");
+        let moved = aside.path().join("moved");
+        std::fs::rename(&gp.root, &moved).expect("move the project");
+        std::os::unix::fs::symlink(&moved, &gp.root).expect("leave a link");
+
+        let err = reveal_asset_for_user(&db, &row.id, "user1", reveal_never)
+            .await
+            .expect_err("refused before the reveal");
+        let (status, body) = reveal_answer(err).await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(body["error"]["code"], "ARTIFACT_PROJECT_MISSING");
+        assert_eq!(
+            body["error"]["message"],
+            format!(
+                "{}: this project's folder is gone or has moved; re-point the project to read \
+                 its files.",
+                gp.root.display()
+            )
+        );
+    }
+
+    /// Every other refusal is Reveal's today, `RevealRefusal`'s sentence as
+    /// it is: `409 REVEAL_REFUSED` for a file that is not there, a folder,
+    /// and a file outside every store and project; `404` for an id the
+    /// owner has no row for. Nothing is revealed.
+    #[tokio::test]
+    async fn reveal_refuses_as_reveal_refused_with_its_sentences() {
+        let gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+
+        let gone = by_product(&db, "Gone");
+        std::fs::remove_file(&gone.storage_path).expect("remove the by-product's file");
+        let folder = gp.home_root().join("artifacts").join("a-folder");
+        std::fs::create_dir_all(&folder).expect("a folder");
+        upload_at(&db, "folder", &folder);
+        let elsewhere = tempfile::tempdir().expect("outside every store");
+        let outside = elsewhere
+            .path()
+            .canonicalize()
+            .expect("canonical")
+            .join("notes.md");
+        std::fs::write(&outside, b"notes").expect("a file outside");
+        upload_at(&db, "outside", &outside);
+
+        for (id, sentence) in [
+            (
+                gone.id.as_str(),
+                format!(
+                    "{} is not there any more, so it cannot be shown in its folder.",
+                    gone.storage_path
+                ),
+            ),
+            (
+                "folder",
+                format!(
+                    "{} is not a file, so it cannot be shown in its folder.",
+                    folder.display()
+                ),
+            ),
+            (
+                "outside",
+                format!(
+                    "{} is not in an OpenAlpaca store or one of your projects, so it is not \
+                     shown in its folder.",
+                    outside.display()
+                ),
+            ),
+        ] {
+            let err = reveal_asset_for_user(&db, id, "user1", reveal_never)
+                .await
+                .expect_err("refused before the reveal");
+            let (status, body) = reveal_answer(err).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{id}");
+            assert_eq!(body["error"]["code"], "REVEAL_REFUSED", "{id}");
+            assert_eq!(body["error"]["message"], sentence.as_str(), "{id}");
+        }
+
+        for (id, owner) in [("missing", "user1"), ("folder", "user2")] {
+            let err = reveal_asset_for_user(&db, id, owner, reveal_never)
+                .await
+                .expect_err("no such row for this owner");
+            assert_eq!(err, RevealFileApiError::NotFound);
+            let (status, body) = reveal_answer(err).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error"]["code"], "NOT_FOUND");
+            assert_eq!(body["error"]["message"], "File not found");
+        }
+    }
+
+    /// Round G G4's sentences, byte for byte, for a reveal the platform
+    /// could not do — the shell's `reveal_in_folder` said them before Q06 —
+    /// and `500 REVEAL_FAILED` around them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reveal_the_platform_could_not_do_says_round_g_s_sentences() {
+        use std::os::unix::process::ExitStatusExt;
+        let path = std::path::Path::new("/s/artifacts/notes.md");
+        assert_eq!(
+            reveal_failed_sentence(
+                path,
+                opener::OpenError::ExitStatus {
+                    cmd: "open",
+                    status: std::process::ExitStatus::from_raw(256),
+                    stderr: "The file does not exist.".to_string(),
+                },
+            ),
+            "open could not show /s/artifacts/notes.md in its folder (exit status: 1)."
+        );
+        let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(
+            reveal_failed_sentence(path, opener::OpenError::Io(not_found())),
+            "Could not show /s/artifacts/notes.md in its folder: entity not found."
+        );
+        assert_eq!(
+            reveal_failed_sentence(
+                path,
+                opener::OpenError::Spawn {
+                    cmds: "xdg-open".to_string(),
+                    source: not_found(),
+                },
+            ),
+            "Could not show /s/artifacts/notes.md in its folder: entity not found."
+        );
+
+        let (status, body) =
+            reveal_answer(RevealFileApiError::RevealFailed("boom".to_string())).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "REVEAL_FAILED");
+        assert_eq!(body["error"]["message"], "boom");
+    }
+
+    /// A reveal whose blocking task could not be run says the shell's
+    /// sentence for it.
+    #[tokio::test]
+    async fn a_reveal_that_could_not_be_run_says_so() {
+        let _gp = crate::test_util::GuardedProject::new();
+        let (_dir, db) = test_db();
+        let row = by_product(&db, "Notes");
+
+        let err = reveal_asset_for_user(&db, &row.id, "user1", reveal_panics)
+            .await
+            .expect_err("the task panicked");
+        match err {
+            RevealFileApiError::RevealFailed(message) => assert!(
+                message.starts_with("Could not show the file in its folder: ")
+                    && message.ends_with('.'),
+                "{message}"
+            ),
+            other => panic!("expected RevealFailed, got {other:?}"),
+        }
+    }
+
     /// `/v1/files*`'s JSON bodies for the API contract's folder
-    /// (API-CONTRACT): one stored row, its metadata, its upload answer and
-    /// an Open that opens nothing.
+    /// (API-CONTRACT): one stored row, its metadata, its upload answer, an
+    /// Open that opens nothing and a Reveal that shows nothing (Q06).
     pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
         let (_dir, db) = test_db();
         let mut asset = sample_asset("f1", "user1");
@@ -1451,5 +1790,15 @@ pub(crate) mod tests {
             .await
             .expect("opened");
         out.response("post-files-id-open", serde_json::to_value(opened).unwrap());
+        // Q06: a Reveal that shows nothing, of a by-product in a guarded store.
+        let _gp = crate::test_util::GuardedProject::new();
+        let row = by_product(&db, "Notes");
+        let revealed = reveal_asset_for_user(&db, &row.id, "user1", reveal_ok)
+            .await
+            .expect("revealed");
+        out.response(
+            "post-files-id-reveal",
+            serde_json::to_value(revealed).unwrap(),
+        );
     }
 }

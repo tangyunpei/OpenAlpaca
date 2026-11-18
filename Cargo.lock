@@ -3944,7 +3944,6 @@ dependencies = [
  "anyhow",
  "libc",
  "openalpaca_app_support",
- "openalpaca_storage",
  "serde",
  "serde_json",
  "tauri",
@@ -4126,6 +4125,7 @@ dependencies = [
  "normpath",
  "url",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]
@@ -8188,6 +8188,7 @@ dependencies = [
  "endi",
  "enumflags2",
  "serde",
+ "url",
  "winnow 1.0.4",
  "zcheapstr",
  "zvariant_derive",

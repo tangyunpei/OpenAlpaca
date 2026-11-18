@@ -66,6 +66,7 @@ import type {
   FeedbackResponse,
   FileAsset,
   FileOpenResponse,
+  FileRevealResponse,
   FileUploadResponse,
   HealthResponse,
   InstallResponse,
@@ -1954,6 +1955,10 @@ const RESPONSES: Record<string, Entry> = {
   "post-files-id-open": body<FileOpenResponse>(
     "FileOpenResponse",
     shape<FileOpenResponse>({ id: "required", status: "required" }, {}),
+  ),
+  "post-files-id-reveal": body<FileRevealResponse>(
+    "FileRevealResponse",
+    shape<FileRevealResponse>({ id: "required", status: "required" }, {}),
   ),
   "post-files-upload": body<FileUploadResponse>(
     "FileUploadResponse",

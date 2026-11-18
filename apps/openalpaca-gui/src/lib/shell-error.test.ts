@@ -67,7 +67,7 @@ describe("shellErrorOf", () => {
 
   it("reads nothing else as the shell's", () => {
     for (const cause of [
-      "command reveal_path missing required key path",
+      "command read_daemon_log_tail missing required key lines",
       null,
       undefined,
       42,

@@ -429,6 +429,12 @@ export interface FileOpenResponse {
   status: "opened";
 }
 
+/** `POST /v1/files/{id}/reveal` (Q06): the id and `revealed`, never a path. */
+export interface FileRevealResponse {
+  id: string;
+  status: "revealed";
+}
+
 // ── LLM settings, keys, models ──────────────────────────────────────────────
 
 export type KeyPriorityValue = "primary" | "fallback";

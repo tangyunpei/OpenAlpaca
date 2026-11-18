@@ -54,22 +54,23 @@ function items(...artifacts: WrittenArtifact[]) {
   });
 }
 
-/** The shell's answer to `reveal_path`; every other command is discovery. */
-let revealAnswer: () => Promise<unknown> = async () => null;
+/** The daemon's answer to `POST /v1/files/{id}/reveal` (Q06). */
+let revealReply: () => Response = () =>
+  new Response(JSON.stringify({ id: "art-1", status: "revealed" }));
 let posted: string[] = [];
 
 beforeEach(() => {
   useUiStore.setState({ view: "chat", openArtifactId: null, toast: null });
   resetConnection();
   posted = [];
-  revealAnswer = async () => null;
-  vi.mocked(invoke).mockImplementation(async (command: string) =>
-    command === "reveal_path" ? revealAnswer() : CONNECTION,
-  );
+  revealReply = () =>
+    new Response(JSON.stringify({ id: "art-1", status: "revealed" }));
+  vi.mocked(invoke).mockImplementation(async () => CONNECTION);
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown, init?: RequestInit) => {
       posted.push(`${init?.method ?? "GET"} ${String(input)}`);
+      if (String(input).endsWith("/reveal")) return revealReply();
       return new Response(JSON.stringify({ id: "art-1", status: "opened" }), {
         status: 200,
       });
@@ -159,27 +160,34 @@ describe("the written-artifact card", () => {
     expect(useUiStore.getState().view).toBe("chat");
   });
 
-  it("asks the shell to reveal the path the frame carried, and shows its refusal", async () => {
+  it("asks the daemon to reveal the frame's file id, and shows its refusal", async () => {
     vi.stubGlobal("isTauri", true);
-    // The shell refuses with its typed refusal, `{ kind, message }` (Q13).
-    revealAnswer = () =>
-      Promise.reject({
-        kind: "reveal_refused",
-        message:
-          "/home/.openalpaca/artifacts/2026-09-05-run/01-connector-audit-findings.md is not there any more, so it cannot be shown in its folder.",
-      });
+    // The daemon refuses with its envelope, `409 REVEAL_REFUSED` (Q06).
+    revealReply = () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "REVEAL_REFUSED",
+            message:
+              "/home/.openalpaca/artifacts/2026-09-05-run/01-connector-audit-findings.md is not there any more, so it cannot be shown in its folder.",
+          },
+        }),
+        { status: 409 },
+      );
     const user = userEvent.setup();
     renderTranscript(written);
 
     await user.click(screen.getByRole("button", { name: revealLabel() }));
 
-    expect(invoke).toHaveBeenCalledWith("reveal_path", { path: written.path });
     await waitFor(() =>
       expect(useUiStore.getState().toast).toBe(
         "/home/.openalpaca/artifacts/2026-09-05-run/01-connector-audit-findings.md is not there any more, so it cannot be shown in its folder.",
       ),
     );
-    expect(posted).toEqual([]);
+    expect(posted).toEqual([
+      `POST http://127.0.0.1:9999/v1/files/${written.artifactId}/reveal`,
+    ]);
+    expect(invoke).not.toHaveBeenCalledWith("reveal_path", expect.anything());
   });
 });
 

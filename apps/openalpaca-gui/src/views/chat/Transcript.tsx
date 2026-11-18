@@ -137,7 +137,7 @@ export function Transcript({ items, dense }: TranscriptProps) {
                     name: item.entry.name,
                   })
                 }
-                onReveal={() => fileActions.reveal(item.entry.path)}
+                onReveal={() => fileActions.reveal(item.entry.artifactId)}
                 onOpenInLibrary={() =>
                   openArtifact(item.entry.artifactId, item.entry.inProject)
                 }

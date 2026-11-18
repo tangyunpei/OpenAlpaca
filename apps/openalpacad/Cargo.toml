@@ -47,7 +47,10 @@ pdf-extract.workspace = true
 zip.workspace = true
 calamine.workspace = true
 signal-hook.workspace = true
-opener.workspace = true
+# Q06: `reveal` for `POST /v1/files/{id}/reveal` (`opener::reveal`; on
+# macOS `open -R -- <path>`). On Linux the feature turns on zbus 5, already in
+# Cargo.lock: the lock gains only opener's edges.
+opener = { workspace = true, features = ["reveal"] }
 # The process's one rustls crypto provider, aws-lc-rs, installed at start
 # (`src/tls.rs`).
 rustls.workspace = true

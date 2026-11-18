@@ -65,6 +65,7 @@
 | POST | `/v1/files/upload` | `files.ts` | `apps/openalpaca-gui/src/lib/api/files.ts` |
 | GET | `/v1/files/{id}/content` | `files.ts` | `apps/openalpaca-gui/src/lib/api/files.ts` |
 | POST | `/v1/files/{id}/open` | `files.ts` | `apps/openalpaca-gui/src/lib/api/files.ts` |
+| POST | `/v1/files/{id}/reveal` | `files.ts` | `apps/openalpaca-gui/src/lib/api/files.ts` |
 | GET | `/v1/files/{id}` | `files.ts` | `apps/openalpaca-gui/src/lib/api/files.ts` |
 | GET | `/v1/health` | `telemetry.ts` | `apps/openalpaca-gui/src/lib/api/telemetry.ts` |
 | DELETE | `/v1/lanes/{lane_key}/followups/{id}` | `followups.ts` | `apps/openalpaca-gui/src/lib/api/followups.ts` |
@@ -151,7 +152,7 @@
 ## Tauri Commands
 
 - Source: `apps/openalpaca-gui/src-tauri/src/lib.rs`
-- Commands: `await_daemon_stopped`, `ensure_daemon_running`, `get_connection_info`, `read_daemon_log_tail`, `reveal_path`
+- Commands: `await_daemon_stopped`, `ensure_daemon_running`, `get_connection_info`, `read_daemon_log_tail`
 
 ## API Module Map
 
@@ -224,8 +225,8 @@
 ### `files.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/files.ts`
-- Exported functions: `downloadFile`, `getFileMetadata`, `openFileWithSystemDefault`, `uploadFile`
-- Endpoints: `POST /v1/files/upload`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `POST /v1/files/{id}/open`
+- Exported functions: `downloadFile`, `getFileMetadata`, `openFileWithSystemDefault`, `revealFile`, `uploadFile`
+- Endpoints: `POST /v1/files/upload`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `POST /v1/files/{id}/open`, `POST /v1/files/{id}/reveal`
 
 ### `followups.test.ts`
 

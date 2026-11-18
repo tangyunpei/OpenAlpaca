@@ -10,7 +10,9 @@
 //! - Waiting until a daemon the webview asked to stop is really gone
 //! - Reading the end of the daemon log, so a daemon that would not start can
 //!   say why
-//! - Showing an artifact in its folder (Finder, Explorer, the file manager)
+//!
+//! Showing an artifact in its folder is the daemon's `POST
+//! /v1/files/{id}/reveal` since Q06; the shell's `reveal_path` went.
 //!
 //! Every command is `async`, so none runs on the main thread, which draws the
 //! window (Tauri runs a command without `async` there); every file read, the
@@ -42,12 +44,11 @@ use login_path::{DaemonPath, DaemonPathReport};
 use openalpaca_app_support::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_app_support::discovery::{self, ConnectionInfo};
 use openalpaca_app_support::{paths, protocol};
-use openalpaca_storage::store;
 use reuse::MismatchWords;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::{Component, Path, PathBuf, Prefix};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -140,14 +141,6 @@ enum ShellError {
     /// daemon is gone is not known.
     #[error("{message}")]
     StopUnconfirmed { message: String },
-    /// `reveal_path`: the path is not one the shell shows
-    /// (`store::RevealRefusal`).
-    #[error("{message}")]
-    RevealRefused { message: String },
-    /// `reveal_path`: the platform's program could not show an admitted
-    /// path, or could not be run.
-    #[error("{message}")]
-    RevealFailed { message: String },
 }
 
 /// [`ShellError::SpawnFailed`] with no log tail.
@@ -473,90 +466,6 @@ async fn await_daemon_stopped() -> Result<DaemonStopReport, ShellError> {
     .map_err(|e| ShellError::StopUnconfirmed {
         message: format!("Could not wait for the daemon to stop: {e}"),
     })
-}
-
-/// Show a file in its folder: Finder with the file selected on macOS
-/// (`open -R`), Explorer with it selected on Windows (`explorer /select,`),
-/// and the folder holding it in the file manager elsewhere (`xdg-open`).
-///
-/// The path comes from the webview — an artifact's `path` as the daemon served
-/// it — so the shell does not take it on trust: `store::revealable_path`
-/// resolves it, symlinks included, and admits only a regular file in an
-/// OpenAlpaca store or under the root of a project `projects/` records, where
-/// a file an agent wrote into the project lives (storage design §13, ST-18:
-/// Reveal answers for such a file whatever its kind). The platform program
-/// gets that resolved path as an argument of its own, never through a shell.
-/// This shows the file; opening it stays the daemon's route
-/// (`POST /v1/files/{id}/open`). A refusal's sentence is one the webview
-/// shows as it is: [`ShellError::RevealRefused`] for a path the check does
-/// not admit, [`ShellError::RevealFailed`] for one the platform could not
-/// show.
-///
-/// The check (it reads `projects/`) and the program both run on the blocking
-/// pool, so a slow disk or file manager never stalls another `invoke`.
-#[tauri::command]
-async fn reveal_path(path: String) -> Result<(), ShellError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = store::revealable_path(Path::new(&path)).map_err(|refusal| {
-            ShellError::RevealRefused {
-                message: refusal.to_string(),
-            }
-        })?;
-        reveal_in_folder(&path).map_err(|message| ShellError::RevealFailed { message })
-    })
-    .await
-    .map_err(|e| ShellError::RevealFailed {
-        message: format!("Could not show the file in its folder: {e}."),
-    })?
-}
-
-/// Run the platform's reveal for an already admitted path and wait for it.
-fn reveal_in_folder(path: &Path) -> Result<(), String> {
-    let (program, args) = if cfg!(target_os = "macos") {
-        ("open", vec!["-R".into(), path.as_os_str().to_owned()])
-    } else if cfg!(windows) {
-        // `/select,` and the path as two arguments, so a path with a space is
-        // quoted on its own: `explorer /select, "C:\a b\c.md"`.
-        (
-            "explorer",
-            vec![
-                "/select,".into(),
-                without_verbatim_prefix(path).into_os_string(),
-            ],
-        )
-    } else {
-        let folder = path.parent().unwrap_or(path);
-        ("xdg-open", vec![folder.as_os_str().to_owned()])
-    };
-    let status = Command::new(program)
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("Could not show {} in its folder: {e}.", path.display()))?;
-    // Explorer exits 1 even when it opened the window, so on Windows only a
-    // failure to start it counts.
-    if status.success() || cfg!(windows) {
-        Ok(())
-    } else {
-        Err(format!(
-            "{program} could not show {} in its folder ({status}).",
-            path.display()
-        ))
-    }
-}
-
-/// `C:\…` for a canonical `\\?\C:\…`, which Explorer does not understand;
-/// any other path as it is.
-fn without_verbatim_prefix(path: &Path) -> PathBuf {
-    let mut components = path.components();
-    if let Some(Component::Prefix(prefix)) = components.next()
-        && let Prefix::VerbatimDisk(drive) = prefix.kind()
-    {
-        let mut plain = PathBuf::from(format!("{}:\\", char::from(drive)));
-        plain.extend(components.filter(|c| !matches!(c, Component::RootDir)));
-        return plain;
-    }
-    path.to_path_buf()
 }
 
 /// What [`spawn_daemon`] started.
@@ -1298,7 +1207,7 @@ fn with_app_hooks<R: tauri::Runtime>(builder: tauri::Builder<R>, t0: Instant) ->
     builder
 }
 
-/// The dialog plugin and the five commands the webview invokes: the one list,
+/// The dialog plugin and the four commands the webview invokes: the one list,
 /// which [`run`] builds the app from and the tests drive over a mock runtime.
 fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder
@@ -1307,8 +1216,7 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
             get_connection_info,
             ensure_daemon_running,
             await_daemon_stopped,
-            read_daemon_log_tail,
-            reveal_path
+            read_daemon_log_tail
         ])
 }
 

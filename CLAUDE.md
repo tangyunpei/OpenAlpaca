@@ -125,7 +125,7 @@ openalpaca_connectors   ← api, app_support, core, storage
 openalpaca_plugins      ← openalpaca_api, openalpaca_app_support, openalpaca_connectors, openalpaca_core, openalpaca_llm, openalpaca_storage
 openalpacad             ← api, app_support, connectors, core, llm, mcp, plugins, storage, wake
 openalpaca (CLI)        ← openalpaca_app_support, openalpaca_core, openalpaca_llm, openalpaca_storage
-openalpaca_gui          ← openalpaca_app_support, openalpaca_storage (until Q06)
+openalpaca_gui          ← openalpaca_app_support
 ```
 
 ### Execution Topology
@@ -271,7 +271,7 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 | Daemon lifecycle | `crates/openalpaca_app_support/src/` (`daemon_lifecycle.rs`, `discovery/`, `protocol/`); `commands/daemon.rs`; `lib/daemon-control.ts` |
 | Approval cards in the GUI | `views/chat/useChatSession.ts`, `hooks/useChat.ts`, `lib/confirmations-over.ts`; `security/sandbox/mod.rs` (`OpenPrompt`) |
 | Conversation titles | `gateway/persistence.rs` (`derive_title`), `repository/conversation/mod.rs` (`set_title_if_empty`) |
-| Open / Reveal in Finder | `store/reveal.rs` (`revealable_path`), `src-tauri/src/lib.rs` (`reveal_path`), `lib/reveal.ts` |
+| Open / Reveal in Finder | `store/reveal.rs` (`revealable_path`), `routes/files_types.rs` (`reveal_asset_for_user`), `lib/reveal.ts` |
 | Factory reset | `apps/openalpaca/src/commands/config_factory_reset.rs`, `database::delete_database_files` |
 | Wake/scheduler | `crates/openalpaca_wake/src/` |
 | Connectors | `crates/openalpaca_connectors/src/` |
@@ -281,7 +281,7 @@ Manuals: `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_Manual.md`, `Install
 ## Feature Flags
 - `openalpaca_llm`: `anthropic`, `openai`, `ollama`, each gating its provider + `reqwest`; `test-endpoint-guard` refuses Anthropic's and OpenAI's real hosts in test builds (llm, core, daemon, CLI, plugins), never a `cargo build`, release or sidecar; off under its `live-eval`, set by core's.
 - `openalpaca_core`: `live-eval` builds the three providers into its test binary for its `#[ignore]`d live evals `crates/openalpaca_core/tests/steer_routing_eval.rs`, `crates/openalpaca_core/tests/memory_eval.rs`; off by default.
-- `openalpaca_storage`: `test-home-guard` makes `store::projects::register` panic unless `OPENALPACA_HOME_STORE` set the home store, not to the real `~/.openalpaca`; on in test builds (storage, core, daemon, CLI, plugins, connectors, shell), never in a `cargo build`, release or sidecar: a backstop, not the protection (*Gotchas*); app_support's tests hold their own `HomeStoreGuard`.
+- `openalpaca_storage`: `test-home-guard` makes `store::projects::register` panic unless `OPENALPACA_HOME_STORE` set the home store, not to the real `~/.openalpaca`; on in test builds (storage, core, daemon, CLI, plugins, connectors), never in a `cargo build`, release or sidecar: a backstop, not the protection (*Gotchas*); app_support's tests hold their own `HomeStoreGuard`.
 - `openalpaca_connectors`: `telegram` (`teloxide`), `imessage` (`rusqlite`, macOS only), `discord` (`twilight-gateway`/`-http`/`-model` + `reqwest`). The daemon enables every provider and connector feature and at start installs aws-lc-rs, the one rustls provider (`tls.rs`; no library does).
 
 ## Settled rules — do not reopen or "improve"

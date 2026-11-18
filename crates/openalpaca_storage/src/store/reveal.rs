@@ -1,17 +1,19 @@
 //! Which paths the app may show in their folder (Round G, G4; storage design
 //! §13, ST-18).
 //!
-//! The GUI's `Reveal in Finder` hands the Tauri shell an artifact's `path`,
-//! which the webview read from the daemon. The shell trusts the file system,
-//! not the webview: [`revealable_path`] resolves the path — symlinks included —
-//! and admits only a regular file under the home store, where every store file
-//! lives — a project's included, in its folder under `projects/` (ST-1) — or
-//! under the root of a project `projects/` records, where a file an agent
-//! wrote into the project lives (ST-12), unless that project is missing:
-//! a missing project's root admits no file (ST-23, R-T18), and a file asked
-//! for under it is refused naming the project (R-T26). The shell then
-//! passes the answer to the platform's reveal as an argument, never through
-//! a shell. Nothing here opens, reads or changes the file.
+//! The GUI's `Reveal in Finder` sends the daemon an artifact's id (`POST
+//! /v1/files/{id}/reveal`, Q06; the Tauri shell's `reveal_path` was handed
+//! the `path` before), and the daemon checks the row's stored path here. The
+//! check trusts the file system, not the row: [`revealable_path`] resolves
+//! the path — symlinks included — and admits only a regular file under the
+//! home store, where every store file lives — a project's included, in its
+//! folder under `projects/` (ST-1) — or under the root of a project
+//! `projects/` records, where a file an agent wrote into the project lives
+//! (ST-12), unless that project is missing: a missing project's root admits
+//! no file (ST-23, R-T18), and a file asked for under it is refused naming
+//! the project (R-T26). The daemon then passes the answer to the platform's
+//! reveal as an argument, never through a shell. Nothing here opens, reads
+//! or changes the file.
 
 use std::fmt;
 use std::path::{Path, PathBuf};

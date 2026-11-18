@@ -86,7 +86,8 @@ pub use extensions::{
     update_extension_handler, validate_plugin_handler,
 };
 pub use files::{
-    get_file_content_handler, get_file_metadata_handler, open_file_handler, upload_file_handler,
+    get_file_content_handler, get_file_metadata_handler, open_file_handler, reveal_file_handler,
+    upload_file_handler,
 };
 pub use followups::{cancel_followup_handler, list_followups_handler, queue_followup_handler};
 pub use orchestrator_latency::{
