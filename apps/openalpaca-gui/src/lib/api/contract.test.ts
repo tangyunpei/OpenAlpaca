@@ -562,9 +562,6 @@ const RESPONSES: Record<string, Entry> = {
       {
         messages: shape<Inner<ChatHistoryResponse["messages"]>>(
           {
-            // No daemon field: no route sends it and no view reads it (a
-            // finding, CONTRACT-SAMPLES-2).
-            confirmation: "may_omit",
             artifacts: "optional",
             content: "required",
             content_json: "optional",
@@ -581,17 +578,6 @@ const RESPONSES: Record<string, Entry> = {
             tokens_out: "optional",
           },
           {
-            confirmation: shape<
-              Inner<Inner<ChatHistoryResponse["messages"]>["confirmation"]>
-            >(
-              {
-                request_id: "required",
-                tool_name: "required",
-                tool_arguments: "required",
-                status: "required",
-              },
-              {},
-            ),
             artifacts: shape<
               Inner<Inner<ChatHistoryResponse["messages"]>["artifacts"]>
             >({ id: "required", kind: "required", name: "required" }, {}),
@@ -1101,9 +1087,6 @@ const RESPONSES: Record<string, Entry> = {
       {
         messages: shape<Inner<SessionMessagesResponse["messages"]>>(
           {
-            // No daemon field: no route sends it and no view reads it (a
-            // finding, CONTRACT-SAMPLES-2).
-            confirmation: "may_omit",
             artifacts: "optional",
             content: "required",
             content_json: "optional",
@@ -1127,17 +1110,6 @@ const RESPONSES: Record<string, Entry> = {
                 id: "required",
                 name: "required",
                 kind: "required",
-              },
-              {},
-            ),
-            confirmation: shape<
-              Inner<Inner<SessionMessagesResponse["messages"]>["confirmation"]>
-            >(
-              {
-                request_id: "required",
-                tool_name: "required",
-                tool_arguments: "required",
-                status: "required",
               },
               {},
             ),

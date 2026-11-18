@@ -158,13 +158,6 @@ export interface AttachmentRef {
   caption?: string;
 }
 
-export interface ToolConfirmation {
-  request_id: string;
-  tool_name: string;
-  tool_arguments: unknown;
-  status: "pending" | "approved" | "denied" | "expired";
-}
-
 /**
  * One `role='artifact'` link on a stored message (GAP-23, closed): a file the
  * message's *run* produced, as the daemon resolves it — the id the Library
@@ -218,7 +211,6 @@ export interface ChatMessage {
    */
   content_json?: string | null;
   display_text?: string | null;
-  confirmation?: ToolConfirmation;
   /**
    * The run this message started (a delegating turn) or reported on (a
    * completion report) — migration 038's column. `null` for ordinary chat.
