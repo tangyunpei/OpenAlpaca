@@ -1356,6 +1356,11 @@ pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
     contract_working_state(&h, &other_id);
     let body = ok_body(list_sessions(&h.deps(), ListSessionsQuery::default())).await;
     out.response("get-sessions", body);
+    // `GET /v1/sessions/{id}`: one row, the list's view; only the CLI
+    // reads it (`chat --session`), so it is a `cli/` sample
+    // (CONTRACT-SAMPLES-3, *Rev 142*'s item 13).
+    let body = ok_body(h.deps().reread(&id)).await;
+    out.cli_response("get-sessions-id", body);
     let body = ok_body(get_session_messages(
         &h.deps(),
         &id,

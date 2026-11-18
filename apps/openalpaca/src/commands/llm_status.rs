@@ -540,6 +540,33 @@ pub(super) async fn llm_status(format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+/// `GET /v1/llm/usage/daily`'s path for `llm usage --daily`: thirty days,
+/// `agent_id` and `date` as typed (sent as they are, not encoded); held to
+/// the route's query sample by `contract_queries` (CONTRACT-SAMPLES-3).
+pub(crate) fn usage_daily_path(agent: Option<&str>, date: Option<&str>) -> String {
+    let mut path = "/v1/llm/usage/daily?limit=30".to_string();
+    if let Some(a) = agent {
+        path.push_str(&format!("&agent_id={}", a));
+    }
+    if let Some(d) = date {
+        path.push_str(&format!("&date={}", d));
+    }
+    path
+}
+
+/// `GET /v1/llm/usage`'s path for `llm usage`: fifty rows, `agent_id` and
+/// `key_id` as typed (sent as they are, not encoded).
+pub(crate) fn usage_path(agent: Option<&str>, key: Option<&str>) -> String {
+    let mut path = "/v1/llm/usage?limit=50".to_string();
+    if let Some(a) = agent {
+        path.push_str(&format!("&agent_id={}", a));
+    }
+    if let Some(k) = key {
+        path.push_str(&format!("&key_id={}", k));
+    }
+    path
+}
+
 pub(super) async fn llm_usage(
     agent: Option<String>,
     date: Option<String>,
@@ -550,23 +577,11 @@ pub(super) async fn llm_usage(
     let client = DaemonClient::connect().await?;
 
     if daily {
-        let mut path = "/v1/llm/usage/daily?limit=30".to_string();
-        if let Some(ref a) = agent {
-            path.push_str(&format!("&agent_id={}", a));
-        }
-        if let Some(ref d) = date {
-            path.push_str(&format!("&date={}", d));
-        }
+        let path = usage_daily_path(agent.as_deref(), date.as_deref());
         let entries: Vec<DailyUsageEntry> = client.get(&path).await?;
         print_list(&entries, format);
     } else {
-        let mut path = "/v1/llm/usage?limit=50".to_string();
-        if let Some(ref a) = agent {
-            path.push_str(&format!("&agent_id={}", a));
-        }
-        if let Some(ref k) = key {
-            path.push_str(&format!("&key_id={}", k));
-        }
+        let path = usage_path(agent.as_deref(), key.as_deref());
         let entries: Vec<UsageEntry> = client.get(&path).await?;
         print_list(&entries, format);
     }
@@ -583,7 +598,7 @@ pub(super) async fn llm_models(refresh: bool, format: OutputFormat) -> Result<()
     let client = DaemonClient::connect().await?;
     let models: Vec<ModelEntry> = if refresh {
         client
-            .post("/v1/models/refresh", &serde_json::json!({}))
+            .post("/v1/models/refresh", &crate::client::empty_body())
             .await?
     } else {
         client.get("/v1/models").await?

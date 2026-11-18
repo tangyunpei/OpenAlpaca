@@ -519,7 +519,7 @@ async fn produce() -> Samples {
 /// — a fixture leaving it `null` or `[]` would drop the keys inside, and
 /// neither side would check them.
 pub(crate) const NESTED: &[(Kind, &str, &str)] = &[
-    // A session's working state, on the four samples that carry a session
+    // A session's working state, on the five samples that carry a session
     // that has one (a create's answer is a fresh session's, with none).
     (
         Kind::Response,
@@ -527,6 +527,7 @@ pub(crate) const NESTED: &[(Kind, &str, &str)] = &[
         "sessions[].working_state.topic",
     ),
     (Kind::Response, "patch-sessions-id", "working_state.topic"),
+    (Kind::CliResponse, "get-sessions-id", "working_state.topic"),
     (
         Kind::Response,
         "post-sessions-id-activate",
@@ -561,6 +562,19 @@ pub(crate) const NESTED: &[(Kind, &str, &str)] = &[
         "get-memories-suggestions",
         "items[].sources[].type",
     ),
+    // `memory doctor`'s malformed and duplicate rows and `memory sync`'s
+    // changes, which the CLI prints (CONTRACT-SAMPLES-3).
+    (
+        Kind::CliResponse,
+        "get-memories-doctor",
+        "partitions[].malformed[].reason",
+    ),
+    (
+        Kind::CliResponse,
+        "get-memories-doctor",
+        "partitions[].duplicates[].files",
+    ),
+    (Kind::CliResponse, "post-memories-sync", "changes[].note_id"),
     // A session message's artifacts. (A message's `confirmation`, which
     // the GUI's type declares, is no field the daemon sends: its
     // descriptor marks it `may_omit`, a finding.)

@@ -4,9 +4,21 @@
   "partitions": [
     {
       "conflicts": [],
-      "duplicates": [],
+      "duplicates": [
+        {
+          "files": [
+            ""
+          ],
+          "id": ""
+        }
+      ],
       "health": "",
-      "malformed": [],
+      "malformed": [
+        {
+          "path": "",
+          "reason": ""
+        }
+      ],
       "notes": 0,
       "orphan": false,
       "owner_key": "",

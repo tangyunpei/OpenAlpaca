@@ -1804,9 +1804,24 @@ pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
     out.response("post-memories-id-undo", body);
 
     // The CLI's own reads (CLI-PROTOCOL): `memory doctor`, `sync`,
-    // `timeline` and `forget`.
+    // `timeline` and `forget`. Since CONTRACT-SAMPLES-3 the doctor finds a
+    // malformed file and a note's id in two files, and the sync a hand
+    // edit, so the rows `memory doctor` and `memory sync` print reach the
+    // folder with their keys; the two extra files go before the sync.
+    let (edited_by_hand, _) = f.extracted("By hand", "# By hand\n\nEdit me.\n");
+    let edited_file = f.note_file(edited_by_hand);
+    let notes_dir = edited_file.parent().unwrap().to_path_buf();
+    let malformed = notes_dir.join("not-a-note.md");
+    std::fs::write(&malformed, "no frontmatter here\n").unwrap();
+    let duplicate = notes_dir.join("a-copy.md");
+    std::fs::copy(&edited_file, &duplicate).unwrap();
     let body = ok_body(f.api.doctor(&Fixture::headers()).await).await;
     out.cli_response("get-memories-doctor", body);
+    std::fs::remove_file(&malformed).unwrap();
+    std::fs::remove_file(&duplicate).unwrap();
+    let mut text = std::fs::read_to_string(&edited_file).unwrap();
+    text.push_str("\nHand-edited.\n");
+    std::fs::write(&edited_file, text).unwrap();
     let body = ok_body(f.api.sync(&Fixture::headers()).await).await;
     out.cli_response("post-memories-sync", body);
     let query = TimelineMemoriesQuery {

@@ -201,7 +201,7 @@ fn resumed_target(target: ChatTarget, resumed: &SessionItem) -> ChatTarget {
 async fn resume(client: &DaemonClient, session_id: &str) -> Result<SessionItem> {
     let path = format!("/v1/sessions/{}/activate", urlencoding::encode(session_id));
     let session: SessionItem = client
-        .post(&path, &serde_json::json!({}))
+        .post(&path, &crate::client::empty_body())
         .await
         .with_context(|| format!("Could not resume conversation {session_id}"))?;
 
@@ -275,7 +275,7 @@ fn tail_offset(total: i64, limit: usize) -> usize {
 }
 
 /// One page of a conversation's messages.
-fn transcript_page_path(session_id: &str, limit: usize, offset: usize) -> String {
+pub(crate) fn transcript_page_path(session_id: &str, limit: usize, offset: usize) -> String {
     format!(
         "/v1/sessions/{}/messages?limit={limit}&offset={offset}",
         urlencoding::encode(session_id)

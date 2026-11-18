@@ -170,7 +170,9 @@ fn model_row(model: &serde_json::Value, tty: bool) -> String {
 }
 
 async fn cmd_agents(client: &DaemonClient) -> anyhow::Result<()> {
-    let agents: serde_json::Value = client.get("/v1/agents?limit=50").await?;
+    let agents: serde_json::Value = client
+        .get(&crate::commands::agents::list_path(None))
+        .await?;
     if let Some(arr) = agents.as_array() {
         if arr.is_empty() {
             println!("{}", "No agents.".dimmed());

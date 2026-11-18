@@ -46,7 +46,10 @@ lacks fails `contract.test.ts` unless its descriptor marks it `may_omit`,
 a key the daemon leaves out of that answer; every sample named after a
 route must name one `router.rs` registers. The CLI's `contract_reads`
 reads every response struct it deserialises from its sample and its
-`contract_bodies` holds each body it sends to `requests/`. A removed or
+`contract_bodies` holds each body it sends to `requests/`; since
+CONTRACT-SAMPLES-3 `contract_queries` holds each query string it builds to
+`queries/`, `contract_reads` lists the keys its memory commands, key
+list, REPL and chat-stream frames read as a `serde_json::Value`, and `GET /v1/sessions/{id}` has its `cli/` sample. A removed or
 renamed field, route or variant bumps
 `openalpaca_app_support::protocol::PROTOCOL` (CLAUDE.md, _Storage_).
 

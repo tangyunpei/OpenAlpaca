@@ -385,24 +385,15 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             at,
         } => {
             let api = Api::connect(&at).await?;
-            let mut query = vec![format!("limit={limit}")];
-            if let Some(k) = kind {
-                query.push(format!("kind={}", urlencoding::encode(&k)));
-            }
-            if let Some(s) = status {
-                query.push(format!("status={}", urlencoding::encode(&s)));
-            }
-            if let Some(s) = scope {
-                query.push(format!("scope={}", urlencoding::encode(&s)));
-            }
-            if history {
-                query.push("include_history=true".into());
-            }
-            if candidates {
-                query.push("include_candidates=true".into());
-            }
             let page = api
-                .get(&format!("/v1/memories?{}", query.join("&")))
+                .get(&list_path(&ListFilters {
+                    limit,
+                    kind: kind.as_deref(),
+                    status: status.as_deref(),
+                    scope: scope.as_deref(),
+                    history,
+                    candidates,
+                }))
                 .await?;
             match format {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&page)?),
@@ -475,11 +466,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
         } => {
             let api = Api::connect(&at).await?;
             let id = api.resolve_id(&id).await?;
-            let path = match &revision {
-                Some(rev) => format!("/v1/memories/{id}?revision={}", urlencoding::encode(rev)),
-                None => format!("/v1/memories/{id}"),
-            };
-            let note = api.get(&path).await?;
+            let note = api.get(&note_path(id, revision.as_deref())).await?;
             if raw {
                 print!("{}", note_from_read(&note)?.serialize());
             } else {
@@ -615,9 +602,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
         }
         MemoryCommands::Suggestions { limit, format, at } => {
             let api = Api::connect(&at).await?;
-            let page = api
-                .get(&format!("/v1/memories/suggestions?limit={limit}"))
-                .await?;
+            let page = api.get(&suggestions_path(limit)).await?;
             print!(
                 "{}",
                 suggestions_text(&page, format, std::io::stdout().is_terminal())
@@ -772,13 +757,9 @@ impl Api {
         for status in ["active", "candidate", "archived"] {
             let mut cursor: Option<String> = None;
             loop {
-                let mut path = format!(
-                    "/v1/memories?limit=100&status={status}&include_history=true&include_candidates=true"
-                );
-                if let Some(c) = &cursor {
-                    path.push_str(&format!("&cursor={}", urlencoding::encode(c)));
-                }
-                let page = self.get(&path).await?;
+                let page = self
+                    .get(&prefix_page_path(status, cursor.as_deref()))
+                    .await?;
                 for item in page["items"].as_array().into_iter().flatten() {
                     let id = item["id"].as_str().unwrap_or("");
                     if id.starts_with(&prefix) && !matches.iter().any(|(m, _)| m == id) {
@@ -807,6 +788,67 @@ impl Api {
             }
         }
     }
+}
+
+// ── the query strings (CONTRACT-SAMPLES-3) ──────────────────────
+
+/// What `memory list` asks for.
+pub(crate) struct ListFilters<'a> {
+    pub limit: usize,
+    pub kind: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    pub history: bool,
+    pub candidates: bool,
+}
+
+/// `GET /v1/memories`'s path for `memory list`: each filter sent only when
+/// given. This and the paths below are held to the routes' query samples
+/// by `contract_queries` (CONTRACT-SAMPLES-3).
+pub(crate) fn list_path(f: &ListFilters<'_>) -> String {
+    let mut query = vec![format!("limit={}", f.limit)];
+    if let Some(k) = f.kind {
+        query.push(format!("kind={}", urlencoding::encode(k)));
+    }
+    if let Some(s) = f.status {
+        query.push(format!("status={}", urlencoding::encode(s)));
+    }
+    if let Some(s) = f.scope {
+        query.push(format!("scope={}", urlencoding::encode(s)));
+    }
+    if f.history {
+        query.push("include_history=true".into());
+    }
+    if f.candidates {
+        query.push("include_candidates=true".into());
+    }
+    format!("/v1/memories?{}", query.join("&"))
+}
+
+/// One page of every note of one status, for [`Api::resolve_id`]'s prefix
+/// match: superseded notes and candidates included.
+pub(crate) fn prefix_page_path(status: &str, cursor: Option<&str>) -> String {
+    let mut path = format!(
+        "/v1/memories?limit=100&status={status}&include_history=true&include_candidates=true"
+    );
+    if let Some(c) = cursor {
+        path.push_str(&format!("&cursor={}", urlencoding::encode(c)));
+    }
+    path
+}
+
+/// `GET /v1/memories/{id}`'s path for `memory show`: a past revision's text
+/// when one is named.
+pub(crate) fn note_path(id: NoteId, revision: Option<&str>) -> String {
+    match revision {
+        Some(rev) => format!("/v1/memories/{id}?revision={}", urlencoding::encode(rev)),
+        None => format!("/v1/memories/{id}"),
+    }
+}
+
+/// `GET /v1/memories/suggestions`'s path for `memory suggestions`.
+pub(crate) fn suggestions_path(limit: usize) -> String {
+    format!("/v1/memories/suggestions?limit={limit}")
 }
 
 // ── search and timeline (design 09 §13.1) ───────────────────────
@@ -863,20 +905,31 @@ pub(crate) async fn timeline(
     before: usize,
     after: usize,
 ) -> Result<Value> {
-    let mut q = Vec::new();
-    match (id, query, date) {
-        (Some(id), None, None) => {
-            let id = api.resolve_id(id).await?;
-            q.push(format!("anchor={id}"));
-        }
-        (None, Some(text), None) => q.push(format!("q={}", urlencoding::encode(text))),
-        (None, None, Some(at)) => q.push(format!("date={}", urlencoding::encode(at))),
+    let around = match (id, query, date) {
+        (Some(id), None, None) => Around::Note(api.resolve_id(id).await?),
+        (None, Some(text), None) => Around::Query(text),
+        (None, None, Some(at)) => Around::Date(at),
         _ => bail!("draw a timeline around exactly one of a note id, --query or --date"),
-    }
-    q.push(format!("before={before}"));
-    q.push(format!("after={after}"));
-    api.get(&format!("/v1/memories/timeline?{}", q.join("&")))
-        .await
+    };
+    api.get(&timeline_path(&around, before, after)).await
+}
+
+/// What a timeline is drawn around: a note, a search's first hit, a date.
+pub(crate) enum Around<'a> {
+    Note(NoteId),
+    Query(&'a str),
+    Date(&'a str),
+}
+
+/// `GET /v1/memories/timeline`'s path for `memory timeline`; held to the
+/// route's query sample by `contract_queries` (CONTRACT-SAMPLES-3).
+pub(crate) fn timeline_path(around: &Around<'_>, before: usize, after: usize) -> String {
+    let anchor = match around {
+        Around::Note(id) => format!("anchor={id}"),
+        Around::Query(text) => format!("q={}", urlencoding::encode(text)),
+        Around::Date(at) => format!("date={}", urlencoding::encode(at)),
+    };
+    format!("/v1/memories/timeline?{anchor}&before={before}&after={after}")
 }
 
 // ── suggestions, confirm, undo ───────────────────────────────────

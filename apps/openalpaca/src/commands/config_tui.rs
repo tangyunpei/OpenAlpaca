@@ -1039,7 +1039,7 @@ fn fetch_agents_or_why() -> Result<Vec<TuiAgentItem>> {
     let client = block_on(DaemonClient::connect())?;
     Ok(block_on(async {
         client
-            .get::<Vec<TuiAgentItem>>("/v1/agents?limit=50")
+            .get::<Vec<TuiAgentItem>>(&super::agents::list_path(None))
             .await
             .unwrap_or_default()
     }))

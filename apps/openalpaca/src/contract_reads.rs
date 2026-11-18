@@ -21,24 +21,36 @@
 //! is how `agent list`'s `model` and `skills` went unread: the name check
 //! is what fails them. A field the daemon does not send is pinned in its
 //! hold's `unsent` list, a finding, so a fix on either side updates it.
-//! The commands that read a body as `serde_json::Value` (`memory`'s, the
-//! key list's, the REPL's) are not typed reads and are not held here.
+//!
+//! **The `serde_json::Value` reads** (*Rev 142*'s item 12, (b), with
+//! CONTRACT-SAMPLES-3): the memory commands, the key list, the REPL and
+//! `chat_stream`'s SSE frames read their answers as `serde_json::Value`, so
+//! no struct names their keys; each key path they read is listed in
+//! [`READS`] against its `responses/` or `stream/` sample, as the `cli/`
+//! reads are. The `POST`s whose route reads no body send
+//! [`crate::client::empty_body`], held to their route having no request
+//! sample ([`EMPTY_BODY_POSTS`]); their answers are held in [`holds`].
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-/// The folder, as the daemon's `contract::DIR` names it.
-const DIR: &str = concat!(
+/// The contract folder, whose kinds the reads and holds name.
+const ROOT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../openalpaca-gui/src/lib/api/contract/cli"
+    "/../openalpaca-gui/src/lib/api/contract"
 );
 
-/// Each sample and the key paths the CLI reads in it.
-const READS: &[(&str, &[&str])] = &[
+/// Each sample and the key paths the CLI reads in it: its kind (`cli`,
+/// `responses` or `stream`), its name, the paths. Every `cli/` sample is
+/// listed; a `responses/` or `stream/` one is listed where the CLI reads it
+/// as a `serde_json::Value` (CONTRACT-SAMPLES-3, *Rev 142*'s item 12, (b)).
+const READS: &[(&str, &str, &[&str])] = &[
     // `sessions.rs` `MeResponse`; `tasks.rs`'s lane.
-    ("get-me", &["default_lane_key"]),
-    // `agents.rs` `AgentItem`, `config_tui.rs` `TuiAgentItem`.
+    ("cli", "get-me", &["default_lane_key"]),
+    // `agents.rs` `AgentItem`, `config_tui.rs` `TuiAgentItem`; the REPL's
+    // `/agents` (`repl/commands` `cmd_agents`) reads `id`, `name`, `status`.
     (
+        "cli",
         "get-agents",
         &[
             "[].id",
@@ -50,14 +62,21 @@ const READS: &[(&str, &[&str])] = &[
         ],
     ),
     // `agents.rs` `create_interactive`, `create_from_file`.
-    ("post-agents", &["agent_id"]),
-    ("post-agents-from-toml", &["agent_id"]),
+    ("cli", "post-agents", &["agent_id"]),
+    ("cli", "post-agents-from-toml", &["agent_id"]),
     // `agents.rs` `remove_agent`, `config_tui.rs` `remove_agent_tui`.
-    ("delete-agents-id", &["status"]),
+    ("cli", "delete-agents-id", &["status"]),
     // `agents.rs` `agent_set_with`, `config_tui.rs` `interactive_edit_agent_config`.
-    ("put-agents-id-config", &["config_version"]),
-    // `memory.rs` `print_doctor`.
+    ("cli", "put-agents-id-config", &["config_version"]),
+    // `chat.rs` `named_session`, `refuse_foreign_lane` (`SessionItem`).
     (
+        "cli",
+        "get-sessions-id",
+        &["id", "lane_key", "workspace_id"],
+    ),
+    // `memory.rs` `print_doctor`, `idless_snapshot_line`.
+    (
+        "cli",
         "get-memories-doctor",
         &[
             "owner_key",
@@ -74,16 +93,32 @@ const READS: &[(&str, &[&str])] = &[
             "partitions[].pending",
             "partitions[].conflicts",
             "partitions[].malformed",
+            "partitions[].malformed[].path",
+            "partitions[].malformed[].reason",
             "partitions[].duplicates",
+            "partitions[].duplicates[].id",
+            "partitions[].duplicates[].files",
+            "idless_project_snapshots",
+            "refused",
+            "unreadable_snapshots",
         ],
     ),
     // `memory.rs` `MemoryCommands::Sync`.
     (
+        "cli",
         "post-memories-sync",
-        &["scanned", "changed", "index_state", "changes"],
+        &[
+            "scanned",
+            "changed",
+            "index_state",
+            "changes",
+            "changes[].note_id",
+            "changes[].revision",
+        ],
     ),
     // `memory.rs` `print_timeline`.
     (
+        "cli",
         "get-memories-timeline",
         &[
             "results",
@@ -97,18 +132,266 @@ const READS: &[(&str, &[&str])] = &[
             "index_state",
         ],
     ),
-    // `memory.rs` `forget_notes`.
+    // `memory.rs` `forget_notes` (`results[].current_revision` only on a
+    // conflict, another outcome than the sample's).
     (
+        "cli",
         "post-memories-forget",
-        &["results", "results[].id", "results[].status"],
+        &[
+            "results",
+            "results[].id",
+            "results[].status",
+            "retained.note",
+        ],
+    ),
+    // ── The `serde_json::Value` reads (*Rev 142*'s item 12) ──
+    // `memory.rs` `list_lines`, `list_more_hint`, `Api::resolve_id`.
+    (
+        "responses",
+        "get-memories",
+        &[
+            "items",
+            "items[].id",
+            "items[].effective_status",
+            "items[].status",
+            "items[].kind",
+            "items[].scope",
+            "items[].origin",
+            "items[].updated_at",
+            "items[].title",
+            "items[].pinned",
+            "next_cursor",
+        ],
+    ),
+    // `memory.rs` `note_text`, `note_from_read`, `edit_note`,
+    // `confirm_note`, `undo_message`, `forget_line`, `is_pending_suggestion`,
+    // `revision_of`, `memory add --supersedes`.
+    (
+        "responses",
+        "get-memories-id",
+        &[
+            "id",
+            "title",
+            "revision",
+            "status",
+            "effective_status",
+            "kind",
+            "scope",
+            "origin",
+            "freshness",
+            "body",
+            "truncated",
+            "path",
+            "supersedes",
+            "sources",
+            "sources[].type",
+            "sources[].id",
+            "sources_status",
+            "superseded_by",
+            "conflict",
+            "frontmatter",
+            "frontmatter.title",
+            "frontmatter.kind",
+            "frontmatter.status",
+            "frontmatter.created_at",
+            "frontmatter.updated_at",
+            "frontmatter.observed_at",
+            "frontmatter.valid_from",
+            "frontmatter.valid_to",
+            "frontmatter.review_after",
+            "frontmatter.pinned",
+            "frontmatter.fact_key",
+            "frontmatter.aliases",
+            "frontmatter.tags",
+            "frontmatter.supersedes",
+            "frontmatter.sources",
+            "frontmatter.sources[].type",
+            "frontmatter.sources[].id",
+            "frontmatter.sources[].observed_at",
+        ],
+    ),
+    // `memory.rs` `MemoryCommands::Add`.
+    (
+        "responses",
+        "post-memories",
+        &["id", "dedup", "revision", "scope", "superseded"],
+    ),
+    // `memory.rs` `search_lines`.
+    (
+        "responses",
+        "get-memories-search",
+        &[
+            "results",
+            "results[].id",
+            "results[].title",
+            "results[].kind",
+            "results[].scope",
+            "results[].effective_status",
+            "results[].origin",
+            "results[].freshness",
+            "results[].conflict",
+            "results[].same_key_loser",
+            "results[].sources_status",
+            "results[].match",
+            "results[].heading",
+            "results[].line_range",
+            "results[].excerpt",
+            "partial",
+            "index_state",
+        ],
+    ),
+    // `memory.rs` `suggestions_text`, `suggestion_line`,
+    // `suggestion_changes_line`, `suggestion_hidden`, `change_values`.
+    (
+        "responses",
+        "get-memories-suggestions",
+        &[
+            "items",
+            "items[].id",
+            "items[].target",
+            "items[].target.title",
+            "items[].target.origin",
+            "items[].target.excerpt",
+            "items[].observed_at",
+            "items[].created_at",
+            "items[].origin",
+            "items[].title",
+            "items[].reason",
+            "items[].older_count",
+            "items[].knowledge",
+            "items[].changes",
+            "items[].changes[].field",
+            "items[].changes[].from",
+            "items[].changes[].to",
+        ],
+    ),
+    // `memory.rs` `Confirmed::lines`; `edit_note`'s saved revision.
+    (
+        "responses",
+        "post-memories-id-confirm",
+        &["revision", "status", "dismissed"],
+    ),
+    ("responses", "post-memories-id-edit", &["revision"]),
+    // `memory.rs` `undo_message`.
+    ("responses", "post-memories-id-undo", &["restored"]),
+    // `llm_keys.rs` `key_rows` (`llm keys list`), `current_key_order`.
+    (
+        "responses",
+        "get-settings-llm",
+        &[
+            "providers",
+            "providers.*.keys",
+            "providers.*.keys[].id",
+            "providers.*.keys[].masked_secret",
+            "providers.*.keys[].priority",
+            "providers.*.keys[].source",
+            "providers.*.keys[].status",
+            "providers.*.requires_key",
+        ],
+    ),
+    // `llm_keys.rs` `keys_add`, `keys_validate`.
+    (
+        "responses",
+        "post-settings-llm-validate",
+        &[
+            "valid",
+            "format_error",
+            "tier",
+            "rate_limits",
+            "models_available",
+        ],
+    ),
+    // The REPL (`repl/commands`: `/model`, `/models`, `/keys`; `repl/mod.rs`
+    // reads `model` at start).
+    (
+        "responses",
+        "get-orchestrator-config",
+        &["model", "fallback_models"],
+    ),
+    ("responses", "get-models", &["[].id", "[].provider"]),
+    (
+        "responses",
+        "get-settings-llm-status",
+        &["*", "*[].is_available", "*[].health"],
+    ),
+    // `chat_stream`'s frames (`handle_sse_event`, `confirmation_details`,
+    // `inline_answer`, `skipped_attachment_lines`, `continued_from_line`).
+    ("stream", "reasoning", &["text"]),
+    ("stream", "delta", &["content"]),
+    (
+        "stream",
+        "done",
+        &[
+            "content",
+            "delegation",
+            "attachments_skipped",
+            "attachments_skipped[].id",
+            "attachments_skipped[].reason",
+            "continued_from",
+            "continued_from.topic",
+            "model",
+            "tokens_in",
+            "tokens_out",
+            "duration_ms",
+        ],
+    ),
+    ("stream", "error", &["message"]),
+    (
+        "stream",
+        "confirmation_requested",
+        &["tool_name", "preview", "tool_arguments", "request_id"],
+    ),
+    // `chat_stream` `poll_task_completion`, `task_outcome_text`.
+    (
+        "responses",
+        "get-tasks-id",
+        &[
+            "task",
+            "task.result_summary",
+            "task.status",
+            "task.created_at",
+            "task.completed_at",
+        ],
     ),
 ];
 
 /// Keys the CLI reads that the daemon does not send — a finding of this
-/// check (CLI-PROTOCOL; `tasks/pending-decisions.md` §1). Empty since
-/// *Rev 123*'s 123-6 (b): `agent list` reads the stored rows'
-/// `skills_json` and `llm_config_json`, the keys `GET /v1/agents` sends.
-const READ_BUT_NOT_SENT: &[(&str, &[&str])] = &[];
+/// check (CLI-PROTOCOL; `tasks/pending-decisions.md` §1): kind, sample,
+/// paths. Empty since *Rev 123*'s 123-6 (b): `agent list` reads the stored
+/// rows' `skills_json` and `llm_config_json`, the keys `GET /v1/agents`
+/// sends.
+const READ_BUT_NOT_SENT: &[(&str, &str, &[&str])] = &[];
+
+/// Keys the CLI reads that the daemon sends, but that no producer's fixture
+/// fills, so no sample carries them (CONTRACT-SAMPLES-3): `memory doctor`'s
+/// conflict, snapshot and refusal rows. Held the other way round: a fixture
+/// that fills one moves it into [`READS`].
+const READ_BUT_UNFILLED: &[(&str, &str, &[&str])] = &[(
+    "cli",
+    "get-memories-doctor",
+    &[
+        "partitions[].conflicts[].kind",
+        "partitions[].conflicts[].note",
+        "partitions[].conflicts[].target",
+        "idless_project_snapshots[].partition_key",
+        "idless_project_snapshots[].root",
+        "refused[].scope",
+        "refused[].owner_key",
+        "refused[].component",
+        "refused[].reason",
+        "unreadable_snapshots[].path",
+        "unreadable_snapshots[].reason",
+    ],
+)];
+
+/// The `POST`s whose route reads no body, which the CLI sends
+/// [`crate::client::empty_body`] (*Rev 142*'s item 12, (b)): the route's
+/// sample name and the command. Each route's answer is held in [`holds`].
+const EMPTY_BODY_POSTS: &[(&str, &str)] = &[
+    ("post-extensions-kind-id-verb", "ext::verb"),
+    ("post-models-refresh", "llm_status::llm_models --refresh"),
+    ("post-sessions-id-activate", "chat::resume"),
+];
 
 /// Every key path a sample holds, spelled as the folder's check spells it.
 fn key_paths(value: &serde_json::Value) -> BTreeSet<String> {
@@ -140,17 +423,14 @@ fn key_paths(value: &serde_json::Value) -> BTreeSet<String> {
     out
 }
 
-fn sample(name: &str) -> BTreeSet<String> {
-    let path = Path::new(DIR).join(format!("{name}.json"));
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()));
-    key_paths(&value)
+fn sample(kind: &str, name: &str) -> BTreeSet<String> {
+    key_paths(&read_sample(kind, name))
 }
 
 #[test]
 fn every_cli_sample_is_read_here_and_every_read_has_its_sample() {
-    let mut on_disk: Vec<String> = std::fs::read_dir(DIR)
+    let dir = Path::new(ROOT).join("cli");
+    let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
         .expect("the folder")
         .map(|entry| {
             entry
@@ -163,7 +443,11 @@ fn every_cli_sample_is_read_here_and_every_read_has_its_sample() {
         .map(|name| name.trim_end_matches(".json").to_string())
         .collect();
     on_disk.sort();
-    let mut listed: Vec<String> = READS.iter().map(|(name, _)| name.to_string()).collect();
+    let mut listed: Vec<String> = READS
+        .iter()
+        .filter(|(kind, _, _)| *kind == "cli")
+        .map(|(_, name, _)| name.to_string())
+        .collect();
     listed.sort();
     assert_eq!(on_disk, listed);
 }
@@ -171,11 +455,11 @@ fn every_cli_sample_is_read_here_and_every_read_has_its_sample() {
 #[test]
 fn every_key_the_cli_reads_is_in_its_sample() {
     let mut missing = Vec::new();
-    for (name, paths) in READS {
-        let held = sample(name);
+    for (kind, name, paths) in READS {
+        let held = sample(kind, name);
         for path in *paths {
             if !held.contains(*path) {
-                missing.push(format!("cli/{name}.json lacks {path}"));
+                missing.push(format!("{kind}/{name}.json lacks {path}"));
             }
         }
     }
@@ -183,26 +467,42 @@ fn every_key_the_cli_reads_is_in_its_sample() {
 }
 
 #[test]
-fn the_keys_read_but_not_sent_are_still_not_sent() {
-    for (name, paths) in READ_BUT_NOT_SENT {
-        let held = sample(name);
+fn the_keys_read_but_not_sent_or_unfilled_are_still_absent() {
+    for (kind, name, paths) in READ_BUT_NOT_SENT.iter().chain(READ_BUT_UNFILLED) {
+        let held = sample(kind, name);
         for path in *paths {
             assert!(
                 !held.contains(*path),
-                "cli/{name}.json now carries {path}: the finding is fixed; drop it from \
-                 READ_BUT_NOT_SENT and read it in READS"
+                "{kind}/{name}.json now carries {path}: drop it from READ_BUT_NOT_SENT or \
+                 READ_BUT_UNFILLED and read it in READS"
             );
         }
     }
 }
 
-// ── The CLI's typed reads (124-2) ───────────────────────────────────────────
+#[test]
+fn every_empty_body_post_goes_to_a_route_that_reads_no_body() {
+    assert_eq!(crate::client::empty_body(), serde_json::json!({}));
+    for (name, by) in EMPTY_BODY_POSTS {
+        let request = Path::new(ROOT)
+            .join("requests")
+            .join(format!("{name}.json"));
+        assert!(
+            !request.exists(),
+            "{by}: {name}'s route now reads a body (requests/{name}.json): send it, with a \
+             named body function held in contract_bodies"
+        );
+        let response = Path::new(ROOT)
+            .join("responses")
+            .join(format!("{name}.json"));
+        assert!(
+            response.exists(),
+            "{by}: no responses/{name}.json, so the route's answer is unheld"
+        );
+    }
+}
 
-/// The contract folder, whose kinds the holds name.
-const ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../openalpaca-gui/src/lib/api/contract"
-);
+// ── The CLI's typed reads (124-2) ───────────────────────────────────────────
 
 /// serde's own list of the wire names a struct reads (the daemon's
 /// `contract::requests::fields`, the same introspection: a deserializer
@@ -268,7 +568,7 @@ fn fields<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
 /// and the names it reads that the daemon does not send there.
 struct Hold {
     label: &'static str,
-    /// `responses`, `cli` or `events`.
+    /// `responses`, `cli`, `events` or `stream`.
     kind: &'static str,
     name: &'static str,
     /// `""` the body; `[]` an array's element; `.`-joined keys, each maybe
@@ -328,9 +628,12 @@ fn holds() -> Vec<Hold> {
         TimelineLane,
     };
     use crate::commands::tidy;
+    use openalpaca_core::gateway::DelegationInfo;
     vec![
-        // `chat_stream::send_chat_with_attachments`.
+        // `chat_stream::send_chat_with_attachments`; `handle_sse_event`'s
+        // `done.delegation`.
         hold!(ChatSendResponse, "responses", "post-chat", ""),
+        hold!(DelegationInfo, "stream", "done", "delegation"),
         // `agents.rs` `list_agents`, `config_tui.rs` `fetch_agents_or_why`
         // (both through the row type).
         hold!(AgentRow, "cli", "get-agents", "[]"),
@@ -379,6 +682,14 @@ fn holds() -> Vec<Hold> {
             ModelEntry,
             "responses",
             "get-models",
+            "[]",
+            ["model_id", "input_price_per_1m", "output_price_per_1m"]
+        ),
+        // `llm models --refresh`'s answer, to an empty-body post.
+        hold!(
+            ModelEntry,
+            "responses",
+            "post-models-refresh",
             "[]",
             ["model_id", "input_price_per_1m", "output_price_per_1m"]
         ),
@@ -435,10 +746,12 @@ fn holds() -> Vec<Hold> {
         hold!(PurgeCounts, "responses", "post-workspaces-purge", "counts"),
         hold!(Kept, "responses", "post-workspaces-purge", "kept"),
         hold!(Removed, "responses", "post-workspaces-purge", "removed"),
-        // `sessions.rs` (`GET /v1/sessions/{id}` has no sample of its own;
-        // its row is the list's), `chat.rs`.
+        // `sessions.rs`, `chat.rs` (`named_session` reads `GET
+        // /v1/sessions/{id}`, `resume` its `activate`'s answer).
         hold!(SessionsResponse, "responses", "get-sessions", ""),
         hold!(SessionItem, "responses", "get-sessions", "sessions[]"),
+        hold!(SessionItem, "cli", "get-sessions-id", ""),
+        hold!(SessionItem, "responses", "post-sessions-id-activate", ""),
         hold!(MeResponse, "cli", "get-me", ""),
         hold!(ChosenProject, "responses", "post-workspaces", ""),
         hold!(TranscriptPage, "responses", "get-sessions-id-messages", ""),
@@ -455,6 +768,14 @@ fn holds() -> Vec<Hold> {
             "responses",
             "get-extensions",
             "[]",
+            ["warnings"]
+        ),
+        // `ext::verb`'s answer, to an empty-body post.
+        hold!(
+            ExtensionRow,
+            "responses",
+            "post-extensions-kind-id-verb",
+            "",
             ["warnings"]
         ),
         hold!(

@@ -275,12 +275,28 @@ pub async fn run(args: TasksArgs) -> Result<()> {
     }
 }
 
-async fn list_tasks(status: Option<String>, limit: usize, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect().await?;
+/// `GET /v1/tasks`'s path for `tasks`: `status` as typed (sent as it is,
+/// not encoded); held to the route's query sample by `contract_queries`.
+pub(crate) fn list_path(status: Option<&str>, limit: usize) -> String {
     let mut path = format!("/v1/tasks?limit={}", limit);
-    if let Some(ref s) = status {
+    if let Some(s) = status {
         path.push_str(&format!("&status={}", s));
     }
+    path
+}
+
+/// `GET /v1/events/history`'s path for `tasks log`: one run's rows.
+pub(crate) fn log_path(task_id: &str, limit: usize) -> String {
+    format!(
+        "/v1/events/history?task_id={}&limit={}",
+        urlencoding::encode(task_id),
+        limit
+    )
+}
+
+async fn list_tasks(status: Option<String>, limit: usize, format: OutputFormat) -> Result<()> {
+    let client = DaemonClient::connect().await?;
+    let path = list_path(status.as_deref(), limit);
     let tasks: Vec<TaskItem> = client.get(&path).await?;
     print_list(&tasks, format);
     Ok(())
@@ -421,13 +437,7 @@ async fn task_log(task_id: &str, limit: usize) -> Result<()> {
     // The server filters by run now (GAP-10) — the whole page is this task's,
     // so `--limit` is a limit on *its* rows rather than on a global window
     // that a busy daemon would fill with other runs' events.
-    let page: EventHistoryPage = client
-        .get(&format!(
-            "/v1/events/history?task_id={}&limit={}",
-            urlencoding::encode(task_id),
-            limit
-        ))
-        .await?;
+    let page: EventHistoryPage = client.get(&log_path(task_id, limit)).await?;
 
     if page.events.is_empty() {
         println!("{}", "No log entries found for this task.".dimmed());

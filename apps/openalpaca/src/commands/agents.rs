@@ -286,12 +286,21 @@ pub(crate) async fn tidy_lines(
     tidy::tidy_lines(tidy::Kind::Agents, config_dir, daemon, apply, now).await
 }
 
-async fn list_agents(status: Option<String>, format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect().await?;
+/// `GET /v1/agents`'s path: fifty rows, and `status` as typed (sent as
+/// it is, not encoded). `agent list`, the REPL's `/agents` and the config
+/// screen's list ask it; `contract_queries` holds it to the route's query
+/// sample (CONTRACT-SAMPLES-3).
+pub(crate) fn list_path(status: Option<&str>) -> String {
     let mut path = "/v1/agents?limit=50".to_string();
-    if let Some(ref s) = status {
+    if let Some(s) = status {
         path.push_str(&format!("&status={}", s));
     }
+    path
+}
+
+async fn list_agents(status: Option<String>, format: OutputFormat) -> Result<()> {
+    let client = DaemonClient::connect().await?;
+    let path = list_path(status.as_deref());
     let agents: Vec<AgentItem> = client.get(&path).await?;
     print_list(&agents, format);
     Ok(())

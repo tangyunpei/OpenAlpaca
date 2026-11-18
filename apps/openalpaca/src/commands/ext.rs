@@ -355,14 +355,19 @@ pub async fn run(args: ExtArgs) -> Result<()> {
     }
 }
 
-pub(crate) async fn fetch_rows(include_orphaned: bool) -> Result<Vec<ExtensionRow>> {
-    let client = DaemonClient::connect().await?;
-    let path = if include_orphaned {
+/// `GET /v1/extensions`'s path: `include_orphaned` only when asked; held
+/// to the route's query sample by `contract_queries` (CONTRACT-SAMPLES-3).
+pub(crate) fn list_path(include_orphaned: bool) -> &'static str {
+    if include_orphaned {
         "/v1/extensions?include_orphaned=true"
     } else {
         "/v1/extensions"
-    };
-    client.get(path).await
+    }
+}
+
+pub(crate) async fn fetch_rows(include_orphaned: bool) -> Result<Vec<ExtensionRow>> {
+    let client = DaemonClient::connect().await?;
+    client.get(list_path(include_orphaned)).await
 }
 
 async fn list(include_orphaned: bool, format: OutputFormat) -> Result<()> {
@@ -491,7 +496,7 @@ pub(crate) async fn verb(kind: &str, id: &str, verb: &str) -> Result<()> {
     let row: ExtensionRow = client
         .post(
             &format!("/v1/extensions/{kind}/{id}/{verb}"),
-            &serde_json::json!({}),
+            &crate::client::empty_body(),
         )
         .await?;
 

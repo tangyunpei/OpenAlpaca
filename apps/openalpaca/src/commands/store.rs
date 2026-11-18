@@ -280,7 +280,7 @@ fn absolute(path: &str) -> Result<String> {
     Ok(absolute.to_string_lossy().into_owned())
 }
 
-fn workspace_query(path: &str) -> String {
+pub(crate) fn workspace_query(path: &str) -> String {
     format!("/v1/workspaces?path={}", urlencoding::encode(path))
 }
 

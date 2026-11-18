@@ -264,6 +264,14 @@ async fn check_response(resp: Response) -> Result<Response> {
     Err(error_from_response(resp).await)
 }
 
+/// The body of a `POST` whose route reads none: `ext` `enable|disable|
+/// reload|approve|deny`, `llm models --refresh`, a resumed conversation's
+/// `activate`. `contract_reads` holds that each such route still has no
+/// request sample (CONTRACT-SAMPLES-3, *Rev 142*'s item 12).
+pub(crate) fn empty_body() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 /// The error a refusal reads as, for a caller that took the raw response.
 pub(crate) async fn error_from_response(resp: Response) -> anyhow::Error {
     let status = resp.status();
