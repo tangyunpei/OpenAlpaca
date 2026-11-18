@@ -27,7 +27,7 @@ The rules:
              `python-version-file: .python-version` and names no `python-version:`
              (with both inputs, setup-python takes the literal, warning only), an
              input's name read in any case, as the runner reads it; and that file
-             holds one line, `X.Y` or `X.Y.Z` (its shape: no Python is looked up).
+             holds one line, `X.Y` (its shape: no Python is looked up).
   build-dir  every CARGO_TARGET_DIR a workflow or a gate script sets is paired with
              CARGO_BUILD_BUILD_DIR (M63, MF-5): on the same command line, on an adjacent
              line of the same script, or as a sibling key of the same `env:` mapping.
@@ -109,7 +109,7 @@ VERSION_COMMENT = re.compile(r"^v\d+\.\d+\.\d+\b")
 PYTHON_LITERAL = re.compile(r"""(?:^\s*(?:-\s+)?|[{,]\s*)["']?(?i:python-version)["']?\s*:""")
 READS_PIN = re.compile(
     r"""(?:^\s*(?:-\s+)?|[{,]\s*)["']?(?i:python-version-file)["']?\s*:\s*["']?\.python-version["']?\s*(?:[,}].*)?$""")
-PIN_LINE = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?")
+PIN_LINE = re.compile(r"[0-9]+\.[0-9]+")
 SHELL_TARGET = re.compile(r"\bCARGO_TARGET_DIR=")
 SHELL_BUILD = re.compile(r"\bCARGO_BUILD_BUILD_DIR=")
 YAML_TARGET = re.compile(r"^(\s*)CARGO_TARGET_DIR\s*:")
@@ -267,7 +267,7 @@ def check_python_pin_steps(rel, lines, out):
 def check_python_pin_file(root, out):
     path = root / ".python-version"
     if not path.is_file():
-        out.append(".python-version:1: python-pin: there is no .python-version; the pin is one line, `X.Y` or `X.Y.Z`")
+        out.append(".python-version:1: python-pin: there is no .python-version; the pin is one line, `X.Y`")
         return
     try:
         text = path.read_bytes().decode("utf-8")
@@ -284,7 +284,7 @@ def check_python_pin_file(root, out):
         what = "reads `%s`" % ascii(lines[0])[1:-1]
     else:
         return
-    out.append(".python-version:1: python-pin: .python-version %s; the pin is one line, `X.Y` or `X.Y.Z`" % what)
+    out.append(".python-version:1: python-pin: .python-version %s; the pin is one line, `X.Y`" % what)
 
 
 def check_build_dir_shell(rel, lines, suffix, out):

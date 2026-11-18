@@ -242,7 +242,8 @@ def test_a_setup_python_step_not_reading_the_pin_file_fails() -> None:
 
 def test_a_missing_python_version_file_fails() -> None:
     out = _planted("python-pin", pin=None)
-    assert ".python-version:1: python-pin: " in out, out
+    want = ".python-version:1: python-pin: there is no .python-version; the pin is one line, `X.Y`"
+    assert want in out.splitlines(), out
 
 
 def test_an_empty_python_version_file_fails() -> None:
@@ -274,12 +275,20 @@ def test_a_python_version_file_that_is_not_utf8_is_no_verdict() -> None:
         assert out.startswith(want) and len(out.splitlines()) == 1, out
 
 
-def test_a_minor_or_a_patch_pin_read_by_setup_python_passes() -> None:
+def test_a_patch_pin_fails() -> None:
+    # the pin is `X.Y` only (PYPIN-XY): a patch pin is refused, named by the python-pin rule
+    for pin in ("3.11.15\n", "3.11.18"):
+        out = _planted("python-pin", pin=pin)
+        want = ".python-version:1: python-pin: .python-version reads `%s`; the pin is one line, `X.Y`" % pin.strip()
+        assert want in out.splitlines(), (pin, out)
+
+
+def test_a_minor_pin_read_by_setup_python_passes() -> None:
     quoted = GOOD_WORKFLOW.replace("python-version-file: .python-version", 'python-version-file: ".python-version"')
     flow = GOOD_WORKFLOW.replace(READS_PIN, "        with: {python-version-file: .python-version}\n")
     commented = GOOD_WORKFLOW.replace(READS_PIN, READS_PIN + '          # python-version: "3.9.25" before the pin\n')
     assert GOOD_WORKFLOW not in (quoted, flow, commented)
-    for workflow, pin in ((GOOD_WORKFLOW, "3.11.18\n"), (GOOD_WORKFLOW, "3.11"), (quoted, "3.11\n"),
+    for workflow, pin in ((GOOD_WORKFLOW, "3.11\n"), (GOOD_WORKFLOW, "3.11"), (quoted, "3.11\n"),
                           (flow, "3.11\n"), (commented, "3.11\n")):
         with tempfile.TemporaryDirectory() as d:
             rc, out = _run(_tree(pathlib.Path(d), workflow=workflow, pin=pin))
