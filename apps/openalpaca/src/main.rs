@@ -85,7 +85,7 @@ enum Commands {
     /// Show or edit the persona documents (USER.md) through the daemon
     Persona(commands::persona::PersonaArgs),
 
-    /// Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt)
+    /// Manage memory notes (list, search, timeline, show, add, edit, suggestions, confirm, undo, forget, sync, doctor, adopt)
     Memory(commands::memory::MemoryArgs),
 
     /// Show the skill catalog and the problems its last scan found (list, info, tidy)
@@ -243,5 +243,23 @@ mod tests {
         }
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         assert_eq!(count(&src), every_subcommand_enum().len());
+    }
+
+    /// PG-3: the `memory` command's help line names every `MemoryCommands`
+    /// variant, in the enum's order, so the line `openalpaca --help` and
+    /// docs/api's command table print cannot leave a verb out again.
+    #[test]
+    fn the_memory_help_line_names_every_memory_verb() {
+        let verbs: Vec<String> =
+            commands::memory::MemoryCommands::augment_subcommands(Command::new("memory"))
+                .get_subcommands()
+                .map(|sub| sub.get_name().to_string())
+                .collect();
+        let cli = super::Cli::command();
+        let memory = cli.find_subcommand("memory").expect("memory is a command");
+        assert_eq!(
+            memory.get_about().map(ToString::to_string),
+            Some(format!("Manage memory notes ({})", verbs.join(", ")))
+        );
     }
 }

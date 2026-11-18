@@ -111,7 +111,7 @@ openalpaca llm status                        # shows which model will answer
 | [`plugin`](#plugin) | Plugin-only shortcut over `ext` |
 | [`sessions`](#sessions) | Stored conversations |
 | [`store`](#store) | Projects: list them, re-point a moved one, delete one's data |
-| [`memory`](#memory) | Memory notes: list, search, add, edit, confirm, undo, forget, sync, doctor, adopt |
+| [`memory`](#memory) | Memory notes: list, search, timeline, show, add, edit, suggestions, confirm, undo, forget, sync, doctor, adopt |
 | [`persona`](#persona) | `USER.md`: show it, edit it |
 | [`skills`](#skills) | The skill catalog and the problems its last scan found |
 | [`chat`](#chat) | Talk to the orchestrator |
