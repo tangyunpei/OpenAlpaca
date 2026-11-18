@@ -135,11 +135,19 @@ impl ProviderUsageTracker {
     }
 
     /// Fetch usage from Anthropic API.
+    ///
+    /// A guarded test build refuses Anthropic's real host here as the
+    /// provider's calls do (GUARD-REACH, pending-decisions *Rev 133* item 5,
+    /// (b), taken *Rev 134*): before any lookup, so no test's token leaves
+    /// the process ([`crate::providers::refuse_real_host`]). A release build
+    /// has no such check.
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
     async fn fetch_anthropic_usage(&self, token: &str) -> Result<ExternalUsage, String> {
         let rt = self.runtime_config.load();
         let fetch_timeout = Duration::from_secs(rt.timeouts.usage_fetch_timeout_secs);
         let url = &rt.endpoints.anthropic_usage;
+        crate::providers::refuse_real_host("Anthropic", url, crate::providers::ANTHROPIC_API_HOSTS)
+            .map_err(|e| e.to_string())?;
         let result = tokio::time::timeout(
             fetch_timeout,
             self.client.get(url.as_str()).bearer_auth(token).send(),
@@ -168,11 +176,16 @@ impl ProviderUsageTracker {
     }
 
     /// Fetch usage from OpenAI API.
+    ///
+    /// A guarded test build refuses OpenAI's real hosts here as the
+    /// provider's calls do (GUARD-REACH, as [`Self::fetch_anthropic_usage`]).
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
     async fn fetch_openai_usage(&self, token: &str) -> Result<ExternalUsage, String> {
         let rt = self.runtime_config.load();
         let fetch_timeout = Duration::from_secs(rt.timeouts.usage_fetch_timeout_secs);
         let url = &rt.endpoints.openai_usage;
+        crate::providers::refuse_real_host("OpenAI", url, crate::providers::OPENAI_API_HOSTS)
+            .map_err(|e| e.to_string())?;
         let result = tokio::time::timeout(
             fetch_timeout,
             self.client.get(url.as_str()).bearer_auth(token).send(),

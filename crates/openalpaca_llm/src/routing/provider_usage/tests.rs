@@ -91,6 +91,97 @@ async fn a_refused_usage_fetch_is_none_and_not_cached() {
     assert_eq!(server.hits("/api/oauth/usage").await, 2);
 }
 
+/// GUARD-REACH (pending-decisions *Rev 133* item 5, (b), taken *Rev 134*):
+/// a guarded test build refuses the two usage fetches at the real default
+/// endpoints `LlmRuntimeConfig::default()` names, as the providers' calls
+/// are refused: an error naming the guard and the host, before any lookup,
+/// so no connection is tried and no token leaves the process. The client
+/// is the test's resolver's, which no proxy reaches and which answers every
+/// name with a refused loopback port, so even the parent's send (red: an
+/// "HTTP error" after one lookup) left nothing on the wire.
+#[cfg(all(
+    feature = "openai",
+    not(feature = "live-eval"),
+    any(target_os = "macos", target_os = "linux")
+))]
+#[tokio::test]
+async fn a_test_build_refuses_the_real_usage_endpoints_before_any_lookup() {
+    use crate::test_support::{Resolver, client_resolving_with, refused_addr};
+    assert!(crate::providers::test_endpoint_guard_armed());
+    let resolver = Resolver::to(refused_addr());
+    let mut tracker = ProviderUsageTracker::new();
+    tracker.client =
+        client_resolving_with(&resolver, Duration::from_secs(5), Duration::from_secs(5));
+    let defaults = LlmRuntimeConfig::default().endpoints;
+    assert!(
+        defaults
+            .anthropic_usage
+            .starts_with("https://api.anthropic.com/")
+    );
+    assert!(defaults.openai_usage.starts_with("https://api.openai.com/"));
+
+    let anthropic = tracker
+        .fetch_anthropic_usage("a-test-token")
+        .await
+        .unwrap_err();
+    assert!(
+        anthropic.contains("test-endpoint-guard") && anthropic.contains("(api.anthropic.com)"),
+        "{anthropic}"
+    );
+    let openai = tracker
+        .fetch_openai_usage("a-test-token")
+        .await
+        .unwrap_err();
+    assert!(
+        openai.contains("test-endpoint-guard") && openai.contains("(api.openai.com)"),
+        "{openai}"
+    );
+    // Through the public path a refusal is no usage, and nothing is cached.
+    assert!(
+        tracker
+            .get_usage(CredentialSource::ClaudeCode, "a-test-token")
+            .await
+            .is_none()
+    );
+    assert_eq!(resolver.lookups(), 0, "no connection was tried");
+}
+
+/// A regional host of OpenAI's API is refused too, and a loopback usage
+/// endpoint (`tracker_on`'s) still answers: the guard reads the host only.
+#[cfg(all(
+    feature = "openai",
+    not(feature = "live-eval"),
+    any(target_os = "macos", target_os = "linux")
+))]
+#[tokio::test]
+async fn the_usage_guard_refuses_only_the_real_hosts() {
+    use crate::test_support::{
+        MockHttpServer, MockResponse, Resolver, client_resolving_with, refused_addr,
+    };
+    let resolver = Resolver::to(refused_addr());
+    let mut rt = LlmRuntimeConfig::default();
+    rt.endpoints.openai_usage = "https://eu.api.openai.com/dashboard/billing/usage".to_string();
+    let mut tracker =
+        ProviderUsageTracker::with_runtime_config(Arc::new(ArcSwap::from_pointee(rt)));
+    tracker.client =
+        client_resolving_with(&resolver, Duration::from_secs(5), Duration::from_secs(5));
+    let regional = tracker
+        .fetch_openai_usage("a-test-token")
+        .await
+        .unwrap_err();
+    assert!(regional.contains("(eu.api.openai.com)"), "{regional}");
+    assert_eq!(resolver.lookups(), 0, "no connection was tried");
+
+    let server =
+        MockHttpServer::start(|_| MockResponse::json(r#"{"total_cost": 1.0, "total_tokens": 10}"#))
+            .await;
+    let loopback = tracker_on(&server)
+        .fetch_anthropic_usage("a-test-token")
+        .await
+        .expect("a loopback usage endpoint answers");
+    assert_eq!(loopback.token_count, 10);
+}
+
 #[test]
 fn test_approximate_flag_always_true() {
     let body = r#"{"total_cost": 12.5, "total_tokens": 50000}"#;

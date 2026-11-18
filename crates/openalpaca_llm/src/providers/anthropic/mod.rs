@@ -18,8 +18,9 @@ const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 /// points a test at a loopback server instead, and a guarded test build
 /// refuses this host (`AnthropicProvider::refuse_real_endpoint`).
 const API_BASE: &str = "https://api.anthropic.com/v1";
-/// [`API_BASE`]'s host, the one a guarded test build refuses.
-const API_HOST: &str = "api.anthropic.com";
+// `API_BASE`'s host, the one a guarded test build refuses: the one list,
+// which the usage fetch refuses too.
+use super::ANTHROPIC_API_HOSTS;
 /// Ids asked for per page of the Models API's list: the most it allows
 /// (1 to 1000, default 20 — its reference page, read 2026-11-12).
 const MODELS_PAGE_LIMIT: u32 = 1000;
@@ -127,7 +128,7 @@ impl AnthropicProvider {
     /// provider at its own server with [`Self::with_api_base`]. A release
     /// build has no such check.
     fn refuse_real_endpoint(&self) -> Result<(), LlmError> {
-        super::refuse_real_host("Anthropic", &self.api_base, &[API_HOST])
+        super::refuse_real_host("Anthropic", &self.api_base, ANTHROPIC_API_HOSTS)
     }
 
     /// Give one non-streaming call this much wall clock, and no more.

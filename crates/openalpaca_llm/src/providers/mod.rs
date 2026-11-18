@@ -161,14 +161,44 @@ pub const fn test_endpoint_guard_yields() -> bool {
     cfg!(feature = "live-eval")
 }
 
+/// Anthropic's API host, the one a guarded test build refuses: the Messages
+/// and Models APIs' (`anthropic::API_BASE`) and the usage endpoint's
+/// (`EndpointsConfig::anthropic_usage`'s default), so the provider and
+/// `ProviderUsageTracker` refuse from one list (GUARD-REACH).
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+pub(crate) const ANTHROPIC_API_HOSTS: &[&str] = &["api.anthropic.com"];
+
+/// The hosts of OpenAI's own API: `api.openai.com` and the regional hosts
+/// of its data-residency table, each of which serves `/v1/responses`
+/// (developers.openai.com/api/docs/guides/data-residency, "Support by
+/// region", read 2026-11-14: the same ten regional hosts the your-data
+/// guide listed on 2026-11-12, which now points there). The usage
+/// endpoint's default (`EndpointsConfig::openai_usage`) is on the first.
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+pub(crate) const OPENAI_API_HOSTS: &[&str] = &[
+    "api.openai.com",
+    "us.api.openai.com",
+    "eu.api.openai.com",
+    "au.api.openai.com",
+    "ca.api.openai.com",
+    "jp.api.openai.com",
+    "in.api.openai.com",
+    "sg.api.openai.com",
+    "kr.api.openai.com",
+    "gb.api.openai.com",
+    "ae.api.openai.com",
+];
+
 /// A guarded test build never sends to a provider's real host: a `base`
 /// whose host is one of `real_hosts` is refused with a configuration error
 /// naming the guard and the host, before any lookup, so no connection is
 /// tried and no test's key leaves the process. Any other base — a loopback
 /// mock, a LAN or other compatible server — passes. Not transient and not an
 /// auth error, so the router neither retries nor counts a refused key.
+/// The providers' calls and `ProviderUsageTracker`'s two usage fetches
+/// (GUARD-REACH) ask it; the tracker compiles under `ollama` alone too.
 #[cfg(all(
-    any(feature = "anthropic", feature = "openai"),
+    any(feature = "anthropic", feature = "openai", feature = "ollama"),
     any(test, feature = "test-endpoint-guard"),
     not(feature = "live-eval")
 ))]
@@ -193,7 +223,7 @@ pub(crate) fn refuse_real_host(
 
 /// Release, `cargo run`, sidecar and `live-eval` builds: no check.
 #[cfg(all(
-    any(feature = "anthropic", feature = "openai"),
+    any(feature = "anthropic", feature = "openai", feature = "ollama"),
     not(all(any(test, feature = "test-endpoint-guard"), not(feature = "live-eval")))
 ))]
 #[inline(always)]

@@ -61,24 +61,9 @@ pub struct OpenAiProvider {
     openai_api: bool,
 }
 
-/// The hosts of OpenAI's own API: `api.openai.com` and the regional hosts
-/// of its data-residency table, each of which serves `/v1/responses`
-/// (developers.openai.com/api/docs/guides/data-residency, "Support by
-/// region", read 2026-11-14: the same ten regional hosts the your-data
-/// guide listed on 2026-11-12, which now points there).
-const OPENAI_API_HOSTS: &[&str] = &[
-    "api.openai.com",
-    "us.api.openai.com",
-    "eu.api.openai.com",
-    "au.api.openai.com",
-    "ca.api.openai.com",
-    "jp.api.openai.com",
-    "in.api.openai.com",
-    "sg.api.openai.com",
-    "kr.api.openai.com",
-    "gb.api.openai.com",
-    "ae.api.openai.com",
-];
+// The hosts of OpenAI's own API: the one list, which the guard and the
+// usage fetch read too.
+use super::OPENAI_API_HOSTS;
 
 /// Whether `base_url` is OpenAI's own API: `https` to one of
 /// [`OPENAI_API_HOSTS`], whatever the path. Every other OpenAI-compatible
