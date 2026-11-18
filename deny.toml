@@ -16,10 +16,21 @@ yanked = "deny"
 unmaintained = "workspace"
 unsound = "workspace"
 # Every ignore names why it is safe to carry and what lifts it. The same ids
-# are cargo-audit's (.cargo/audit.toml) and the DU-23 (c) waiver record's.
-# None today: P34's three, on calamine 0.36.1's own zip 8.6.0, were lifted
-# when calamine 0.37 moved to zip ^9.
-ignore = []
+# are cargo-audit's (.cargo/audit.toml).
+# P34's three, on calamine 0.36.1's own zip 8.6.0, were lifted when calamine
+# 0.37 moved to zip ^9.
+#
+# RUSTSEC-2026-0543: chrono 0.4.45 is flagged unmaintained (not vulnerable;
+# all versions, no patched release, and 0.4.45 is the newest). Eight members
+# name chrono directly, and rmcp, teloxide-core and tokio-cron-scheduler bring
+# it in whatever the workspace does. The owner accepted it on 2026-11-17
+# until the workspace moves off chrono, which he tied to the openalpaca_wake
+# rework. Lifted when no workspace manifest (a member's, or the root's
+# [workspace.dependencies]) names chrono: scripts/repo_policy.py's `chrono`
+# rule then fails until this ignore goes.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; accepted 2026-11-17 until the workspace moves off chrono" },
+]
 
 [licenses]
 # Each licence a crate in Cargo.lock needs, by name, and nothing more: a crate

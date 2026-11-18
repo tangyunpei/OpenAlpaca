@@ -101,7 +101,8 @@ guard = _load_guard()
 
 
 def _tree(root: pathlib.Path, workflow: str | None = GOOD_WORKFLOW, script: str = GOOD_SCRIPT,
-          lock: str = LOCK_WITH_ZIP8, deny: str = DENY, pin: str | None = "3.11\n") -> pathlib.Path:
+          lock: str = LOCK_WITH_ZIP8, deny: str = DENY, pin: str | None = "3.11\n",
+          files: dict[str, str] | None = None) -> pathlib.Path:
     if workflow is not None:  # None: no .github at all
         (root / ".github" / "workflows").mkdir(parents=True)
         (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
@@ -111,6 +112,9 @@ def _tree(root: pathlib.Path, workflow: str | None = GOOD_WORKFLOW, script: str 
     (root / "deny.toml").write_text(deny, encoding="utf-8")
     if pin is not None:  # None: no .python-version at all
         (root / ".python-version").write_bytes(pin.encode("utf-8"))
+    for rel, text in (files or {}).items():  # any further file, by its path under the root
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
     return root
 
 
@@ -345,6 +349,86 @@ def test_the_zip_majors_are_read_from_the_lock_and_none_without_one() -> None:
         lock.write_text(LOCK_WITH_ZIP8, encoding="utf-8")
         majors = guard.locked_zip_majors(lock)
         assert majors == ["8", "9"], majors
+
+
+DENY_CHRONO = DENY.replace("ignore = [\n", "ignore = [\n    { id = \"RUSTSEC-2026-0543\", reason = \"chrono 0.4.45, unmaintained\" },\n")
+AUDIT_CHRONO = '[advisories]\nignore = ["RUSTSEC-2026-0543"]\n'
+WORKSPACE = '[workspace]\nmembers = ["crates/a", "crates/b"]\n'
+MEMBER_A = '[package]\nname = "a"\n\n[dependencies]\nserde = "1"\n'
+MEMBER_B = '[package]\nname = "b"\n'
+
+
+def _members(a: str = MEMBER_A, b: str = MEMBER_B, workspace: str = WORKSPACE) -> dict[str, str]:
+    return {"Cargo.toml": workspace, "crates/a/Cargo.toml": a, "crates/b/Cargo.toml": b}
+
+
+def test_a_chrono_ignore_with_no_manifest_naming_chrono_fails() -> None:
+    out = _planted("chrono", deny=DENY_CHRONO, files=_members())
+    assert "deny.toml:" in out and "lift the chrono ignore" in out, out
+    out = _planted("chrono", files={**_members(), ".cargo/audit.toml": AUDIT_CHRONO})
+    assert ".cargo/audit.toml:2: chrono: RUSTSEC-2026-0543" in out, out
+
+
+def test_a_chrono_ignore_in_both_files_with_chrono_gone_names_both() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), deny=DENY_CHRONO,
+                             files={**_members(), ".cargo/audit.toml": AUDIT_CHRONO}))
+        assert rc == 1 and out.count(": chrono: ") == 2, out
+
+
+def test_a_chrono_ignore_beside_a_member_naming_chrono_passes() -> None:
+    named = {
+        "a workspace dependency": MEMBER_A + "chrono.workspace = true\n",
+        "a version": MEMBER_A + 'chrono = { version = "0.4", features = ["serde"] }\n',
+        "a dev-dependency": MEMBER_A + '\n[dev-dependencies]\nchrono = "0.4"\n',
+        "a build-dependency": MEMBER_A + '\n[build-dependencies]\nchrono = "0.4"\n',
+        "a target's dependency": MEMBER_A + "\n[target.'cfg(unix)'.dependencies]\nchrono = \"0.4\"\n",
+        "a renamed package": MEMBER_A + 'time04 = { package = "chrono", version = "0.4" }\n',
+    }
+    for what, a in named.items():
+        with tempfile.TemporaryDirectory() as d:
+            rc, out = _run(_tree(pathlib.Path(d), deny=DENY_CHRONO,
+                                 files={**_members(a=a), ".cargo/audit.toml": AUDIT_CHRONO}))
+            assert rc == 0, (what, out)
+    # [workspace.dependencies] naming chrono counts too (the entry's words)
+    ws = WORKSPACE + '\n[workspace.dependencies]\nchrono = "0.4"\n'
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), deny=DENY_CHRONO, files=_members(workspace=ws)))
+        assert rc == 0, out
+
+
+def test_chrono_named_only_where_it_is_no_dependency_does_not_count() -> None:
+    # a comment, a feature's name, or a crate outside the members is no direct dependency
+    a = MEMBER_A + '# chrono = "0.4"\n\n[features]\nchrono = []\n'
+    files = {**_members(a=a), "tools/x/Cargo.toml": '[package]\nname = "x"\n[dependencies]\nchrono = "0.4"\n'}
+    _planted("chrono", deny=DENY_CHRONO, files=files)
+
+
+def test_no_chrono_ignore_needs_no_chrono() -> None:
+    lifted = DENY + "# RUSTSEC-2026-0543 lifted when the workspace moved off chrono\n"
+    with tempfile.TemporaryDirectory() as d:
+        rc, out = _run(_tree(pathlib.Path(d), deny=lifted, files=_members()))
+        assert rc == 0, out
+
+
+def test_an_unreadable_manifest_beside_a_live_chrono_ignore_is_no_verdict() -> None:
+    for files, bad in ((_members(workspace="[workspace\n"), "Cargo.toml"),
+                       (_members(a="[package\n"), "crates/a/Cargo.toml"),
+                       ({"Cargo.toml": WORKSPACE, "crates/a/Cargo.toml": MEMBER_A}, "crates/b/Cargo.toml")):
+        with tempfile.TemporaryDirectory() as d:
+            root = _tree(pathlib.Path(d), deny=DENY_CHRONO, files=files)
+            rc, out = _run(root)
+            assert rc == 2, (bad, out)
+            want = "repo_policy: cannot read %s" % (root.resolve() / bad)
+            assert out.startswith(want) and len(out.splitlines()) == 1, (bad, out)
+
+
+def test_the_chrono_manifests_are_read_from_the_members() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        assert guard.chrono_manifests(root) == [], "no Cargo.toml reads as no manifest naming chrono"
+        root = _tree(root, files=_members(b=MEMBER_B + '[dependencies]\nchrono = "0.4"\n'))
+        assert guard.chrono_manifests(root) == ["crates/b/Cargo.toml"], guard.chrono_manifests(root)
 
 
 def test_a_repository_without_workflows_checks_its_gate_scripts() -> None:

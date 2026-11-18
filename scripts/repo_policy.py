@@ -34,6 +34,13 @@ The rules:
   zip8       while deny.toml or .cargo/audit.toml ignores RUSTSEC-2026-0367, -0368 or
              -0369 (zip < 9, calamine's zip 8.6.0), Cargo.lock holds a zip 8 — so the
              ignores are lifted when calamine moves to zip 9, rather than remembered.
+  chrono     while deny.toml or .cargo/audit.toml ignores RUSTSEC-2026-0543 (chrono
+             unmaintained), a workspace member's manifest — or the root's
+             [workspace.dependencies] — names chrono as a dependency (normal, dev, build
+             or a target's, under its own name or as `package = "chrono"`) — so the
+             ignore is lifted when the workspace moves off chrono: cargo-deny's
+             `unmaintained = "workspace"` then passes without it. Crates that bring chrono
+             in transitively (rmcp, teloxide-core) are not read, and need not be.
 
 The workflows are .github/workflows/*.yml and *.yaml. The gate scripts are the *.sh,
 *.py, *.ps1, *.ts and *.mjs files under scripts/, tasks/deps-upgrade/tools/ and
@@ -61,6 +68,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 GATE_DIRS = ("scripts", "tasks/deps-upgrade/tools", "apps/openalpaca-gui/scripts")
 GATE_SUFFIXES = (".sh", ".py", ".ps1", ".ts", ".mjs")
 ZIP_IDS = ("RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369")
+CHRONO_ID = "RUSTSEC-2026-0543"
+DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies",
+              "dev_dependencies", "build_dependencies")
 
 # Named exceptions: (rule, path, a substring of the line) -> why.
 EXCEPTIONS = {
@@ -304,15 +314,20 @@ def check_build_dir_yaml(rel, lines, out):
     check_build_dir_shell(rel, lines, ".yml", out)
 
 
-def ignored_zip_ids(path: pathlib.Path):
-    """[(line, id)] of the zip ids a TOML file names outside comments."""
+def ignored_ids(path: pathlib.Path, ids):
+    """[(line, id)] of the given ids a TOML file names outside comments."""
     if not path.is_file():
         return []
     hits = []
     for n, line in enumerate(read(path), 1):
         body = strip_comment(line)
-        hits += [(n, i) for i in ZIP_IDS if i in body]
+        hits += [(n, i) for i in ids if i in body]
     return hits
+
+
+def ignored_zip_ids(path: pathlib.Path):
+    """[(line, id)] of the zip ids a TOML file names outside comments."""
+    return ignored_ids(path, ZIP_IDS)
 
 
 def locked_zip_majors(lock: pathlib.Path) -> list[str]:
@@ -345,6 +360,62 @@ def check_zip8(root, out):
             out.append("%s:%d: zip8: %s is ignored but Cargo.lock holds no zip 8 — lift the zip ignores (calamine has moved)" % (rel, n, ident))
 
 
+def load_toml(path: pathlib.Path) -> dict:
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as e:
+        raise Unreadable("%s: %s" % (path, e))
+    except tomllib.TOMLDecodeError as e:
+        raise Unreadable("%s: not TOML: %s" % (path, e))
+
+
+def names_chrono(table) -> bool:
+    """Whether a dependency table names chrono, under its own name or as its `package`."""
+    if not isinstance(table, dict):
+        return False
+    return any(k == "chrono" or (isinstance(v, dict) and v.get("package") == "chrono")
+               for k, v in table.items())
+
+
+def manifest_names_chrono(doc: dict) -> bool:
+    tables = [doc.get(t) for t in DEP_TABLES]
+    target = doc.get("target")
+    if isinstance(target, dict):
+        tables += [cfg.get(t) for cfg in target.values() if isinstance(cfg, dict) for t in DEP_TABLES]
+    return any(names_chrono(t) for t in tables)
+
+
+def chrono_manifests(root: pathlib.Path) -> list[str]:
+    """The manifests (relative paths) that name chrono as a direct dependency: the root's own
+    tables and its [workspace.dependencies], then each [workspace] member's. [] with no
+    Cargo.toml at the root."""
+    top = root / "Cargo.toml"
+    if not top.is_file():
+        return []
+    doc = load_toml(top)
+    workspace = doc.get("workspace") if isinstance(doc.get("workspace"), dict) else {}
+    found = []
+    if manifest_names_chrono(doc) or names_chrono(workspace.get("dependencies")):
+        found.append("Cargo.toml")
+    members = workspace.get("members", [])
+    if not isinstance(members, list) or not all(isinstance(m, str) for m in members):
+        raise Unreadable("%s: [workspace] members is not a list of paths" % top)
+    for m in members:
+        dirs = sorted(root.glob(m)) if any(c in m for c in "*?[") else [root / m]
+        for d in dirs:
+            if manifest_names_chrono(load_toml(d / "Cargo.toml")):
+                found.append((d / "Cargo.toml").relative_to(root).as_posix())
+    return found
+
+
+def check_chrono(root, out):
+    for rel in ("deny.toml", ".cargo/audit.toml"):
+        hits = ignored_ids(root / rel, (CHRONO_ID,))
+        if hits and not chrono_manifests(root):
+            n, ident = hits[0]
+            out.append("%s:%d: chrono: %s is ignored but no workspace manifest names chrono — lift the chrono ignore (the workspace has moved off chrono)" % (rel, n, ident))
+
+
 def check(root: pathlib.Path) -> list[str]:
     out: list[str] = []
     for path in workflows(root):
@@ -361,6 +432,7 @@ def check(root: pathlib.Path) -> list[str]:
         check_build_dir_shell(rel, lines, path.suffix, out)
     check_python_pin_file(root, out)
     check_zip8(root, out)
+    check_chrono(root, out)
     return out
 
 
