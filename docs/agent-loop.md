@@ -450,8 +450,9 @@ request passed. So do a workflow's lead row and each subagent's
 `cap_spend` are read at the top of a round, before its request, so
 neither holds the request that ended the loop; `estimated_cost`, the
 agent's tracker total, also holds a reused instance id's earlier runs.
-The session log's `workflow_done` record still carries
-`estimated_cost_usd`.
+The session log's `workflow_done` record carries both: `estimated_cost_usd`,
+as before, and `requests_cost_usd`, the loop's `requests_cost`, the last
+request included (UPR-1-LOG).
 
 Because a multi-round turn streams the text written before each tool
 call, the deltas of a turn need not add up to its answer.

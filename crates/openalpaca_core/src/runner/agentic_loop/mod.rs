@@ -467,6 +467,11 @@ async fn run_agentic_loop_inner(
                 "input_tokens": result.total_input_tokens,
                 "output_tokens": result.total_output_tokens,
                 "estimated_cost_usd": result.estimated_cost,
+                // UPR-1-LOG (the advisor's pick (b) on Rev 127's item 17,
+                // taken 2026-11-17): what this loop's requests cost, each as
+                // counted, the last one included — the figure the usage rows
+                // record (UPR-1); `estimated_cost_usd` stays, unchanged.
+                "requests_cost_usd": result.requests_cost,
                 "elapsed_ms": result.elapsed.as_millis() as u64,
                 "model": result.model_used,
             }),

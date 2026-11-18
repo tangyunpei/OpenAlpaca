@@ -3130,9 +3130,10 @@ async fn test_steering_cancel_during_llm_call_reappends_undelivered() {
 
 /// The loop's four emit points, on one run: a `round` per LLM response
 /// carrying the `tool_use` blocks verbatim, a `tool_call` before dispatch and
-/// a `tool_result` after it, and a `workflow_done` at the exit. Every record
-/// is stamped with the run's `task_id` and the loop's `span_id` (P-20), and
-/// the seq is gap-free across all of them.
+/// a `tool_result` after it, and a `workflow_done` at the exit (with both
+/// `estimated_cost_usd` and, since UPR-1-LOG, `requests_cost_usd`). Every
+/// record is stamped with the run's `task_id` and the loop's `span_id`
+/// (P-20), and the seq is gap-free across all of them.
 #[tokio::test]
 async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
     use crate::bus::EventBus;
@@ -3298,6 +3299,23 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
     assert_eq!(done.data["finish_reason"], "complete");
     assert_eq!(done.data["rounds_used"], 2);
     assert_eq!(done.data["tool_calls_made"], 1);
+    // UPR-1-LOG (the advisor's pick (b) on Rev 127's item 17, taken
+    // 2026-11-17): beside the tracker's total, read at the top of the last
+    // round, the record carries what the loop's requests cost, the last
+    // one included. Here the two differ by that last request.
+    let usd = |key: &str| {
+        done.data[key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{key} in {}", done.data))
+    };
+    assert!((usd("estimated_cost_usd") - result.estimated_cost).abs() < 1e-12);
+    assert!((usd("requests_cost_usd") - result.requests_cost).abs() < 1e-12);
+    assert!(
+        result.requests_cost > result.estimated_cost,
+        "the fixture tells the two apart: {} against {}",
+        result.requests_cost,
+        result.estimated_cost
+    );
 
     // The index row is the writer's, and points back at both records.
     let (session_id, task, log_seq, result_ref): (String, String, i64, String) = db
