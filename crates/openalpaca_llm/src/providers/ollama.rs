@@ -7,15 +7,12 @@ use async_trait::async_trait;
 const DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
 
 /// Ollama provider that delegates to OpenAI-compatible endpoint.
+///
+/// The `ollama` feature implies `openai`: chat goes through the OpenAI
+/// provider in Ollama's flavour, and only discovery (`/api/tags`,
+/// `/api/show`) is Ollama's own.
 pub struct OllamaProvider {
-    #[cfg(feature = "openai")]
     inner: super::openai::OpenAiProvider,
-    #[cfg(not(feature = "openai"))]
-    client: reqwest::Client,
-    #[cfg(not(feature = "openai"))]
-    model: String,
-    #[cfg(not(feature = "openai"))]
-    base_url: String,
     /// Deadline for the native `/api/*` calls; the chat calls carry the inner
     /// provider's copy of it (L7).
     request_timeout: Option<std::time::Duration>,
@@ -39,25 +36,12 @@ impl OllamaProvider {
         max_tokens: Option<u32>,
     ) -> Self {
         let url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        #[cfg(feature = "openai")]
-        {
-            Self {
-                inner: super::openai::OpenAiProvider::new_without_auth_with_client(
-                    client, model, url, max_tokens,
-                )
-                .with_flavour(super::openai::OpenAiFlavour::Ollama),
-                request_timeout: None,
-            }
-        }
-        #[cfg(not(feature = "openai"))]
-        {
-            let _ = max_tokens;
-            Self {
-                client,
-                model,
-                base_url: url,
-                request_timeout: None,
-            }
+        Self {
+            inner: super::openai::OpenAiProvider::new_without_auth_with_client(
+                client, model, url, max_tokens,
+            )
+            .with_flavour(super::openai::OpenAiFlavour::Ollama),
+            request_timeout: None,
         }
     }
 
@@ -68,10 +52,7 @@ impl OllamaProvider {
     /// [`crate::providers::build_http_client`] (L7).
     pub fn with_request_timeout(mut self, request_timeout: std::time::Duration) -> Self {
         self.request_timeout = Some(request_timeout);
-        #[cfg(feature = "openai")]
-        {
-            self.inner = self.inner.with_request_timeout(request_timeout);
-        }
+        self.inner = self.inner.with_request_timeout(request_timeout);
         self
     }
 
@@ -84,14 +65,7 @@ impl OllamaProvider {
     }
 
     pub fn base_url(&self) -> &str {
-        #[cfg(feature = "openai")]
-        {
-            &self.inner.base_url
-        }
-        #[cfg(not(feature = "openai"))]
-        {
-            &self.base_url
-        }
+        &self.inner.base_url
     }
 
     /// The root Ollama serves its own API from — `base_url` without the
@@ -103,14 +77,7 @@ impl OllamaProvider {
     /// The shared HTTP client, so discovery reuses the router's connection
     /// pool instead of standing up a new one per call.
     fn client(&self) -> &reqwest::Client {
-        #[cfg(feature = "openai")]
-        {
-            self.inner.http_client()
-        }
-        #[cfg(not(feature = "openai"))]
-        {
-            &self.client
-        }
+        self.inner.http_client()
     }
 
     /// `POST /api/show` for one installed tag.
@@ -259,17 +226,14 @@ impl LlmProvider for OllamaProvider {
     /// Without these three forwards the trait defaults applied: the whole
     /// answer was awaited and then replayed as one event, so a 27B model's
     /// reply landed in a single burst after a long silence.
-    #[cfg(feature = "openai")]
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
     }
 
-    #[cfg(feature = "openai")]
     async fn chat_streaming(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
         self.inner.chat_streaming(request).await
     }
 
-    #[cfg(feature = "openai")]
     async fn chat_streaming_with_key(
         &self,
         key: &str,
@@ -279,75 +243,7 @@ impl LlmProvider for OllamaProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
-        #[cfg(feature = "openai")]
-        {
-            self.inner.chat(request).await
-        }
-        #[cfg(not(feature = "openai"))]
-        {
-            // Standalone implementation (minimal OpenAI-compatible request)
-            let url = format!("{}/chat/completions", self.base_url);
-            let messages: Vec<serde_json::Value> = request
-                .messages
-                .iter()
-                .map(|m| {
-                    let role = match m.role {
-                        Role::System => "system",
-                        Role::User => "user",
-                        Role::Assistant => "assistant",
-                        Role::Tool => "tool",
-                    };
-                    serde_json::json!({ "role": role, "content": m.content })
-                })
-                .collect();
-
-            let body = serde_json::json!({
-                "model": request.model.as_deref().unwrap_or(&self.model),
-                "messages": messages,
-            });
-
-            let response = self
-                .client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(crate::providers::reqwest_error)?;
-
-            let status = response.status().as_u16();
-            let response_body: serde_json::Value = response
-                .json()
-                .await
-                .map_err(crate::providers::reqwest_error)?;
-
-            if status >= 400 {
-                let message = response_body["error"]["message"]
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string();
-                return Err(LlmError::Api { status, message });
-            }
-
-            let choice = &response_body["choices"][0];
-            let content = choice["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let model = response_body["model"]
-                .as_str()
-                .unwrap_or(&self.model)
-                .to_string();
-
-            Ok(ChatResponse {
-                content,
-                tool_calls: vec![],
-                model,
-                usage: Usage::default(),
-                finish_reason: FinishReason::Stop,
-                thinking: None,
-                parts: None,
-            })
-        }
+        self.inner.chat(request).await
     }
 }
 
@@ -371,11 +267,10 @@ mod tests {
         assert_eq!(provider.base_url(), "http://192.168.1.100:11434/v1");
     }
 
-    /// Ollama delegates to the OpenAI provider's request builder when the
-    /// `openai` feature is enabled (the default in the workspace). Exercise
-    /// placement through that same builder: a kept budget notice
-    /// (`ChatMessage::notice`) sent last goes as the tail system-role message.
-    #[cfg(feature = "openai")]
+    /// Ollama delegates to the OpenAI provider's request builder (the
+    /// `ollama` feature implies `openai`). Exercise placement through that
+    /// same builder: a kept budget notice (`ChatMessage::notice`) sent last
+    /// goes as the tail system-role message.
     #[test]
     fn test_ollama_ephemeral_notice_placement() {
         use crate::providers::openai::request::build_request_body;

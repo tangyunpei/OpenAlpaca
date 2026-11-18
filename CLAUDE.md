@@ -279,8 +279,8 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 Manuals: `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_Manual.md`, `Installation_Manual.md`, `QuickStart_Manual.md`, `Skill_Template_Reference.md`); `docs/tools/DESIGN.md` and `TECHNICAL.md` date from 2026-07-19: verify before citing. Unserved in the GUI: `GapId = "GAP-17" | "GAP-20"` (adding a connector, the per-template enable toggle).
 
 ## Feature Flags
-- `openalpaca_llm`: `anthropic`, `openai`, `ollama`, each gating its provider + `reqwest`; `test-endpoint-guard` refuses Anthropic's and OpenAI's real hosts in test builds (llm, core, daemon, CLI, plugins), never a `cargo build`, release or sidecar; off under its `live-eval`, set by core's.
-- `openalpaca_core`: `live-eval` builds the three providers into its test binary for its `#[ignore]`d live evals `crates/openalpaca_core/tests/steer_routing_eval.rs`, `crates/openalpaca_core/tests/memory_eval.rs`; off by default.
+- `openalpaca_llm`: `anthropic`, `openai`, `ollama` (implies `openai`), each gating its provider + `reqwest`; `test-endpoint-guard` refuses Anthropic's and OpenAI's real hosts in test builds (llm, core, daemon, CLI, plugins), never a `cargo build`, release or sidecar; off under its `live-eval`, set by core's.
+- `openalpaca_core`: `live-eval` builds the three providers into its test binary for its `#[ignore]`d live evals `crates/openalpaca_core/tests/steer_routing_eval.rs` and `memory_eval.rs`; off by default.
 - `openalpaca_storage`: `test-home-guard` makes `store::projects::register` panic unless `OPENALPACA_HOME_STORE` set the home store, not to the real `~/.openalpaca`; on in test builds (storage, core, daemon, CLI, plugins, connectors), never in a `cargo build`, release or sidecar: a backstop, not the protection (*Gotchas*); app_support's tests hold their own `HomeStoreGuard`.
 - `openalpaca_connectors`: `telegram` (`teloxide`), `imessage` (`rusqlite`, macOS only), `discord` (`twilight-gateway`/`-http`/`-model` + `reqwest`). The daemon enables every provider and connector feature and at start installs aws-lc-rs, the one rustls provider (`tls.rs`; no library does).
 

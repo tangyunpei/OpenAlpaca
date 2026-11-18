@@ -695,7 +695,7 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
 // toggles on after boot is built here, not by `build_router`. Feature-gated for
 // the reason given at the top of this file — these drive a real
 // `OllamaProvider` against a loopback mock server.
-#[cfg(all(feature = "ollama", feature = "openai"))]
+#[cfg(feature = "ollama")]
 mod local_provider_registration {
     use super::*;
     use crate::config::llm_config::LlmRuntimeConfig;

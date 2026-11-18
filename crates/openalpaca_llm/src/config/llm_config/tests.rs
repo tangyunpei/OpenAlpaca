@@ -302,7 +302,7 @@ request_timeout_secs = 999999999
 // builds the crate with none of them, and these tests drive a real
 // `OllamaProvider` against a loopback mock server. `cargo test --workspace`
 // runs them, because `openalpacad` asks for all three features.
-#[cfg(all(feature = "ollama", feature = "openai"))]
+#[cfg(feature = "ollama")]
 mod local_provider_boot {
     use crate::routing::router::{RequestContext, RouterRequest};
     use crate::test_support::{MockHttpServer, MockResponse};

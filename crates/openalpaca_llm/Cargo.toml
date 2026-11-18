@@ -10,7 +10,9 @@ license.workspace = true
 default = []
 anthropic = ["dep:reqwest"]
 openai = ["dep:reqwest"]
-ollama = ["dep:reqwest"]
+# Ollama is served through the OpenAI provider (its OpenAI-compatible
+# `/v1` surface), so the feature brings `openai` with it.
+ollama = ["openai"]
 # LLM-TEST-GUARD: test builds of the crates that depend on this one turn it on
 # through their [dev-dependencies], so a provider refuses Anthropic's and
 # OpenAI's real hosts in the test binaries of the crates that turn it on and
