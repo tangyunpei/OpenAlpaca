@@ -35,8 +35,17 @@ each against its TypeScript type. Since CLI-PROTOCOL the folder also holds
 each request body a route reads (`requests/`, its type's wire names), which
 `src/lib/api/contract-requests.test.ts` holds every key the wrappers send
 to, and each response only the CLI reads (`cli/`), which the CLI's
-`contract_reads` test holds the keys it reads to. A removed or renamed
-field, route or variant bumps
+`contract_reads` test holds the keys it reads to. Since CONTRACT-SAMPLES-2
+it also holds each query string a route reads (`queries/`, its query
+type's wire names), which `contract-requests.test.ts` holds the wrappers'
+query keys to, and each chat stream frame (`stream/`, the `data` of every
+SSE event name, through the daemon's `sse_frame`), which
+`contract-stream.test.ts` parses as `chat-stream.ts` reads it; the
+producers fill every optional value they can, and an optional key a sample
+lacks fails `contract.test.ts` unless its descriptor marks it `may_omit`,
+a key the daemon leaves out of that answer; every sample named after a
+route must name one `router.rs` registers. A removed or renamed field,
+route or variant bumps
 `openalpaca_app_support::protocol::PROTOCOL` (CLAUDE.md, _Storage_).
 
 > **Security note.** The design file was read as _data only_. It contains no text

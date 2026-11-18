@@ -4,19 +4,29 @@
   "effective_status": "",
   "freshness": "",
   "frontmatter": {
-    "aliases": [],
+    "aliases": [
+      ""
+    ],
     "created_at": "",
-    "fact_key": null,
+    "fact_key": "",
     "id": "",
     "kind": "",
     "observed_at": null,
     "pinned": false,
     "review_after": null,
     "schema": 0,
-    "sources": [],
+    "sources": [
+      {
+        "id": "",
+        "observed_at": null,
+        "type": ""
+      }
+    ],
     "status": "",
     "supersedes": [],
-    "tags": [],
+    "tags": [
+      ""
+    ],
     "title": "",
     "updated_at": "",
     "valid_from": null,
@@ -28,7 +38,13 @@
   "path": "",
   "revision": "",
   "scope": "",
-  "sources": [],
+  "sources": [
+    {
+      "id": "",
+      "observed_at": null,
+      "type": ""
+    }
+  ],
   "sources_status": "",
   "status": "",
   "superseded_by": [],

@@ -2292,5 +2292,107 @@ pub(crate) mod tests {
             "get-chat-confirmations",
             serde_json::to_value(pending).unwrap(),
         );
+
+        // CONTRACT-SAMPLES-2 (*Rev 107*'s chat-stream item, (b)): the send's
+        // answer, the handler's own type, and each frame the stream sends,
+        // through `sse_frame`, the one place a frame is named and written.
+        let sent = ChatSendResponseBody {
+            stream_id: "stream-1".to_string(),
+            lane_key: lane.to_string(),
+            model_used: Some("model-a".to_string()),
+        };
+        out.response("post-chat", serde_json::to_value(sent).unwrap());
+        let examples = stream_examples();
+        let mut seen = [false; STREAM_VARIANTS];
+        for event in &examples {
+            seen[stream_index(event)] = true;
+            let (name, data) = sse_frame(event);
+            let data: serde_json::Value = serde_json::from_str(&data).expect("a frame is JSON");
+            out.stream(name, data);
+        }
+        assert!(
+            seen.iter().all(|s| *s),
+            "every ChatStreamEvent variant has its example in stream_examples"
+        );
+    }
+
+    /// How many variants `ChatStreamEvent` has: [`stream_index`]'s range.
+    const STREAM_VARIANTS: usize = 7;
+
+    /// An exhaustive match with no catch-all: a new variant does not compile
+    /// until it has an index, and the producer fails until
+    /// [`stream_examples`] carries one of it.
+    fn stream_index(event: &openalpaca_core::chat::ChatStreamEvent) -> usize {
+        use openalpaca_core::chat::ChatStreamEvent as E;
+        match event {
+            E::Thinking => 0,
+            E::Reasoning { .. } => 1,
+            E::Delta { .. } => 2,
+            E::Done { .. } => 3,
+            E::Error { .. } => 4,
+            E::ConfirmationRequested { .. } => 5,
+            E::ConfirmationResolved { .. } => 6,
+        }
+    }
+
+    /// One of each frame, every optional value filled, so each sample
+    /// carries every key its frame can.
+    fn stream_examples() -> Vec<openalpaca_core::chat::ChatStreamEvent> {
+        use openalpaca_core::chat::ChatStreamEvent as E;
+        use openalpaca_core::gateway::{
+            ContinuedFrom, DelegationInfo, MemoryUsed, SkippedAttachment,
+        };
+        let note =
+            openalpaca_storage::memory_files::NoteId::parse("00000021-0000-4000-8000-000000000001")
+                .unwrap();
+        vec![
+            E::Thinking,
+            E::Reasoning {
+                text: "Looking.".to_string(),
+            },
+            E::Delta {
+                content: "Here".to_string(),
+            },
+            E::Done {
+                content: "Here it is.".to_string(),
+                model: "model-a".to_string(),
+                tokens_in: 10,
+                tokens_out: 5,
+                duration_ms: 90,
+                attachments_used: Some(vec!["file-1".to_string()]),
+                attachments_skipped: Some(vec![SkippedAttachment {
+                    id: "img-1".to_string(),
+                    reason: "the answering model does not support image input".to_string(),
+                }]),
+                memory_used: Some(vec![MemoryUsed {
+                    id: note,
+                    revision: "a".repeat(64),
+                    reason: openalpaca_core::memory::service::UsedReason::Recall,
+                }]),
+                delegation: Some(DelegationInfo {
+                    task_id: "task-1".to_string(),
+                    title: "Write the report".to_string(),
+                }),
+                working_state_updated: true,
+                continued_from: Some(ContinuedFrom {
+                    session_id: "session-0".to_string(),
+                    topic: "Trip".to_string(),
+                }),
+            },
+            E::Error {
+                message: "The model refused the request.".to_string(),
+            },
+            E::ConfirmationRequested {
+                request_id: "req-1".to_string(),
+                tool_name: "file_write".to_string(),
+                tool_arguments: serde_json::json!({ "path": "notes.md" }),
+                preview: Some("+ a line".to_string()),
+                per_call: true,
+            },
+            E::ConfirmationResolved {
+                request_id: "req-1".to_string(),
+                outcome: openalpaca_core::events::ConfirmationOutcome::Approved,
+            },
+        ]
     }
 }

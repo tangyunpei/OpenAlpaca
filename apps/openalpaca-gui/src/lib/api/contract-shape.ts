@@ -12,6 +12,13 @@
  * descriptor follows; a key the daemon removes or renames fails vitest,
  * naming the sample and the type. A key the sample carries and the type
  * does not is an addition, and passes: the GUI reads what it knows.
+ *
+ * An optional key is held as a required one is (CONTRACT-SAMPLES-2; *Rev
+ * 107*'s renamed-optional-key item, (b)): the daemon's producers fill every
+ * optional value their fixtures can, so a sample lacking an optional key is
+ * a rename or a removal — unless its descriptor marks it `"may_omit"`, a key
+ * the daemon leaves out of this answer (`skip_serializing_if`, or an
+ * outcome the sample is not), each mark with its reason beside it.
  */
 
 /** An array's element, else the type itself. */
@@ -20,9 +27,15 @@ type Elem<V> = V extends readonly (infer E)[] ? E : V;
 /** What a field's descriptor describes: its object, or its array's. */
 export type Inner<V> = NonNullable<Elem<NonNullable<V>>>;
 
-/** Every key of `T`, as the type has it: required or optional. */
+/**
+ * Every key of `T`, as the type has it: required, or optional — `"optional"`
+ * when the sample must carry it, `"may_omit"` when the daemon may leave it
+ * out of the sample's answer.
+ */
 export type Presence<T> = {
-  readonly [K in keyof T]-?: {} extends Pick<T, K> ? "optional" : "required";
+  readonly [K in keyof T]-?: {} extends Pick<T, K>
+    ? "optional" | "may_omit"
+    : "required";
 };
 
 /**
@@ -84,8 +97,9 @@ function join(path: string, key: string): string {
 
 /**
  * What in `value` the descriptor cannot read, one line each, empty when the
- * sample parses: a key the type requires that the sample lacks, or an
- * object the type expects where the sample has something else.
+ * sample parses: a key the type requires, or an optional key not marked
+ * `"may_omit"`, that the sample lacks, or an object the type expects where
+ * the sample has something else.
  */
 export function check<T>(value: unknown, node: Node<T>, path = ""): string[] {
   const out: string[] = [];
@@ -117,13 +131,18 @@ function walk(
     }
     return;
   }
-  const keys = node.keys as Record<string, "required" | "optional">;
+  const keys = node.keys as Record<
+    string,
+    "required" | "optional" | "may_omit"
+  >;
   for (const [key, presence] of Object.entries(keys)) {
-    if (presence === "required" && !(key in fields)) {
-      out.push(
-        `${join(path, key)}: required by the type, absent from the sample`,
-      );
-    }
+    if (key in fields || presence === "may_omit") continue;
+    out.push(
+      presence === "required"
+        ? `${join(path, key)}: required by the type, absent from the sample`
+        : `${join(path, key)}: optional in the type, absent from the sample ` +
+            `(renamed or removed, or a key the daemon may omit: mark it "may_omit")`,
+    );
   }
   const nested = node.nested as Record<string, Node<unknown>>;
   for (const [key, child] of Object.entries(nested)) {

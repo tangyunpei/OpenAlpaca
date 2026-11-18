@@ -11,7 +11,27 @@
   "status": "",
   "title": "",
   "updated_at": "",
-  "working_state": null,
-  "working_state_updated_at": null,
+  "working_state": {
+    "asked": [
+      ""
+    ],
+    "decisions": [
+      ""
+    ],
+    "done": [
+      ""
+    ],
+    "goal": "",
+    "next": "",
+    "open": [
+      ""
+    ],
+    "refs": [
+      ""
+    ],
+    "topic": "",
+    "v": 0
+  },
+  "working_state_updated_at": "",
   "workspace_id": ""
 }

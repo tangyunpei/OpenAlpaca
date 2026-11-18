@@ -11,6 +11,7 @@
     "fallback_models": [],
     "icon": "",
     "id": "",
+    "last_run_at": "",
     "max_cost_per_task": 0,
     "max_tool_calls": 0,
     "model": "",
@@ -34,6 +35,8 @@
     "singleton": false,
     "source": "",
     "state": "",
+    "temperature": 0,
+    "timeout_seconds": 0,
     "verbosity": "",
     "warnings": [],
     "window": ""

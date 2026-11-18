@@ -28,6 +28,8 @@ struct Fixture {
     home_store: std::path::PathBuf,
     api: MemoryApi,
     bus: EventBus,
+    /// The service's database, where a note's sources are verified.
+    db: Database,
 }
 
 impl Fixture {
@@ -46,7 +48,7 @@ impl Fixture {
             .create_global_user(OWNER, None)
             .unwrap();
         let bus = EventBus::new(64);
-        let service = MemoryService::new(Some(db), MemoryIndex::open_in_memory().unwrap())
+        let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap())
             .with_bus(bus.clone());
         service.rebuild_index().unwrap();
         Self {
@@ -59,6 +61,7 @@ impl Fixture {
                 owner_id: OWNER.to_string(),
             },
             bus,
+            db,
         }
     }
 
@@ -1651,23 +1654,78 @@ async fn a_write_whose_project_cannot_be_recorded_is_refused_and_writes_nothing(
 
 /// `/v1/memories*`'s JSON bodies for the API contract's folder
 /// (API-CONTRACT): a saved note with a pending suggestion and two revisions,
-/// a learned note, a candidate, and each write's answer.
+/// a learned note, a candidate, and each write's answer. Since
+/// CONTRACT-SAMPLES-2 every optional value the fixture can fill is filled:
+/// the saved note cites a message and carries an alias, a tag and a key,
+/// and the suggestion changes a tag and cites the message too, so the
+/// `sources` and `changes` shapes reach the folder with their keys.
+/// A suggestion on `target` that changes its tags and cites `message`, as
+/// learning writes one (the producer's own; [`Fixture::suggestion`] stays
+/// what the route tests assert on).
+fn contract_suggestion(f: &Fixture, target: NoteId, target_revision: &str, message: i64) {
+    let ctx = f
+        .api
+        .service
+        .context(
+            OWNER,
+            WorkspaceHint::None,
+            Surface::Extraction,
+            Capabilities::EXTRACTION,
+            Attribution::default(),
+        )
+        .unwrap();
+    let out = f
+        .api
+        .service
+        .store(
+            &ctx,
+            StoreInput {
+                title: "Commute".into(),
+                body: "# Commute\n\n## Knowledge\nBike.\n\n## Evidence and limits\nFrom what you said on 2026-09-24. Replaces “Commute” (saved by you): The user said so.\n".into(),
+                kind: Some(NoteKind::Fact),
+                aliases: vec!["travel to work".to_string()],
+                tags: vec!["work".to_string(), "travel".to_string()],
+                fact_key: Some("commute.mode".to_string()),
+                sources: vec![openalpaca_storage::memory_files::NoteSource {
+                    kind: openalpaca_storage::memory_files::SourceType::Message,
+                    id: message.to_string(),
+                    observed_at: Some(chrono::Utc::now()),
+                }],
+                observed_at: Some(chrono::Utc::now()),
+                supersedes: Some((target, target_revision.to_string())),
+                replace_policy: ReplacePolicy::SuggestUnlessLearned,
+                provenance: Some(ExtractionProvenance::UserWords),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(out.suggestion);
+}
+
 pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
     use crate::contract::ok_body;
     let f = Fixture::new();
-    let created = ok_body(
-        f.api
-            .create(
-                &Fixture::headers(),
-                create_body("Commute", "# Commute\n\n## Knowledge\nBus.\n", "fact"),
-            )
-            .await,
-    )
-    .await;
+    let message = openalpaca_storage::ConversationRepository::new(&f.db)
+        .insert(&openalpaca_storage::ConversationMessage {
+            lane_key: format!("{OWNER}:gui"),
+            role: "user".to_string(),
+            content: "I take the bus.".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut body = create_body("Commute", "# Commute\n\n## Knowledge\nBus.\n", "fact");
+    body.aliases = vec!["travel to work".to_string()];
+    body.tags = vec!["work".to_string()];
+    body.fact_key = Some("commute.mode".to_string());
+    body.sources = vec![SourceBody {
+        kind: "message".to_string(),
+        id: message.to_string(),
+    }];
+    let created = ok_body(f.api.create(&Fixture::headers(), body).await).await;
     out.response("post-memories", created.clone());
     let note = NoteId::parse(created["id"].as_str().unwrap()).unwrap();
     let revision = created["revision"].as_str().unwrap().to_string();
-    f.suggestion(note, &revision, "Bike.");
+    contract_suggestion(&f, note, &revision, message);
     f.extracted("Learned", "# Learned\n\nFrom what you said.\n");
     let (candidate, candidate_revision) = f.candidate("Candidate", "# Candidate\n\nMaybe.\n");
 

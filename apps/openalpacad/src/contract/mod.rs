@@ -14,6 +14,11 @@
 //! sends; and the **responses only the CLI reads** (`cli/`), against which
 //! the CLI's tests check the keys it reads — under the owner's rule that the
 //! CLI and the app use one daemon, both clients are held to one `PROTOCOL`.
+//! Since CONTRACT-SAMPLES-2 two more: the **query strings** the routes read
+//! (`queries/`, each its query type's wire names, as a request body's are),
+//! and the **chat stream's frames** (`stream/`, one per frame kind, the
+//! `data` of each SSE event `GET /v1/chat/stream/{id}` sends, named after
+//! its event name).
 //!
 //! **A sample is a shape, not a recording.** Every scalar is written as its
 //! kind's neutral value (`""`, `0`, `false`; `null` stays `null`), an array
@@ -22,7 +27,10 @@
 //! pid, id or clock reaches the repository. An event sample keeps its
 //! `type`. A sample moves when the wire's shape moves, and also when its
 //! producer's fixture does: a fixture that leaves a nested value `null` or
-//! absent drops that value's key paths, which reads as a removal.
+//! absent drops that value's key paths, which reads as a removal — so the
+//! producers fill every optional value their fixtures can
+//! (CONTRACT-SAMPLES-2), and [`NESTED`] names the nested shapes that must
+//! reach the folder with their keys.
 //!
 //! **The checks** ([`the_samples_are_the_folder`]): a sample that differs
 //! from its file, a file no producer writes any more and a producer's sample
@@ -33,13 +41,15 @@
 //! `openalpaca_app_support::protocol::PROTOCOL` is above the protocol the
 //! folder records (`protocol.json`): the PROTOCOL rule (CLAUDE.md,
 //! *Storage*). An addition — a new key path or a new sample — needs no
-//! bump. The rewrite records the new `PROTOCOL`. The check reads bodies and
-//! events only: a sample's name is its producer's literal, never read from
-//! the router, so a route path renamed or removed in `router.rs` alone moves
-//! no sample.
+//! bump. The rewrite records the new `PROTOCOL`. Every sample named after a
+//! route (all but the events and the stream's frames) is held to the
+//! router's registered method and path table ([`routes`]): a path renamed
+//! or removed in `router.rs` alone fails the check, though it moves no
+//! sample.
 
 mod events;
 pub(crate) mod requests;
+mod routes;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -56,7 +66,8 @@ pub(crate) const DIR: &str = concat!(
 /// a `PROTOCOL` bump).
 const WRITE_ENV: &str = "OPENALPACA_CONTRACT_WRITE";
 
-/// Where a sample lives: `responses/`, `events/`, `requests/` or `cli/`.
+/// Where a sample lives: `responses/`, `events/`, `requests/`, `cli/`,
+/// `queries/` or `stream/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Kind {
     Response,
@@ -65,16 +76,23 @@ pub(crate) enum Kind {
     Request,
     /// A response only the CLI reads (CLI-PROTOCOL).
     CliResponse,
+    /// A query string a route reads (CONTRACT-SAMPLES-2; *Rev 123*'s 123-5).
+    Query,
+    /// A chat stream frame's `data`, named after its SSE event name
+    /// (CONTRACT-SAMPLES-2; *Rev 107*'s chat-stream item).
+    Stream,
 }
 
 impl Kind {
     /// Every kind, as the folder is read: a kind missing here would leave
     /// its files unread, and a removal in them unseen.
-    const ALL: [Kind; 4] = [
+    const ALL: [Kind; 6] = [
         Kind::Response,
         Kind::Event,
         Kind::Request,
         Kind::CliResponse,
+        Kind::Query,
+        Kind::Stream,
     ];
 
     fn folder(self) -> &'static str {
@@ -83,7 +101,15 @@ impl Kind {
             Kind::Event => "events",
             Kind::Request => "requests",
             Kind::CliResponse => "cli",
+            Kind::Query => "queries",
+            Kind::Stream => "stream",
         }
+    }
+
+    /// Whether the kind's samples are named after a route
+    /// (`<method>-<path>`), and so held to the router's table.
+    fn names_a_route(self) -> bool {
+        !matches!(self, Kind::Event | Kind::Stream)
     }
 }
 
@@ -120,6 +146,22 @@ impl Samples {
     /// shaped as [`Self::response`] shapes one.
     pub(crate) fn cli_response(&mut self, name: &str, body: Value) {
         self.insert(Kind::CliResponse, name, shape(&body, "", &[], false));
+    }
+
+    /// A query string's sample, named after its route (`get-memories`): the
+    /// query type's wire names, as [`requests::Body`] reads a body's.
+    pub(crate) fn query(&mut self, name: &str, query: requests::Body) {
+        self.insert(
+            Kind::Query,
+            name,
+            shape(&query.into_value(), "", &[], false),
+        );
+    }
+
+    /// A chat stream frame's `data`, named after the frame's SSE event name
+    /// (`done`), shaped as [`Self::response`] shapes a body.
+    pub(crate) fn stream(&mut self, name: &str, data: Value) {
+        self.insert(Kind::Stream, name, shape(&data, "", &[], false));
     }
 
     /// An event's sample, named after its `type`.
@@ -471,18 +513,122 @@ async fn produce() -> Samples {
     samples
 }
 
+/// The nested shapes the producers' fixtures fill (CONTRACT-SAMPLES-2;
+/// *Rev 107*'s nested-shapes and fixture items, (b)): each a key path that
+/// reaches the folder only when its value is an object or a non-empty array
+/// — a fixture leaving it `null` or `[]` would drop the keys inside, and
+/// neither side would check them.
+pub(crate) const NESTED: &[(Kind, &str, &str)] = &[
+    // A session's working state, on the four samples that carry a session
+    // that has one (a create's answer is a fresh session's, with none).
+    (
+        Kind::Response,
+        "get-sessions",
+        "sessions[].working_state.topic",
+    ),
+    (Kind::Response, "patch-sessions-id", "working_state.topic"),
+    (
+        Kind::Response,
+        "post-sessions-id-activate",
+        "working_state.topic",
+    ),
+    (
+        Kind::Response,
+        "post-sessions-id-archive",
+        "working_state.topic",
+    ),
+    // A memory note's sources, and its frontmatter's.
+    (Kind::Response, "get-memories-id", "sources[].type"),
+    (
+        Kind::Response,
+        "get-memories-id",
+        "frontmatter.sources[].type",
+    ),
+    // A search result's sources.
+    (
+        Kind::Response,
+        "get-memories-search",
+        "results[].sources[].type",
+    ),
+    // A suggestion's changes and sources.
+    (
+        Kind::Response,
+        "get-memories-suggestions",
+        "items[].changes[].field",
+    ),
+    (
+        Kind::Response,
+        "get-memories-suggestions",
+        "items[].sources[].type",
+    ),
+    // A session message's artifacts. (A message's `confirmation`, which
+    // the GUI's type declares, is no field the daemon sends: its
+    // descriptor marks it `may_omit`, a finding.)
+    (
+        Kind::Response,
+        "get-sessions-id-messages",
+        "messages[].artifacts[].id",
+    ),
+    // An install's declared contributions and manifest: a plugin's (an MCP
+    // server's answer leaves both `null` — it has neither — and is read
+    // as the same type).
+    (
+        Kind::Response,
+        "post-extensions-plugin",
+        "extension.declared.types",
+    ),
+    (Kind::Response, "post-extensions-plugin", "manifest.name"),
+    // The run detail's outcome, beside its row (the detail's `task` is the
+    // stored row, with no `outcome` of its own), and a list row's.
+    (Kind::Response, "get-tasks-id", "outcome.artifacts[].key"),
+    (Kind::Response, "get-tasks", "[].outcome.artifacts[].key"),
+];
+
+/// Each [`NESTED`] path a run's samples lack.
+fn nested_problems(items: &BTreeMap<(Kind, String), Value>) -> Vec<String> {
+    NESTED
+        .iter()
+        .filter_map(|(kind, name, path)| {
+            let label = format!("{}/{name}", kind.folder());
+            match items.get(&(*kind, name.to_string())) {
+                None => Some(format!(
+                    "{label}: no producer writes it, and NESTED names it"
+                )),
+                Some(value) if !key_paths(value).contains(*path) => Some(format!(
+                    "{label}: lacks {path}; its producer's fixture leaves that value \
+                     null or empty — fill it, so the keys inside reach the folder"
+                )),
+                Some(_) => None,
+            }
+        })
+        .collect()
+}
+
+/// Each route-named sample whose name is no route `router.rs` registers.
+fn route_problems(items: &BTreeMap<(Kind, String), Value>) -> Vec<String> {
+    let names: std::collections::BTreeSet<String> = items
+        .keys()
+        .filter(|(kind, _)| kind.names_a_route())
+        .map(|(_, name)| name.clone())
+        .collect();
+    routes::check(&names)
+}
+
 #[tokio::test]
 async fn the_samples_are_the_folder() {
     let samples = produce().await;
     let dir = Path::new(DIR);
     let folder = Folder::read(dir);
     let write = std::env::var_os(WRITE_ENV).is_some_and(|v| v == "1");
-    let verdict = judge(
+    let mut verdict = judge(
         &samples.items,
         &folder,
         openalpaca_app_support::protocol::PROTOCOL,
         write,
     );
+    // Neither is cured by a rewrite: a fixture to fill, a route to restore.
+    verdict.problems.extend(nested_problems(&samples.items));
+    verdict.problems.extend(route_problems(&samples.items));
     assert!(
         verdict.problems.is_empty(),
         "the API contract's samples ({}):\n  {}",

@@ -8,8 +8,17 @@
 //! both and a body neither sends today is still a request field the
 //! PROTOCOL rule binds. A body the handler reads into `serde_json::Value`
 //! is read through a type here too (`PluginSourceBody`, `McpDeclaration`).
-//! The multipart upload (`POST /v1/files/upload`, its one `file` part) and
-//! the query strings are not bodies and are not sampled.
+//! The multipart upload (`POST /v1/files/upload`, its one `file` part) is
+//! not a body and is not sampled.
+//!
+//! **Queries** (`queries/`, CONTRACT-SAMPLES-2; *Rev 123*'s 123-5, (b)):
+//! every query type a route reads (`Query<T>`), read off its type as a
+//! body's is, named after its route. A query key is a request field the
+//! PROTOCOL rule binds, so a key renamed or removed fails the folder's bump
+//! check. Two routes read their query into a map, not a type — the events
+//! socket (`GET /v1/events`) and the chat stream (`GET
+//! /v1/chat/stream/{stream_id}`), each only its `?token=` — and are not
+//! sampled.
 //!
 //! **The CLI's own reads** (`cli/`): the responses of the routes only the
 //! CLI reads, each built from the type or the builder its handler answers
@@ -21,7 +30,73 @@ use crate::contract::requests::Body;
 /// Every request body's sample, and every response only the CLI reads.
 pub(crate) fn contract_samples(out: &mut Samples) {
     requests(out);
+    queries(out);
     cli_reads(out);
+}
+
+fn queries(out: &mut Samples) {
+    use super::TokenParams;
+    use super::agents_types::{ListAgentsQuery, ListTemplatesQuery};
+    use super::artifacts::{ContentParams, DiffParams, ListArtifactsParams};
+    use super::chat_types::{DeleteHistoryQuery, HistoryQuery};
+    use super::dispatch_decisions::DecisionParams;
+    use super::events_history::HistoryParams;
+    use super::extensions::{DeleteQuery, ListQuery};
+    use super::memories::{
+        ListMemoriesQuery, ReadMemoryQuery, RecentlyLearnedQuery, RecentlyUsedQuery,
+        SearchMemoriesQuery, SuggestionsQuery, TimelineMemoriesQuery,
+    };
+    use super::orchestrator_latency::{AggregateParams, LatencyParams};
+    use super::sessions::{ListSessionsQuery, SessionEventsQuery, SessionMessagesQuery};
+    use super::settings_types::{LlmUsageDailyQuery, LlmUsageQuery, UsageSummaryQuery};
+    use super::tasks_types::ListTasksQuery;
+    use super::workspaces::WorkspaceQuery;
+
+    out.query("get-agents", Body::of::<ListAgentsQuery>());
+    out.query("get-agent-templates", Body::of::<ListTemplatesQuery>());
+    out.query("get-tasks", Body::of::<ListTasksQuery>());
+    out.query("get-artifacts", Body::of::<ListArtifactsParams>());
+    out.query("get-artifacts-id-content", Body::of::<ContentParams>());
+    out.query(
+        "get-artifacts-id-versions-n-content",
+        Body::of::<TokenParams>(),
+    );
+    out.query("get-artifacts-id-diff", Body::of::<DiffParams>());
+    out.query("get-files-id-content", Body::of::<TokenParams>());
+    out.query("get-workspaces", Body::of::<WorkspaceQuery>());
+    out.query("get-chat-history", Body::of::<HistoryQuery>());
+    out.query("delete-chat-history", Body::of::<DeleteHistoryQuery>());
+    out.query("get-sessions", Body::of::<ListSessionsQuery>());
+    out.query(
+        "get-sessions-id-messages",
+        Body::of::<SessionMessagesQuery>(),
+    );
+    out.query("get-sessions-id-events", Body::of::<SessionEventsQuery>());
+    out.query("get-llm-usage", Body::of::<LlmUsageQuery>());
+    out.query("get-llm-usage-daily", Body::of::<LlmUsageDailyQuery>());
+    out.query("get-usage-summary", Body::of::<UsageSummaryQuery>());
+    out.query("get-extensions", Body::of::<ListQuery>());
+    out.query("delete-extensions-kind-id", Body::of::<DeleteQuery>());
+    out.query("get-events-history", Body::of::<HistoryParams>());
+    out.query("get-orchestrator-latency", Body::of::<LatencyParams>());
+    out.query(
+        "get-orchestrator-latency-aggregate",
+        Body::of::<AggregateParams>(),
+    );
+    out.query("get-orchestrator-decisions", Body::of::<DecisionParams>());
+    out.query("get-memories", Body::of::<ListMemoriesQuery>());
+    out.query("get-memories-search", Body::of::<SearchMemoriesQuery>());
+    out.query("get-memories-timeline", Body::of::<TimelineMemoriesQuery>());
+    out.query(
+        "get-memories-recently-learned",
+        Body::of::<RecentlyLearnedQuery>(),
+    );
+    out.query(
+        "get-memories-recently-used",
+        Body::of::<RecentlyUsedQuery>(),
+    );
+    out.query("get-memories-suggestions", Body::of::<SuggestionsQuery>());
+    out.query("get-memories-id", Body::of::<ReadMemoryQuery>());
 }
 
 fn requests(out: &mut Samples) {

@@ -2,7 +2,7 @@
   "config": {
     "agent": {
       "description": "",
-      "icon": null,
+      "icon": "",
       "id": "",
       "name": ""
     },
@@ -22,10 +22,11 @@
       "denied_models": null,
       "denied_sections": null,
       "max_context_tokens": null,
-      "max_cost_per_task": null,
-      "max_tool_calls": null,
+      "max_cost_per_task": 0,
+      "max_rounds": 0,
+      "max_tool_calls": 0,
       "require_confirmation_for": null,
-      "timeout_seconds": null
+      "timeout_seconds": 0
     },
     "llm": {
       "fallback_models": null,
@@ -34,6 +35,7 @@
     },
     "preset": {
       "persona": "",
+      "temperature": 0,
       "verbosity": ""
     }
   },

@@ -55,6 +55,7 @@ import type {
   AgentTemplate,
   ChatDeleteResponse,
   ChatHistoryResponse,
+  ChatSendResponse,
   CliBackendStatus,
   Connector,
   CreateTaskResponse,
@@ -560,7 +561,9 @@ const RESPONSES: Record<string, Entry> = {
       {
         messages: shape<Inner<ChatHistoryResponse["messages"]>>(
           {
-            confirmation: "optional",
+            // No daemon field: no route sends it and no view reads it (a
+            // finding, CONTRACT-SAMPLES-2).
+            confirmation: "may_omit",
             artifacts: "optional",
             content: "required",
             content_json: "optional",
@@ -646,7 +649,8 @@ const RESPONSES: Record<string, Entry> = {
     "ExtensionRow[]",
     shape<ExtensionRow>(
       {
-        warnings: "optional",
+        // Per-call: only the verb that produced a warning sends it (row_json).
+        warnings: "may_omit",
         actionable: "required",
         added_capabilities: "required",
         agents: "required",
@@ -1096,7 +1100,9 @@ const RESPONSES: Record<string, Entry> = {
       {
         messages: shape<Inner<SessionMessagesResponse["messages"]>>(
           {
-            confirmation: "optional",
+            // No daemon field: no route sends it and no view reads it (a
+            // finding, CONTRACT-SAMPLES-2).
+            confirmation: "may_omit",
             artifacts: "optional",
             content: "required",
             content_json: "optional",
@@ -1173,10 +1179,14 @@ const RESPONSES: Record<string, Entry> = {
                 >
               >(
                 {
-                  managed: "optional",
-                  credential_status: "optional",
-                  credential_expires_at: "optional",
-                  external_usage: "optional",
+                  // skip_serializing_if; settings_service never sets it (a finding).
+                  managed: "may_omit",
+                  // skip_serializing_if; settings_service never sets it (a finding).
+                  credential_status: "may_omit",
+                  // skip_serializing_if; settings_service never sets it (a finding).
+                  credential_expires_at: "may_omit",
+                  // skip_serializing_if; settings_service never sets it (a finding).
+                  external_usage: "may_omit",
                   id: "required",
                   masked_secret: "required",
                   monthly_usage_usd: "required",
@@ -1472,10 +1482,14 @@ const RESPONSES: Record<string, Entry> = {
         outcome: parsedOutcomeShape,
         task: shape<Inner<TaskDetailResponse["task"]>>(
           {
-            outcome: "optional",
-            cost_usd: "optional",
-            subagent_count: "optional",
-            steerable: "optional",
+            // The list row's only: the detail sends its outcome beside `task`.
+            outcome: "may_omit",
+            // The list row's only (GAP-08b).
+            cost_usd: "may_omit",
+            // The list row's only.
+            subagent_count: "may_omit",
+            // The list row's only: the detail sends it beside `task`.
+            steerable: "may_omit",
             artifact_count: "optional",
             completed_at: "required",
             created_at: "required",
@@ -1513,8 +1527,10 @@ const RESPONSES: Record<string, Entry> = {
       {
         lanes: shape<Inner<TaskTimeline["lanes"]>>(
           {
-            steps_current: "optional",
-            steps_total: "optional",
+            // skip_serializing_if: nothing counts a subagent's steps (TimelineLaneResponse).
+            steps_current: "may_omit",
+            // skip_serializing_if: nothing counts a subagent's steps (TimelineLaneResponse).
+            steps_total: "may_omit",
             agent_instance_id: "required",
             detail: "required",
             ended_at: "required",
@@ -1696,6 +1712,14 @@ const RESPONSES: Record<string, Entry> = {
       {},
     ),
   ),
+  // `lib/chat-stream.ts`'s `sendChatMessage` (CONTRACT-SAMPLES-2).
+  "post-chat": body<ChatSendResponse>(
+    "ChatSendResponse",
+    shape<ChatSendResponse>(
+      { lane_key: "required", model_used: "required", stream_id: "required" },
+      {},
+    ),
+  ),
   "post-command": body<ShutdownAccepted>(
     "ShutdownAccepted",
     shape<ShutdownAccepted>({ request_id: "required", status: "required" }, {}),
@@ -1704,7 +1728,8 @@ const RESPONSES: Record<string, Entry> = {
     "ExtensionRow",
     shape<ExtensionRow>(
       {
-        warnings: "optional",
+        // Per-call: only a verb that produced a warning sends it (row_json).
+        warnings: "may_omit",
         actionable: "required",
         added_capabilities: "required",
         agents: "required",
@@ -1751,8 +1776,10 @@ const RESPONSES: Record<string, Entry> = {
     "InstallResponse",
     shape<InstallResponse>(
       {
-        added_capabilities: "optional",
-        consent_reset: "optional",
+        // A plugin install's only: an MCP server's answer is {extension, manifest}.
+        added_capabilities: "may_omit",
+        // A plugin install's only: an MCP server's answer is {extension, manifest}.
+        consent_reset: "may_omit",
         extension: "required",
         manifest: "required",
       },
@@ -1776,7 +1803,8 @@ const RESPONSES: Record<string, Entry> = {
         ),
         extension: shape<Inner<InstallResponse["extension"]>>(
           {
-            warnings: "optional",
+            // Per-call: only a verb that produced a warning sends it (row_json).
+            warnings: "may_omit",
             actionable: "required",
             added_capabilities: "required",
             agents: "required",
@@ -1833,7 +1861,8 @@ const RESPONSES: Record<string, Entry> = {
       {
         extension: shape<Inner<InstallResponse["extension"]>>(
           {
-            warnings: "optional",
+            // Per-call: only a verb that produced a warning sends it (row_json).
+            warnings: "may_omit",
             actionable: "required",
             added_capabilities: "required",
             agents: "required",
@@ -2113,10 +2142,14 @@ const RESPONSES: Record<string, Entry> = {
     "TaskActionResponse",
     shape<TaskActionResponse>(
       {
-        session_id: "optional",
-        rounds_replayed: "optional",
-        from_seq: "optional",
-        to_seq: "optional",
+        // Resume's only (resume_task); a cancel answers {task_id, status}.
+        session_id: "may_omit",
+        // Resume's only (resume_task).
+        rounds_replayed: "may_omit",
+        // Resume's only (resume_task).
+        from_seq: "may_omit",
+        // Resume's only (resume_task).
+        to_seq: "may_omit",
         status: "required",
         task_id: "required",
       },
@@ -2141,10 +2174,14 @@ const RESPONSES: Record<string, Entry> = {
     "TaskActionResponse",
     shape<TaskActionResponse>(
       {
-        session_id: "optional",
-        rounds_replayed: "optional",
-        from_seq: "optional",
-        to_seq: "optional",
+        // Resume's only (resume_task); a start answers {task_id, status}.
+        session_id: "may_omit",
+        // Resume's only (resume_task).
+        rounds_replayed: "may_omit",
+        // Resume's only (resume_task).
+        from_seq: "may_omit",
+        // Resume's only (resume_task).
+        to_seq: "may_omit",
         status: "required",
         task_id: "required",
       },
@@ -2280,7 +2317,8 @@ const RESPONSES: Record<string, Entry> = {
       {
         extension: shape<Inner<InstallResponse["extension"]>>(
           {
-            warnings: "optional",
+            // Per-call: only a verb that produced a warning sends it (row_json).
+            warnings: "may_omit",
             actionable: "required",
             added_capabilities: "required",
             agents: "required",
@@ -2728,6 +2766,27 @@ describe("the API contract's samples", () => {
       ).toEqual([]);
     },
   );
+
+  // CONTRACT-SAMPLES-2 (*Rev 107*'s renamed-optional-key item, (b)): an
+  // optional key the sample lacks fails unless its descriptor marks it one
+  // the daemon may omit — the health answer's `protocol`, the key Q04's
+  // compatibility check reads, renamed as the post-review saw it.
+  it("a renamed optional key fails, and only a may_omit mark lets one be absent", () => {
+    const entry = RESPONSES["get-health"];
+    const sample = responseSamples.get("get-health") as Record<string, unknown>;
+    expect(entry).toBeDefined();
+    if (entry === undefined) return;
+    const { protocol, ...rest } = sample;
+    const renamed = { ...rest, wire_protocol: protocol };
+    expect(check(renamed, entry.node)).toEqual([
+      'protocol: optional in the type, absent from the sample (renamed or removed, or a key the daemon may omit: mark it "may_omit")',
+    ]);
+    const lenient = shape<{ a: string; b?: number }>(
+      { a: "required", b: "may_omit" },
+      {},
+    );
+    expect(check({ a: "" }, lenient)).toEqual([]);
+  });
 
   it.each(sorted(Object.keys(EVENTS)))(
     "events/%s parses as its ServerEvent variant",

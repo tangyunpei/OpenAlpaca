@@ -1315,7 +1315,9 @@ async fn writes_on_another_owners_session_answer_404() {
 
 /// `/v1/sessions*`'s JSON bodies for the API contract's folder
 /// (API-CONTRACT): two conversations on the lane, one bound to a project,
-/// with a message each.
+/// with a message each. Since CONTRACT-SAMPLES-2 both carry a working state
+/// with every list filled, and the message a linked artifact, so those
+/// shapes reach the folder with their keys.
 pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
     use crate::contract::ok_body;
     let home = tempfile::tempdir().expect("home store");
@@ -1333,9 +1335,14 @@ pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
         },
     ))
     .await;
+    // A create's answer is a fresh conversation's: it has no working state
+    // yet, so this sample alone leaves `working_state` `null`; the four
+    // answers below carry the same row type with its state.
     out.response("post-sessions", created.clone());
     let id = created["id"].as_str().expect("an id").to_string();
-    h.repo()
+    contract_working_state(&h, &id);
+    let message = h
+        .repo()
         .insert(&ConversationMessage {
             lane_key: LANE.to_string(),
             role: "user".to_string(),
@@ -1343,8 +1350,10 @@ pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
             ..Default::default()
         })
         .expect("insert");
+    contract_artifact_link(&h, message);
     let other = ok_body(create_session(&h.deps(), CreateSessionRequest::default())).await;
     let other_id = other["id"].as_str().expect("an id").to_string();
+    contract_working_state(&h, &other_id);
     let body = ok_body(list_sessions(&h.deps(), ListSessionsQuery::default())).await;
     out.response("get-sessions", body);
     let body = ok_body(get_session_messages(
@@ -1368,4 +1377,51 @@ pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
     out.response("post-sessions-id-activate", body);
     let body = ok_body(archive_session(&h.deps(), &other_id)).await;
     out.response("post-sessions-id-archive", body);
+}
+
+/// A working state with every list holding a line, written to `session`.
+fn contract_working_state(h: &Harness, session: &str) {
+    let state = openalpaca_core::orchestrator::working_state::WorkingState {
+        v: openalpaca_core::orchestrator::working_state::VERSION,
+        topic: "Trip".to_string(),
+        goal: "Book a trip.".to_string(),
+        done: vec!["Picked dates.".to_string()],
+        asked: vec!["Which airport? The nearer one.".to_string()],
+        decisions: vec!["No red-eye.".to_string()],
+        open: vec!["The hotel.".to_string()],
+        next: "Compare hotels.".to_string(),
+        refs: vec!["task-1".to_string()],
+    };
+    let text = serde_json::to_string(&state).expect("a state serializes");
+    assert!(
+        h.repo()
+            .update_working_state(session, 0, &text, 0)
+            .expect("write the state"),
+        "the state is written"
+    );
+}
+
+/// A report artifact linked to `message`, as a run's result is.
+fn contract_artifact_link(h: &Harness, message: i64) {
+    use openalpaca_storage::store::StoreScope;
+    use openalpaca_storage::{ArtifactKind, ArtifactStore, FileAssetRepository, NewArtifact};
+    let artifact = ArtifactStore::new(&h.db)
+        .put(NewArtifact::new(
+            "owner-1",
+            &StoreScope::Home,
+            ArtifactKind::Markdown,
+            "report",
+            b"body\n",
+        ))
+        .expect("put")
+        .0;
+    FileAssetRepository::new(&h.db)
+        .link_to_message_with_role(
+            message,
+            &artifact.id,
+            0,
+            None,
+            openalpaca_storage::repository::file_asset::ARTIFACT_ROLE,
+        )
+        .expect("link");
 }

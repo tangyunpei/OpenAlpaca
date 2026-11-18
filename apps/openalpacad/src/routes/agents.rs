@@ -1533,10 +1533,63 @@ pub(crate) mod tests {
     /// `/v1/agents*`, `/v1/agent-templates*` and `/v1/agent-instances`'
     /// JSON bodies for the API contract's folder: the bundled layer under a
     /// lead file, one running instance, one stored agent with its metrics.
+    /// Since CONTRACT-SAMPLES-2 the lead file sets every optional value a
+    /// template can (an icon, a temperature and each limit) and the lead has
+    /// one finished run, so the keys the template rows leave out when unset
+    /// reach the folder.
     pub(crate) async fn contract_samples(out: &mut crate::contract::Samples) {
         use crate::contract::ok_body;
         use openalpaca_storage::{AgentMetrics, SubAgentConfig};
-        let t = Templates::new(&[("lead_agent.md", lead("model-a"))]);
+        let lead_file = "---\nid: lead_agent\nname: Lead\ndescription: leads\nicon: compass\n\
+                         singleton: true\nmodel: model-a\ntemperature: 0.2\nmax_tool_calls: 5\n\
+                         timeout_seconds: 60\nmax_cost_per_task: 1.5\nmax_rounds: 4\n\
+                         capabilities:\n  - \"orchestration\"\n---\n\n## Persona\n\nLeads.\n";
+        let t = Templates::new(&[("lead_agent.md", lead_file.to_string())]);
+        // The finished run the lead's one span belongs to.
+        openalpaca_storage::TaskRepository::new(&t.db)
+            .create(&openalpaca_storage::Task {
+                id: "task-0".to_string(),
+                title: "Lead the run".to_string(),
+                description: None,
+                status: openalpaca_storage::TaskStatus::Completed,
+                priority: 0,
+                progress_current: None,
+                progress_total: None,
+                result_summary: None,
+                created_by: "user-1".to_string(),
+                source_lane: "user-1:gui".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                state_json: None,
+                state_version: 1,
+                outcome_json: None,
+                outcome_kind: None,
+                artifact_count: 0,
+                workspace_id: None,
+                source_task_id: None,
+                session_id: None,
+                unattended: false,
+            })
+            .unwrap();
+        let spans = SubagentSpanRepository::new(&t.db);
+        spans
+            .open(openalpaca_storage::NewSubagentSpan {
+                id: "span-1",
+                task_id: "task-0",
+                template_id: "lead_agent",
+                agent_instance_id: "lead_agent::a",
+                objective: Some("lead the run"),
+            })
+            .unwrap();
+        spans
+            .close(
+                "span-1",
+                openalpaca_storage::SpanState::Done,
+                None,
+                Some("done"),
+            )
+            .unwrap();
         let mut instance = t
             .registry
             .spawn_instance("lead_agent", "task-1".to_string())

@@ -6,7 +6,11 @@
   "denied_capabilities": [],
   "description": "",
   "fallback_models": [],
+  "icon": "",
   "id": "",
+  "last_run_at": "",
+  "max_cost_per_task": 0,
+  "max_tool_calls": 0,
   "model": "",
   "name": "",
   "not_used": [
@@ -28,6 +32,8 @@
   "singleton": false,
   "source": "",
   "state": "",
+  "temperature": 0,
+  "timeout_seconds": 0,
   "verbosity": "",
   "warnings": [],
   "window": ""

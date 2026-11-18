@@ -15,12 +15,16 @@
  * an optional key is checked too. A sample's value that is `null` is a
  * field whose inside the sample does not describe; what a wrapper sends
  * under it is not checked.
+ *
+ * The query strings the same way (CONTRACT-SAMPLES-2; *Rev 123*'s 123-5,
+ * (b)): every key a wrapper puts in a query string is one the route's query
+ * type reads, as `./contract/queries/` records it.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { sendChatMessage } from "@/lib/chat-stream";
-import { resetConnection } from "@/lib/connection";
+import { ensureConnection, resetConnection } from "@/lib/connection";
 
 import {
   createAgentTemplate,
@@ -28,8 +32,19 @@ import {
   updateAgentConfig,
   updateAgentTemplate,
 } from "./agents";
-import { setArtifactPinned } from "./artifacts";
-import { respondToConfirmation, setMessageFeedback } from "./chat";
+import {
+  artifactContentUrl,
+  fileContentUrl,
+  getArtifactDiff,
+  listArtifacts,
+  setArtifactPinned,
+} from "./artifacts";
+import {
+  clearChatHistory,
+  getChatHistory,
+  respondToConfirmation,
+  setMessageFeedback,
+} from "./chat";
 import {
   configureConnector,
   performConnectorAction,
@@ -38,20 +53,35 @@ import {
 import {
   addMcpServer,
   installPlugin,
+  listExtensions,
   setExtensionConfig,
+  uninstallExtension,
   updatePlugin,
   validatePlugin,
 } from "./extensions";
 import { queueFollowup } from "./followups";
 import {
   createMemory,
+  getMemory,
+  listMemories,
+  searchMemories,
   updateMemory,
   type CreateMemoryInput,
   type MemoryPatch,
 } from "./memories";
-import { updateOrchestratorConfig } from "./orchestrator";
+import {
+  getDispatchDecisions,
+  getLatencyAggregates,
+  getLatencyRecords,
+  updateOrchestratorConfig,
+} from "./orchestrator";
 import { putPersonaUser } from "./persona";
-import { createSession, updateSession } from "./sessions";
+import {
+  createSession,
+  getSessionMessages,
+  listSessions,
+  updateSession,
+} from "./sessions";
 import {
   reorderKeys,
   setKeyPriority,
@@ -60,7 +90,8 @@ import {
   validateKey,
 } from "./settings";
 import { requestDaemonShutdown } from "./status";
-import { createTask, performTaskAction, steerTask } from "./tasks";
+import { createTask, listTasks, performTaskAction, steerTask } from "./tasks";
+import { getEventHistory } from "./telemetry";
 import type {
   AddKeyRequest,
   AgentConfigFile,
@@ -71,7 +102,13 @@ import type {
   UpdateOrchestratorRequest,
   ValidateKeyRequest,
 } from "./types";
-import { chooseProject, deleteProjectData, repointProject } from "./workspaces";
+import { getLlmUsage, getLlmUsageDaily, getUsageSummary } from "./usage";
+import {
+  chooseProject,
+  deleteProjectData,
+  getWorkspace,
+  repointProject,
+} from "./workspaces";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => ({
@@ -83,22 +120,33 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 // ── The samples ─────────────────────────────────────────────────────────────
 
-const requestSamples = new Map(
-  Object.entries(
-    import.meta.glob("./contract/requests/*.json", {
-      eager: true,
-      import: "default",
-    }) as Record<string, unknown>,
-  ).map(([path, value]) => [
-    path.replace(/^.*\//, "").replace(/\.json$/, ""),
-    value,
-  ]),
+function byName(files: Record<string, unknown>): Map<string, unknown> {
+  return new Map(
+    Object.entries(files).map(([path, value]) => [
+      path.replace(/^.*\//, "").replace(/\.json$/, ""),
+      value,
+    ]),
+  );
+}
+
+const requestSamples = byName(
+  import.meta.glob("./contract/requests/*.json", {
+    eager: true,
+    import: "default",
+  }),
+);
+const querySamples = byName(
+  import.meta.glob("./contract/queries/*.json", {
+    eager: true,
+    import: "default",
+  }),
 );
 
 // ── What the wrappers send ──────────────────────────────────────────────────
 
 interface Sent {
   method: string;
+  url: string;
   body: unknown;
 }
 
@@ -118,9 +166,10 @@ beforeEach(() => {
   reply = () => json({});
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (_input: unknown, init?: RequestInit) => {
+    vi.fn(async (input: unknown, init?: RequestInit) => {
       sent.push({
         method: init?.method ?? "GET",
+        url: String(input),
         body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
       });
       return reply();
@@ -357,6 +406,188 @@ const CASES: Array<[string, () => Promise<unknown>]> = [
   ["patch-workspaces", () => repointProject("/a", "/b")],
   ["post-workspaces-purge", () => deleteProjectData("/r", true)],
 ];
+
+// ── Every key of each query a wrapper sends ─────────────────────────────────
+
+/** Each query sample and a call that sends its route's every query key. */
+const QUERY_CASES: Array<[string, () => Promise<unknown>]> = [
+  [
+    "get-artifacts",
+    () =>
+      listArtifacts({
+        taskId: "t",
+        kind: "markdown",
+        origin: "produced",
+        projectRoot: "/r",
+        pinned: true,
+        q: "q",
+        includeMissing: true,
+        inProject: true,
+        limit: 1,
+        offset: 1,
+      } satisfies Required<Parameters<typeof listArtifacts>[0]>),
+  ],
+  ["get-artifacts-id-diff", () => getArtifactDiff("a", 1, 2)],
+  [
+    "get-chat-history",
+    () =>
+      getChatHistory({
+        limit: 1,
+        offset: 1,
+        laneKey: "o:gui",
+        sessionId: "s",
+      } satisfies Required<Parameters<typeof getChatHistory>[0]>),
+  ],
+  ["delete-chat-history", () => clearChatHistory("o:gui")],
+  ["get-extensions", () => listExtensions()],
+  ["delete-extensions-kind-id", () => uninstallExtension("plugin", "p", false)],
+  [
+    "get-orchestrator-latency",
+    () => getLatencyRecords({ mode: "m", from: "f", to: "t", limit: 1 }),
+  ],
+  [
+    "get-orchestrator-latency-aggregate",
+    () => getLatencyAggregates({ from: "f", to: "t" }),
+  ],
+  [
+    "get-orchestrator-decisions",
+    () => getDispatchDecisions({ mode: "m", from: "f", to: "t", limit: 1 }),
+  ],
+  [
+    "get-memories",
+    () =>
+      listMemories(
+        {
+          scope: "global",
+          status: "active",
+          kind: "fact",
+          cursor: "c",
+          limit: 1,
+          includeHistory: true,
+          includeCandidates: true,
+        } satisfies Required<Parameters<typeof listMemories>[0]>,
+        null,
+      ),
+  ],
+  [
+    "get-memories-search",
+    () =>
+      searchMemories(
+        {
+          q: "q",
+          scope: "global",
+          kind: "fact",
+          limit: 1,
+        } satisfies Required<Parameters<typeof searchMemories>[0]>,
+        null,
+      ),
+  ],
+  ["get-memories-id", () => getMemory(ID, null, { revision: REV })],
+  [
+    "get-sessions",
+    () =>
+      listSessions({
+        workspace_id: "w",
+        source: "gui",
+        status: "active",
+        q: "q",
+        limit: 1,
+        offset: 1,
+      } satisfies Required<Parameters<typeof listSessions>[0]>),
+  ],
+  [
+    "get-sessions-id-messages",
+    () => getSessionMessages("s", { limit: 1, offset: 1, before_id: 1 }),
+  ],
+  [
+    "get-tasks",
+    () =>
+      listTasks({
+        status: "active",
+        createdBy: "o",
+        limit: 1,
+      } satisfies Required<Parameters<typeof listTasks>[0]>),
+  ],
+  [
+    "get-events-history",
+    () =>
+      getEventHistory({
+        limit: 1,
+        taskId: "t",
+        agentId: "a",
+        eventType: "e",
+        before: 1,
+      } satisfies Required<Parameters<typeof getEventHistory>[0]>),
+  ],
+  [
+    "get-llm-usage",
+    () =>
+      getLlmUsage({
+        agentId: "a",
+        keyId: "k",
+        limit: 1,
+        taskId: "t",
+      } satisfies Required<Parameters<typeof getLlmUsage>[0]>),
+  ],
+  [
+    "get-llm-usage-daily",
+    () => getLlmUsageDaily({ agentId: "a", date: "d", limit: 1 }),
+  ],
+  ["get-usage-summary", () => getUsageSummary()],
+  ["get-workspaces", () => getWorkspace("/r")],
+];
+
+/** The keys a URL's query string carries. */
+function queryKeys(url: string): string[] {
+  return [...new URL(url).searchParams.keys()];
+}
+
+/** The keys a query sample holds. */
+function sampleKeys(name: string): string[] | undefined {
+  const sample = querySamples.get(name);
+  return sample === undefined
+    ? undefined
+    : Object.keys(sample as Record<string, unknown>);
+}
+
+describe("the API contract's query samples", () => {
+  it.each(QUERY_CASES)(
+    "queries/%s holds every key its wrapper sends",
+    async (name, call) => {
+      reply = () => json(name === "get-extensions" ? [] : {});
+      await call().catch(() => undefined);
+      expect(sent).toHaveLength(1);
+      const request = sent[0];
+      if (request === undefined) throw new Error("no request");
+      expect(name.startsWith(`${request.method.toLowerCase()}-`)).toBe(true);
+      const known = sampleKeys(name);
+      expect(known, `queries/${name}.json`).toBeDefined();
+      const sentKeys = queryKeys(request.url);
+      expect(sentKeys.length, `${name} sends a query`).toBeGreaterThan(0);
+      expect(
+        sentKeys.filter((key) => !known?.includes(key)),
+        `keys queries/${name}.json does not hold`,
+      ).toEqual([]);
+    },
+  );
+
+  it("the content URLs' one key is the token their routes read", async () => {
+    await ensureConnection();
+    for (const [name, url] of [
+      ["get-artifacts-id-content", artifactContentUrl("a")],
+      ["get-artifacts-id-versions-n-content", artifactContentUrl("a", 2)],
+      ["get-files-id-content", fileContentUrl("f")],
+    ] as const) {
+      expect(url, name).not.toBeNull();
+      const known = sampleKeys(name);
+      expect(known, `queries/${name}.json`).toBeDefined();
+      expect(
+        queryKeys(url ?? "").filter((key) => !known?.includes(key)),
+        `keys queries/${name}.json does not hold`,
+      ).toEqual([]);
+    }
+  });
+});
 
 describe("the API contract's request samples", () => {
   it.each(CASES)(

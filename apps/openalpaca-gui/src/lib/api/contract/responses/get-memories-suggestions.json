@@ -1,7 +1,17 @@
 {
   "items": [
     {
-      "changes": [],
+      "changes": [
+        {
+          "field": "",
+          "from": [
+            ""
+          ],
+          "to": [
+            ""
+          ]
+        }
+      ],
       "created_at": "",
       "id": "",
       "knowledge": "",
@@ -12,7 +22,13 @@
       "reason": "",
       "revision": "",
       "scope": "",
-      "sources": [],
+      "sources": [
+        {
+          "id": "",
+          "observed_at": "",
+          "type": ""
+        }
+      ],
       "target": {
         "excerpt": "",
         "excerpt_left_out": 0,

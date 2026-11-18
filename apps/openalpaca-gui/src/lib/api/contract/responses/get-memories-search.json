@@ -23,7 +23,13 @@
       "revision": "",
       "same_key_loser": false,
       "scope": "",
-      "sources": [],
+      "sources": [
+        {
+          "id": "",
+          "observed_at": null,
+          "type": ""
+        }
+      ],
       "sources_status": "",
       "status": "",
       "superseded_by": [],

@@ -1,7 +1,13 @@
 {
   "messages": [
     {
-      "artifacts": [],
+      "artifacts": [
+        {
+          "id": "",
+          "kind": "",
+          "name": ""
+        }
+      ],
       "content": "",
       "content_json": null,
       "created_at": "",
