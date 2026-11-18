@@ -103,19 +103,19 @@ pub async fn run(args: PersonaArgs) -> Result<()> {
 
 /// `GET /v1/persona/user`'s body.
 #[derive(Debug, Deserialize)]
-struct PersonaUserResponse {
+pub(crate) struct PersonaUserResponse {
     content: String,
 }
 
 /// `PUT /v1/persona/user`'s body.
 #[derive(Debug, Serialize)]
-struct PersonaUserBody<'a> {
-    content: &'a str,
+pub(crate) struct PersonaUserBody<'a> {
+    pub(crate) content: &'a str,
 }
 
 /// `PUT /v1/persona/user`'s answer.
 #[derive(Debug, Deserialize)]
-struct PersonaUserWritten {
+pub(crate) struct PersonaUserWritten {
     etag: String,
 }
 

@@ -85,14 +85,14 @@ pub struct SessionItem {
 }
 
 #[derive(Debug, Deserialize)]
-struct SessionsResponse {
+pub(crate) struct SessionsResponse {
     sessions: Vec<SessionItem>,
     #[allow(dead_code)]
     total: i64,
 }
 
 #[derive(Debug, Deserialize)]
-struct MeResponse {
+pub(crate) struct MeResponse {
     default_lane_key: String,
 }
 

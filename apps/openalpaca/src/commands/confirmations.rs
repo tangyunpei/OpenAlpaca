@@ -112,7 +112,7 @@ pub struct PendingPrompt {
 }
 
 #[derive(Debug, Deserialize)]
-struct PendingPrompts {
+pub(crate) struct PendingPrompts {
     #[serde(default)]
     confirmations: Vec<PendingPrompt>,
 }
@@ -415,7 +415,7 @@ async fn answer(request_id: &str, approved: bool, entire_tool: bool) -> Result<(
 
 /// One `tool_confirmation_requested` frame off `/v1/events`.
 #[derive(Debug, Deserialize)]
-struct ConfirmationFrame {
+pub(crate) struct ConfirmationFrame {
     request_id: String,
     tool_name: String,
     #[serde(default)]

@@ -1,0 +1,65 @@
+[
+  {
+    "config": {
+      "agent": {
+        "id": "code_reviewer",
+        "name": "Code Reviewer",
+        "description": "Reviews code",
+        "icon": null
+      },
+      "capabilities": {
+        "assigned": [
+          "research",
+          "code_review"
+        ],
+        "denied": null
+      },
+      "preset": {
+        "persona": "You review.",
+        "verbosity": null
+      },
+      "constraints": {
+        "max_tool_calls": null,
+        "timeout_seconds": null,
+        "max_cost_per_task": 2.5,
+        "require_confirmation_for": null,
+        "allowed_capabilities": null,
+        "denied_capabilities": null,
+        "allowed_models": null,
+        "denied_models": null,
+        "auto_approve": null,
+        "denied_sections": null,
+        "max_context_tokens": null
+      },
+      "llm": {
+        "model": "model-a",
+        "fallback_models": null,
+        "overrides": null
+      }
+    }
+  },
+  {
+    "config": {
+      "agent": {
+        "id": "reader",
+        "name": "Reader",
+        "description": "",
+        "icon": null
+      },
+      "capabilities": {
+        "assigned": [],
+        "denied": null
+      },
+      "preset": {
+        "persona": "",
+        "verbosity": null
+      },
+      "constraints": null,
+      "llm": {
+        "model": "model-a",
+        "fallback_models": null,
+        "overrides": null
+      }
+    }
+  }
+]

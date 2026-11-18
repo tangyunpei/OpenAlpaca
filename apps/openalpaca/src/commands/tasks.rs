@@ -95,7 +95,7 @@ pub enum TasksCommands {
 // ── Local deserialization structs ────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TaskItem {
+pub(crate) struct TaskItem {
     id: String,
     title: String,
     status: String,
@@ -111,12 +111,12 @@ struct TaskItem {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TaskDetail {
+pub(crate) struct TaskDetail {
     task: TaskInner,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TaskInner {
+pub(crate) struct TaskInner {
     id: String,
     title: String,
     #[serde(default)]
@@ -143,7 +143,7 @@ struct TaskInner {
 /// opened when the subagent is spawned, so a lane still working has a row here
 /// where `agent_task_history` had none at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TimelineLane {
+pub(crate) struct TimelineLane {
     label: String,
     template_id: String,
     /// `running` / `done` / `failed` / `blocked` / `cancelled`.
@@ -158,7 +158,7 @@ struct TimelineLane {
 
 /// `GET /v1/tasks/{id}/timeline` (GAP-09).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaskTimeline {
+pub(crate) struct TaskTimeline {
     lanes: Vec<TimelineLane>,
 }
 
@@ -178,7 +178,7 @@ struct TaskStatusJson<'a> {
 
 /// One row of `GET /v1/events/history`.
 #[derive(Debug, Serialize, Deserialize)]
-struct EventLogEntry {
+pub(crate) struct EventLogEntry {
     id: Option<i64>,
     timestamp: String,
     event_type: String,
@@ -197,7 +197,7 @@ struct EventLogEntry {
 
 /// `GET /v1/events/history` — always this envelope, never a bare array (P20).
 #[derive(Debug, Serialize, Deserialize)]
-struct EventHistoryPage {
+pub(crate) struct EventHistoryPage {
     events: Vec<EventLogEntry>,
     /// Pass back as `?before=` to walk to the older page; `null` at the end.
     #[serde(default)]
@@ -499,6 +499,12 @@ fn owner_of(lane_key: &str) -> &str {
         .map_or(lane_key, |(owner, _)| owner)
 }
 
+/// `POST /v1/tasks/{id}/action`'s body (`cancel`, `pause`, `resume`,
+/// `start`), from `task cancel|pause|resume`.
+pub(crate) fn action_body(action: &str) -> serde_json::Value {
+    serde_json::json!({ "action": action })
+}
+
 /// The body `POST /v1/tasks` takes.
 ///
 /// **The lane is the caller's own** (V6). `"cli_user:cli"` was a lane nobody
@@ -515,7 +521,12 @@ fn owner_of(lane_key: &str) -> &str {
 /// the GUI, the follow-up runner — inherits what the parker said unless it
 /// declares for itself. Sent only when it is true, so an attended create's
 /// body is what it was but for the lane.
-fn create_body(title: &str, priority: i32, unattended: bool, lane_key: &str) -> serde_json::Value {
+pub(crate) fn create_body(
+    title: &str,
+    priority: i32,
+    unattended: bool,
+    lane_key: &str,
+) -> serde_json::Value {
     let mut body = serde_json::json!({
         "title": title,
         "created_by": owner_of(lane_key),
@@ -561,7 +572,7 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
 
 async fn task_action(task_id: &str, action: &str) -> Result<()> {
     let client = DaemonClient::connect().await?;
-    let body = serde_json::json!({ "action": action });
+    let body = action_body(action);
     let result: serde_json::Value = client
         .post(&format!("/v1/tasks/{}/action", task_id), &body)
         .await?;

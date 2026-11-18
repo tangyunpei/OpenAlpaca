@@ -233,10 +233,7 @@ async fn keys_add(
     // Auto-validate the key
     print!("{}", "Validating key... ".dimmed());
     let client = DaemonClient::connect().await?;
-    let validate_body = serde_json::json!({
-        "provider": provider,
-        "secret": secret,
-    });
+    let validate_body = validate_body(&provider, &secret);
     match client
         .post::<_, serde_json::Value>("/v1/settings/llm/validate", &validate_body)
         .await
@@ -309,16 +306,8 @@ async fn keys_add(
     // Submit. The id field is `id` — `key_id` was silently dropped by serde and
     // the daemon minted a `key_<uuid8>` instead, so the id printed back by
     // `keys list` was never the one asked for.
-    let body = serde_json::json!({
-        "provider": provider,
-        "key": {
-            "id": format!("{}_{}", provider, chrono::Utc::now().timestamp()),
-            "secret": secret,
-            "source": source,
-            "notes": notes,
-            "priority": priority,
-        }
-    });
+    let id = format!("{}_{}", provider, chrono::Utc::now().timestamp());
+    let body = add_key_body(&provider, &id, &secret, &source, &notes, &priority);
 
     let _: serde_json::Value = client.put("/v1/settings/llm", &body).await?;
     println!("{} Key added for {}", "✓".green(), provider);
@@ -404,10 +393,7 @@ async fn keys_validate(provider: &str, secret: Option<&str>) -> Result<()> {
         ValidatePlan::Grade => secret.unwrap_or_default(),
     };
 
-    let body = serde_json::json!({
-        "provider": provider,
-        "secret": secret,
-    });
+    let body = validate_body(provider, secret);
 
     let result: serde_json::Value = client.post("/v1/settings/llm/validate", &body).await?;
 
@@ -437,12 +423,61 @@ async fn keys_validate(provider: &str, secret: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn keys_set_primary(provider: &str, key_id: &str) -> Result<()> {
-    let client = DaemonClient::connect().await?;
-    let body = serde_json::json!({
+/// `POST /v1/settings/llm/validate`'s body, from `llm keys add` and
+/// `llm keys validate`.
+pub(crate) fn validate_body(provider: &str, secret: &str) -> serde_json::Value {
+    serde_json::json!({
+        "provider": provider,
+        "secret": secret,
+    })
+}
+
+/// `PUT /v1/settings/llm`'s body, from `llm keys add`. The id field is
+/// `id` — `key_id` was silently dropped by serde and the daemon minted a
+/// `key_<uuid8>` instead, so the id printed back by `keys list` was never
+/// the one asked for.
+pub(crate) fn add_key_body(
+    provider: &str,
+    id: &str,
+    secret: &str,
+    source: &str,
+    notes: &str,
+    priority: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "provider": provider,
+        "key": {
+            "id": id,
+            "secret": secret,
+            "source": source,
+            "notes": notes,
+            "priority": priority,
+        }
+    })
+}
+
+/// `PUT /v1/settings/llm/keys/reorder`'s body from `llm keys set-primary`
+/// — as sent, which the route's `ReorderKeysRequest` refuses: it lacks
+/// `key_order` (`contract_bodies`' `SENT_UNREAD`; an owner item).
+pub(crate) fn set_primary_body(provider: &str, key_id: &str) -> serde_json::Value {
+    serde_json::json!({
         "provider": provider,
         "primary_key_id": key_id,
-    });
+    })
+}
+
+/// `PUT /v1/settings/llm/keys/reorder`'s body from `llm keys reorder` — as
+/// sent, which the route refuses: it names neither `provider` nor
+/// `key_order` (`contract_bodies`' `SENT_UNREAD`; an owner item).
+pub(crate) fn reorder_body(key_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "key_ids": key_ids,
+    })
+}
+
+async fn keys_set_primary(provider: &str, key_id: &str) -> Result<()> {
+    let client = DaemonClient::connect().await?;
+    let body = set_primary_body(provider, key_id);
     let _: serde_json::Value = client.put("/v1/settings/llm/keys/reorder", &body).await?;
     println!("{} Set {} as primary for {}", "✓".green(), key_id, provider);
     Ok(())
@@ -450,9 +485,7 @@ async fn keys_set_primary(provider: &str, key_id: &str) -> Result<()> {
 
 async fn keys_reorder(key_ids: Vec<String>) -> Result<()> {
     let client = DaemonClient::connect().await?;
-    let body = serde_json::json!({
-        "key_ids": key_ids,
-    });
+    let body = reorder_body(&key_ids);
     let _: serde_json::Value = client.put("/v1/settings/llm/keys/reorder", &body).await?;
     println!("{} Keys reordered", "✓".green());
     Ok(())

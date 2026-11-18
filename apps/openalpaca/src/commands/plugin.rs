@@ -114,6 +114,12 @@ async fn plugin_info(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// `POST /v1/extensions/plugin/{id}/config`'s body, from `plugin config
+/// set`.
+pub(crate) fn config_body(key: &str, value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "key": key, "value": value })
+}
+
 async fn plugin_config(name: &str, action: ConfigAction) -> Result<()> {
     let client = DaemonClient::connect().await?;
 
@@ -132,7 +138,7 @@ async fn plugin_config(name: &str, action: ConfigAction) -> Result<()> {
                 serde_json::Value::String(value.clone())
             };
 
-            let body = serde_json::json!({ "key": key, "value": json_value });
+            let body = config_body(&key, json_value);
             let _result: serde_json::Value = client
                 .post(&format!("/v1/extensions/plugin/{}/config", name), &body)
                 .await?;

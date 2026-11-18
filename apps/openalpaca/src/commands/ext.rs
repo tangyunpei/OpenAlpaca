@@ -624,7 +624,7 @@ pub(crate) fn mcp_add_body(command: ExtMcpCommands) -> Result<serde_json::Value>
 /// What an install or an update answers with: the row, plus the manifest the
 /// owner has to look at before approving.
 #[derive(Debug, Deserialize)]
-struct InstallResponse {
+pub(crate) struct InstallResponse {
     extension: ExtensionRow,
     #[serde(default)]
     manifest: Option<ManifestSummary>,
@@ -635,7 +635,7 @@ struct InstallResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct ValidateResponse {
+pub(crate) struct ValidateResponse {
     manifest: ManifestSummary,
     #[serde(default)]
     installed: bool,
@@ -643,7 +643,7 @@ struct ValidateResponse {
 
 /// The manifest summary, as the daemon reads it off `plugin.toml`.
 #[derive(Debug, Deserialize)]
-struct ManifestSummary {
+pub(crate) struct ManifestSummary {
     name: String,
     version: String,
     #[serde(default)]
@@ -950,7 +950,7 @@ fn update_text(response: &InstallResponse, tty: bool) -> String {
 }
 
 #[derive(Debug, Deserialize)]
-struct UninstallResponse {
+pub(crate) struct UninstallResponse {
     removed: String,
     #[serde(default)]
     trashed: Option<String>,

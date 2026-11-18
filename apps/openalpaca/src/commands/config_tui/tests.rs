@@ -17,8 +17,8 @@ fn the_screens_create_body_carries_no_temperature() {
             max_cost,
         );
         assert!(!body.to_string().contains("temperature"), "{body}");
-        assert_eq!(body["config"]["name"], "Reader");
-        assert_eq!(body["config"]["persona"], "You read.");
+        assert_eq!(body["config"]["agent"]["name"], "Reader");
+        assert_eq!(body["config"]["preset"]["persona"], "You read.");
     }
 }
 

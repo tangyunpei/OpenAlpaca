@@ -735,3 +735,87 @@ async fn agents_set_on_a_stale_version_says_to_retry() {
 
     server.join().expect("the server finishes");
 }
+
+/// *Rev 123*'s 123-6 and *Rev 124*'s 124-1, (b): `agent list` and `agent
+/// status` read the row the daemon sends — `skills_json` (a list of
+/// capabilities) and `llm_config_json` (an object with a `model`) — where
+/// they read `model` and `skills`, keys no route sends, and always printed
+/// `-`. The row is `cli/get-agents.json`'s keys with values in them.
+fn agent_row(
+    skills_json: serde_json::Value,
+    llm_config_json: serde_json::Value,
+) -> serde_json::Value {
+    let sample: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../openalpaca-gui/src/lib/api/contract/cli/get-agents.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut row = sample[0].clone();
+    row["id"] = "reviewer".into();
+    row["name"] = "Reviewer".into();
+    row["status"] = "idle".into();
+    row["description"] = "Reviews code".into();
+    row["skills_json"] = skills_json;
+    row["llm_config_json"] = llm_config_json;
+    row
+}
+
+fn stored_skills() -> serde_json::Value {
+    serde_json::json!(
+        r#"[{"name":"research","category":"assigned","proficiency":1.0},{"name":"code_review","category":"assigned","proficiency":1.0}]"#
+    )
+}
+
+#[test]
+fn agent_list_prints_the_rows_model_and_skills() {
+    plain();
+    let row: AgentItem = serde_json::from_value(agent_row(
+        stored_skills(),
+        serde_json::json!(r#"{"model":"model-a","fallback_models":[],"overrides":{}}"#),
+    ))
+    .unwrap();
+    let line = row.table_row();
+    assert!(line.contains("model-a"), "{line}");
+    assert!(line.contains("research, code_"), "{line}");
+    // Nothing stored, an empty list, or a text that is not JSON: `-`.
+    for (skills, llm) in [
+        (serde_json::Value::Null, serde_json::Value::Null),
+        (serde_json::json!("[]"), serde_json::json!("{}")),
+        (serde_json::json!("not json"), serde_json::json!("[1]")),
+    ] {
+        let row: AgentItem = serde_json::from_value(agent_row(skills, llm)).unwrap();
+        let line = row.table_row();
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(
+            columns,
+            ["reviewer", "Reviewer", "idle", "-", "-"],
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn agent_status_prints_the_rows_model_and_skills() {
+    plain();
+    let detail: AgentDetail = serde_json::from_value(serde_json::json!({
+        "agent": agent_row(stored_skills(), serde_json::json!(r#"{"model":"model-a"}"#)),
+        "metrics": null,
+    }))
+    .unwrap();
+    let lines = status_lines(&detail);
+    assert!(lines.contains(&"Model: model-a".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"Skills: research, code_review".to_string()),
+        "{lines:?}"
+    );
+    let bare: AgentDetail = serde_json::from_value(serde_json::json!({
+        "agent": agent_row(serde_json::Value::Null, serde_json::Value::Null),
+    }))
+    .unwrap();
+    let lines = status_lines(&bare);
+    assert!(lines.contains(&"Model: -".to_string()), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.starts_with("Skills:")), "{lines:?}");
+}

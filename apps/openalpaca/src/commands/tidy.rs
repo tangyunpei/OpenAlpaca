@@ -184,13 +184,13 @@ impl Copy {
 
 /// A row of either listing route, as far as a tidy reads it.
 #[derive(Debug, Deserialize)]
-struct Row {
+pub(crate) struct Row {
     #[serde(default)]
     not_used: Vec<NotUsed>,
 }
 
 #[derive(Debug, Deserialize)]
-struct NotUsed {
+pub(crate) struct NotUsed {
     reason: String,
     #[serde(default)]
     path: Option<String>,

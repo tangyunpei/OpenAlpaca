@@ -24,7 +24,7 @@ pub enum ConnectorCommands {
 }
 
 #[derive(Deserialize)]
-struct ConnectorStatus {
+pub(crate) struct ConnectorStatus {
     id: String,
     name: String,
     status: String,
@@ -66,9 +66,15 @@ async fn list_connectors() -> Result<()> {
     Ok(())
 }
 
+/// `POST /v1/connectors/{id}/action`'s body (`enable`, `disable`, …), from
+/// `connector enable|disable`.
+pub(crate) fn action_body(action: &str) -> serde_json::Value {
+    serde_json::json!({ "action": action })
+}
+
 async fn perform_action(name: &str, action: &str) -> Result<()> {
     let client = DaemonClient::connect().await?;
-    let body = serde_json::json!({ "action": action });
+    let body = action_body(action);
     let result: serde_json::Value = client
         .post(&format!("/v1/connectors/{}/action", name), &body)
         .await?;

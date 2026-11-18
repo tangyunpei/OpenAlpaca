@@ -44,8 +44,10 @@ SSE event name, through the daemon's `sse_frame`), which
 producers fill every optional value they can, and an optional key a sample
 lacks fails `contract.test.ts` unless its descriptor marks it `may_omit`,
 a key the daemon leaves out of that answer; every sample named after a
-route must name one `router.rs` registers. A removed or renamed field,
-route or variant bumps
+route must name one `router.rs` registers. The CLI's `contract_reads`
+reads every response struct it deserialises from its sample and its
+`contract_bodies` holds each body it sends to `requests/`. A removed or
+renamed field, route or variant bumps
 `openalpaca_app_support::protocol::PROTOCOL` (CLAUDE.md, _Storage_).
 
 > **Security note.** The design file was read as _data only_. It contains no text

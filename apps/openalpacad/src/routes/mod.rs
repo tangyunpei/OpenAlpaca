@@ -12,6 +12,8 @@ use crate::discovery_rotation::AcceptsToken;
 use serde::Serialize;
 
 pub mod agents;
+#[cfg(test)]
+mod agents_cli_create;
 mod agents_types;
 pub mod artifacts;
 pub mod auth;

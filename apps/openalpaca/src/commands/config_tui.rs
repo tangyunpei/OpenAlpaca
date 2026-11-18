@@ -982,23 +982,38 @@ fn interactive_daemon(
 
 // ── Agent management structs (local deserialization) ────────────────────
 //
-// These mirror the structs in agents.rs but are kept local to avoid coupling.
+// The screen's own read types; an agent row is read through agents.rs's
+// `AgentRow`, and the bodies it sends are agents.rs's.
 
+/// A stored agent as `GET /v1/agents` sends it, read through the row type
+/// `agent list` reads (its `skills_json` and `llm_config_json`, *Rev 123*'s
+/// 123-6, (b)), so the menu's model and skills are the row's.
 #[derive(Debug, Deserialize)]
-struct TuiAgentItem {
+#[serde(from = "super::agents::AgentRow")]
+pub(crate) struct TuiAgentItem {
     id: String,
     name: String,
     status: String,
-    #[serde(default)]
     model: Option<String>,
-    #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
     skills: Option<Vec<String>>,
 }
 
+impl From<super::agents::AgentRow> for TuiAgentItem {
+    fn from(row: super::agents::AgentRow) -> Self {
+        Self {
+            model: super::agents::row_model(row.llm_config_json.as_deref()),
+            skills: super::agents::row_skills(row.skills_json.as_deref()),
+            id: row.id,
+            name: row.name,
+            status: row.status,
+            description: row.description,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
-struct TuiAgentConfigResponse {
+pub(crate) struct TuiAgentConfigResponse {
     config: serde_json::Value,
     config_version: u64,
 }
@@ -1266,10 +1281,7 @@ fn interactive_edit_agent_config(agent_id: &str, agent_name: &str) -> Result<()>
             set_nested_value(&mut config, path, json_val);
         } else if sel == fields.len() {
             // Save
-            let body = serde_json::json!({
-                "config": config,
-                "config_version": version,
-            });
+            let body = super::agents::config_body(config.clone(), version);
             let save_result: Result<serde_json::Value> = block_on(async {
                 client
                     .put(&format!("/v1/agents/{}/config", agent_id), &body)
@@ -1405,7 +1417,7 @@ fn parse_json_value(s: &str) -> serde_json::Value {
 /// Perform a pause/resume action on an agent.
 fn agent_action_tui(agent_id: &str, action: &str) -> Result<()> {
     let client = block_on(DaemonClient::connect())?;
-    let body = serde_json::json!({ "action": action });
+    let body = super::agents::action_body(action);
     let result: serde_json::Value = block_on(async {
         client
             .post(&format!("/v1/agents/{}/action", agent_id), &body)
@@ -1456,34 +1468,9 @@ fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// The `POST /v1/agents` body the creation screen sends. It carries no
-/// temperature: the screen does not ask for one, since no agent turn sends
-/// a temperature to the model.
-fn create_agent_body(
-    name: &str,
-    description: &str,
-    model: &str,
-    persona: &str,
-    skills: &[String],
-    max_cost: f64,
-) -> serde_json::Value {
-    let mut agent_config = serde_json::json!({
-        "name": name,
-        "description": description,
-        "llm": {
-            "model": model,
-        },
-        "skills": skills,
-        "persona": persona,
-    });
-
-    if max_cost > 0.0 {
-        agent_config["constraints"] = serde_json::json!({
-            "max_cost_per_task": max_cost,
-        });
-    }
-    serde_json::json!({ "config": agent_config })
-}
+// The `POST /v1/agents` body the creation screen sends is the one `agent
+// create` sends (AGENT-CREATE-CLI).
+use super::agents::create_agent_body;
 
 /// Interactive agent creation wizard (mirrors agents.rs create_interactive).
 fn interactive_create_agent() -> Result<()> {

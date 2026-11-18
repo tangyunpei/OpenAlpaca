@@ -513,28 +513,25 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             if body.trim().is_empty() {
                 bail!("the body is empty; nothing was saved");
             }
-            let mut request = json!({
-                "title": title,
-                "body": body,
-                "kind": kind,
-                "aliases": aliases,
-                "tags": tags,
-            });
-            if let Some(s) = scope {
-                request["scope"] = Value::String(s);
-            }
-            if let Some(k) = fact_key {
-                request["fact_key"] = Value::String(k);
-            }
-            if let Some(target) = supersedes {
+            let supersedes = match supersedes {
                 // The target's current revision, so a race is a visible 409.
-                let target = api.resolve_id(&target).await?;
-                let current = api.get(&format!("/v1/memories/{target}")).await?;
-                request["supersedes"] = json!({
-                    "id": target.to_string(),
-                    "expected_revision": current["revision"],
-                });
-            }
+                Some(target) => {
+                    let target = api.resolve_id(&target).await?;
+                    let current = api.get(&format!("/v1/memories/{target}")).await?;
+                    Some((target.to_string(), current["revision"].clone()))
+                }
+                None => None,
+            };
+            let request = create_body(NewNote {
+                title: &title,
+                body: &body,
+                kind: &kind,
+                aliases: &aliases,
+                tags: &tags,
+                scope,
+                fact_key,
+                supersedes,
+            });
             let response = api
                 .send(Method::POST, "/v1/memories", None, Some(&request))
                 .await?;
@@ -1127,6 +1124,68 @@ impl Confirmed {
     }
 }
 
+/// A note `memory add` saves, as `POST /v1/memories` reads it.
+pub(crate) struct NewNote<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) body: &'a str,
+    pub(crate) kind: &'a str,
+    pub(crate) aliases: &'a [String],
+    pub(crate) tags: &'a [String],
+    pub(crate) scope: Option<String>,
+    pub(crate) fact_key: Option<String>,
+    /// The note it replaces: its id and the revision read just before.
+    pub(crate) supersedes: Option<(String, Value)>,
+}
+
+/// `POST /v1/memories`'s body, from `memory add`.
+pub(crate) fn create_body(note: NewNote<'_>) -> Value {
+    let mut request = json!({
+        "title": note.title,
+        "body": note.body,
+        "kind": note.kind,
+        "aliases": note.aliases,
+        "tags": note.tags,
+    });
+    if let Some(s) = note.scope {
+        request["scope"] = Value::String(s);
+    }
+    if let Some(k) = note.fact_key {
+        request["fact_key"] = Value::String(k);
+    }
+    if let Some((id, revision)) = note.supersedes {
+        request["supersedes"] = json!({
+            "id": id,
+            "expected_revision": revision,
+        });
+    }
+    request
+}
+
+/// `POST /v1/memories/{id}`'s confirm body, from `memory confirm`: the
+/// replaced note's revision when the note replaces one.
+pub(crate) fn confirm_body(target_revision: Option<String>) -> Value {
+    let mut body = json!({ "action": "confirm" });
+    if let Some(revision) = target_revision {
+        body["target_revision"] = Value::String(revision);
+    }
+    body
+}
+
+/// `POST /v1/memories/{id}`'s edit body, from `memory edit`.
+pub(crate) fn edit_body(patch: Value) -> Value {
+    json!({ "action": "edit", "patch": patch })
+}
+
+/// `POST /v1/memories/forget`'s body, from `memory forget`: one batch.
+pub(crate) fn forget_body(batch: &[(NoteId, String)]) -> Value {
+    json!({
+        "targets": batch
+            .iter()
+            .map(|(id, revision)| json!({ "id": id.to_string(), "expected_revision": revision }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// `confirm` (design 09 §3.5, S5): the candidate's revision as `If-Match`
 /// and, when it names a note it would replace, that note's current revision
 /// as `target_revision` — fetched now, right before the confirm, so what is
@@ -1138,7 +1197,7 @@ impl Confirmed {
 pub(crate) async fn confirm_note(api: &Api, id: NoteId) -> Result<Confirmed> {
     let current = api.get(&format!("/v1/memories/{id}")).await?;
     let revision = revision_of(&current)?;
-    let mut body = json!({ "action": "confirm" });
+    let mut target_revision = None;
     let mut replaced_title = None;
     if let Some(target) = current["supersedes"]
         .as_array()
@@ -1146,9 +1205,10 @@ pub(crate) async fn confirm_note(api: &Api, id: NoteId) -> Result<Confirmed> {
         .and_then(Value::as_str)
     {
         let target = api.get(&format!("/v1/memories/{target}")).await?;
-        body["target_revision"] = Value::String(revision_of(&target)?);
+        target_revision = Some(revision_of(&target)?);
         replaced_title = target["title"].as_str().map(str::to_string);
     }
+    let body = confirm_body(target_revision);
     let response = api
         .send(
             Method::POST,
@@ -1318,7 +1378,7 @@ pub(crate) async fn edit_note(
             Method::POST,
             &format!("/v1/memories/{id}"),
             Some(&revision),
-            Some(&json!({ "action": "edit", "patch": patch })),
+            Some(&edit_body(patch)),
         )
         .await?;
     match response.status().as_u16() {
@@ -1576,12 +1636,7 @@ pub(crate) async fn forget_notes(
 ) -> Result<()> {
     let mut sent = 0;
     for batch in targets.chunks(20) {
-        let body = json!({
-            "targets": batch
-                .iter()
-                .map(|(id, revision)| json!({ "id": id.to_string(), "expected_revision": revision }))
-                .collect::<Vec<_>>(),
-        });
+        let body = forget_body(batch);
         let response = api
             .send(Method::POST, "/v1/memories/forget", None, Some(&body))
             .await?;

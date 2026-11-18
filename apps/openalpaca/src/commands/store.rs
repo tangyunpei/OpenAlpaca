@@ -73,7 +73,7 @@ pub enum StoreCommands {
 
 /// One project, as the daemon answers it.
 #[derive(Debug, Deserialize)]
-struct ProjectView {
+pub(crate) struct ProjectView {
     id: String,
     root: String,
     name: String,
@@ -83,7 +83,7 @@ struct ProjectView {
 
 /// The rows the five path columns hold under one root.
 #[derive(Debug, Default, Deserialize)]
-struct RowCounts {
+pub(crate) struct RowCounts {
     #[serde(default)]
     artifacts: usize,
     #[serde(default)]
@@ -117,7 +117,7 @@ impl RowCounts {
 
 /// One path, as `GET /v1/workspaces?path=` describes it.
 #[derive(Debug, Deserialize)]
-struct WorkspaceView {
+pub(crate) struct WorkspaceView {
     path: String,
     #[serde(default)]
     root: Option<String>,
@@ -138,7 +138,7 @@ struct WorkspaceView {
 }
 
 #[derive(Debug, Deserialize)]
-struct RepointResult {
+pub(crate) struct RepointResult {
     old_path: String,
     new_path: String,
     moved: RowCounts,
@@ -146,21 +146,21 @@ struct RepointResult {
 }
 
 #[derive(Debug, Serialize)]
-struct RebaseRequest<'a> {
-    old_path: &'a str,
-    new_path: &'a str,
+pub(crate) struct RebaseRequest<'a> {
+    pub(crate) old_path: &'a str,
+    pub(crate) new_path: &'a str,
 }
 
 #[derive(Debug, Serialize)]
-struct PurgeRequest<'a> {
-    path: &'a str,
-    dry_run: bool,
+pub(crate) struct PurgeRequest<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) dry_run: bool,
 }
 
 /// One line of the daemon's plan: an entry, what it holds for this project,
 /// the retention class the README gives it, and `delete` or `keep`.
 #[derive(Debug, Deserialize)]
-struct PlanEntry {
+pub(crate) struct PlanEntry {
     entry: String,
     holds: String,
     retention: String,
@@ -168,7 +168,7 @@ struct PlanEntry {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct PurgeCounts {
+pub(crate) struct PurgeCounts {
     #[serde(default)]
     sessions: usize,
     #[serde(default)]
@@ -212,7 +212,7 @@ impl PurgeCounts {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct Kept {
+pub(crate) struct Kept {
     #[serde(default)]
     uploads: usize,
     #[serde(default)]
@@ -220,7 +220,7 @@ struct Kept {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct Removed {
+pub(crate) struct Removed {
     #[serde(default)]
     session_dirs: usize,
     #[serde(default)]
@@ -230,7 +230,7 @@ struct Removed {
 }
 
 #[derive(Debug, Deserialize)]
-struct DeleteResult {
+pub(crate) struct DeleteResult {
     #[serde(default)]
     applied: bool,
     project: ProjectView,

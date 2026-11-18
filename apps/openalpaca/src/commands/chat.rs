@@ -225,9 +225,14 @@ async fn resume(client: &DaemonClient, session_id: &str) -> Result<SessionItem> 
 /// A project as `POST /v1/workspaces` answers it — the two fields this
 /// command prints and sends.
 #[derive(Debug, serde::Deserialize)]
-struct ChosenProject {
+pub(crate) struct ChosenProject {
     root: String,
     name: String,
+}
+
+/// `POST /v1/workspaces`'s body, from `chat --project`.
+pub(crate) fn project_body(path: &str) -> serde_json::Value {
+    serde_json::json!({ "path": path })
 }
 
 /// `chat --project <dir>` (R10): the daemon resolves the folder — the git
@@ -237,22 +242,19 @@ async fn choose_project(client: &DaemonClient, dir: &std::path::Path) -> Result<
     let path = std::path::absolute(dir)
         .with_context(|| format!("Cannot make {} an absolute path", dir.display()))?;
     client
-        .post(
-            "/v1/workspaces",
-            &serde_json::json!({ "path": path.to_string_lossy() }),
-        )
+        .post("/v1/workspaces", &project_body(&path.to_string_lossy()))
         .await
         .with_context(|| format!("Could not use {} as this chat's project", path.display()))
 }
 
 #[derive(serde::Deserialize)]
-struct TranscriptMessage {
+pub(crate) struct TranscriptMessage {
     role: String,
     content: String,
 }
 
 #[derive(serde::Deserialize)]
-struct TranscriptPage {
+pub(crate) struct TranscriptPage {
     messages: Vec<TranscriptMessage>,
     /// Every message the conversation holds, not just this page's — the count
     /// the tail's offset is derived from. Defaulted so a daemon that predates

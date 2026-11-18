@@ -19,6 +19,8 @@ mod chat_stream;
 mod client;
 mod commands;
 #[cfg(test)]
+mod contract_bodies;
+#[cfg(test)]
 mod contract_reads;
 mod manager;
 mod output;
