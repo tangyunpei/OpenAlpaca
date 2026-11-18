@@ -99,18 +99,16 @@ fn case(
 
 /// Keys a body sends that its route's type does not read — findings of
 /// this check (CONTRACT-SAMPLES-2; `tasks/pending-decisions.md` §1, owner
-/// items): `llm keys reorder` sends `key_ids` where `ReorderKeysRequest`
-/// reads `key_order`, and `llm strategy` sends a `strategy` that
+/// items): `llm strategy` sends a `strategy` that
 /// `UpdateOrchestratorRequest` does not have. Pinned as unread, so the
 /// fix, on either side, updates this list.
-const SENT_UNREAD: &[(&str, &str)] = &[
-    ("llm_keys::reorder_body", "key_ids"),
-    ("llm_status::strategy_body", "strategy"),
-];
+const SENT_UNREAD: &[(&str, &str)] = &[("llm_status::strategy_body", "strategy")];
 
-/// Bodies the route's type refuses — the same findings, and `llm keys
-/// set-primary`, whose body lacks the `key_order` the type requires.
-const REFUSED: &[&str] = &["llm_keys::set_primary_body", "llm_keys::reorder_body"];
+/// Bodies the route's type refuses — a finding of this check. Empty since
+/// *Rev 142*'s item 7, (b): `llm keys set-primary` and `llm keys reorder`
+/// send `{provider, key_order, primary_key_id}`, as `ReorderKeysRequest`
+/// reads it.
+const REFUSED: &[&str] = &[];
 
 /// The request samples no CLI command sends: the routes only the app (or
 /// nothing yet) writes.
@@ -178,7 +176,7 @@ fn cases() -> Vec<Case> {
         case(
             "post-agents",
             "agents::create_agent_body",
-            agents::create_agent_body("Reader", "Reads", "m", "You read.", &skills, 2.5),
+            agents::create_agent_body("reader", "Reader", "Reads", "m", "You read.", &skills, 2.5),
             &["config"],
         ),
         case(
@@ -197,8 +195,15 @@ fn cases() -> Vec<Case> {
             "put-agents-id-config",
             "agents::config_body",
             agents::config_body(
-                agents::create_agent_body("Reader", "Reads", "m", "You read.", &skills, 2.5)
-                    ["config"]
+                agents::create_agent_body(
+                    "reader",
+                    "Reader",
+                    "Reads",
+                    "m",
+                    "You read.",
+                    &skills,
+                    2.5,
+                )["config"]
                     .clone(),
                 3,
             ),
@@ -208,7 +213,13 @@ fn cases() -> Vec<Case> {
             "post-tasks",
             "tasks::create_body",
             tasks::create_body("Ship it", 1, true, "user-1:cli"),
-            &["created_by", "priority", "source_lane", "title", "unattended"],
+            &[
+                "created_by",
+                "priority",
+                "source_lane",
+                "title",
+                "unattended",
+            ],
         ),
         case(
             "post-tasks-id-action",
@@ -309,20 +320,31 @@ fn cases() -> Vec<Case> {
         case(
             "put-settings-llm",
             "llm_keys::add_key_body",
-            llm_keys::add_key_body("openai", "openai_1", "not-a-secret", "manual", "n", "primary"),
+            llm_keys::add_key_body(
+                "openai",
+                "openai_1",
+                "not-a-secret",
+                "manual",
+                "n",
+                "primary",
+            ),
             &["key", "provider"],
         ),
         case(
             "put-settings-llm-keys-reorder",
             "llm_keys::set_primary_body",
-            llm_keys::set_primary_body("openai", "k"),
-            &["primary_key_id", "provider"],
+            llm_keys::set_primary_body(
+                "openai",
+                "k",
+                &json!({ "providers": { "openai": { "keys": [{ "id": "k" }] } } }),
+            ),
+            &["key_order", "primary_key_id", "provider"],
         ),
         case(
             "put-settings-llm-keys-reorder",
             "llm_keys::reorder_body",
-            llm_keys::reorder_body(&["k".to_string()]),
-            &["key_ids"],
+            llm_keys::reorder_body("openai", &["k".to_string()]),
+            &["key_order", "primary_key_id", "provider"],
         ),
         case(
             "put-orchestrator-config",
@@ -347,7 +369,16 @@ fn cases() -> Vec<Case> {
                 fact_key: Some("k".to_string()),
                 supersedes: Some((note.to_string(), json!("r"))),
             }),
-            &["aliases", "body", "fact_key", "kind", "scope", "supersedes", "tags", "title"],
+            &[
+                "aliases",
+                "body",
+                "fact_key",
+                "kind",
+                "scope",
+                "supersedes",
+                "tags",
+                "title",
+            ],
         ),
         case(
             "post-memories-id",
@@ -493,6 +524,7 @@ fn the_interactive_creations_body_is_the_one_the_daemon_test_posts() {
     let skills = vec!["research".to_string(), "code_review".to_string()];
     let built = json!([
         agents::create_agent_body(
+            &agents::agent_id_for("Code Reviewer"),
             "Code Reviewer",
             "Reviews code",
             "model-a",
@@ -500,7 +532,15 @@ fn the_interactive_creations_body_is_the_one_the_daemon_test_posts() {
             &skills,
             2.5
         ),
-        agents::create_agent_body("Reader", "", "model-a", "", &[], 0.0),
+        agents::create_agent_body(
+            &agents::agent_id_for("Reader"),
+            "Reader",
+            "",
+            "model-a",
+            "",
+            &[],
+            0.0
+        ),
     ]);
     let pinned: Value =
         serde_json::from_slice(&std::fs::read(CREATE_BODIES).expect("the pinned bodies"))

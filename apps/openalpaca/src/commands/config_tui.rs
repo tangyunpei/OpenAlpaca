@@ -1470,7 +1470,7 @@ fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
 
 // The `POST /v1/agents` body the creation screen sends is the one `agent
 // create` sends (AGENT-CREATE-CLI).
-use super::agents::{CAPABILITIES_PROMPT, create_agent_body};
+use super::agents::{CAPABILITIES_PROMPT, ask_agent_id, create_agent_body};
 
 /// Interactive agent creation wizard (mirrors agents.rs create_interactive).
 fn interactive_create_agent() -> Result<()> {
@@ -1489,6 +1489,9 @@ fn interactive_create_agent() -> Result<()> {
         println!("{}", style("Cancelled.").dim());
         return Ok(());
     }
+
+    // 1a. The id, derived from the name and the person's to change
+    let id = ask_agent_id(&theme, &name)?;
 
     // 2. Description
     let description: String = Input::with_theme(&theme)
@@ -1543,21 +1546,21 @@ fn interactive_create_agent() -> Result<()> {
         .interact_text()?;
     let max_cost: f64 = max_cost_input.parse().unwrap_or(0.0);
 
-    let body = create_agent_body(&name, &description, &model, &persona, &skills, max_cost);
+    let body = create_agent_body(
+        &id,
+        &name,
+        &description,
+        &model,
+        &persona,
+        &skills,
+        max_cost,
+    );
 
     // Confirm
     println!();
     println!("{}", style("Agent summary:").bold());
-    println!("  {} {}", style("Name:").dim(), name);
-    if !description.is_empty() {
-        println!("  {} {}", style("Desc:").dim(), description);
-    }
-    println!("  {} {}", style("Model:").dim(), model);
-    if !skills.is_empty() {
-        println!("  {} {}", style("Skills:").dim(), skills.join(", "));
-    }
-    if max_cost > 0.0 {
-        println!("  {} ${:.2}", style("Max cost:").dim(), max_cost);
+    for line in creation_summary_lines(&name, &description, &model, &skills, max_cost) {
+        println!("{line}");
     }
     println!();
 
@@ -1590,6 +1593,34 @@ fn interactive_create_agent() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The creation screen's summary before it asks to create, line by line.
+/// The capabilities asked for are shown under "Capabilities:" (*Rev 142*'s
+/// item 14, (a)).
+fn creation_summary_lines(
+    name: &str,
+    description: &str,
+    model: &str,
+    skills: &[String],
+    max_cost: f64,
+) -> Vec<String> {
+    let mut out = vec![format!("  {} {}", style("Name:").dim(), name)];
+    if !description.is_empty() {
+        out.push(format!("  {} {}", style("Desc:").dim(), description));
+    }
+    out.push(format!("  {} {}", style("Model:").dim(), model));
+    if !skills.is_empty() {
+        out.push(format!(
+            "  {} {}",
+            style("Capabilities:").dim(),
+            skills.join(", ")
+        ));
+    }
+    if max_cost > 0.0 {
+        out.push(format!("  {} ${:.2}", style("Max cost:").dim(), max_cost));
+    }
+    out
 }
 
 /// Try to fetch the list of available models from the daemon.

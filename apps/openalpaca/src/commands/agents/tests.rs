@@ -820,6 +820,60 @@ fn agent_status_prints_the_rows_model_and_skills() {
     assert!(!lines.iter().any(|l| l.starts_with("Skills:")), "{lines:?}");
 }
 
+/// *Rev 142*'s item 9, (b): `GET /v1/agents/{id}`'s metrics carry no
+/// `total_cost_usd`, so `agent status` prints no "Total cost" line, even
+/// for a body that has one.
+#[test]
+fn agent_status_prints_no_total_cost_line() {
+    plain();
+    let detail: AgentDetail = serde_json::from_value(serde_json::json!({
+        "agent": agent_row(serde_json::Value::Null, serde_json::Value::Null),
+        "metrics": {
+            "tasks_completed": 3,
+            "tasks_failed": 1,
+            "success_rate": 0.75,
+            "total_cost_usd": 1.25,
+        },
+    }))
+    .unwrap();
+    let lines = status_lines(&detail);
+    assert!(
+        lines.contains(&"  Tasks completed: 3".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"  Success rate: 75.0%".to_string()),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("Total cost")), "{lines:?}");
+}
+
+/// *Rev 142*'s item 11, (a): both interactive creations ask the id after
+/// the name, with the id derived from it as the default, and post the
+/// answer as given — no check here; the route refuses a taken id.
+#[test]
+fn the_agent_id_is_asked_with_the_derived_id_as_its_default() {
+    let mut asked = Vec::new();
+    let id = agent_id_with("Code Reviewer", |prompt, default| {
+        asked.push((prompt.to_string(), default));
+        Ok("reviewer_2".to_string())
+    })
+    .unwrap();
+    assert_eq!(id, "reviewer_2");
+    assert_eq!(
+        asked,
+        [(AGENT_ID_PROMPT.to_string(), "code_reviewer".to_string())]
+    );
+    assert!(AGENT_ID_PROMPT.contains("id"), "{AGENT_ID_PROMPT}");
+    // Enter keeps the default: a name with no ASCII letter or digit still
+    // offers `agent`, which the person can now change.
+    let kept = agent_id_with("代理", |_, default| Ok(default)).unwrap();
+    assert_eq!(kept, "agent");
+    let body = create_agent_body("reviewer_2", "Code Reviewer", "", "m", "", &[], 0.0);
+    assert_eq!(body["config"]["agent"]["id"], "reviewer_2");
+    assert_eq!(body["config"]["agent"]["name"], "Code Reviewer");
+}
+
 /// The capabilities prompt's examples are capabilities a shipped template
 /// assigns, so a person who types them gets an agent whose tools the
 /// sandbox admits (its answer is `capabilities.assigned`).

@@ -190,8 +190,6 @@ pub(crate) struct AgentMetricsInfo {
     #[serde(default)]
     tasks_failed: Option<i64>,
     #[serde(default)]
-    total_cost_usd: Option<f64>,
-    #[serde(default)]
     success_rate: Option<f64>,
 }
 
@@ -354,9 +352,6 @@ fn status_lines(detail: &AgentDetail) -> Vec<String> {
         if let Some(sr) = m.success_rate {
             out.push(format!("  {} {:.1}%", "Success rate:".dimmed(), sr * 100.0));
         }
-        if let Some(cost) = m.total_cost_usd {
-            out.push(format!("  {} ${:.4}", "Total cost:".dimmed(), cost));
-        }
     }
     out
 }
@@ -513,6 +508,9 @@ async fn create_interactive() -> Result<()> {
         .with_prompt("Agent name")
         .interact_text()?;
 
+    // 1a. The id, derived from the name and the person's to change
+    let id = ask_agent_id(&theme, &name)?;
+
     // 2. Description
     let description: String = Input::with_theme(&theme)
         .with_prompt("Description")
@@ -562,7 +560,15 @@ async fn create_interactive() -> Result<()> {
         .allow_empty(true)
         .interact_text()?;
 
-    let body = create_agent_body(&name, &description, &model, &persona, &skills, max_cost);
+    let body = create_agent_body(
+        &id,
+        &name,
+        &description,
+        &model,
+        &persona,
+        &skills,
+        max_cost,
+    );
     let client = DaemonClient::connect().await?;
     let result: serde_json::Value = client.post("/v1/agents", &body).await?;
 
@@ -599,10 +605,35 @@ pub(crate) fn from_toml_body(toml_content: &str) -> serde_json::Value {
 pub(crate) const CAPABILITIES_PROMPT: &str =
     "Capabilities (comma-separated, e.g., web_access,memory_read)";
 
-/// The id an interactive creation gives the agent it names: the name in
-/// lower case, each run of characters other than ASCII letters and digits
-/// one `_`, none at either end — `"Code Reviewer"` is `code_reviewer`. A
-/// name with no such character at all is `agent`.
+/// The prompt both interactive creations ask the agent's id with, after
+/// its name (*Rev 142*'s item 11, (a)).
+pub(crate) const AGENT_ID_PROMPT: &str = "Agent id";
+
+/// The id both interactive creations give the agent: [`AGENT_ID_PROMPT`]
+/// asked through `ask` with [`agent_id_for`]'s id as its default, the
+/// answer taken as given. Nothing checks it here: `POST /v1/agents`
+/// refuses an id that is taken.
+pub(crate) fn agent_id_with(
+    name: &str,
+    ask: impl FnOnce(&str, String) -> Result<String>,
+) -> Result<String> {
+    ask(AGENT_ID_PROMPT, agent_id_for(name))
+}
+
+/// [`agent_id_with`] at the terminal: Enter keeps the derived id.
+pub(crate) fn ask_agent_id(theme: &ColorfulTheme, name: &str) -> Result<String> {
+    agent_id_with(name, |prompt, derived| {
+        Ok(Input::with_theme(theme)
+            .with_prompt(prompt)
+            .default(derived)
+            .interact_text()?)
+    })
+}
+
+/// The id an interactive creation offers for the agent it names: the name
+/// in lower case, each run of characters other than ASCII letters and
+/// digits one `_`, none at either end — `"Code Reviewer"` is
+/// `code_reviewer`. A name with no such character at all is `agent`.
 pub(crate) fn agent_id_for(name: &str) -> String {
     let mut id = String::new();
     for c in name.trim().chars() {
@@ -624,12 +655,14 @@ pub(crate) fn agent_id_for(name: &str) -> String {
 /// create`'s prompts and the `openalpaca config` screen's
 /// (AGENT-CREATE-CLI; *Rev 123*'s 123-4, (b)): `{config}`, the agent's
 /// config file as the route's `CreateAgentRequest` reads it, built from the
-/// type itself (`openalpaca_core::agent::config::AgentConfigFile`). The
+/// type itself (`openalpaca_core::agent::config::AgentConfigFile`). The id
+/// is the one the person kept or typed ([`agent_id_with`]). The
 /// skills are the capabilities assigned (the type has no `skills`), the
 /// persona the preset's, the cost the one constraint when above zero. No
 /// temperature: the screens do not ask for one, since no agent turn sends a
 /// temperature to the model.
 pub(crate) fn create_agent_body(
+    id: &str,
     name: &str,
     description: &str,
     model: &str,
@@ -657,7 +690,7 @@ pub(crate) fn create_agent_body(
     });
     let config = AgentConfigFile {
         agent: AgentMeta {
-            id: agent_id_for(name),
+            id: id.to_string(),
             name: name.to_string(),
             description: description.to_string(),
             icon: None,

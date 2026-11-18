@@ -9,6 +9,7 @@ fn the_screens_create_body_carries_no_temperature() {
     let skills = vec!["research".to_string()];
     for max_cost in [0.0, 2.5] {
         let body = create_agent_body(
+            "reader",
             "Reader",
             "Reads things",
             "some-model",
@@ -78,4 +79,30 @@ fn the_credential_check_reads_the_home_user_home_reports() {
     );
     run_with_home(test, &root.join("abs-home"), root, &[]);
     run_with_home(test, std::path::Path::new("rel-home"), root, &[]);
+}
+
+/// *Rev 142*'s item 14, (a): the creation screen asks for capabilities and
+/// its summary shows them under "Capabilities:", that one line relabelled.
+#[test]
+fn the_creation_summary_shows_the_capabilities_under_their_name() {
+    let skills = vec!["web_access".to_string(), "memory_read".to_string()];
+    let lines: Vec<String> = creation_summary_lines("Reader", "Reads", "m", &skills, 2.5)
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).into_owned())
+        .collect();
+    assert!(
+        lines.contains(&"  Capabilities: web_access, memory_read".to_string()),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("Skills:")), "{lines:?}");
+    assert!(lines.contains(&"  Name: Reader".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"  Max cost: $2.50".to_string()),
+        "{lines:?}"
+    );
+    let none = creation_summary_lines("Reader", "", "m", &[], 0.0);
+    assert!(
+        !none.iter().any(|l| l.contains("Capabilities:")),
+        "{none:?}"
+    );
 }

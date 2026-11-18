@@ -64,9 +64,11 @@ pub enum KeysCommands {
         /// Key ID to make primary
         key_id: String,
     },
-    /// Reorder keys
+    /// Reorder a provider's keys
     Reorder {
-        /// Key IDs in desired order
+        /// Provider name
+        provider: String,
+        /// Key IDs in desired order; keys not named keep their order after them
         key_ids: Vec<String>,
     },
 }
@@ -185,7 +187,7 @@ pub(super) async fn run_keys(args: KeysArgs) -> Result<()> {
             keys_validate(&provider, secret.as_deref()).await
         }
         KeysCommands::SetPrimary { provider, key_id } => keys_set_primary(&provider, &key_id).await,
-        KeysCommands::Reorder { key_ids } => keys_reorder(key_ids).await,
+        KeysCommands::Reorder { provider, key_ids } => keys_reorder(&provider, key_ids).await,
     }
 }
 
@@ -456,36 +458,58 @@ pub(crate) fn add_key_body(
     })
 }
 
-/// `PUT /v1/settings/llm/keys/reorder`'s body from `llm keys set-primary`
-/// — as sent, which the route's `ReorderKeysRequest` refuses: it lacks
-/// `key_order` (`contract_bodies`' `SENT_UNREAD`; an owner item).
-pub(crate) fn set_primary_body(provider: &str, key_id: &str) -> serde_json::Value {
+/// A provider's key ids in their order, as `GET /v1/settings/llm` lists
+/// them (`[]` for a provider it does not list).
+pub(crate) fn current_key_order(config: &serde_json::Value, provider: &str) -> Vec<String> {
+    config["providers"][provider]["keys"]
+        .as_array()
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|k| k["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `PUT /v1/settings/llm/keys/reorder`'s body from `llm keys set-primary`,
+/// as the route's `ReorderKeysRequest` reads it: the provider's keys in
+/// the order `config` (the `GET /v1/settings/llm` just read) lists them,
+/// unchanged, and the key to make primary (*Rev 142*'s item 7, (b)).
+pub(crate) fn set_primary_body(
+    provider: &str,
+    key_id: &str,
+    config: &serde_json::Value,
+) -> serde_json::Value {
     serde_json::json!({
         "provider": provider,
+        "key_order": current_key_order(config, provider),
         "primary_key_id": key_id,
     })
 }
 
-/// `PUT /v1/settings/llm/keys/reorder`'s body from `llm keys reorder` — as
-/// sent, which the route refuses: it names neither `provider` nor
-/// `key_order` (`contract_bodies`' `SENT_UNREAD`; an owner item).
-pub(crate) fn reorder_body(key_ids: &[String]) -> serde_json::Value {
+/// `PUT /v1/settings/llm/keys/reorder`'s body from `llm keys reorder`, as
+/// the route's `ReorderKeysRequest` reads it: the order asked for, and no
+/// primary, so every key keeps its priority.
+pub(crate) fn reorder_body(provider: &str, key_ids: &[String]) -> serde_json::Value {
     serde_json::json!({
-        "key_ids": key_ids,
+        "provider": provider,
+        "key_order": key_ids,
+        "primary_key_id": null,
     })
 }
 
 async fn keys_set_primary(provider: &str, key_id: &str) -> Result<()> {
     let client = DaemonClient::connect().await?;
-    let body = set_primary_body(provider, key_id);
+    let config: serde_json::Value = client.get("/v1/settings/llm").await?;
+    let body = set_primary_body(provider, key_id, &config);
     let _: serde_json::Value = client.put("/v1/settings/llm/keys/reorder", &body).await?;
     println!("{} Set {} as primary for {}", "✓".green(), key_id, provider);
     Ok(())
 }
 
-async fn keys_reorder(key_ids: Vec<String>) -> Result<()> {
+async fn keys_reorder(provider: &str, key_ids: Vec<String>) -> Result<()> {
     let client = DaemonClient::connect().await?;
-    let body = reorder_body(&key_ids);
+    let body = reorder_body(provider, &key_ids);
     let _: serde_json::Value = client.put("/v1/settings/llm/keys/reorder", &body).await?;
     println!("{} Keys reordered", "✓".green());
     Ok(())
@@ -622,5 +646,90 @@ mod tests {
         });
 
         assert!(key_rows(&config).is_empty());
+    }
+
+    /// The `llm keys` verbs' bodies, pinned whole for the daemon's
+    /// `routes::settings::keys_cli_tests`, which drives them through
+    /// `PUT /v1/settings/llm/keys/reorder`'s own handler.
+    const KEYS_BODIES: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/commands/llm_keys/keys-bodies.json"
+    );
+
+    /// `GET /v1/settings/llm` with two `openai` keys, `key-1` first.
+    fn two_keys() -> serde_json::Value {
+        serde_json::json!({
+            "providers": {
+                "openai": {
+                    "enabled": true,
+                    "requires_key": true,
+                    "keys": [
+                        { "id": "key-1", "priority": "primary" },
+                        { "id": "key-2", "priority": "fallback" },
+                    ],
+                },
+            },
+        })
+    }
+
+    /// *Rev 142*'s item 7, (b): `set-primary` sends the provider's keys in
+    /// the order it just read, and the key to make primary; `reorder` the
+    /// order asked for and no primary — `{provider, key_order,
+    /// primary_key_id}`, the keys `ReorderKeysRequest` reads.
+    #[test]
+    fn the_keys_verbs_send_what_the_reorder_route_reads() {
+        let config = two_keys();
+        assert_eq!(current_key_order(&config, "openai"), ["key-1", "key-2"]);
+        assert!(current_key_order(&config, "anthropic").is_empty());
+        let set_primary = set_primary_body("openai", "key-2", &config);
+        assert_eq!(
+            set_primary,
+            serde_json::json!({
+                "provider": "openai",
+                "key_order": ["key-1", "key-2"],
+                "primary_key_id": "key-2",
+            })
+        );
+        let order = ["key-2".to_string(), "key-1".to_string()];
+        let reorder = reorder_body("openai", &order);
+        assert_eq!(
+            reorder,
+            serde_json::json!({
+                "provider": "openai",
+                "key_order": ["key-2", "key-1"],
+                "primary_key_id": null,
+            })
+        );
+        for body in [&set_primary, &reorder] {
+            serde_json::from_value::<openalpaca_llm::config::settings_types::ReorderKeysRequest>(
+                body.clone(),
+            )
+            .unwrap_or_else(|e| panic!("the route's type refuses {body}: {e}"));
+        }
+
+        let built = serde_json::json!({ "set_primary": set_primary, "reorder": reorder });
+        let pinned: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(KEYS_BODIES).expect("the pinned bodies"))
+                .expect("JSON");
+        assert_eq!(
+            built, pinned,
+            "the keys verbs' bodies moved: rewrite {KEYS_BODIES} with them, and run the \
+             daemon's routes::settings::keys_cli_tests"
+        );
+    }
+
+    /// The order is read where `GET /v1/settings/llm`'s sample holds a key's
+    /// id: `providers.<provider>.keys[].id`.
+    #[test]
+    fn the_key_order_is_read_where_the_settings_sample_holds_it() {
+        let sample: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../openalpaca-gui/src/lib/api/contract/responses/get-settings-llm.json"
+            ))
+            .expect("the sample"),
+        )
+        .expect("JSON");
+        assert_eq!(current_key_order(&sample, "*"), [""]);
     }
 }

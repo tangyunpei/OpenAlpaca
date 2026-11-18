@@ -337,15 +337,9 @@ fn holds() -> Vec<Hold> {
         // `agents.rs` `agent_status`.
         hold!(AgentDetail, "responses", "get-agents-id", ""),
         hold!(AgentRow, "responses", "get-agents-id", "agent"),
-        // A finding: the metrics row has no `total_cost_usd`, so `agent
-        // status` never prints its "Total cost" line (an owner item).
-        hold!(
-            AgentMetricsInfo,
-            "responses",
-            "get-agents-id",
-            "metrics",
-            ["total_cost_usd"]
-        ),
+        // `agent status`'s metrics: no `total_cost_usd`, which the row never
+        // sent, since *Rev 142*'s item 9 (b) dropped its "Total cost" line.
+        hold!(AgentMetricsInfo, "responses", "get-agents-id", "metrics"),
         // `agents.rs` `agent_config`, `agent_set_with`; the TUI's editor.
         hold!(AgentConfigResponse, "responses", "get-agents-id-config", ""),
         hold!(

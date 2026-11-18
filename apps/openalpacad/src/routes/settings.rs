@@ -140,16 +140,27 @@ pub async fn reorder_keys(
     };
 
     let event_provider = body.provider.clone();
+    let response = reorder_keys_response(service, body).await;
+    if response.status() == StatusCode::OK {
+        let _ = state.gateway.bus.publish(SystemEvent::KeyStatusChanged {
+            provider: event_provider,
+            key_id: "*".to_string(),
+            status: "reordered".to_string(),
+            timestamp: Utc::now(),
+        });
+    }
+    response
+}
+
+/// The reorder route past its service lookup: what it answers for `body`
+/// (the `llm keys` verbs' bodies are driven through it,
+/// `keys_cli_tests`).
+pub(crate) async fn reorder_keys_response(
+    service: &openalpaca_llm::LlmSettingsService,
+    body: ReorderKeysRequest,
+) -> Response {
     match service.reorder_keys(body).await {
-        Ok(()) => {
-            let _ = state.gateway.bus.publish(SystemEvent::KeyStatusChanged {
-                provider: event_provider,
-                key_id: "*".to_string(),
-                status: "reordered".to_string(),
-                timestamp: Utc::now(),
-            });
-            (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
-        }
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response(),
         Err(e) => settings_error(StatusCode::INTERNAL_SERVER_ERROR, "DISK_WRITE_FAILED", &e)
             .into_response(),
     }
@@ -871,6 +882,9 @@ pub async fn update_web_search_config(
 
 #[cfg(test)]
 mod provider_enabled_tests;
+
+#[cfg(test)]
+mod keys_cli_tests;
 
 #[cfg(test)]
 pub(crate) mod contract_tests;

@@ -198,7 +198,7 @@
   - `remove` (fields: `provider`, `key_id`)
   - `validate` (fields: `provider`, `secret`)
   - `set-primary` (fields: `provider`, `key_id`)
-  - `reorder` (fields: `key_ids`)
+  - `reorder` (fields: `provider`, `key_ids`)
 - Parsed flags: `--format`, `--notes`, `--priority`, `--provider`, `--secret`, `--source`
 
 ### `llm_status`
