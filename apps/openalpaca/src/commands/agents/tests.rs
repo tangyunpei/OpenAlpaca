@@ -402,6 +402,35 @@ fn listing_end(path: &Path, root: &Path) -> String {
     )
 }
 
+/// What `--apply` answers with `agents/` a git work tree itself, the config
+/// directory outside one: `path` is `agents/`, as given (TIDY-LINKED).
+fn own_refusal(path: &Path) -> String {
+    format!(
+        "`openalpaca agents tidy --apply` moves nothing inside a git work tree, and {} is \
+         a git work tree itself: a copy there may be a file the repository holds, as in a \
+         development checkout, whose config/ is the source of the built-in ones. Nothing was \
+         moved; `openalpaca agents tidy` lists the copies, for you to move yourself.",
+        path.display()
+    )
+}
+
+/// The listing's last line with `agents/` a git work tree itself.
+fn own_listing_end(path: &Path) -> String {
+    format!(
+        "Nothing was moved; `openalpaca agents tidy --apply` moves nothing here: {} is a git \
+         work tree itself.",
+        path.display()
+    )
+}
+
+/// What a tidy says of an `agents/` holding no unedited copy (TIDY-1).
+fn nothing_to_tidy(agents: &Path) -> String {
+    format!(
+        "No unedited copies of shipped templates in {}: nothing to tidy.",
+        agents.display()
+    )
+}
+
 /// What `--apply` answers with `agents/` a link into a git work tree:
 /// `path` is the link, as given, and `root` the work tree it resolves into.
 #[cfg(unix)]
@@ -469,25 +498,32 @@ async fn agents_tidy_apply_in_a_git_work_tree_is_refused_naming_it() {
     assert!(!store.agents.join(".archived").exists());
 }
 
-/// The refusal comes before a copy is read, so inside a git work tree an
-/// `agents/` with nothing to tidy is refused the same way, and nothing is
-/// made in it.
+/// With nothing to tidy, a tidy says so first (TIDY-1): inside a git work
+/// tree an `agents/` holding no unedited copy — only the person's own files
+/// — is no refusal under `--apply`, but the one "nothing to tidy" line, and
+/// nothing is moved or made; with the copy back, `--apply` is refused.
 #[tokio::test]
-async fn agents_tidy_apply_in_a_git_work_tree_is_refused_with_nothing_to_tidy() {
+async fn agents_tidy_apply_in_a_git_work_tree_with_nothing_to_tidy_says_so() {
     plain();
     let store = Store::new();
-    for entry in std::fs::read_dir(&store.agents).unwrap() {
-        std::fs::remove_file(entry.unwrap().path()).unwrap();
-    }
+    let copy = std::fs::read(store.agents.join("system_agent.md")).unwrap();
+    std::fs::remove_file(store.agents.join("system_agent.md")).unwrap();
     std::fs::create_dir(store._dir.path().join(".git")).unwrap();
     let root = store._dir.path().canonicalize().unwrap();
+    let before = store.snapshot();
+    assert_eq!(before.len(), 3);
 
+    let lines = tidy_lines(&store.config, None, true, now()).await.unwrap();
+
+    assert_eq!(lines, vec![nothing_to_tidy(&store.agents)]);
+    assert_eq!(store.snapshot(), before);
+    assert!(!store.agents.join(".archived").exists());
+
+    std::fs::write(store.agents.join("system_agent.md"), copy).unwrap();
     let error = tidy_lines(&store.config, None, true, now())
         .await
         .unwrap_err();
-
     assert_eq!(error.to_string(), refusal(&store.config, &root));
-    assert!(store.snapshot().is_empty());
     assert!(!store.agents.join(".archived").exists());
 }
 
@@ -560,45 +596,58 @@ async fn agents_tidy_apply_with_agents_linked_into_a_git_work_tree_is_refused_na
     assert!(!store.agents.join(".archived").exists());
 }
 
-/// The linked `agents/` is refused before a copy is read, as the config
-/// directory is: with nothing to tidy in it, `--apply` is refused the same
-/// way, and nothing is made in it.
+/// The linked `agents/` says "nothing to tidy" first, as the config
+/// directory does (TIDY-1): with nothing in it, `--apply` answers that one
+/// line, and nothing is made through the link.
 #[cfg(unix)]
 #[tokio::test]
-async fn agents_tidy_apply_with_agents_linked_into_a_work_tree_and_nothing_to_tidy_is_refused() {
+async fn agents_tidy_apply_with_agents_linked_into_a_work_tree_and_nothing_to_tidy_says_so() {
     plain();
     let store = Store::new();
     for entry in std::fs::read_dir(&store.agents).unwrap() {
         std::fs::remove_file(entry.unwrap().path()).unwrap();
     }
-    let root = link_agents_into_a_work_tree(&store);
+    link_agents_into_a_work_tree(&store);
+
+    let lines = tidy_lines(&store.config, None, true, now()).await.unwrap();
+
+    assert_eq!(lines, vec![nothing_to_tidy(&store.agents)]);
+    assert!(store.snapshot().is_empty());
+    assert!(!store.agents.join(".archived").exists());
+}
+
+/// An `agents/` that is a git work tree itself — a folder of the config
+/// directory's own holding a `.git` entry, the config directory outside any
+/// work tree — is checked too (TIDY-LINKED, the advisor's "check it too"):
+/// `--apply` is refused naming `agents/`, nothing moves, no `.archived/` is
+/// made, and the listing's last line says so; with nothing to tidy in it,
+/// `--apply` says that first (TIDY-1). The `.git` entry is this test's own,
+/// in its scratch directory; no git runs.
+#[tokio::test]
+async fn agents_tidy_apply_in_an_agents_folder_that_is_its_own_work_tree_is_refused_naming_it() {
+    plain();
+    let store = Store::new();
+    std::fs::create_dir(store.agents.join(".git")).unwrap();
+    assert!(!store._dir.path().join(".git").exists());
+    assert!(!store.config.join(".git").exists());
+    let before = store.snapshot();
+    assert_eq!(before.len(), 4);
 
     let error = tidy_lines(&store.config, None, true, now())
         .await
         .unwrap_err();
 
-    assert_eq!(error.to_string(), linked_refusal(&store.agents, &root));
-    assert!(store.snapshot().is_empty());
+    assert_eq!(error.to_string(), own_refusal(&store.agents));
+    assert_eq!(store.snapshot(), before);
     assert!(!store.agents.join(".archived").exists());
-}
 
-/// Only a link is checked, as the owner took it: an `agents/` that is a
-/// folder of the config directory's own holding a `.git` entry — the
-/// config directory outside any work tree — is tidied as before.
-#[tokio::test]
-async fn agents_tidy_apply_in_an_agents_folder_holding_its_own_git_entry_moves_as_before() {
-    plain();
-    let store = Store::new();
-    std::fs::create_dir(store.agents.join(".git")).unwrap();
-
-    let text = tidy_lines(&store.config, None, true, now())
+    let text = tidy_lines(&store.config, None, false, now())
         .await
         .unwrap()
         .join("\n");
-
     assert!(
-        text.starts_with(&format!(
-            "Moved {} to {}",
+        text.contains(&format!(
+            "  {} (version: earlier)\n    would move to {}",
             store.agents.join("system_agent.md").display(),
             store
                 .agents
@@ -607,7 +656,13 @@ async fn agents_tidy_apply_in_an_agents_folder_holding_its_own_git_entry_moves_a
         )),
         "{text}"
     );
-    assert!(!store.agents.join("system_agent.md").exists());
+    assert!(text.ends_with(&own_listing_end(&store.agents)), "{text}");
+    assert_eq!(store.snapshot(), before);
+
+    std::fs::remove_file(store.agents.join("system_agent.md")).unwrap();
+    let lines = tidy_lines(&store.config, None, true, now()).await.unwrap();
+    assert_eq!(lines, vec![nothing_to_tidy(&store.agents)]);
+    assert!(!store.agents.join(".archived").exists());
 }
 
 /// AGENT-SETS: `agents set` on a run's own instance while it runs is

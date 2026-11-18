@@ -136,13 +136,15 @@ fn a_git_work_tree_is_the_nearest_ancestor_holding_a_git_entry() {
 /// Which work tree a tidy of a config directory's `agents/` would move
 /// inside, and the path it names (TIDY-LINKED): the config directory's,
 /// naming it, first; else, for an `agents/` that is a link resolving into
-/// one, that one, naming `agents/` as given; nothing for a missing
-/// `agents/`, a folder of its own (with or without a `.git` entry), a link
-/// to a folder in no work tree, or a link naming nothing. Every `.git` and
-/// link here is this test's own, in its scratch directory; no git runs.
+/// one, that one, naming `agents/` as given; else, for a folder of its own
+/// holding a `.git` entry of either kind, that folder, a work tree itself;
+/// nothing for a missing `agents/`, a plain folder of its own (a `.git`
+/// only in a folder below it, as in a template's own folder), a link to a
+/// folder in no work tree, or a link naming nothing. Every `.git` and link here is this test's own,
+/// in its scratch directory; no git runs.
 #[cfg(unix)]
 #[test]
-fn a_linked_folder_is_checked_after_the_config_directory_and_only_a_link() {
+fn a_linked_folder_or_one_that_is_its_own_work_tree_is_checked_after_the_config_directory() {
     let dir = tempfile::tempdir().unwrap();
     let _env = EnvSandbox::enter(dir.path());
     let scratch = dir.path().canonicalize().unwrap();
@@ -156,12 +158,24 @@ fn a_linked_folder_is_checked_after_the_config_directory_and_only_a_link() {
     let outside = scratch.join("plain/agents");
     std::fs::create_dir_all(&outside).unwrap();
 
-    // Missing, then a folder of its own, then one holding a `.git` entry.
+    // Missing, then a plain folder of its own, one with a `.git` only in a
+    // template's folder below it, then one holding a `.git` directory, then
+    // a `.git` file: a work tree itself, named as given.
     assert_eq!(work_tree_of(&config, &agents), None);
     std::fs::create_dir(&agents).unwrap();
     assert_eq!(work_tree_of(&config, &agents), None);
-    std::fs::create_dir(agents.join(".git")).unwrap();
+    std::fs::create_dir_all(agents.join("deeper/.git")).unwrap();
     assert_eq!(work_tree_of(&config, &agents), None);
+    std::fs::create_dir(agents.join(".git")).unwrap();
+    let own = Some(WorkTree {
+        named: agents.clone(),
+        root: agents.canonicalize().unwrap(),
+        place: Place::Itself,
+    });
+    assert_eq!(work_tree_of(&config, &agents), own);
+    std::fs::remove_dir(agents.join(".git")).unwrap();
+    std::fs::write(agents.join(".git"), "gitdir: ../elsewhere/.git\n").unwrap();
+    assert_eq!(work_tree_of(&config, &agents), own);
     std::fs::remove_dir_all(&agents).unwrap();
 
     // A link to a folder in no work tree, then one naming nothing.
@@ -179,7 +193,7 @@ fn a_linked_folder_is_checked_after_the_config_directory_and_only_a_link() {
         Some(WorkTree {
             named: agents.clone(),
             root: repo.clone(),
-            linked: true,
+            place: Place::LinkInto,
         })
     );
 
@@ -191,7 +205,7 @@ fn a_linked_folder_is_checked_after_the_config_directory_and_only_a_link() {
         Some(WorkTree {
             named: config.clone(),
             root: scratch.join("store"),
-            linked: false,
+            place: Place::Inside,
         })
     );
 }

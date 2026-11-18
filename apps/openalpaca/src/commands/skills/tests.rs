@@ -669,3 +669,103 @@ async fn skills_tidy_apply_with_skills_linked_into_a_git_work_tree_is_refused_na
     );
     assert!(!store.skills.join(".archived").exists());
 }
+
+/// With nothing to tidy, a tidy says so first (TIDY-1): with the config
+/// directory inside a git work tree and `skills/` holding only a folder of
+/// the person's own, `skills tidy --apply` is no refusal but the one
+/// "nothing to tidy" line, and nothing is moved or made. The `.git` entry
+/// is this test's own, in its scratch directory.
+#[tokio::test]
+async fn skills_tidy_apply_in_a_git_work_tree_with_nothing_to_tidy_says_so() {
+    plain();
+    let store = TidyStore::new();
+    std::fs::write(store.config.join(".git"), "gitdir: ../elsewhere/.git\n").unwrap();
+    let edited = store.skills.join("create-skill/SKILL.md");
+    let mut bytes = std::fs::read(&edited).unwrap();
+    bytes.extend_from_slice(b"\nKeep it short.\n");
+    std::fs::write(&edited, &bytes).unwrap();
+
+    let lines = tidy_lines(&store.config, None, true, now()).await.unwrap();
+
+    assert_eq!(
+        lines,
+        vec![format!(
+            "No unedited copies of shipped skills in {}: nothing to tidy.",
+            store.skills.display()
+        )]
+    );
+    assert_eq!(std::fs::read(&edited).unwrap(), bytes);
+    assert!(!store.skills.join(".archived").exists());
+}
+
+/// A `skills/` that is a git work tree itself — a folder of the config
+/// directory's own holding a `.git` file, the config directory outside any
+/// work tree — is checked too (TIDY-LINKED, the advisor's "check it too"):
+/// `skills tidy --apply` is refused naming `skills/`, the folder stays
+/// whole, and the listing's last line says so; with nothing to tidy in it,
+/// `--apply` says that first (TIDY-1). The `.git` entry is this test's own,
+/// in its scratch directory; no git runs.
+#[tokio::test]
+async fn skills_tidy_apply_in_a_skills_folder_that_is_its_own_work_tree_is_refused_naming_it() {
+    plain();
+    let store = TidyStore::new();
+    std::fs::write(store.skills.join(".git"), "gitdir: ../elsewhere/.git\n").unwrap();
+    assert!(!store._dir.path().join(".git").exists());
+    assert!(!store.config.join(".git").exists());
+
+    let error = tidy_lines(&store.config, None, true, now())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "`openalpaca skills tidy --apply` moves nothing inside a git work tree, and {} is \
+             a git work tree itself: a copy there may be a file the repository holds, as in a \
+             development checkout, whose config/ is the source of the built-in ones. Nothing \
+             was moved; `openalpaca skills tidy` lists the copies, for you to move yourself.",
+            store.skills.display()
+        )
+    );
+    for name in CREATE_SKILL_82022776 {
+        assert_eq!(
+            std::fs::read(store.skills.join("create-skill").join(name)).unwrap(),
+            create_skill_fixture(name)
+        );
+    }
+    assert!(!store.skills.join(".archived").exists());
+
+    let text = tidy_lines(&store.config, None, false, now())
+        .await
+        .unwrap()
+        .join("\n");
+    assert!(
+        text.contains(&format!(
+            "would move to {}",
+            store
+                .skills
+                .join(".archived/create-skill.20261107120000")
+                .display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(&format!(
+            "Nothing was moved; `openalpaca skills tidy --apply` moves nothing here: {} is a \
+             git work tree itself.",
+            store.skills.display()
+        )),
+        "{text}"
+    );
+
+    std::fs::remove_dir_all(store.skills.join("create-skill")).unwrap();
+    let lines = tidy_lines(&store.config, None, true, now()).await.unwrap();
+    assert_eq!(
+        lines,
+        vec![format!(
+            "No unedited copies of shipped skills in {}: nothing to tidy.",
+            store.skills.display()
+        )]
+    );
+    assert!(!store.skills.join(".archived").exists());
+}

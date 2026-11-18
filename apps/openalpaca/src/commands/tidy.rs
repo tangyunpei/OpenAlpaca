@@ -28,19 +28,22 @@
 //!
 //! With the config directory inside a git work tree `--apply` moves nothing
 //! (the owner's item 22 of 2026-11-12, C5a's development checkout as (b)):
-//! it is refused, naming the work tree, before anything is read or the
-//! daemon asked, and the listing says so in its last line. A development
-//! checkout's `config/`, named by `OPENALPACA_CONFIG_DIR`, is the source of
-//! the built-in files, so every file there is an unedited copy and a move
-//! would take the repository's own files out of place. An `agents/` or
-//! `skills/` a link places inside a work tree, the config directory outside
-//! one, is refused the same way, naming that folder as a link into it
-//! (the owner's item 6 of 2026-11-14, TIDY-LINKED): a move there is a move
-//! inside the work tree.
-//! Only a link is checked: a folder of the config directory's own holding a
-//! `.git` entry, or a template file or skill folder that is itself a link
-//! (a move renames the link, not what it names), is tidied as before.
-//! [`git_work_tree`] says how a work tree is found.
+//! where there is a copy to move it is refused, naming the work tree,
+//! before anything moves or the daemon is asked, and the listing says so in
+//! its last line; where there is none, the "nothing to tidy" line comes
+//! first, with `--apply` as without (TIDY-1). A development checkout's
+//! `config/`, named by `OPENALPACA_CONFIG_DIR`, is the source of the
+//! built-in files, so every file there is an unedited copy and a move would
+//! take the repository's own files out of place. An `agents/` or `skills/`
+//! a link places inside a work tree, the config directory outside one, is
+//! refused the same way, naming that folder as a link into it (the owner's
+//! item 6 of 2026-11-14), and so is one that is a work tree itself, a
+//! folder of the config directory's own holding a `.git` entry (TIDY-LINKED,
+//! "check it too"): a move there is a move inside the work tree.
+//! A template file or skill folder inside it is not checked: one holding a
+//! `.git` entry, or one that is itself a link (a move renames the link, not
+//! what it names), is tidied as before. [`git_work_tree`] says how a work
+//! tree is found.
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -238,54 +241,83 @@ fn git_work_tree(path: &Path) -> Option<PathBuf> {
 /// path its refusal names.
 #[derive(Debug, PartialEq, Eq)]
 struct WorkTree {
-    /// The path named, as given: the config directory, or the linked folder.
+    /// The path named, as given: the config directory, or the folder.
     named: PathBuf,
     /// The work tree, as resolved.
     root: PathBuf,
-    /// `named` is a link resolving into `root`, not a path inside it.
-    linked: bool,
+    /// How `named` stands to `root`.
+    place: Place,
+}
+
+/// How the path a refusal names stands to its work tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// A path inside it: the config directory.
+    Inside,
+    /// A link resolving into it: the `agents/` or `skills/` folder.
+    LinkInto,
+    /// The work tree itself: the folder, holding its own `.git` entry.
+    Itself,
 }
 
 impl WorkTree {
-    /// How `named` stands to `root`, in the refusal and the listing.
-    fn relation(&self) -> &'static str {
-        if self.linked { "a link into" } else { "inside" }
+    /// How `named` stands to `root`, in the refusal.
+    fn relation(&self) -> String {
+        match self.place {
+            Place::Inside => format!("inside {}", shown(&self.root)),
+            Place::LinkInto => format!("a link into {}", shown(&self.root)),
+            Place::Itself => "a git work tree itself".to_string(),
+        }
+    }
+
+    /// How `named` stands to `root`, in the listing's last line.
+    fn listed_relation(&self) -> String {
+        match self.place {
+            Place::Inside => format!("inside the git work tree {}", shown(&self.root)),
+            Place::LinkInto => format!("a link into the git work tree {}", shown(&self.root)),
+            Place::Itself => "a git work tree itself".to_string(),
+        }
     }
 }
 
 /// The git work tree a tidy of `dir`, the `agents/` or `skills/` of
 /// `config_dir`, would move inside, with the path to name for it: the
 /// config directory, as given, when it is inside one; else `dir`, as given,
-/// when it is a link resolving into one. `None` otherwise — for a missing
-/// `dir`, and for a folder of the config directory's own, even one holding
-/// a `.git` entry, as the owner's item 6 names only a linked folder. The
-/// config directory is resolved by its check, so `dir`, its child, can
-/// resolve elsewhere only by being a link itself.
+/// when it is a link resolving into one or a work tree itself, a folder of
+/// the config directory's own holding a `.git` entry (TIDY-LINKED). `None`
+/// otherwise, and for a missing `dir`. The config directory is in no work
+/// tree by then, so `dir`, its child, is in one only by being a link into
+/// one or by holding its own `.git`; a `.git` deeper down, in a template's
+/// or a skill's folder, is not looked for.
 fn work_tree_of(config_dir: &Path, dir: &Path) -> Option<WorkTree> {
     if let Some(root) = git_work_tree(config_dir) {
         return Some(WorkTree {
             named: config_dir.to_path_buf(),
             root,
-            linked: false,
+            place: Place::Inside,
         });
     }
-    let linked = std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_symlink());
-    if !linked {
-        return None;
-    }
+    let meta = std::fs::symlink_metadata(dir).ok()?;
+    let place = if meta.file_type().is_symlink() {
+        Place::LinkInto
+    } else {
+        Place::Itself
+    };
     git_work_tree(dir).map(|root| WorkTree {
         named: dir.to_path_buf(),
         root,
-        linked: true,
+        place,
     })
 }
 
 /// What a tidy of `config_dir`'s `agents/` or `skills/` prints, having
 /// moved what it moved: a listing, without `apply`; with it, a line per
 /// copy moved or left and, when one moved, the warning last. `daemon` is
-/// the running daemon, if one runs; `now` names the archive. With
-/// `config_dir` inside a git work tree, or the folder a link into one,
-/// `apply` is refused before anything is read ([`work_tree_of`]).
+/// the running daemon, if one runs; `now` names the archive. With nothing
+/// to tidy, it says so first, `apply` or not (TIDY-1). With a copy to move
+/// and `config_dir` inside a git work tree, or the folder a link into one or
+/// one itself ([`work_tree_of`]), `apply` is refused before anything moves
+/// or the daemon is asked.
 pub(crate) async fn tidy_lines(
     kind: Kind,
     config_dir: &Path,
@@ -295,18 +327,6 @@ pub(crate) async fn tidy_lines(
 ) -> Result<Vec<String>> {
     let dir = config_dir.join(kind.dir());
     let work_tree = work_tree_of(config_dir, &dir);
-    if apply && let Some(tree) = &work_tree {
-        return Err(anyhow!(
-            "`openalpaca {kind} tidy --apply` moves nothing inside a git work tree, and {path} \
-             is {relation} {root}: a copy there may be a file the repository holds, as in a \
-             development checkout, whose config/ is the source of the built-in ones. Nothing \
-             was moved; `openalpaca {kind} tidy` lists the copies, for you to move yourself.",
-            kind = kind.dir(),
-            path = shown(&tree.named),
-            relation = tree.relation(),
-            root = shown(&tree.root),
-        ));
-    }
     let stamp = now.format("%Y%m%d%H%M%S").to_string();
     let copies = kind
         .copies(&dir, &stamp)
@@ -317,6 +337,17 @@ pub(crate) async fn tidy_lines(
             kind.noun(),
             shown(&dir)
         )]);
+    }
+    if apply && let Some(tree) = &work_tree {
+        return Err(anyhow!(
+            "`openalpaca {kind} tidy --apply` moves nothing inside a git work tree, and {path} \
+             is {relation}: a copy there may be a file the repository holds, as in a \
+             development checkout, whose config/ is the source of the built-in ones. Nothing \
+             was moved; `openalpaca {kind} tidy` lists the copies, for you to move yourself.",
+            kind = kind.dir(),
+            path = shown(&tree.named),
+            relation = tree.relation(),
+        ));
     }
     let daemon_lists = match daemon {
         Some(client) => Some(daemon_set_aside(kind, client).await?),
@@ -380,12 +411,10 @@ pub(crate) async fn tidy_lines(
     if !apply {
         lines.push(match &work_tree {
             Some(tree) => format!(
-                "Nothing was moved; `openalpaca {} tidy --apply` moves nothing here: {} is \
-                 {} the git work tree {}.",
+                "Nothing was moved; `openalpaca {} tidy --apply` moves nothing here: {} is {}.",
                 kind.dir(),
                 shown(&tree.named),
-                tree.relation(),
-                shown(&tree.root)
+                tree.listed_relation()
             ),
             None => format!(
                 "Nothing was moved; `openalpaca {} tidy --apply` moves them.",
