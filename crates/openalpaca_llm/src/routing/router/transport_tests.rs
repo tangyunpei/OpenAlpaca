@@ -334,14 +334,19 @@ const LOCAL_2: &str = "m-local-2";
 const CLOUD: &str = "m-cloud";
 
 /// The error a spent local call ends as, or a panic naming what came back.
-fn local_timeout(err: &LlmRouterError, model: &str) {
+/// `asked`: whether the spent model is the one the call asked for, not a
+/// rung of its fallback ladder (LTM-1, the advisor's (b) the owner took on
+/// 2026-11-17).
+fn local_timeout(err: &LlmRouterError, model: &str, asked: bool) {
     match err {
         LlmRouterError::LocalCallTimedOut {
             model: named,
             provider,
             timeout_secs,
+            asked: was_asked,
         } => {
             assert_eq!(named, model, "{err}");
+            assert_eq!(*was_asked, asked, "asked for, not a rung: {err}");
             assert_eq!(provider, "ollama", "{err}");
             assert_eq!(*timeout_secs, REQUEST_TIMEOUT.as_secs(), "{err}");
             assert!(err.to_string().contains("not asked again"), "{err}");
@@ -375,7 +380,7 @@ async fn a_local_call_that_used_its_whole_timeout_is_not_asked_again() {
         0,
         "no rung of its own: {err}"
     );
-    local_timeout(&err, PRIMARY);
+    local_timeout(&err, PRIMARY, true);
     assert!(
         elapsed >= REQUEST_TIMEOUT,
         "it waited its deadline: {elapsed:?}"
@@ -384,6 +389,25 @@ async fn a_local_call_that_used_its_whole_timeout_is_not_asked_again() {
         elapsed < REQUEST_TIMEOUT + SLACK,
         "held to one deadline: {elapsed:?}"
     );
+}
+
+/// LTM-1 (the advisor's (b), taken 2026-11-17): the model a call asks for
+/// is the one it resolved to before it was sent — an id nothing can serve,
+/// or no id at all, settles on the local default first — so a spent local
+/// call there is the asked model's, and a second attempt would ask it
+/// again. Only a rung the ladder reached after another model failed is not.
+#[tokio::test]
+async fn a_local_model_settled_on_before_the_call_is_the_one_asked_for() {
+    let server = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
+    let router = router(&server.base_url, plain_client(), &[PRIMARY], rates(100));
+
+    let unroutable = router.complete(request("m-not-served")).await.unwrap_err();
+    local_timeout(&unroutable, PRIMARY, true);
+    let mut unnamed = request(PRIMARY);
+    unnamed.model = None;
+    let unnamed = router.complete(unnamed).await.unwrap_err();
+    local_timeout(&unnamed, PRIMARY, true);
+    assert_eq!(hits(&server, PRIMARY).await, 2);
 }
 
 /// A streamed call to a silent local server spends its read gap — the same
@@ -399,13 +423,13 @@ async fn a_streamed_local_call_that_used_its_whole_read_gap_is_not_asked_again()
         Ok(_) => panic!("a silent server opened a stream"),
         Err(e) => e,
     };
-    local_timeout(&streamed, PRIMARY);
+    local_timeout(&streamed, PRIMARY, true);
 
     let err = router
         .complete_elsewhere(request(PRIMARY), streamed)
         .await
         .unwrap_err();
-    local_timeout(&err, PRIMARY);
+    local_timeout(&err, PRIMARY, true);
     assert_eq!(hits(&server, PRIMARY).await, 1, "not asked again: {err}");
     assert_eq!(
         hits(&server, FALLBACK_1).await,
@@ -506,7 +530,7 @@ async fn a_ladder_whose_local_rung_spent_its_whole_timeout_ends_naming_it() {
 
     let err = router.complete(request(CLOUD)).await.unwrap_err();
 
-    local_timeout(&err, PRIMARY);
+    local_timeout(&err, PRIMARY, false);
     assert_eq!(
         hits(&cloud, CLOUD).await,
         3,
@@ -551,7 +575,7 @@ async fn a_cloud_timeout_whose_local_rung_spent_its_whole_timeout_ends_naming_it
 
     let err = router.complete(request(CLOUD)).await.unwrap_err();
 
-    local_timeout(&err, PRIMARY);
+    local_timeout(&err, PRIMARY, false);
     assert_eq!(
         hits(&cloud, CLOUD).await,
         1,

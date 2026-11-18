@@ -778,6 +778,98 @@ fn a_failed_entry_with_no_output_shows_its_error_alone_and_a_long_error_is_cut()
     assert!(!summary.contains("Last output:"));
 }
 
+/// **LTM-2** (the advisor's "keep the sentence whole", which the owner took
+/// on 2026-11-17). The record's measured case: a local model's spent
+/// timeout (agent `worker`, model `llama-local:8b`) whose line, about 506
+/// bytes before its tool error, is followed by a 100-byte last tool error.
+/// `wait_for_subagents`' summary cuts a failed line over 512 bytes, and on
+/// the parent the "A retry will not help" sentence fell in the cut middle;
+/// now it is kept whole and the text around it is cut instead, the agent's
+/// name and the tool error's tail still shown. A tool error that itself
+/// says the words does not move the kept sentence.
+#[test]
+fn the_wait_summary_keeps_the_retry_sentence_whole() {
+    use crate::runner::LoopFinishReason;
+    use openalpaca_llm::LlmRouterError;
+
+    let sentence = "A retry will not help: the local model used up its whole timeout, and every \
+                    attempt waits as long — give the work a narrower objective, or do this part \
+                    yourself.";
+    let spent = LlmRouterError::LocalCallTimedOut {
+        model: "llama-local:8b".to_string(),
+        provider: "ollama".to_string(),
+        timeout_secs: 3600,
+        asked: true,
+    }
+    .to_string();
+    for tool_error in [
+        format!("[tool_error] web_fetch: {}", "x".repeat(76)),
+        format!(
+            "[tool_error] web_fetch: A retry will not help: {}",
+            "y".repeat(53)
+        ),
+    ] {
+        assert_eq!(tool_error.len(), 100);
+        let mut result = loop_result(LoopFinishReason::Error(spent.clone()));
+        result.last_tool_error = Some(tool_error.clone());
+        let line = result.subagent_failure("worker", 1.0);
+        assert!(line.len() > 512, "the line is cut: {} bytes", line.len());
+        assert!(line.contains(sentence), "{line}");
+
+        let tracker = SubagentTracker::new();
+        tracker.register("run-1");
+        tracker.fail_with_output("run-1", line, String::new());
+        let report = tracker.report();
+        assert!(report.contains(sentence), "the sentence whole: {report}");
+        assert!(
+            report.starts_with(
+                "- **run-1**: failed — Agent 'worker' could not finish: llama-local:8b"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.ends_with(&tool_error[tool_error.len() - 20..]),
+            "the tool error's tail: {report}"
+        );
+        // Within the error's 512 bytes, plus the elision notices.
+        let shown: usize = report
+            .trim_start_matches("- **run-1**: failed — ")
+            .split("\n\n")
+            .filter(|part| !part.starts_with("[... "))
+            .map(str::len)
+            .sum();
+        assert!(shown <= 512, "{shown} bytes shown: {report}");
+    }
+}
+
+/// **LTM-2.** Only the line's own sentence is kept whole: an error the line
+/// did not write (a plugin's, here 2,000 bytes) that holds the words with no
+/// full stop, or a tool error quoted after the line's own words, is cut as
+/// any other text, so the summary's 512-byte bound holds.
+#[test]
+fn the_wait_summary_keeps_its_bound_whatever_the_error_says() {
+    for error in [
+        format!("plugin failed: A retry will not help: {}", "z".repeat(2000)),
+        format!(
+            "Agent 'worker' could not finish: boom. The last tool error was: A retry will not \
+             help: {}.",
+            "w".repeat(2000)
+        ),
+    ] {
+        let tracker = SubagentTracker::new();
+        tracker.register("run-1");
+        tracker.fail("run-1", error.clone());
+        let report = tracker.report();
+        let shown: usize = report
+            .trim_start_matches("- **run-1**: failed — ")
+            .split("\n\n")
+            .filter(|part| !part.starts_with("[... "))
+            .map(str::len)
+            .sum();
+        assert!(shown <= 512, "{shown} bytes shown of {}", error.len());
+    }
+}
+
 // ── F2: check_subagent_status returns a failed subagent's whole answer ──
 
 /// The tool returns the kept output whole — 3,015 characters, 9,015 bytes
@@ -7419,6 +7511,7 @@ async fn a_subagent_whose_local_model_spent_its_whole_timeout_is_told_a_retry_wi
         model: "llama-local:8b".to_string(),
         provider: "ollama".to_string(),
         timeout_secs: 5,
+        asked: true,
     }
     .to_string();
     assert!(
@@ -7428,6 +7521,162 @@ async fn a_subagent_whose_local_model_spent_its_whole_timeout_is_told_a_retry_wi
     assert!(
         failure.contains(&format!("{spent} A retry will not help: ")),
         "{failure}"
+    );
+}
+
+/// A cloud model (a provider that needs a key) answering every request
+/// overloaded, a failure that may pass: the router walks its fallback
+/// ladder from it.
+fn overloaded() -> openalpaca_llm::LlmError {
+    openalpaca_llm::LlmError::Overloaded {
+        status: 529,
+        retry_after_ms: None,
+    }
+}
+
+/// A router whose default is the cloud model `claude-sonnet-5-5`, served by
+/// `cloud`, with the local `llama-local:8b`, served by `local` with no key,
+/// as its fallback chain's one rung.
+fn cloud_with_a_local_rung(
+    cloud: Arc<dyn openalpaca_llm::LlmProvider>,
+    local: Arc<dyn openalpaca_llm::LlmProvider>,
+) -> LlmRouter {
+    use openalpaca_llm::{ApiKey, KeyPool, ProviderEntry, ProviderType, SelectionStrategy};
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        ProviderType::Anthropic,
+        ProviderEntry {
+            provider: cloud,
+            key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(KeyPool::new(
+                vec![ApiKey::new(
+                    "test".to_string(),
+                    ProviderType::Anthropic,
+                    "sk-test-not-a-key".to_string(),
+                )],
+                SelectionStrategy::RoundRobin,
+            ))),
+        },
+    );
+    providers.insert(
+        ProviderType::Ollama,
+        ProviderEntry {
+            provider: local,
+            key_pool: Arc::new(arc_swap::ArcSwap::from_pointee(KeyPool::new(
+                vec![],
+                SelectionStrategy::RoundRobin,
+            ))),
+        },
+    );
+    let registry = openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new());
+    for (model, provider) in [
+        ("claude-sonnet-5-5", ProviderType::Anthropic),
+        ("llama-local:8b", ProviderType::Ollama),
+    ] {
+        registry.register(
+            model.to_string(),
+            openalpaca_llm::ModelInfo {
+                provider,
+                input_price_per_million: 0.0,
+                output_price_per_million: 0.0,
+                context_window: 32_768,
+                discovered: true,
+                supports_image: false,
+                supports_audio: false,
+                supports_document: false,
+                supports_reasoning: false,
+                supports_tools: true,
+                declared: true,
+                long_prompt: None,
+                cache_rates: None,
+                request_contract: openalpaca_llm::RequestContract::NONE,
+            },
+        );
+    }
+    let mut chains = std::collections::HashMap::new();
+    chains.insert(
+        "claude-sonnet-5-5".to_string(),
+        vec!["llama-local:8b".to_string()],
+    );
+    LlmRouter::new(
+        providers,
+        registry,
+        chains,
+        Arc::new(openalpaca_llm::CostTracker::new(
+            openalpaca_llm::ModelRegistry::with_defaults(),
+        )),
+        "claude-sonnet-5-5".to_string(),
+    )
+}
+
+/// **LTM-1** (the advisor's (b), which the owner took on 2026-11-17). A
+/// subagent asked to run on a cloud model that failed in a way that may
+/// pass, whose fallback ladder then reached a local model that used up its
+/// whole timeout, ends with the router's `LocalCallTimedOut` naming the
+/// local model — and its lead is not told a retry will not help: a second
+/// subagent would ask the cloud model first, which may answer then. A
+/// subagent asked to run on the local model itself still is (the test
+/// above). On the parent the line said a retry will not help.
+#[tokio::test(start_paused = true)]
+async fn a_cloud_subagent_whose_local_rung_spent_its_timeout_is_not_told_a_retry_cannot_help() {
+    let timeout = std::time::Duration::from_secs(5);
+    let failure = worker_status_after(
+        Arc::new(cloud_with_a_local_rung(
+            Arc::new(FailingProvider { error: overloaded }),
+            Arc::new(SpentLocalProvider { timeout }),
+        )),
+        crate::test_util::make_agent("worker", vec![]),
+    )
+    .await
+    .unwrap_err();
+
+    let spent = openalpaca_llm::LlmRouterError::LocalCallTimedOut {
+        model: "llama-local:8b".to_string(),
+        provider: "ollama".to_string(),
+        timeout_secs: 5,
+        asked: false,
+    }
+    .to_string();
+    assert!(
+        failure.contains(&format!("Agent 'worker' could not finish: {spent}")),
+        "the local rung's timeout as the router names it: {failure}"
+    );
+    assert!(
+        !failure.contains("A retry will not help"),
+        "a retry asks the cloud model first: {failure}"
+    );
+}
+
+/// **LTM-1.** The line reads the loop's word on whose timeout it was: the
+/// same router text is told a retry will not help when the spent model was
+/// the one asked for, and is not when it was a rung of the ladder.
+#[test]
+fn a_spent_local_timeout_is_marked_only_when_the_model_was_the_one_asked_for() {
+    use crate::runner::LoopFinishReason;
+    use openalpaca_llm::LlmRouterError;
+
+    let text = |asked: bool| {
+        LlmRouterError::LocalCallTimedOut {
+            model: "llama-local:8b".to_string(),
+            provider: "ollama".to_string(),
+            timeout_secs: 3600,
+            asked,
+        }
+        .to_string()
+    };
+    assert_eq!(text(true), text(false), "the person reads the same text");
+
+    let mut asked = loop_result(LoopFinishReason::Error(text(true)));
+    asked.spent_fallback_rung = false;
+    assert!(
+        asked
+            .subagent_failure("researcher", 1.0)
+            .contains("A retry will not help: the local model used up its whole timeout")
+    );
+    let mut rung = loop_result(LoopFinishReason::Error(text(false)));
+    rung.spent_fallback_rung = true;
+    assert_eq!(
+        rung.subagent_failure("researcher", 1.0),
+        format!("Agent 'researcher' could not finish: {}", text(false))
     );
 }
 
@@ -7449,6 +7698,7 @@ fn loop_result(finish_reason: crate::runner::LoopFinishReason) -> LoopResult {
         requests_cost: 1.04,
         last_tool_error: None,
         working_state: None,
+        spent_fallback_rung: false,
     }
 }
 
@@ -7568,6 +7818,7 @@ fn a_spent_local_timeout_is_one_a_retry_cannot_help() {
             model: model.to_string(),
             provider: provider.to_string(),
             timeout_secs,
+            asked: true,
         }
         .to_string()
     };

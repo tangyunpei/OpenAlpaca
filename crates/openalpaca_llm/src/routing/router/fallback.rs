@@ -42,9 +42,21 @@ impl LlmRouter {
                     self.note_substitution(original_model, &fallback_model);
                     return Ok(response);
                 }
-                Err(e @ LlmRouterError::LocalCallTimedOut { .. }) => {
+                Err(LlmRouterError::LocalCallTimedOut {
+                    model,
+                    provider: name,
+                    timeout_secs,
+                    ..
+                }) => {
                     spent_on.extend(provider);
-                    spent.get_or_insert(e);
+                    // A rung's spent timeout, not the asked model's (LTM-1):
+                    // kept only when the asked model's own is not.
+                    spent.get_or_insert(LlmRouterError::LocalCallTimedOut {
+                        model,
+                        provider: name,
+                        timeout_secs,
+                        asked: false,
+                    });
                 }
                 Err(_) => continue,
             }

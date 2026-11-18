@@ -299,7 +299,18 @@ provider refused, no model the agent can use, a model it may not use, a
 local model that used up its whole timeout (`LocalCallTimedOut`, read by
 its text's shape, since the text opens with the model's id;
 LOCAL-TIMEOUT-MARK) — the line says *"A retry will not help"*, and the
-lead prompt's step 5 retries a failure unless its failure says so.
+lead prompt's step 5 retries a failure unless its failure says so. The
+local timeout is named only when the spent model is the one the call asked
+for (LTM-1): when a cloud model failed in a way that may pass and its
+fallback ladder then reached a local model that spent its timeout, the
+router's error says so (`LocalCallTimedOut::asked`, false), the loop keeps
+it as `LoopResult::spent_fallback_rung`, and the line leaves the sentence
+out, since a second attempt asks the cloud model first. The text the
+person reads is the same either way. `wait_for_subagents`' summary, which
+cuts a failed line over 512 bytes as its head and tail, keeps that
+sentence whole and cuts the text around it instead (LTM-2,
+`tracker.rs`'s `cut_error`); `check_subagent_status` shows the line
+whole.
 Credentials the provider refused on every attempt reach the loop as the
 router's `AllKeysRefused` — on the streaming and the non-streaming path,
 and kept past the fallback ladder when no rung answers, as
@@ -433,9 +444,14 @@ its row's multiples — as `LoopResult::requests_cost`. A chat turn's row
 (the main loop's and the social fast path's) and a skill invocation's,
 with the `LlmCallCompleted` event each publishes, record that sum, never
 the turn's summed tokens priced at once, which can pass a threshold no
-request passed. `estimated_cost` and `cap_spend` are read at the top of a
-round, before its request, so neither holds the request that ended the
-loop.
+request passed. So do a workflow's lead row and each subagent's
+(`record_llm_usage`) and a nested skill's execution record
+(`invoke_skill`, `cost_usd`), since UPR-1. `estimated_cost` and
+`cap_spend` are read at the top of a round, before its request, so
+neither holds the request that ended the loop; `estimated_cost`, the
+agent's tracker total, also holds a reused instance id's earlier runs.
+The session log's `workflow_done` record still carries
+`estimated_cost_usd`.
 
 Because a multi-round turn streams the text written before each tool
 call, the deltas of a turn need not add up to its answer.

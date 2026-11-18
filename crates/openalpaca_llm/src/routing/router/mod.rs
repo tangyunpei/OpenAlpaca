@@ -81,6 +81,8 @@ pub(super) fn spent_local_call(
         model: model.to_string(),
         provider: provider.name().to_string(),
         timeout_secs: timeout.as_secs(),
+        // A rung's is marked by `try_fallback`, which knows it is one.
+        asked: true,
     })
 }
 
@@ -351,6 +353,9 @@ impl LlmRouter {
             model: model.to_string(),
             provider,
             timeout_secs: bound.as_secs(),
+            // A streamed round is never a rung: `complete_streaming` walks
+            // no ladder.
+            asked: true,
         }
     }
 

@@ -13,6 +13,7 @@ pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
 
 // Internal re-exports so the core loop and tests can access submodule items
 use backend::LlmBackend;
+pub(crate) use config::{LAST_TOOL_ERROR, RETRY_WILL_NOT_HELP};
 pub(crate) use context::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
 pub(crate) use tool_helpers::MAX_TOOL_RESULT_SIZE;
 use crate::utils::text::head_tail;
@@ -76,6 +77,8 @@ struct LoopState {
     /// Design 11 §3.3: the last working state a compaction wrote, and its
     /// boundary in the list the loop was handed.
     working_state: Option<(crate::orchestrator::working_state::WorkingState, usize)>,
+    /// `LoopResult::spent_fallback_rung` (LTM-1).
+    spent_fallback_rung: bool,
 }
 
 impl LoopState {
@@ -94,6 +97,7 @@ impl LoopState {
             requests_cost: 0.0,
             last_tool_error: None,
             working_state: None,
+            spent_fallback_rung: false,
         }
     }
 
@@ -113,6 +117,7 @@ impl LoopState {
             requests_cost: self.requests_cost,
             last_tool_error: self.last_tool_error.clone(),
             working_state: self.working_state.clone(),
+            spent_fallback_rung: self.spent_fallback_rung,
         }
     }
 
@@ -136,6 +141,7 @@ impl LoopState {
             requests_cost: self.requests_cost,
             last_tool_error: self.last_tool_error.clone(),
             working_state: self.working_state.clone(),
+            spent_fallback_rung: self.spent_fallback_rung,
         }
     }
 }
@@ -1622,6 +1628,10 @@ async fn run_agentic_loop_core(
                 // The failed call never delivered this round's drained
                 // steering messages — return them for follow-up conversion.
                 return_pending_steering(config, &mut pending_steering);
+                // LTM-1: whose spent local timeout this was, which the
+                // error's text does not say.
+                state.spent_fallback_rung =
+                    matches!(e, LlmRouterError::LocalCallTimedOut { asked: false, .. });
                 return state.result(LoopFinishReason::Error(e.to_string()));
             }
         }

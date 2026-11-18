@@ -404,7 +404,8 @@ pub struct LoopResult {
     /// its cache reads and writes at its row's multiples. The usage row of
     /// a chat turn and of a skill's invocation is written from it
     /// (USAGE-PER-REQUEST), never from `total_input_tokens`, a sum that can
-    /// pass a threshold no request passed. Only the requests this loop
+    /// pass a threshold no request passed; so are a workflow's lead and
+    /// subagent rows and a nested skill's execution record (UPR-1). Only the requests this loop
     /// received an answer to: a call the router counted and then refused
     /// (an empty completion) is no more in it than in the token totals.
     pub requests_cost: f64,
@@ -424,6 +425,15 @@ pub struct LoopResult {
     /// it falls short of the truth, never past it. `None` when the loop never
     /// wrote one.
     pub working_state: Option<(WorkingState, usize)>,
+    /// Whether an `Error` exit's `LocalCallTimedOut` was a rung of the
+    /// router's fallback ladder — reached after the model the call asked
+    /// for failed in a way that may pass — rather than that model itself
+    /// (`LlmRouterError::LocalCallTimedOut::asked`, LTM-1). The error's text
+    /// is the same either way; [`Self::subagent_failure`] reads this to
+    /// tell the lead a retry will not help only when the asked model spent
+    /// its timeout, since a second attempt asks it first. False for every
+    /// other exit.
+    pub spent_fallback_rung: bool,
 }
 
 impl LoopResult {
@@ -482,8 +492,8 @@ impl LoopResult {
                 rounds_spent(self.rounds_used)
             ),
             LoopFinishReason::CostExceeded => format!(
-                "Agent '{agent}' {STOPPED_SHORT}: it {HIT_COST_LIMIT} of {} (it spent {}). A \
-                 retry will not help: every attempt has the same limit — give the work a \
+                "Agent '{agent}' {STOPPED_SHORT}: it {HIT_COST_LIMIT} of {} (it spent {}). \
+                 {RETRY_WILL_NOT_HELP} every attempt has the same limit — give the work a \
                  narrower objective, or do this part yourself.",
                 usd(max_cost),
                 usd(self.cap_spend)
@@ -496,7 +506,7 @@ impl LoopResult {
             }
             LoopFinishReason::Error(e) => {
                 let e = e.trim_end();
-                match retry_cannot_help(e) {
+                match retry_cannot_help(e, self.spent_fallback_rung) {
                     Some(why) => {
                         let stop = if e.ends_with(['.', '!', '?']) {
                             ""
@@ -504,8 +514,8 @@ impl LoopResult {
                             "."
                         };
                         format!(
-                            "Agent '{agent}' could not finish: {e}{stop} A retry will not \
-                             help: {why}."
+                            "Agent '{agent}' could not finish: {e}{stop} \
+                             {RETRY_WILL_NOT_HELP} {why}."
                         )
                     }
                     None => format!("Agent '{agent}' could not finish: {e}"),
@@ -521,7 +531,7 @@ impl LoopResult {
     /// `reason`, then the last tool error when there was one (V3, W2).
     fn with_last_tool_error(&self, reason: String) -> String {
         match self.last_tool_error {
-            Some(ref err) => format!("{reason} The last tool error was: {}", user_facing(err)),
+            Some(ref err) => format!("{reason} {LAST_TOOL_ERROR} {}", user_facing(err)),
             None => reason,
         }
     }
@@ -533,6 +543,17 @@ impl LoopResult {
 const STOPPED_SHORT: &str = "stopped before reaching an answer";
 const HIT_COST_LIMIT: &str = "hit its cost limit";
 const HIT_OUTPUT_LIMIT: &str = "the reply hit the model's output limit";
+
+/// How [`LoopResult::subagent_failure`]'s sentence saying a retry cannot
+/// change the outcome opens; the sentence runs to its first full stop.
+/// `wait_for_subagents`' summary keeps that sentence whole when it cuts a
+/// failed line (LTM-2), finding it by these words.
+pub(crate) const RETRY_WILL_NOT_HELP: &str = "A retry will not help:";
+
+/// How the last tool error a failed line quotes is introduced
+/// (`with_last_tool_error`): the summary's cut looks for the retry
+/// sentence only before it (LTM-2).
+pub(crate) const LAST_TOOL_ERROR: &str = "The last tool error was:";
 
 fn rounds_spent(rounds: usize) -> String {
     format!(
@@ -570,8 +591,13 @@ fn usd(amount: f64) -> String {
 /// the loop asks again; a second subagent would wait out the same timeout on
 /// the same model, so it is named here too (LOCAL-TIMEOUT-MARK, item 18 of
 /// the owner's answer of 2026-11-14). Its text opens with the model's id, so
-/// it is matched by its shape (`fits_shape`), not a prefix.
-fn retry_cannot_help(error: &str) -> Option<&'static str> {
+/// it is matched by its shape (`fits_shape`), not a prefix. Only when the
+/// spent model is the one the call asked for, though (LTM-1, the advisor's
+/// (b), which the owner took on 2026-11-17): a rung of the fallback ladder
+/// that spent its timeout after a cloud model failed in a way that may pass
+/// (`spent_fallback_rung`) is not named, since a second subagent would ask
+/// the cloud model first, which may answer then.
+fn retry_cannot_help(error: &str, spent_fallback_rung: bool) -> Option<&'static str> {
     use openalpaca_llm::{LlmError, LlmRouterError};
     let is = |e: LlmRouterError| error == e.to_string();
     let starts = |e: LlmRouterError| error.starts_with(&e.to_string());
@@ -603,16 +629,19 @@ fn retry_cannot_help(error: &str) -> Option<&'static str> {
     if error.starts_with("Model access denied:") {
         return Some("this agent may not use the model that answered");
     }
-    if fits_shape(
-        error,
-        &LlmRouterError::LocalCallTimedOut {
-            model: FIELD.to_string(),
-            provider: FIELD.to_string(),
-            timeout_secs: u64::MAX,
-        }
-        .to_string()
-        .replace(&u64::MAX.to_string(), FIELD),
-    ) {
+    if !spent_fallback_rung
+        && fits_shape(
+            error,
+            &LlmRouterError::LocalCallTimedOut {
+                model: FIELD.to_string(),
+                provider: FIELD.to_string(),
+                timeout_secs: u64::MAX,
+                asked: true,
+            }
+            .to_string()
+            .replace(&u64::MAX.to_string(), FIELD),
+        )
+    {
         return Some(
             "the local model used up its whole timeout, and every attempt waits as long — give \
              the work a narrower objective, or do this part yourself",

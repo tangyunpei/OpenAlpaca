@@ -301,7 +301,10 @@ impl BuiltInTool for InvokeSkillTool {
                     .ok()
                     .map(|r| r.total_output_tokens as i32)
                     .unwrap_or(0),
-                cost_usd: result.as_ref().ok().map(|r| r.estimated_cost).unwrap_or(0.0),
+                // UPR-1: what this invocation's requests cost, the last
+                // included, not the tracker's total for its agent id, which
+                // every nested invocation of the skill shares.
+                cost_usd: result.as_ref().ok().map(|r| r.requests_cost).unwrap_or(0.0),
                 model_used: result.as_ref().ok().and_then(|r| r.model_used.clone()),
                 query_preview: if store_preview {
                     Some(query.chars().take(200).collect())
@@ -647,6 +650,54 @@ Never runs.
                 .any(|e| matches!(e, SystemEvent::SkillCompleted { .. })),
             "SkillCompleted must not fire on an empty error finish: {:?}",
             events
+        );
+    }
+
+    /// **UPR-1** (the advisor's (b), which the owner took on 2026-11-17): a
+    /// nested skill's execution record carries what its loop's requests
+    /// cost, each as the caps counted it (`requests_cost`), the request that
+    /// ended the loop included. On the parent it read `estimated_cost`, the
+    /// tracker's total at the top of the last round, so a skill answered in
+    /// one request was recorded at $0.
+    #[tokio::test]
+    async fn a_nested_skills_record_carries_what_its_requests_cost() {
+        let tmp = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+        let provider = mock_provider();
+        let router = Arc::new(LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-6".to_string(),
+        ));
+        let tool = InvokeSkillTool::new(
+            fixture_catalog(&tmp),
+            Arc::new(ToolRegistry::new().unwrap()),
+            router.clone(),
+            EventBus::new(64),
+            Some(db.clone()),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            1.0,
+        );
+
+        tool.execute_with_context(
+            &serde_json::json!({"skill": "echo-skill", "query": "say hi"}),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(provider.call_count.load(Ordering::SeqCst), 1, "one request");
+
+        let counted = router.cost_tracker.total_cost().await;
+        assert!(counted > 0.0, "the request was counted: ${counted}");
+        let health = SkillExecutionRepository::new(&db)
+            .all_skill_health()
+            .unwrap();
+        assert_eq!(health.len(), 1, "one record");
+        assert!(
+            (health[0].avg_cost_usd - counted).abs() < 1e-12,
+            "the record says what the caps counted: ${} against ${counted}",
+            health[0].avg_cost_usd
         );
     }
 

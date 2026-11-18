@@ -145,6 +145,15 @@ pub enum LlmRouterError {
         model: String,
         provider: String,
         timeout_secs: u64,
+        /// Whether `model` is the model the call asked for — the one it
+        /// settled on before it was sent, an unroutable id's or no id's
+        /// substitute included — rather than a rung of the fallback ladder
+        /// walked after that model failed in another way (LTM-1, the
+        /// advisor's (b), which the owner took on 2026-11-17). A second
+        /// attempt asks the asked model first, so only when this is true
+        /// would it wait out the same timeout again. Not in the text: the
+        /// person reads the same words either way.
+        asked: bool,
     },
 
     #[error("No fallback chain configured for model: {0}")]
