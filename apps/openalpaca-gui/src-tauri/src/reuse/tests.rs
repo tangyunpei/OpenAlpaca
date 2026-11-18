@@ -206,11 +206,59 @@ fn an_unreadable_file_s_refusal_says_another_build_wrote_it() {
         error["message"],
         "The daemon running (pid 4242, version 0.9.0) wrote a discovery file this app \
          cannot read: another build of OpenAlpaca. Nothing was stopped or started. Update \
-         the app, or stop that daemon with `openalpaca daemon stop` and press Reconnect in \
-         Settings → Connection to start this app's own."
+         the app, or stop that daemon with the `openalpaca` of the build that started it (or \
+         `kill 4242`), then press Reconnect in Settings → Connection to start this app's own."
+    );
+    assert_eq!(
+        error["remedy"],
+        "Update the app, or stop that daemon with the `openalpaca` of the build that started \
+         it (or `kill 4242`), then press Reconnect in Settings → Connection to start this \
+         app's own."
     );
     assert_eq!(error["daemon_protocol"], serde_json::Value::Null);
     assert_eq!(error["shell_protocol"], 3);
+}
+
+/// 123-7 (b): this build's `openalpaca daemon stop` cannot read another
+/// build's file either, so no refusal over one names it: the way out is
+/// that build's stop or the pid's signal, whatever protocol the file
+/// states — newer (updating the app offered) or older (the stop alone).
+#[test]
+fn another_build_s_refusal_never_names_this_build_s_daemon_stop() {
+    let refusal_of = |bytes: &[u8]| {
+        let Verdict::Mismatch(m) =
+            decide_reuse(&look(read_discovery_bytes(bytes), silent(), true), &SHELL)
+        else {
+            panic!("not a mismatch");
+        };
+        assert!(!m.readable);
+        serde_json::to_value(m.into_error()).unwrap()
+    };
+    let newer = refusal_of(br#"{"pid":4242,"build":{"version":"0.9.0","protocol":4}}"#);
+    assert_eq!(
+        newer["remedy"],
+        "Update the app to one that speaks protocol 4, or stop that daemon with the \
+         `openalpaca` of the build that started it (or `kill 4242`), then press Reconnect in \
+         Settings → Connection to start this app's own."
+    );
+    let older = refusal_of(br#"{"pid":4242,"build":{"version":"0.1.0","protocol":1}}"#);
+    assert_eq!(
+        older["remedy"],
+        "Stop that daemon with the `openalpaca` of the build that started it (or `kill \
+         4242`), then press Reconnect in Settings → Connection to start this app's own."
+    );
+    assert_eq!(
+        older["message"],
+        "The daemon running (pid 4242, version 0.1.0, protocol 1) wrote a discovery file this \
+         app cannot read: another build of OpenAlpaca. Nothing was stopped or started. Stop \
+         that daemon with the `openalpaca` of the build that started it (or `kill 4242`), \
+         then press Reconnect in Settings → Connection to start this app's own."
+    );
+    for error in [&newer, &older] {
+        let message = error["message"].as_str().unwrap();
+        assert!(!message.contains("daemon stop"), "{message}");
+        assert_eq!(error["kind"], "mismatch");
+    }
 }
 
 /// With one protocol supported, the sentence names one.
@@ -1564,5 +1612,176 @@ fn the_ladder_s_line_carries_no_token_or_path() {
     );
     assert_eq!(world.lines.len(), 1);
     assert!(!world.lines[0].contains(&token), "{}", world.lines[0]);
+    assert!(!world.lines[0].contains('/'), "{}", world.lines[0]);
+}
+
+// ============================================================================
+// The reconnect ladder's answer as a verdict (119-1 (b))
+// ============================================================================
+
+/// `get_connection_info`'s answer of `d`, as the window labelled `window`
+/// asked it.
+fn ladder_answered(
+    world: &mut FakeWorld,
+    watch: &Mutex<StartingWatch>,
+    window: &str,
+    d: &Discovery,
+) {
+    ladder_answer(watch, window, d, |line| world.log(line));
+}
+
+/// The line the ladder's answer of a daemon of this build, pid `pid`,
+/// writes.
+fn ladder_answer_line(pid: u32) -> String {
+    format!(
+        "reuse (the reconnect ladder) — pid {pid}, version {}, protocol {}, as its discovery \
+         file states; its health was not asked.",
+        THIS_SHELL.version, THIS_SHELL.protocol
+    )
+}
+
+/// 119-1 (b): a window the ladder refused a mismatch and then connected
+/// (the other daemon stopped, this app's own or the CLI's started) has a
+/// reuse as its last `gui.log` verdict line, naming the ladder, not the
+/// stale mismatch; the same answer asked again adds no line.
+#[test]
+fn the_ladder_s_answer_after_its_mismatch_is_the_last_verdict_line() {
+    let newer = discovery_of("9.9.9", THIS_SHELL.protocol + 1);
+    let ours = this_build_discovery(5151);
+    let mut world = FakeWorld::new(|_, _| look(DiscoveryRead::Missing, silent(), false));
+    let watch = Mutex::new(StartingWatch::default());
+    ladder(&mut world, &watch, WINDOW, &newer);
+    for _ in 0..3 {
+        ladder_answered(&mut world, &watch, WINDOW, &ours);
+    }
+    assert_eq!(
+        verdict_lines(&world, WINDOW),
+        [
+            mismatch_line(THIS_SHELL.protocol + 1),
+            ladder_answer_line(5151)
+        ]
+    );
+    assert_eq!(world.looks, 0, "the ladder's line asks the world nothing");
+}
+
+/// The ladder's answer adds a line and removes none: after `ensure_with`'s
+/// reuse of the same pid it logs nothing (the hourly re-read and a `401`'s
+/// add nothing), and `ensure_with`'s reuse after it still logs its own,
+/// health-checked line naming whose daemon it is; another window keeps its
+/// own.
+#[test]
+fn the_ladder_s_answer_and_ensure_s_reuse_share_the_window_s_record() {
+    let ours = this_build_discovery(5151);
+    let script_d = ours.clone();
+    let mut world = FakeWorld::new(move |_, _| healthy(&script_d));
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    ladder_answered(&mut world, &watch, WINDOW, &ours);
+    let lines = verdict_lines(&world, WINDOW);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("reuse — pid 5151, "), "{}", lines[0]);
+
+    let script_d = ours.clone();
+    let mut world = FakeWorld::new(move |_, _| healthy(&script_d));
+    let watch = Mutex::new(StartingWatch::default());
+    ladder_answered(&mut world, &watch, WINDOW, &ours);
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    ladder_answered(&mut world, &watch, WINDOW, &ours);
+    let lines = verdict_lines(&world, WINDOW);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0], ladder_answer_line(5151));
+    assert!(lines[1].starts_with("reuse — pid 5151, "), "{}", lines[1]);
+    ladder_answered(&mut world, &watch, "second", &ours);
+    assert_eq!(verdict_lines(&world, "second"), [ladder_answer_line(5151)]);
+}
+
+/// A daemon replaced while the window is open, in the order the window
+/// asks (its reuse of A, the rung's answer of B, then the re-bootstrap
+/// that finds another instance): three lines, the last `ensure_with`'s
+/// health-checked reuse of B, as on the parent but for the ladder's line.
+#[test]
+fn a_replaced_daemon_keeps_ensure_s_reuse_line_after_the_ladder_s() {
+    let a = this_build_discovery(5151);
+    let b = this_build_discovery(6161);
+    let script_a = a.clone();
+    let script_b = b.clone();
+    let mut looks = 0;
+    let mut world = FakeWorld::new(move |_, _| {
+        looks += 1;
+        if looks == 1 {
+            healthy(&script_a)
+        } else {
+            healthy(&script_b)
+        }
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    ladder_answered(&mut world, &watch, WINDOW, &b);
+    assert_eq!(kind(&ask(&mut world, &watch)), "reused");
+    let lines = verdict_lines(&world, WINDOW);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines[0].starts_with("reuse — pid 5151, "), "{}", lines[0]);
+    assert_eq!(lines[1], ladder_answer_line(6161));
+    assert!(lines[2].starts_with("reuse — pid 6161, "), "{}", lines[2]);
+}
+
+/// Another daemon the ladder answers is a change: a line of its own.
+#[test]
+fn the_ladder_s_answer_of_another_daemon_logs_again() {
+    let mut world = FakeWorld::new(|_, _| look(DiscoveryRead::Missing, silent(), false));
+    let watch = Mutex::new(StartingWatch::default());
+    ladder_answered(&mut world, &watch, WINDOW, &this_build_discovery(5151));
+    ladder_answered(&mut world, &watch, WINDOW, &this_build_discovery(6161));
+    ladder_answered(&mut world, &watch, WINDOW, &this_build_discovery(6161));
+    assert_eq!(
+        verdict_lines(&world, WINDOW),
+        [ladder_answer_line(5151), ladder_answer_line(6161)]
+    );
+}
+
+/// The ladder's answer leaves the spawn's wait and the starting clock as
+/// they were, as its mismatch does: only `ensure_with`'s answers end or
+/// extend them.
+#[test]
+fn the_ladder_s_answer_leaves_the_spawn_s_wait_alone() {
+    let spawned = this_build_discovery(9090);
+    let script_d = spawned.clone();
+    let mut world = FakeWorld::new(move |_, spawns| {
+        if spawns == 0 {
+            look(DiscoveryRead::Missing, silent(), false)
+        } else {
+            booting(&script_d)
+        }
+    });
+    let watch = Mutex::new(StartingWatch::default());
+    assert_eq!(kind(&ask(&mut world, &watch)), "starting");
+    let (spawn, seen) = {
+        let w = watch.lock().unwrap();
+        (w.spawn.map(|p| (p.pid, p.at, p.asked)), w.seen.clone())
+    };
+    assert!(spawn.is_some() && seen.is_some());
+    world.pass(Duration::from_secs(3));
+    ladder_answered(&mut world, &watch, WINDOW, &spawned);
+    let w = watch.lock().unwrap();
+    assert_eq!(w.spawn.map(|p| (p.pid, p.at, p.asked)), spawn);
+    assert_eq!(w.seen, seen);
+}
+
+/// The ladder's answer line carries no token, no instance id and no path.
+#[test]
+fn the_ladder_s_answer_line_carries_no_token_or_path() {
+    let ours = this_build_discovery(5151);
+    let token = ours.auth.token.clone();
+    assert!(!token.is_empty());
+    let mut world = FakeWorld::new(|_, _| look(DiscoveryRead::Missing, silent(), false));
+    ladder_answered(
+        &mut world,
+        &Mutex::new(StartingWatch::default()),
+        WINDOW,
+        &ours,
+    );
+    assert_eq!(world.lines.len(), 1);
+    assert!(!world.lines[0].contains(&token), "{}", world.lines[0]);
+    assert!(!world.lines[0].contains(INSTANCE), "{}", world.lines[0]);
     assert!(!world.lines[0].contains('/'), "{}", world.lines[0]);
 }

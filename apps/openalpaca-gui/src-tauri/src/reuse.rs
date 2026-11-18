@@ -25,11 +25,13 @@
 //! path with a world it writes; [`RealWorld`] is the machine's. The owner's
 //! rule judges it: whether the CLI or the app started the daemon, both use
 //! the same one (2026-11-16). Each window's verdict, when it changes, is one
-//! line of `gui.log` (Q04-VERDICT), the reconnect ladder's mismatch among
-//! them ([`ladder_mismatch`], LADDER-LINE).
+//! line of `gui.log` (Q04-VERDICT), the reconnect ladder's mismatch and
+//! answer among them ([`ladder_mismatch`], LADDER-LINE; [`ladder_answer`],
+//! 119-1).
 
 use crate::{ShellError, did_not_start, record_spawned, spawn_daemon};
 use openalpaca_app_support::daemon_lifecycle;
+use openalpaca_app_support::discovery::Discovery;
 use openalpaca_app_support::paths;
 use openalpaca_app_support::protocol::{
     self, ClientBuild, Compat, DiscoveryRead, Health, Look, Mismatch, Reused, STARTING_BUDGET,
@@ -105,10 +107,22 @@ fn note_sentence(shell: &ClientBuild, why: Compat, protocol: u32, version: &str)
 const STOP_AND_RECONNECT: &str = "stop that daemon with `openalpaca daemon stop` and press \
                                   Reconnect in Settings → Connection to start this app's own.";
 
-/// [`STOP_AND_RECONNECT`] as a sentence of its own.
-const STOP_AND_RECONNECT_SENTENCE: &str = "Stop that daemon with `openalpaca daemon stop` and \
-                                           press Reconnect in Settings → Connection to start \
-                                           this app's own.";
+/// The way out of a mismatch over a discovery file this app cannot read:
+/// another build's, which this build's `openalpaca daemon stop` cannot read
+/// either (123-7 (b)), so the daemon is stopped by the build that started it
+/// or by its pid, the CLI's way out for the same file.
+fn stop_by_pid_and_reconnect(pid: u32) -> String {
+    format!(
+        "stop that daemon with the `openalpaca` of the build that started it (or `kill {pid}`), \
+         then press Reconnect in Settings → Connection to start this app's own."
+    )
+}
+
+/// `clause` as a sentence of its own.
+fn sentence(mut clause: String) -> String {
+    clause[..1].make_ascii_uppercase();
+    clause
+}
 
 /// A mismatch as this shell says it — the `who`, the `gui.log` line and the
 /// refusal the webview receives — over
@@ -154,12 +168,17 @@ impl MismatchWords for Mismatch {
         let newer = self
             .daemon_protocol
             .is_none_or(|p| p > self.client.protocol);
+        // `openalpaca daemon stop` reads the file this build reads, so it is
+        // the way out only for a file this app can read.
+        let stop = if self.readable {
+            STOP_AND_RECONNECT.to_owned()
+        } else {
+            stop_by_pid_and_reconnect(self.pid)
+        };
         let remedy = match (newer, self.daemon_protocol) {
-            (true, Some(p)) => {
-                format!("Update the app to one that speaks protocol {p}, or {STOP_AND_RECONNECT}")
-            }
-            (true, None) => format!("Update the app, or {STOP_AND_RECONNECT}"),
-            (false, _) => STOP_AND_RECONNECT_SENTENCE.to_owned(),
+            (true, Some(p)) => format!("Update the app to one that speaks protocol {p}, or {stop}"),
+            (true, None) => format!("Update the app, or {stop}"),
+            (false, _) => sentence(stop),
         };
         let who = self.who();
         let message = if self.readable {
@@ -216,6 +235,10 @@ enum Said {
     Starting(u32),
     StillStarting(u32),
     Reuse(u32),
+    /// The reconnect ladder's answer of a pid, read from the file alone: a
+    /// verdict apart from [`Said::Reuse`], so `ensure_with`'s health-checked
+    /// reuse after it still has its line (119-1).
+    LadderReuse(u32),
     Mismatch(u32),
     SidecarMissing,
     SpawnFailed,
@@ -305,6 +328,13 @@ impl StartingWatch {
                 true
             }
         }
+    }
+
+    /// Whether `window`'s last verdict is a reuse of `pid`, by either path.
+    fn last_is_reuse_of(&self, window: &str, pid: u32) -> bool {
+        self.said.iter().any(|(label, last)| {
+            label == window && matches!(last, Said::Reuse(p) | Said::LadderReuse(p) if *p == pid)
+        })
     }
 
     /// Forget everything, as at the app's start: no test inherits another's.
@@ -551,6 +581,39 @@ pub(crate) fn ladder_mismatch(
 ) {
     if watch(starting_watch).say(window, Said::Mismatch(mismatch.pid)) {
         log(verdict_line(window, &mismatch.log_line()));
+    }
+}
+
+/// The reconnect ladder's answer — `get_connection_info`'s connection to
+/// `d`, read from the file alone (the rung asks no health) — as the verdict
+/// of the window labelled `window` (119-1 (b)), whichever read asked it
+/// (a rung, a `401`'s re-read, the hourly re-read): recorded in the same
+/// per-window record and, unless that window's last verdict is already a
+/// reuse of `d`'s pid by either path, one line handed to `log` naming the
+/// ladder, so a mismatch the window was told before is not left as its
+/// last line once it connects. It adds a line and removes none:
+/// `ensure_with`'s reuse after it is a change ([`Said::LadderReuse`] is
+/// not [`Said::Reuse`]), so its line saying whose daemon it is stays. The
+/// line says what the read knows: the pid, version and protocol the file
+/// states, and that health was not asked; never the token or a path.
+/// Nothing else of the watch is touched, as for [`ladder_mismatch`].
+pub(crate) fn ladder_answer(
+    starting_watch: &Mutex<StartingWatch>,
+    window: &str,
+    d: &Discovery,
+    log: impl FnOnce(String),
+) {
+    let changed = {
+        let mut w = watch(starting_watch);
+        !w.last_is_reuse_of(window, d.pid) && w.say(window, Said::LadderReuse(d.pid))
+    };
+    if changed {
+        let line = format!(
+            "reuse (the reconnect ladder) — pid {}, version {}, protocol {}, as its discovery \
+             file states; its health was not asked.",
+            d.pid, d.build.version, d.build.protocol
+        );
+        log(verdict_line(window, &line));
     }
 }
 

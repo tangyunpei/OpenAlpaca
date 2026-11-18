@@ -480,6 +480,63 @@ fn the_ladder_s_mismatch_is_one_line_of_gui_log() {
     );
 }
 
+/// 119-1 (b): a window the ladder refused a mismatch, then answered once
+/// the file names a daemon of this build, has the answer as its last
+/// `gui.log` verdict line, a reuse naming the ladder, logged once however
+/// often it is asked again.
+#[cfg(unix)]
+#[test]
+fn the_ladder_s_answer_after_its_mismatch_is_one_line_of_gui_log() {
+    let guard = HomeStoreGuard::set("info-answer-gui-log");
+    let daemon = FakeDaemonProcess::start(&guard);
+    let newer = write_newer_discovery_for(daemon.pid);
+    let read = with_the_shell_log(|| {
+        let refused = read_connection_info("main").expect_err("refused");
+        let ours = write_discovery_for(daemon.pid, closed_port());
+        let answers = (0..3)
+            .map(|_| read_connection_info("main").map(|c| c.info.instance_id))
+            .collect::<Vec<_>>();
+        (refused, ours, answers)
+    });
+    drop(daemon);
+    let (refused, ours, answers) = read;
+    assert_eq!(
+        serde_json::to_value(refused).expect("as JSON")["kind"],
+        "mismatch"
+    );
+    assert!(
+        answers
+            .iter()
+            .all(|a| a.as_deref().ok() == Some(ours.instance_id.as_str())),
+        "{answers:?}"
+    );
+    let verdicts: Vec<String> = gui_log_text()
+        .lines()
+        .filter(|l| l.contains(" INFO ") && l.contains("Daemon verdict for window `main`: "))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(verdicts.len(), 2, "{}", gui_log_text());
+    assert!(
+        verdicts[0].contains(&format!(
+            "refusal (mismatch) — pid {}, version 9.9.9",
+            newer.pid
+        )),
+        "{}",
+        verdicts[0]
+    );
+    assert!(
+        verdicts[1].ends_with(&format!(
+            "Daemon verdict for window `main`: reuse (the reconnect ladder) — pid {}, version \
+             {SHELL_VERSION}, protocol {}, as its discovery file states; its health was not \
+             asked.",
+            ours.pid,
+            openalpaca_app_support::protocol::PROTOCOL
+        )),
+        "{}",
+        verdicts[1]
+    );
+}
+
 /// The same file over a pid that is no daemon (here the test's own) is
 /// answered as before Q04: a mismatch is never said of a process that is
 /// gone, and the socket's failure keeps the ladder going.

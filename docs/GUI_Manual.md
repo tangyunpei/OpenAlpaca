@@ -145,7 +145,10 @@ whole bridge (`src-tauri/src/lib.rs`):
   daemon…, then Start daemon. A daemon that speaks a protocol the app does
   not is **refused, never stopped or replaced**: the card reads `Daemon
   version mismatch` with both protocols and the way out (update the app, or
-  stop that daemon with `openalpaca daemon stop` and press `Reconnect`); the
+  stop that daemon with `openalpaca daemon stop` and press `Reconnect`; when
+  another build of OpenAlpaca wrote its discovery file, which this build's
+  `daemon stop` cannot read, the card names its pid and says to stop it with
+  that build's `openalpaca` or `kill <pid>`, then press `Reconnect`); the
   window does not reconnect until you do, and while that daemon runs the app
   starts nothing beside it. A daemon that is running but does not answer
   yet — one still opening its database or connecting to its MCP servers, the
@@ -1656,8 +1659,10 @@ is starting` for long means a daemon is up but busy booting (often its MCP
 servers connecting); after 45 s the card shows the end of its log and, if
 it never finishes, how to stop it. `state/logs/gui.log` has one line each
 time what the window is told changes — starting, still starting, the daemon
-used, a version mismatch (met when the window starts, reconnects or reads its
-connection again: one line per change, not per ask), the daemon missing beside
+used (a reconnect's answer too, named as the reconnect ladder's: read from the
+discovery file, its health not asked), a version mismatch (met when the window
+starts, reconnects or reads its connection again: one line per change, not per
+ask), the daemon missing beside
 the app; a daemon that failed to start writes no verdict line there (its reason is
 on the card; the spawn and the daemon's exit are logged). In `bun run dev` there is no Tauri bridge, so every shell command
 fails by design.

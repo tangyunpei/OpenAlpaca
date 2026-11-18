@@ -264,9 +264,9 @@ fn connection_with(info: ConnectionInfo, pid: u32, note: Option<String>) -> Shel
 /// Get connection info from discovery.json.
 /// Returns error if daemon is not running or discovery is invalid.
 ///
-/// The file is read on the blocking pool. Its mismatch is the asking
-/// window's verdict, by the webview's label, as `ensure_daemon_running`'s
-/// is (LADDER-LINE).
+/// The file is read on the blocking pool. Its mismatch and its answer are
+/// the asking window's verdict, by the webview's label, as
+/// `ensure_daemon_running`'s is (LADDER-LINE, 119-1).
 #[tauri::command]
 async fn get_connection_info<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
@@ -291,8 +291,10 @@ async fn connection_info_for_window(window: String) -> Result<ShellConnection, S
 /// check its token. A file over a pid that is gone is answered as before:
 /// the socket fails, and the ladder goes on. The refusal is `window`'s
 /// verdict, recorded where `ensure_daemon_running`'s are and, when it is a
-/// change, one `INFO` line of `gui.log` ([`reuse::ladder_mismatch`]); an
-/// answer, or another refusal, records nothing.
+/// change, one `INFO` line of `gui.log` ([`reuse::ladder_mismatch`]); its
+/// answer is too, a reuse naming the ladder unless the window's last
+/// verdict is already a reuse of that pid ([`reuse::ladder_answer`],
+/// 119-1 (b)); another refusal records nothing.
 fn read_connection_info(window: &str) -> Result<ShellConnection, ShellError> {
     let Some(d) = discovery::read_discovery().map_err(|e| ShellError::DiscoveryUnreadable {
         message: e.to_string(),
@@ -316,6 +318,9 @@ fn read_connection_info(window: &str) -> Result<ShellConnection, ShellError> {
         message: e.to_string(),
     })?;
 
+    reuse::ladder_answer(&reuse::STARTING, window, &d, |line| {
+        tracing::info!("{line}");
+    });
     Ok(shell_connection(&d))
 }
 
