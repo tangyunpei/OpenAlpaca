@@ -284,14 +284,14 @@ pub(crate) async fn tidy_lines(
     tidy::tidy_lines(tidy::Kind::Agents, config_dir, daemon, apply, now).await
 }
 
-/// `GET /v1/agents`'s path: fifty rows, and `status` as typed (sent as
-/// it is, not encoded). `agent list`, the REPL's `/agents` and the config
-/// screen's list ask it; `contract_queries` holds it to the route's query
+/// `GET /v1/agents`'s path: fifty rows, and `status` as typed, encoded
+/// (*Rev 147*'s item 6, (b)). `agent list`, the REPL's `/agents` and the
+/// config screen's list ask it; `contract_queries` holds it to the route's query
 /// sample (CONTRACT-SAMPLES-3).
 pub(crate) fn list_path(status: Option<&str>) -> String {
     let mut path = "/v1/agents?limit=50".to_string();
     if let Some(s) = status {
-        path.push_str(&format!("&status={}", s));
+        path.push_str(&format!("&status={}", urlencoding::encode(s)));
     }
     path
 }
@@ -617,24 +617,57 @@ pub(crate) const CAPABILITIES_PROMPT: &str =
 pub(crate) const AGENT_ID_PROMPT: &str = "Agent id";
 
 /// The id both interactive creations give the agent: [`AGENT_ID_PROMPT`]
-/// asked through `ask` with [`agent_id_for`]'s id as its default, the
-/// answer taken as given. Nothing checks it here: `POST /v1/agents`
-/// refuses an id that is taken.
+/// asked through `ask` with [`agent_id_for`]'s id as its default. An answer
+/// is taken only in the form [`agent_id_for`] gives (`agent_id_for(typed)
+/// == typed`), the form the CLI sent before the id could be typed (*Rev
+/// 147*'s item 4, the CLI side): otherwise `say` is given
+/// [`agent_id_refusal`] and the id is asked again, its form of the answer
+/// the default. `POST /v1/agents` itself checks no id's form and joins it
+/// into a file path; only this CLI's prompts hold it.
 pub(crate) fn agent_id_with(
     name: &str,
-    ask: impl FnOnce(&str, String) -> Result<String>,
+    mut ask: impl FnMut(&str, String) -> Result<String>,
+    mut say: impl FnMut(&str),
 ) -> Result<String> {
-    ask(AGENT_ID_PROMPT, agent_id_for(name))
+    let mut offered = agent_id_for(name);
+    loop {
+        let typed = ask(AGENT_ID_PROMPT, offered)?;
+        match agent_id_refusal(&typed) {
+            None => return Ok(typed),
+            Some(refusal) => {
+                say(&refusal);
+                offered = agent_id_for(&typed);
+            }
+        }
+    }
 }
 
-/// [`agent_id_with`] at the terminal: Enter keeps the derived id.
-pub(crate) fn ask_agent_id(theme: &ColorfulTheme, name: &str) -> Result<String> {
-    agent_id_with(name, |prompt, derived| {
-        Ok(Input::with_theme(theme)
-            .with_prompt(prompt)
-            .default(derived)
-            .interact_text()?)
+/// Why `typed` is not an agent id this CLI sends, in [`agent_id_for`]'s
+/// own terms, or `None` when it is one (`agent_id_for(typed) == typed`).
+pub(crate) fn agent_id_refusal(typed: &str) -> Option<String> {
+    let form = agent_id_for(typed);
+    (form != typed).then(|| {
+        format!(
+            "'{typed}' is not an agent id: an id holds only lower-case ASCII letters and \
+             digits, each run of other characters one `_`, none at either end; \
+             `{form}` is that form of it"
+        )
     })
+}
+
+/// [`agent_id_with`] at the terminal: Enter keeps the offered id, and an
+/// answer in another form is refused on its own line and asked again.
+pub(crate) fn ask_agent_id(theme: &ColorfulTheme, name: &str) -> Result<String> {
+    agent_id_with(
+        name,
+        |prompt, offered| {
+            Ok(Input::with_theme(theme)
+                .with_prompt(prompt)
+                .default(offered)
+                .interact_text()?)
+        },
+        |refusal| eprintln!("{} {refusal}", "✗".red()),
+    )
 }
 
 /// The id an interactive creation offers for the agent it names: the name
@@ -663,11 +696,11 @@ pub(crate) fn agent_id_for(name: &str) -> String {
 /// (AGENT-CREATE-CLI; *Rev 123*'s 123-4, (b)): `{config}`, the agent's
 /// config file as the route's `CreateAgentRequest` reads it, built from the
 /// type itself (`openalpaca_core::agent::config::AgentConfigFile`). The id
-/// is the one the person kept or typed ([`agent_id_with`]). The
-/// skills are the capabilities assigned (the type has no `skills`), the
-/// persona the preset's, the cost the one constraint when above zero. No
-/// temperature: the screens do not ask for one, since no agent turn sends a
-/// temperature to the model.
+/// is the one the person kept or typed, in [`agent_id_for`]'s form
+/// ([`agent_id_with`]). The skills are the capabilities assigned (the type
+/// has no `skills`), the persona the preset's, the cost the one constraint
+/// when above zero. No temperature: the screens do not ask for one, since
+/// no agent turn sends a temperature to the model.
 pub(crate) fn create_agent_body(
     id: &str,
     name: &str,

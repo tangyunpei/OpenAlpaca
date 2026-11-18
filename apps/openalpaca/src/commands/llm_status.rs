@@ -541,28 +541,28 @@ pub(super) async fn llm_status(format: OutputFormat) -> Result<()> {
 }
 
 /// `GET /v1/llm/usage/daily`'s path for `llm usage --daily`: thirty days,
-/// `agent_id` and `date` as typed (sent as they are, not encoded); held to
+/// `agent_id` and `date` as typed, encoded (*Rev 147*'s item 6, (b)); held to
 /// the route's query sample by `contract_queries` (CONTRACT-SAMPLES-3).
 pub(crate) fn usage_daily_path(agent: Option<&str>, date: Option<&str>) -> String {
     let mut path = "/v1/llm/usage/daily?limit=30".to_string();
     if let Some(a) = agent {
-        path.push_str(&format!("&agent_id={}", a));
+        path.push_str(&format!("&agent_id={}", urlencoding::encode(a)));
     }
     if let Some(d) = date {
-        path.push_str(&format!("&date={}", d));
+        path.push_str(&format!("&date={}", urlencoding::encode(d)));
     }
     path
 }
 
 /// `GET /v1/llm/usage`'s path for `llm usage`: fifty rows, `agent_id` and
-/// `key_id` as typed (sent as they are, not encoded).
+/// `key_id` as typed, encoded (*Rev 147*'s item 6, (b)).
 pub(crate) fn usage_path(agent: Option<&str>, key: Option<&str>) -> String {
     let mut path = "/v1/llm/usage?limit=50".to_string();
     if let Some(a) = agent {
-        path.push_str(&format!("&agent_id={}", a));
+        path.push_str(&format!("&agent_id={}", urlencoding::encode(a)));
     }
     if let Some(k) = key {
-        path.push_str(&format!("&key_id={}", k));
+        path.push_str(&format!("&key_id={}", urlencoding::encode(k)));
     }
     path
 }

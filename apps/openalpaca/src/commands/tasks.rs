@@ -278,12 +278,12 @@ pub async fn run(args: TasksArgs) -> Result<()> {
     }
 }
 
-/// `GET /v1/tasks`'s path for `tasks`: `status` as typed (sent as it is,
-/// not encoded); held to the route's query sample by `contract_queries`.
+/// `GET /v1/tasks`'s path for `tasks`: `status` as typed, encoded (*Rev
+/// 147*'s item 6, (b)); held to the route's query sample by `contract_queries`.
 pub(crate) fn list_path(status: Option<&str>, limit: usize) -> String {
     let mut path = format!("/v1/tasks?limit={}", limit);
     if let Some(s) = status {
-        path.push_str(&format!("&status={}", s));
+        path.push_str(&format!("&status={}", urlencoding::encode(s)));
     }
     path
 }

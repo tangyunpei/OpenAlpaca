@@ -408,8 +408,9 @@ fn the_query_helpers_split_name_and_match_routes() {
 }
 
 /// The builders this entry named send the bytes their inline `format!`s
-/// sent before (CONTRACT-SAMPLES-3 moved them, nothing else): a value the
-/// old code did not encode is still sent as typed.
+/// sent before (CONTRACT-SAMPLES-3 moved them, nothing else), but for the
+/// four values the old code did not encode, which are now encoded as the
+/// memory builders' are (*Rev 147*'s item 6, (b)): `a b` is `a%20b`.
 #[test]
 fn the_named_builders_send_what_the_inline_ones_sent() {
     use crate::commands::memory::{self, Around, ListFilters};
@@ -420,7 +421,7 @@ fn the_named_builders_send_what_the_inline_ones_sent() {
     assert_eq!(agents::list_path(None), "/v1/agents?limit=50");
     assert_eq!(
         agents::list_path(Some("a b")),
-        "/v1/agents?limit=50&status=a b"
+        "/v1/agents?limit=50&status=a%20b"
     );
     assert_eq!(tasks::list_path(None, 20), "/v1/tasks?limit=20");
     assert_eq!(
@@ -485,5 +486,52 @@ fn the_named_builders_send_what_the_inline_ones_sent() {
     assert_eq!(
         memory::timeline_path(&Around::Date("2026-06-10"), 5, 20),
         "/v1/memories/timeline?date=2026-06-10&before=5&after=20"
+    );
+}
+
+/// *Rev 147*'s item 6, (b): a value holding `&`, `#`, `%` or a space no
+/// longer splits or cuts the query — each of the four builders sends it
+/// encoded, and it decodes back whole.
+#[test]
+fn the_four_typed_query_values_are_sent_encoded() {
+    use crate::commands::{agents, llm_status, tasks};
+    let typed = "a&b=c#d%e f";
+    let sent = "a%26b%3Dc%23d%25e%20f";
+    assert_eq!(
+        agents::list_path(Some(typed)),
+        format!("/v1/agents?limit=50&status={sent}")
+    );
+    assert_eq!(
+        tasks::list_path(Some(typed), 20),
+        format!("/v1/tasks?limit=20&status={sent}")
+    );
+    assert_eq!(
+        llm_status::usage_daily_path(Some(typed), Some(typed)),
+        format!("/v1/llm/usage/daily?limit=30&agent_id={sent}&date={sent}")
+    );
+    assert_eq!(
+        llm_status::usage_path(Some(typed), Some(typed)),
+        format!("/v1/llm/usage?limit=50&agent_id={sent}&key_id={sent}")
+    );
+    for path in [
+        agents::list_path(Some(typed)),
+        tasks::list_path(Some(typed), 20),
+        llm_status::usage_daily_path(Some(typed), Some(typed)),
+        llm_status::usage_path(Some(typed), Some(typed)),
+    ] {
+        let (_, query) = path.split_once('?').expect("a query");
+        let values: Vec<String> = query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .filter(|(key, _)| *key != "limit")
+            .map(|(_, v)| urlencoding::decode(v).expect("UTF-8").into_owned())
+            .collect();
+        assert!(!values.is_empty(), "{path}");
+        assert!(values.iter().all(|v| v == typed), "{path}: {values:?}");
+    }
+    // A run instance's id keeps its meaning: `:` is encoded too.
+    assert_eq!(
+        llm_status::usage_path(Some("reader::1a2b"), None),
+        "/v1/llm/usage?limit=50&agent_id=reader%3A%3A1a2b"
     );
 }

@@ -849,15 +849,19 @@ fn agent_status_prints_no_total_cost_line() {
 }
 
 /// *Rev 142*'s item 11, (a): both interactive creations ask the id after
-/// the name, with the id derived from it as the default, and post the
-/// answer as given — no check here; the route refuses a taken id.
+/// the name, with the id derived from it as the default, and post an
+/// answer in that form as given; the route refuses a taken id.
 #[test]
 fn the_agent_id_is_asked_with_the_derived_id_as_its_default() {
     let mut asked = Vec::new();
-    let id = agent_id_with("Code Reviewer", |prompt, default| {
-        asked.push((prompt.to_string(), default));
-        Ok("reviewer_2".to_string())
-    })
+    let id = agent_id_with(
+        "Code Reviewer",
+        |prompt, default| {
+            asked.push((prompt.to_string(), default));
+            Ok("reviewer_2".to_string())
+        },
+        |refusal| panic!("refused: {refusal}"),
+    )
     .unwrap();
     assert_eq!(id, "reviewer_2");
     assert_eq!(
@@ -867,11 +871,59 @@ fn the_agent_id_is_asked_with_the_derived_id_as_its_default() {
     assert!(AGENT_ID_PROMPT.contains("id"), "{AGENT_ID_PROMPT}");
     // Enter keeps the default: a name with no ASCII letter or digit still
     // offers `agent`, which the person can now change.
-    let kept = agent_id_with("代理", |_, default| Ok(default)).unwrap();
+    let kept = agent_id_with("代理", |_, default| Ok(default), |r| panic!("{r}")).unwrap();
     assert_eq!(kept, "agent");
     let body = create_agent_body("reviewer_2", "Code Reviewer", "", "m", "", &[], 0.0);
     assert_eq!(body["config"]["agent"]["id"], "reviewer_2");
     assert_eq!(body["config"]["agent"]["name"], "Code Reviewer");
+}
+
+/// *Rev 147*'s item 4, the CLI side: a typed id `agent_id_for` would
+/// change is refused and asked again — `../x` once reached the daemon's
+/// path join as typed — its form of the answer offered; only an answer in
+/// that form is sent, as before the id could be typed.
+#[test]
+fn a_typed_agent_id_in_another_form_is_asked_again() {
+    let mut answers = vec!["x", "Reviewer 2", "../x"];
+    let mut asked = Vec::new();
+    let mut said = Vec::new();
+    let id = agent_id_with(
+        "Code Reviewer",
+        |_, offered| {
+            asked.push(offered);
+            Ok(answers
+                .pop()
+                .expect("asked no more than answered")
+                .to_string())
+        },
+        |refusal| said.push(refusal.to_string()),
+    )
+    .unwrap();
+    assert_eq!(id, "x");
+    assert_eq!(asked, ["code_reviewer", "x", "reviewer_2"]);
+    assert_eq!(
+        said,
+        [
+            "'../x' is not an agent id: an id holds only lower-case ASCII letters and digits, \
+             each run of other characters one `_`, none at either end; `x` is that form of it",
+            "'Reviewer 2' is not an agent id: an id holds only lower-case ASCII letters and \
+             digits, each run of other characters one `_`, none at either end; `reviewer_2` \
+             is that form of it",
+        ]
+    );
+}
+
+/// The ids taken are exactly those `agent_id_for` leaves as they are.
+#[test]
+fn an_agent_id_is_taken_only_in_agent_id_for_s_form() {
+    for ok in ["code_reviewer", "agent", "a1", "x"] {
+        assert_eq!(agent_id_refusal(ok), None, "{ok}");
+    }
+    for refused in [
+        "", "a__b", "_a", "a_", "A", "a-b", "a b", "../x", "a/b", "日本",
+    ] {
+        assert!(agent_id_refusal(refused).is_some(), "{refused}");
+    }
 }
 
 /// The capabilities prompt's examples are capabilities a shipped template
