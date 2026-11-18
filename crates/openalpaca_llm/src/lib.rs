@@ -238,6 +238,7 @@ mod tests {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("tool_calls"));

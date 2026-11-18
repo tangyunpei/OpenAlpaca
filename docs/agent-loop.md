@@ -26,7 +26,7 @@ siblings); `cache_markers` lives in the provider layer and carries only
 | 3 | `loop.step.cost_check` | Accumulate round cost; return CostExceeded if over `config.max_cost` | step 3 |
 | 4 | `loop.step.compaction` | Graduated budget-aware history compaction | step 4 |
 | 5 | `loop.step.build_request` | Assemble `RouterRequest` for this iteration | step 5 |
-| 6 | `loop.step.pressure_layer` | Compute the ephemeral budget notice (fires only at >=80% cost or rounds, flag-gated) | nested in step 5 |
+| 6 | `loop.step.pressure_layer` | Append the budget notice to the run's list, where it stays (fires only at >=80% cost or rounds, flag-gated) | nested in step 5 |
 | 7 | `loop.step.cache_markers` | Apply the three Anthropic `cache_control: ephemeral` markers (system, last tool, last message) | `providers/anthropic/request.rs` |
 | 8 | `loop.step.llm_call` | Dispatch `backend.complete(...)` under `tokio::select!` with the cancel token | step 8 |
 | 9 | `loop.step.response_parse` | Parse the `ChatResponse`; split into tool-call branch or final-text branch | step 9 |
@@ -736,21 +736,29 @@ Prefer concluding the current task over opening new tool calls. ...
 [/budget_notice]
 ```
 
-Placement: always last, never in the system prompt. Anthropic — a `user`
-message of one text block after the request's last message (after the tool
-results; the API combines consecutive user messages into one turn), added
-after the cache breakpoints, so it carries no `cache_control` and the
-system prompt and cached prefix are the request's without it
-(ANTHROPIC-THINKING; Anthropic's preserved-thinking pages, read 2026-11-14:
-keep `system` the same and "Put every update in a new message at the
-end"). OpenAI/Ollama — tail `system`-role message in the `messages` array
-(on OpenAI's Responses API, C7b, the last item of the `input` array).
+Placement: last in the request it is sent with, never in the system
+prompt, and kept there (BUDGET-NOTICE-KEPT, the owner's "Budget notice: A"
+of 2026-11-17, reversing spec P0b's "never appended"). The loop appends it
+to the run's list as `ChatMessage::notice` after compaction and the
+steering drain, one per round from 80%, and leaves it there, so every
+later request carries each notice in its place and the history before
+every turn is what that turn saw. Anthropic — a `user` message of one text
+block in its place (after the tool results; the API combines consecutive
+user messages into one turn), with no `cache_control` (ANTHROPIC-THINKING;
+Anthropic's preserved-thinking pages, read 2026-11-14: keep `system` the
+same and "Put every update in a new message at the end, and leave it
+there"). OpenAI/Ollama — a `system`-role message in its place in the
+`messages` array (on OpenAI's Responses API, C7b, an item of the `input`
+array).
 
-The notice is stateless (recomputed per iteration), never persisted to
-conversation history, and never mutates the `Arc<Vec<ChatMessage>>` the
-loop holds. Since the next request does not repeat it where it was, a turn
-produced under a notice is kept without its thinking or reasoning (see
-*Thinking blocks within one run*).
+The notice is recomputed per iteration and lives only in the loop's list:
+it is never written as sent to the session log or a conversation's
+history, though a compaction's working state may sum it up with the
+older messages it folds in. A request that fails takes its notice back
+before the retry, which sends its own. A turn produced under a notice
+keeps its thinking or reasoning like any other (see *Thinking blocks
+within one run*). The notices are part of what a compaction reads and of
+the cached prefix of every later request.
 
 ## Cache Breakpoint Topology (Anthropic)
 
@@ -758,8 +766,8 @@ Three of Anthropic's four allowed `cache_control: ephemeral` markers:
 
 1. System prompt block.
 2. Last tool definition.
-3. Last message's last content block (spec P1); with the budget notice on, the
-   block before the notice, which follows it with no marker.
+3. Last message's last content block (spec P1); never a budget notice's: with
+   one sent last, the block before it, and a notice carries no marker.
 
 Verify via `usage.cache_read_input_tokens` in the `ChatResponse`.
 
@@ -938,12 +946,9 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   back unchanged. This holds for a tool call's turn, the `MaxTokens`
   continuation, the steering drain and the answer guard's round. A
   compaction takes every kept block out of the run's list for good; never
-  some of them. A turn produced under a budget notice is kept without its
-  blocks (the notice was that request's last message and the next request
-  does not repeat it there); the blocks before the first notice stay
-  (ANTHROPIC-THINKING; the pages let a request leave out "the newest"
-  blocks, read 2026-11-14), though the thinking page asks for a tool-use
-  turn's thinking back (an owner item: keep the notice where it was sent).
+  some of them. A turn produced under a budget notice keeps its blocks:
+  the notice stays in the run's list where it was sent, so the next
+  request repeats it in its place (BUDGET-NOTICE-KEPT).
   A turn cut at `max_tokens` before any text or tool call is continued
   only when its round streams (a main-loop or skill turn streamed to its
   chat); a lead's or subagent's round ends its run on an empty-completion
@@ -965,13 +970,12 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   OpenAI's Responses API (C7b, a request with tools to OpenAI's own API)
   keeps a turn's output items the same way when the turn carried a
   reasoning item, and sends them back before the turn's tool results, its
-  reasoning encrypted as OpenAI returned it; the same compaction and notice
-  rules take them out. There the notice is the last input item, so a turn
-  produced under it follows it, and the next request, which moves it, is a
-  prefix change after which OpenAI drops that reasoning ("Keep the prefix
-  unchanged", read 2026-11-12): that turn's reasoning is not sent back, and
-  the reasoning before the first notice is. Each arm sends back only a
-  turn its own API returned.
+  reasoning encrypted as OpenAI returned it; only a compaction takes them
+  out. A budget notice stays in its place as an `input` item, so each
+  request is a prefix of the next ("Keep the prefix unchanged", read
+  2026-11-12) and a turn produced under a notice goes back with its
+  reasoning (BUDGET-NOTICE-KEPT). Each arm sends back only a turn its own
+  API returned.
   The thinking text can be streamed to a watching client (see
   [Streaming](#streaming)). It is persisted nowhere: the field is never
   serialized, so no session log, row or history line holds it.

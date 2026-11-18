@@ -811,6 +811,7 @@ fn test_flatten_messages() {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         },
         ChatMessage::user("Hello"),
         ChatMessage {
@@ -821,6 +822,7 @@ fn test_flatten_messages() {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         },
     ];
     let flattened = flatten_messages(&messages);
@@ -840,6 +842,7 @@ fn test_truncate_messages_for_cli_small_input() {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         },
         ChatMessage::user("Hello"),
         ChatMessage {
@@ -850,6 +853,7 @@ fn test_truncate_messages_for_cli_small_input() {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         },
     ];
     let result = truncate_messages_for_cli(&messages);
@@ -872,6 +876,7 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         },
         ChatMessage::user(&big_content), // middle — should be dropped
         ChatMessage {
@@ -882,6 +887,7 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         }, // middle — should be dropped
         ChatMessage::user(&big_content), // middle — should be dropped
         ChatMessage {
@@ -892,6 +898,7 @@ fn test_truncate_messages_for_cli_large_input() {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         }, // second-to-last — kept
         ChatMessage::user("What next?"), // last — kept
     ];

@@ -932,6 +932,118 @@ fn the_budget_notice_follows_the_cached_tail_and_carries_no_cache_control() {
     );
 }
 
+// ── BUDGET-NOTICE-KEPT: a kept notice goes in its place ─────────────────
+
+/// A thinking turn calling `search` as `id`, its blocks as Anthropic
+/// returned them.
+fn kept_thinking_turn(id: &str) -> ChatMessage {
+    let blocks = vec![
+        serde_json::json!({"type": "thinking", "thinking": "plan", "signature": format!("sig-{id}")}),
+        serde_json::json!({"type": "tool_use", "id": id, "name": "search", "input": {"q": "x"}}),
+    ];
+    ChatMessage {
+        tool_calls: Some(vec![crate::types::ToolCall {
+            id: id.to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"q": "x"}),
+        }]),
+        echo: crate::types::EchoedTurn::from_blocks(blocks),
+        ..ChatMessage::assistant("")
+    }
+}
+
+/// Round N's request, ending with the notice it sends, and round N+1's: N's
+/// list, the turn produced under the notice and its result, then N+1's own
+/// notice — as the loop keeps them (`ChatMessage::notice`).
+fn kept_notice_rounds(enable_caching: bool) -> (ChatRequest, ChatRequest) {
+    let mut first = notice_request(enable_caching, None);
+    let mut list = first.messages.to_vec();
+    list.push(ChatMessage::notice(
+        "[budget_notice]\n80% used\n[/budget_notice]",
+    ));
+    first.messages = Arc::new(list.clone());
+    list.push(kept_thinking_turn("tc_2"));
+    list.push(ChatMessage::tool_result("tc_2", "found again"));
+    list.push(ChatMessage::notice(
+        "[budget_notice]\n90% used\n[/budget_notice]",
+    ));
+    let second = ChatRequest {
+        messages: Arc::new(list),
+        ..notice_request(enable_caching, None)
+    };
+    (first, second)
+}
+
+/// A kept notice goes where it was sent, a user text block of its own as
+/// the per-request one always went, never into `system`; the request that
+/// sent it is a prefix of the next, and the turn produced under it goes
+/// back with its thinking.
+#[test]
+fn a_kept_notice_goes_in_its_place_and_the_turn_after_keeps_its_thinking() {
+    let (first, second) = kept_notice_rounds(false);
+    let before = request::build_request_body("claude-test", 1024, &first);
+    let after = request::build_request_body("claude-test", 1024, &second);
+    let plain = request::build_request_body("claude-test", 1024, &notice_request(false, None));
+
+    assert_eq!(before["system"], "plain system", "{before}");
+    assert_eq!(after["system"], before["system"]);
+    let sent = before["messages"].as_array().unwrap();
+    let next = after["messages"].as_array().unwrap();
+    assert_eq!(&next[..sent.len()], &sent[..], "round N is a prefix of N+1");
+    assert_eq!(
+        sent.last().unwrap(),
+        &serde_json::json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "[budget_notice]\n80% used\n[/budget_notice]"}],
+        }),
+        "the notice as the per-request notice goes"
+    );
+    let per_request = request::build_request_body(
+        "claude-test",
+        1024,
+        &notice_request(false, Some("[budget_notice]\n80% used\n[/budget_notice]")),
+    );
+    assert_eq!(before, per_request, "kept or per-request, the same body");
+    assert_eq!(
+        &sent[..sent.len() - 1],
+        plain["messages"].as_array().unwrap().as_slice()
+    );
+    assert_eq!(next[sent.len()]["role"], "assistant");
+    assert_eq!(next[sent.len()]["content"][0]["type"], "thinking");
+    assert_eq!(next[sent.len()]["content"][0]["signature"], "sig-tc_2");
+    assert_eq!(next.len(), sent.len() + 3);
+    assert_eq!(
+        next.last().unwrap()["content"][0]["text"],
+        "[budget_notice]\n90% used\n[/budget_notice]"
+    );
+}
+
+/// With caching on no breakpoint goes on a kept notice: the last message
+/// before the newest notice carries it, and the older notice, inside the
+/// cached prefix now, carries none.
+#[test]
+fn a_kept_notice_carries_no_cache_control() {
+    let (first, second) = kept_notice_rounds(true);
+    let before = request::build_request_body("claude-test", 1024, &first);
+    let per_request = request::build_request_body(
+        "claude-test",
+        1024,
+        &notice_request(true, Some("[budget_notice]\n80% used\n[/budget_notice]")),
+    );
+    assert_eq!(before, per_request, "kept or per-request, the same body");
+
+    let after = request::build_request_body("claude-test", 1024, &second);
+    let next = after["messages"].as_array().unwrap();
+    let marked: Vec<usize> = (0..next.len())
+        .filter(|&i| next[i].to_string().contains("cache_control"))
+        .collect();
+    assert_eq!(
+        marked,
+        vec![next.len() - 2],
+        "the tool result before the notice: {after}"
+    );
+}
+
 /// With no system prompt, a notice adds none: it is the last message.
 #[test]
 fn a_notice_with_no_system_prompt_sends_no_system() {

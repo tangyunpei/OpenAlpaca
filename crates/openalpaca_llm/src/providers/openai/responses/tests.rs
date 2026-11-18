@@ -370,6 +370,52 @@ fn the_ephemeral_notice_is_the_last_input_item() {
     );
 }
 
+/// BUDGET-NOTICE-KEPT: a kept notice goes in its place, a `system` item as
+/// the per-request one goes; the request that sent it is a prefix of the
+/// next, and the turn produced under it goes back with its reasoning.
+#[test]
+fn a_kept_notice_goes_in_its_place_and_the_turn_after_keeps_its_reasoning() {
+    let provider = cloud();
+    let output = serde_json::json!([
+        reasoning_item("rs_2", Some("gAAAA-encrypted")),
+        call_item("call_2", "search", r#"{"q":"more"}"#),
+    ]);
+    let response = provider
+        .parse_responses_response(answer(output.clone()))
+        .expect("parses");
+    let mut list = vec![ChatMessage::system("Base."), ChatMessage::user("go")];
+    let mut per_request = request(list.clone(), vec![closed_tool("search")]);
+    per_request.ephemeral_system_notice = Some("[budget_notice] 80%".to_string());
+    list.push(ChatMessage::notice("[budget_notice] 80%"));
+    let first = provider.build_responses_body(&request(list.clone(), vec![closed_tool("search")]));
+    assert_eq!(
+        first,
+        provider.build_responses_body(&per_request),
+        "the same body"
+    );
+    list.push(ChatMessage::assistant_with_tools(&response));
+    list.push(ChatMessage::tool_result("call_2", "2 more"));
+    list.push(ChatMessage::notice("[budget_notice] 90%"));
+    let second = provider.build_responses_body(&request(list, vec![closed_tool("search")]));
+
+    let sent = first["input"].as_array().unwrap();
+    let next = second["input"].as_array().unwrap();
+    assert_eq!(&next[..sent.len()], &sent[..], "round N is a prefix of N+1");
+    assert_eq!(
+        sent.last().unwrap(),
+        &serde_json::json!({"role": "system", "content": "[budget_notice] 80%"})
+    );
+    assert_eq!(
+        &next[sent.len()..sent.len() + 2],
+        output.as_array().unwrap().as_slice()
+    );
+    assert_eq!(
+        next.last().unwrap(),
+        &serde_json::json!({"role": "system", "content": "[budget_notice] 90%"})
+    );
+    assert!(second.get("instructions").is_none());
+}
+
 /// A user message's parts become `input_text` and `input_image` items.
 #[test]
 fn a_user_messages_parts_become_input_content() {

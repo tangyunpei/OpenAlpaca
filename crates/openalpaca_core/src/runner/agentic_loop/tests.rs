@@ -1671,18 +1671,15 @@ struct MockRouterProvider {
     responses: Vec<Result<ChatResponse, LlmError>>,
     call_count: AtomicUsize,
     /// Records the `ephemeral_system_notice` field from every incoming
-    /// `ChatRequest`. Exposed via `notices_seen()` for Task 5 (P0b) tests
-    /// that need to assert what the backend actually received.
+    /// `ChatRequest`. Exposed via `notices_seen()`: the loop's budget notice
+    /// rides in the messages (BUDGET-NOTICE-KEPT), so it stays `None`.
     notices: std::sync::Mutex<Vec<Option<String>>>,
-    /// Records the system-message count of the messages sent with each
-    /// `chat()` call. Used by Task 5 (P0b) to confirm the ephemeral
-    /// notice is not persisted into the conversation (i.e., the request
-    /// never carries more than the original single system prompt).
-    system_count_per_call: std::sync::Mutex<Vec<usize>>,
     /// The content of every `Role::Tool` message the backend has been sent —
     /// what the *model* actually sees of a tool result, which is not what the
     /// session log records (§5.4: the log keeps the untruncated payload).
     tool_results_seen: std::sync::Mutex<Vec<String>>,
+    /// The text of every message of each `chat()` call, in order.
+    contents_per_call: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl MockRouterProvider {
@@ -1691,9 +1688,18 @@ impl MockRouterProvider {
             responses,
             call_count: AtomicUsize::new(0),
             notices: std::sync::Mutex::new(Vec::new()),
-            system_count_per_call: std::sync::Mutex::new(Vec::new()),
             tool_results_seen: std::sync::Mutex::new(Vec::new()),
+            contents_per_call: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// The text of every message of each call, oldest call first.
+    #[allow(dead_code)]
+    fn contents_seen(&self) -> Vec<Vec<String>> {
+        self.contents_per_call
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// The tool-result texts the model was given, newest call last.
@@ -1709,15 +1715,6 @@ impl MockRouterProvider {
     #[allow(dead_code)]
     fn notices_seen(&self) -> Vec<Option<String>> {
         self.notices
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
-    }
-
-    /// Snapshot the per-call count of system messages observed so far.
-    #[allow(dead_code)]
-    fn system_counts_seen(&self) -> Vec<usize> {
-        self.system_count_per_call
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
@@ -1739,15 +1736,10 @@ impl LlmProvider for MockRouterProvider {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(request.ephemeral_system_notice.clone());
-        let system_count = request
-            .messages
-            .iter()
-            .filter(|m| matches!(m.role, openalpaca_llm::Role::System))
-            .count();
-        self.system_count_per_call
+        self.contents_per_call
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push(system_count);
+            .push(request.messages.iter().map(|m| m.content.clone()).collect());
         {
             let mut seen = self
                 .tool_results_seen
@@ -2508,7 +2500,7 @@ async fn test_ten_loop_step_spans_emitted() {
     }
 }
 
-// ─── Task 5 (P0b): ephemeral budget-pressure notice tests ────────────
+// ─── Task 5 (P0b, BUDGET-NOTICE-KEPT): budget-pressure notice tests ──
 
 /// Shared fixture: build a router over a `MockRouterProvider` that always
 /// returns a cheap one-shot response, then drive `run_agentic_loop_routed`
@@ -2586,7 +2578,7 @@ async fn run_loop_with_seeded_cost(
 #[tokio::test]
 async fn test_ephemeral_notice_absent_when_flag_off() {
     // Even though cost is at 90% of the budget, the flag is off — so the
-    // backend must see `ephemeral_system_notice = None`.
+    // backend sees no notice, beside the messages or among them.
     let (_result, provider) = run_loop_with_seeded_cost(
         /* experimental_ephemeral_pressure = */ false,
         /* simulated_cost = */ 0.009,
@@ -2604,12 +2596,18 @@ async fn test_ephemeral_notice_absent_when_flag_off() {
         "flag off but backend saw a notice: {:?}",
         notices
     );
+    for contents in provider.contents_seen() {
+        assert!(
+            contents.iter().all(|c| !c.contains("[budget_notice]")),
+            "flag off but a message is a notice: {contents:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn test_ephemeral_notice_fires_over_cost_threshold() {
-    // Flag on, cost at 90% — the backend must see a notice containing the
-    // `[budget_notice]` envelope and the 90% cost figure.
+    // Flag on, cost at 90% — the request's last message is the notice, with
+    // the `[budget_notice]` envelope and the 90% cost figure.
     let (_result, provider) = run_loop_with_seeded_cost(
         /* experimental_ephemeral_pressure = */ true,
         /* simulated_cost = */ 0.009,
@@ -2617,33 +2615,29 @@ async fn test_ephemeral_notice_fires_over_cost_threshold() {
     )
     .await;
 
-    let notices = provider.notices_seen();
-    let first = notices
+    let contents = provider.contents_seen();
+    let first = contents
         .into_iter()
         .next()
         .expect("expected at least one chat() call");
-    let notice = first.expect("flag on with cost at 90% — expected Some(notice)");
+    let notice = first.last().expect("a request has messages");
     assert!(
         notice.contains("[budget_notice]"),
-        "notice missing [budget_notice] envelope: {}",
-        notice
+        "the last message is not the notice: {first:?}"
     );
     assert!(
-        notice.contains("90%") || notice.contains("90"),
+        notice.contains("90%"),
         "notice missing 90% cost figure: {}",
         notice
     );
 }
 
 #[tokio::test]
-async fn test_ephemeral_notice_not_persisted_in_messages() {
-    // Flag on, cost at 90%. The notice must ride on the ephemeral
-    // per-request field and never be appended to the persistent message
-    // list. We assert this by inspecting the `role_counts` of the
-    // messages the backend actually received: there must be exactly one
-    // System message (the original system prompt), NOT two (the original
-    // + a pushed notice, which is what the old broken append used to
-    // do).
+async fn test_ephemeral_notice_is_kept_in_the_list_not_beside_it() {
+    // BUDGET-NOTICE-KEPT (the owner, 2026-11-17, reversing spec P0b's "never
+    // appended"): flag on, cost at 90%, the notice is one message of the
+    // list — the original system prompt and user message, then the notice —
+    // and the per-request field is left empty.
     let (result, provider) = run_loop_with_seeded_cost(
         /* experimental_ephemeral_pressure = */ true,
         /* simulated_cost = */ 0.009,
@@ -2657,21 +2651,71 @@ async fn test_ephemeral_notice_not_persisted_in_messages() {
         "unexpected finish reason: {:?}",
         result.finish_reason
     );
+    assert_eq!(provider.notices_seen(), vec![None]);
+    let contents = provider.contents_seen();
+    assert_eq!(contents.len(), 1, "expected exactly one chat() call");
+    assert_eq!(contents[0].len(), 3, "{:?}", contents[0]);
+    assert_eq!(contents[0][..2], ["You are a helpful assistant.", "hello"]);
+    assert!(contents[0][2].contains("[budget_notice]"));
+}
 
-    let system_counts = provider.system_counts_seen();
-    assert_eq!(
-        system_counts.len(),
-        1,
-        "expected exactly one chat() call, got {}",
-        system_counts.len()
+/// A request that failed produced no turn, so its notice is not kept: the
+/// retry carries one notice, its own, last — never two.
+#[tokio::test(start_paused = true)]
+async fn a_retried_request_carries_one_budget_notice() {
+    use openalpaca_llm::error::TransportKind;
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Err(LlmError::Transport {
+            kind: TransportKind::RequestTimeout,
+            message: "error sending request for url (http://127.0.0.1:1/)".to_string(),
+        }),
+        Ok(MockProvider::simple_response("Done.")),
+    ]));
+    let router = LlmRouter::single_provider(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        ProviderType::Anthropic,
+        "claude-sonnet-5-5".to_string(),
     );
-    assert_eq!(
-        system_counts[0], 1,
-        "expected exactly one system message in the persistent history \
-         (not 2 — the old broken append would have pushed a second one), \
-         got {}",
-        system_counts[0]
-    );
+    let acc = LoopCostAccumulator::new();
+    acc.add_usd(0.009);
+    let config = LoopConfig {
+        max_rounds: 5,
+        max_cost: 0.01,
+        model: Some("claude-sonnet-5-5".to_string()),
+        enable_caching: false,
+        thinking: None,
+        experimental_ephemeral_pressure: true,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::system("Be brief."), ChatMessage::user("hello")],
+        vec![],
+        &config,
+        None,
+        "test-agent",
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(acc),
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    let contents = provider.contents_seen();
+    assert_eq!(contents.len(), 2, "one failed call, one retry");
+    for (i, call) in contents.iter().enumerate() {
+        let notices: Vec<usize> = call
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.contains("[budget_notice]"))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(notices, vec![call.len() - 1], "call {i}: {call:?}");
+    }
 }
 
 // ─── Routing V2: steering drain tests ────────────────────────────────
@@ -6859,52 +6903,131 @@ async fn a_compaction_takes_every_thinking_block_out_and_keeps_it_out() {
     assert!(compactions > 0, "a compaction ran");
 }
 
-/// The budget notice is the last message of the request that carries it,
-/// and the next request does not repeat it there (ANTHROPIC-THINKING), so
-/// only a turn produced under a notice loses its thinking: the request that
-/// first carries one sends every earlier block, and each later one every
-/// block but those of the turns produced under a notice — the newest, which
-/// the pages let a request leave out (.../preserved-thinking/
-/// change-tools-or-instructions, read 2026-11-14: "Leave out the oldest
-/// blocks, the newest, or all of them, but none in between").
-#[tokio::test]
-async fn a_budget_notice_takes_out_only_the_thinking_produced_under_it() {
-    let mut responses: Vec<ChatResponse> = (0..18)
-        .map(|i| thinking_tool_turn(&format!("tc_{i}"), &format!("sig-{i}"), 0))
-        .collect();
+/// A Responses API turn (C7b) that calls `search` once: a reasoning item
+/// with its encrypted content, then the call.
+fn reasoning_tool_turn(id: &str) -> ChatResponse {
+    let items = vec![
+        serde_json::json!({
+            "type": "reasoning", "id": format!("rs_{id}"), "summary": [],
+            "encrypted_content": format!("enc-{id}")
+        }),
+        serde_json::json!({
+            "type": "function_call", "id": format!("fc_{id}"), "call_id": id,
+            "name": "search", "arguments": "{\"query\":\"test\"}"
+        }),
+    ];
+    ChatResponse {
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: id.to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"query": "test"}),
+        }],
+        finish_reason: FinishReason::ToolUse,
+        echo: openalpaca_llm::EchoedTurn::from_response_items(items),
+        ..MockProvider::simple_response("")
+    }
+}
+
+/// Where each budget notice sits in a request's messages, with its text.
+fn notices_in(request: &ChatRequest) -> Vec<(usize, String)> {
+    request
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.contains("[budget_notice]"))
+        .map(|(i, m)| (i, m.content.clone()))
+        .collect()
+}
+
+/// A message as a request carries it, for comparing two requests' lists.
+fn sent(m: &ChatMessage) -> (String, String, Option<openalpaca_llm::EchoedTurn>) {
+    (format!("{:?}", m.role), m.content.clone(), m.echo.clone())
+}
+
+/// Nine tool turns of `turn`, then an answer, under a 10-round budget with
+/// the pressure layer `on` or off: the notice fires from round 8 (80%).
+async fn ten_round_run(turn: fn(&str) -> ChatResponse, on: bool) -> Vec<ChatRequest> {
+    let mut responses: Vec<ChatResponse> = (0..9).map(|i| turn(&format!("tc_{i}"))).collect();
     responses.push(MockProvider::simple_response("Done."));
     let provider = EchoRecorder::new(responses);
     let config = LoopConfig {
-        max_rounds: 20,
+        max_rounds: 10,
         enable_caching: false,
-        experimental_ephemeral_pressure: true,
+        experimental_ephemeral_pressure: on,
         ..Default::default()
     };
-
     let result = run_recorded(&provider, &config).await;
-
     assert_eq!(result.finish_reason, LoopFinishReason::Complete);
-    let requests = provider.requests();
-    assert_eq!(requests.len(), 19);
-    assert!(requests[15].ephemeral_system_notice.is_none());
-    for (i, request) in requests.iter().enumerate().skip(16) {
+    provider.requests()
+}
+
+/// BUDGET-NOTICE-KEPT (the owner, 2026-11-17: "Budget notice: A"): each
+/// budget notice stays in the run's list where it was sent — the request's
+/// last message — so every later request carries it in its place, the
+/// request before a turn is a prefix of the one after it, and the turn
+/// produced under a notice goes back with its thinking (Anthropic) or its
+/// reasoning (OpenAI's Responses API), as every other turn does.
+fn assert_notices_kept_in_place(requests: &[ChatRequest]) {
+    assert_eq!(requests.len(), 10);
+    for (i, request) in requests.iter().enumerate() {
         assert!(
-            request.ephemeral_system_notice.is_some(),
-            "request {i} carries the notice"
+            request.ephemeral_system_notice.is_none(),
+            "request {i}: the notice rides in the list, not beside it"
         );
     }
-    let kept =
-        |i: usize| -> Vec<bool> { echoes(&requests[i]).iter().map(Option::is_some).collect() };
+    assert!(notices_in(&requests[7]).is_empty(), "no notice before 80%");
+    let first = notices_in(&requests[8]);
+    assert_eq!(first.len(), 1, "request 8 carries one notice");
+    assert_eq!(first[0].0, requests[8].messages.len() - 1, "sent last");
+    let second = notices_in(&requests[9]);
+    assert_eq!(second.len(), 2, "request 9 keeps 8's and adds its own");
+    assert_eq!(second[0], first[0], "8's notice stays where it was sent");
     assert_eq!(
-        kept(16),
-        vec![true; 16],
-        "the first notice takes nothing out"
+        second[1].0,
+        requests[9].messages.len() - 1,
+        "the new one last"
     );
-    let mut expected = vec![true; 16];
-    expected.push(false);
-    assert_eq!(kept(17), expected, "the turn under the notice goes without");
-    expected.push(false);
-    assert_eq!(kept(18), expected, "and so does every later one");
+    let before: Vec<_> = requests[8].messages.iter().map(sent).collect();
+    let after: Vec<_> = requests[9].messages[..before.len()]
+        .iter()
+        .map(sent)
+        .collect();
+    assert_eq!(before, after, "request 8 is a prefix of request 9");
+    let kept: Vec<bool> = echoes(&requests[9]).iter().map(Option::is_some).collect();
+    assert_eq!(kept, vec![true; 9], "every turn keeps its thinking");
+}
+
+#[tokio::test]
+async fn a_budget_notice_stays_where_it_was_sent_and_thinking_goes_back() {
+    let requests = ten_round_run(|id| thinking_tool_turn(id, &format!("sig-{id}"), 0), true).await;
+    assert_notices_kept_in_place(&requests);
+}
+
+#[tokio::test]
+async fn a_budget_notice_stays_where_it_was_sent_and_reasoning_goes_back() {
+    let requests = ten_round_run(reasoning_tool_turn, true).await;
+    assert_notices_kept_in_place(&requests);
+}
+
+/// With the pressure layer off (the default) nothing of this reaches a
+/// request: no notice, in the list or beside it, and each request is the
+/// last one plus the turn and its result.
+#[tokio::test]
+async fn with_the_pressure_layer_off_no_request_carries_a_notice() {
+    for turn in [
+        (|id: &str| thinking_tool_turn(id, &format!("sig-{id}"), 0)) as fn(&str) -> ChatResponse,
+        reasoning_tool_turn,
+    ] {
+        let requests = ten_round_run(turn, false).await;
+        assert_eq!(requests.len(), 10);
+        for (i, request) in requests.iter().enumerate() {
+            assert!(request.ephemeral_system_notice.is_none(), "request {i}");
+            assert!(notices_in(request).is_empty(), "request {i}");
+            assert_eq!(request.messages.len(), 2 + 2 * i, "request {i}");
+            let kept: Vec<bool> = echoes(request).iter().map(Option::is_some).collect();
+            assert_eq!(kept, vec![true; i], "request {i}");
+        }
+    }
 }
 
 /// A loop with a context budget asks the server to keep every turn's

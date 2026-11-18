@@ -145,9 +145,25 @@ pub(super) fn build_request_body(
     // back with its thinking either — a block left out between two that are
     // kept fails the API's check on every block after it.
     let mut thinking_left_out = false;
+    // Where the kept budget notices went (BUDGET-NOTICE-KEPT): no cache
+    // breakpoint goes on one, so the request that sends a notice caches what
+    // it would have cached without it.
+    let mut notice_slots: Vec<usize> = Vec::new();
 
     for msg in request.messages.iter() {
         match msg.role {
+            // A kept budget notice (BUDGET-NOTICE-KEPT): in its place, as
+            // the per-request notice below has always gone — a user text
+            // block of its own, never in `system`, which stays the same on
+            // every request (.../preserved-thinking/prefix-checks, read
+            // 2026-11-14), so each later request repeats it as it was sent.
+            Role::System if msg.notice => {
+                notice_slots.push(messages.len());
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": [{"type": "text", "text": msg.content}],
+                }));
+            }
             Role::System => {
                 if !system_text.is_empty() {
                     system_text.push('\n');
@@ -291,9 +307,13 @@ pub(super) fn build_request_body(
         }
 
         // Third breakpoint: conversation tail. Attach cache_control to the
-        // last message's last content block. (Introduced in P1 / Task 1.)
+        // last message's last content block (introduced in P1 / Task 1) —
+        // the last but a kept budget notice sent after it.
         if let Some(serde_json::Value::Array(msgs_arr)) = body.get_mut("messages")
-            && let Some(last_msg) = msgs_arr.last_mut()
+            && let Some(last_msg) = (0..msgs_arr.len())
+                .rev()
+                .find(|at| !notice_slots.contains(at))
+                .and_then(|at| msgs_arr.get_mut(at))
         {
             let content = &mut last_msg["content"];
             match content {
@@ -320,7 +340,7 @@ pub(super) fn build_request_body(
         }
     }
 
-    // The ephemeral notice (the budget notice, spec P0b): the request's last
+    // The per-request notice (`ephemeral_system_notice`): the request's last
     // message, a user text block after the tool results, added after the
     // cache breakpoints so it never carries `cache_control` and the cached
     // prefix is the request's without it (ANTHROPIC-THINKING). The pages,
@@ -335,9 +355,9 @@ pub(super) fn build_request_body(
     // own after the tool results' is that block. Not a `role: "system"`
     // message: .../preserved-thinking/change-tools-or-instructions says
     // some models don't accept one (every model with preserved thinking
-    // does), and the arm sends the notice to every Anthropic row. The notice
-    // is not kept, so the turn produced under it goes back without its
-    // thinking (`runner/agentic_loop`).
+    // does), and the arm sends the notice to every Anthropic row. The
+    // agentic loop no longer sends its budget notice here: it keeps it in
+    // the run's list, rendered in place above (BUDGET-NOTICE-KEPT).
     if let Some(ref notice) = request.ephemeral_system_notice
         && let Some(serde_json::Value::Array(msgs_arr)) = body.get_mut("messages")
     {

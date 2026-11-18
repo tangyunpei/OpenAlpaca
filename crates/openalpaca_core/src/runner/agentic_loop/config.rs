@@ -118,8 +118,9 @@ pub struct LoopConfig {
     /// Optional event bus for emitting compaction telemetry.
     /// When set, the agentic loop publishes `CompactionTriggered` events.
     pub event_bus: Option<EventBus>,
-    /// When true, the loop injects an ephemeral system notice into each
-    /// request once cost or round ratios cross 0.8 (spec P0).
+    /// When true, the loop sends a budget notice as each request's last
+    /// message once cost or round ratios cross 0.8 (spec P0), and keeps it
+    /// in its list where it was sent (BUDGET-NOTICE-KEPT).
     pub experimental_ephemeral_pressure: bool,
     /// Steering inbox for mid-workflow user interjections (Routing V2).
     /// When `Some`, the loop drains queued messages at its round boundary

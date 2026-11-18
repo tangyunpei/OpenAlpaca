@@ -535,11 +535,6 @@ async fn run_agentic_loop_core(
     }
     let tools_arc = Arc::new(tools);
     let mut consecutive_llm_errors: usize = 0;
-    // ANTHROPIC-THINKING: whether a request of this loop has carried the
-    // budget notice. From then on every turn is kept without its thinking,
-    // whatever a later round's notice is, so the blocks left out are always
-    // the newest, never some in between.
-    let mut notice_shown = false;
     const MAX_LLM_RETRIES: usize = 3;
 
     // ── Steering state (Routing V2) ────────────────────────────────
@@ -677,13 +672,18 @@ async fn run_agentic_loop_core(
             }
         }
 
-        // ── Ephemeral budget-pressure notice (spec P0b) ────────────
-        // Stateless: recomputed every iteration, passed to `backend.complete`
-        // as `ephemeral_system_notice`, never appended to `messages`; every
-        // provider places it last in the request, never in the system prompt
-        // (ANTHROPIC-THINKING). Fires when either the cost ratio or rounds
-        // ratio reaches 0.8.
-        let ephemeral_notice = if config.experimental_ephemeral_pressure {
+        // ── Budget-pressure notice (spec P0b, BUDGET-NOTICE-KEPT) ──
+        // Recomputed every iteration; fires when either the cost ratio or
+        // the rounds ratio reaches 0.8. Sent as the request's last message
+        // and kept in `messages` where it was sent (the owner's "Budget
+        // notice: A" of 2026-11-17, reversing P0b's "never appended"): a
+        // request that dropped an earlier notice would differ before the
+        // turn produced under it, which could then not go back with its
+        // thinking. The pages' form: "Put every update in a new message at
+        // the end, and leave it there" (platform.claude.com/docs/en/
+        // build-with-claude/preserved-thinking/prefix-checks, read
+        // 2026-11-14). Never in the system prompt (ANTHROPIC-THINKING).
+        let budget_notice = if config.experimental_ephemeral_pressure {
             let rounds_ratio = (state.rounds as f64) / (config.max_rounds as f64).max(1.0);
             let fire = cost_ratio.max(rounds_ratio) >= 0.8;
             if fire {
@@ -899,6 +899,15 @@ async fn run_agentic_loop_core(
         }
 
         // ── 5. Build request (pre-LLM-call assembly) ──────────────
+        // The notice goes last, after compaction and the steering drain,
+        // and stays (`ChatMessage::notice`); `notice_at` is its place, so a
+        // request that fails — which produced no turn — takes it back
+        // before the retry sends its own.
+        let notice_at = budget_notice.as_deref().map(|n| {
+            let list = Arc::make_mut(&mut messages);
+            list.push(ChatMessage::notice(n));
+            list.len() - 1
+        });
         let tool_choice = {
             let _span = tracing::info_span!(
                 "loop.step.build_request",
@@ -909,11 +918,11 @@ async fn run_agentic_loop_core(
             .entered();
             tracing::trace!("build_request step entered");
 
-            // ── 6. Pressure-layer ephemeral notice ─────────────────
-            // `ephemeral_notice` is computed above (after the cost_check
+            // ── 6. Pressure-layer notice ───────────────────────────
+            // `budget_notice` is computed above (after the cost_check
             // step). The span fires only when a notice is present, so the
             // telemetry signal tracks real injections rather than no-ops.
-            if let Some(ref n) = ephemeral_notice {
+            if let Some(ref n) = budget_notice {
                 let _ps = tracing::info_span!(
                     "loop.step.pressure_layer",
                     agent_id = agent_id,
@@ -964,7 +973,6 @@ async fn run_agentic_loop_core(
                     config.max_stream_duration,
                     config.max_keyless_stream_duration,
                     context_management.clone(),
-                    ephemeral_notice.clone(),
                 ).instrument(llm_call_span.clone()) => result,
                 _ = token.cancelled() => {
                     tracing::info!(agent_id = agent_id, round = state.rounds + 1, "LLM call interrupted by cancellation");
@@ -990,7 +998,6 @@ async fn run_agentic_loop_core(
                     config.max_stream_duration,
                     config.max_keyless_stream_duration,
                     context_management.clone(),
-                    ephemeral_notice.clone(),
                 )
                 .instrument(llm_call_span)
                 .await
@@ -998,25 +1005,8 @@ async fn run_agentic_loop_core(
 
         // ── 9/10. Parse response / persist or execute tools ────────
         match llm_result {
-            Ok(mut response) => {
+            Ok(response) => {
                 consecutive_llm_errors = 0;
-                // ANTHROPIC-THINKING: the notice was this request's last
-                // message and is not kept, so the next request differs
-                // before this turn's thinking and it cannot go back; it is
-                // the newest, which a request may leave out. The thinking
-                // before the notice stays. Latched, not this round's notice:
-                // were the notice ever to lapse (its ratios only rise
-                // today), a turn after it keeping its thinking would follow
-                // one without, the gap the prefix check refuses ("but not
-                // one in between", .../preserved-thinking/prefix-checks).
-                notice_shown |= ephemeral_notice.is_some();
-                if notice_shown && response.echo.take().is_some() {
-                    tracing::debug!(
-                        agent_id,
-                        cause = "budget_notice",
-                        "A turn produced under the budget notice is kept without its thinking"
-                    );
-                }
                 // Any injected steering messages were consumed by this call.
                 pending_steering.clear();
 
@@ -1598,6 +1588,14 @@ async fn run_agentic_loop_core(
                     {
                         consecutive_llm_errors += 1;
                         state.rounds += 1; // count retry against round budget
+                        // The failed request produced no turn: its notice
+                        // goes, and the retry sends its own, last.
+                        if let Some(at) = notice_at {
+                            let list = Arc::make_mut(&mut messages);
+                            if list.get(at).is_some_and(|m| m.notice) {
+                                list.remove(at);
+                            }
+                        }
                         let backoff_secs = (1u64 << consecutive_llm_errors).min(30);
                         tracing::warn!(
                             agent_id = agent_id,

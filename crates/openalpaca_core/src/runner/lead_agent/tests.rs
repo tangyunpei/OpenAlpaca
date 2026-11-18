@@ -3831,6 +3831,7 @@ fn replayed_round() -> crate::session_log::replay::ReplayPlan {
                 tool_call_id: None,
                 is_error: false,
                 echo: None,
+                notice: false,
             },
             openalpaca_llm::ChatMessage::tool_result("tu-1", "fn main() {}"),
         ],

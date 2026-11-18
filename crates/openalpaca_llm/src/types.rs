@@ -114,6 +114,13 @@ pub struct ChatMessage {
     /// database row or history line holds thinking.
     #[serde(skip)]
     pub echo: Option<EchoedTurn>,
+    /// A loop's budget notice, kept in the run's list where it was sent
+    /// (BUDGET-NOTICE-KEPT; [`Self::notice`]): a system message that every
+    /// arm sends in its place, the Anthropic arm as a user text block, since
+    /// its `system` field must stay the same on every request. Lives only
+    /// within one loop, like `echo`, and is never serialized.
+    #[serde(skip)]
+    pub notice: bool,
 }
 
 /// An assistant turn's content blocks exactly as the provider returned them,
@@ -245,6 +252,7 @@ impl ChatMessage {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         }
     }
 
@@ -257,6 +265,7 @@ impl ChatMessage {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         }
     }
 
@@ -279,6 +288,7 @@ impl ChatMessage {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         }
     }
 
@@ -291,6 +301,7 @@ impl ChatMessage {
             tool_call_id: None,
             is_error: false,
             echo: None,
+            notice: false,
         }
     }
 
@@ -307,6 +318,7 @@ impl ChatMessage {
             tool_call_id: None,
             is_error: false,
             echo: response.echo.clone(),
+            notice: false,
         }
     }
 
@@ -330,6 +342,19 @@ impl ChatMessage {
         }
     }
 
+    /// The budget notice a loop sends as the last message of a request and
+    /// keeps where it was sent (BUDGET-NOTICE-KEPT, the owner's "Budget
+    /// notice: A" of 2026-11-17, reversing spec P0b's "never appended"): a
+    /// system message marked [`Self::notice`], so each later request carries
+    /// it in its place and the history before every turn stays as that turn
+    /// saw it — the condition for sending its thinking back.
+    pub fn notice(content: &str) -> Self {
+        Self {
+            notice: true,
+            ..Self::system(content)
+        }
+    }
+
     /// Leave this message's thinking out of every later request (C7a): what
     /// it was produced after has changed, so the API's prefix check would
     /// fail it, and once out it stays out. Returns whether there was any.
@@ -346,6 +371,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.to_string()),
             is_error: false,
             echo: None,
+            notice: false,
         }
     }
 
@@ -370,6 +396,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.to_string()),
             is_error: false,
             echo: None,
+            notice: false,
         }
     }
 
@@ -500,10 +527,13 @@ pub struct ChatRequest {
     pub thinking: Option<ThinkingConfig>,
     /// Context management configuration (Anthropic only). Other providers ignore this.
     pub context_management: Option<crate::context_management::ContextManagement>,
-    /// Ephemeral notice (e.g., budget pressure) injected into this request
-    /// only. Never persisted to conversation history. Every provider places
-    /// it last, after the request's messages, and never in the system prompt
-    /// (spec P0; ANTHROPIC-THINKING moved Anthropic's out of `system`).
+    /// A notice injected into this request only, never persisted to
+    /// conversation history. Every provider places it last, after the
+    /// request's messages, and never in the system prompt (spec P0;
+    /// ANTHROPIC-THINKING moved Anthropic's out of `system`), in the form a
+    /// kept [`ChatMessage::notice`] takes there. The agentic loop's budget
+    /// notice no longer rides here: it stays in the run's list
+    /// (BUDGET-NOTICE-KEPT).
     pub ephemeral_system_notice: Option<String>,
 }
 

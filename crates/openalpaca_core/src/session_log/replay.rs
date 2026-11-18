@@ -577,6 +577,7 @@ fn assistant_message(round: &Round) -> ChatMessage {
         tool_call_id: None,
         is_error: false,
         echo: None,
+        notice: false,
     }
 }
 

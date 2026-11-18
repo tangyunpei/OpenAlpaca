@@ -249,10 +249,10 @@ processing_batch_size = 5
 processing_poll_interval_secs = 10
 
 [experimental]
-# Add an ephemeral budget notice as the last message of each LLM request
-# when budget pressure crosses 80% of cost or rounds. Helps the model
-# self-throttle instead of getting cut off mid-tool-call. Default off until
-# validated.
+# Add a budget notice as the last message of each LLM request when budget
+# pressure crosses 80% of cost or rounds; each notice stays in the run where
+# it was sent. Helps the model self-throttle instead of getting cut off
+# mid-tool-call. Default off until validated.
 ephemeral_pressure_layer = false
 
 [daemon.env]

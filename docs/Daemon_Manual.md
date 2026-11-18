@@ -535,12 +535,14 @@ as Anthropic's pages ask. The same holds after a truncated answer, after a
 steering message that arrived at the end of a round, and after the answer
 guard's corrective round. When the run compacts its history, every kept
 block is left out from then on: never some of them. The budget notice
-(shown only with `[experimental] ephemeral_pressure_layer` on) is the last
-message of the request it rides on, never part of the system prompt, and
-is not repeated there in the next request; so a turn the model produced
-while a notice showed goes back without its thinking, and the thinking
-from before the first notice still goes back. Thinking is never written to
-the session log, the database or a conversation's history.
+(shown only with `[experimental] ephemeral_pressure_layer` on, one per
+round from 80% of a run's rounds or cost) is the last message of the
+request it is sent with, never part of the system prompt, and it stays in
+the run where it was sent, so every later request of the run carries each
+notice in its place and a turn the model produced while a notice showed
+goes back with its thinking too. Thinking is never written to the session
+log, the database or a conversation's history; nor is a notice as sent,
+though a compaction's working state may sum one up with the rest.
 
 The loop's `context_management` asks the API to keep the thinking of
 every turn (`clear_thinking_20251015` with `keep` `"all"`), so the model
@@ -602,12 +604,11 @@ On the Responses API each request:
   they led to. A compaction leaves them out from then on, as it leaves out
   Anthropic's thinking. A budget notice (shown only with
   `[experimental] ephemeral_pressure_layer` on, from 80% of a run's rounds
-  or cost) is the last item, so a turn's reasoning comes after it; the next
-  request moves it, changing the history before that reasoning, which
-  OpenAI's guide says makes the API drop the reasoning. So a turn produced
-  while a notice shows goes back without its reasoning, and the reasoning
-  from before the first notice still goes back. They are never written to
-  the session log, the database or a conversation's history.
+  or cost) is the last item of the request it is sent with and stays in
+  the run where it was sent, so the history before a turn's reasoning is
+  what the turn saw and a turn produced while a notice shows goes back with
+  its reasoning too. They are never written to the session log, the
+  database or a conversation's history.
 
 The usage is read as on Chat Completions: input tokens, output tokens
 (reasoning included, which OpenAI bills as output), cached input and the

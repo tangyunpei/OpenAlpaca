@@ -21,9 +21,9 @@
 //!   ([`EchoedTurn::from_response_items`]). No `include` is sent: the API
 //!   "doesn't require it".
 //! - System messages stay input items with the `system` role, each in its
-//!   place, the ephemeral notice last — never `instructions`: a change before
-//!   a reasoning item is a prefix change, after which "the API will drop
-//!   reasoning items".
+//!   place (a kept budget notice too), the per-request notice last — never
+//!   `instructions`: a change before a reasoning item is a prefix change,
+//!   after which "the API will drop reasoning items".
 
 mod streaming;
 

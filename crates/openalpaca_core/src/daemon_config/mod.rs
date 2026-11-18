@@ -23,9 +23,10 @@ use std::path::Path;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExperimentalConfig {
-    /// When true, inject an ephemeral system notice when budget pressure
-    /// reaches 80% of cost or rounds (spec P0). Default false until
-    /// validated in real use.
+    /// When true, send a budget notice as each request's last message once
+    /// budget pressure reaches 80% of cost or rounds (spec P0), and keep it
+    /// in the run where it was sent (BUDGET-NOTICE-KEPT). Default false
+    /// until validated in real use.
     pub ephemeral_pressure_layer: bool,
 }
 
