@@ -38,7 +38,9 @@ On the machine that builds release artifacts, install:
 - Standard Unix tools: `awk`, `sed`, `date` (present on any macOS machine)
 
 The script checks for each of these and stops with the missing command's name,
-and stops when `bun --version` is not the pinned version, naming both.
+and stops when `bun --version` is not the pinned version, naming both. Before
+any of these it needs the repository's `LICENSE` at the root, with text: a
+missing or empty one stops it, naming the file.
 
 ## Build Release Artifact
 
@@ -48,8 +50,13 @@ From repository root:
 ./scripts/release/package-macos.sh
 ```
 
-It must run on macOS, and it packages for the host architecture only. Before
-it builds anything it checks `THIRD-PARTY-NOTICES` at the repository root: the
+It must run on macOS, and it packages for the host architecture only. First
+it checks `LICENSE` at the repository root, and stops, naming it, when the
+file is missing or empty. The package ships it: the `.app` carries it as a
+resource and the holder line of `LICENSE` as its copyright (`tauri.conf.json`'s
+`bundle.copyright`), and `bundle.licenseFile` names it for the installer
+formats (an MSI, or a DMG or deb when one is built). Before it builds anything it also checks
+`THIRD-PARTY-NOTICES` at the repository root: the
 file records the SHA-256 of the `Cargo.lock` and `bun.lock` it was generated
 from, and the script stops, naming the stale lockfile, when either is not the
 tree's. Regenerate it with `python3.11 -I scripts/release/gen_notices.py`
@@ -77,9 +84,10 @@ app bundle, and then checks that the daemon inside the bundle and the
 they differ (an unsigned bundle is assumed: signing changes the bytes). `package-linux.sh` and `package-windows.ps1` follow the same
 sequence (the daemon is read out of the AppImage with `--appimage-extract`, out
 of the MSI with an administrative `msiexec /a` install into a scratch folder),
-but neither checks `THIRD-PARTY-NOTICES` nor puts it or `LICENSE` at the
-archive's root yet (macOS first): their app bundles carry both through the
-shared `tauri.conf.json`, the notices unchecked, until they gain the check.
+and stop first on a missing or empty `LICENSE` the same way, but neither
+checks `THIRD-PARTY-NOTICES` nor puts it or `LICENSE` at the archive's root
+yet (macOS first): their app bundles carry both through the shared
+`tauri.conf.json`, the notices unchecked, until they gain the check.
 
 Expected output:
 
@@ -1073,7 +1081,7 @@ The scripts, all PowerShell 5.1 or later, in `scripts/release/`:
 
 | Script | Usage |
 |---|---|
-| `package-windows.ps1` | No arguments. Needs `cargo`, `rustc`, `bun` (the version the root `package.json` pins; any other stops it, naming both), `git`. Writes `dist\openalpaca-windows-<target>-v<version>.zip` plus `.sha256`, with the GUI as an MSI. |
+| `package-windows.ps1` | No arguments. Needs a `LICENSE` with text at the repository root (a missing or empty one stops it, naming it, before any tool check or build), `cargo`, `rustc`, `bun` (the version the root `package.json` pins; any other stops it, naming both), `git`. Writes `dist\openalpaca-windows-<target>-v<version>.zip` plus `.sha256`, with the GUI as an MSI. |
 | `install-windows.ps1` | `-File <archive.zip>` or `-Url <https://…/archive.zip>`, plus `-Prefix <dir>` (default `%LOCALAPPDATA%\OpenAlpaca`) and `-Yes`. |
 | `uninstall-windows.ps1` | `-Prefix <dir>` and `-Yes`. |
 

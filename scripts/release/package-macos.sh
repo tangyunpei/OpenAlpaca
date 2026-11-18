@@ -118,14 +118,30 @@ require_current_notices() {
   done
 }
 
+# Dies unless the repository's root LICENSE is a file with something in it,
+# naming it: the package ships it, and tauri.conf.json names it as
+# bundle.licenseFile (read by the installer formats; the .app carries it
+# as a resource). Run first, before any tool is
+# checked or anything is built (the owner, 2026-11-17).
+require_license() {
+  local license="$REPO_ROOT/LICENSE"
+  [[ -f "$license" ]] \
+    || die "No LICENSE at $license: a package ships the repository's licence; restore the file before packaging."
+  [[ -s "$license" ]] \
+    || die "$license is empty: a package ships the repository's licence; restore its text before packaging."
+}
+
 # `source scripts/release/package-macos.sh` defines the functions above and
 # builds nothing. It turns on `set -euo pipefail` in the sourcing shell, and a
 # failing lookup's `die` exits that shell, an interactive one included: source
 # it inside `bash -c`. scripts/tests/test_gen_notices.py drives
-# require_current_notices through this seam; the packaging legs themselves
+# require_current_notices through this seam, and test_package_license.py
+# require_license; the packaging legs themselves
 # stay deferred (DU-33), unlike the Windows scripts' -DotSourceOnly, which
 # Pester drives, run by hand on Windows.
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+
+require_license
 
 [[ "$(uname -s)" == "Darwin" ]] || die "package-macos.sh must run on macOS."
 

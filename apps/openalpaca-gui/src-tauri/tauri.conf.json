@@ -35,6 +35,8 @@
       "icons/icon.ico"
     ],
     "externalBin": ["bin/openalpacad"],
+    "copyright": "Copyright (c) 2026 byalpaca",
+    "licenseFile": "../../../LICENSE",
     "resources": {
       "../../../LICENSE": "LICENSE",
       "../../../THIRD-PARTY-NOTICES": "THIRD-PARTY-NOTICES"
