@@ -125,6 +125,62 @@ pub(crate) fn serve_until_idle(
     answers: Vec<String>,
     idle: std::time::Duration,
 ) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
+    serve_while(answers, move |waiting_since| waiting_since.elapsed() < idle)
+}
+
+/// A [`serve_until_stopped`] server: [`Self::stop`] ends it and hands back
+/// the requests it received; dropped unstopped (a test that panicked
+/// first), it is told to end all the same.
+pub(crate) struct StoppableServer {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: Option<std::thread::JoinHandle<Vec<String>>>,
+}
+
+impl StoppableServer {
+    /// Ends the server — at once if it is waiting for a connection — and
+    /// returns the raw requests it received. Called after the code under
+    /// test has returned, every request that code sent has been answered,
+    /// so the list is all it sent: what a test that offers an answer the
+    /// code must not ask for checks, with no idle window to wait out.
+    pub(crate) fn stop(mut self) -> Vec<String> {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.server
+            .take()
+            .expect("the server is joined once")
+            .join()
+            .expect("the server finishes")
+    }
+}
+
+impl Drop for StoppableServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// [`serve`], ending when the test calls [`StoppableServer::stop`] or every
+/// answer is served.
+pub(crate) fn serve_until_stopped(answers: Vec<String>) -> (std::net::SocketAddr, StoppableServer) {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let told = std::sync::Arc::clone(&stop);
+    let (addr, server) = serve_while(answers, move |_| {
+        !told.load(std::sync::atomic::Ordering::SeqCst)
+    });
+    (
+        addr,
+        StoppableServer {
+            stop,
+            server: Some(server),
+        },
+    )
+}
+
+/// [`serve`], waiting for each connection only while `keep_waiting`, given
+/// the instant the wait began, says so.
+fn serve_while(
+    answers: Vec<String>,
+    mut keep_waiting: impl FnMut(std::time::Instant) -> bool + Send + 'static,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let addr = listener.local_addr().expect("the bound address");
     listener
@@ -133,12 +189,12 @@ pub(crate) fn serve_until_idle(
     let server = std::thread::spawn(move || {
         let mut seen = Vec::new();
         for answer in answers {
-            let deadline = std::time::Instant::now() + idle;
+            let waiting_since = std::time::Instant::now();
             let mut socket = loop {
                 match listener.accept() {
                     Ok((socket, _)) => break Some(socket),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if std::time::Instant::now() >= deadline {
+                        if !keep_waiting(waiting_since) {
                             break None;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(5));

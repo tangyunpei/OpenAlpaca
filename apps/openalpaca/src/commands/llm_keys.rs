@@ -851,72 +851,75 @@ mod tests {
         );
     }
 
-    /// The settings read, served once, and a PUT answer the verb must not
-    /// reach when it refuses.
-    fn settings_then_put() -> (
-        std::net::SocketAddr,
-        std::thread::JoinHandle<Vec<String>>,
-        crate::test_util::EnvSandbox,
-        tempfile::TempDir,
-    ) {
-        use crate::test_util::{EnvSandbox, json_answer, serve_until_idle};
-        let dir = tempfile::tempdir().unwrap();
-        let env = EnvSandbox::enter(dir.path());
-        let (addr, server) = serve_until_idle(
-            vec![
-                json_answer("200 OK", "settings", &two_keys().to_string()),
-                json_answer("200 OK", "put", "{}"),
-            ],
-            std::time::Duration::from_secs(2),
+    /// The settings read and a PUT answer the verb must not reach when it
+    /// refuses, from a server the test stops once the verb has returned.
+    /// No `EnvSandbox`: the `_with` verbs reach the daemon only through the
+    /// `DaemonClient::for_tests` they are given — `get`, `put`, the pure
+    /// body and check functions, `println!` — and never resolve the home
+    /// store or the config directory, so these tests leave `ENV_LOCK` to
+    /// the tests that need it.
+    fn settings_then_put() -> (std::net::SocketAddr, crate::test_util::StoppableServer) {
+        use crate::test_util::{json_answer, serve_until_stopped};
+        serve_until_stopped(vec![
+            json_answer("200 OK", "settings", &two_keys().to_string()),
+            json_answer("200 OK", "put", "{}"),
+        ])
+    }
+
+    /// The one request a refused verb sent: the settings read, and no PUT,
+    /// though one was on offer.
+    fn only_the_read(requests: &[String]) {
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(requests[0].starts_with("GET /v1/settings/llm HTTP/1.1"));
+        assert!(
+            !requests.iter().any(|r| r.starts_with("PUT ")),
+            "{requests:?}"
         );
-        (addr, server, env, dir)
     }
 
     /// `set-primary` with a key id the provider does not hold reads the
     /// order and stops there: no PUT, so no key is made a fallback.
     #[tokio::test]
     async fn set_primary_with_an_unknown_key_sends_no_put() {
-        let (addr, server, _env, _dir) = settings_then_put();
+        let (addr, server) = settings_then_put();
         let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
         let err = keys_set_primary_with(&client, "openai", "key-9")
             .await
             .unwrap_err()
             .to_string();
-        let requests = server.join().expect("the server finishes");
+        let requests = server.stop();
         assert_eq!(
             err,
             "openai holds no key 'key-9': openai holds key-1, key-2"
         );
-        assert_eq!(requests.len(), 1, "{requests:?}");
-        assert!(requests[0].starts_with("GET /v1/settings/llm HTTP/1.1"));
+        only_the_read(&requests);
     }
 
     /// `reorder` reads the order first too: a mistyped provider never
     /// reaches the route.
     #[tokio::test]
     async fn reorder_with_an_unknown_provider_sends_no_put() {
-        let (addr, server, _env, _dir) = settings_then_put();
+        let (addr, server) = settings_then_put();
         let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
         let err = keys_reorder_with(&client, "opneai", &ids(&["key-1"]))
             .await
             .unwrap_err()
             .to_string();
-        let requests = server.join().expect("the server finishes");
+        let requests = server.stop();
         assert_eq!(err, "unknown provider 'opneai': the daemon lists openai");
-        assert_eq!(requests.len(), 1, "{requests:?}");
-        assert!(requests[0].starts_with("GET /v1/settings/llm HTTP/1.1"));
+        only_the_read(&requests);
     }
 
     /// A partial order is sent as asked, after the read, and the line says
     /// which keys keep their place after it.
     #[tokio::test]
     async fn reorder_reads_then_sends_a_partial_order_and_says_so() {
-        let (addr, server, _env, _dir) = settings_then_put();
+        let (addr, server) = settings_then_put();
         let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
         let line = keys_reorder_with(&client, "openai", &ids(&["key-2"]))
             .await
             .unwrap();
-        let requests = server.join().expect("the server finishes");
+        let requests = server.stop();
         assert_eq!(requests.len(), 2, "{requests:?}");
         assert!(requests[0].starts_with("GET /v1/settings/llm HTTP/1.1"));
         assert!(requests[1].starts_with("PUT /v1/settings/llm/keys/reorder HTTP/1.1"));
