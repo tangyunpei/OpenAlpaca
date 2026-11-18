@@ -19,6 +19,7 @@ pub struct AgentsArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum AgentsCommands {
     /// List agents
     List {

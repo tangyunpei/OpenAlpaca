@@ -55,6 +55,7 @@ pub struct SessionsArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum SessionsCommands {
     /// Delete a conversation: its rows and its transcript on disk
     Delete {

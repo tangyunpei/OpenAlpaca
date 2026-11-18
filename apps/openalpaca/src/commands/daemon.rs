@@ -14,6 +14,7 @@ pub struct DaemonArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum DaemonAction {
     /// Show daemon status
     Status,

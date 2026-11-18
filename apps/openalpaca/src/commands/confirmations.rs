@@ -45,6 +45,7 @@ use crate::output::{OutputFormat, TableRow, json_with_hidden_escaped, table_head
 use crate::reuse;
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum ConfirmationCommands {
     /// List the approval prompts a run is waiting on, oldest first
     List {

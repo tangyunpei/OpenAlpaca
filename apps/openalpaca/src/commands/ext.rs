@@ -65,6 +65,7 @@ pub struct ExtArgs {
 // argument surface, not a cost anything pays.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum ExtCommands {
     /// List MCP servers and plugins
     List {
@@ -152,6 +153,7 @@ pub enum ExtCommands {
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum ExtMcpCommands {
     /// Write a servers block into config/mcp.toml and connect it
     Add {

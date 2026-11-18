@@ -44,6 +44,7 @@ pub struct StoreArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum StoreCommands {
     /// List the projects OpenAlpaca keeps a folder for, and mark a missing one
     List,

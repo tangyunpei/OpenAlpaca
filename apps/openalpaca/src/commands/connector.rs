@@ -12,6 +12,7 @@ pub struct ConnectorArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum ConnectorCommands {
     /// List all connectors and their status
     List,

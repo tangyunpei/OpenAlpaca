@@ -16,6 +16,7 @@ pub struct KeysArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum KeysCommands {
     /// List all API keys
     List {

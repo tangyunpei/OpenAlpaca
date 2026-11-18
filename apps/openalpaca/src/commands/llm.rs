@@ -15,6 +15,7 @@ pub struct LlmArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum LlmCommands {
     /// Show LLM system status overview
     Status {

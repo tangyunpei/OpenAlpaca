@@ -87,7 +87,9 @@ pub struct MemoryArgs {
     pub command: MemoryCommands,
 }
 
-/// Which project a daemon-backed verb addresses (design §7a, the CLI row).
+// Which project a daemon-backed verb addresses (design §7a, the CLI row).
+// A plain comment: a doc comment here would be clap's about text, and on a
+// deferred variant (M61) it would replace the verb's own on its --help page.
 #[derive(Args, Clone, Debug, Default)]
 pub struct ScopeArgs {
     /// Address the global partition only: send no project
@@ -180,6 +182,7 @@ fn is_recorded_root(path: &Path) -> bool {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(defer = true)]
 pub enum MemoryCommands {
     /// List notes (active by default)
     List {

@@ -25,11 +25,14 @@ pub struct TasksArgs {
     pub command: TasksCommands,
 }
 
-/// The help text below may hold commas, apostrophes and `//` lines again:
-/// `scripts/gen_api_docs.py` blanks comment text before it splits a
-/// `Subcommand` enum body, so prose no longer invents or shadows a variant.
-/// Covered by `scripts/tests/test_gen_api_docs.py`.
+// The help text below may hold commas, apostrophes and `//` lines again:
+// `scripts/gen_api_docs.py` blanks comment text before it splits a
+// `Subcommand` enum body, so prose no longer invents or shadows a variant.
+// Covered by `scripts/tests/test_gen_api_docs.py`. A plain comment: a doc
+// comment here would be clap's about text, and under the deferred
+// `Commands` (M61) it would replace `tasks --help`'s own.
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum TasksCommands {
     /// List tasks
     List {
@@ -921,7 +924,10 @@ mod tests {
     fn tasks_list_status_help_names_interrupted() {
         use clap::Args as _;
 
-        let cmd = TasksArgs::augment_args(clap::Command::new("tasks"));
+        // `TasksCommands` defers its variants' arguments (M61): built, the
+        // `list` subcommand carries them.
+        let mut cmd = TasksArgs::augment_args(clap::Command::new("tasks"));
+        cmd.build();
         let list = cmd
             .find_subcommand("list")
             .expect("tasks has a list subcommand");

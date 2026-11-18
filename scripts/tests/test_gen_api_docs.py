@@ -204,6 +204,21 @@ pub enum GuiAction {
     assert [v["command"] for v in enums[0]["variants"]] == ["start", "stop"]
 
 
+def test_an_attribute_between_the_derive_and_the_enum_is_fine() -> None:
+    # M61: every CLI Subcommand enum carries `#[command(defer = true)]`.
+    source = """
+#[derive(Subcommand)]
+#[command(defer = true)]
+pub enum GuiAction {
+    Start,
+    Stop,
+}
+"""
+    enums = gen.parse_subcommand_enums(source)
+    assert [e["name"] for e in enums] == ["GuiAction"]
+    assert [v["command"] for v in enums[0]["variants"]] == ["start", "stop"]
+
+
 # ── case 5: the GUI endpoints table ─────────────────────────────────────
 
 

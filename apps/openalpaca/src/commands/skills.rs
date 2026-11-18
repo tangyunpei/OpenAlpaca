@@ -47,6 +47,7 @@ pub struct SkillsArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum SkillsCommands {
     /// List the loaded skills, then every problem the last scan found in a SKILL.md
     List {

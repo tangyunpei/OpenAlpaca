@@ -9,6 +9,7 @@ pub struct GuiArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum GuiAction {
     /// Start GUI
     Start,

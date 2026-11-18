@@ -21,6 +21,7 @@ pub struct PluginArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum PluginCommands {
     /// List all plugins
     List {
@@ -63,6 +64,7 @@ pub enum PluginCommands {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum ConfigAction {
     /// Set a configuration key
     Set {

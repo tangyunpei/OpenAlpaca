@@ -731,7 +731,13 @@ def parse_cli_top_commands(text: str) -> list[tuple[str, str, str]]:
 def parse_subcommand_enums(text: str) -> list[dict[str, object]]:
     code = mask_rust_noncode(text)
     enums: list[dict[str, object]] = []
-    for m in re.finditer(r"#\[derive\(Subcommand\)\]\s*pub\s+enum\s+([A-Za-z0-9_]+)\s*\{", code, re.S):
+    # Attributes may sit between the derive and the enum (M61's
+    # `#[command(defer = true)]` on every CLI enum).
+    for m in re.finditer(
+        r"#\[derive\(Subcommand\)\]\s*(?:#\[[^\]]*\]\s*)*pub\s+enum\s+([A-Za-z0-9_]+)\s*\{",
+        code,
+        re.S,
+    ):
         enum_name = m.group(1)
         brace = code.find("{", m.end() - 1)
         if brace == -1:

@@ -32,6 +32,7 @@ pub struct PersonaArgs {
 }
 
 #[derive(Subcommand)]
+#[command(defer = true)]
 pub enum PersonaCommands {
     /// Print a persona document as the daemon holds it
     Show {
