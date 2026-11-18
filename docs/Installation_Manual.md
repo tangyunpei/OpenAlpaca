@@ -54,8 +54,8 @@ It must run on macOS, and it packages for the host architecture only. First
 it checks `LICENSE` at the repository root, and stops, naming it, when the
 file is missing or empty. The package ships it: the `.app` carries it as a
 resource and the holder line of `LICENSE` as its copyright (`tauri.conf.json`'s
-`bundle.copyright`), and `bundle.licenseFile` names it for the installer
-formats (an MSI, or a DMG or deb when one is built). Before it builds anything it also checks
+`bundle.copyright`), and `bundle.licenseFile` names it for the bundles
+that carry a licence. Before it builds anything it also checks
 `THIRD-PARTY-NOTICES` at the repository root: the
 file records the SHA-256 of the `Cargo.lock` and `bun.lock` it was generated
 from, and the script stops, naming the stale lockfile, when either is not the
