@@ -335,26 +335,23 @@ pub(crate) async fn extract_task_memories(
         &response.content,
         response.finish_reason == openalpaca_llm::FinishReason::MaxTokens,
     );
-    let parsed = match parsed {
-        Some(v) => v,
-        None => {
-            if let Err(e) = usage_repo.record_and_log(
-                AGENT_LABEL,
-                Some(&params.task_id),
-                &resolved_provider,
-                &actual_model,
-                response.usage.input_tokens as i32,
-                response.usage.output_tokens as i32,
-                call_cost,
-                latency_ms,
-                "error",
-                Some("JSON parse failure"),
-            ) {
-                tracing::warn!("Failed to persist task extraction LLM usage: {e}");
-            }
-            tracing::warn!(task_id = %params.task_id, "task extraction: malformed JSON from the model");
-            return TaskExtractionOutcome::Extracted(TaskExtractionReport::default());
+    let Some(parsed) = parsed else {
+        if let Err(e) = usage_repo.record_and_log(
+            AGENT_LABEL,
+            Some(&params.task_id),
+            &resolved_provider,
+            &actual_model,
+            response.usage.input_tokens as i32,
+            response.usage.output_tokens as i32,
+            call_cost,
+            latency_ms,
+            "error",
+            Some("JSON parse failure"),
+        ) {
+            tracing::warn!("Failed to persist task extraction LLM usage: {e}");
         }
+        tracing::warn!(task_id = %params.task_id, "task extraction: malformed JSON from the model");
+        return TaskExtractionOutcome::Extracted(TaskExtractionReport::default());
     };
     if let Err(e) = usage_repo.record_and_log(
         AGENT_LABEL,

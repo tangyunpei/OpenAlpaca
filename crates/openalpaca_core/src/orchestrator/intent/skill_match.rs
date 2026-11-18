@@ -30,9 +30,11 @@ impl IntentParser {
 
         // 1. Slash-command skill invocation: "/review some code"
         if let Some(without_slash) = trimmed.strip_prefix('/') {
-            let parts: Vec<&str> = without_slash.splitn(2, ' ').collect();
-            let command = parts[0];
-            let query = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            let (command, query) = without_slash
+                .split_once(' ')
+                .map_or((without_slash, ""), |(command, query)| {
+                    (command, query.trim())
+                });
 
             if let Some(entry) = catalog.get_by_command(command) {
                 return Intent::SkillInvocation {

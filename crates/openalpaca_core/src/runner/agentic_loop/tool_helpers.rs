@@ -17,10 +17,7 @@ pub(super) fn truncate_tool_result_to(text: String, limit: usize) -> String {
     }
 
     // Find the nearest char boundary at or before the byte limit
-    let mut end = limit;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = text.floor_char_boundary(limit);
 
     let slice = &text[..end];
 

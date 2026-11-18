@@ -48,7 +48,7 @@ impl StreamableHttpTransport {
     /// for a dead one — cut, rmcp would re-open the GET stream and any event
     /// sent meanwhile would be lost — and short enough that a dead connection
     /// nobody waits on is noticed within minutes.
-    pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+    pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 
     pub fn new(server_name: impl Into<String>, url: Url) -> Self {
         Self {

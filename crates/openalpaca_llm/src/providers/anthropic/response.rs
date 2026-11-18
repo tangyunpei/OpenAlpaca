@@ -38,25 +38,21 @@ pub(super) fn parse_response(
     if let Some(content_blocks) = body["content"].as_array() {
         for block in content_blocks {
             match block["type"].as_str() {
-                Some("thinking") => {
-                    if let Some(thought) = block["thinking"].as_str() {
-                        let existing = thinking.get_or_insert_with(String::new);
-                        if !existing.is_empty() {
-                            existing.push('\n');
-                        }
-                        existing.push_str(thought);
+                Some("thinking") if let Some(thought) = block["thinking"].as_str() => {
+                    let existing = thinking.get_or_insert_with(String::new);
+                    if !existing.is_empty() {
+                        existing.push('\n');
                     }
+                    existing.push_str(thought);
                 }
-                Some("text") => {
-                    if let Some(text) = block["text"].as_str() {
-                        if !content.is_empty() {
-                            content.push('\n');
-                        }
-                        content.push_str(text);
-                        parts_vec.push(ContentPart::Text {
-                            text: text.to_string(),
-                        });
+                Some("text") if let Some(text) = block["text"].as_str() => {
+                    if !content.is_empty() {
+                        content.push('\n');
                     }
+                    content.push_str(text);
+                    parts_vec.push(ContentPart::Text {
+                        text: text.to_string(),
+                    });
                 }
                 Some("tool_use") => {
                     tool_calls.push(ToolCall {

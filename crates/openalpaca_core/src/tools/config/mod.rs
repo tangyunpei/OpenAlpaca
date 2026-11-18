@@ -161,9 +161,8 @@ pub fn load_tools_from_file(path: &Path) -> Result<Vec<RegisteredTool>, String> 
 pub fn load_tools_from_dir(dir: &Path) -> Vec<RegisteredTool> {
     let mut all_tools = Vec::new();
 
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return all_tools,
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return all_tools;
     };
 
     for entry in entries.flatten() {

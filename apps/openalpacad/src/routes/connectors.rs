@@ -97,8 +97,7 @@ fn connector_rows(
                     .get(&format!("{}.token", id))
                     .ok()
                     .flatten()
-                    .filter(|t| !t.is_empty())
-                    .is_some(),
+                    .is_some_and(|t| !t.is_empty()),
             };
             connector_row(detail, configured, &messages)
         })

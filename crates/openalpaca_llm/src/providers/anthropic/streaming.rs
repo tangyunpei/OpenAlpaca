@@ -148,9 +148,8 @@ pub(super) fn parse_anthropic_sse(
                         }
                     }
 
-                    let event_type = match event_type {
-                        Some(t) => t,
-                        None => continue,
+                    let Some(event_type) = event_type else {
+                        continue;
                     };
 
                     // Terminal event
@@ -158,9 +157,8 @@ pub(super) fn parse_anthropic_sse(
                         return None;
                     }
 
-                    let data = match data {
-                        Some(d) => d,
-                        None => continue,
+                    let Some(data) = data else {
+                        continue;
                     };
 
                     let json: serde_json::Value = match serde_json::from_str(&data) {
@@ -197,34 +195,30 @@ pub(super) fn parse_anthropic_sse(
                                 .as_u64()
                                 .and_then(|i| state.blocks.get_mut(&(i as usize)));
                             match delta_type {
-                                "text_delta" => {
-                                    if let Some(text) = delta["text"].as_str() {
-                                        if let Some(TurnBlock::Text { text: kept }) = block {
-                                            kept.push_str(text);
-                                        }
-                                        return Some((
-                                            Ok(StreamEvent::TextDelta {
-                                                text: text.to_string(),
-                                            }),
-                                            state,
-                                        ));
+                                "text_delta" if let Some(text) = delta["text"].as_str() => {
+                                    if let Some(TurnBlock::Text { text: kept }) = block {
+                                        kept.push_str(text);
                                     }
+                                    return Some((
+                                        Ok(StreamEvent::TextDelta {
+                                            text: text.to_string(),
+                                        }),
+                                        state,
+                                    ));
                                 }
-                                "thinking_delta" => {
-                                    if let Some(thinking) = delta["thinking"].as_str() {
-                                        if let Some(TurnBlock::Thinking {
-                                            thinking: kept, ..
-                                        }) = block
-                                        {
-                                            kept.push_str(thinking);
-                                        }
-                                        return Some((
-                                            Ok(StreamEvent::ThinkingDelta {
-                                                thinking: thinking.to_string(),
-                                            }),
-                                            state,
-                                        ));
+                                "thinking_delta"
+                                    if let Some(thinking) = delta["thinking"].as_str() =>
+                                {
+                                    if let Some(TurnBlock::Thinking { thinking: kept, .. }) = block
+                                    {
+                                        kept.push_str(thinking);
                                     }
+                                    return Some((
+                                        Ok(StreamEvent::ThinkingDelta {
+                                            thinking: thinking.to_string(),
+                                        }),
+                                        state,
+                                    ));
                                 }
                                 // The block's one signature, just before its
                                 // `content_block_stop` (C7a).
@@ -239,21 +233,20 @@ pub(super) fn parse_anthropic_sse(
                                         kept.push_str(signature);
                                     }
                                 }
-                                "input_json_delta" => {
-                                    if let Some(pj) = delta["partial_json"].as_str() {
-                                        if let Some(TurnBlock::ToolUse { partial_json, .. }) = block
-                                        {
-                                            partial_json.push_str(pj);
-                                        }
-                                        let idx = json["index"].as_u64().unwrap_or(0) as usize;
-                                        return Some((
-                                            Ok(StreamEvent::InputJsonDelta {
-                                                index: idx,
-                                                partial_json: pj.to_string(),
-                                            }),
-                                            state,
-                                        ));
+                                "input_json_delta"
+                                    if let Some(pj) = delta["partial_json"].as_str() =>
+                                {
+                                    if let Some(TurnBlock::ToolUse { partial_json, .. }) = block {
+                                        partial_json.push_str(pj);
                                     }
+                                    let idx = json["index"].as_u64().unwrap_or(0) as usize;
+                                    return Some((
+                                        Ok(StreamEvent::InputJsonDelta {
+                                            index: idx,
+                                            partial_json: pj.to_string(),
+                                        }),
+                                        state,
+                                    ));
                                 }
                                 _ => {}
                             }
@@ -297,36 +290,32 @@ pub(super) fn parse_anthropic_sse(
                             };
                             return Some((Ok(StreamEvent::Done { finish_reason }), state));
                         }
-                        "message_start" => {
-                            if let Some(usage) = json["message"]["usage"].as_object() {
-                                let input_tokens = usage
-                                    .get("input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32;
-                                let cache_creation = usage
-                                    .get("cache_creation_input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32;
-                                let cache_read = usage
-                                    .get("cache_read_input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32;
-                                if input_tokens > 0 || cache_creation > 0 || cache_read > 0 {
-                                    return Some((
-                                        Ok(StreamEvent::Usage(Usage {
-                                            input_tokens: input_tokens
-                                                + cache_creation
-                                                + cache_read,
-                                            output_tokens: 0,
-                                            cache_creation_input_tokens: cache_creation,
-                                            cache_read_input_tokens: cache_read,
-                                        })),
-                                        state,
-                                    ));
-                                }
+                        "message_start"
+                            if let Some(usage) = json["message"]["usage"].as_object() =>
+                        {
+                            let input_tokens = usage
+                                .get("input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as u32;
+                            let cache_creation = usage
+                                .get("cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                                as u32;
+                            let cache_read = usage
+                                .get("cache_read_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as u32;
+                            if input_tokens > 0 || cache_creation > 0 || cache_read > 0 {
+                                return Some((
+                                    Ok(StreamEvent::Usage(Usage {
+                                        input_tokens: input_tokens + cache_creation + cache_read,
+                                        output_tokens: 0,
+                                        cache_creation_input_tokens: cache_creation,
+                                        cache_read_input_tokens: cache_read,
+                                    })),
+                                    state,
+                                ));
                             }
                         }
                         "error" => {

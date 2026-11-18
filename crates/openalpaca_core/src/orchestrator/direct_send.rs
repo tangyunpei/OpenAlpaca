@@ -202,9 +202,8 @@ impl Orchestrator {
         }
 
         // 4. Verify a default recipient exists
-        let (db, owner) = match (&self.db, owner_id) {
-            (Some(db), Some(id)) => (db, id),
-            _ => return None,
+        let (Some(db), Some(owner)) = (&self.db, owner_id) else {
+            return None;
         };
         if !has_default_recipient(db, owner, &params.channel) {
             return None;

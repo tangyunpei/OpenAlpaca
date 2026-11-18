@@ -704,8 +704,7 @@ impl Orchestrator {
     pub fn is_bootstrapping(&self) -> bool {
         self.bootstrap_document
             .read()
-            .map(|guard| guard.is_some())
-            .unwrap_or(false)
+            .is_ok_and(|guard| guard.is_some())
     }
 }
 

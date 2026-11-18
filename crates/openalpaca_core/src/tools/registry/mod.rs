@@ -1186,8 +1186,7 @@ impl ToolRegistry {
     pub fn is_exempt_from_timeout(&self, tool_name: &str) -> bool {
         self.tools
             .get(tool_name)
-            .map(|t| t.value().exempt_from_timeout)
-            .unwrap_or(false)
+            .is_some_and(|t| t.value().exempt_from_timeout)
     }
 
     /// Returns tool definitions for all tools whose `provides_capabilities`

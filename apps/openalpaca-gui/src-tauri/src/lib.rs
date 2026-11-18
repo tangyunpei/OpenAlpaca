@@ -865,7 +865,7 @@ const RELOAD_LIMIT: usize = 3;
 
 /// The span [`RELOAD_LIMIT`] counts over: a reload this old or older no
 /// longer counts.
-const RELOAD_WINDOW: Duration = Duration::from_secs(60);
+const RELOAD_WINDOW: Duration = Duration::from_mins(1);
 
 /// The dialog's first button (RELOAD-DIALOG), its default button: reload
 /// the window once.

@@ -390,14 +390,13 @@ pub fn list_provider_keys(provider: &str) -> Result<Vec<ProviderKeyInfo>> {
     let encryptor = encryptor()?;
     let store = secret_store();
 
-    let keys = match config
+    let Some(keys) = config
         .providers
         .as_ref()
         .and_then(|p| p.get(provider))
         .and_then(|pc| pc.keys.as_ref())
-    {
-        Some(keys) => keys,
-        None => return Ok(Vec::new()),
+    else {
+        return Ok(Vec::new());
     };
 
     let mut result = Vec::new();

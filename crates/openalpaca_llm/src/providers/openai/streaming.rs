@@ -165,9 +165,8 @@ pub(super) fn parse_openai_sse(
                         continue;
                     }
 
-                    let data = match line.strip_prefix("data: ") {
-                        Some(d) => d,
-                        None => continue,
+                    let Some(data) = line.strip_prefix("data: ") else {
+                        continue;
                     };
 
                     if data == "[DONE]" {

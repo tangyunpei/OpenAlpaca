@@ -81,12 +81,11 @@ impl BuiltInTool for ReadResultTool {
         let results_dir = session_dir.join(crate::session_log::RESULTS_DIR);
         // A session that has never spilled has no directory — that is a
         // missing result, not a broken tool.
-        let path =
-            match openalpaca_storage::store::confine_to_root(&results_dir, &results_dir.join(&name))
-            {
-                Ok(path) => path,
-                Err(_) => return Err(not_there(&session_dir, &name).await),
-            };
+        let Ok(path) =
+            openalpaca_storage::store::confine_to_root(&results_dir, &results_dir.join(&name))
+        else {
+            return Err(not_there(&session_dir, &name).await);
+        };
 
         let offset = arguments
             .get("offset")
@@ -101,11 +100,10 @@ impl BuiltInTool for ReadResultTool {
 
         // One seek and one bounded read: the page is `limit` bytes wherever it
         // sits in the file, and a 256 MB spill costs the same as a 4 KB one.
-        let (buf, total) = match read_page_bytes(&path, offset, limit).await {
-            Ok(read) => read,
+        let Ok((buf, total)) = read_page_bytes(&path, offset, limit).await else {
             // The file was there for `confine_to_root` and is not now, or it
             // cannot be opened at all — answer it the way a miss is answered.
-            Err(_) => return Err(not_there(&session_dir, &name).await),
+            return Err(not_there(&session_dir, &name).await);
         };
         let from = (offset as usize).min(total);
         let (start, end) = page_bounds(&buf, limit, from + buf.len() >= total);

@@ -368,8 +368,7 @@ mcp_compatible = true
             .arg("-c")
             .arg(format!("kill -0 {pid} 2>/dev/null"))
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .is_ok_and(|s| s.success())
     }
 
     /// Kill a plugin's child out of band and wait until the supervisor's

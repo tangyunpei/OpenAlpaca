@@ -222,23 +222,20 @@ pub(crate) async fn run_with<W: reuse::World>(
     let mut event_count = 0;
 
     // Handle Ctrl+C gracefully
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
     loop {
         tokio::select! {
             msg = read.next() => {
                 match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(event) = serde_json::from_str::<ServerEvent>(&text) {
-                            print_event(&event);
-                            event_count += 1;
+                    Some(Ok(Message::Text(text))) if let Ok(event) = serde_json::from_str::<ServerEvent>(&text) => {
+                        print_event(&event);
+                        event_count += 1;
 
-                            if count > 0 && event_count >= count {
-                                println!();
-                                println!("{} Received {} events", "→".cyan(), event_count);
-                                break;
-                            }
+                        if count > 0 && event_count >= count {
+                            println!();
+                            println!("{} Received {} events", "→".cyan(), event_count);
+                            break;
                         }
                     }
                     Some(Ok(Message::Close(_))) => {

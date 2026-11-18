@@ -26,9 +26,8 @@ impl NotificationDispatcher {
 
     /// Cross-channel Discord delivery for tasks not originating from Discord.
     pub(super) async fn try_cross_channel_discord(&self, created_by: &str, message: &str) {
-        let send = match self.connector_send {
-            Some(ref s) => s,
-            None => return,
+        let Some(ref send) = self.connector_send else {
+            return;
         };
         let pref_repo = PreferenceRepository::new(&self.db);
 
@@ -43,21 +42,19 @@ impl NotificationDispatcher {
                     .get("discord.notify_task_completion")
                     .ok()
                     .flatten()
-                    .map(|v| v == "true")
-                    .unwrap_or(false)
+                    .is_some_and(|v| v == "true")
             });
         if !should_notify {
             return;
         }
 
-        let channel_id = match pref_repo
+        let Some(channel_id) = pref_repo
             .get(created_by, "discord.last_channel_id")
             .ok()
             .flatten()
             .map(|p| p.value)
-        {
-            Some(id) => id,
-            None => return,
+        else {
+            return;
         };
 
         if let Err(e) = send.send_message("discord", &channel_id, message).await {

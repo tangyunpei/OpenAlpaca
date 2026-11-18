@@ -305,23 +305,20 @@ impl IMessageConnector {
             .get_or_default("imessage.allow_from_me")
             .ok()
             .flatten()
-            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
-            .unwrap_or(true);
+            .is_none_or(|v| matches!(v.as_str(), "true" | "1" | "yes"));
 
         let direct_require_prefix = config_repo
             .get_or_default("imessage.direct_require_prefix")
             .ok()
             .flatten()
-            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
-            .unwrap_or(false);
+            .is_some_and(|v| matches!(v.as_str(), "true" | "1" | "yes"));
 
         // Canonical values: "true"/"false". Also accepts "1"/"yes" for convenience.
         let group_require_prefix = config_repo
             .get_or_default("imessage.group_require_prefix")
             .ok()
             .flatten()
-            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
-            .unwrap_or(true);
+            .is_none_or(|v| matches!(v.as_str(), "true" | "1" | "yes"));
 
         let mut owner_handles: Vec<String> = config_repo
             .get("imessage.owner_handles")

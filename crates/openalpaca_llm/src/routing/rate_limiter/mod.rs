@@ -74,7 +74,7 @@ impl TokenBucket {
                     Duration::from_secs_f64(deficit / inner.refill_rate)
                 } else {
                     // Zero refill rate — would wait forever; cap at 60s
-                    Duration::from_secs(60)
+                    Duration::from_mins(1)
                 }
             };
 
@@ -233,8 +233,7 @@ impl CircuitBreaker {
                 // prevents both the thundering herd and a permanent wedge.
                 let stale = inner
                     .probe_started
-                    .map(|t| t.elapsed() >= inner.recovery_timeout)
-                    .unwrap_or(true);
+                    .is_none_or(|t| t.elapsed() >= inner.recovery_timeout);
                 if inner.probe_in_flight && !stale {
                     return Err(CircuitState::HalfOpen);
                 }

@@ -49,11 +49,9 @@ fn sample(name: &str) -> Value {
 fn unknown_keys(body: &Value, sample: &Value, path: &str, out: &mut Vec<String>) {
     match (body, sample) {
         (_, Value::Null) => {}
-        (Value::Array(items), Value::Array(element)) => {
-            if let Some(element) = element.first() {
-                for item in items {
-                    unknown_keys(item, element, &format!("{path}[]"), out);
-                }
+        (Value::Array(items), Value::Array(element)) if let Some(element) = element.first() => {
+            for item in items {
+                unknown_keys(item, element, &format!("{path}[]"), out);
             }
         }
         (Value::Object(fields), Value::Object(known)) => {

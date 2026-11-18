@@ -7040,3 +7040,15 @@ async fn the_loop_asks_the_server_to_keep_all_thinking() {
     );
     assert_eq!(edits["edits"][1]["type"], "clear_tool_uses_20250919");
 }
+
+#[test]
+fn truncate_tool_result_to_backs_off_inside_a_multi_byte_char() {
+    // Ten two-byte characters, no sentence, line or word boundary: a limit
+    // of 5 lands inside the third, so the cut keeps the first two (4 bytes).
+    let text = "\u{e9}".repeat(10);
+    let result = truncate_tool_result_to(text, 5);
+    assert_eq!(
+        result,
+        "\u{e9}\u{e9}\n\n[... truncated: showing first 4 of 20 bytes]"
+    );
+}

@@ -16,7 +16,7 @@ use crate::stdio_channel::StdioChannel;
 /// caller names no figure of its own ([`StdioChannel::call`]). `initialize`
 /// (10 s) and `shutdown` (3 s) name theirs, and so does a tool call the
 /// sandbox cuts (`PluginToolProxy`); set by no key.
-pub const CHANNEL_DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+pub const CHANNEL_DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// A running plugin child process with its JSON-RPC transport channel.
 pub struct PluginProcess {

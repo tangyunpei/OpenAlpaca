@@ -127,9 +127,8 @@ pub(super) async fn deliver_artifacts(
 ) {
     use openalpaca_core::orchestrator::task_state::TaskOutcome;
 
-    let outcome_json = match outcome_json {
-        Some(oj) => oj,
-        None => return,
+    let Some(outcome_json) = outcome_json else {
+        return;
     };
     let outcome: TaskOutcome = match serde_json::from_str(outcome_json) {
         Ok(o) => o,
@@ -159,14 +158,13 @@ pub(super) async fn deliver_artifacts(
     let file_repo = FileAssetRepository::new(db);
     let store = ArtifactStore::new(db);
     for artifact in outcome.artifacts.iter().take(MAX_ARTIFACTS_PER_TASK) {
-        let asset = match resolve_artifact_file(
+        let Some(asset) = resolve_artifact_file(
             &file_repo,
             artifact.file_asset_id.as_deref(),
             &artifact.key,
             expected_owner,
-        ) {
-            Some(a) => a,
-            None => continue,
+        ) else {
+            continue;
         };
         let record = match store.get(&asset.id, expected_owner) {
             Ok(Some(record)) => record,

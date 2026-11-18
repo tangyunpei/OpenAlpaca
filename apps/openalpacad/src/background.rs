@@ -375,7 +375,7 @@ pub fn spawn_telemetry_cleanup(db: Database, cancel: CancellationToken) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(86400)) => {}
+                _ = tokio::time::sleep(tokio::time::Duration::from_hours(24)) => {}
                 _ = cancel.cancelled() => {
                     tracing::info!("Telemetry cleanup task shutting down");
                     break;

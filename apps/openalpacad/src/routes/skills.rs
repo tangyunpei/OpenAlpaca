@@ -143,7 +143,7 @@ pub(crate) fn skills_json(
                         // An extension with no ledger entry reads as enabled —
                         // the §6.2a fail-open default, stated the same way the
                         // tool catalog states it.
-                        "enabled": record.as_ref().map(|r| r.disposition.0).unwrap_or(true),
+                        "enabled": record.as_ref().is_none_or(|r| r.disposition.0),
                         "state": record.as_ref().map(|r| r.state.word()).unwrap_or("enabled"),
                     });
                     ("plugin", origin, format!("plugin:{plugin_id}"))

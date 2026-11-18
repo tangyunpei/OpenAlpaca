@@ -123,7 +123,7 @@ impl PermissionTable {
     /// The owner's toggle. An absent entry reads as `true` — the serde default
     /// an entry would have had (design §5.1, row 1).
     pub fn enabled(&self, plugin: &str) -> bool {
-        self.entries.get(plugin).map(|e| e.enabled).unwrap_or(true)
+        self.entries.get(plugin).is_none_or(|e| e.enabled)
     }
 
     /// Every plugin the store carries an entry for.

@@ -249,14 +249,12 @@ pub(super) fn apply_to_config(
                         k.secret_ref
                             .as_ref()
                             .and_then(|sr| store.get(sr).ok().flatten())
-                            .map(|decrypted| decrypted == value)
-                            .unwrap_or(false)
+                            .is_some_and(|decrypted| decrypted == value)
                     } else {
                         k.secret_encrypted
                             .as_ref()
                             .and_then(|enc| encryptor().ok().and_then(|e| e.decrypt(enc).ok()))
-                            .map(|decrypted| decrypted == value)
-                            .unwrap_or(false)
+                            .is_some_and(|decrypted| decrypted == value)
                     }
                 });
                 if !already_stored {

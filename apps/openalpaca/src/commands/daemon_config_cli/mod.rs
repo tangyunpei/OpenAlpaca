@@ -373,9 +373,8 @@ pub fn get_daemon_value(key: &str) -> Result<Option<String>> {
         find_mapping(key).ok_or_else(|| anyhow::anyhow!("Unknown daemon config key '{}'", key))?;
 
     let root = load_toml_value()?;
-    let section = match navigate_to_section(&root, mapping.section) {
-        Some(s) => s,
-        None => return Ok(None),
+    let Some(section) = navigate_to_section(&root, mapping.section) else {
+        return Ok(None);
     };
 
     match section.get(mapping.field) {

@@ -162,9 +162,8 @@ fn build_router_from_hierarchical(
                         None
                     };
 
-                    let secret = match secret {
-                        Some(s) => s,
-                        None => continue, // Skip this key, try next
+                    let Some(secret) = secret else {
+                        continue; // Skip this key, try next
                     };
 
                     let mut api_key =

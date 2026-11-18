@@ -1596,7 +1596,7 @@ async fn a_30_minute_quiet_period_makes_the_conversation_due_for_its_episode() {
         .turn_started(uuid::Uuid::new_v4(), "user1:cli", false);
     guard.attach_session(&few);
     drop(guard);
-    tokio::time::advance(std::time::Duration::from_secs(31 * 60)).await;
+    tokio::time::advance(std::time::Duration::from_mins(31)).await;
     scene.queue.sweep().await;
     assert!(
         !scene.queue.is_episode_due(&few),

@@ -467,16 +467,13 @@ pub async fn chat_stream_handler(
 
     let chat_service = &state.chat_service;
 
-    let rx = match chat_service.stream_manager().get_receiver(&stream_id) {
-        Some(rx) => rx,
-        None => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "STREAM_NOT_FOUND",
-                "Stream not found or expired",
-            )
-            .into_response();
-        }
+    let Some(rx) = chat_service.stream_manager().get_receiver(&stream_id) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "STREAM_NOT_FOUND",
+            "Stream not found or expired",
+        )
+        .into_response();
     };
 
     let stream = make_sse_stream(rx, state.cancel_token.clone());

@@ -277,12 +277,9 @@ async fn reader_task<R>(
         // Step 4: Route the message.
         if let Some(id_val) = msg.get("id") {
             // Response — correlate with pending request.
-            let id = match id_val.as_u64() {
-                Some(n) => n,
-                None => {
-                    warn!(?id_val, "received response with non-u64 id");
-                    continue;
-                }
+            let Some(id) = id_val.as_u64() else {
+                warn!(?id_val, "received response with non-u64 id");
+                continue;
             };
 
             let result = if let Some(result) = msg.get("result") {

@@ -1870,7 +1870,7 @@ pub struct WaitForSubagentsTool {
 #[async_trait]
 impl BuiltInTool for WaitForSubagentsTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
-        let max_wait = Duration::from_secs(600); // 10 minutes safety cap
+        let max_wait = Duration::from_mins(10); // 10 minutes safety cap
         let deadline = tokio::time::Instant::now() + max_wait;
 
         loop {
@@ -1897,8 +1897,7 @@ impl BuiltInTool for WaitForSubagentsTool {
             // tracker wakes with `notify_waiters`, which keeps no permit, so
             // a completion landing between the check and a later
             // registration would be lost and the wait would run to the cap.
-            let subagent_change = self.tracker.notify.notified();
-            tokio::pin!(subagent_change);
+            let mut subagent_change = std::pin::pin!(self.tracker.notify.notified());
             subagent_change.as_mut().enable();
             if self.tracker.all_done() {
                 break;

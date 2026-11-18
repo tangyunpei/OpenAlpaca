@@ -25,13 +25,11 @@ pub(super) async fn update_state_with_retry(
     const MAX_RETRIES: usize = 3;
     for attempt in 0..MAX_RETRIES {
         let repo = openalpaca_storage::repository::TaskRepository::new(db);
-        let existing = match repo.get(task_id) {
-            Ok(Some(t)) => t,
-            _ => return false,
+        let Ok(Some(existing)) = repo.get(task_id) else {
+            return false;
         };
-        let sj = match existing.state_json.as_deref() {
-            Some(s) => s,
-            None => return false,
+        let Some(sj) = existing.state_json.as_deref() else {
+            return false;
         };
         let mut state: TaskState = match serde_json::from_str(sj) {
             Ok(s) => s,

@@ -901,3 +901,33 @@ Echo.
         Intent::SkillInvocation { .. }
     ));
 }
+
+#[test]
+fn test_router_slash_command_splits_at_the_first_space_and_trims_the_query() {
+    let (_tmp, catalog) = make_router_test_catalog();
+    let router = SkillRouter::new(0.65, 0.45);
+
+    // The query is everything after the first space, trimmed.
+    let intent = parser().parse_with_skills_and_router(
+        "/explain-code    main.rs  lib.rs  ",
+        &catalog,
+        &router,
+    );
+    match intent {
+        Intent::SkillInvocation { skill_name, query } => {
+            assert_eq!(skill_name, "Explain Code");
+            assert_eq!(query, "main.rs  lib.rs");
+        }
+        other => panic!("Expected SkillInvocation, got {:?}", other),
+    }
+
+    // No space: the whole text is the command and the query is the message.
+    let intent = parser().parse_with_skills_and_router("/explain-code", &catalog, &router);
+    match intent {
+        Intent::SkillInvocation { skill_name, query } => {
+            assert_eq!(skill_name, "Explain Code");
+            assert_eq!(query, "/explain-code");
+        }
+        other => panic!("Expected SkillInvocation, got {:?}", other),
+    }
+}

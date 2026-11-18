@@ -232,12 +232,9 @@ impl TableRow for AgentItem {
 // ── Command runner ───────────────────────────────────────────────
 
 pub async fn run(args: AgentsArgs) -> Result<()> {
-    let command = match args.command {
-        Some(cmd) => cmd,
-        None => {
-            // No subcommand → interactive create
-            return create_interactive().await;
-        }
+    let Some(command) = args.command else {
+        // No subcommand → interactive create
+        return create_interactive().await;
     };
 
     match command {

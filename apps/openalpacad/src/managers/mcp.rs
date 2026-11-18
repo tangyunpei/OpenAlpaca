@@ -2137,7 +2137,7 @@ impl ExtensionSupervisor for McpSupervisor {
         // W — skipped when the bit already matches (§8: "W is skipped — the bit
         // is already `true`"), which is also what keeps a redundant enable off
         // a read-only file.
-        if self.ledger.record(id).map(|r| r.disposition.0) != Some(true) {
+        if self.ledger.record(id).is_none_or(|r| !r.disposition.0) {
             self.write_bit(name, true)?;
         }
         self.ledger.set_disposition(id, true);
@@ -2173,7 +2173,7 @@ impl ExtensionSupervisor for McpSupervisor {
         // Symmetric with `enable`: W is skipped when the bit is already
         // `false`, so a redundant disable against a read-only file is the
         // `200`-current no-op §3.3.1 promises, not a `500`.
-        if self.ledger.record(id).map(|r| r.disposition.0) != Some(false) {
+        if self.ledger.record(id).is_none_or(|r| r.disposition.0) {
             self.write_bit(name, false)?;
         }
         if self.ledger.record(id).is_none() {

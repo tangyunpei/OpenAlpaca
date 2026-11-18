@@ -163,12 +163,11 @@ async fn a_silent_server_is_a_timeout_and_transient() {
 async fn a_silent_server_ends_a_streamed_call_on_the_read_gap() {
     let server = MockHttpServer::start(|_| MockResponse::json("{}").after(SILENCE)).await;
     let started = Instant::now();
-    let err = match provider(&server.base_url)
+    let Err(err) = provider(&server.base_url)
         .chat_streaming_with_key("", request())
         .await
-    {
-        Ok(_) => panic!("a silent server opened a stream"),
-        Err(e) => e,
+    else {
+        panic!("a silent server opened a stream");
     };
     let elapsed = started.elapsed();
 
@@ -561,12 +560,11 @@ async fn anthropics_calls_say_what_failed() {
     );
 
     let nowhere = Resolver::no_such_name();
-    let err = match anthropic(&nowhere, REQUEST_TIMEOUT)
+    let Err(err) = anthropic(&nowhere, REQUEST_TIMEOUT)
         .chat_streaming_with_key("sk-test", request())
         .await
-    {
-        Ok(_) => panic!("an unresolvable host opened a stream"),
-        Err(e) => e,
+    else {
+        panic!("an unresolvable host opened a stream");
     };
     assert!(!err.is_transient(), "{err}");
     assert_eq!(kind(&err), Some(TransportKind::Dns));
@@ -622,12 +620,11 @@ async fn a_test_build_refuses_anthropics_real_endpoint() {
     );
 
     let chat = real.chat(request()).await.unwrap_err();
-    let stream = match real
+    let Err(stream) = real
         .chat_streaming_with_key("sk-ant-test-not-a-key", request())
         .await
-    {
-        Ok(_) => panic!("a stream opened on Anthropic's real endpoint"),
-        Err(e) => e,
+    else {
+        panic!("a stream opened on Anthropic's real endpoint");
     };
     let list = real
         .list_models_with_key("sk-ant-test-not-a-key")
@@ -703,12 +700,11 @@ async fn a_test_build_refuses_openais_real_hosts() {
         };
 
         let chat = real.chat(request()).await.unwrap_err();
-        let stream = match real
+        let Err(stream) = real
             .chat_streaming_with_key("sk-test-not-a-key", request())
             .await
-        {
-            Ok(_) => panic!("a stream opened on OpenAI's real endpoint"),
-            Err(e) => e,
+        else {
+            panic!("a stream opened on OpenAI's real endpoint");
         };
         let list = real
             .list_models_with_key("sk-test-not-a-key")

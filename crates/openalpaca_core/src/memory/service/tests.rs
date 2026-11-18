@@ -6783,3 +6783,15 @@ fn the_doctor_wire_lists_idless_project_snapshots_and_no_move_snapshots() {
         serde_json::json!([{ "partition_key": key, "root": root }])
     );
 }
+
+#[test]
+fn cut_bytes_backs_off_to_the_char_boundary_at_or_below_the_cut() {
+    // "a" then three two-byte "é": a cut landing inside a character keeps
+    // the characters before it; one landing on a boundary keeps it.
+    let text = "a\u{e9}\u{e9}\u{e9}";
+    assert_eq!(cut_bytes(text, 2), ("a".to_string(), true));
+    assert_eq!(cut_bytes(text, 3), ("a\u{e9}".to_string(), true));
+    assert_eq!(cut_bytes(text, 4), ("a\u{e9}".to_string(), true));
+    assert_eq!(cut_bytes(text, 0), (String::new(), true));
+    assert_eq!(cut_bytes(text, 7), (text.to_string(), false));
+}

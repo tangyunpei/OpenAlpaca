@@ -372,14 +372,16 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
                 .as_deref()
                 .is_some_and(|span| !span.is_empty() && span != lead_span);
             match record.kind.as_str() {
-                "subagent_open" if is_subagent_lane(record) => {
-                    if let (Some(span), Some(run_id)) = (&record.span_id, subagent_run_id(record)) {
-                        subagent_lanes.insert(span.clone(), plan.subagents.len());
-                        plan.subagents.push(ReplayedSubagent {
-                            run_id,
-                            close: None,
-                        });
-                    }
+                "subagent_open"
+                    if is_subagent_lane(record)
+                        && let (Some(span), Some(run_id)) =
+                            (&record.span_id, subagent_run_id(record)) =>
+                {
+                    subagent_lanes.insert(span.clone(), plan.subagents.len());
+                    plan.subagents.push(ReplayedSubagent {
+                        run_id,
+                        close: None,
+                    });
                 }
                 "subagent_close" if is_subagent_lane(record) => {
                     let close = ReplayedClose {

@@ -14,12 +14,12 @@ pub(super) const DEFAULT_CONTEXT_THRESHOLD: f64 = 0.6;
 
 /// The longest one streamed round may run when the routed provider needs a
 /// key: ten minutes ([`LoopConfig::max_stream_duration`]'s default).
-pub(super) const KEYED_STREAM_ROUND: Duration = Duration::from_secs(600);
+pub(super) const KEYED_STREAM_ROUND: Duration = Duration::from_mins(10);
 
 /// The longest one streamed round may run when the routed provider needs no
 /// key — a local model, which may run up to an hour (LOCAL-CALL-HOUR):
 /// [`LoopConfig::max_keyless_stream_duration`]'s default.
-pub(super) const KEYLESS_STREAM_ROUND: Duration = Duration::from_secs(3600);
+pub(super) const KEYLESS_STREAM_ROUND: Duration = Duration::from_hours(1);
 
 /// Optional callback for streaming events (UI progress, logging).
 pub type StreamCallback = Arc<dyn Fn(&StreamEvent) + Send + Sync>;

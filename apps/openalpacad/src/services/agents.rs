@@ -42,9 +42,8 @@ pub(super) fn load_agent_templates(
     )
     .map_err(|e| anyhow::anyhow!(e))?;
 
-    let entries = match std::fs::read_dir(&config_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Ok(entries) = std::fs::read_dir(&config_dir) else {
+        return Ok(());
     };
 
     for entry in entries.flatten() {

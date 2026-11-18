@@ -126,8 +126,8 @@ mod tests {
     #[test]
     fn backoff_handles_overflow_safely() {
         // Very large attempt, very large base — must not panic
-        let d = backoff_for_attempt(u32::MAX, u64::MAX / 2, Duration::from_secs(60));
-        assert_eq!(d, Duration::from_secs(60)); // capped
+        let d = backoff_for_attempt(u32::MAX, u64::MAX / 2, Duration::from_mins(1));
+        assert_eq!(d, Duration::from_mins(1)); // capped
     }
 
     #[test]

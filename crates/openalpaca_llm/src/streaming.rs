@@ -303,7 +303,7 @@ mod tests {
         // Apply a wall-clock deadline of 2 minutes (shorter than "infinite" but
         // longer than idle timeout). The stream keeps sending so idle timeout
         // never fires, but the wall-clock timeout should cancel it.
-        let wall_clock = Duration::from_secs(120);
+        let wall_clock = Duration::from_mins(2);
         let result =
             tokio::time::timeout(wall_clock, collect_stream(slow_stream, "m".into())).await;
 

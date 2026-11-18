@@ -292,7 +292,7 @@ request_timeout_secs = 999999999
     );
     assert_eq!(
         runtime.request_timeout_for("openai"),
-        std::time::Duration::from_secs(86_400)
+        std::time::Duration::from_hours(24)
     );
 }
 

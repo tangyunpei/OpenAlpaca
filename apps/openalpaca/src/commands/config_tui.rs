@@ -321,9 +321,7 @@ fn sync_ai_config_map(config: &mut HashMap<String, String>) {
     // Remove stale AI keys first
     config.retain(|k, _| {
         !k.starts_with("ai.") || {
-            config_schema::lookup(k)
-                .map(|d| d.backend != ConfigBackend::LlmToml)
-                .unwrap_or(true)
+            config_schema::lookup(k).is_none_or(|d| d.backend != ConfigBackend::LlmToml)
         }
     });
     // Re-read from disk
@@ -373,10 +371,7 @@ fn interactive_provider_keys(
 
         // Enabled toggle
         let enabled_key = format!("ai.{}.enabled", provider);
-        let is_enabled = config
-            .get(&enabled_key)
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        let is_enabled = config.get(&enabled_key).is_some_and(|v| v == "true");
         let toggle_label = if is_enabled {
             format!(
                 "{}  {}",
@@ -620,11 +615,7 @@ fn interactive_add_key(
 
     // Auto-enable if this is the first key
     let enabled_key = format!("ai.{}.enabled", provider);
-    if !config.contains_key(&enabled_key)
-        || config
-            .get(&enabled_key)
-            .map(|v| v == "false")
-            .unwrap_or(false)
+    if !config.contains_key(&enabled_key) || config.get(&enabled_key).is_some_and(|v| v == "false")
     {
         config.insert(enabled_key, "true".to_string());
     }
@@ -1793,8 +1784,7 @@ fn effective_bool(config: &HashMap<String, String>, key: &str) -> bool {
     config.get(key).map(|v| v == "true").unwrap_or_else(|| {
         config_schema::lookup(key)
             .and_then(|d| d.default)
-            .map(|d| d == "true")
-            .unwrap_or(false)
+            .is_some_and(|d| d == "true")
     })
 }
 
@@ -1892,8 +1882,7 @@ fn format_provider_status(
     if !api_key_key.is_empty() {
         let has_key = config
             .get(api_key_key)
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false);
+            .is_some_and(|v| !v.trim().is_empty());
         if has_key {
             lines.push(format!(
                 "  {} {} is set",
@@ -1927,9 +1916,8 @@ fn apply_auto_enable(
 
     // Derive the corresponding .enabled key from the credential key
     // e.g. "ai.anthropic.api_key" → "ai.anthropic.enabled"
-    let prefix = match def.key.rsplit_once('.') {
-        Some((p, _)) => p,
-        None => return,
+    let Some((prefix, _)) = def.key.rsplit_once('.') else {
+        return;
     };
     let enabled_key = format!("{}.enabled", prefix);
 

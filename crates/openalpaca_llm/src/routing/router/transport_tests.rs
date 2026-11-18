@@ -288,9 +288,8 @@ async fn a_streamed_attempt_and_its_non_streaming_retry_are_held_to_the_bound() 
     let chain = router.substitution_ladder(PRIMARY, &[]).len();
 
     let started = Instant::now();
-    let streamed = match router.complete_streaming(request(PRIMARY)).await {
-        Ok(_) => panic!("a silent server opened a stream"),
-        Err(e) => e,
+    let Err(streamed) = router.complete_streaming(request(PRIMARY)).await else {
+        panic!("a silent server opened a stream");
     };
     let after_stream = started.elapsed();
     assert_eq!(
@@ -418,9 +417,8 @@ async fn a_streamed_local_call_that_used_its_whole_read_gap_is_not_asked_again()
     let models = [PRIMARY, FALLBACK_1];
     let router = router(&server.base_url, plain_client(), &models, rates(100));
 
-    let streamed = match router.complete_streaming(request(PRIMARY)).await {
-        Ok(_) => panic!("a silent server opened a stream"),
-        Err(e) => e,
+    let Err(streamed) = router.complete_streaming(request(PRIMARY)).await else {
+        panic!("a silent server opened a stream");
     };
     local_timeout(&streamed, PRIMARY, true);
 
@@ -473,9 +471,8 @@ async fn a_local_call_that_used_its_whole_timeout_may_be_answered_by_another_pro
         );
 
         let response = if streamed {
-            let spent = match router.complete_streaming(request(PRIMARY)).await {
-                Ok(_) => panic!("a silent server opened a stream"),
-                Err(e) => e,
+            let Err(spent) = router.complete_streaming(request(PRIMARY)).await else {
+                panic!("a silent server opened a stream");
             };
             router.complete_elsewhere(request(PRIMARY), spent).await
         } else {
@@ -676,9 +673,8 @@ async fn a_local_timeout_short_of_its_whole_figure_keeps_the_retry_row() {
         PATIENT,
     );
 
-    let streamed = match router.complete_streaming(request(PRIMARY)).await {
-        Ok(_) => panic!("a silent server opened a stream"),
-        Err(e) => e,
+    let Err(streamed) = router.complete_streaming(request(PRIMARY)).await else {
+        panic!("a silent server opened a stream");
     };
     assert!(
         matches!(&streamed, LlmRouterError::Llm(e) if e.is_transient()),

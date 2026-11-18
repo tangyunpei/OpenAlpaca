@@ -27,7 +27,7 @@ use crate::events::SystemEvent;
 use crate::tools::registry::ToolContext;
 
 /// Suppression window for the withheld announcement (design §7.4).
-const WARN_DEDUP_WINDOW: Duration = Duration::from_secs(600);
+const WARN_DEDUP_WINDOW: Duration = Duration::from_mins(10);
 /// LRU cap on the dedup set, swept lazily on insert.
 const WARN_DEDUP_CAP: usize = 512;
 

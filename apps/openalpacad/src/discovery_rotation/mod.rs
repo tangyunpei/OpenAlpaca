@@ -42,7 +42,7 @@ use tracing::{info, warn};
 
 /// How often the task reads the wall clock: the longest a file stays expired
 /// after a wake from a sleep past its expiry.
-pub(crate) const CHECK_EVERY: Duration = Duration::from_secs(60);
+pub(crate) const CHECK_EVERY: Duration = Duration::from_mins(1);
 
 /// A token check: the daemon's set, or (in a route's tests) one fixed token.
 pub(crate) trait AcceptsToken {

@@ -535,8 +535,7 @@ pub(crate) async fn watch_with<W: reuse::World>(
 
     let tty = std::io::stdout().is_terminal();
     let (_, mut read) = ws_stream.split();
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
     loop {
         tokio::select! {

@@ -599,3 +599,15 @@ fn test_the_subagent_bound_has_a_row() {
     assert!(validate(key, "0").is_err());
     assert!(validate(key, "1001").is_err());
 }
+
+#[test]
+fn test_lookup_pattern_takes_exactly_one_dot() {
+    // A dynamic connector key is `<word>.token` or `<word>.enabled` with one
+    // dot: a second dot, a missing dot or an empty word is no key. (No input
+    // tells a split at the first dot from one at the last: the prefix check
+    // refuses a dotted prefix either way.)
+    assert!(lookup("wechat.token.extra").is_none());
+    assert!(lookup("wechat").is_none());
+    assert!(lookup(".token").is_none());
+    assert!(lookup("we_chat.enabled").is_some());
+}

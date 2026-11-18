@@ -422,9 +422,8 @@ impl ChatService {
             let repo = FileAssetRepository::new(&db);
             let mut out = Vec::with_capacity(attachment_refs.len());
             for att_ref in &attachment_refs {
-                let asset = match repo.get_by_id(&att_ref.file_id)? {
-                    Some(a) => a,
-                    None => anyhow::bail!("Attachment not found: {}", att_ref.file_id),
+                let Some(asset) = repo.get_by_id(&att_ref.file_id)? else {
+                    anyhow::bail!("Attachment not found: {}", att_ref.file_id);
                 };
                 if asset.owner_id != principal {
                     anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);

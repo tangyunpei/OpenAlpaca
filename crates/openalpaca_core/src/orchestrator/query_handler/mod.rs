@@ -205,9 +205,8 @@ impl Orchestrator {
     /// Build a deterministic `<send_context>` block with resolved recipient info.
     /// This removes ambiguity: the LLM sees facts, not hints.
     pub(in crate::orchestrator) fn build_send_context(&self, owner_id: Option<&str>) -> String {
-        let (db, owner) = match (&self.db, owner_id) {
-            (Some(db), Some(id)) => (db, id),
-            _ => return String::new(),
+        let (Some(db), Some(owner)) = (&self.db, owner_id) else {
+            return String::new();
         };
         let sendable = self
             .connector_sender

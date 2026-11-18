@@ -583,12 +583,9 @@ impl SkillCatalog {
         // Collect old index data and insert entry under entries lock,
         // then release entries lock before acquiring index locks to avoid deadlock.
         let (old_slash_cmd, old_aliases, new_slash_cmd, new_aliases) = {
-            let mut entries_guard = match self.entries.write() {
-                Ok(g) => g,
-                Err(_) => {
-                    tracing::error!(skill = %key, "Failed to acquire entries write lock — skill not loaded");
-                    return;
-                }
+            let Ok(mut entries_guard) = self.entries.write() else {
+                tracing::error!(skill = %key, "Failed to acquire entries write lock — skill not loaded");
+                return;
             };
 
             // Collect old entry's index data for cleanup

@@ -369,7 +369,7 @@ mod confirmation {
         let response = rx.try_recv().expect("broker should deliver response");
         assert!(response.approved);
         // Queue drained
-        assert!(pending.get(&42u64).map(|q| q.is_empty()).unwrap_or(true));
+        assert!(pending.get(&42u64).is_none_or(|q| q.is_empty()));
     }
 
     #[test]

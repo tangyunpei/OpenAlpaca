@@ -987,8 +987,7 @@ impl ModelRegistry {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .map(|info| info.supports_image)
-            .unwrap_or(false)
+            .is_some_and(|info| info.supports_image)
     }
 
     /// Check if a model supports audio input.
@@ -997,8 +996,7 @@ impl ModelRegistry {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .map(|info| info.supports_audio)
-            .unwrap_or(false)
+            .is_some_and(|info| info.supports_audio)
     }
 
     /// Check if a model supports document (PDF) input.
@@ -1007,8 +1005,7 @@ impl ModelRegistry {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .map(|info| info.supports_document)
-            .unwrap_or(false)
+            .is_some_and(|info| info.supports_document)
     }
 
     /// Check if a model supports reasoning (OpenAI o-series).
@@ -1017,8 +1014,7 @@ impl ModelRegistry {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .map(|info| info.supports_reasoning)
-            .unwrap_or(false)
+            .is_some_and(|info| info.supports_reasoning)
     }
 
     /// Check if a model can be given tools.
@@ -1031,8 +1027,7 @@ impl ModelRegistry {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(model_id)
-            .map(|info| info.supports_tools)
-            .unwrap_or(true)
+            .is_none_or(|info| info.supports_tools)
     }
 
     /// A model this provider can serve, preferring a confirmed tool-capable one.

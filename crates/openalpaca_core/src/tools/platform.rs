@@ -295,7 +295,7 @@ mod tests {
         let pidfile = dir.path().join("pid");
         let run = tokio::spawn(run_bounded(
             starts_a_sleep(dir.path(), &pidfile),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         ));
         let pid = pid_from_file(&pidfile, Duration::from_secs(5)).await;
         let _kill = KillOnFail(pid);
@@ -327,7 +327,7 @@ mod tests {
             detached_file.display()
         ));
         cmd.current_dir(dir.path());
-        let run = tokio::spawn(run_bounded(cmd, Duration::from_secs(60)));
+        let run = tokio::spawn(run_bounded(cmd, Duration::from_mins(1)));
         // The detached process is out of the run's reach, so it is guarded
         // the moment its pid is known, before anything else can fail.
         let detached = pid_from_file(&detached_file, Duration::from_secs(5)).await;
@@ -369,7 +369,7 @@ mod tests {
             pidfile.display()
         ));
         cmd.current_dir(&gp.root);
-        let outcome = run_bounded(cmd, Duration::from_secs(60)).await;
+        let outcome = run_bounded(cmd, Duration::from_mins(1)).await;
         let shell = pid_from_file(&pidfile, Duration::from_secs(1)).await;
         let output = outcome.expect("the command runs to its end");
         assert!(output.status.success(), "{:?}", output.status);

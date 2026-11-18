@@ -158,8 +158,7 @@ impl ConnectorManager {
             } else {
                 let has_token = config_repo
                     .get(&format!("{}.token", name))
-                    .map(|v| v.is_some())
-                    .unwrap_or(false);
+                    .is_ok_and(|v| v.is_some());
 
                 if !has_token && !token_optional {
                     "unconfigured".to_string()

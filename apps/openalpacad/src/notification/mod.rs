@@ -146,9 +146,8 @@ impl NotificationDispatcher {
         outcome_summary: Option<&str>,
     ) {
         let repo = TaskRepository::new(&self.db);
-        let task = match repo.get(task_id) {
-            Ok(Some(t)) => t,
-            _ => return,
+        let Ok(Some(task)) = repo.get(task_id) else {
+            return;
         };
 
         let content = format_completion_message(
@@ -195,9 +194,8 @@ impl NotificationDispatcher {
 
     async fn handle_failure(&self, task_id: &str, error: &str, outcome_kind: Option<&str>) {
         let repo = TaskRepository::new(&self.db);
-        let task = match repo.get(task_id) {
-            Ok(Some(t)) => t,
-            _ => return,
+        let Ok(Some(task)) = repo.get(task_id) else {
+            return;
         };
 
         // Parse artifact_count from outcome_json (partially-failed pipelines may have artifacts)
@@ -346,7 +344,7 @@ impl NotificationDispatcher {
             let owner = owner.to_string();
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
+                    std::time::Duration::from_mins(1),
                     deliver_artifacts(&db, &*send, &task_id, "telegram", &chat_id_str, outcome_json.as_deref(), &owner),
                 ).await;
             });
