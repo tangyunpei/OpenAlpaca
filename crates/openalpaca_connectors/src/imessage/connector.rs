@@ -12,7 +12,6 @@
 use crate::common::format_confirmation_prompt;
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use dashmap::DashMap;
 use openalpaca_core::{
     bus::EventBus,
@@ -377,7 +376,6 @@ impl IMessageConnector {
     }
 }
 
-#[async_trait]
 impl Connector for IMessageConnector {
     fn name(&self) -> &str {
         "imessage"

@@ -10,7 +10,6 @@ use crate::common::{
 };
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use dashmap::DashMap;
 use openalpaca_api::events::EventSource;
 use openalpaca_core::{
@@ -759,7 +758,6 @@ impl DiscordConnector {
     }
 }
 
-#[async_trait]
 impl Connector for DiscordConnector {
     fn name(&self) -> &str {
         "discord"
