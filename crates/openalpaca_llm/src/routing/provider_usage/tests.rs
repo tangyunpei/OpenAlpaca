@@ -1,15 +1,94 @@
 use super::*;
 
+/// A build with no provider feature has no HTTP client: every fetch is
+/// `None`, and nothing is sent anywhere.
+#[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
 #[tokio::test]
-async fn test_cache_empty_returns_none_without_fetch() {
+async fn without_a_provider_feature_no_usage_is_fetched() {
     let tracker = ProviderUsageTracker::new();
-    // Without a valid token, fetch will fail and return None
     let result = tracker
         .get_usage(CredentialSource::ClaudeCode, "invalid-token")
         .await;
-    // Should gracefully return None (or possibly Some if mock succeeds)
-    // Main thing: no panic
-    let _ = result;
+    assert!(result.is_none());
+}
+
+/// A tracker whose two usage endpoints are a loopback server's, fetched by
+/// a client no proxy reaches: no test sends a token to Anthropic's or
+/// OpenAI's real usage endpoints, which `LlmRuntimeConfig::default()`
+/// names (on the parent this module's one fetch test built
+/// `ProviderUsageTracker::new()` and sent its request to
+/// api.anthropic.com in every workspace run).
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+fn tracker_on(server: &crate::test_support::MockHttpServer) -> ProviderUsageTracker {
+    let mut rt = LlmRuntimeConfig::default();
+    rt.endpoints.anthropic_usage = format!("{}/api/oauth/usage", server.base_url);
+    rt.endpoints.openai_usage = format!("{}/dashboard/billing/usage", server.base_url);
+    let mut tracker =
+        ProviderUsageTracker::with_runtime_config(Arc::new(ArcSwap::from_pointee(rt)));
+    tracker.client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("a test client");
+    tracker
+}
+
+/// Each source's usage is fetched from its own endpoint, parsed, and then
+/// served from the cache: a second ask sends no second request.
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+#[tokio::test]
+async fn usage_is_fetched_from_the_configured_endpoint_once_then_cached() {
+    use crate::test_support::{MockHttpServer, MockResponse};
+    let server = MockHttpServer::start(|req| match req.path.as_str() {
+        "/api/oauth/usage" => MockResponse::json(
+            r#"{"total_cost": 12.5, "total_tokens": 50000, "period": "2026-02"}"#,
+        ),
+        "/dashboard/billing/usage" => {
+            MockResponse::json(r#"{"total_usage": 1250.0, "total_tokens": 100000}"#)
+        }
+        _ => MockResponse::not_found(),
+    })
+    .await;
+    let tracker = tracker_on(&server);
+
+    for _ in 0..2 {
+        let anthropic = tracker
+            .get_usage(CredentialSource::ClaudeCode, "a-test-token")
+            .await
+            .expect("Anthropic usage from the loopback server");
+        assert!((anthropic.cost_usd - 12.5).abs() < 0.01);
+        assert_eq!(anthropic.token_count, 50000);
+        let openai = tracker
+            .get_usage(CredentialSource::Codex, "a-test-token")
+            .await
+            .expect("OpenAI usage from the loopback server");
+        assert!((openai.cost_usd - 12.5).abs() < 0.01);
+        assert_eq!(openai.token_count, 100000);
+    }
+
+    assert_eq!(server.hits("/api/oauth/usage").await, 1);
+    assert_eq!(server.hits("/dashboard/billing/usage").await, 1);
+    assert_eq!(server.requests().await.len(), 2);
+}
+
+/// A refused fetch is no usage, and nothing is cached: the next ask
+/// fetches again.
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+#[tokio::test]
+async fn a_refused_usage_fetch_is_none_and_not_cached() {
+    use crate::test_support::{MockHttpServer, MockResponse};
+    let server = MockHttpServer::start(|_| MockResponse::error(401, r#"{"error":"no"}"#)).await;
+    let tracker = tracker_on(&server);
+
+    for _ in 0..2 {
+        assert!(
+            tracker
+                .get_usage(CredentialSource::ClaudeCode, "invalid-token")
+                .await
+                .is_none()
+        );
+    }
+
+    assert_eq!(server.hits("/api/oauth/usage").await, 2);
 }
 
 #[test]
