@@ -9,7 +9,6 @@ use super::*;
 use crate::security::confirmation::{ConfirmationBroker, ConfirmationResponse};
 use crate::tools::ToolRegistry;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
-use async_trait::async_trait;
 use std::sync::Mutex;
 
 /// A builtin that keeps the arguments of every run.
@@ -18,7 +17,6 @@ struct Kept {
     runs: Mutex<Vec<serde_json::Value>>,
 }
 
-#[async_trait]
 impl BuiltInTool for Kept {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.runs.lock().unwrap().push(arguments.clone());
@@ -52,7 +50,7 @@ fn sandbox_with(
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(tool),
+            backend: ToolBackend::built_in_arc(tool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,

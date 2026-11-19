@@ -10,7 +10,6 @@ fn test_lead_agent_registry_contains_coordination_tools() {
 
     struct NoopTool;
 
-    #[async_trait]
     impl BuiltInTool for NoopTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("noop".to_string())
@@ -26,7 +25,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+        backend: ToolBackend::built_in(NoopTool),
         provides_capabilities: vec!["web_search".to_string()],
         exempt_from_timeout: false,
         annotations: None,
@@ -156,7 +155,7 @@ fn every_per_request_lead_tool_says_its_arguments_reach_no_program() {
     registry
         .register(RegisteredTool {
             definition: crate::tools::builtins::invoke_skill_tool_definition(),
-            backend: ToolBackend::BuiltIn(Arc::new(crate::tools::builtins::InvokeSkillTool::new(
+            backend: ToolBackend::built_in(crate::tools::builtins::InvokeSkillTool::new(
                 Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
                 Arc::new(ToolRegistry::default()),
                 router,
@@ -164,7 +163,7 @@ fn every_per_request_lead_tool_says_its_arguments_reach_no_program() {
                 None,
                 daemon_config,
                 1.0,
-            ))),
+            )),
             provides_capabilities: vec![],
             exempt_from_timeout: crate::tools::builtins::builtin_is_exempt_from_timeout(
                 "invoke_skill",
@@ -4657,7 +4656,6 @@ impl CountingBuiltIn {
     }
 }
 
-#[async_trait]
 impl crate::tools::registry::BuiltInTool for CountingBuiltIn {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4683,7 +4681,7 @@ fn register_capability_tool(
                 strict: None,
                 input_examples: None,
             },
-            backend: crate::tools::registry::ToolBackend::BuiltIn(backend),
+            backend: crate::tools::registry::ToolBackend::built_in_arc(backend),
             provides_capabilities: vec![capability.to_string()],
             exempt_from_timeout: false,
             annotations: None,

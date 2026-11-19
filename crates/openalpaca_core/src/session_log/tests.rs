@@ -3425,7 +3425,6 @@ async fn rebuilding_executes_no_tool() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Counter(std::sync::Arc<AtomicUsize>);
-    #[async_trait::async_trait]
     impl BuiltInTool for Counter {
         async fn execute(&self, _args: &serde_json::Value) -> Result<String, String> {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -3443,7 +3442,7 @@ async fn rebuilding_executes_no_tool() {
                 parameters: serde_json::json!({"type": "object"}),
                 ..Default::default()
             },
-            backend: ToolBackend::BuiltIn(std::sync::Arc::new(Counter(calls.clone()))),
+            backend: ToolBackend::built_in(Counter(calls.clone())),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,

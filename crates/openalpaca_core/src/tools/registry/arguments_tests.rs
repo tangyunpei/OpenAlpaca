@@ -17,7 +17,6 @@ struct Kept {
     reaches_a_program: bool,
 }
 
-#[async_trait]
 impl BuiltInTool for Kept {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.runs.lock().unwrap().push(arguments.clone());
@@ -45,7 +44,7 @@ fn register(registry: &ToolRegistry, name: &str, parameters: serde_json::Value, 
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(tool),
+            backend: ToolBackend::built_in_arc(tool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,

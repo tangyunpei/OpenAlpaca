@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use dashmap::DashMap;
 use openalpaca_api::plugin_traits::{DynPluginToolExecutor, PluginToolExecutor};
 use openalpaca_llm::ToolDefinition;
@@ -321,7 +320,7 @@ pub fn permission_tier(annotations: Option<&openalpaca_mcp::ToolAnnotations>) ->
 /// Backend that executes a tool's logic.
 #[derive(Clone)]
 pub enum ToolBackend {
-    BuiltIn(Arc<dyn BuiltInTool>),
+    BuiltIn(Arc<DynBuiltInTool<'static>>),
     Http {
         method: String,
         url: String,
@@ -348,19 +347,36 @@ pub enum ToolBackend {
     },
 }
 
+impl ToolBackend {
+    /// A built-in backend running `tool`, type-erased here so a
+    /// registration site names the tool alone.
+    pub fn built_in(tool: impl BuiltInTool + 'static) -> Self {
+        Self::BuiltIn(DynBuiltInTool::new_arc(tool))
+    }
+
+    /// A built-in backend sharing `tool` with a caller that keeps a handle
+    /// to the concrete value.
+    pub fn built_in_arc(tool: Arc<impl BuiltInTool + 'static>) -> Self {
+        Self::BuiltIn(DynBuiltInTool::from_arc(tool))
+    }
+}
+
 /// Trait for built-in tool implementations.
-#[async_trait]
+#[dynosaur::dynosaur(pub DynBuiltInTool = dyn(box) BuiltInTool)]
 pub trait BuiltInTool: Send + Sync {
-    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String>;
+    fn execute(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> impl Future<Output = Result<String, String>> + Send;
 
     /// Execute with per-invocation context. Default delegates to execute().
     /// Override for tools that need identity (owner_id, task_id, etc.).
-    async fn execute_with_context(
+    fn execute_with_context(
         &self,
         arguments: &serde_json::Value,
         _ctx: &ToolContext,
-    ) -> Result<String, String> {
-        self.execute(arguments).await
+    ) -> impl Future<Output = Result<String, String>> + Send {
+        async move { self.execute(arguments).await }
     }
 
     /// What the confirmation card says about this call, written by the
@@ -369,12 +385,12 @@ pub trait BuiltInTool: Send + Sync {
     /// default — raises the ordinary card with the literal arguments, and
     /// `Err(reason)` refuses the call with **no card**, so a person is never
     /// asked about something that would be refused after the click.
-    async fn confirmation_preview(
+    fn confirmation_preview(
         &self,
         _arguments: &serde_json::Value,
         _ctx: &ToolContext,
-    ) -> Result<Option<String>, String> {
-        Ok(None)
+    ) -> impl Future<Output = Result<Option<String>, String>> + Send {
+        async move { Ok(None) }
     }
 
     /// Whether this tool's arguments reach a shell line or another program,
@@ -389,12 +405,12 @@ pub trait BuiltInTool: Send + Sync {
     /// Called when a person denied this call on its card (design 09 §4.3),
     /// with `ctx.human_denial` set. What it returns is added to the refusal
     /// the model reads. The default does nothing.
-    async fn on_confirmation_denied(
+    fn on_confirmation_denied(
         &self,
         _arguments: &serde_json::Value,
         _ctx: &ToolContext,
-    ) -> Option<String> {
-        None
+    ) -> impl Future<Output = Option<String>> + Send {
+        async move { None }
     }
 }
 
@@ -752,7 +768,7 @@ impl ToolRegistry {
 
     /// The builtin behind `tool_name`, for the confirmation hooks below.
     /// Only a builtin has them; every other backend answers the defaults.
-    fn builtin(&self, tool_name: &str) -> Option<Arc<dyn BuiltInTool>> {
+    fn builtin(&self, tool_name: &str) -> Option<Arc<DynBuiltInTool<'static>>> {
         self.tools
             .get(tool_name)
             .and_then(|entry| match &entry.backend {

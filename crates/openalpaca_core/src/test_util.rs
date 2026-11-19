@@ -430,7 +430,6 @@ pub(crate) const SLOW_TOOL_RUNS: std::time::Duration = std::time::Duration::from
 /// and answers `"finished"`.
 pub(crate) struct Sleeps;
 
-#[async_trait::async_trait]
 impl crate::tools::registry::BuiltInTool for Sleeps {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         tokio::time::sleep(SLOW_TOOL_RUNS).await;
@@ -447,7 +446,7 @@ pub(crate) fn slow_shell() -> crate::tools::registry::RegisteredTool {
         .find(|tool| tool.definition.name == "shell_execute")
         .expect("shell_execute is a builtin");
     crate::tools::registry::RegisteredTool {
-        backend: crate::tools::registry::ToolBackend::BuiltIn(std::sync::Arc::new(Sleeps)),
+        backend: crate::tools::registry::ToolBackend::built_in(Sleeps),
         annotations: None,
         ..shell
     }

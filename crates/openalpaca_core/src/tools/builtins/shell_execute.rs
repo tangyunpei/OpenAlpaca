@@ -1,10 +1,8 @@
 use crate::tools::platform::{RunFailure, run_bounded, shell_command, shown_output};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::tools::working_folder::{WorkingFolderRefusal, working_folder};
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::path::Path;
-use std::sync::Arc;
 
 use super::annotations_for_builtin;
 use super::approval_preview::command_card;
@@ -165,7 +163,6 @@ fn timed_out(secs: u64) -> String {
     )
 }
 
-#[async_trait]
 impl BuiltInTool for ShellExecuteTool {
     /// R26: a command runs in its conversation's working folder, and a call
     /// reached with no context names none — refused, never run in the
@@ -232,7 +229,7 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
                 serde_json::json!({"command": "grep -rn 'TODO' src/"}),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(ShellExecuteTool)),
+        backend: ToolBackend::built_in(ShellExecuteTool),
         provides_capabilities: vec!["shell_execute".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("shell_execute"),
@@ -246,6 +243,7 @@ pub(super) fn shell_execute_tool() -> RegisteredTool {
 mod tests {
     use super::*;
     use crate::test_util::{GONE_WITHIN, KillOnFail, pid_from_file, wait_until_gone};
+    use std::sync::Arc;
     use std::time::Duration;
 
     /// A command, run in `dir`, that starts a background `sleep`, writes its
@@ -350,6 +348,7 @@ mod preview_tests {
     use crate::test_util::GuardedProject;
     use crate::tools::ToolRegistry;
     use openalpaca_llm::ToolCall;
+    use std::sync::Arc;
 
     fn registry() -> ToolRegistry {
         let registry = ToolRegistry::default();

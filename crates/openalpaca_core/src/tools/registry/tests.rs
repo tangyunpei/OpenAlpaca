@@ -4,7 +4,6 @@ struct MockBuiltIn {
     response: String,
 }
 
-#[async_trait]
 impl BuiltInTool for MockBuiltIn {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(self.response.clone())
@@ -20,9 +19,9 @@ fn make_tool_with_caps(name: &str, caps: Vec<&str>) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: caps.into_iter().map(String::from).collect(),
         exempt_from_timeout: false,
         annotations: None,
@@ -41,9 +40,9 @@ fn make_tool(name: &str, response: &str) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: response.to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -325,9 +324,9 @@ async fn test_schema_missing_required_field() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -364,9 +363,9 @@ async fn test_schema_wrong_type() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -409,9 +408,9 @@ async fn test_schema_valid_args_pass() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -438,9 +437,9 @@ async fn test_schema_non_object_args_rejected() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -641,9 +640,9 @@ async fn test_registry_execute_with_context_routes_to_builtin() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "mock".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -696,7 +695,6 @@ async fn test_memory_search_reads_context_not_args() {
 
     struct ContextCaptureTool;
 
-    #[async_trait]
     impl super::BuiltInTool for ContextCaptureTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Err("should not be called directly".to_string())
@@ -741,7 +739,6 @@ async fn test_missing_owner_id_returns_error() {
     // requires ctx.owner_id and returns an error when it is None.
     struct OwnerRequiringTool;
 
-    #[async_trait]
     impl super::BuiltInTool for OwnerRequiringTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Err("direct execute not supported".to_string())
@@ -902,9 +899,9 @@ async fn test_concurrent_register_and_execute() {
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+                backend: ToolBackend::built_in(MockBuiltIn {
                     response: format!("ok_{i}"),
-                })),
+                }),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
                 annotations: None,
@@ -1020,9 +1017,9 @@ fn make_tool_with_name(name: &str) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+        backend: ToolBackend::built_in(MockBuiltIn {
             response: "ok".to_string(),
-        })),
+        }),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -1203,9 +1200,9 @@ async fn test_unknown_type_rejected_via_validation() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            backend: ToolBackend::built_in(MockBuiltIn {
                 response: "ok".to_string(),
-            })),
+            }),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1247,9 +1244,9 @@ async fn test_enum_validation_valid_value() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            backend: ToolBackend::built_in(MockBuiltIn {
                 response: "ok".to_string(),
-            })),
+            }),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1284,9 +1281,9 @@ async fn test_enum_validation_invalid_value() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockBuiltIn {
+            backend: ToolBackend::built_in(MockBuiltIn {
                 response: "ok".to_string(),
-            })),
+            }),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -2970,7 +2967,6 @@ fn created_by_resolves_the_principal_before_the_owner_id() {
 /// A builtin that says its arguments reach a program, as a skill script does.
 struct ProgramBuiltIn;
 
-#[async_trait]
 impl BuiltInTool for ProgramBuiltIn {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok("ran".to_string())
@@ -2988,7 +2984,7 @@ fn only_a_first_party_builtin_is_spared_the_traversal_rule() {
     registry
         .register(make_tool_with_backend(
             "script_like",
-            ToolBackend::BuiltIn(Arc::new(ProgramBuiltIn)),
+            ToolBackend::built_in(ProgramBuiltIn),
         ))
         .unwrap();
     registry
@@ -3328,4 +3324,30 @@ fn a_schema_takes_timeout_secs_only_where_it_names_one() {
     assert!(!registry.declares_timeout_secs("names_others"));
     assert!(!registry.declares_timeout_secs("names_nothing"));
     assert!(!registry.declares_timeout_secs("no_such_tool"));
+}
+
+/// A type-erased built-in is held in `ToolBackend::BuiltIn` and the
+/// per-request tool sets, and every call through it runs in spawned work.
+///
+/// The supertraits alone make the held form `Send + Sync`, so the test
+/// also holds each async method's declared `+ Send`: the generic body
+/// sees only the trait's declaration, and naming it at the Dyn compiles
+/// it.
+#[test]
+fn a_held_built_in_tool_is_send_and_sync() {
+    fn send_and_sync<T: Send + Sync + ?Sized>() {}
+    send_and_sync::<Arc<DynBuiltInTool<'static>>>();
+
+    fn is_send<T: Send>(_: &T) {}
+    fn futures_are_send<T: BuiltInTool + ?Sized>(
+        tool: &T,
+        arguments: &serde_json::Value,
+        ctx: &ToolContext,
+    ) {
+        is_send(&tool.execute(arguments));
+        is_send(&tool.execute_with_context(arguments, ctx));
+        is_send(&tool.confirmation_preview(arguments, ctx));
+        is_send(&tool.on_confirmation_denied(arguments, ctx));
+    }
+    let _ = futures_are_send::<DynBuiltInTool<'static>>;
 }

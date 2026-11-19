@@ -538,7 +538,6 @@ fn make_security_gate_with_registry(
 
 struct MockBuiltInTool;
 
-#[async_trait::async_trait]
 impl BuiltInTool for MockBuiltInTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok("mock tool result".to_string())
@@ -554,7 +553,7 @@ fn make_mock_tool(name: &str) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockBuiltInTool)),
+        backend: ToolBackend::built_in(MockBuiltInTool),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -612,7 +611,6 @@ mod request_workspace_threading {
     /// Records the `ToolContext` every invocation was handed.
     struct RecordingTool(Arc<Mutex<Vec<ToolContext>>>);
 
-    #[async_trait]
     impl BuiltInTool for RecordingTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Err("needs context".to_string())
@@ -680,7 +678,7 @@ mod request_workspace_threading {
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let registry = ToolRegistry::default();
         let mut tool = make_mock_tool("record_ctx");
-        tool.backend = ToolBackend::BuiltIn(Arc::new(RecordingTool(recorded.clone())));
+        tool.backend = ToolBackend::built_in(RecordingTool(recorded.clone()));
         registry.register(tool).unwrap();
         let registry = Arc::new(registry);
 
@@ -805,7 +803,6 @@ mod a_list_change_mid_turn {
     /// turn's tool call is still running.
     struct TheServerChangesItsList(Arc<ToolRegistry>);
 
-    #[async_trait]
     impl BuiltInTool for TheServerChangesItsList {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             self.0.remove("srv__dropped");
@@ -888,8 +885,7 @@ mod a_list_change_mid_turn {
         ledger.upsert(&ext, true, ExtensionState::Enabled);
         ledger.record_tools(&ext, ["srv__dropped", "srv__kept"]);
         let mut change_list = make_mock_tool("change_list");
-        change_list.backend =
-            ToolBackend::BuiltIn(Arc::new(TheServerChangesItsList(registry.clone())));
+        change_list.backend = ToolBackend::built_in(TheServerChangesItsList(registry.clone()));
         registry.register(change_list).unwrap();
 
         // "full" puts the whole registry on the main-loop surface, so the
@@ -2669,7 +2665,6 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
 
     // Builtin the plugin skill calls back into through the sandbox.
     struct EchoTool;
-    #[async_trait]
     impl BuiltInTool for EchoTool {
         async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
             Ok(format!(
@@ -2715,7 +2710,7 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
+            backend: ToolBackend::built_in(EchoTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -4366,7 +4361,6 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
     const INLINE_BYTES: usize = 1024;
 
     struct BigOutputTool;
-    #[async_trait]
     impl BuiltInTool for BigOutputTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("q".repeat(RESULT_BYTES))
@@ -4431,7 +4425,7 @@ async fn a_skill_loop_honours_the_configured_inline_threshold() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(BigOutputTool)),
+            backend: ToolBackend::built_in(BigOutputTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -5914,7 +5908,6 @@ async fn a_streaming_skill_keeps_its_forced_tool_choice() {
 
 struct FailingBuiltInTool;
 
-#[async_trait::async_trait]
 impl BuiltInTool for FailingBuiltInTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("missing required parameter: target".to_string())
@@ -5939,7 +5932,7 @@ async fn a_skill_turn_that_reaches_no_answer_says_why() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(FailingBuiltInTool)),
+            backend: ToolBackend::built_in(FailingBuiltInTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,

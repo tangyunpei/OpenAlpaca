@@ -6,7 +6,6 @@ use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext, ToolRegistry};
-use async_trait::async_trait;
 use openalpaca_llm::LlmRouter;
 use openalpaca_llm::{ChatMessage, ToolDefinition};
 use std::sync::Arc;
@@ -344,7 +343,7 @@ impl SkillInvocationToolExecutor {
                     let tool = ScriptToolBuiltIn::new(skill_dir, cfg, roots.clone())?;
                     cloned.register(RegisteredTool {
                         definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
-                        backend: ToolBackend::BuiltIn(Arc::new(tool)),
+                        backend: ToolBackend::built_in(tool),
                         provides_capabilities: vec![],
                         exempt_from_timeout: false,
                         annotations: None,
@@ -396,10 +395,10 @@ impl SkillInvocationToolExecutor {
                                 strict: None,
                                 input_examples: None,
                             },
-                            backend: ToolBackend::BuiltIn(Arc::new(SkillInvocationBuiltInAdapter {
+                            backend: ToolBackend::built_in(SkillInvocationBuiltInAdapter {
                                 executor: child_executor.clone(),
                                 skill_id: dep_id.clone(),
-                            })),
+                            }),
                             provides_capabilities: vec![],
                             exempt_from_timeout: true,
                             annotations: None,
@@ -526,7 +525,6 @@ pub struct SkillInvocationBuiltInAdapter {
     pub skill_id: String,
 }
 
-#[async_trait]
 impl BuiltInTool for SkillInvocationBuiltInAdapter {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.executor
@@ -604,7 +602,6 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    #[async_trait]
     impl BuiltInTool for EchoTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -658,9 +655,9 @@ Use echo_tool to answer.
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(Arc::new(EchoTool {
+                backend: ToolBackend::built_in(EchoTool {
                     calls: calls.clone(),
-                })),
+                }),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
                 annotations: None,

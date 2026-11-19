@@ -3173,7 +3173,6 @@ async fn a_long_report_survives_to_the_two_thousand_character_cap() {
 /// A tool that would do something, if it were ever allowed to run.
 struct DangerTool;
 
-#[async_trait::async_trait]
 impl crate::tools::registry::BuiltInTool for DangerTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok("the tool ran".to_string())
@@ -3203,7 +3202,7 @@ fn setup_with_tool_and_router(
                 strict: None,
                 input_examples: None,
             },
-            backend: crate::tools::registry::ToolBackend::BuiltIn(Arc::new(DangerTool)),
+            backend: crate::tools::registry::ToolBackend::built_in(DangerTool),
             provides_capabilities: vec![tool_name.to_string()],
             exempt_from_timeout: false,
             annotations: None,

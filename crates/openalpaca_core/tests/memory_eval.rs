@@ -2568,12 +2568,11 @@ impl ReadLog {
 /// A built-in tool that answers exactly as `inner` does and records, for
 /// the request its context names, what an answered call returned.
 struct ReadRecorder {
-    inner: Arc<dyn openalpaca_core::tools::registry::BuiltInTool>,
+    inner: Arc<openalpaca_core::tools::registry::DynBuiltInTool<'static>>,
     tool: String,
     log: Arc<ReadLog>,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_core::tools::registry::BuiltInTool for ReadRecorder {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.inner.execute(arguments).await
@@ -2616,11 +2615,11 @@ fn record_reads(
 ) -> openalpaca_core::tools::registry::RegisteredTool {
     use openalpaca_core::tools::registry::ToolBackend;
     if let ToolBackend::BuiltIn(inner) = &tool.backend {
-        tool.backend = ToolBackend::BuiltIn(Arc::new(ReadRecorder {
+        tool.backend = ToolBackend::built_in(ReadRecorder {
             inner: inner.clone(),
             tool: tool.definition.name.clone(),
             log: log.clone(),
-        }));
+        });
     }
     tool
 }
@@ -12581,7 +12580,7 @@ async fn the_read_recorder_changes_nothing_the_reader_sees() {
     use openalpaca_core::security::policy::Principal;
     use openalpaca_core::tools::ToolContext;
     use openalpaca_core::tools::builtins::memory_read_tools;
-    use openalpaca_core::tools::registry::{RegisteredTool, ToolBackend};
+    use openalpaca_core::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
     use openalpaca_storage::{Database, IdentityRepository};
 
     let home = tempfile::tempdir().unwrap();

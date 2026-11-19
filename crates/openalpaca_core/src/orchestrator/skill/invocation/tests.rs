@@ -10,7 +10,6 @@ use openalpaca_api::plugin_traits::ToolCallbackExecutor;
 
 struct NoopTool;
 
-#[async_trait::async_trait]
 impl BuiltInTool for NoopTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(String::new())
@@ -27,7 +26,7 @@ fn register(registry: &ToolRegistry, name: &str, provides: Vec<String>) {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(NoopTool)),
+            backend: ToolBackend::built_in(NoopTool),
             provides_capabilities: provides,
             exempt_from_timeout: false,
             annotations: None,
@@ -472,7 +471,6 @@ async fn an_attended_skill_turn_keeps_the_fail_closed_refusal() {
 /// Keeps the context the one call it served was handed.
 struct RecordsCtx(Arc<Mutex<Option<crate::tools::registry::ToolContext>>>);
 
-#[async_trait::async_trait]
 impl BuiltInTool for RecordsCtx {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("needs context".to_string())
@@ -505,7 +503,7 @@ async fn a_plugin_skills_tool_calls_carry_the_turns_conversation() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(RecordsCtx(seen.clone()))),
+            backend: ToolBackend::built_in(RecordsCtx(seen.clone())),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -554,7 +552,7 @@ async fn a_plugin_skills_tool_call_is_cut_at_the_daemons_per_tool_bound() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(crate::test_util::Sleeps)),
+            backend: ToolBackend::built_in(crate::test_util::Sleeps),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -637,7 +635,6 @@ impl openalpaca_api::plugin_traits::PluginSkillExecutor for SendsArguments {
 /// A builtin that keeps the arguments it ran on.
 struct KeepsArguments(Arc<Mutex<Vec<serde_json::Value>>>);
 
-#[async_trait::async_trait]
 impl BuiltInTool for KeepsArguments {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.0.lock().unwrap().push(arguments.clone());
@@ -666,7 +663,7 @@ async fn a_plugin_skills_json_string_tool_call_reaches_the_tool_as_its_object() 
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(KeepsArguments(kept.clone()))),
+            backend: ToolBackend::built_in(KeepsArguments(kept.clone())),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,

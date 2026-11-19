@@ -317,7 +317,6 @@ mod tests {
     use crate::bus::EventBus;
     use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
     use crate::tools::ToolRegistry;
-    use async_trait::async_trait;
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -404,7 +403,6 @@ mod tests {
 
     struct EchoTool;
 
-    #[async_trait]
     impl BuiltInTool for EchoTool {
         async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
             Ok(format!("echo:{}", arguments.get("q").and_then(|v| v.as_str()).unwrap_or("")))
@@ -422,7 +420,7 @@ mod tests {
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
+                backend: ToolBackend::built_in(EchoTool),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
                 annotations: None,

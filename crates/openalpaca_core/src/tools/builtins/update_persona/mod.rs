@@ -9,11 +9,9 @@ pub use writer::{UserDocumentRead, UserDocumentWriter, UserDocumentWritten};
 use crate::bus::EventBus;
 use crate::tools::builtins::annotations_for_builtin;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::hash::sha256_hex;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// Runtime context for all persona document tools.
 #[derive(Clone)]
@@ -126,7 +124,6 @@ struct PersonaUpdateTool {
     identity: identity::IdentityHandler,
 }
 
-#[async_trait]
 impl BuiltInTool for PersonaUpdateTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         // Reject unknown top-level fields
@@ -319,7 +316,7 @@ pub(super) fn update_persona_tool(ctx: PersonaToolContext) -> RegisteredTool {
                 }),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(tool)),
+        backend: ToolBackend::built_in(tool),
         provides_capabilities: vec!["persona_write".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("update_persona"),

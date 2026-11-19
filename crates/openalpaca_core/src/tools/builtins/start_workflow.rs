@@ -13,7 +13,6 @@ use crate::daemon_config::RoutingConfig;
 use crate::events::SystemEvent;
 use crate::orchestrator::dispatcher::{generate_title, DispatchOutcome, TaskDispatcher};
 use crate::tools::registry::{BuiltInTool, ToolContext};
-use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::ToolDefinition;
 use std::sync::{Arc, Mutex};
@@ -69,7 +68,6 @@ impl StartWorkflowTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for StartWorkflowTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("start_workflow requires execution context — use execute_with_context".to_string())

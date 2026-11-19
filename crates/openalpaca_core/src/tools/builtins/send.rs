@@ -3,7 +3,6 @@ use super::annotations_for_builtin;
 use super::helpers::{acting_folder, named_folder, resolve_workspace_path};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::utils::text::{escape_hidden_line, hidden_notice};
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::repository::TaskRepository;
 use openalpaca_storage::{ArtifactRecord, ArtifactStore, Database};
@@ -279,7 +278,6 @@ impl SendTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for SendTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.execute_with_context(arguments, &ToolContext::default())
@@ -444,7 +442,7 @@ pub(super) fn send_tool(provider: ConnectorSendLock, db: Option<Database>) -> Re
                 }),
             ]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(SendTool { provider, db })),
+        backend: ToolBackend::built_in(SendTool { provider, db }),
         provides_capabilities: vec!["messaging".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("send"),
@@ -458,6 +456,7 @@ pub(super) fn send_tool(provider: ConnectorSendLock, db: Option<Database>) -> Re
 mod tests {
     use super::*;
     use crate::orchestrator::ConnectorSendProvider;
+    use async_trait::async_trait;
     use openalpaca_storage::store::StoreScope;
     use openalpaca_storage::{ArtifactKind, ArtifactRecord, NewArtifact};
     use std::sync::{Mutex, RwLock};

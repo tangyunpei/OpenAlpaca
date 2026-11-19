@@ -52,8 +52,6 @@ use tokio_util::sync::CancellationToken;
 
 // Test-only imports (for `use super::*` in tests.rs)
 #[cfg(test)]
-use async_trait::async_trait;
-#[cfg(test)]
 use crate::tools::registry::BuiltInTool;
 #[cfg(test)]
 use openalpaca_llm::ToolDefinition;
@@ -429,7 +427,7 @@ pub async fn run_lead_agent(
             &invoke_skill_def.name,
         ),
         definition: invoke_skill_def,
-        backend: crate::tools::registry::ToolBackend::BuiltIn(invoke_skill_tool),
+        backend: crate::tools::registry::ToolBackend::built_in_arc(invoke_skill_tool),
         provides_capabilities: vec![],
         annotations: None,
         version: env!("CARGO_PKG_VERSION").to_string(),

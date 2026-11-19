@@ -474,7 +474,6 @@ File.
         use openalpaca_core::tools::registry::{RegisteredTool, ToolBackend};
 
         struct Noop;
-        #[async_trait]
         impl openalpaca_core::tools::registry::BuiltInTool for Noop {
             async fn execute(&self, _a: &serde_json::Value) -> Result<String, String> {
                 Ok(String::new())
@@ -492,7 +491,7 @@ File.
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(Arc::new(Noop)),
+                backend: ToolBackend::built_in(Noop),
                 provides_capabilities: vec!["github_issues".to_string()],
                 exempt_from_timeout: false,
                 annotations: None,
@@ -513,7 +512,7 @@ File.
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(Arc::new(Noop)),
+                backend: ToolBackend::built_in(Noop),
                 provides_capabilities: vec!["search".to_string()],
                 exempt_from_timeout: false,
                 annotations: None,

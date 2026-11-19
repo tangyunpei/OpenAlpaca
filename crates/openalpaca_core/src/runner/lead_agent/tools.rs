@@ -25,7 +25,6 @@ use crate::tools::extensions::ExtensionId;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_api::plugin_traits::PluginAgentExecutor;
 use openalpaca_llm::{ChatMessage, LlmRouter, ModelChoice, ToolDefinition};
@@ -534,7 +533,6 @@ async fn join_every_run(runs: &mut tokio::task::JoinSet<()>) {
     while runs.join_next().await.is_some() {}
 }
 
-#[async_trait]
 impl BuiltInTool for SpawnSubagentTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         // 1. Parse arguments. An absent, `null` or empty `agent_id` is the
@@ -1594,7 +1592,6 @@ impl SpawnSubagentsBatchTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for SpawnSubagentsBatchTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let subagents = arguments
@@ -1757,7 +1754,6 @@ pub struct CheckSubagentStatusTool {
     pub(super) tracker: Arc<SubagentTracker>,
 }
 
-#[async_trait]
 impl BuiltInTool for CheckSubagentStatusTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let run_id = arguments
@@ -1869,7 +1865,6 @@ pub struct WaitForSubagentsTool {
     pub(super) steering: Option<Arc<SteeringInbox>>,
 }
 
-#[async_trait]
 impl BuiltInTool for WaitForSubagentsTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         let max_wait = Duration::from_mins(10); // 10 minutes safety cap
@@ -2005,7 +2000,6 @@ impl PostUpdateTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for PostUpdateTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let message = arguments
@@ -2192,7 +2186,6 @@ impl QueueFollowupTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for QueueFollowupTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         self.queue(arguments, self.constructed_principal(), None)
@@ -2254,7 +2247,7 @@ pub fn register_workflow_tools(
     registry
         .register(RegisteredTool {
             definition: post_update_tool_definition(),
-            backend: ToolBackend::BuiltIn(post_update_tool),
+            backend: ToolBackend::built_in_arc(post_update_tool),
             provides_capabilities: vec!["orchestration".to_string()],
             exempt_from_timeout: false,
             annotations: None,
@@ -2266,7 +2259,7 @@ pub fn register_workflow_tools(
     registry
         .register(RegisteredTool {
             definition: queue_followup_tool_definition(),
-            backend: ToolBackend::BuiltIn(queue_followup_tool),
+            backend: ToolBackend::built_in_arc(queue_followup_tool),
             provides_capabilities: vec!["orchestration".to_string()],
             exempt_from_timeout: false,
             annotations: None,
@@ -2375,7 +2368,7 @@ pub fn register_coordination_tools(
     // These are known-good builtin tool definitions — unwrap is safe.
     registry.register(RegisteredTool {
         definition: spawn_def,
-        backend: ToolBackend::BuiltIn(spawn_tool),
+        backend: ToolBackend::built_in_arc(spawn_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: false,
         annotations: None,
@@ -2386,7 +2379,7 @@ pub fn register_coordination_tools(
     if let (Some(batch), Some(def)) = (batch_spawn_tool, batch_def) {
         registry.register(RegisteredTool {
             definition: def,
-            backend: ToolBackend::BuiltIn(batch),
+            backend: ToolBackend::built_in_arc(batch),
             provides_capabilities: vec!["orchestration".to_string()],
             exempt_from_timeout: false,
             annotations: None,
@@ -2397,7 +2390,7 @@ pub fn register_coordination_tools(
     }
     registry.register(RegisteredTool {
         definition: check_def,
-        backend: ToolBackend::BuiltIn(check_status_tool),
+        backend: ToolBackend::built_in_arc(check_status_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
         annotations: None,
@@ -2407,7 +2400,7 @@ pub fn register_coordination_tools(
     }).unwrap();
     registry.register(RegisteredTool {
         definition: wait_def,
-        backend: ToolBackend::BuiltIn(wait_tool),
+        backend: ToolBackend::built_in_arc(wait_tool),
         provides_capabilities: vec!["orchestration".to_string()],
         exempt_from_timeout: true,
         annotations: None,

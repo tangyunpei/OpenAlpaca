@@ -22,7 +22,6 @@ use crate::orchestrator::skill_catalog::SkillCatalog;
 use crate::runner::LoopFinishReason;
 use crate::tools::registry::{BuiltInTool, ToolContext, ToolRegistry};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::{LlmRouter, ToolDefinition};
 use openalpaca_storage::SkillExecutionEntry;
@@ -129,7 +128,6 @@ impl InvokeSkillTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for InvokeSkillTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("invoke_skill requires execution context — use execute_with_context".to_string())

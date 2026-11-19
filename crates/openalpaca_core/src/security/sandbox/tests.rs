@@ -1,5 +1,4 @@
 use super::*;
-use async_trait::async_trait;
 use crate::bus::EventBus;
 use crate::security::confirmation::{ConfirmationBroker, ConfirmationResponse};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
@@ -7,7 +6,6 @@ use crate::tools::ToolRegistry;
 
 struct MockTool;
 
-#[async_trait]
 impl BuiltInTool for MockTool {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         // Check for the slow_tool marker in arguments
@@ -29,7 +27,7 @@ fn make_registry() -> Arc<ToolRegistry> {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+        backend: ToolBackend::built_in(MockTool),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -45,7 +43,7 @@ fn make_registry() -> Arc<ToolRegistry> {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+        backend: ToolBackend::built_in(MockTool),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -756,7 +754,7 @@ fn make_registry_with_destructive() -> Arc<ToolRegistry> {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+            backend: ToolBackend::built_in(MockTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(true)),
@@ -775,7 +773,7 @@ fn make_registry_with_destructive() -> Arc<ToolRegistry> {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(MockTool)),
+            backend: ToolBackend::built_in(MockTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: Some(openalpaca_mcp::ToolAnnotations::new().destructive(false)),
@@ -1257,7 +1255,6 @@ struct Recorder {
     refuse_preview: Option<String>,
 }
 
-#[async_trait]
 impl BuiltInTool for Recorder {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("needs a context".to_string())
@@ -1314,7 +1311,7 @@ fn per_call_sandbox(
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(backend),
+                backend: ToolBackend::built_in_arc(backend),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
                 annotations: None,
@@ -1440,7 +1437,7 @@ async fn auto_approve_still_prompts_a_per_call_tool() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(quiet.clone()),
+            backend: ToolBackend::built_in_arc(quiet.clone()),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1597,7 +1594,7 @@ async fn no_broker_refuses_it() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(confirm.clone()),
+            backend: ToolBackend::built_in_arc(confirm.clone()),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -1724,7 +1721,7 @@ fn traversal_sandbox(skill_dir: &std::path::Path) -> SandboxManager {
     };
     let registry = ToolRegistry::default();
     registry
-        .register(tool("note_tool", ToolBackend::BuiltIn(Arc::new(MockTool))))
+        .register(tool("note_tool", ToolBackend::built_in(MockTool)))
         .unwrap();
     registry
         .register(tool(
@@ -1763,7 +1760,7 @@ fn traversal_sandbox(skill_dir: &std::path::Path) -> SandboxManager {
     )
     .unwrap();
     registry
-        .register(tool("skill_script:noop", ToolBackend::BuiltIn(Arc::new(script))))
+        .register(tool("skill_script:noop", ToolBackend::built_in(script)))
         .unwrap();
     SandboxManager::new(
         Arc::new(registry),
@@ -1999,7 +1996,7 @@ async fn a_tool_that_runs_no_command_is_cut_at_the_bound_whatever_it_asks() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(crate::test_util::Sleeps)),
+            backend: ToolBackend::built_in(crate::test_util::Sleeps),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,

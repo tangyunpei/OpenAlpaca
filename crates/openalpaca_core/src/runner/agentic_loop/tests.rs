@@ -1,5 +1,4 @@
 use super::*;
-use async_trait::async_trait;
 use openalpaca_llm::{CallRecord, ChatResponse, LlmError, LlmRouter, ProviderType, Usage};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -286,7 +285,6 @@ async fn test_sandbox_execution() {
 
     struct TestTool;
 
-    #[async_trait]
     impl BuiltInTool for TestTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("sandbox result".to_string())
@@ -302,7 +300,7 @@ async fn test_sandbox_execution() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(std::sync::Arc::new(TestTool)),
+        backend: ToolBackend::built_in(TestTool),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -363,7 +361,6 @@ async fn test_sandbox_denied_tool() {
 
     struct TestTool;
 
-    #[async_trait]
     impl BuiltInTool for TestTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("should not reach".to_string())
@@ -379,7 +376,7 @@ async fn test_sandbox_denied_tool() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(std::sync::Arc::new(TestTool)),
+        backend: ToolBackend::built_in(TestTool),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -539,7 +536,6 @@ async fn test_cancellation_during_tool_execution() {
         token: CancellationToken,
     }
 
-    #[async_trait]
     impl BuiltInTool for CancellingTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             self.token.cancel();
@@ -562,7 +558,7 @@ async fn test_cancellation_during_tool_execution() {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(std::sync::Arc::new(cancelling_tool)),
+        backend: ToolBackend::built_in(cancelling_tool),
         provides_capabilities: vec![],
         exempt_from_timeout: false,
         annotations: None,
@@ -631,7 +627,6 @@ async fn a_run_cancelled_while_a_prompt_waits_withdraws_the_prompt_and_says_so()
 
     struct Search;
 
-    #[async_trait]
     impl BuiltInTool for Search {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("never approved, never run".to_string())
@@ -648,7 +643,7 @@ async fn a_run_cancelled_while_a_prompt_waits_withdraws_the_prompt_and_says_so()
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(Search)),
+            backend: ToolBackend::built_in(Search),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -3157,7 +3152,6 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
     use crate::tools::ToolRegistry;
 
     struct EchoTool;
-    #[async_trait]
     impl BuiltInTool for EchoTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("the search result".to_string())
@@ -3174,7 +3168,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
+            backend: ToolBackend::built_in(EchoTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -3365,7 +3359,6 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
     const RESULT_BYTES: usize = 40 * 1024;
 
     struct BigOutputTool;
-    #[async_trait]
     impl BuiltInTool for BigOutputTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("q".repeat(RESULT_BYTES))
@@ -3382,7 +3375,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(BigOutputTool)),
+            backend: ToolBackend::built_in(BigOutputTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -3554,7 +3547,6 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
     const RESULT_BYTES: usize = 40 * 1024;
 
     struct FailingTool;
-    #[async_trait]
     impl BuiltInTool for FailingTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             // A head and a tail a reader can tell apart.
@@ -3572,7 +3564,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(FailingTool)),
+            backend: ToolBackend::built_in(FailingTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -3808,7 +3800,6 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
     const RESULT_BYTES: usize = 40 * 1024;
 
     struct BigOutputTool;
-    #[async_trait]
     impl BuiltInTool for BigOutputTool {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok("q".repeat(RESULT_BYTES))
@@ -3825,7 +3816,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(BigOutputTool)),
+            backend: ToolBackend::built_in(BigOutputTool),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -5321,7 +5312,6 @@ mod stated_tool_timeout {
     /// Stands in for a command that runs past the sandbox's cut.
     struct Hangs;
 
-    #[async_trait]
     impl BuiltInTool for Hangs {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -5334,7 +5324,7 @@ mod stated_tool_timeout {
     /// `ceiling`.
     async fn hanging_command(secs: u64, ceiling: u64, arguments: serde_json::Value) -> String {
         let hangs = RegisteredTool {
-            backend: ToolBackend::BuiltIn(Arc::new(Hangs)),
+            backend: ToolBackend::built_in(Hangs),
             annotations: None,
             ..shell()
         };
@@ -5452,7 +5442,6 @@ mod tool_error_flag {
     /// A tool that answers with exactly what it was built with.
     struct Says(Result<&'static str, &'static str>);
 
-    #[async_trait]
     impl BuiltInTool for Says {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             self.0.map(str::to_string).map_err(str::to_string)
@@ -5474,7 +5463,7 @@ mod tool_error_flag {
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(Arc::new(Says(answer))),
+                backend: ToolBackend::built_in(Says(answer)),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
                 annotations: None,
@@ -5606,7 +5595,6 @@ mod no_output {
     /// A tool that succeeds with exactly what it was built with.
     struct Quiet(String);
 
-    #[async_trait]
     impl BuiltInTool for Quiet {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok(self.0.clone())
@@ -5633,7 +5621,7 @@ mod no_output {
                     strict: None,
                     input_examples: None,
                 },
-                backend: ToolBackend::BuiltIn(Arc::new(Quiet(output))),
+                backend: ToolBackend::built_in(Quiet(output)),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
                 annotations: None,
@@ -5833,7 +5821,6 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
     const LAST_LINE: &str = "Finished release in 41s — 3 warnings (see above)";
 
     struct LongBuild;
-    #[async_trait]
     impl BuiltInTool for LongBuild {
         async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
             Ok(format!(
@@ -5855,7 +5842,7 @@ async fn a_spilled_command_result_keeps_its_last_line_in_the_stub() {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(Arc::new(LongBuild)),
+            backend: ToolBackend::built_in(LongBuild),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations: None,
@@ -6080,7 +6067,7 @@ mod round_groups {
     fn tool(
         name: &str,
         annotations: Option<openalpaca_mcp::ToolAnnotations>,
-        body: Arc<dyn BuiltInTool>,
+        body: Arc<impl BuiltInTool + 'static>,
     ) -> RegisteredTool {
         RegisteredTool {
             definition: ToolDefinition {
@@ -6090,7 +6077,7 @@ mod round_groups {
                 strict: None,
                 input_examples: None,
             },
-            backend: ToolBackend::BuiltIn(body),
+            backend: ToolBackend::built_in_arc(body),
             provides_capabilities: vec![],
             exempt_from_timeout: false,
             annotations,
@@ -6127,7 +6114,6 @@ mod round_groups {
         most: AtomicUsize,
     }
 
-    #[async_trait]
     impl BuiltInTool for InFlight {
         async fn execute(&self, arguments: &Value) -> Result<String, String> {
             let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
@@ -6144,7 +6130,6 @@ mod round_groups {
     /// all in flight together, `Err` when this call waited alone.
     struct Meets(tokio::sync::Barrier);
 
-    #[async_trait]
     impl BuiltInTool for Meets {
         async fn execute(&self, _arguments: &Value) -> Result<String, String> {
             tokio::time::timeout(Duration::from_secs(5), self.0.wait())
@@ -6169,7 +6154,6 @@ mod round_groups {
         }
     }
 
-    #[async_trait]
     impl BuiltInTool for Journal {
         async fn execute(&self, arguments: &Value) -> Result<String, String> {
             let id = arguments["id"].as_str().unwrap_or_default().to_string();
@@ -6185,7 +6169,6 @@ mod round_groups {
     /// Cancels the run, then never finishes: only the cancel ends its call.
     struct CancelsTheRun(CancellationToken);
 
-    #[async_trait]
     impl BuiltInTool for CancelsTheRun {
         async fn execute(&self, _arguments: &Value) -> Result<String, String> {
             self.0.cancel();

@@ -33,7 +33,7 @@ use crate::orchestrator::dispatcher::TaskDispatcher;
 use crate::orchestrator::skill_catalog::SkillCatalog;
 use crate::runner::lead_agent::{QueueFollowupTool, queue_followup_tool_definition};
 use crate::tools::ToolRegistry;
-use crate::tools::registry::{BuiltInTool, ToolContext};
+use crate::tools::registry::{DynBuiltInTool, ToolContext};
 use arc_swap::ArcSwap;
 use openalpaca_llm::{LlmRouter, ToolDefinition};
 use std::sync::Arc;
@@ -57,7 +57,7 @@ pub struct MainLoopToolSet {
     /// Per-request instances to inject into the per-request registry,
     /// paired with their definitions. Excludes the memory read tools, whose
     /// backends are already globally registered.
-    pub instances: Vec<(ToolDefinition, Arc<dyn BuiltInTool>)>,
+    pub instances: Vec<(ToolDefinition, Arc<DynBuiltInTool<'static>>)>,
     /// Kept for result-cell readback after the loop (structured delegation).
     pub start_workflow: Arc<StartWorkflowTool>,
     /// Present only when the workflow-aware tools were included; kept for
@@ -171,7 +171,7 @@ pub fn main_loop_tool_set(
     unattended: bool,
 ) -> MainLoopToolSet {
     let mut definitions: Vec<ToolDefinition> = Vec::new();
-    let mut instances: Vec<(ToolDefinition, Arc<dyn BuiltInTool>)> = Vec::new();
+    let mut instances: Vec<(ToolDefinition, Arc<DynBuiltInTool<'static>>)> = Vec::new();
     let mut memory_confirm_offered = false;
 
     // ── Always-core set ─────────────────────────────────────────────────
@@ -184,14 +184,13 @@ pub fn main_loop_tool_set(
     ));
     let start_def = start_workflow_tool_definition();
     definitions.push(start_def.clone());
-    instances.push((start_def, start_workflow.clone() as Arc<dyn BuiltInTool>));
+    instances.push((start_def, DynBuiltInTool::from_arc(start_workflow.clone())));
 
     let status_def = task_status_tool_definition();
     definitions.push(status_def.clone());
     instances.push((
         status_def,
-        Arc::new(TaskStatusTool::new(db.clone(), shared_context.clone()))
-            as Arc<dyn BuiltInTool>,
+        DynBuiltInTool::new_arc(TaskStatusTool::new(db.clone(), shared_context.clone())),
     ));
 
     // The memory writers need the service; without one (tests, a daemon
@@ -202,21 +201,21 @@ pub fn main_loop_tool_set(
         definitions.push(store_def.clone());
         instances.push((
             store_def,
-            Arc::new(MemoryStoreTool::new(service.clone())) as Arc<dyn BuiltInTool>,
+            DynBuiltInTool::new_arc(MemoryStoreTool::new(service.clone())),
         ));
 
         let update_def = memory_update_tool_definition();
         definitions.push(update_def.clone());
         instances.push((
             update_def,
-            Arc::new(MemoryUpdateTool::new(service.clone())) as Arc<dyn BuiltInTool>,
+            DynBuiltInTool::new_arc(MemoryUpdateTool::new(service.clone())),
         ));
 
         let forget_def = memory_forget_tool_definition();
         definitions.push(forget_def.clone());
         instances.push((
             forget_def,
-            Arc::new(MemoryForgetTool::new(service.clone())) as Arc<dyn BuiltInTool>,
+            DynBuiltInTool::new_arc(MemoryForgetTool::new(service.clone())),
         ));
 
         // Design 09 §4.1 (ruling LR13): `memory_confirm` only where a person
@@ -229,7 +228,7 @@ pub fn main_loop_tool_set(
             definitions.push(confirm_def.clone());
             instances.push((
                 confirm_def,
-                Arc::new(MemoryConfirmTool::new(service)) as Arc<dyn BuiltInTool>,
+                DynBuiltInTool::new_arc(MemoryConfirmTool::new(service)),
             ));
             memory_confirm_offered = true;
         }
@@ -295,7 +294,7 @@ pub fn main_loop_tool_set(
         definitions.push(invoke_def.clone());
         instances.push((
             invoke_def,
-            Arc::new(InvokeSkillTool::new(
+            DynBuiltInTool::new_arc(InvokeSkillTool::new(
                 skill_catalog,
                 global_registry.clone(),
                 router,
@@ -303,7 +302,7 @@ pub fn main_loop_tool_set(
                 db.clone(),
                 daemon_config,
                 max_cost,
-            )) as Arc<dyn BuiltInTool>,
+            )),
         ));
     }
 
@@ -317,7 +316,7 @@ pub fn main_loop_tool_set(
         ));
         let steer_def = steer_workflow_tool_definition();
         definitions.push(steer_def.clone());
-        instances.push((steer_def, steer.clone() as Arc<dyn BuiltInTool>));
+        instances.push((steer_def, DynBuiltInTool::from_arc(steer.clone())));
 
         // Main-loop queue_followup: identity and the turn's resolved project
         // root (`request_workspace_root`, F4) come from the invocation's
@@ -330,7 +329,7 @@ pub fn main_loop_tool_set(
         definitions.push(followup_def.clone());
         instances.push((
             followup_def,
-            Arc::new(QueueFollowupTool::for_main_loop(
+            DynBuiltInTool::new_arc(QueueFollowupTool::for_main_loop(
                 db,
                 bus,
                 lane_key.to_string(),
@@ -338,7 +337,7 @@ pub fn main_loop_tool_set(
                 // S5: the promise is kept by a later turn the runner starts,
                 // by which time this client may be long gone.
                 unattended,
-            )) as Arc<dyn BuiltInTool>,
+            )),
         ));
         Some(steer)
     } else {
@@ -358,6 +357,7 @@ pub fn main_loop_tool_set(
 mod tests {
     use super::*;
     use crate::test_util::{make_agent, template_from_agent};
+    use crate::tools::registry::BuiltInTool;
 
     fn routing(steering_enabled: bool) -> RoutingConfig {
         RoutingConfig {

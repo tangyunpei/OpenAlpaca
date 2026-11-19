@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::store::{StoreScope, projects};
@@ -319,7 +318,6 @@ struct ArtifactWriteTool {
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
 }
 
-#[async_trait]
 impl BuiltInTool for ArtifactWriteTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("artifact_write requires execution context — use execute_with_context".to_string())
@@ -531,7 +529,7 @@ pub(super) fn artifact_write_tool(
 ) -> RegisteredTool {
     RegisteredTool {
         definition: artifact_write_tool_definition(),
-        backend: ToolBackend::BuiltIn(Arc::new(ArtifactWriteTool { db, daemon_config })),
+        backend: ToolBackend::built_in(ArtifactWriteTool { db, daemon_config }),
         provides_capabilities: vec!["artifact_write".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("artifact_write"),

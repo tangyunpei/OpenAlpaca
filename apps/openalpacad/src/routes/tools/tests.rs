@@ -39,7 +39,6 @@ fn mcp_tool(server: &str, name: &str) -> RegisteredTool {
 
 struct Noop;
 
-#[async_trait::async_trait]
 impl openalpaca_core::tools::registry::BuiltInTool for Noop {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok(String::new())
@@ -49,7 +48,7 @@ impl openalpaca_core::tools::registry::BuiltInTool for Noop {
 fn builtin_tool(name: &str) -> RegisteredTool {
     RegisteredTool {
         definition: definition(name),
-        backend: ToolBackend::BuiltIn(Arc::new(Noop)),
+        backend: ToolBackend::built_in(Noop),
         provides_capabilities: vec![name.to_string()],
         exempt_from_timeout: false,
         annotations: None,

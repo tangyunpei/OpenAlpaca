@@ -720,7 +720,6 @@ block and restart the daemon.
 1. Create a new file in `crates/openalpaca_core/src/tools/builtins/`.
 2. Implement the `BuiltInTool` trait:
    ```rust
-   #[async_trait]
    impl BuiltInTool for MyTool {
        async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
            // implementation
@@ -730,8 +729,9 @@ block and restart the daemon.
    }
    ```
 3. Create a factory function returning `RegisteredTool` — populate
-   `definition`, `backend`, `provides_capabilities`, `exempt_from_timeout`
-   (normally `false`), `annotations`, `version`, `author`, `created_at`.
+   `definition`, `backend` (`ToolBackend::built_in(MyTool)`),
+   `provides_capabilities`, `exempt_from_timeout` (normally `false`),
+   `annotations`, `version`, `author`, `created_at`.
 4. Add an annotation profile for the new name in `annotations_for_builtin()`
    if the tool should be classified (read-only vs destructive drives
    confirmation gating and virtual capabilities).

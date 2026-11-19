@@ -11,7 +11,6 @@ use super::*;
 use crate::security::confirmation::{ConfirmationBroker, ConfirmationResponse};
 use crate::tools::extensions::{ExtensionId, ExtensionState, Transition, WithdrawalCause};
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
-use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A builtin that counts the times it ran.
@@ -20,7 +19,6 @@ struct Counted {
     runs: AtomicUsize,
 }
 
-#[async_trait]
 impl BuiltInTool for Counted {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         self.runs.fetch_add(1, Ordering::SeqCst);
@@ -168,7 +166,7 @@ async fn a_call_its_schema_refuses_raises_no_card() {
         .register(registered(
             "write_note",
             note_schema(),
-            ToolBackend::BuiltIn(tool.clone()),
+            ToolBackend::built_in_arc(tool.clone()),
         ))
         .unwrap();
     let mut h = harness(registry);
@@ -273,7 +271,7 @@ async fn a_valid_call_still_raises_its_card() {
         .register(registered(
             "write_note",
             note_schema(),
-            ToolBackend::BuiltIn(tool.clone()),
+            ToolBackend::built_in_arc(tool.clone()),
         ))
         .unwrap();
     let mut h = harness(registry);
@@ -315,7 +313,7 @@ async fn an_unattended_run_hears_the_arguments_problem_not_the_missing_approver(
         .register(registered(
             "write_note",
             note_schema(),
-            ToolBackend::BuiltIn(tool.clone()),
+            ToolBackend::built_in_arc(tool.clone()),
         ))
         .unwrap();
     let h = harness(registry);
@@ -346,7 +344,7 @@ async fn a_call_that_asks_for_no_approval_is_refused_at_dispatch_as_before() {
         .register(registered(
             "write_note",
             note_schema(),
-            ToolBackend::BuiltIn(tool.clone()),
+            ToolBackend::built_in_arc(tool.clone()),
         ))
         .unwrap();
     let mut h = harness(registry);

@@ -816,7 +816,7 @@ impl Orchestrator {
                         let tool = ScriptToolBuiltIn::new(skill_dir, cfg, roots.clone())?;
                         cloned.register(RegisteredTool {
                             definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
-                            backend: ToolBackend::BuiltIn(Arc::new(tool)),
+                            backend: ToolBackend::built_in(tool),
                             provides_capabilities: vec![],
                             exempt_from_timeout: false,
                             annotations: None,
@@ -878,12 +878,12 @@ impl Orchestrator {
                                     strict: None,
                                     input_examples: None,
                                 },
-                                backend: ToolBackend::BuiltIn(Arc::new(
+                                backend: ToolBackend::built_in(
                                     SkillInvocationBuiltInAdapter {
                                         executor: executor.clone(),
                                         skill_id: dep_id.clone(),
                                     },
-                                )),
+                                ),
                                 provides_capabilities: vec![],
                                 exempt_from_timeout: true, // nested skills manage own timeouts
                                 annotations: None,

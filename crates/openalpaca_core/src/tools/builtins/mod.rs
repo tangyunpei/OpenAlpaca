@@ -42,7 +42,6 @@ use crate::orchestrator::task_state::{TaskState, WorkspaceEntryType};
 use crate::orchestrator::ConnectorSendProvider;
 use crate::tools::registry::{BuiltInTool, ToolContext};
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use openalpaca_llm::{ToolDefinition, WebSearchConfig};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -90,7 +89,6 @@ struct WorkspaceReadTool {
     db: Option<openalpaca_storage::Database>,
 }
 
-#[async_trait]
 impl BuiltInTool for WorkspaceReadTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("workspace_read requires execution context — use execute_with_context".to_string())
@@ -164,7 +162,6 @@ struct WorkspaceWriteTool {
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
 }
 
-#[async_trait]
 impl BuiltInTool for WorkspaceWriteTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("workspace_write requires execution context — use execute_with_context".to_string())
@@ -397,12 +394,12 @@ pub fn builtin_tools(
             vec!["workspace_write".to_string()]
         };
         let backend = if def.name == "workspace_read" {
-            ToolBackend::BuiltIn(Arc::new(WorkspaceReadTool { db: ws_db.clone() }))
+            ToolBackend::built_in(WorkspaceReadTool { db: ws_db.clone() })
         } else {
-            ToolBackend::BuiltIn(Arc::new(WorkspaceWriteTool {
+            ToolBackend::built_in(WorkspaceWriteTool {
                 db: ws_db.clone(),
                 daemon_config: tool_cfg.clone(),
-            }))
+            })
         };
         tools.push(RegisteredTool {
             annotations: annotations_for_builtin(&def.name),
@@ -597,7 +594,6 @@ impl ScriptToolBuiltIn {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for ScriptToolBuiltIn {
     async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String> {
         let args = json_to_cli_args(arguments);

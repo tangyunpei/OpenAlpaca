@@ -10,9 +10,6 @@
 //! owner's (`origin = upload`) reads like a by-product: it is the owner's own
 //! file, and refusing it would guard nothing.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use openalpaca_storage::store::project_root_of;
 use openalpaca_storage::{ArtifactError, ArtifactKind, ArtifactStore, Database};
@@ -27,7 +24,6 @@ struct ArtifactReadTool {
     db: Option<Database>,
 }
 
-#[async_trait]
 impl BuiltInTool for ArtifactReadTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("artifact_read requires execution context — use execute_with_context".to_string())
@@ -185,7 +181,7 @@ pub(super) fn artifact_read_tool(db: Option<Database>) -> RegisteredTool {
                 "limit": 8192
             })]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(ArtifactReadTool { db })),
+        backend: ToolBackend::built_in(ArtifactReadTool { db }),
         // R42: comes with `read_result`, which every shipped template names,
         // so a seeded install's agents read by-products with no template edit.
         provides_capabilities: vec!["read_result".into(), "artifact_read".into()],

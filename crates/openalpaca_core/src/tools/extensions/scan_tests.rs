@@ -20,7 +20,6 @@ use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
 
 struct Ok200;
 
-#[async_trait::async_trait]
 impl BuiltInTool for Ok200 {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Ok("ok".into())
@@ -36,7 +35,7 @@ fn tool(name: &str, caps: &[&str], author: &str) -> RegisteredTool {
             strict: None,
             input_examples: None,
         },
-        backend: ToolBackend::BuiltIn(Arc::new(Ok200)),
+        backend: ToolBackend::built_in(Ok200),
         provides_capabilities: caps.iter().map(|c| c.to_string()).collect(),
         exempt_from_timeout: false,
         annotations: None,

@@ -267,7 +267,8 @@ path to an MCP client or plugin executor must go through
 ```rust
 #[derive(Clone)]
 pub enum ToolBackend {
-    BuiltIn(Arc<dyn BuiltInTool>),
+    BuiltIn(Arc<DynBuiltInTool<'static>>),   // built by ToolBackend::built_in(tool)
+                                              // or built_in_arc(Arc<tool>)
     Http {
         method: String,                       // GET, POST, PUT, DELETE
         url: String,                          // URL template with {param} placeholders
@@ -293,21 +294,29 @@ pub enum ToolBackend {
 ### BuiltInTool Trait
 
 ```rust
-#[async_trait]
+#[dynosaur::dynosaur(pub DynBuiltInTool = dyn(box) BuiltInTool)]
 pub trait BuiltInTool: Send + Sync {
-    async fn execute(&self, arguments: &serde_json::Value) -> Result<String, String>;
+    fn execute(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> impl Future<Output = Result<String, String>> + Send;
 
     /// Execute with per-invocation context. Default delegates to execute().
     /// Override for tools that need identity (owner_id, task_id, etc.).
-    async fn execute_with_context(
+    fn execute_with_context(
         &self,
         arguments: &serde_json::Value,
         _ctx: &ToolContext,
-    ) -> Result<String, String> {
-        self.execute(arguments).await
+    ) -> impl Future<Output = Result<String, String>> + Send {
+        async move { self.execute(arguments).await }
     }
+    // confirmation_preview, arguments_reach_a_program and
+    // on_confirmation_denied have defaults too.
 }
 ```
+
+An implementation writes plain `async fn` bodies with no attribute.
+`DynBuiltInTool` is the type-erased form every registry holds.
 
 Context-dependent tools (the six memory tools, `update_persona`,
 `workspace_read`, `workspace_write`, `artifact_write`, `read_result`,

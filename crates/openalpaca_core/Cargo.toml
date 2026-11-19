@@ -23,6 +23,7 @@ live-eval = [
 [dependencies]
 arc-swap.workspace = true
 async-trait.workspace = true
+dynosaur.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

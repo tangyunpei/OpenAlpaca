@@ -21,10 +21,8 @@
 //! not granted it is refused by the gate, fail-closed, like any other.
 
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
-use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use super::annotations_for_builtin;
 
@@ -54,7 +52,6 @@ impl ReadResultTool {
     }
 }
 
-#[async_trait]
 impl BuiltInTool for ReadResultTool {
     async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
         Err("read_result requires execution context — use execute_with_context".to_string())
@@ -280,7 +277,7 @@ pub(super) fn read_result_tool(sessions_root: Option<PathBuf>) -> RegisteredTool
                 "limit": 8192
             })]),
         },
-        backend: ToolBackend::BuiltIn(Arc::new(ReadResultTool { sessions_root })),
+        backend: ToolBackend::built_in(ReadResultTool { sessions_root }),
         provides_capabilities: vec!["read_result".into()],
         exempt_from_timeout: false,
         annotations: annotations_for_builtin("read_result"),
