@@ -6,12 +6,14 @@ use std::time::Duration;
 
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
-    ClientCapabilities, ClientConfig, ClientRequest, Implementation, PingRequest, ProtocolVersion,
-    ServerCapabilities, ServerNotification, SubscriptionFilter,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities, ClientConfig,
+    ClientRequest, ClientResult, Implementation, InputRequest, InputResponses, NumberOrString,
+    PingRequest, ProtocolVersion, ServerCapabilities, ServerNotification, ServerRequest,
+    SubscriptionFilter,
 };
 use rmcp::service::{
     ClientInitializeError, ClientLifecycleMode, ClientServiceExt, NotificationContext, Peer,
-    RoleClient, RunningService, ServiceError, Subscription, SubscriptionEnd,
+    RequestContext, RoleClient, RunningService, ServiceError, Subscription, SubscriptionEnd,
 };
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{
@@ -507,6 +509,20 @@ impl McpClient {
             .ok_or(McpError::TransportClosed)
     }
 
+    /// [`Self::current_peer`] and a clone of the handler the service is
+    /// served with, both taken under the one lock and returned without it:
+    /// a `tools/call`'s rounds answer the server's input requests through
+    /// the handler while the requests go out on the peer (N-MCP-3).
+    async fn current_session(&self) -> Result<(Peer<RoleClient>, NotifyingHandler), McpError> {
+        self.inner
+            .service
+            .lock()
+            .await
+            .as_ref()
+            .map(|running| (running.peer().clone(), running.service().clone()))
+            .ok_or(McpError::TransportClosed)
+    }
+
     /// Translate a failed request. A request cut off because the owner sealed
     /// the client — a `disconnect` closed the service under it — reads
     /// [`McpError::Closed`], the deliberate close, never the unexpected
@@ -538,7 +554,7 @@ impl McpClient {
     /// Health check — sends an MCP `ping`.
     pub async fn ping(&self) -> Result<(), McpError> {
         let peer = self.current_peer().await?;
-        // rmcp (still at 3.7) does not expose a typed `ping()` helper on `Peer<RoleClient>`;
+        // rmcp 3.9.0 does not expose a typed `ping()` helper on `Peer<RoleClient>`;
         // construct a PingRequest manually and discard the (empty) server response.
         let req: ClientRequest = PingRequest::default().into();
         peer.send_request(req)
@@ -756,29 +772,29 @@ impl McpClient {
         // and be reported as this client's timeout, not the sandbox's (kept:
         // the connect bound stays, as before; an owner item,
         // TIMEOUT-ONE-CLOCK).
+        // A server in the 2026-07-28 lifecycle may answer `input_required`
+        // (SEP-2322): [`Self::call_rounds`] answers it, every round under
+        // this one deadline, each round a request of its own the server
+        // asked for — a new id, sent once — never a resend; the reconnect
+        // above runs before the first round only.
         let request_timeout = self.inner.config.request_timeout;
         let outcome = match deadline {
             None => {
                 let op = async {
                     self.ensure_connected().await?;
-                    let peer = self.current_peer().await?;
-                    let result = peer
-                        .call_tool(params)
-                        .await
-                        .map_err(|e| self.call_error(e))?;
-                    Ok::<_, McpError>(result)
+                    let (peer, handler) = self.current_session().await?;
+                    self.call_rounds(&peer, &handler, params).await
                 };
                 with_cancel_and_timeout(op, cancel_token, request_timeout).await
             }
             Some(deadline) => {
                 let connect = async {
                     self.ensure_connected().await?;
-                    self.current_peer().await
+                    self.current_session().await
                 };
                 match with_cancel_and_timeout(connect, cancel_token, request_timeout).await {
-                    Ok(peer) => {
-                        let op =
-                            async { peer.call_tool(params).await.map_err(|e| self.call_error(e)) };
+                    Ok((peer, handler)) => {
+                        let op = self.call_rounds(&peer, &handler, params);
                         with_cancel_and_timeout(op, cancel_token, deadline).await
                     }
                     Err(e) => Err(e),
@@ -803,6 +819,73 @@ impl McpClient {
                 Err(e)
             }
         }
+    }
+
+    /// The rounds of one `tools/call` (SEP-2322, the multi round-trip
+    /// request): at most `DEFAULT_MRTR_MAX_ROUNDS` (rmcp's, 10; no key
+    /// sets it), each one `call_tool_once` on `peer`.
+    ///
+    /// * A final result ends the call.
+    /// * `input_required` is answered: each input request through
+    ///   `handler` ([`answer_input_request`], one at a time), and the next
+    ///   round carries the answers and the server's `requestState` as it
+    ///   came. That next round is a request of its own, which the server
+    ///   asked for — a new id, sent once — not a resend of the last
+    ///   (N-MCP-1). A round that carried no input request (state alone)
+    ///   waits [`state_only_pause`] first.
+    /// * `input_required` on the last round ends the call with
+    ///   [`McpError::InputRoundsExceeded`]; nothing more is sent.
+    /// * A task in place of the result (SEP-2663) is an unexpected response
+    ///   until M83 designs its polling; so is an `input_required` with
+    ///   neither requests nor state, or an answer rmcp adds later.
+    /// * A failed round ends the call with its error, never sent again.
+    async fn call_rounds(
+        &self,
+        peer: &Peer<RoleClient>,
+        handler: &NotifyingHandler,
+        mut params: CallToolRequestParams,
+    ) -> Result<CallToolResult, McpError> {
+        let unexpected = || self.call_error(ServiceError::UnexpectedResponse);
+        let mut state_only_rounds = 0u32;
+        for round in 1..=rmcp::model::DEFAULT_MRTR_MAX_ROUNDS {
+            let asked = match peer.call_tool_once(params.clone()).await {
+                Ok(CallToolResponse::Complete(result)) => return Ok(result),
+                Ok(CallToolResponse::InputRequired(asked)) => asked,
+                Ok(CallToolResponse::Task(task)) => {
+                    tracing::debug!(
+                        server_name = %self.inner.config.server_name,
+                        task_id = %task.task.task_id,
+                        "MCP server answered a tool call with a task; tasks are not polled"
+                    );
+                    return Err(unexpected());
+                }
+                Ok(_) => return Err(unexpected()),
+                Err(e) => return Err(self.call_error(e)),
+            };
+            if round == rmcp::model::DEFAULT_MRTR_MAX_ROUNDS {
+                break;
+            }
+            let requests = asked.input_requests.unwrap_or_default();
+            if requests.is_empty() && asked.request_state.is_none() {
+                return Err(unexpected());
+            }
+            let mut answers = InputResponses::new();
+            for (key, request) in requests {
+                let answer = answer_input_request(handler, peer, &key, request).await?;
+                answers.insert(key, answer);
+            }
+            if answers.is_empty() {
+                tokio::time::sleep(state_only_pause(state_only_rounds)).await;
+                state_only_rounds += 1;
+            } else {
+                state_only_rounds = 0;
+            }
+            params.input_responses = (!answers.is_empty()).then_some(answers);
+            params.request_state = asked.request_state;
+        }
+        Err(McpError::InputRoundsExceeded(
+            rmcp::model::DEFAULT_MRTR_MAX_ROUNDS,
+        ))
     }
 
     /// N-MCP-1's pre-send half: when the current service is absent or its
@@ -851,11 +934,23 @@ impl McpClient {
 ///
 /// On timeout: returns `McpError::Timeout(duration)`.
 ///
-/// Either way `op` is dropped, and with it rmcp's request: since rmcp 3.6 a
-/// `tools/call` or `tools/list` dropped before its answer sends one
-/// `notifications/cancelled` naming its id ("request abandoned by the
-/// caller"), which `call_tests.rs` pins for a timed-out call. A cancel
-/// carrying a reason of our own is a later refinement.
+/// Either way `op` is dropped, and with it rmcp's request. **The cancel
+/// contract** (M15): rmcp 3.9.0 guards every request in flight that a
+/// `tools/call` round or a `tools/list` page sends (`call_tool_once`,
+/// `list_all_tools`), so a request dropped before its answer — by this
+/// timeout or token, by the daemon's sandbox cutting the call at its bound,
+/// or by a run's `/cancel` dropping the tool round — sends exactly **one**
+/// `notifications/cancelled` naming its id, with rmcp's reason ("request
+/// abandoned by the caller"); none goes out for a request answered, or for
+/// a drop between two rounds, when nothing is in flight. Delivery is rmcp's
+/// best effort (a queue that is full or closing drops it). Over stdio and
+/// a legacy streamable-HTTP session the notification is sent; on a
+/// `2026-07-28` streamable-HTTP session none is POSTed — rmcp drops that
+/// request's response stream instead, which is what the server sees.
+/// `call_tests.rs` pins a timed-out call, the daemon's tests a sandbox cut
+/// and a run's cancel. The reason is rmcp's, not ours: a reason of our own
+/// would need a request without rmcp's guard and a guard of our own (the
+/// one-clock rule took no such form, M15's D10 (A)).
 async fn with_cancel_and_timeout<F, T>(
     op: F,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
@@ -879,6 +974,55 @@ where
         Ok(result) => result,
         Err(_elapsed) => Err(McpError::Timeout(timeout)),
     }
+}
+
+/// Answer one input request of an `input_required` round, under the
+/// server's `key`, through the connection's handler — the answer as the next
+/// round carries it. The client declares no roots, sampling or elicitation,
+/// so the handler answers rmcp's defaults: an elicitation `Decline`, a
+/// sampling request a JSON-RPC error that ends the call, roots an empty
+/// list.
+///
+/// One step per request, per round: the seam M84 fills, where a person is
+/// asked. Its open problem is the clock: the call's one clock (the
+/// sandbox's cut, TIMEOUT-ONE-CLOCK) runs through this step and cannot be
+/// held while a person answers.
+async fn answer_input_request(
+    handler: &NotifyingHandler,
+    peer: &Peer<RoleClient>,
+    key: &str,
+    request: InputRequest,
+) -> Result<serde_json::Value, McpError> {
+    let (request, kind) = match request {
+        InputRequest::Elicitation(request) => (ServerRequest::ElicitRequest(request), "elicit"),
+        InputRequest::CreateMessage(request) => {
+            (ServerRequest::CreateMessageRequest(request), "sample")
+        }
+        InputRequest::ListRoots(request) => (ServerRequest::ListRootsRequest(request), "roots"),
+        _ => return Err(McpError::from(ServiceError::UnexpectedResponse)),
+    };
+    let context = RequestContext::new(NumberOrString::String(key.into()), peer.clone());
+    let answer = rmcp::Service::handle_request(handler, request, context)
+        .await
+        .map_err(|e| McpError::from(ServiceError::McpError(e)))?;
+    let answers_it = matches!(
+        (kind, &answer),
+        ("elicit", ClientResult::ElicitResult(_))
+            | ("sample", ClientResult::CreateMessageResult(_))
+            | ("roots", ClientResult::ListRootsResult(_))
+    );
+    if !answers_it {
+        return Err(McpError::from(ServiceError::UnexpectedResponse));
+    }
+    serde_json::to_value(answer).map_err(|e| McpError::Sdk(format!("an input answer: {e}")))
+}
+
+/// How long a round that carried only the server's state waits before the
+/// next: 50 ms, doubling each such round in a row, at most 250 ms — so a
+/// server polling through `requestState` is not answered in a tight loop.
+fn state_only_pause(rounds_in_a_row: u32) -> Duration {
+    let millis = 50u64.saturating_mul(2u64.saturating_pow(rounds_in_a_row));
+    Duration::from_millis(millis.min(250))
 }
 
 /// Internal: materialise the Transport variant a TransportKind names. A stdio
@@ -2266,3 +2410,7 @@ mod concurrency_tests;
 // P19b: a 2026-07-28 session subscribes to its server's list changes.
 #[cfg(test)]
 mod listen_tests;
+
+// M15: a tools/call answered input_required is driven round by round.
+#[cfg(test)]
+mod mrtr_tests;

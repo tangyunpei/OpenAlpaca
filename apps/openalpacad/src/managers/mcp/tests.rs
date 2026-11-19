@@ -79,6 +79,11 @@ struct StubOpts {
     /// what it writes to its stderr (`>&2`) is the stderr a test reads back
     /// (N-MCP-5).
     stderr_snippet: &'static str,
+    /// Say nothing to the first `tools/call` and keep reading, so the
+    /// `notifications/cancelled` a dropped call sends reaches the sent log
+    /// ([`Self::hang_call`] holds the shell in `wait` instead); answer every
+    /// later one (M15).
+    silent_first_call: bool,
 }
 
 /// How a stub answers the `server/discover` probe.
@@ -324,6 +329,7 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     let exit_trigger = dir.join(format!("{tag}-exit"));
     let listen_id = dir.join(format!("{tag}-listen-id"));
     let call_result = dir.join(format!("{tag}-call-result.json"));
+    let first_call_seen = dir.join(format!("{tag}-first-call-seen"));
 
     std::fs::write(&pid_log, "").expect("create pid log");
     std::fs::write(&tools_file, tools_json(&["echo"])).expect("create tools file");
@@ -337,6 +343,14 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
         "text=`printf '%s' \"$line\" | sed -n 's/.*\"name\":\"\\([^\"]*\\)\".*/\\1/p'`\n"
     } else {
         ""
+    };
+    let silent_first = if opts.silent_first_call {
+        format!(
+            "if [ ! -f '{mark}' ]; then : > '{mark}'; continue; fi\n      ",
+            mark = first_call_seen.display()
+        )
+    } else {
+        String::new()
     };
     let hang_call = if opts.hang_call {
         "hang\n".to_string()
@@ -493,7 +507,7 @@ hang() {{
       ;;
     *'"method":"tools/call"'*)
       text=ok
-      {echo_name}{hang_call}if [ -f '{call_result}' ]; then
+      {silent_first}{echo_name}{hang_call}if [ -f '{call_result}' ]; then
         printf '{{"jsonrpc":"2.0","id":%s,"result":%s}}\n' "$id" "`cat '{call_result}'`"
       else
         printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"%s"}}],"isError":false}}}}\n' "$id" "$text"
@@ -1285,6 +1299,22 @@ async fn call_through_the_sandbox(
     Vec<(bool, Option<openalpaca_api::events::ToolFailureReason>)>,
     usize,
 ) {
+    let (answer, executed, violations) = call_through_the_sandbox_until(h, bound_secs, None).await;
+    (answer.expect("no cancel token"), executed, violations)
+}
+
+/// [`call_through_the_sandbox`], the sandboxed call raced against `cancel`
+/// as a run's tool round is (`runner::unless_cancelled`): a cancel drops
+/// it, and the answer is `None`.
+async fn call_through_the_sandbox_until(
+    h: &Harness,
+    bound_secs: u64,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> (
+    Option<Result<String, String>>,
+    Vec<(bool, Option<openalpaca_api::events::ToolFailureReason>)>,
+    usize,
+) {
     use openalpaca_core::events::SystemEvent;
     use openalpaca_core::security::capabilities::Allowlist;
     use openalpaca_core::security::sandbox::{SandboxManager, SandboxPolicy};
@@ -1314,7 +1344,11 @@ async fn call_through_the_sandbox(
         agent_id: Some("one-clock".to_string()),
         ..Default::default()
     };
-    let answer = sandbox.execute_tool(&call, &policy, &ctx).await;
+    let run = sandbox.execute_tool(&call, &policy, &ctx);
+    let answer = match cancel {
+        Some(token) => token.run_until_cancelled(run).await,
+        None => Some(run.await),
+    };
     let (mut executed, mut violations) = (Vec::new(), 0);
     while let Ok(event) = events.try_recv() {
         match event {
@@ -1419,6 +1453,149 @@ async fn an_mcp_call_past_the_bound_is_cut_at_the_bound_as_a_failed_run() {
         )]
     );
     assert_eq!(violations, 0, "a timeout is no security violation");
+}
+
+/// A stub that says nothing to its first call and answers every later one,
+/// declared with a `request_timeout_secs` (10 s) past every bound here, up
+/// and `Enabled`.
+async fn silent_first_call_server(h: &Harness) -> Stub {
+    let stub = stub_server(
+        h.path(),
+        "drop",
+        StubOpts {
+            silent_first_call: true,
+            ..StubOpts::default()
+        },
+    );
+    h.write_config(&format!(
+        r#"[defaults]
+connect_timeout_secs = 10
+request_timeout_secs = 10
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 20
+
+[servers.srv]
+transport = "stdio"
+command = "{}"
+"#,
+        stub.script.display()
+    ));
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    stub
+}
+
+/// The ids of the `tools/call`s the stub read, and the `requestId` of each
+/// `notifications/cancelled`, oldest first.
+fn calls_and_cancels(stub: &Stub) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let sent = stub.sent();
+    let of = |method: &str, id: fn(&serde_json::Value) -> serde_json::Value| {
+        sent.iter()
+            .filter(|(_, m)| m["method"] == method)
+            .map(|(_, m)| id(m))
+            .collect::<Vec<_>>()
+    };
+    (
+        of("tools/call", |m| m["id"].clone()),
+        of("notifications/cancelled", |m| {
+            m["params"]["requestId"].clone()
+        }),
+    )
+}
+
+/// M15's cancel contract on the sandbox's cut: the cut drops the call, and
+/// rmcp 3.9.0's guard on the request in flight sends exactly one
+/// `notifications/cancelled`, naming that request's id. A call answered
+/// after it sends none.
+#[tokio::test]
+async fn a_call_the_sandbox_cuts_is_cancelled_once_by_its_id_and_an_answered_one_is_not() {
+    let h = Harness::new(1);
+    let stub = silent_first_call_server(&h).await;
+
+    let (answer, executed, _) = call_through_the_sandbox(&h, 1).await;
+    assert_eq!(
+        answer.as_ref().map_err(String::as_str),
+        Err("Tool 'srv__echo' timed out after 1s"),
+        "the sandbox cut the silent call"
+    );
+    assert_eq!(
+        executed,
+        vec![(
+            false,
+            Some(openalpaca_api::events::ToolFailureReason::Timeout)
+        )]
+    );
+    let cancelled = || !calls_and_cancels(&stub).1.is_empty();
+    assert!(
+        eventually(Duration::from_secs(5), cancelled).await,
+        "the cut call is cancelled on the wire"
+    );
+    // Give a second notification the time it would take to land.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (calls, cancels) = calls_and_cancels(&stub);
+    assert_eq!(calls.len(), 1, "the call reached the server once");
+    assert_eq!(
+        cancels,
+        [calls[0].clone()],
+        "one cancel, naming the cut call's id"
+    );
+
+    let (answer, _, _) = call_through_the_sandbox(&h, 3).await;
+    assert!(answer.is_ok(), "the next call is answered: {answer:?}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (calls, cancels) = calls_and_cancels(&stub);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        cancels,
+        [calls[0].clone()],
+        "the answered call is not cancelled"
+    );
+    assert_eq!(stub.spawn_count(), 1, "one child throughout");
+}
+
+/// The same on a run's `/cancel`: the run's token drops the sandboxed call
+/// once it has reached the server, and exactly one `notifications/cancelled`
+/// names its id.
+#[tokio::test]
+async fn a_call_a_runs_cancel_drops_is_cancelled_once_by_its_id() {
+    let h = Harness::new(1);
+    let stub = silent_first_call_server(&h).await;
+
+    let token = tokio_util::sync::CancellationToken::new();
+    let cancel = {
+        let token = token.clone();
+        let sent = stub.sent_log.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !std::fs::read_to_string(&sent)
+                .unwrap_or_default()
+                .contains(r#""method":"tools/call""#)
+            {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the call reaches the server"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            token.cancel();
+        }
+    };
+    let ((answer, _, _), ()) =
+        tokio::join!(call_through_the_sandbox_until(&h, 5, Some(&token)), cancel);
+    assert!(answer.is_none(), "the cancel dropped the call: {answer:?}");
+    let cancelled = || !calls_and_cancels(&stub).1.is_empty();
+    assert!(
+        eventually(Duration::from_secs(5), cancelled).await,
+        "the dropped call is cancelled on the wire"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (calls, cancels) = calls_and_cancels(&stub);
+    assert_eq!(calls.len(), 1, "the call reached the server once");
+    assert_eq!(
+        cancels,
+        [calls[0].clone()],
+        "one cancel, naming the dropped call's id"
+    );
 }
 
 // ============================================================================

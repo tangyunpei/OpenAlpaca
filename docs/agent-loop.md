@@ -1023,7 +1023,14 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   default) and an MCP tool's server's `request_timeout_secs`
   (`config/mcp.toml`, 30 s by default) are cut there by the sandbox where
   below the bound, else at the bound, so each such call ends when it did
-  before (an MCP reconnect before the call keeps the server's figure). A
+  before (an MCP reconnect before the call keeps the server's figure); an
+  MCP call that reports progress is cut there all the same, since progress
+  resets no clock, and every round of one the server answers
+  `input_required` runs under the same cut. A cut or a run's `/cancel`
+  drops the MCP request in flight, and rmcp sends the server exactly one
+  `notifications/cancelled` naming it ("request abandoned by the caller";
+  on a `2026-07-28` streamable-HTTP session the request's stream is
+  dropped instead, no notification POSTed). A
   builtin stops at a deadline of its own where it has one, `web_fetch`'s
   among them, with its own error. A plugin tool waits for its plugin's
   answer past the sandbox's figure (PLUGIN-WAIT); only a call made

@@ -1193,6 +1193,35 @@ depends on the registry dropping the last reference.
   consecutive reconnects with no successful call between them (exponential
   backoff) end in `ReconnectExhausted`.  A client sealed by a disable does
   not reconnect.
+- A `2026-07-28` server may answer a `tools/call` with `input_required`
+  (SEP-2322, the multi round-trip request): `McpClient::call_tool_under`
+  drives the rounds itself (`call_rounds`), at most rmcp's
+  `DEFAULT_MRTR_MAX_ROUNDS` (10; no key sets it), each round a
+  `call_tool_once` on the peer cloned out of the service lock.  Each input
+  request is answered through the connection's handler
+  (`answer_input_request`): the client declares no elicitation, sampling or
+  roots, so an elicitation is declined (M84 will ask a person), a sampling
+  request ends the call with the handler's JSON-RPC error, and roots are an
+  empty list; the next round carries the answers and the server's
+  `requestState`, and a round with state alone waits 50 ms first, doubling
+  to 250 ms.  Each round is a request of its own that the server asked
+  for, a new id sent once, never a resend; the pre-send reconnect runs
+  before the first round only, a transport lost between rounds fails the
+  call, and every round runs under the call's one deadline.  A server still
+  asking on the tenth round ends the call with `InputRoundsExceeded` (not
+  retried, no row change); a task in place of the result (SEP-2663) is an
+  unexpected response until M83 polls tasks.
+- A request dropped before its answer — the client's own timeout, the
+  sandbox's cut, a run's `/cancel` dropping the tool round — sends exactly
+  one `notifications/cancelled` naming its id, with rmcp's reason ("request
+  abandoned by the caller"), from rmcp 3.9.0's guard on every request in
+  flight; an answered request sends none, nor does a drop between two
+  rounds.  Over stdio and a legacy streamable-HTTP session it is a
+  notification; on a `2026-07-28` streamable-HTTP session none is POSTed:
+  rmcp drops that request's response stream, which is what the server
+  sees.  Delivery is rmcp's best effort.  A call that reports progress is
+  still cut at the smaller of its server's `request_timeout_secs` and the
+  per-tool bound (TIMEOUT-ONE-CLOCK): progress resets no clock.
 - A stdio child's exit is learned at once (N-MCP-1b): an exit observer on
   every spawn (`transport/stdio.rs`, `ReportExit`) hands the client the
   status the process's wait returned, the client reports it as
