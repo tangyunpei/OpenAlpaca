@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+use openalpaca_api::plugin_traits::{
+    DynToolCallbackExecutor, PluginSkillExecutor, ToolCallbackExecutor,
+};
 use openalpaca_core::tools::extensions::ExtensionLedger;
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -57,7 +59,7 @@ impl PluginSkillExecutor for PluginSkillBridge {
         &self,
         query: &str,
         context: &Value,
-        tool_executor: &dyn ToolCallbackExecutor,
+        tool_executor: &DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         // Gather available tool names from context (if provided)
         let available_tools = context

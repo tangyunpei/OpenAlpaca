@@ -2678,7 +2678,9 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
 #[tokio::test]
 async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
     use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
-    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+    use openalpaca_api::plugin_traits::{
+        DynToolCallbackExecutor, PluginSkillExecutor, ToolCallbackExecutor,
+    };
 
     // Builtin the plugin skill calls back into through the sandbox.
     struct EchoTool;
@@ -2703,7 +2705,7 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
             &self,
             query: &str,
             _context: &serde_json::Value,
-            tool_executor: &dyn ToolCallbackExecutor,
+            tool_executor: &DynToolCallbackExecutor<'_>,
         ) -> Result<String, String> {
             *self.received_query.lock().unwrap() = Some(query.to_string());
             let tool_result = tool_executor
@@ -4825,7 +4827,7 @@ impl openalpaca_api::plugin_traits::PluginSkillExecutor for TombstoneStubExecuto
         &self,
         _query: &str,
         _context: &serde_json::Value,
-        _tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+        _tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         Ok(String::new())
     }
@@ -7229,7 +7231,7 @@ async fn a_slash_turns_image_reaches_the_skills_vision_model() {
 /// so the attachment is reported skipped with a reason that says why.
 #[tokio::test]
 async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
-    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+    use openalpaca_api::plugin_traits::{DynToolCallbackExecutor, PluginSkillExecutor};
 
     struct EchoPluginSkill;
     #[async_trait::async_trait]
@@ -7238,7 +7240,7 @@ async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
             &self,
             query: &str,
             _c: &serde_json::Value,
-            _t: &dyn ToolCallbackExecutor,
+            _t: &DynToolCallbackExecutor<'_>,
         ) -> Result<String, String> {
             Ok(format!("plugin saw: {query}"))
         }

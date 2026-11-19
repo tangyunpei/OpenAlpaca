@@ -61,9 +61,18 @@ pub trait PluginToolExecutor: Send + Sync {
 
 /// Callback interface for executing tool calls requested by a plugin skill.
 /// The daemon implements this to provide tool access to skills during invocation.
-#[async_trait]
+///
+/// Its method returns `impl Future + Send`, so an implementor writes plain
+/// `async fn`; a plugin skill receives the callback as
+/// [`DynToolCallbackExecutor`] (`&DynToolCallbackExecutor<'_>`), built with
+/// `DynToolCallbackExecutor::from_ref`.
+#[dynosaur::dynosaur(pub DynToolCallbackExecutor = dyn(box) ToolCallbackExecutor)]
 pub trait ToolCallbackExecutor: Send + Sync {
-    async fn execute_tool(&self, tool_name: &str, arguments: &Value) -> Result<String, String>;
+    fn execute_tool(
+        &self,
+        tool_name: &str,
+        arguments: &Value,
+    ) -> impl Future<Output = Result<String, String>> + Send;
 }
 
 /// Trait for executing skills via a plugin subprocess.
@@ -77,7 +86,7 @@ pub trait PluginSkillExecutor: Send + Sync {
         &self,
         query: &str,
         context: &Value,
-        tool_executor: &dyn ToolCallbackExecutor,
+        tool_executor: &DynToolCallbackExecutor<'_>,
     ) -> Result<String, String>;
 
     fn plugin_id(&self) -> &str;
@@ -139,7 +148,7 @@ pub trait PluginAgentExecutor: Send + Sync {
 mod tests {
     use std::sync::Arc;
 
-    use super::DynPluginToolExecutor;
+    use super::{DynPluginToolExecutor, DynToolCallbackExecutor};
 
     /// A type-erased executor crosses tasks: the registry holds it in
     /// `ToolBackend::Plugin` and calls it from spawned work.
@@ -147,5 +156,13 @@ mod tests {
     fn a_held_plugin_tool_executor_is_send_and_sync() {
         fn send_and_sync<T: Send + Sync + ?Sized>() {}
         send_and_sync::<Arc<DynPluginToolExecutor<'static>>>();
+    }
+
+    /// A type-erased tool callback rides inside a plugin skill's boxed,
+    /// `Send` invoke future, so the held form is `Send + Sync`.
+    #[test]
+    fn a_held_tool_callback_executor_is_send_and_sync() {
+        fn send_and_sync<T: Send + Sync + ?Sized>() {}
+        send_and_sync::<Arc<DynToolCallbackExecutor<'static>>>();
     }
 }

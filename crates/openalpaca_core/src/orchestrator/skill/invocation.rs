@@ -1332,6 +1332,8 @@ impl Orchestrator {
             tool_ctx,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
+        let tool_executor =
+            openalpaca_api::plugin_traits::DynToolCallbackExecutor::from_ref(&callback);
 
         let context = serde_json::json!({
             "source": source,
@@ -1349,7 +1351,7 @@ impl Orchestrator {
         // bridge rewrites the common cases itself; this is the belt-and-braces
         // catch for any path that surfaced a raw one (design §3.2 T3(b)).
         let content = ledger
-            .run_scoped(&extension, executor.invoke(query, &context, &callback))
+            .run_scoped(&extension, executor.invoke(query, &context, tool_executor))
             .await
             .map_err(|e| format!("Plugin skill '{skill_name}' failed: {e}"))?;
 
@@ -1473,7 +1475,6 @@ struct SandboxToolCallback {
     calls: std::sync::atomic::AtomicUsize,
 }
 
-#[async_trait::async_trait]
 impl openalpaca_api::plugin_traits::ToolCallbackExecutor for SandboxToolCallback {
     async fn execute_tool(
         &self,

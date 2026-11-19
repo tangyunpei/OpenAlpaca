@@ -572,7 +572,7 @@ fn a_plugin_skill_over_a_bundled_key_gives_it_back_when_it_goes() {
             &self,
             _query: &str,
             _context: &serde_json::Value,
-            _tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+            _tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
         ) -> Result<String, String> {
             Ok(String::new())
         }

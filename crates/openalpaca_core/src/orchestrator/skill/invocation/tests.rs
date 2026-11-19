@@ -6,6 +6,7 @@ use crate::middleware::skill::SkillFrontmatter;
 use crate::security::capabilities::CapabilityManager;
 use crate::tools::ToolRegistry;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+use openalpaca_api::plugin_traits::ToolCallbackExecutor;
 
 struct NoopTool;
 
@@ -138,7 +139,7 @@ impl openalpaca_api::plugin_traits::PluginSkillExecutor for StubPluginSkill {
         &self,
         _query: &str,
         _context: &serde_json::Value,
-        tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+        tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         self.invoked.store(true, Ordering::SeqCst);
         let outcome = tool_executor
@@ -619,7 +620,7 @@ impl openalpaca_api::plugin_traits::PluginSkillExecutor for SendsArguments {
         &self,
         _query: &str,
         _context: &serde_json::Value,
-        tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+        tool_executor: &openalpaca_api::plugin_traits::DynToolCallbackExecutor<'_>,
     ) -> Result<String, String> {
         let outcome = tool_executor
             .execute_tool(&self.tool, &self.arguments)
