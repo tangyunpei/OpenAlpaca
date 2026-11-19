@@ -2474,7 +2474,7 @@ fn read_version_text(id: &str, version: u32, path: &Path) -> Result<String> {
         }));
     }
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(String::from_utf8_lossy_owned(bytes))
 }
 
 /// One produced head sitting directly in a run/loose directory.

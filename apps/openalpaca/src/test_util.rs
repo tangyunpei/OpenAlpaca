@@ -105,7 +105,7 @@ pub(crate) fn serve(
                     }
                 }
             }
-            seen.push(String::from_utf8_lossy(&raw).to_string());
+            seen.push(String::from_utf8_lossy_owned(raw));
             socket
                 .write_all(answer.as_bytes())
                 .expect("the answer is written");
@@ -218,7 +218,7 @@ fn serve_while(
                     break;
                 }
             }
-            seen.push(String::from_utf8_lossy(&raw).to_string());
+            seen.push(String::from_utf8_lossy_owned(raw));
             socket
                 .write_all(answer.as_bytes())
                 .expect("the answer is written");

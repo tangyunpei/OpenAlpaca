@@ -1683,7 +1683,7 @@ async fn execute_http(
                 break;
             }
         }
-        String::from_utf8_lossy(&body_bytes).into_owned()
+        String::from_utf8_lossy_owned(body_bytes)
     };
 
     if status.is_success() {

@@ -928,7 +928,7 @@ fn ps_tree(pids: &[i32]) -> String {
         .args(["-o", "pid,ppid,pgid,command", "-p", &list])
         .output()
         .expect("run ps");
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    String::from_utf8_lossy_owned(out.stdout)
 }
 
 /// **The forking server through the disable / re-enable path.** A stdio
