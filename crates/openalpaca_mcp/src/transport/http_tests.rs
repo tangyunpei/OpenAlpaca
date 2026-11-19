@@ -39,7 +39,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use url::Url;
 
-use super::{HttpAuth, StreamableHttpTransport, Transport, TransportInner, TransportKind};
+use super::{HttpAuth, StreamableHttpTransport, TransportInner, TransportKind};
 use crate::lifecycle::ConnectionSnapshot;
 use crate::{McpClient, McpClientConfig, McpError};
 

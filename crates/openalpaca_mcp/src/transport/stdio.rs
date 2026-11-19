@@ -5,14 +5,13 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use process_wrap::tokio::CommandWrap;
 use rmcp::transport::TokioChildProcess;
 use tokio::process::Command;
 
 use crate::error::McpError;
 
-use super::{Transport, TransportConnection, TransportInner};
+use super::{TransportConnection, TransportInner};
 
 /// Told what a spawned server's wait returned, once per process — however the
 /// wait was reached: rmcp's close when the server's output ends, its kill
@@ -79,9 +78,8 @@ impl StdioTransport {
     }
 }
 
-#[async_trait]
-impl Transport for StdioTransport {
-    async fn connect(&self) -> Result<TransportConnection, McpError> {
+impl StdioTransport {
+    pub async fn connect(&self) -> Result<TransportConnection, McpError> {
         let mut cmd = Command::new(&self.command);
         cmd.args(&self.args);
         for (k, v) in &self.env {
@@ -110,11 +108,11 @@ impl Transport for StdioTransport {
         })
     }
 
-    fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         "stdio"
     }
 
-    fn server_name(&self) -> &str {
+    pub fn server_name(&self) -> &str {
         &self.server_name
     }
 }

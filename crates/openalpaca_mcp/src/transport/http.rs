@@ -3,13 +3,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use url::{Origin, Url};
 
 use crate::error::{McpError, RefusedRedirect};
 
-use super::{HttpAuth, Transport, TransportConnection, TransportInner};
+use super::{HttpAuth, TransportConnection, TransportInner};
 
 /// How long the TCP (and TLS) handshake may take before the server counts as
 /// unreachable — the LLM clients' bound (`providers::build_http_client`), and
@@ -179,9 +178,8 @@ fn origin_of(url: &Url) -> String {
     }
 }
 
-#[async_trait]
-impl Transport for StreamableHttpTransport {
-    async fn connect(&self) -> Result<TransportConnection, McpError> {
+impl StreamableHttpTransport {
+    pub async fn connect(&self) -> Result<TransportConnection, McpError> {
         let headers = self.build_headers()?;
         let configured = self.url.origin();
         let credentialed = self.carries_credentials();
@@ -221,11 +219,11 @@ impl Transport for StreamableHttpTransport {
         })
     }
 
-    fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         "streamable-http"
     }
 
-    fn server_name(&self) -> &str {
+    pub fn server_name(&self) -> &str {
         &self.server_name
     }
 }

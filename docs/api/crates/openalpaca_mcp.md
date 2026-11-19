@@ -13,7 +13,7 @@
 - over MCP. Server mode (originally sketched as P4) is an explicit non-goal.
 - Provides:
 - - [`McpClient`] — connect to MCP servers, list/call tools, auto-reconnect.
-- - [`Transport`] trait with stdio + streamable-HTTP implementations.
+- - [`Transport`], an enum over the stdio and streamable-HTTP transports.
 - - [`McpError`] with retry/cancellation helpers.
 
 ## Modules

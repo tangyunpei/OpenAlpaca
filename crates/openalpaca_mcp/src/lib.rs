@@ -6,7 +6,7 @@
 //!
 //! Provides:
 //! - [`McpClient`] — connect to MCP servers, list/call tools, auto-reconnect.
-//! - [`Transport`] trait with stdio + streamable-HTTP implementations.
+//! - [`Transport`], an enum over the stdio and streamable-HTTP transports.
 //! - [`McpError`] with retry/cancellation helpers.
 
 pub mod error;

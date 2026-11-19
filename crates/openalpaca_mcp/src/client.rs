@@ -868,12 +868,12 @@ where
     }
 }
 
-/// Internal: materialise a Transport impl from a TransportKind. A stdio
+/// Internal: materialise the Transport variant a TransportKind names. A stdio
 /// transport reports each process's exit to `exit_observer`.
 fn build_transport(
     cfg: &McpClientConfig,
     exit_observer: ExitObserver,
-) -> Result<Box<dyn Transport>, McpError> {
+) -> Result<Transport, McpError> {
     use crate::transport::{StdioTransport, StreamableHttpTransport};
     match &cfg.transport {
         TransportKind::Stdio {
@@ -891,7 +891,7 @@ fn build_transport(
             if let Some(cwd) = cwd {
                 t = t.with_cwd(cwd.clone());
             }
-            Ok(Box::new(t))
+            Ok(Transport::Stdio(t))
         }
         TransportKind::Http {
             url,
@@ -913,7 +913,7 @@ fn build_transport(
             for (k, v) in extra_headers {
                 t = t.with_header(k, v);
             }
-            Ok(Box::new(t))
+            Ok(Transport::Http(t))
         }
     }
 }
@@ -1335,6 +1335,40 @@ fn declared_list_changes(capabilities: &ServerCapabilities) -> Option<Subscripti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `build_transport` picks the `Transport` variant its `TransportKind`
+    /// names (M55a: an enum over the closed set, not a boxed trait object),
+    /// and the variant answers `kind` and `server_name` as its struct does.
+    #[test]
+    fn build_transport_is_the_variant_its_kind_names() {
+        let observer: ExitObserver = Arc::new(|_| {});
+        let stdio = McpClientConfig {
+            server_name: "local".into(),
+            transport: TransportKind::Stdio {
+                command: "/bin/true".into(),
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            },
+            ..Default::default()
+        };
+        let t = build_transport(&stdio, Arc::clone(&observer)).expect("a stdio transport");
+        assert!(matches!(t, Transport::Stdio(_)));
+        assert_eq!((t.kind(), t.server_name()), ("stdio", "local"));
+
+        let http = McpClientConfig {
+            server_name: "remote".into(),
+            transport: TransportKind::Http {
+                url: url::Url::parse("http://127.0.0.1:1/mcp").unwrap(),
+                auth: None,
+                extra_headers: std::collections::HashMap::new(),
+            },
+            ..Default::default()
+        };
+        let t = build_transport(&http, observer).expect("an http transport");
+        assert!(matches!(t, Transport::Http(_)));
+        assert_eq!((t.kind(), t.server_name()), ("streamable-http", "remote"));
+    }
 
     /// A stdio "server" that records every spawn and exits immediately: the
     /// handshake always fails, but the pid log proves whether a child was
