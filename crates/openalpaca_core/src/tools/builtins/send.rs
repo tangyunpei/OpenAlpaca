@@ -861,6 +861,55 @@ mod tests {
         );
     }
 
+    /// M85: an image an MCP tool returned, kept as a by-product, is sent by
+    /// the id its line names, with the type the server gave it.
+    #[tokio::test]
+    async fn an_image_an_mcp_tool_returned_is_sent_by_its_id() {
+        use base64::Engine as _;
+        let saved = saved();
+        let sink = super::super::ByProductSink::new(saved.db.clone(), None);
+        let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let line = super::super::save_tool_by_product(
+            Some(&sink),
+            Some(&owner_ctx(OWNER)),
+            super::super::ToolBlob {
+                tool: "srv__shoot",
+                what: "image",
+                title: "srv shoot image a 1",
+                base64: &encoded,
+                mime_type: Some("image/png"),
+            },
+        );
+        let id = line
+            .split_once("artifact \"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .unwrap_or_else(|| panic!("not kept: {line}"))
+            .0
+            .to_string();
+        let record = ArtifactStore::new(&saved.db)
+            .get(&id, OWNER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.kind, Some(ArtifactKind::Image));
+
+        let sender = Arc::new(RecordingSender::default());
+        let mut args = artifact_args(&id);
+        args["filename"] = serde_json::json!("shot.png");
+        let out = artifact_tool(&saved, &sender)
+            .execute_with_context(&args, &owner_ctx(OWNER))
+            .await;
+        assert_eq!(out.as_deref(), Ok("Sent file 'shot.png'"));
+        assert_eq!(
+            *sender.files.lock().unwrap(),
+            vec![(
+                record.storage_path.clone(),
+                "shot.png".to_string(),
+                "image/png".to_string()
+            )]
+        );
+    }
+
     /// S5's M3, send's half: a by-product of no project is sent without
     /// looking the turn's project up, so a turn whose project cannot be
     /// looked up (a root `projects::lookup` cannot resolve: a folder that is

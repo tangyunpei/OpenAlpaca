@@ -154,17 +154,23 @@ fn metadata_json(value: Option<&serde_json::Value>) -> Result<Option<String>, St
     }
 }
 
-/// One tool call's artifact, as the two tools that save one hand it over:
-/// `artifact_write` with the model's own kind, note, summary and metadata, and
+/// One tool call's artifact, as the tools that save one hand it over:
+/// `artifact_write` with the model's own kind, note, summary and metadata,
 /// `file_write` — when its file is not written into a project folder (G2) —
-/// with the path it was given and the kind that path's extension maps to.
+/// with the path it was given and the kind that path's extension maps to, and
+/// an MCP tool's image, audio or embedded blob (M85, `save_tool_by_product`)
+/// with the bytes the server sent and its MIME type.
 pub(super) struct ToolArtifact<'a> {
-    /// The calling tool's name, for the refusals this path words.
-    pub(super) tool: &'static str,
+    /// The calling tool's name, for the refusals this path words: a builtin's
+    /// fixed name, or an MCP tool's registry name (M85).
+    pub(super) tool: &'a str,
     /// The title plus the extension hint, split by [`split_name`].
     pub(super) name: &'a str,
     pub(super) kind: ArtifactKind,
-    pub(super) content: &'a str,
+    pub(super) content: &'a [u8],
+    /// The MIME type the row records and the extension's mime tier reads
+    /// (`NewArtifact::mime_type`); `None` takes the kind's default.
+    pub(super) mime_type: Option<&'a str>,
     pub(super) note: Option<&'a str>,
     pub(super) summary: Option<&'a str>,
     /// The raw `metadata` argument; [`metadata_json`] reads it.
@@ -191,6 +197,7 @@ pub(super) fn put_tool_artifact(
         name,
         kind,
         content,
+        mime_type,
         note,
         summary,
         metadata,
@@ -228,7 +235,8 @@ pub(super) fn put_tool_artifact(
 
     let (title, name_hint) = split_name(name);
 
-    let mut new = NewArtifact::new(owner_id, scope, kind, title, content.as_bytes());
+    let mut new = NewArtifact::new(owner_id, scope, kind, title, content);
+    new.mime_type = mime_type;
     new.name_hint = name_hint;
     new.note = note;
     new.summary = summary;
@@ -363,7 +371,8 @@ impl BuiltInTool for ArtifactWriteTool {
                 tool: "artifact_write",
                 name,
                 kind,
-                content,
+                content: content.as_bytes(),
+                mime_type: None,
                 note: arguments.get("note").and_then(|v| v.as_str()),
                 summary: arguments.get("summary").and_then(|v| v.as_str()),
                 metadata: arguments.get("metadata"),

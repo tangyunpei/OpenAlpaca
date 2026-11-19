@@ -1132,6 +1132,23 @@ works in).
   `artifact_read` reads it back by its id, and that writing the same path
   again saves its next version. `file_edit` is refused with no project; its
   sentence names `file_write`.
+- **An MCP tool's images, audio and embedded files** are saved as
+  by-products the same way, never asked: in the project's folder in the home
+  store when the conversation has a project, the home store's own otherwise,
+  each one its own artifact, announced as `artifact_written` and listed in
+  the Library, its bytes exactly as the server sent them (base64-decoded,
+  never converted). The model reads, in each one's place, a line naming the
+  artifact's id, its absolute path, its MIME type and its size — or why
+  nothing was saved: over `[execution.artifacts] max_artifact_bytes`, data
+  that is not base64, or a turn with no owner. The kind comes from the MIME
+  type the server gave (one that is not `type/subtype` counts as none),
+  whatever the block: an image, a PDF, an archive, an HTML file, code or a
+  table opens in its app, and audio, an SVG, plain text or a file with no
+  type is shown in its folder only (`.bin`).
+  `artifact_read` returns text only, so the model cannot read back an image,
+  audio clip, PDF or archive (the kind follows the server's MIME label, not
+  the bytes); `send` can send one by its id. An embedded text resource reaches the model
+  as its text.
 
 A path that names no file (`''`, `.`, `reports/`, a blank name) is refused,
 and a turn with no owner — `POST /v1/command {"command":"process"}` runs as

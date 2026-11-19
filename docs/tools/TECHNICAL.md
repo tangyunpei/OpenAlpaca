@@ -1126,11 +1126,13 @@ depends on the registry dropping the last reference.
   `<server>__<tool>` in their capabilities resolve the tool through the
   registry's capability index (annotation-derived virtual capabilities
   still apply).
-- `serialize_call_result(result, &SerializeOptions::default())` flattens a
+- `serialize_call_result(result, &SerializeOptions)` flattens a
   `CallToolResult` into `Result<String, String>`: blocks are concatenated
-  with newlines — a text block as its text, a resource link as
-  `[resource link: <label> — <uri>]` (the label its `name`, else its
-  `title`; the URI alone when both are empty); then a `structuredContent`
+  with newlines — a text block, and an embedded text resource, as its
+  text; a resource link as `[resource link: <label> — <uri>]` (the label
+  its `name`, else its `title`; the URI alone when both are empty); an
+  image, an audio clip and an embedded resource's blob kept as a
+  by-product (M85, below) and named by its line; then a `structuredContent`
   value is appended pretty-printed unless a text block already parses to
   the same value (an rmcp-built server mirrors it as compact text), and a
   `null` one is read as absent; `is_error = true` becomes a tool error.
@@ -1138,13 +1140,42 @@ depends on the registry dropping the last reference.
   served by `GET /v1/tools` as `output_schema` (`null` when none); it never
   enters the provider's tool definition, and nothing validates a result
   against it yet.
+- **Images, audio and embedded blobs are by-products (M85).** The
+  registry's MCP arm passes `SerializeOptions::for_call(<registry name>,
+  <sink>, <context>)`; the sink (`builtins::ByProductSink`: the database
+  and the daemon config) is set once by the daemon
+  (`ToolRegistry::set_by_product_sink`, `services/tools.rs`) and carried
+  into every clone. Each block goes through `save_tool_by_product`
+  (`tools/builtins/mod.rs`): ASCII whitespace stripped, base64 decoded
+  padded or unpadded, the size decided on the decoded length against
+  `[execution.artifacts] max_artifact_bytes`, the server's MIME string kept
+  only when it is `type/subtype` of token characters (lower-cased,
+  parameters dropped; else none), the kind `ArtifactKind::for_mime` gives
+  it, then `put_tool_artifact` into the turn's project's store or the home
+  store — never asked (ST-15), announced once as `ArtifactWritten`, and
+  never image-decoded, transcoded or compressed. Each block's title is
+  `<tool> <kind> <call tag> <n>` (the tool's name cut to fit the 60-byte
+  slug), so no block becomes a version of another. Its line is
+  `[<image|audio|embedded resource> saved as artifact "<id>" at <absolute
+  path> (<MIME type>, <n> bytes)]`, or `[<…>: nothing was saved: <why>]` —
+  no tool context, no sink, data that is not base64, over the limit, no
+  owner, the store's refusal — never a failed call. The kind follows the
+  server's MIME string on every block type, by the store's rule: an audio
+  clip, an SVG, `text/plain` and a blob with no MIME type are Reveal-only
+  `.bin` files; a raster image, `text/html`, a PDF, an archive (zip, tar),
+  code (`text/x-python`, JSON) or a table (CSV) is openable. `artifact_read`
+  reads back a text-kind blob and refuses an image or binary (audio, PDF,
+  archive) id (text only; the kind follows the server's MIME label, not
+  the bytes); `send` sends a saved image by its id. A result marked `isError`
+  keeps its blocks the same way. Nothing caps how many blocks one call
+  keeps but the size of the message carrying them (on stdio, rmcp's
+  16 MiB line limit).
 
 ### Limitations (current state)
 
-- **Non-text content is dropped**: image, audio and embedded-resource
-  blocks in tool results are replaced with a bracketed placeholder — they
-  are not surfaced to the model (a resource link prints its label and URI,
-  above).
+- **The model never sees an image's pixels**: an image, audio clip or
+  embedded blob is kept as a by-product and the model reads only its line
+  (above); a block of a kind a later rmcp adds is a bracketed placeholder.
 - **A live tool's definition is read once per load**: the tool-list
   refresh compares names only, so a server that changes a listed tool's
   `outputSchema`, input schema or description under the same name keeps

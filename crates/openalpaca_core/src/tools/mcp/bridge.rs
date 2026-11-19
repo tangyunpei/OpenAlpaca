@@ -7,14 +7,16 @@
 //!   collisions resolved (N-MCP-4).
 //! - [`serialize_call_result`] — flatten a `CallToolResult` into the
 //!   `Result<String, String>` shape the rest of the tool-call path consumes,
-//!   under one [`SerializeOptions`].
+//!   under one [`SerializeOptions`]; an image, audio clip or embedded blob is
+//!   kept as a by-product and named by a line (M85).
 
 use std::sync::Arc;
 
-use openalpaca_mcp::{CallToolResult, ContentBlock, McpClient, Resource, Tool};
+use openalpaca_mcp::{CallToolResult, ContentBlock, McpClient, Resource, ResourceContents, Tool};
 use serde_json::Value;
 
-use crate::tools::registry::{RegisteredTool, ToolBackend};
+use crate::tools::builtins::{ByProductSink, ToolBlob, save_tool_by_product};
+use crate::tools::registry::{RegisteredTool, ToolBackend, ToolContext};
 
 /// The longest tool name every provider accepts: OpenAI's documented limit
 /// for a function name ("a-z, A-Z, 0-9, or contain underscores and dashes,
@@ -181,42 +183,118 @@ pub fn rmcp_tool_to_registered(
     }
 }
 
-/// How [`serialize_call_result`] reads one result. M14 needs nothing from
-/// it yet: it is the one place a later entry adds what the serializer must
-/// know (M85 the by-product sink, M82 the output schema), so the signature
-/// keeps one parameter. Built with `SerializeOptions::default()`.
+/// How [`serialize_call_result`] reads one result: the one place an entry
+/// adds what the serializer must know (M85 the by-product sink and the call's
+/// context, M82 the output schema), so the signature keeps one parameter.
+/// `SerializeOptions::default()` has no sink and no context: an image, audio
+/// clip or embedded blob is then named by a "nothing was saved" line.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct SerializeOptions {}
+pub struct SerializeOptions<'a> {
+    /// M85: where a block of bytes is kept, and the call it came from.
+    pub(crate) by_products: ByProducts<'a>,
+}
+
+impl<'a> SerializeOptions<'a> {
+    /// The options of one dispatched call: its registry name, the registry's
+    /// sink and the call's context, either of which may be absent.
+    pub(crate) fn for_call(
+        tool: &'a str,
+        sink: Option<&'a ByProductSink>,
+        ctx: Option<&'a ToolContext>,
+    ) -> Self {
+        Self {
+            by_products: ByProducts { tool, sink, ctx },
+        }
+    }
+}
+
+/// What M85's by-products need from the call (see [`SerializeOptions`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ByProducts<'a> {
+    /// The tool's registry name (`<server>__<tool>`): it leads each
+    /// by-product's title and the store's refusals name it.
+    pub(crate) tool: &'a str,
+    pub(crate) sink: Option<&'a ByProductSink>,
+    pub(crate) ctx: Option<&'a ToolContext>,
+}
 
 /// Convert an rmcp [`CallToolResult`] into the `Result<String, String>` shape
 /// the tool registry hands back to the agentic loop.
 ///
-/// Concatenates content blocks with newline separators: a text block as its
-/// text, a resource link as `[resource link: <label> — <uri>]` (the label is
-/// its `name`, else its `title`; the URI alone when both are empty), an image
-/// or any other block as a bracketed placeholder so the LLM can see it
-/// existed. Then, when `structured_content` holds a value other than JSON
-/// `null` and no text block already parses to that same value (an rmcp-built
-/// server mirrors it as compact text), the value is appended pretty-printed
-/// (M14). When `is_error == Some(true)`, returns `Err(body)` so the tool-call
+/// Concatenates content blocks with newline separators: a text block, and an
+/// embedded text resource, as its text; a resource link as
+/// `[resource link: <label> — <uri>]` (the label is its `name`, else its
+/// `title`; the URI alone when both are empty); an image, an audio clip and an
+/// embedded blob kept as a by-product through `save_tool_by_product` (M85,
+/// DU-R6 (b)) and named by its line — the artifact's id, absolute path, MIME
+/// type and size, or why nothing was saved; any other block as a bracketed
+/// placeholder so the LLM can see it existed. Each kept block takes a title
+/// of its own (`<tool> <kind> <call tag> <n>`), so two blocks of one call, or
+/// of two calls, never become versions of one artifact. Then, when
+/// `structured_content` holds a value other than JSON `null` and no text block
+/// already parses to that same value (an rmcp-built server mirrors it as
+/// compact text), the value is appended pretty-printed (M14). When `is_error == Some(true)`, returns `Err(body)` so the tool-call
 /// path treats it as a tool error.
 pub fn serialize_call_result(
     result: CallToolResult,
-    _options: &SerializeOptions,
+    options: &SerializeOptions<'_>,
 ) -> Result<String, String> {
+    let by_products = options.by_products;
+    // One tag per call, so the titles of two calls to one tool differ.
+    let call_tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+    let keep = |n: usize, what: &str, label: &str, base64: &str, mime: Option<&str>| {
+        let title = by_product_title(by_products.tool, label, &call_tag, n);
+        save_tool_by_product(
+            by_products.sink,
+            by_products.ctx,
+            ToolBlob {
+                tool: by_products.tool,
+                what,
+                title: &title,
+                base64,
+                mime_type: mime,
+            },
+        )
+    };
+
     let mut buf = String::new();
-    for content in &result.content {
+    for (index, content) in result.content.iter().enumerate() {
         if !buf.is_empty() {
             buf.push('\n');
         }
+        let n = index + 1;
         match content {
             ContentBlock::Text(t) => buf.push_str(&t.text),
-            ContentBlock::Image(_) => {
-                buf.push_str(
-                    "[image content omitted — P2 does not yet surface non-text MCP content]",
-                );
-            }
+            ContentBlock::Image(image) => buf.push_str(&keep(
+                n,
+                "image",
+                "image",
+                &image.data,
+                Some(&image.mime_type),
+            )),
+            ContentBlock::Audio(audio) => buf.push_str(&keep(
+                n,
+                "audio",
+                "audio",
+                &audio.data,
+                Some(&audio.mime_type),
+            )),
+            ContentBlock::Resource(embedded) => match &embedded.resource {
+                ResourceContents::TextResourceContents { text, .. } => buf.push_str(text),
+                ResourceContents::BlobResourceContents {
+                    blob, mime_type, ..
+                } => buf.push_str(&keep(
+                    n,
+                    "embedded resource",
+                    "resource",
+                    blob,
+                    mime_type.as_deref(),
+                )),
+                // `ResourceContents` is `#[non_exhaustive]`: a kind a later
+                // rmcp adds still reaches the model as a placeholder.
+                _ => buf.push_str("[non-text content: resource]"),
+            },
             ContentBlock::ResourceLink(link) => buf.push_str(&resource_link_line(link)),
             other => {
                 buf.push_str(&format!("[non-text content: {}]", content_kind_name(other)));
@@ -268,6 +346,16 @@ fn resource_link_line(link: &Resource) -> String {
         Some(label) => format!("[resource link: {label} — {}]", link.uri),
         None => format!("[resource link: {}]", link.uri),
     }
+}
+
+/// `<tool> <label> <call tag> <n>`, the tool's name cut so the whole title
+/// stays within the store's slug (`FILE_NAME_SLUG_BYTES`) and the tag and
+/// the block's number, which make it distinct, are never cut away.
+fn by_product_title(tool: &str, label: &str, call_tag: &str, n: usize) -> String {
+    let suffix = format!(" {label} {call_tag} {n}");
+    let room = openalpaca_storage::store::FILE_NAME_SLUG_BYTES.saturating_sub(suffix.len());
+    let tool = &tool[..tool.floor_char_boundary(room)];
+    format!("{tool}{suffix}")
 }
 
 fn content_kind_name(c: &ContentBlock) -> &'static str {

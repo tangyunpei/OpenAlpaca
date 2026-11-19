@@ -118,6 +118,9 @@ struct Stub {
     /// While this exists, a server built with `StubOpts::exit_on_trigger`
     /// exits with that code; the incarnation that exits removes it first.
     exit_trigger: PathBuf,
+    /// While this exists, `tools/call` answers with its one line as the
+    /// result, in place of the `ok` text ([`Stub::set_call_result`], M85).
+    call_result: PathBuf,
 }
 
 impl Stub {
@@ -201,6 +204,13 @@ impl Stub {
     /// Replace the tool set the next `tools/list` will answer with.
     fn set_tools(&self, tools: &[&str]) {
         std::fs::write(&self.tools_file, tools_json(tools)).expect("write tools file");
+    }
+
+    /// Answer every later `tools/call` with `result`, a `CallToolResult` as
+    /// JSON on one line.
+    fn set_call_result(&self, result: &str) {
+        assert!(!result.contains('\n'), "one line: the server reads none");
+        std::fs::write(&self.call_result, result).expect("write call result");
     }
 
     /// Ask the server to push `notifications/tools/list_changed`.
@@ -309,6 +319,7 @@ fn stub_server(dir: &Path, tag: &str, opts: StubOpts) -> Stub {
     let sent_log = dir.join(format!("{tag}-sent.log"));
     let exit_trigger = dir.join(format!("{tag}-exit"));
     let listen_id = dir.join(format!("{tag}-listen-id"));
+    let call_result = dir.join(format!("{tag}-call-result.json"));
 
     std::fs::write(&pid_log, "").expect("create pid log");
     std::fs::write(&tools_file, tools_json(&["echo"])).expect("create tools file");
@@ -477,7 +488,11 @@ hang() {{
       ;;
     *'"method":"tools/call"'*)
       text=ok
-      {echo_name}{hang_call}printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"%s"}}],"isError":false}}}}\n' "$id" "$text"
+      {echo_name}{hang_call}if [ -f '{call_result}' ]; then
+        printf '{{"jsonrpc":"2.0","id":%s,"result":%s}}\n' "$id" "`cat '{call_result}'`"
+      else
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"content":[{{"type":"text","text":"%s"}}],"isError":false}}}}\n' "$id" "$text"
+      fi
       ;;
     *'"method":"subscriptions/listen"'*)
       printf '%s' "$id" > '{listen_id}'
@@ -496,6 +511,7 @@ done
         break_list = break_list.display(),
         sent_log = sent_log.display(),
         listen_id = listen_id.display(),
+        call_result = call_result.display(),
     );
 
     std::fs::write(&script, body).expect("write stub server");
@@ -514,6 +530,7 @@ done
         escapee_log,
         sent_log,
         exit_trigger,
+        call_result,
     }
 }
 
@@ -546,15 +563,35 @@ impl Harness {
     /// `failed` event and T1 step 3's `ExtensionCapabilityWithdrawn`. The two
     /// dependent handles are installed the way `services/mcp.rs` installs them.
     fn new(drain_secs: u64) -> Self {
+        Self::build(drain_secs, None)
+    }
+
+    /// [`Self::new`] whose registry keeps an MCP tool's blocks of bytes in
+    /// `db`, under `max_artifact_bytes` — the sink `services/tools.rs` sets
+    /// (M85).
+    fn with_by_products(drain_secs: u64, db: openalpaca_storage::Database, cap: u64) -> Self {
+        Self::build(drain_secs, Some((db, cap)))
+    }
+
+    fn build(drain_secs: u64, by_products: Option<(openalpaca_storage::Database, u64)>) -> Self {
         let home = tempfile::tempdir().expect("home store");
         let env = HomeStoreGuard::set(home.path());
         let dir = tempfile::tempdir().expect("config dir");
         let config_path = dir.path().join("mcp.toml");
 
         let bus = EventBus::new(256);
-        let registry = Arc::new(ToolRegistry::with_event_bus(bus.clone()).expect("tool registry"));
         let mut cfg = DaemonConfig::default();
         cfg.extensions.drain_timeout_secs = drain_secs;
+        let mut registry = ToolRegistry::with_event_bus(bus.clone()).expect("tool registry");
+        if let Some((db, cap)) = by_products {
+            cfg.execution.artifacts.max_artifact_bytes = cap;
+            let config = Arc::new(ArcSwap::from_pointee(cfg.clone()));
+            registry.set_by_product_sink(openalpaca_core::tools::builtins::ByProductSink::new(
+                db,
+                Some(config),
+            ));
+        }
+        let registry = Arc::new(registry);
         let daemon_config = Arc::new(ArcSwap::from_pointee(cfg));
         let agents = Arc::new(AgentRegistry::new());
         let skills_dir = tempfile::tempdir().expect("skills dir");
@@ -1449,6 +1486,170 @@ async fn a_refresh_maps_the_added_names_and_keeps_the_first_of_two_that_collide(
         vec!["srv__echo".to_string(), "srv__read_file".to_string()],
         "the ledger records the registry's names"
     );
+    h.supervisor.shutdown_all().await;
+}
+
+// ============================================================================
+// M85: images, audio and embedded blobs kept as by-products
+// ============================================================================
+
+/// RFC 4648 base64 with padding, written here because the daemon crate has
+/// no base64 dependency and a test adds none (no lock byte moves).
+fn standard_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The plan's gate, end to end through a real stdio server and a per-request
+/// clone of the registry, as a turn calls it: an image, an audio clip and an
+/// embedded blob become three by-products whose bytes equal the decoded
+/// input; an over-limit image and invalid base64 become two "nothing was
+/// saved" lines; the Library lists the three, each announced once; and a
+/// call with no context saves nothing and says so.
+///
+/// No card: the save is not a tool call of its own, and the tool itself
+/// declares no `destructiveHint`, the one annotation an MCP tool asks on
+/// (`effective_confirmation_set`; T35 (iv) is taken, not built). The call
+/// here goes through the registry, not the sandbox, so the test asserts that
+/// annotation and that no `ToolConfirmationRequested` was published.
+#[tokio::test]
+async fn an_mcp_tools_images_audio_and_blobs_are_kept_as_by_products() {
+    use openalpaca_storage::{ArtifactQuery, ArtifactStore, Database};
+
+    let db_dir = tempfile::tempdir().expect("db dir");
+    let db = Database::open(&db_dir.path().join("test.db")).expect("database");
+    let h = Harness::with_by_products(1, db.clone(), 1024);
+    let stub = stub_server(h.path(), "by-products", StubOpts::default());
+    stub.set_tools(&["shoot"]);
+    let b64 = standard_base64;
+    let png: Vec<u8> = (0..200u8).map(|i| i | 0x80).collect();
+    let wav: Vec<u8> = (0..100u8).map(|i| i.wrapping_mul(7) | 0x80).collect();
+    let pdf: Vec<u8> = (0..50u8).map(|i| i.wrapping_mul(13) | 0x80).collect();
+    let too_big: Vec<u8> = vec![0xff; 1025];
+    let result = serde_json::json!({
+        "content": [
+            {"type": "image", "data": b64(&png), "mimeType": "image/png"},
+            {"type": "audio", "data": b64(&wav), "mimeType": "audio/wav"},
+            {"type": "resource", "resource": {
+                "uri": "file:///report.pdf", "mimeType": "application/pdf", "blob": b64(&pdf)
+            }},
+            {"type": "image", "data": b64(&too_big), "mimeType": "image/png"},
+            {"type": "image", "data": "not base64 at all!", "mimeType": "image/png"}
+        ],
+        "isError": false
+    });
+    stub.set_call_result(&result.to_string());
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let registered = h.registry.get("srv__shoot").expect("the tool registers");
+    assert_eq!(
+        registered
+            .annotations
+            .as_ref()
+            .and_then(|a| a.destructive_hint),
+        None,
+        "the stub's tool declares no destructiveHint, so no card is derived for it"
+    );
+
+    let mut events = h.bus.subscribe();
+    let owner = "owner-mcp";
+    let ctx = openalpaca_core::tools::ToolContext {
+        owner_id: Some(owner.to_string()),
+        event_bus: Some(h.bus.clone()),
+        ..Default::default()
+    };
+    let per_request = (*h.registry).clone();
+    let out = per_request
+        .execute_with_context("srv__shoot", &serde_json::json!({}), &ctx)
+        .await
+        .expect("the call succeeds");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 5, "{out}");
+
+    let store = ArtifactStore::new(&db);
+    let mut kept = Vec::new();
+    for (line, input) in lines[..3].iter().zip([&png, &wav, &pdf]) {
+        let id = line
+            .split_once("saved as artifact \"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .unwrap_or_else(|| panic!("not kept: {line}"))
+            .0;
+        let record = store.get(id, owner).expect("read").expect("the row");
+        assert!(line.contains(&record.storage_path), "{line}");
+        assert!(
+            line.contains(&format!("({}, {} bytes)", record.mime_type, input.len())),
+            "{line}"
+        );
+        assert_eq!(
+            &std::fs::read(&record.storage_path).expect("the file"),
+            input
+        );
+        kept.push(record.id);
+    }
+    assert_eq!(
+        lines[3],
+        "[image: nothing was saved: the image is 1025 bytes, over the 1024-byte limit for one \
+         artifact ([execution.artifacts] max_artifact_bytes)]"
+    );
+    assert!(
+        lines[4].starts_with("[image: nothing was saved: the image's data is not valid base64 ("),
+        "{}",
+        lines[4]
+    );
+
+    let (listed, total) = store.list(&ArtifactQuery::new(owner)).expect("list");
+    assert_eq!(total, 3, "the Library lists the three");
+    let mut listed: Vec<String> = listed.into_iter().map(|r| r.id).collect();
+    listed.sort();
+    let mut expected = kept.clone();
+    expected.sort();
+    assert_eq!(listed, expected);
+
+    let mut announced = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            SystemEvent::ArtifactWritten { artifact_id, .. } => announced.push(artifact_id),
+            SystemEvent::ToolConfirmationRequested { .. } => panic!("no card is raised"),
+            _ => {}
+        }
+    }
+    assert_eq!(announced, kept, "each kept block announced once, in order");
+
+    // The same call with no context: nothing saved, and every block says so.
+    let bare = h
+        .registry
+        .execute("srv__shoot", &serde_json::json!({}))
+        .await
+        .expect("the call succeeds");
+    assert_eq!(bare.lines().count(), 5);
+    for (line, what) in bare
+        .lines()
+        .zip(["image", "audio", "embedded resource", "image", "image"])
+    {
+        assert_eq!(
+            line,
+            format!(
+                "[{what}: nothing was saved: the call carries no tool context, so the bytes have \
+                 no owner or store]"
+            )
+        );
+    }
+    assert_eq!(store.list(&ArtifactQuery::new(owner)).expect("list").1, 3);
     h.supervisor.shutdown_all().await;
 }
 

@@ -74,6 +74,154 @@ pub(crate) fn is_project_turn(ctx: &ToolContext) -> bool {
     )
 }
 
+/// Where an MCP tool's images, audio and embedded blobs are kept (M85,
+/// DU-R6 (b)): the database and the daemon config `put_tool_artifact`
+/// takes. The daemon sets one on its registry at boot
+/// ([`ToolRegistry::set_by_product_sink`](crate::tools::ToolRegistry::set_by_product_sink));
+/// a registry with none keeps nothing and says so in the tool's result.
+#[derive(Clone)]
+pub struct ByProductSink {
+    db: openalpaca_storage::Database,
+    daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+}
+
+impl ByProductSink {
+    /// `daemon_config` supplies `[execution.artifacts]`'s caps; `None` takes
+    /// their defaults.
+    pub fn new(
+        db: openalpaca_storage::Database,
+        daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
+    ) -> Self {
+        Self { db, daemon_config }
+    }
+}
+
+impl std::fmt::Debug for ByProductSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ByProductSink").finish_non_exhaustive()
+    }
+}
+
+/// One block an MCP server returned as base64 bytes (M85): an image, an
+/// audio clip or an embedded resource's blob.
+pub(crate) struct ToolBlob<'a> {
+    /// The MCP tool's registry name, which the store's refusals name.
+    pub(crate) tool: &'a str,
+    /// What the block is, as its line names it: `image`, `audio` or
+    /// `embedded resource`.
+    pub(crate) what: &'a str,
+    /// The artifact's title, distinct for every block of every call, so two
+    /// blocks never become two versions of one artifact.
+    pub(crate) title: &'a str,
+    /// The block's data as the server sent it.
+    pub(crate) base64: &'a str,
+    /// The server's MIME string, untrusted: [`accepted_mime`] reads it.
+    pub(crate) mime_type: Option<&'a str>,
+}
+
+/// Keep one MCP block as a by-product of the turn's project, or of none
+/// (M85, ST-15: never asked), and return the line the tool's result carries
+/// in its place: the artifact's id, its absolute path, its MIME type and its
+/// size, or `nothing was saved: <why>`. Every failure is a line, never a
+/// failed call: no tool context, no sink, data that is not base64, bytes over
+/// `[execution.artifacts] max_artifact_bytes`, no owner, the store's own
+/// refusal. The bytes are stored as decoded, never image-decoded, transcoded
+/// or compressed; their kind is the store's rule for the MIME type
+/// (`ArtifactKind::for_mime`). `put_tool_artifact` announces the write.
+pub(crate) fn save_tool_by_product(
+    sink: Option<&ByProductSink>,
+    ctx: Option<&ToolContext>,
+    blob: ToolBlob<'_>,
+) -> String {
+    match keep_tool_blob(sink, ctx, &blob) {
+        Ok(record) => format!(
+            "[{} saved as artifact \"{}\" at {} ({}, {} bytes)]",
+            blob.what, record.id, record.storage_path, record.mime_type, record.size_bytes
+        ),
+        Err(why) => format!("[{}: nothing was saved: {why}]", blob.what),
+    }
+}
+
+fn keep_tool_blob(
+    sink: Option<&ByProductSink>,
+    ctx: Option<&ToolContext>,
+    blob: &ToolBlob<'_>,
+) -> Result<openalpaca_storage::ArtifactRecord, String> {
+    use base64::Engine as _;
+
+    let ctx = ctx.ok_or_else(|| {
+        "the call carries no tool context, so the bytes have no owner or store".to_string()
+    })?;
+    let sink =
+        sink.ok_or_else(|| "no artifact store is wired to this tool registry".to_string())?;
+    let cap = artifact_write::artifact_caps(sink.daemon_config.as_ref()).max_artifact_bytes;
+    let over = |size: String| {
+        format!(
+            "the {} is {size} bytes, over the {cap}-byte limit for one artifact \
+             ([execution.artifacts] max_artifact_bytes)",
+            blob.what
+        )
+    };
+
+    // A server that shells out to `base64` wraps its lines: ASCII whitespace
+    // is not data.
+    let data: Vec<u8> = blob
+        .base64
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    // An upper bound, at most 2 over the real length: a cheap refusal before
+    // decoding anything far too large. The cap itself is decided below, on
+    // the decoded length.
+    let estimate = base64::decoded_len_estimate(data.len()) as u64;
+    if estimate > cap.saturating_add(2) {
+        return Err(over(format!("at least {}", estimate - 2)));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD_PAD_INDIFFERENT
+        .decode(&data)
+        .map_err(|e| format!("the {}'s data is not valid base64 ({e})", blob.what))?;
+    if bytes.len() as u64 > cap {
+        return Err(over(bytes.len().to_string()));
+    }
+
+    let mime = blob.mime_type.and_then(accepted_mime);
+    let kind = openalpaca_storage::ArtifactKind::for_mime(
+        mime.as_deref().unwrap_or("application/octet-stream"),
+    );
+    artifact_write::put_tool_artifact(
+        &sink.db,
+        ctx,
+        &artifact_write::scope_from_context(ctx),
+        sink.daemon_config.as_ref(),
+        artifact_write::ToolArtifact {
+            tool: blob.tool,
+            name: blob.title,
+            kind,
+            content: &bytes,
+            mime_type: mime.as_deref(),
+            note: None,
+            summary: None,
+            metadata: None,
+        },
+    )
+}
+
+/// A server's MIME string, when it is one: `type/subtype`, each an RFC 9110
+/// token, lower-cased, its parameters dropped. Anything else is no MIME type
+/// at all (M85: the string comes from an outside server and names the file's
+/// extension and kind).
+fn accepted_mime(raw: &str) -> Option<String> {
+    let essence = raw.split(';').next()?.trim().to_ascii_lowercase();
+    let (kind, subtype) = essence.split_once('/')?;
+    let token = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    };
+    (token(kind) && token(subtype)).then_some(essence)
+}
+
 /// Context required by the `update_persona` tool at runtime.
 /// Re-export from the update_persona module.
 pub use update_persona::PersonaToolContext;

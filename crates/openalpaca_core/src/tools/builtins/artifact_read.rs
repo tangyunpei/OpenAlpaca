@@ -504,6 +504,64 @@ mod tests {
         assert!(err.ends_with(&format!("{file}).")), "{err}");
     }
 
+    /// Keep one MCP block the way the bridge does (M85), and return the id
+    /// its line names.
+    fn keep_mcp_block(fx: &Fixture, title: &str, data: &[u8], mime: &str) -> String {
+        use base64::Engine as _;
+        let sink = super::super::ByProductSink::new(fx.db.clone(), None);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        let line = super::super::save_tool_by_product(
+            Some(&sink),
+            Some(&fx.project_ctx()),
+            super::super::ToolBlob {
+                tool: "srv__fetch",
+                what: "embedded resource",
+                title,
+                base64: &encoded,
+                mime_type: Some(mime),
+            },
+        );
+        line.split_once("artifact \"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .unwrap_or_else(|| panic!("not kept: {line}"))
+            .0
+            .to_string()
+    }
+
+    /// M85 under D3 (a): artifact_read stays text only. A text-MIME blob an
+    /// MCP tool returned reads back by its id; an image it returned is
+    /// refused with the existing line.
+    #[tokio::test]
+    async fn an_mcp_text_blob_reads_back_and_an_mcp_image_is_refused() {
+        let fx = Fixture::new();
+        let text = keep_mcp_block(
+            &fx,
+            "srv fetch resource a 1",
+            b"{\"rows\": 3}\n",
+            "application/json",
+        );
+        let out = fx
+            .read(&fx.project_ctx(), json!({"artifact_id": text}))
+            .await
+            .unwrap();
+        assert!(out.starts_with("{\"rows\": 3}\n"), "{out}");
+
+        let image = keep_mcp_block(
+            &fx,
+            "srv fetch image a 2",
+            &[0x89, b'P', b'N', b'G'],
+            "image/png",
+        );
+        assert_eq!(
+            fx.read(&fx.project_ctx(), json!({"artifact_id": image}))
+                .await
+                .unwrap_err(),
+            format!(
+                "artifact_read: '{image}' is an image artifact; artifact_read returns text only."
+            )
+        );
+    }
+
     /// No owner, no read: every artifact belongs to one.
     #[tokio::test]
     async fn a_turn_with_no_owner_cannot_read_an_artifact() {

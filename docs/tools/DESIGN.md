@@ -785,8 +785,13 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 - A server whose connection is lost for good is marked `failed`; its tools
   are refused with that reason until it is reloaded.
 - Tool-call errors (`is_error` results) surface as tool errors to the LLM.
-- **Limitations:** non-text MCP content (images, resources, audio) is
-  replaced with a bracketed placeholder; MCP *resources* and *prompts* are
+- Images, audio clips and embedded blobs in a result are kept as
+  by-products of the turn's project, or of none, within
+  `max_artifact_bytes` and never asked; the model reads a line naming the
+  artifact's id, path, MIME type and size, or why nothing was saved.
+- **Limitations:** the model never sees an image's content (it can name
+  and `send` the by-product; `artifact_read` returns text only); MCP
+  *resources* and *prompts* are
   not implemented — only tools are imported.  Server mode (exposing
   OpenAlpaca's tools over MCP) is a non-goal.
 
@@ -948,7 +953,7 @@ reset or a project purge.
 | Area | Current State | Potential Enhancement |
 |------|--------------|----------------------|
 | **MCP resources & prompts** | Stubbed (tools only) | Import server resources/prompts into agent context |
-| **Non-text MCP content** | Replaced with placeholder text | Surface images/resources to multimodal models |
+| **Non-text MCP content** | Kept as by-products, named in the result's text | Surface images/resources to multimodal models |
 | **Per-field authorization** | Tool-name granularity | JSON path-based argument restrictions |
 | **Hot-reload of TOML tools** | Startup-only load | Watch `config/tools/` and re-register at runtime |
 | **Result streaming** | Buffered, then spilled or cut | Streaming for long-running tools |

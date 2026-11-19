@@ -902,7 +902,8 @@ while `?kind=` takes exactly one, and because that keeps `total` meaning one
 thing.
 
 By default the list shows by-products — drafts, pictures and hand-offs agents
-saved, your uploads, and every file saved in a conversation with no project.
+saved, the images, audio and files an MCP tool returned, your uploads, and
+every file saved in a conversation with no project.
 The `Results in the project` chip shows instead the files agents wrote into
 your projects (`?in_project=true`): each row is named by the file's path in its
 project, carries a `project` tag, and its subtitle starts with the project's

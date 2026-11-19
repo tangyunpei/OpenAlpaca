@@ -512,6 +512,11 @@ pub struct ToolRegistry {
     capability_providers: DashMap<ProviderHandle, Arc<dyn capabilities::CapabilityProvider>>,
     next_provider_handle: AtomicU64,
     provider_mutex: std::sync::Mutex<()>,
+    /// Where an MCP tool's images, audio and embedded blobs are kept (M85):
+    /// set once by the daemon at boot ([`Self::set_by_product_sink`]) and
+    /// carried into every clone, so a per-request registry keeps them too.
+    /// `None` — every test registry — keeps nothing and says so.
+    by_product_sink: Option<Arc<crate::tools::builtins::ByProductSink>>,
 }
 
 impl Clone for ToolRegistry {
@@ -542,6 +547,7 @@ impl Clone for ToolRegistry {
                 self.next_provider_handle.load(Ordering::Relaxed),
             ),
             provider_mutex: std::sync::Mutex::new(()),
+            by_product_sink: self.by_product_sink.clone(),
         }
     }
 }
@@ -598,6 +604,7 @@ impl ToolRegistry {
             capability_providers: DashMap::new(),
             next_provider_handle: AtomicU64::new(0),
             provider_mutex: std::sync::Mutex::new(()),
+            by_product_sink: None,
         };
 
         // Install the default AnnotationCapabilityProvider.
@@ -605,6 +612,13 @@ impl ToolRegistry {
         let _ = registry.register_capability_provider(Arc::new(AnnotationCapabilityProvider));
 
         Ok(registry)
+    }
+
+    /// Keep an MCP tool's images, audio and embedded blobs through `sink`
+    /// (M85, DU-R6 (b)): the daemon's one production registry sets it at
+    /// boot, before the registry is shared; every clone carries it.
+    pub fn set_by_product_sink(&mut self, sink: crate::tools::builtins::ByProductSink) {
+        self.by_product_sink = Some(Arc::new(sink));
     }
 
     /// This registry with `client` as its `Http`-backend tools' client — a
@@ -762,8 +776,9 @@ impl ToolRegistry {
     /// Execute a tool by name with per-invocation context.
     /// Routes to BuiltInTool::execute_with_context() for BuiltIn backends; a
     /// command tool runs in the call's working folder (storage design §10,
-    /// R26); a plugin tool waits past the sandbox's cut (PLUGIN-WAIT); Http
-    /// and MCP backends do not read the context.
+    /// R26); a plugin tool waits past the sandbox's cut (PLUGIN-WAIT); an
+    /// MCP tool's images, audio and embedded blobs are kept as by-products of
+    /// the context's turn (M85); an Http backend does not read the context.
     pub async fn execute_with_context(
         &self,
         tool_name: &str,
@@ -958,7 +973,11 @@ impl ToolRegistry {
                 match called {
                     Ok(result) => crate::tools::mcp::bridge::serialize_call_result(
                         result,
-                        &crate::tools::mcp::bridge::SerializeOptions::default(),
+                        &crate::tools::mcp::bridge::SerializeOptions::for_call(
+                            tool_name,
+                            self.by_product_sink.as_deref(),
+                            ctx,
+                        ),
                     ),
                     Err(e) => {
                         tracing::warn!(
