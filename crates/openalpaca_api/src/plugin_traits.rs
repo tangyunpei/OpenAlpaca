@@ -162,7 +162,8 @@ mod tests {
 
     use super::{
         DynPluginAgentExecutor, DynPluginSkillExecutor, DynPluginToolExecutor,
-        DynToolCallbackExecutor, PluginSkillExecutor, PluginToolExecutor, ToolCallbackExecutor,
+        DynToolCallbackExecutor, PluginAgentExecutor, PluginSkillExecutor, PluginToolExecutor,
+        ToolCallbackExecutor,
     };
 
     /// Compiles only for a `Send` value: applied to an unpolled future.
@@ -219,10 +220,18 @@ mod tests {
     }
 
     /// A type-erased agent executor is held in a plugin template's
-    /// `AgentSource::Plugin` and driven from spawned subagent work.
+    /// `AgentSource::Plugin` and driven from spawned subagent work; its
+    /// methods' declared `+ Send` is held as for `PluginToolExecutor`.
     #[test]
     fn a_held_plugin_agent_executor_is_send_and_sync() {
         fn send_and_sync<T: Send + Sync + ?Sized>() {}
         send_and_sync::<Arc<DynPluginAgentExecutor<'static>>>();
+
+        fn futures_are_send<E: PluginAgentExecutor + ?Sized>(e: &E, context: &Value) {
+            is_send(&e.spawn("i", "t", "do", context));
+            is_send(&e.step("i", Some(context)));
+            is_send(&e.stop("i"));
+        }
+        let _ = futures_are_send::<DynPluginAgentExecutor<'static>>;
     }
 }
